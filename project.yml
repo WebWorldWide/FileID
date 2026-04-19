@@ -1,0 +1,15 @@
+name: FileID
+options:
+  bundleIdPrefix: com.user
+targets:
+  FileID:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources: [Sources]
+    info:
+      path: Info.plist
+      properties:
+        NSPhotoLibraryUsageDescription: "FileID needs access to your photos to identify and tag them."
+        NSAppleEventsUsageDescription: "FileID needs this to manage files."
+        LSMultipleInstancesProhibited: true
