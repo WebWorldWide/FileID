@@ -21,7 +21,6 @@ actor ThumbnailService {
         
         let ext = url.pathExtension.lowercased()
         let isVideo = ["mp4", "mov"].contains(ext)
-        let isPDF = ext == "pdf"
         
         var image: NSImage?
         

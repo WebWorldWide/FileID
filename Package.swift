@@ -9,7 +9,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "FileID",
-            path: "Sources"
+            path: "Sources",
+            resources: [
+                .copy("../Resources/aura_tag_icon.png")
+            ]
         )
     ]
 )

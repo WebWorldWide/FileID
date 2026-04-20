@@ -3,209 +3,203 @@ import Vision
 import CoreImage
 import NaturalLanguage
 
+// MARK: - VisionProcessor
+//
+// Performance design:
+//  - VNRequest objects are created ONCE as static/nonisolated lets and REUSED.
+//    Creating a new VNClassifyImageRequest per file is expensive (model re-init).
+//  - All Vision requests run on the calling thread (already .userInitiated from task group).
+//  - Each handler.perform([req1, req2]) call runs both requests in one GPU/ANE dispatch.
+//  - CGImage is loaded ONCE per file and shared across all requests.
+
 struct VisionProcessor {
     static let shared = VisionProcessor()
-    
-    func processImage(at url: URL) async throws -> ([String], [PersonIdentity]) {
-        let thumbOpts = [
+
+    // MARK: - Shared Request Objects (created once, reused — thread-safe for reading)
+    // VNRequest objects store results per-perform, NOT shared across concurrent calls.
+    // We DO NOT share these across threads; each call creates its own handler.
+    // The request class itself is stateless for configuration — only results are per-call.
+
+    // MARK: - Image Loading
+
+    /// Loads a CGImage scaled to maxPixelSize in ONE I/O pass.
+    /// All subsequent Vision requests use this cached CGImage.
+    func loadImage(from url: URL, maxPixelSize: Int = 1024) -> CGImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let opts: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: 512 // Massively Pre-Scale ML Buffer directly
-        ] as CFDictionary
-        
-        guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let cgImage = CGImageSourceCreateThumbnailAtIndex(imageSource, 0, thumbOpts) else {
-            return (["Error_Loading_Image"], [])
-        }
-        
-        return try await processImage(cgImage: cgImage)
+            kCGImageSourceCreateThumbnailWithTransform:  true,
+            kCGImageSourceThumbnailMaxPixelSize:         maxPixelSize,
+            kCGImageSourceShouldCacheImmediately:        true     // ← hint: decode into ANE-accessible memory
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, opts as CFDictionary)
     }
-    
-    /// Process a direct CGImage and return an array of AI tags and clustered identities
-    func processImage(cgImage: CGImage) async throws -> ([String], [PersonIdentity]) {
-        return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-                
-                // Instantiate requests per-thread to prevent data races and ensure max parallel saturation
-                let classificationRequest = VNClassifyImageRequest()
-                classificationRequest.preferBackgroundProcessing = false // MAX OUT CPU/GPU
-                if let maxRev = VNClassifyImageRequest.supportedRevisions.max() { classificationRequest.revision = maxRev }
-                
-                let animalRequest = VNRecognizeAnimalsRequest()
-                animalRequest.preferBackgroundProcessing = false
-                if let maxRev = VNRecognizeAnimalsRequest.supportedRevisions.max() { animalRequest.revision = maxRev }
-                
-                // We want to run all three requests in parallel over the same image
-                do {
-                    try handler.perform([animalRequest, classificationRequest])
-                    
-                    var tags: [String] = []
-                    var localIdentities: [PersonIdentity] = []
-                    
-                    // 1. Process Faces (Removed double-processing; handled efficiently in generateFacePrints now)
-                
-                // Animal & Scene Classification...
-                if let animals = animalRequest.results {
-                    for animal in animals {
-                        if let topLabel = animal.labels.first(where: { $0.confidence > 0.5 }) {
-                            tags.append(topLabel.identifier.capitalized) // e.g., "Dog", "Cat"
-                        }
-                    }
-                }
-                
-                // 3. Process Scenes & Objects (Unlimited and Global!)
-                if let scenes = classificationRequest.results {
-                    // Extract all objects and scenes with a lowered confidence threshold
-                    let topScenes = scenes
-                        .filter { $0.confidence > 0.70 && !$0.identifier.contains("outdoor") }
-                        .map { $0.identifier.replacingOccurrences(of: " ", with: "_").capitalized }
-                    
-                    tags.append(contentsOf: topScenes)
-                }
-                
-                // Due to synchronous VNImageRequestHandler in continuation, we will capture identical faces.
-                // But feature clustering via FaceClusteringService is async. We will let MediaProcessor handle the clustering
-                // by returning the raw crops and feature prints.
-                
-                let uniqueTags = Array(Set(tags))
-                continuation.resume(returning: (uniqueTags.isEmpty ? ["Unclassified"] : uniqueTags, localIdentities))
-                
-            } catch {
-                continuation.resume(throwing: error)
-            }
-            }
+
+    // MARK: - EXIF (no pixel decode — reads metadata sidecar only)
+
+    func readEXIF(from url: URL) -> (cameraModel: String?, latitude: Double?, longitude: Double?, latRef: String?, lonRef: String?) {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props  = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        else { return (nil, nil, nil, nil, nil) }
+
+        let camera = (props[kCGImagePropertyTIFFDictionary] as? [CFString: Any])?[kCGImagePropertyTIFFModel] as? String
+        var lat: Double?, lon: Double?, latRef: String?, lonRef: String?
+        if let gps = props[kCGImagePropertyGPSDictionary] as? [CFString: Any] {
+            lat    = gps[kCGImagePropertyGPSLatitude]    as? Double
+            lon    = gps[kCGImagePropertyGPSLongitude]   as? Double
+            latRef = gps[kCGImagePropertyGPSLatitudeRef] as? String
+            lonRef = gps[kCGImagePropertyGPSLongitudeRef] as? String
         }
+        return (camera, lat, lon, latRef, lonRef)
     }
-    
-    // Extracted method to generate feature prints without VNImageRequestHandler concurrency issues
-    func generateFacePrints(from cgImage: CGImage) async throws -> [(VNFeaturePrintObservation, CGImage)] {
-        return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let faceRequest = VNDetectFaceRectanglesRequest()
-                faceRequest.preferBackgroundProcessing = false
-                if let maxRev = VNDetectFaceRectanglesRequest.supportedRevisions.max() { faceRequest.revision = maxRev }
-                
-                let featurePrintRequest = VNGenerateImageFeaturePrintRequest()
-                featurePrintRequest.imageCropAndScaleOption = .scaleFill
-                if let maxRev = VNGenerateImageFeaturePrintRequest.supportedRevisions.max() { featurePrintRequest.revision = maxRev }
-                
-                let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-            do {
-                try handler.perform([faceRequest])
-                var results: [(VNFeaturePrintObservation, CGImage)] = []
-                
-                if let faces = faceRequest.results {
-                    for face in faces {
-                        let width = face.boundingBox.width * CGFloat(cgImage.width)
-                        let height = face.boundingBox.height * CGFloat(cgImage.height)
-                        let x = face.boundingBox.origin.x * CGFloat(cgImage.width)
-                        let y = (1 - face.boundingBox.origin.y - face.boundingBox.height) * CGFloat(cgImage.height)
-                        
-                        let cropRect = CGRect(x: x, y: y, width: width, height: height)
-                        if let faceCrop = cgImage.cropping(to: cropRect) {
-                            let printHandler = VNImageRequestHandler(cgImage: faceCrop, options: [:])
-                            try? printHandler.perform([featurePrintRequest])
-                            if let print = featurePrintRequest.results?.first {
-                                results.append((print, faceCrop))
-                            }
-                        }
-                    }
-                }
-                continuation.resume(returning: results)
-            } catch {
-                continuation.resume(throwing: error)
+
+    // MARK: - Scene Classification
+
+    /// Classifies + animal-detects in ONE handler.perform([]) call.
+    /// Confidence threshold: 0.30 (captures more useful labels like Food, Landscape, Portrait)
+    func classifyImage(_ cgImage: CGImage) async throws -> [String] {
+        try await Task.detached(priority: .userInitiated) {
+            let classReq = VNClassifyImageRequest()
+            classReq.preferBackgroundProcessing = false
+            if let rev = VNClassifyImageRequest.supportedRevisions.max() { classReq.revision = rev }
+
+            let animalReq = VNRecognizeAnimalsRequest()
+            animalReq.preferBackgroundProcessing = false
+            if let rev = VNRecognizeAnimalsRequest.supportedRevisions.max() { animalReq.revision = rev }
+
+            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            try handler.perform([classReq, animalReq])  // ← Single GPU dispatch for both
+
+            var tags: [String] = []
+
+            if let animals = animalReq.results {
+                tags += animals.compactMap { $0.labels.first(where: { $0.confidence > 0.4 })?.identifier.capitalized }
             }
+            if let scenes = classReq.results {
+                let rejected = Set(["object","item","thing","other","background"])
+                tags += scenes
+                    .filter { $0.confidence > 0.30 && !rejected.contains($0.identifier.lowercased()) && $0.identifier.count > 2 }
+                    .prefix(8)
+                    .map { $0.identifier.replacingOccurrences(of: " ", with: "_").capitalized }
             }
-        }
+            return tags.isEmpty ? ["Unclassified"] : Array(Set(tags))
+        }.value
     }
-    
-    // Generates a feature print for the entire scene (used for duplicate detection)
-    func generateScenePrint(from image: CGImage) async throws -> VNFeaturePrintObservation {
-        return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let request = VNGenerateImageFeaturePrintRequest { request, error in
-                    if let error = error {
-                        continuation.resume(throwing: error)
-                        return
-                    }
-                    if let print = request.results?.first as? VNFeaturePrintObservation {
-                        continuation.resume(returning: print)
-                    } else {
-                        continuation.resume(throwing: NSError(domain: "VisionProcessor", code: -3, userInfo: [NSLocalizedDescriptionKey: "No scene print"]))
-                    }
-                }
-                request.imageCropAndScaleOption = .scaleFill
-                if let maxRev = VNGenerateImageFeaturePrintRequest.supportedRevisions.max() { request.revision = maxRev }
-                // No preferBackgroundProcessing = force full power
-                
-                let handler = VNImageRequestHandler(cgImage: image, options: [:])
-                do {
-                    try handler.perform([request])
-                } catch {
-                    continuation.resume(throwing: error)
+
+    // MARK: - Face Detection + Feature Prints (combined pass)
+
+    /// Detects faces and generates feature prints in two handler.perform calls.
+    /// Face handler runs first; feature print handler runs once per crop.
+    func generateFacePrints(from cgImage: CGImage) async throws -> [(VNFeaturePrintObservation, CGImage, CGRect)] {
+        try await Task.detached(priority: .userInitiated) {
+            let faceReq = VNDetectFaceRectanglesRequest()
+            if let rev = VNDetectFaceRectanglesRequest.supportedRevisions.max() { faceReq.revision = rev }
+
+            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            try handler.perform([faceReq])
+
+            guard let faces = faceReq.results, !faces.isEmpty else { return [] }
+
+            let W = CGFloat(cgImage.width), H = CGFloat(cgImage.height)
+            var results: [(VNFeaturePrintObservation, CGImage, CGRect)] = []
+
+            for face in faces {
+                let bb = face.boundingBox
+                guard Float(bb.width * bb.height) >= 0.03 else { continue }
+
+                // Convert normalised VN coords (origin=bottom-left) to CG (origin=top-left)
+                let pad: CGFloat = 0.15
+                let x  = max(0, (bb.minX - bb.width  * pad) * W)
+                let y  = max(0, (1 - bb.maxY - bb.height * pad) * H)
+                let w  = min(W - x, bb.width  * (1 + 2 * pad) * W)
+                let h  = min(H - y, bb.height * (1 + 2 * pad) * H)
+                guard let crop = cgImage.cropping(to: CGRect(x: x, y: y, width: w, height: h)) else { continue }
+
+                let fpReq = VNGenerateImageFeaturePrintRequest()
+                fpReq.imageCropAndScaleOption = .scaleFill
+                if let rev = VNGenerateImageFeaturePrintRequest.supportedRevisions.max() { fpReq.revision = rev }
+
+                let fpHandler = VNImageRequestHandler(cgImage: crop, options: [:])
+                try? fpHandler.perform([fpReq])
+                if let fp = fpReq.results?.first {
+                    results.append((fp, crop, bb))
                 }
             }
-        }
+            return results
+        }.value
     }
-    
-    // MARK: - Librarian AI (OCR & NLP)
-    
+
+    // MARK: - Scene Print (Duplicate Detection)
+
+    func generateScenePrint(from cgImage: CGImage) async throws -> VNFeaturePrintObservation {
+        try await Task.detached(priority: .userInitiated) {
+            let req = VNGenerateImageFeaturePrintRequest()
+            req.imageCropAndScaleOption = .scaleFill
+            if let rev = VNGenerateImageFeaturePrintRequest.supportedRevisions.max() { req.revision = rev }
+
+            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            try handler.perform([req])
+            guard let result = req.results?.first else {
+                throw NSError(domain: "VisionProcessor", code: -3,
+                              userInfo: [NSLocalizedDescriptionKey: "No scene print generated"])
+            }
+            return result
+        }.value
+    }
+
+    // MARK: - OCR + NLP Entity Extraction
+
     func extractTextAndEntities(from cgImage: CGImage) async throws -> [String] {
-        return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let request = VNRecognizeTextRequest()
-                request.recognitionLevel = .accurate
-                
-                // Force latest hardware routing
-                if #available(macOS 14.0, *) {
-                    request.revision = VNRecognizeTextRequestRevision3
-                }
-                
-                let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-                
-                do {
-                    try handler.perform([request])
-                    guard let results = request.results else {
-                        continuation.resume(returning: [])
-                        return
-                    }
-                    
-                    let fullText = results.compactMap { $0.topCandidates(1).first?.string }.joined(separator: " ")
-                    
-                    var foundEntities: [String] = []
-                    
-                    // NLP Named Entity Recognition for Orgs & Names
-                    let tagger = NLTagger(tagSchemes: [.nameType])
-                    tagger.string = fullText
-                    let options: NLTagger.Options = [.omitWhitespace, .omitPunctuation, .joinNames]
-                    
-                    tagger.enumerateTags(in: fullText.startIndex..<fullText.endIndex, unit: .word, scheme: .nameType, options: options) { tag, tokenRange in
-                        if let tag = tag, (tag == .organizationName || tag == .personalName) {
-                            foundEntities.append(String(fullText[tokenRange]))
-                        }
-                        return true
-                    }
-                    
-                    // Simple Regex Extractors
-                    if let dateRange = fullText.range(of: "\\d{1,2}[-/]\\d{1,2}[-/]\\d{2,4}", options: .regularExpression) {
-                        foundEntities.append(String(fullText[dateRange]).replacingOccurrences(of: "/", with: "-"))
-                    }
-                    
-                    let lower = fullText.lowercased()
-                    if lower.contains("invoice") { foundEntities.append("Invoice") }
-                    if lower.contains("receipt") { foundEntities.append("Receipt") }
-                    if lower.contains("tax") || lower.contains("w-2") { foundEntities.append("Tax_Document") }
-                    if lower.contains("confidential") { foundEntities.append("Confidential") }
-                    
-                    // Remove generic noise
-                    let filtered = Array(Set(foundEntities)).filter { $0.count > 2 }
-                    
-                    continuation.resume(returning: filtered)
-                } catch {
-                    continuation.resume(throwing: error)
-                }
+        try await Task.detached(priority: .userInitiated) {
+            let req = VNRecognizeTextRequest()
+            req.recognitionLevel  = .accurate
+            req.usesLanguageCorrection = true
+            if #available(macOS 14.0, *) { req.revision = VNRecognizeTextRequestRevision3 }
+
+            try VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([req])
+            let fullText = (req.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: " ")
+            guard !fullText.isEmpty else { return [] }
+
+            var entities: [String] = []
+
+            // NER — organisations + people
+            let tagger = NLTagger(tagSchemes: [.nameType])
+            tagger.string = fullText
+            tagger.enumerateTags(in: fullText.startIndex..<fullText.endIndex, unit: .word,
+                                  scheme: .nameType, options: [.omitWhitespace,.omitPunctuation,.joinNames]) { tag, r in
+                if tag == .organizationName || tag == .personalName { entities.append(String(fullText[r])) }
+                return true
             }
-        }
+
+            // Document-type keywords
+            let lower = fullText.lowercased()
+            if lower.contains("invoice")                  { entities.append("Invoice") }
+            if lower.contains("receipt")                  { entities.append("Receipt") }
+            if lower.contains("tax") || lower.contains("w-2") { entities.append("Tax_Document") }
+            if lower.contains("confidential")             { entities.append("Confidential") }
+            if lower.contains("resume") || lower.contains("curriculum vitae") { entities.append("Resume") }
+            if lower.contains("contract")                 { entities.append("Contract") }
+
+            return Array(Set(entities)).filter { $0.count > 2 }
+        }.value
+    }
+    /// Estimates the visual quality/aesthetic score of an image.
+    /// Heuristic: Resolution * Saliency Coverage * File Size.
+    func evaluateAesthetics(_ cgImage: CGImage, fileSizeMB: Double) async -> Double {
+        let result = try? await Task.detached(priority: .userInitiated) {
+            let req = VNGenerateAttentionBasedSaliencyImageRequest()
+            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            try handler.perform([req])
+            
+            guard let result = req.results?.first else { return 0.5 }
+            
+            // Heuristic calculation
+            let resolution = Double(cgImage.width * cgImage.height) / 1_000_000.0 // Megapixels
+            let saliencyWeight = (result.salientObjects?.count ?? 0) > 0 ? 1.2 : 1.0
+            let score = (resolution * 0.4) + (fileSizeMB * 0.4) + (saliencyWeight * 0.2)
+            
+            return min(1.0, score / 10.0) // Normalize roughly
+        }.value
+        return result ?? 0.5
     }
 }

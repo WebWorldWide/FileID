@@ -1,15 +1,33 @@
 name: FileID
 options:
-  bundleIdPrefix: com.user
+  bundleIdPrefix: com.fileid
+  deploymentTarget:
+    macOS: "14.0"
+  xcodeVersion: "16.0"
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    CODE_SIGN_ENTITLEMENTS: FileID.entitlements
+    INFOPLIST_FILE: Info.plist
+    PRODUCT_BUNDLE_IDENTIFIER: com.fileid.app
 targets:
   FileID:
     type: application
     platform: macOS
-    deploymentTarget: "14.0"
-    sources: [Sources]
+    sources:
+      - path: Sources
+    resources:
+      - path: Resources
     info:
       path: Info.plist
       properties:
         NSPhotoLibraryUsageDescription: "FileID needs access to your photos to identify and tag them."
         NSAppleEventsUsageDescription: "FileID needs this to manage files."
         LSMultipleInstancesProhibited: true
+        NSHighResolutionCapable: true
+        NSDesktopFolderUsageDescription: "FileID needs access to read and rename your photos."
+        NSDocumentsFolderUsageDescription: "FileID needs access to read and rename your photos."
+        NSDownloadsFolderUsageDescription: "FileID needs access to read and rename your photos."
+    entitlements:
+      path: FileID.entitlements

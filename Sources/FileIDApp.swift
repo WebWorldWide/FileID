@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import SwiftData
 
 @main
 struct FileIDApp: App {
@@ -12,6 +13,7 @@ struct FileIDApp: App {
                 .frame(minWidth: 1200, minHeight: 800)
                 .background(VisualEffectView(material: .hudWindow, blendingMode: .behindWindow))
                 .ignoresSafeArea()
+                .modelContainer(for: [FileRecord.self, PersonRecord.self])
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
@@ -20,6 +22,16 @@ struct FileIDApp: App {
                 Button("About FileID Professional") { }
             }
             CommandGroup(replacing: .newItem) { }
+            CommandMenu("File") {
+                Button("Open Folder…") {
+                    NotificationCenter.default.post(name: .fileIDOpenFolder, object: nil)
+                }
+                .keyboardShortcut("o", modifiers: .command)
+                Button("Rescan Current Folder") {
+                    NotificationCenter.default.post(name: .fileIDRescan, object: nil)
+                }
+                .keyboardShortcut("r", modifiers: .command)
+            }
         }
     }
 }
@@ -44,8 +56,9 @@ struct VisualEffectView: NSViewRepresentable {
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
+    var appViewModel: AppViewModel?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Ensure the window has transparent background and titlebar is full size content
         if let window = NSApplication.shared.windows.first {
             window.isOpaque = false
             window.backgroundColor = .clear
@@ -54,4 +67,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             window.styleMask.insert(.fullSizeContentView)
         }
     }
+}
+
+// MARK: - Notification Names
+
+extension Notification.Name {
+    static let fileIDOpenFolder = Notification.Name("fileIDOpenFolder")
+    static let fileIDRescan     = Notification.Name("fileIDRescan")
 }

@@ -1,8 +1,9 @@
 import SwiftUI
-import AppKit
+import SwiftData
 
 struct FinalReviewView: View {
     @ObservedObject var viewModel: AppViewModel
+    @Query(filter: #Predicate<FileRecord> { $0.statusValue == "reviewRequired" }) private var reviewFiles: [FileRecord]
     
     var body: some View {
         VStack(spacing: 0) {
@@ -26,10 +27,8 @@ struct FinalReviewView: View {
             .padding()
             
             List {
-                ForEach(viewModel.activeFiles) { file in
-                    if file.status == .reviewRequired {
-                        ReviewRow(file: file)
-                    }
+                ForEach(reviewFiles) { file in
+                    ReviewRow(file: file)
                 }
             }
             .listStyle(.inset)
@@ -37,19 +36,15 @@ struct FinalReviewView: View {
             
             HStack(spacing: 20) {
                 Button("Deselect All") {
-                    for i in 0..<viewModel.activeFiles.count {
-                        if viewModel.activeFiles[i].status == .reviewRequired {
-                            viewModel.activeFiles[i].isSelectedForRename = false
-                        }
+                    for file in reviewFiles {
+                        file.isSelectedForRename = false
                     }
                 }
                 .buttonStyle(.bordered)
                 
                 Button("Select All") {
-                    for i in 0..<viewModel.activeFiles.count {
-                        if viewModel.activeFiles[i].status == .reviewRequired {
-                            viewModel.activeFiles[i].isSelectedForRename = true
-                        }
+                    for file in reviewFiles {
+                        file.isSelectedForRename = true
                     }
                 }
                 .buttonStyle(.bordered)
@@ -71,7 +66,7 @@ struct FinalReviewView: View {
 }
 
 struct ReviewRow: View {
-    @Bindable var file: AppViewModel.FileStatus
+    @Bindable var file: FileRecord
     
     var body: some View {
         HStack(spacing: 16) {
@@ -79,22 +74,15 @@ struct ReviewRow: View {
                 .toggleStyle(.checkbox)
                 .tint(Color(red: 1.0, green: 0.8, blue: 0.0))
             
-            // Image Preview
-            if let thumbURL = file.thumbnailURL {
-                AsyncImage(url: thumbURL) { phase in
-                    if let image = phase.image {
-                        image.resizable().scaledToFill()
-                    } else {
-                        Rectangle().fill(Color(white: 0.15)).overlay { ProgressView() }
-                    }
-                }
-                .frame(width: 80, height: 80)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-            } else {
+            // Image Preview (Using ThumbnailService as before)
+            ZStack {
                 RoundedRectangle(cornerRadius: 8)
                     .fill(Color(white: 0.15))
                     .frame(width: 80, height: 80)
-                    .overlay(Image(systemName: "photo").foregroundColor(.gray))
+                
+                ThumbnailView(url: file.url)
+                    .frame(width: 80, height: 80)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
             }
             
             VStack(alignment: .leading, spacing: 4) {
@@ -128,11 +116,31 @@ struct ReviewRow: View {
         )
     }
     
-    // Hash the UUID into a consistent bright color so duplicates share a tint!
     private func colorForDuplicateGroup(_ uuid: UUID?) -> Color {
         guard let uuid = uuid else { return .clear }
         let colors: [Color] = [.red, .orange, .green, .blue, .purple, .pink, .yellow, .mint, .cyan]
         let hash = abs(uuid.hashValue) % colors.count
         return colors[hash]
+    }
+}
+
+// Helper Thumbnail View
+struct ThumbnailView: View {
+    let url: URL
+    @State private var image: NSImage?
+    
+    var body: some View {
+        Group {
+            if let image = image {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                ProgressView()
+            }
+        }
+        .task {
+            image = await ThumbnailService.shared.getThumbnail(for: url)
+        }
     }
 }
