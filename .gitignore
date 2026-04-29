@@ -2,22 +2,13 @@
 .DS_Store
 .AppleDouble
 .LSOverride
-
-# Icon must end with two \r
 Icon
-
-
-# Thumbnails
 ._*
-
-# Files that might appear in the root of a volume
 .DocumentRevisions-V100
 .TemporaryItems
 .Trashes
 .VolumeIcon.icns
 .com.apple.timemachine.donotpresent
-
-# Directories potentially created on remote AFP share
 .AppleDB
 .AppleDesktop
 Network Trash Folder
@@ -25,16 +16,37 @@ Temporary Items
 .apdisk
 
 # Swift / SPM
-.DS_Store
 /.build
+.build/
 /Packages
 /*.xcodeproj
 /*.xcworkspace
 .swiftpm/
-.build/
+
+# Built app bundle (assembled by run.sh; glob covers Finder-duplicated copies).
+/FileID*.app/
 
 # IDEs
 .vscode/
 .idea/
 *.swp
 *.swo
+
+# Model weights — these are downloaded at runtime, not source artifacts.
+# Anything under Resources that is code stays tracked; large binary weight
+# formats are excluded wholesale.
+*.safetensors
+*.gguf
+*.mlmodel
+*.mlmodelc
+*.mlpackage
+*.onnx
+*.pt
+*.pth
+*.bin
+*.ckpt
+*.tflite
+*.weights
+Resources/Models/
+Resources/**/weights/
+Resources/**/*.safetensors

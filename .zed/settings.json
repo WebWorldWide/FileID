@@ -1,0 +1,11 @@
+{
+  "lsp": {
+    "sourcekit-lsp": {
+      "initialization_options": {
+        "env": {
+          "DEVELOPER_DIR": "/Applications/Xcode.app/Contents/Developer"
+        }
+      }
+    }
+  }
+}
