@@ -48,32 +48,57 @@ METALLIB_CACHE="$PROJECT_DIR/.build/cache/mlx.metallib"
 if [ ! -f "$METALLIB_CACHE" ]; then
     echo "⚙️  Building mlx.metallib (one-time, ~30 s)..."
     if ! command -v cmake >/dev/null 2>&1; then
-        echo "❌ cmake not found. Install via 'brew install cmake' to enable Deep Analyze."
-        echo "   (Skipping metallib build — Deep Analyze will fail until cmake is installed.)"
-    elif ! TOOLCHAINS=Metal DEVELOPER_DIR="$XCODE_DEV_DIR" xcrun --find metal >/dev/null 2>&1; then
-        echo "❌ Metal Toolchain not found. Install via:"
-        echo "   xcodebuild -downloadComponent MetalToolchain"
-        echo "   (Skipping metallib build — Deep Analyze will fail until installed.)"
-    else
-        BUILDDIR=$(mktemp -d)
-        TOOLCHAINS=Metal DEVELOPER_DIR="$XCODE_DEV_DIR" cmake \
-            "$PROJECT_DIR/.build/checkouts/mlx-swift/Source/Cmlx/mlx" \
-            -B "$BUILDDIR" \
-            -DMLX_BUILD_METAL=ON -DMLX_BUILD_TESTS=OFF -DMLX_BUILD_EXAMPLES=OFF \
-            -DMLX_BUILD_BENCHMARKS=OFF -DMLX_BUILD_PYTHON_BINDINGS=OFF \
-            -DCMAKE_BUILD_TYPE=Release > /dev/null 2>&1
-        TOOLCHAINS=Metal DEVELOPER_DIR="$XCODE_DEV_DIR" cmake --build "$BUILDDIR" --target mlx-metallib > /dev/null 2>&1
-        BUILT="$BUILDDIR/mlx/backend/metal/kernels/mlx.metallib"
-        if [ -f "$BUILT" ]; then
-            mkdir -p "$(dirname "$METALLIB_CACHE")"
-            cp "$BUILT" "$METALLIB_CACHE"
-            echo "✅ Built mlx.metallib ($(du -sh "$METALLIB_CACHE" | cut -f1))"
-        else
-            echo "❌ metallib build failed; Deep Analyze will not work this run."
-        fi
+        echo "❌ cmake not found — required to build Deep Analyze GPU kernels."
+        echo "   Install: brew install cmake"
+        echo "   Then re-run ./run.sh."
+        exit 1
+    fi
+    if ! TOOLCHAINS=Metal DEVELOPER_DIR="$XCODE_DEV_DIR" xcrun --find metal >/dev/null 2>&1; then
+        echo "❌ Metal Toolchain not found — required to build Deep Analyze GPU kernels."
+        echo "   Install: xcodebuild -downloadComponent MetalToolchain"
+        echo "   Then re-run ./run.sh."
+        exit 1
+    fi
+    BUILDDIR=$(mktemp -d)
+    TOOLCHAINS=Metal DEVELOPER_DIR="$XCODE_DEV_DIR" cmake \
+        "$PROJECT_DIR/.build/checkouts/mlx-swift/Source/Cmlx/mlx" \
+        -B "$BUILDDIR" \
+        -DMLX_BUILD_METAL=ON -DMLX_BUILD_TESTS=OFF -DMLX_BUILD_EXAMPLES=OFF \
+        -DMLX_BUILD_BENCHMARKS=OFF -DMLX_BUILD_PYTHON_BINDINGS=OFF \
+        -DCMAKE_BUILD_TYPE=Release > /dev/null 2>&1
+    TOOLCHAINS=Metal DEVELOPER_DIR="$XCODE_DEV_DIR" cmake --build "$BUILDDIR" --target mlx-metallib > /dev/null 2>&1
+    BUILT="$BUILDDIR/mlx/backend/metal/kernels/mlx.metallib"
+    if [ -f "$BUILT" ]; then
+        mkdir -p "$(dirname "$METALLIB_CACHE")"
+        cp "$BUILT" "$METALLIB_CACHE"
+        echo "✅ Built mlx.metallib ($(du -sh "$METALLIB_CACHE" | cut -f1))"
         rm -rf "$BUILDDIR"
+    else
+        echo "❌ metallib build failed; cmake + Metal Toolchain are present but the build step did not produce mlx.metallib."
+        echo "   Build artifacts at $BUILDDIR (kept for inspection)."
+        echo "   Re-run ./run.sh after fixing the build."
+        exit 1
     fi
 fi
+
+echo "🛑 Quitting any running FileID processes..."
+# Stop the running app + engine BEFORE we touch the DB. If we wipe the
+# .sqlite while an engine still has it open, that engine's next write
+# trips SQLITE_IOERR — the "disk I/O error - BEGIN IMMEDIATE T..." you
+# see in the sidebar after a hot restart.
+#
+# `osascript` first (lets the app quit cleanly + flush logs); pkill
+# afterwards as the safety net for unresponsive instances.
+osascript -e 'tell application "FileID" to quit' >/dev/null 2>&1 || true
+sleep 0.5
+pkill -f "FileID.app/Contents/MacOS/FileID"        2>/dev/null || true
+pkill -f "FileID.app/Contents/MacOS/FileIDEngine"  2>/dev/null || true
+pkill -x "FileID"                                   2>/dev/null || true
+pkill -x "FileIDEngine"                             2>/dev/null || true
+sleep 0.5
+# Final hammer for anything still alive after the polite kill.
+pkill -9 -f "FileID.app/Contents/MacOS/"           2>/dev/null || true
+pkill -9 -x "FileIDEngine"                          2>/dev/null || true
 
 echo "🧹 Wiping SQLite + caches (preserving model weights)..."
 APP_SUPPORT="$HOME/Library/Application Support"
@@ -84,6 +109,15 @@ rm -rf "$APP_SUPPORT/FileID/checkpoints"
 rm -rf "$APP_SUPPORT/FileID/logs"
 rm -rf "$APP_SUPPORT/FileID/thumbs.cache"
 rm -rf "$APP_SUPPORT/FileID/face_crops"
+
+echo "🧹 Resetting app preferences (UserDefaults)..."
+# Wipes EVERY FileID preference: pickedFolderBookmark, sidebar visibility,
+# active tab, library kind filter, last-rename undo journal, person-tag
+# history, AI toggles, AI Models picker. Models on disk are preserved.
+defaults delete com.fileid.app 2>/dev/null || true
+# `cfprefsd` caches preferences in memory — restart it so the next FileID
+# launch reads the fresh empty defaults instead of the cached old ones.
+killall cfprefsd 2>/dev/null || true
 
 echo "📦 Assembling $APP_NAME.app bundle..."
 rm -rf "$APP_BUNDLE"

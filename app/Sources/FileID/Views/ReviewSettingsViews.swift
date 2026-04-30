@@ -1,126 +1,144 @@
-// Review + Settings tabs.
+// Settings tab. (Review tab folded into Settings → Advanced.)
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 import FileIDShared
 
-struct ReviewView: View {
+// MARK: - Settings
+
+struct SettingsTab: View {
     let engine: EngineClient
     let store: ReadStore
+    @AppStorage(AppSettings.cleanupAutoTagKey) private var cleanupAutoTag: Bool = AppSettings.cleanupAutoTagDefault
+    @State private var showAdvanced = false
     @State private var sessions: [ReadStore.ScanSessionRow] = []
-    @State private var lastSeenBatchIndex: Int = -1
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                Text("Review").font(.largeTitle.bold())
+            VStack(alignment: .leading, spacing: 20) {
+                Text("Settings").font(.largeTitle.bold())
 
-                if !engine.queueState.isIdle {
-                    GlassCard {
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Image(systemName: "list.bullet.rectangle")
-                                    .foregroundStyle(Theme.gold)
-                                Text("Queue").font(.headline)
-                                Spacer()
-                                Text("\(engine.queueState.depth) total")
-                                    .font(.caption.monospaced()).foregroundStyle(.secondary)
+                // ─── User-facing settings (always visible) ───────────────
+
+                GlassCard {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Cleanup").font(.headline)
+                        Toggle(isOn: $cleanupAutoTag) {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Tag kept files after Cleanup")
+                                    .font(.callout)
+                                Text("When ON, after you trash duplicates the surviving keepers get a Finder tag (\"\(AppSettings.cleanupAutoTagName)\"). Useful for finding files you've already deduped via a Finder Smart Folder.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
                             }
-                            if let r = engine.queueState.running {
-                                HStack(spacing: 6) {
-                                    Image(systemName: "play.circle.fill").foregroundStyle(.green)
-                                    Text("Running:").font(.caption.bold()).foregroundStyle(.secondary)
-                                    Text(r.title).font(.callout.monospaced())
+                        }
+                        .toggleStyle(.switch)
+                    }
+                }
+
+                // AI Models — visible because users genuinely care about
+                // which models are installed and download status.
+                CLIPSemanticSearchCard()
+
+                DeepAnalyzeModelPickerCard(engine: engine)
+                FaceEmbedderCard(engine: engine, store: store)
+                privacyCard
+
+                // ─── Advanced (collapsed by default) ─────────────────────
+                // Engine PIDs, DB paths, log files. Power-user info that
+                // doesn't help a casual user choose anything; hiding it
+                // declutters the page.
+
+                GlassCard {
+                    DisclosureGroup(isExpanded: $showAdvanced) {
+                        VStack(alignment: .leading, spacing: 16) {
+                            Divider().opacity(0.3)
+
+                            // Engine
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Engine").font(.subheadline.bold())
+                                infoRow("Status", connectionLabel)
+                                if case .ready(let info) = engine.state {
+                                    infoRow("Version", info.version)
+                                    infoRow("PID",     "\(info.pid)")
+                                    infoRow("Workers", "\(info.workerCap)")
+                                    infoRow("Memory",  "\(Int(info.physicalMemoryGB)) GB")
                                 }
-                            }
-                            if !engine.queueState.pending.isEmpty {
-                                Divider().opacity(0.3)
-                                ForEach(engine.queueState.pending) { j in
-                                    HStack(spacing: 6) {
-                                        Image(systemName: "clock").foregroundStyle(.tertiary)
-                                        Text(j.title).font(.caption.monospaced())
-                                        Spacer()
+                                HStack(spacing: 8) {
+                                    Button("Restart Engine") { engine.start() }
+                                        .buttonStyle(.bordered)
+                                        .help("Spawn a fresh engine process. Cancels any in-flight scan.")
+                                    if case .ready = engine.state {
+                                        Button("Stop Engine") { engine.shutdown() }
+                                            .buttonStyle(.bordered)
+                                            .help("Cleanly shut down the engine process.")
                                     }
                                 }
                             }
-                        }
-                    }
-                }
 
-                // Live progress (mirrors what the sidebar shows, larger).
-                if let p = engine.lastProgress {
-                    GlassCard {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("Active scan").font(.headline)
-                            Text("\(p.processed) / \(p.total) (\(p.discovered) discovered)")
-                                .font(.title2.monospaced())
-                            ProgressView(value: Double(p.processed),
-                                         total: Double(max(p.total, 1)))
-                                .tint(Theme.gold)
-                            HStack(spacing: 24) {
-                                stat("rate",   String(format: "%.1f files/s", p.filesPerSecond))
-                                if let eta = p.etaSeconds, eta > 0 {
-                                    stat("ETA",  formatETA(eta))
+                            Divider().opacity(0.3)
+
+                            // Storage
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Storage").font(.subheadline.bold())
+                                infoRow("Total files",   "\(store.totalFiles)")
+                                infoRow("Images tagged", "\(store.totalImages)")
+                                infoRow("Duplicate groups", "\(store.totalDuplicateGroups)")
+                                infoRow("Reclaimable",   String(format: "%.1f MB", store.totalReclaimableMB))
+                                infoRow("Database", ReadStore.defaultDBURL.path)
+                                Button("Show database in Finder") {
+                                    NSWorkspace.shared.activateFileViewerSelecting([ReadStore.defaultDBURL])
                                 }
-                                stat("RSS",    "\(p.residentMB) MB")
-                                stat("avail",  "\(p.availableMB) MB")
-                                if p.failed > 0 {
-                                    stat("failed", "\(p.failed)").foregroundStyle(.red)
+                                .buttonStyle(.bordered)
+                            }
+
+                            Divider().opacity(0.3)
+
+                            // Recent scans (folded in from former Review tab)
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Recent scans").font(.subheadline.bold())
+                                if sessions.isEmpty {
+                                    Text("No scans recorded yet.")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                } else {
+                                    ForEach(sessions) { s in
+                                        sessionRow(s)
+                                    }
+                                }
+                            }
+
+                            Divider().opacity(0.3)
+
+                            // Logs
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Logs").font(.subheadline.bold())
+                                Text("Detailed scan + app logs for troubleshooting.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                HStack(spacing: 8) {
+                                    Button("Open scan log") {
+                                        NSWorkspace.shared.open(SettingsTab.scanLogURL)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    Button("Open app log") {
+                                        NSWorkspace.shared.open(SettingsTab.appLogURL)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    Button("Show logs in Finder") {
+                                        NSWorkspace.shared.activateFileViewerSelecting([SettingsTab.scanLogURL])
+                                    }
+                                    .buttonStyle(.bordered)
                                 }
                             }
                         }
-                    }
-                }
-
-                // Last batch summary (M2 telemetry surfaced).
-                if let b = engine.lastBatch {
-                    GlassCard {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("Last batch").font(.headline)
-                            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 4) {
-                                GridRow {
-                                    Text("Batch #").foregroundStyle(.secondary)
-                                    Text("\(b.batchIndex)").font(.body.monospaced())
-                                }
-                                GridRow {
-                                    Text("Files").foregroundStyle(.secondary)
-                                    Text("\(b.filesInBatch)").font(.body.monospaced())
-                                }
-                                GridRow {
-                                    Text("Wall").foregroundStyle(.secondary)
-                                    Text(String(format: "%.2f s", b.wallSeconds)).font(.body.monospaced())
-                                }
-                                GridRow {
-                                    Text("Insert p50/p95").foregroundStyle(.secondary)
-                                    Text(String(format: "%.1f / %.1f ms", b.storeInsertP50Ms, b.storeInsertP95Ms))
-                                        .font(.body.monospaced())
-                                }
-                                GridRow {
-                                    Text("RSS / avail").foregroundStyle(.secondary)
-                                    Text("\(b.residentMB) MB / \(b.availableMB) MB")
-                                        .font(.body.monospaced())
-                                }
-                            }
-                            .font(.callout)
-                        }
-                    }
-                }
-
-                // Recent scan history.
-                GlassCard {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("Recent scans").font(.headline)
-                            Spacer()
-                            Text("\(sessions.count)")
-                                .font(.caption.monospaced()).foregroundStyle(.secondary)
-                        }
-                        if sessions.isEmpty {
-                            Text("No scans recorded yet.")
-                                .font(.callout).foregroundStyle(.secondary)
-                        } else {
-                            ForEach(sessions) { s in
-                                sessionRow(s)
-                            }
+                        .padding(.top, 8)
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "wrench.and.screwdriver")
+                                .foregroundStyle(.secondary)
+                            Text("Advanced").font(.headline)
+                            Text("(engine status, database, scan history, logs)")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
                         }
                     }
                 }
@@ -128,15 +146,10 @@ struct ReviewView: View {
             .padding(24)
         }
         .onAppear {
-            store.openIfPossible()
             sessions = store.recentSessions()
         }
-        .onChange(of: engine.lastBatch?.batchIndex ?? -1) { _, new in
-            if new != lastSeenBatchIndex {
-                lastSeenBatchIndex = new
-                store.notifyChanged()
-                sessions = store.recentSessions()
-            }
+        .onChange(of: showAdvanced) { _, expanded in
+            if expanded { sessions = store.recentSessions() }
         }
     }
 
@@ -149,151 +162,74 @@ struct ReviewView: View {
                 .foregroundStyle(s.status == "completed" ? .green
                                  : s.status == "running"  ? Theme.gold : .red)
             VStack(alignment: .leading, spacing: 2) {
-                Text(s.rootPath).font(.callout.monospaced()).lineLimit(1).truncationMode(.middle)
+                Text(s.rootPath).font(.caption.monospaced()).lineLimit(1).truncationMode(.middle)
                 HStack(spacing: 12) {
                     Text(s.startedAt.formatted(date: .abbreviated, time: .shortened))
-                    Text("status: \(s.status)")
+                    Text(s.status)
                     if let n = s.lastFileIndex { Text("\(n) files") }
                 }
                 .font(.caption2.monospaced()).foregroundStyle(.secondary)
             }
             Spacer()
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 1)
     }
 
-    @ViewBuilder
-    private func stat(_ k: String, _ v: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(k).font(.caption2).foregroundStyle(.secondary)
-            Text(v).font(.callout.monospaced())
+    /// Privacy disclosure card. Explicit about what's stored where —
+    /// matches Apple's HIG guidance and supports an ADA "Inclusivity"
+    /// case (transparent local-first behavior).
+    private var privacyCard: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 6) {
+                    Image(systemName: "lock.shield")
+                        .foregroundStyle(.green)
+                    Text("Privacy").font(.headline)
+                    Spacer()
+                    Text("100% on-device")
+                        .font(.caption.bold())
+                        .foregroundStyle(.green)
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(Capsule().fill(Color.green.opacity(0.15)))
+                }
+                Text("FileID never sends your photos, captions, names, or any data to any server. Everything runs on your Mac. No cloud, no analytics, no telemetry.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Divider().opacity(0.3)
+                privacyRow(icon: "photo",
+                            title: "Your photos",
+                            detail: "Stay where you put them. FileID reads them; nothing is uploaded.")
+                privacyRow(icon: "person.2.crop.square.stack",
+                            title: "Faces + names",
+                            detail: "Stored only in FileID's local database. Names you type are never transmitted.")
+                privacyRow(icon: "text.below.photo",
+                            title: "Captions + smart names",
+                            detail: "Generated by an on-device Vision-Language Model. Apple Neural Engine + Metal. No internet round-trip.")
+                privacyRow(icon: "internaldrive",
+                            title: "Where it lives",
+                            detail: "~/Library/Application Support/FileID/. Open the database in the Advanced section above. Delete the folder to remove all FileID data.")
+                privacyRow(icon: "antenna.radiowaves.left.and.right.slash",
+                            title: "Network use",
+                            detail: "FileID only contacts the network to download AI models you opt-in to (Hugging Face / Apple). Once installed, models never re-contact the source.")
+            }
         }
     }
 
-    private func formatETA(_ seconds: Double) -> String {
-        let s = Int(seconds.rounded())
-        let h = s / 3600; let m = (s % 3600) / 60; let sec = s % 60
-        if h > 0 { return String(format: "%dh %dm", h, m) }
-        if m > 0 { return String(format: "%dm %ds", m, sec) }
-        return "\(sec)s"
-    }
-}
-
-// MARK: - Settings
-
-struct SettingsTab: View {
-    let engine: EngineClient
-    let store: ReadStore
-    @AppStorage(AppSettings.useAIFaceClusteringKey) private var useAIFaceClustering: Bool = AppSettings.useAIFaceClusteringDefault
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                Text("Settings").font(.largeTitle.bold())
-
-                GlassCard {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Face Clustering").font(.headline)
-                        Toggle(isOn: $useAIFaceClustering) {
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text("Use AI to cluster faces (more accurate)")
-                                    .font(.callout)
-                                Text("When ON, the People tab's primary action runs the local Vision-Language Model on face crops to merge clusters that look like the same person. When OFF, only the fast L2-distance pass runs — faster but less accurate.")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .toggleStyle(.switch)
-                    }
-                }
-
-                GlassCard {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Engine").font(.headline)
-                        infoRow("Status", connectionLabel)
-                        if case .ready(let info) = engine.state {
-                            infoRow("Version", info.version)
-                            infoRow("PID",     "\(info.pid)")
-                            infoRow("Workers", "\(info.workerCap)")
-                            infoRow("Memory",  "\(Int(info.physicalMemoryGB)) GB")
-                        }
-                        HStack(spacing: 8) {
-                            // Manual restart — useful when auto-respawn budget
-                            // has been exhausted (state == .crashed) and the
-                            // user wants to retry without relaunching the app.
-                            Button("Restart Engine") { engine.start() }
-                                .buttonStyle(.bordered)
-                                .help("Spawn a fresh engine process. Cancels any in-flight scan.")
-                            if case .ready = engine.state {
-                                Button("Stop Engine") { engine.shutdown() }
-                                    .buttonStyle(.bordered)
-                                    .help("Cleanly shut down the engine process.")
-                            }
-                        }
-                    }
-                }
-
-                GlassCard {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Storage").font(.headline)
-                        infoRow("Total files",   "\(store.totalFiles)")
-                        infoRow("Images tagged", "\(store.totalImages)")
-                        infoRow("Duplicate groups", "\(store.totalDuplicateGroups)")
-                        infoRow("Reclaimable",   String(format: "%.1f MB", store.totalReclaimableMB))
-                        Divider().opacity(0.4)
-                        infoRow("DB path", ReadStore.defaultDBURL.path)
-                        Button("Show DB in Finder") {
-                            NSWorkspace.shared.activateFileViewerSelecting([ReadStore.defaultDBURL])
-                        }
-                        .buttonStyle(.bordered)
-                    }
-                }
-
-                GlassCard {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Diagnostics").font(.headline)
-                        Text("Per-batch profiler events stream to scan.jsonl. `jq`-queryable. App-side debug events go to app.log.")
-                            .font(.callout).foregroundStyle(.secondary)
-                        HStack(spacing: 8) {
-                            Button("Open scan log") {
-                                NSWorkspace.shared.open(SettingsTab.scanLogURL)
-                            }
-                            .buttonStyle(.bordered)
-                            Button("Open app log") {
-                                NSWorkspace.shared.open(SettingsTab.appLogURL)
-                            }
-                            .buttonStyle(.bordered)
-                            Button("Show logs in Finder") {
-                                NSWorkspace.shared.activateFileViewerSelecting([SettingsTab.scanLogURL])
-                            }
-                            .buttonStyle(.bordered)
-                        }
-                    }
-                }
-
-                GlassCard {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("AI Models — fast tier (per-file CLIP)").font(.headline)
-                        modelStatusRow(
-                            name: "MobileCLIP-S2 (image)",
-                            url: SettingsTab.mobileCLIPImageURL
-                        )
-                        modelStatusRow(
-                            name: "MobileCLIP-S2 (text)",
-                            url: SettingsTab.mobileCLIPTextURL
-                        )
-                        Divider().opacity(0.3)
-                        Button("Open Models folder") {
-                            NSWorkspace.shared.activateFileViewerSelecting([SettingsTab.modelsFolderURL])
-                        }
-                        .buttonStyle(.bordered)
-                    }
-                }
-
-                DeepAnalyzeModelPickerCard(engine: engine)
-                FaceEmbedderCard(engine: engine, store: store)
+    @ViewBuilder
+    private func privacyRow(icon: String, title: String, detail: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon)
+                .foregroundStyle(.green)
+                .font(.callout)
+                .frame(width: 18, alignment: .center)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.callout.bold())
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(24)
+            Spacer(minLength: 0)
         }
     }
 
@@ -336,23 +272,202 @@ struct SettingsTab: View {
         }
     }
 
-    static var modelsFolderURL: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("FileID/Models", isDirectory: true)
-    }
-    static var mobileCLIPImageURL: URL {
-        modelsFolderURL.appendingPathComponent("mobileclip_image/mobileclip_s2_image.mlpackage")
-    }
-    static var mobileCLIPTextURL: URL {
-        modelsFolderURL.appendingPathComponent("mobileclip_text/mobileclip_s2_text.mlpackage")
-    }
+    static var modelsFolderURL: URL { AppSupportPath.models }
     static var scanLogURL: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("FileID/logs/scan.jsonl")
+        AppSupportPath.fileID.appendingPathComponent("logs/scan.jsonl")
     }
     static var appLogURL: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("FileID/logs/app.log")
+        AppSupportPath.fileID.appendingPathComponent("logs/app.log")
+    }
+}
+
+// MARK: - CLIP semantic-search card
+
+/// Settings card for the CLIP semantic-search tier. State-driven —
+/// shows install status, download/extract progress, and the manual
+/// "install from local zip" fallback.
+struct CLIPSemanticSearchCard: View {
+    @State private var installer = CLIPModelInstaller.shared
+    @State private var confirmUninstall = false
+
+    var body: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("AI Models — semantic search (CLIP)").font(.headline)
+                Text("Type natural-language searches like \"sunset at the beach\" and FileID ranks every photo by visual relevance. Uses MobileCLIP-S2 — runs entirely on your Mac.")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Divider().opacity(0.3)
+
+                // Per-file install state.
+                fileStatusRow(
+                    name: "MobileCLIP-S2 (image)",
+                    url: CLIPModelInstaller.modelsRoot
+                        .appendingPathComponent("mobileclip_image/mobileclip_s2_image.mlpackage")
+                )
+                fileStatusRow(
+                    name: "MobileCLIP-S2 (text)",
+                    url: CLIPTextEncoder.defaultModelURL
+                )
+                fileStatusRow(
+                    name: "BPE vocabulary (vocab.json + merges.txt)",
+                    url: CLIPTextEncoder.defaultDirectory
+                        .appendingPathComponent("vocab.json")
+                )
+
+                Divider().opacity(0.3)
+
+                // State-aware footer.
+                statusFooter
+            }
+        }
+        .onAppear { installer.refreshStatus() }
+        .confirmationDialog(
+            "Remove CLIP models?",
+            isPresented: $confirmUninstall,
+            titleVisibility: .visible
+        ) {
+            Button("Remove", role: .destructive) { installer.uninstall() }
+            Button("Keep", role: .cancel) {}
+        } message: {
+            Text("Frees ~350 MB. Semantic search will revert to keyword search until you reinstall.")
+        }
+    }
+
+    @ViewBuilder
+    private var statusFooter: some View {
+        switch installer.status {
+        case .unknown:
+            ProgressView().controlSize(.small)
+        case .missing(let reason):
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.down.circle")
+                    .foregroundStyle(Theme.gold)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(reason).font(.caption2).foregroundStyle(.secondary)
+                    Text("~210 MB download from huggingface.co (Apple's MobileCLIP repo + OpenAI's BPE vocabulary).")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                }
+                Spacer()
+            }
+            HStack(spacing: 8) {
+                Button {
+                    installer.install()
+                } label: {
+                    Label("Download", systemImage: "arrow.down.circle.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.gold)
+
+                Button("Install from local zip…") { pickLocalZip() }
+                    .buttonStyle(.bordered)
+
+                Button("Open Models folder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([SettingsTab.modelsFolderURL])
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                Spacer()
+            }
+
+        case .downloading(let frac, let msg):
+            VStack(alignment: .leading, spacing: 6) {
+                if frac > 0 {
+                    ProgressView(value: frac)
+                } else {
+                    ProgressView()
+                }
+                HStack {
+                    Text(msg).font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Cancel") { installer.cancel() }
+                        .buttonStyle(.borderless)
+                        .controlSize(.small)
+                }
+            }
+
+        case .extracting:
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Extracting…").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+            }
+
+        case .installed(let bytes):
+            HStack(spacing: 8) {
+                Image(systemName: "checkmark.seal.fill")
+                    .foregroundStyle(.green)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Installed").font(.callout.bold())
+                    Text("\(bytes / 1_048_576) MB on disk · semantic search active.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Open Models folder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([SettingsTab.modelsFolderURL])
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                Button("Uninstall") { confirmUninstall = true }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .foregroundStyle(.red)
+            }
+
+        case .installFailed(let why):
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                    Text(why).font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                }
+                HStack(spacing: 8) {
+                    Button("Retry") { installer.install() }
+                        .buttonStyle(.bordered)
+                    Button("Install from local zip…") { pickLocalZip() }
+                        .buttonStyle(.bordered)
+                    Button("Open Models folder") {
+                        NSWorkspace.shared.activateFileViewerSelecting([SettingsTab.modelsFolderURL])
+                    }
+                    .buttonStyle(.borderless)
+                    Spacer()
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func fileStatusRow(name: String, url: URL) -> some View {
+        let installed = FileManager.default.fileExists(atPath: url.path)
+        HStack(alignment: .center, spacing: 8) {
+            Image(systemName: installed ? "checkmark.circle.fill" : "circle.dashed")
+                .foregroundStyle(installed ? .green : .secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(name).font(.callout)
+                Text(url.path)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer()
+        }
+    }
+
+    private func pickLocalZip() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.zip]
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose the clip-models.zip file."
+        panel.prompt = "Install"
+        if panel.runModal() == .OK, let url = panel.url {
+            installer.installFromLocalZip(url)
+        }
     }
 }
 

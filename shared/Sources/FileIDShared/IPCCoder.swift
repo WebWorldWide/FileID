@@ -6,7 +6,11 @@ public enum IPCCoder {
     public static let encoder: JSONEncoder = {
         let e = JSONEncoder()
         e.dateEncodingStrategy = .iso8601
-        e.outputFormatting = []  // single line, no whitespace — newline-delimited wire
+        // .sortedKeys: deterministic byte-for-byte output. Required so
+        // round-trip tests can compare bytes, and so different macOS
+        // releases (which changed default key order in macOS 26) emit
+        // the same wire frames.
+        e.outputFormatting = [.sortedKeys]
         return e
     }()
 

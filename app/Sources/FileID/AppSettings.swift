@@ -2,8 +2,10 @@
 import Foundation
 
 enum AppSettings {
-    /// People-tab primary clustering: true = VLM-driven (more accurate),
-    /// false = L2-only (faster, more false splits).
-    static let useAIFaceClusteringKey = "ai.fileid.faceClustering.useAI"
-    static let useAIFaceClusteringDefault: Bool = true
+    /// After Cleanup trashes selected duplicates, optionally tag the
+    /// keepers with a "duplicate-resolved" Finder tag so they show up
+    /// in a Smart Folder.
+    static let cleanupAutoTagKey = "cleanup.autoTagKeepers"
+    static let cleanupAutoTagDefault: Bool = true
+    static let cleanupAutoTagName = "duplicate-resolved"
 }

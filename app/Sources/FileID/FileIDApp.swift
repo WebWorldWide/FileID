@@ -22,7 +22,17 @@ struct FileIDApp: App {
                 // Tab views own their top padding to clear the floating
                 // traffic-light overlay.
                 .ignoresSafeArea()
-                .onAppear { engine.start() }
+                .onAppear {
+                    engine.start()
+                    // V2.1 — try to load the CLIP text encoder for
+                    // semantic search. No-op if the model isn't
+                    // installed; the search bar quietly falls back to
+                    // keyword search.
+                    Task.detached { _ = CLIPTextEncoder.shared.load() }
+                    // V5 — prime the install-status check so the
+                    // Settings card opens with accurate state.
+                    CLIPModelInstaller.shared.refreshStatus()
+                }
                 .onDisappear { engine.shutdown() }
         }
         .windowStyle(.hiddenTitleBar)

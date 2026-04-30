@@ -157,10 +157,38 @@ def convert(variant: str, out_dir: Path) -> Path:
     coreml_out = list(coreml_out_dict.values())[0].squeeze()
 
     cos = float(np.dot(onnx_out, coreml_out) / (np.linalg.norm(onnx_out) * np.linalg.norm(coreml_out)))
-    print(f"      Cosine similarity ONNX vs CoreML: {cos:.6f}")
+    print(f"      Cosine similarity ONNX vs CoreML (single tensor): {cos:.6f}")
     if cos < 0.99:
         print(f"      ERROR: cosine < 0.99 — conversion changed semantics. Investigate.")
         sys.exit(2)
+
+    # Diversity check — the previous bug we caught: the ONNX↔CoreML
+    # match looked perfect, but the model was producing constant output
+    # for every input (so every face cosine = 1.0, clustering collapsed
+    # to one). Run several distinct random tensors through CoreML and
+    # confirm pairwise cosines vary. Healthy: min < 0.95. Degenerate:
+    # min > 0.99.
+    print(f"      Running diversity check (5 distinct inputs)...")
+    distinct_outs = []
+    for s in range(5):
+        rng2 = np.random.default_rng(seed=100 + s)
+        rand = rng2.random((in_size, in_size, 3), dtype=np.float32)
+        pil2 = Image.fromarray((rand * 255).astype(np.uint8), "RGB")
+        out2 = list(mlmodel.predict({g_input.name: pil2}).values())[0].squeeze()
+        nrm = float(np.linalg.norm(out2))
+        if nrm > 0:
+            out2 = out2 / nrm
+        distinct_outs.append(out2)
+    pair_sims = []
+    for i in range(len(distinct_outs)):
+        for j in range(i + 1, len(distinct_outs)):
+            pair_sims.append(float(np.dot(distinct_outs[i], distinct_outs[j])))
+    mn, mx = min(pair_sims), max(pair_sims)
+    print(f"      Pairwise cosine across 5 distinct inputs: min {mn:+.4f}  max {mx:+.4f}")
+    if mn > 0.95:
+        print(f"      ERROR: model is degenerate — produces near-identical output")
+        print(f"      regardless of input. Conversion or graph is broken.")
+        sys.exit(3)
     print(f"      OK.\n")
     print(f"Done. Restart FileID to pick up the new model.")
     return out_path

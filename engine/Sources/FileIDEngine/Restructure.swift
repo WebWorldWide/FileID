@@ -56,11 +56,16 @@ public enum Restructure {
             // LEFT JOIN persons via face_prints to get any named-person
             // strings on each file. We GROUP_CONCAT names, then split
             // back in Swift (avoids a per-file second query).
+            //
+            // Separator is the ASCII unit-separator (\u{1F}). Comma
+            // would silently shred names like "Smith, John" into two
+            // fragments and emit an incorrect bucket — `\u{1F}` never
+            // appears in a person name so the round-trip is lossless.
             let r = try GRDB.Row.fetchAll(db, sql: """
                 SELECT
                   f.id, f.path_text, f.kind, f.created_at, f.modified_at,
                   f.location_lat, f.location_lon, f.has_text, f.vlm_proposed_name,
-                  GROUP_CONCAT(DISTINCT p.name) AS names
+                  GROUP_CONCAT(DISTINCT p.name, char(31)) AS names
                 FROM files f
                 LEFT JOIN face_prints fp ON fp.file_id = f.id
                 LEFT JOIN persons p ON p.id = fp.person_id
@@ -101,8 +106,15 @@ public enum Restructure {
             // Pick a bucket.
             let bucket: String
             if let names = s.personNames, !names.isEmpty {
-                let first = names.split(separator: ",").first.map { String($0).trimmingCharacters(in: .whitespaces) } ?? "Unknown"
-                bucket = "People/\(first)"
+                // Split on the ASCII unit-separator we used in the
+                // GROUP_CONCAT separator above. Trim whitespace in case
+                // any DB row happens to have leading/trailing spaces.
+                let first = names
+                    .split(separator: "\u{1F}")
+                    .first
+                    .map { String($0).trimmingCharacters(in: .whitespaces) }
+                    ?? "Unknown"
+                bucket = "People/\(first.isEmpty ? "Unknown" : first)"
             } else if let lat = s.lat, let lon = s.lon {
                 // 0.5° bucket ≈ ~50 km cells. Names like "37.5,-122.0".
                 let latB = (lat * 2).rounded() / 2

@@ -11,14 +11,35 @@ struct Detail: View {
     /// When the sidebar is hidden, Detail shows a toggle button in the
     /// top safe-area inset to bring it back.
     @Binding var sidebarVisible: Bool
+    /// Reserved for future cross-tab navigation needs. V3 removed
+    /// AssistantOrganizeView's "Review" hand-off so this is currently
+    /// unused — kept on the API surface so future inter-tab flows
+    /// don't need to re-thread it through MainWindow.
+    var onSwitchTab: (MainWindow.Tab) -> Void = { _ in }
 
     var body: some View {
         Group {
             if pickedURL == nil && store.totalFiles == 0 {
                 EmptyState(onPickFolder: pickFolder)
             } else {
+                // V3: Library is always home. No more takeover screen.
+                // Sidebar's Start Scan is the single CTA; the Library
+                // tab shows scan progress + tile fill-in directly.
                 tabContent
+                    .transition(.opacity)
             }
+        }
+        // V2.0 Spotlight integration — re-index FileID's photos with
+        // their smart names + captions + tags whenever a scan or Deep
+        // Analyze batch completes. Cheap (single bulk write); keeps the
+        // ⌘Space search results fresh.
+        .onChange(of: engine.lastProgress?.phase) { _, new in
+            if new == .completed {
+                Task.detached { await SpotlightIndexer.indexAll(dbPath: ReadStore.defaultDBURL.path) }
+            }
+        }
+        .onChange(of: engine.deepAnalyzeComplete?.processed ?? -1) { _, _ in
+            Task.detached { await SpotlightIndexer.indexAll(dbPath: ReadStore.defaultDBURL.path) }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         // 28 pt strip at the top for traffic-light buttons + the sidebar
@@ -63,15 +84,24 @@ struct Detail: View {
 
     @ViewBuilder
     private var tabContent: some View {
-        switch activeTab {
-        case .library:     LibraryView(engine: engine, store: store)
-        case .deep:        DeepAnalyzeView(engine: engine, store: store)
-        case .cleanup:     CleanupView(engine: engine, store: store)
-        case .restructure: RestructureView(store: store, engine: engine)
-        case .people:      PeopleView(engine: engine, store: store)
-        case .review:      ReviewView(engine: engine, store: store)
-        case .settings:    SettingsTab(engine: engine, store: store)
+        // Wrapped to give every tab swap an implicit cross-fade. Keyed
+        // on the tab raw value so SwiftUI knows when it's a different
+        // view tree.
+        Group {
+            switch activeTab {
+            case .library:     LibraryView(engine: engine, store: store)
+            case .people:      PeopleView(engine: engine, store: store,
+                                          onSwitchTab: onSwitchTab)
+            case .cleanup:     CleanupView(engine: engine, store: store)
+            case .deep:        DeepAnalyzeView(engine: engine, store: store,
+                                                onSwitchTab: onSwitchTab)
+            case .restructure: RestructureView(store: store, engine: engine)
+            case .settings:    SettingsTab(engine: engine, store: store)
+            }
         }
+        .id(activeTab)
+        .transition(.opacity.combined(with: .move(edge: .trailing)))
+        .animation(.easeInOut(duration: 0.22), value: activeTab)
     }
 }
 
@@ -79,6 +109,8 @@ struct Detail: View {
 
 private struct EmptyState: View {
     let onPickFolder: () -> Void
+    @State private var shimmer: Double = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private struct PipelineStep {
         let n: Int
@@ -88,17 +120,17 @@ private struct EmptyState: View {
 
     private let steps: [PipelineStep] = [
         .init(n: 1, title: "Scan",
-              detail: "Apple Vision finds faces, EXIF, OCR text, and duplicates. Around 80 files per second on Apple Silicon."),
+              detail: "Reads your files, finds faces, indexes text in photos."),
         .init(n: 2, title: "Cluster",
-              detail: "Faces are grouped into people automatically using on-device face prints."),
-        .init(n: 3, title: "AI verify",
-              detail: "Local Qwen vision model verifies ambiguous matches and merges them. Far fewer false splits than face prints alone."),
+              detail: "Groups faces by person."),
+        .init(n: 3, title: "Verify",
+              detail: "Double-checks the ambiguous matches."),
         .init(n: 4, title: "Name",
-              detail: "You name the most-photographed people. One-time, ~30 seconds."),
+              detail: "You name the people you recognize."),
         .init(n: 5, title: "Deep Analyze",
-              detail: "Local VLM writes a caption and suggested filename for every photo, using the names you provided."),
+              detail: "Writes captions and smart filenames using the names you gave."),
         .init(n: 6, title: "Restructure",
-              detail: "Propose a clean folder layout. Apply via symlinks (reversible) or commit to real moves when you're sure."),
+              detail: "Proposes a clean folder layout. Reversible via shortcuts before any real moves."),
     ]
 
     var body: some View {
@@ -118,8 +150,39 @@ private struct EmptyState: View {
 
     private var titleBlock: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("FileID")
-                .font(.system(size: 44, weight: .bold))
+            Group {
+                if reduceMotion {
+                    // Solid gold for users who prefer reduced motion —
+                    // still distinctive, just not animated.
+                    Text("FileID")
+                        .font(.system(size: 56, weight: .bold))
+                        .foregroundStyle(Theme.gold)
+                } else {
+                    // Iridescent gradient pulled from the FileID logo's
+                    // rainbow backdrop. Slowly drifts so the title feels
+                    // alive without being distracting — the splash's
+                    // signature visual.
+                    Text("FileID")
+                        .font(.system(size: 56, weight: .bold))
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [
+                                    Theme.gold, Theme.delight, Theme.ai,
+                                    Theme.info, Theme.gold
+                                ],
+                                startPoint: UnitPoint(x: shimmer, y: 0),
+                                endPoint: UnitPoint(x: shimmer + 1, y: 1)
+                            )
+                        )
+                        .onAppear {
+                            withAnimation(
+                                .linear(duration: 12).repeatForever(autoreverses: false)
+                            ) {
+                                shimmer = 1
+                            }
+                        }
+                }
+            }
             Text("Local-first photo organizer. Everything runs on your Mac.")
                 .font(.title3)
                 .foregroundStyle(.secondary)

@@ -174,9 +174,25 @@ public actor DBWriter {
             // and increment the failure counter so the user notices.
             JSONLog.shared.error(ev: "db_write_failed", sess: sessionID,
                                  error: "\(error)")
+            // Translate raw SQLite errors into actionable advice. The most
+            // common case in practice is "the .sqlite file got unlinked
+            // out from under us" — happens when the user re-runs run.sh
+            // while a previous engine is still scanning. Surfacing the raw
+            // SQL string isn't useful; tell them what to actually do.
+            let errString = "\(error)"
+            let userMessage: String
+            if errString.contains("error 10") || errString.contains("disk I/O") {
+                userMessage = "The database is no longer reachable mid-scan (SQLite I/O error). This usually means another FileID process held the .sqlite file. Quit FileID completely (⌘Q), then re-run ./run.sh — it now kills stale processes before wiping."
+            } else if errString.contains("error 5") || errString.contains("database is locked") {
+                userMessage = "Another FileID process is holding the database. Quit FileID (⌘Q) and re-run ./run.sh."
+            } else if errString.contains("error 13") || errString.contains("disk is full") {
+                userMessage = "Disk full — free space and re-run."
+            } else {
+                userMessage = "Batch \(self.batchIndex) write failed: \(error)"
+            }
             await sink.emit(.error(EngineError(
                 kind: "db_write_failed",
-                message: "Batch \(self.batchIndex) write failed: \(error)"
+                message: userMessage
             )))
         }
 
@@ -366,15 +382,23 @@ public actor DBWriter {
     // attached to a person later (they're "candidates" — clustering just
     // doesn't anchor on them).
 
-    /// Minimum face capture quality required to anchor a cluster. Below
-    /// 0.40 Apple Vision typically rates a face as blurry, occluded, or
-    /// poorly lit — embedding it produces a noisy point in feature space.
-    static let qualityFloor: Double = 0.40
+    /// Minimum face capture quality required to anchor a cluster. Apple
+    /// Vision's `faceCaptureQuality` rates "is this portrait-studio-
+    /// quality?" not "is this a recognizable face?" — real candid photos
+    /// score well below 0.4 even when clearly recognizable. We trust
+    /// ArcFace + Chinese Whispers' cosine threshold to handle weak
+    /// embeddings; the only quality cases we filter are catastrophic
+    /// (extremely blurry frames, occluded eyes). 0.02 is the bottom of
+    /// the "still has a face" range; below this it's typically a false
+    /// positive from the detector.
+    static let qualityFloor: Double = 0.02
 
     /// Minimum bbox area (fraction of image) for clustering. Faces under
-    /// 0.5 % of the frame are typically background extras whose embedding
-    /// captures crowd noise more than identity.
-    static let minBBoxAreaFraction: Double = 0.005
+    /// 0.2% of the frame produce noisy ArcFace embeddings — crowd extras
+    /// don't carry enough identity signal. Lowered from 0.005 (V2): group
+    /// photos have small faces but ArcFace's 8-pixel crop minimum + 112×112
+    /// rescale handles them when the source image is high-res.
+    static let minBBoxAreaFraction: Double = 0.002
 
     /// |yaw| beyond this is "heavy profile" — same identity at frontal vs
     /// 60° profile lands far apart in embedding space, polluting clusters.
@@ -391,14 +415,14 @@ public actor DBWriter {
     }
 
     /// Combined quality / size / pose filter. Returns true if the face
-    /// should be excluded from clustering. Quality of nil means we
-    /// couldn't measure it (Vision didn't return a quality observation
-    /// for this bbox); we conservatively keep those faces — quality
-    /// observations sometimes miss profile faces but those still cluster
-    /// fine if pose is reasonable.
+    /// should be excluded from clustering. Quality of `nil` means Vision
+    /// couldn't measure quality for this bbox — typically a low-confidence
+    /// detection — so we exclude it (V2 change; we used to include
+    /// nil-quality faces conservatively, but that admitted noise).
     static func isExcluded(quality: Double?, yaw: Double?, pitch: Double?,
                            bboxArea: Double) -> Bool {
-        if let q = quality, q < qualityFloor { return true }
+        guard let q = quality else { return true }
+        if q < qualityFloor { return true }
         if bboxArea < minBBoxAreaFraction { return true }
         if let y = yaw, abs(y) > maxYawRadians { return true }
         if let p = pitch, abs(p) > maxPitchRadians { return true }

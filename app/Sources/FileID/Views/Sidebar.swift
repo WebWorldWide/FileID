@@ -4,6 +4,7 @@ import FileIDShared
 
 struct Sidebar: View {
     let engine: EngineClient
+    let store: ReadStore
     @Binding var activeTab: MainWindow.Tab
     @Binding var pickedURL: URL?
     /// Bound from MainWindow's HStack split.
@@ -18,7 +19,9 @@ struct Sidebar: View {
                     folderRow.padding(.horizontal, 12)
                 }
 
-                sidebarSection("NAVIGATION") {
+                // Tabs are obviously navigation — no header needed. The
+                // "Pick a folder…" hint covers the disabled case.
+                Group {
                     if pickedURL == nil {
                         Text("Pick a folder above to enable tabs")
                             .font(.caption)
@@ -35,8 +38,9 @@ struct Sidebar: View {
                 }
 
                 if let url = pickedURL {
-                    sidebarSection("PROCESSING CONTROL") {
-                        ProcessingControl(engine: engine, pickedURL: url,
+                    sidebarSection("SCAN CONTROL") {
+                        ProcessingControl(engine: engine, store: store,
+                                           pickedURL: url,
                                            changePickedURL: { pickedURL = $0 })
                             .padding(.horizontal, 12)
                     }
@@ -49,14 +53,19 @@ struct Sidebar: View {
                     }
                 }
 
-                sidebarSection("ENGINE") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        EngineStatusRow(state: engine.state)
-                        if let err = engine.lastError {
-                            engineErrorRow(err)
+                // Engine status pill is only worth showing when something
+                // is wrong (crash, error). When everything is healthy the
+                // sidebar stays clean — fewer dividers, less visual noise.
+                if shouldShowEngineSection {
+                    sidebarSection("ENGINE") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            EngineStatusRow(state: engine.state)
+                            if let err = engine.lastError {
+                                engineErrorRow(err)
+                            }
                         }
+                        .padding(.horizontal, 12)
                     }
-                    .padding(.horizontal, 12)
                 }
             }
             .padding(.vertical, 16)
@@ -88,6 +97,17 @@ struct Sidebar: View {
         }
     }
 
+    /// Show the engine pill only when there's something interesting:
+    /// not yet ready (starting / crashed) or an error worth surfacing.
+    /// "Engine: Ready" is noise — the running scan already proves it.
+    private var shouldShowEngineSection: Bool {
+        if engine.lastError != nil { return true }
+        switch engine.state {
+        case .starting, .crashed: return true
+        case .ready:              return false
+        }
+    }
+
     @ViewBuilder
     private func sidebarSection<Content: View>(_ title: String,
                                                 @ViewBuilder content: () -> Content)
@@ -113,6 +133,9 @@ struct Sidebar: View {
                     RoundedRectangle(cornerRadius: 6)
                         .fill(active ? Theme.gold.opacity(0.18) : Color.clear)
                 )
+                .accessibilityLabel("\(tab.rawValue) tab")
+                .accessibilityAddTraits(active ? [.isSelected, .isButton] : [.isButton])
+                .accessibilityHint(active ? "Currently selected" : "Switches to \(tab.rawValue)")
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -198,6 +221,7 @@ struct Sidebar: View {
 
 private struct ProcessingControl: View {
     let engine: EngineClient
+    let store: ReadStore
     let pickedURL: URL
     let changePickedURL: (URL?) -> Void
 
@@ -207,6 +231,13 @@ private struct ProcessingControl: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            // Whole-pipeline indicator is always visible — even when
+            // nothing is in flight — so the user can see at a glance
+            // where they are in the workflow (e.g., post-scan they
+            // know "now go name people, then run Deep Analyze").
+            PipelineProgress(engine: engine, store: store)
+                .padding(.vertical, 2)
+
             if let p = engine.lastProgress, p.phase != .idle {
                 liveOrDone(p)
             } else {
@@ -254,9 +285,6 @@ private struct ProcessingControl: View {
             BadgePill(label: p.phase.rawValue.capitalized)
             Spacer()
         }
-
-        PipelineDots(activePhase: p.phase)
-            .padding(.vertical, 2)
 
         Text(statusText(p))
             .font(.caption.bold())
@@ -436,56 +464,105 @@ private struct ProcessingControl: View {
 
 // MARK: - Pipeline dots
 
-/// Discovery → Tag → Post-scan → Done indicator.
-private struct PipelineDots: View {
-    let activePhase: ScanPhase
+/// Whole-workflow indicator: Scan → Tag → People → Captions → Done.
+/// Reads engine signals + cheap DB counters so it stays accurate even
+/// across launches (i.e. when `engine.lastProgress` is nil but the DB
+/// already has a clustered library from a prior session).
+struct PipelineProgress: View {
+    let engine: EngineClient
+    let store: ReadStore
 
-    private struct Stage: Identifiable {
-        let id: String
-        let label: String
-        let phase: ScanPhase
+    enum Stage: Int, CaseIterable, Identifiable {
+        case scan = 0, tag, people, captions, done
+        var id: Int { rawValue }
+        var label: String {
+            switch self {
+            case .scan:     return "Scan"
+            case .tag:      return "Tag"
+            case .people:   return "People"
+            case .captions: return "Captions"
+            case .done:     return "Done"
+            }
+        }
     }
-    private let stages: [Stage] = [
-        Stage(id: "d", label: "Discover", phase: .discovering),
-        Stage(id: "t", label: "Tag",       phase: .tagging),
-        Stage(id: "p", label: "Post-scan", phase: .postScan),
-        Stage(id: "c", label: "Done",      phase: .completed)
-    ]
+
+    /// Where the user is in the workflow right now. Live signals win
+    /// over DB-derived state so the bar tracks an in-flight stage.
+    private var current: Stage {
+        if let p = engine.lastProgress {
+            switch p.phase {
+            case .discovering: return .scan
+            case .tagging:     return .tag
+            case .postScan:    return .people
+            case .completed, .cancelled, .failed, .idle: break
+            }
+        }
+        if engine.faceClusteringInFlight { return .people }
+        if engine.deepAnalyzeInFlight    { return .captions }
+
+        // Nothing in flight — derive from the DB state.
+        let scanned   = store.totalFiles > 0
+        let clustered = store.totalFacePrints() > 0
+        let named     = store.namedPersonCount() > 0
+        let captioned = store.totalCaptioned() > 0
+        if !scanned   { return .scan }
+        if !clustered { return .people }   // clustering still pending
+        if !named     { return .people }   // user hasn't named anyone yet
+        if !captioned { return .captions } // Deep Analyze still pending
+        return .done
+    }
 
     private func state(for s: Stage) -> (filled: Bool, active: Bool) {
-        let order: [ScanPhase] = [.idle, .discovering, .tagging, .postScan, .completed]
-        let cIdx = order.firstIndex(of: activePhase == .cancelled || activePhase == .failed
-                                     ? .completed : activePhase) ?? 0
-        let sIdx = order.firstIndex(of: s.phase) ?? 0
-        return (filled: sIdx < cIdx, active: sIdx == cIdx)
+        let c = current
+        // Done is "filled" only when current = done (everything's complete).
+        // Otherwise every stage strictly before the current one is filled,
+        // and the current stage itself is active.
+        let filled = s.rawValue < c.rawValue || c == .done
+        let active = s == c
+        return (filled, active)
     }
 
     var body: some View {
-        // Decoupled dot + label rows: scaleEffect on the dot can't
-        // displace the label.
-        VStack(spacing: 4) {
-            HStack(spacing: 0) {
-                ForEach(Array(stages.enumerated()), id: \.element.id) { idx, s in
-                    let st = state(for: s)
-                    dotCell(state: st)
-                    if idx < stages.count - 1 {
-                        Rectangle()
-                            .fill(st.filled ? Theme.gold : Color.white.opacity(0.10))
-                            .frame(height: 1)
-                            .frame(maxWidth: .infinity)
+        // 5 equal columns; each column has its dot centered above its
+        // label so they always align vertically. Connector segments live
+        // in the same column as the dot — left half + right half — so
+        // they meet between adjacent dots without offsetting them.
+        let stages = Stage.allCases
+        HStack(spacing: 0) {
+            ForEach(Array(stages.enumerated()), id: \.element.id) { idx, s in
+                let st = state(for: s)
+                let prevFilled = idx > 0 ? state(for: stages[idx - 1]).filled : false
+                VStack(spacing: 4) {
+                    ZStack {
+                        // Left connector — only when not the first dot.
+                        // Filled when the PREVIOUS stage is filled (the
+                        // segment "leads into" this dot from the left).
+                        if idx > 0 {
+                            HStack(spacing: 0) {
+                                Rectangle()
+                                    .fill(prevFilled ? Theme.gold : Color.white.opacity(0.10))
+                                    .frame(height: 1)
+                                Spacer(minLength: 0)
+                            }
+                        }
+                        // Right connector — only when not the last dot.
+                        if idx < stages.count - 1 {
+                            HStack(spacing: 0) {
+                                Spacer(minLength: 0)
+                                Rectangle()
+                                    .fill(st.filled ? Theme.gold : Color.white.opacity(0.10))
+                                    .frame(height: 1)
+                            }
+                        }
+                        dotCell(state: st)
                     }
-                }
-            }
-            .frame(height: 14)
-            HStack(spacing: 0) {
-                ForEach(stages) { s in
-                    let st = state(for: s)
+                    .frame(height: 14)
                     Text(s.label)
                         .font(.system(size: 8, weight: .semibold))
                         .foregroundStyle(st.active ? Theme.gold
                                           : (st.filled ? Color.primary : Color.secondary))
-                        .frame(maxWidth: .infinity)
                 }
+                .frame(maxWidth: .infinity)
             }
         }
         .padding(.horizontal, 4)

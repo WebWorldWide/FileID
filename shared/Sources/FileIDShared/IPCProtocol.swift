@@ -27,9 +27,6 @@ public struct IPCCommand: Codable, Sendable {
         case deepAnalyzeFolder(pathPrefix: String, modelKind: String)
         case deepAnalyzeAll(modelKind: String, skipExisting: Bool)
         case deepAnalyzeCancel
-        /// Run VLM verification on every borderline cluster pair and
-        /// auto-merge those Qwen confirms with confidence ≥ 0.75.
-        case runVLMFaceVerification(modelKind: String)
     }
 }
 
@@ -53,40 +50,12 @@ public struct IPCEvent: Codable, Sendable {
         case error(EngineError)
         case log(LogLine)
         case faceClusteringComplete(FaceClusteringResult)
+        case deepAnalyzeStarting(DeepAnalyzeStarting)
         case deepAnalyzeProgress(DeepAnalyzeProgress)
         case deepAnalyzeFileDone(DeepAnalyzeFileDone)
         case deepAnalyzeComplete(DeepAnalyzeComplete)
         case modelDownloadProgress(ModelDownloadProgress)
         case queueState(QueueState)
-        case vlmFaceVerificationComplete(VLMFaceVerificationResult)
-        case vlmFaceVerificationProgress(VLMFaceVerificationProgress)
-    }
-}
-
-public struct VLMFaceVerificationProgress: Codable, Sendable {
-    public let pairsExamined: Int
-    public let pairsTotal: Int
-    public let mergedSoFar: Int
-    public let etaSeconds: Double?
-    public init(pairsExamined: Int, pairsTotal: Int,
-                mergedSoFar: Int, etaSeconds: Double?) {
-        self.pairsExamined = pairsExamined
-        self.pairsTotal = pairsTotal
-        self.mergedSoFar = mergedSoFar
-        self.etaSeconds = etaSeconds
-    }
-}
-
-public struct VLMFaceVerificationResult: Codable, Sendable {
-    public let pairsExamined: Int
-    public let pairsConfirmedSame: Int
-    public let pairsMerged: Int
-    public let durationSeconds: Double
-    public init(pairsExamined: Int, pairsConfirmedSame: Int, pairsMerged: Int, durationSeconds: Double) {
-        self.pairsExamined = pairsExamined
-        self.pairsConfirmedSame = pairsConfirmedSame
-        self.pairsMerged = pairsMerged
-        self.durationSeconds = durationSeconds
     }
 }
 
@@ -262,6 +231,28 @@ public struct QueueState: Codable, Sendable {
 
     public var isIdle: Bool { running == nil && pending.isEmpty }
     public var depth: Int { (running == nil ? 0 : 1) + pending.count }
+}
+
+/// Streamed by the engine the moment a Deep Analyze command arrives,
+/// then again as the runner advances through model load / target
+/// resolution. Lets the UI show progressive feedback during the ~10s
+/// VLM cold-load before the first per-file `deepAnalyzeProgress` fires.
+public struct DeepAnalyzeStarting: Codable, Sendable {
+    public let modelKind: String
+    public let phase: Phase
+    public let message: String
+
+    public init(modelKind: String, phase: Phase, message: String) {
+        self.modelKind = modelKind
+        self.phase = phase
+        self.message = message
+    }
+
+    public enum Phase: String, Codable, Sendable {
+        case queued
+        case loadingModel
+        case resolvingTargets
+    }
 }
 
 public struct DeepAnalyzeProgress: Codable, Sendable {

@@ -11,9 +11,12 @@
 // (user picks a different one in Settings) drops the prior container
 // and loads the new one — costs ~10 s on M1.
 import Foundation
+import AVFoundation
+import AppKit
 import CoreImage
 import CommonCrypto
 import ImageIO
+import QuickLookThumbnailing
 import MLX
 import MLXLMCommon
 import MLXVLM
@@ -466,15 +469,141 @@ public actor DeepAnalyze {
 
     // MARK: - Image loader (engine-local, no Vision dependency)
 
+    /// Loads a CGImage from any supported source. For PDFs renders
+    /// the first page; for videos extracts a keyframe at ~25% in; for
+    /// everything else uses ImageIO thumbnails. Single entry point so
+    /// Deep Analyze can caption images, PDFs, and videos through the
+    /// same code path.
     nonisolated static func loadCGImage(url: URL, maxPixelSize: Int) -> CGImage? {
-        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
-        let opts: [CFString: Any] = [
-            kCGImageSourceShouldCacheImmediately: true,
-            kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
-        ]
-        return CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary)
+        let ext = url.pathExtension.lowercased()
+        if ext == "pdf" {
+            return renderFirstPDFPage(url: url, maxPixelSize: maxPixelSize)
+        }
+        if isVideoExtension(ext) {
+            return extractVideoKeyframe(url: url, maxPixelSize: maxPixelSize)
+        }
+        // Try ImageIO first — fast for images via thumbnail decode.
+        if let src = CGImageSourceCreateWithURL(url as CFURL, nil) {
+            let opts: [CFString: Any] = [
+                kCGImageSourceShouldCacheImmediately: true,
+                kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+            ]
+            if let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) {
+                return cg
+            }
+        }
+        // Quick Look fallback — handles .docx / .pages / .txt / .md /
+        // .key / .numbers / etc. Anything macOS can render a preview
+        // for, the VLM can caption. Returns nil if QL doesn't have a
+        // generator for this UTI; Deep Analyze silently skips.
+        return quickLookThumbnail(url: url, maxPixelSize: maxPixelSize)
+    }
+
+    /// Synchronous wrapper around QLThumbnailGenerator. The Quick Look
+    /// API is callback-based, but Deep Analyze's loader is synchronous —
+    /// so we bridge with a DispatchSemaphore. Only the engine's serial
+    /// VLM-prep stage calls this, so blocking briefly is fine.
+    nonisolated static func quickLookThumbnail(url: URL, maxPixelSize: Int) -> CGImage? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let req = QLThumbnailGenerator.Request(
+            fileAt: url,
+            size: CGSize(width: maxPixelSize, height: maxPixelSize),
+            scale: 1.0,
+            representationTypes: .thumbnail
+        )
+        let sema = DispatchSemaphore(value: 0)
+        // Sendable box for Swift 6 strict-concurrency capture rules —
+        // QL's completion runs on a non-actor queue, so we can't mutate
+        // a stack var directly.
+        let box = ImageBox()
+        QLThumbnailGenerator.shared.generateBestRepresentation(for: req) { rep, _ in
+            if let rep {
+                box.set(rep.cgImage)
+            }
+            sema.signal()
+        }
+        // 8-second hard cap. QL can hang on network volumes or
+        // unresponsive previewers; we'd rather skip than wedge the
+        // whole batch. ImageIO's thumbnail timeout doesn't apply here.
+        _ = sema.wait(timeout: .now() + .seconds(8))
+        return box.get()
+    }
+
+    /// Sendable wrapper for the QL completion handler.
+    private final class ImageBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: CGImage?
+        func set(_ v: CGImage?) { lock.lock(); value = v; lock.unlock() }
+        func get() -> CGImage? { lock.lock(); defer { lock.unlock() }; return value }
+    }
+
+    /// Common video container extensions. Mirrors FileTypes.kind.
+    nonisolated static func isVideoExtension(_ ext: String) -> Bool {
+        switch ext {
+        case "mp4", "m4v", "mov", "avi", "mkv", "webm", "mpg", "mpeg",
+             "3gp", "3g2", "wmv", "flv":
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Pull a representative keyframe out of a video at ~25% of its
+    /// duration. AVAssetImageGenerator handles the I/O + decode and
+    /// caps the output to maxPixelSize so RAW 4K frames don't blow
+    /// memory. Returns nil if the asset is unreadable (DRM, partial
+    /// download, codec we can't decode, etc.) — Deep Analyze then
+    /// silently skips the file just like it would for a missing PDF.
+    nonisolated static func extractVideoKeyframe(url: URL, maxPixelSize: Int) -> CGImage? {
+        let asset = AVURLAsset(url: url, options: [
+            AVURLAssetPreferPreciseDurationAndTimingKey: false
+        ])
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = CMTime(seconds: 0.5, preferredTimescale: 600)
+        generator.requestedTimeToleranceAfter  = CMTime(seconds: 0.5, preferredTimescale: 600)
+        generator.maximumSize = CGSize(width: maxPixelSize, height: maxPixelSize)
+
+        // Try 25% in first; fall back to 0s if that fails (very short
+        // clip or unseekable asset).
+        let durationSeconds = CMTimeGetSeconds(asset.duration)
+        let target: CMTime
+        if durationSeconds.isFinite, durationSeconds > 0 {
+            target = CMTime(seconds: durationSeconds * 0.25, preferredTimescale: 600)
+        } else {
+            target = .zero
+        }
+        if let cg = try? generator.copyCGImage(at: target, actualTime: nil) {
+            return cg
+        }
+        return try? generator.copyCGImage(at: .zero, actualTime: nil)
+    }
+
+    nonisolated static func renderFirstPDFPage(url: URL, maxPixelSize: Int) -> CGImage? {
+        guard let pdf = CGPDFDocument(url as CFURL),
+              let page = pdf.page(at: 1) else { return nil }
+        let bounds = page.getBoxRect(.mediaBox)
+        guard bounds.width > 0, bounds.height > 0 else { return nil }
+        // Scale so the longer side ≈ maxPixelSize. PDFs are vector;
+        // we just need enough resolution for the VLM to read text.
+        let longSide = max(bounds.width, bounds.height)
+        let scale = CGFloat(maxPixelSize) / longSide
+        let w = Int(bounds.width * scale)
+        let h = Int(bounds.height * scale)
+        guard w > 0, h > 0 else { return nil }
+        let cs = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(
+            data: nil, width: w, height: h, bitsPerComponent: 8,
+            bytesPerRow: 0, space: cs,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        ctx.setFillColor(CGColor(gray: 1, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.scaleBy(x: scale, y: scale)
+        ctx.drawPDFPage(page)
+        return ctx.makeImage()
     }
 }
 

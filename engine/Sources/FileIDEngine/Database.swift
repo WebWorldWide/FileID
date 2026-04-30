@@ -251,6 +251,25 @@ public final class Database: @unchecked Sendable {
                 """)
         }
 
+        // v7: identity anchors. Each cluster's L2-normalized centroid
+        // and the 90th-percentile cosine distance from members to that
+        // centroid (= anchor_radius) are persisted on the persons row.
+        // On the next clustering run, new clusters whose centroids fall
+        // within an old anchor's radius inherit the old structured-name
+        // fields. Lets named people survive re-clustering without the
+        // app needing to track cluster identity manually.
+        //
+        //   centroid:        2048-byte blob (512-d float32 L2-normalized)
+        //   anchor_radius:   cosine sim cutoff for membership match
+        //   last_clustered_at: timestamp of the run that wrote this anchor
+        m.registerMigration("v7_identity_anchors") { db in
+            try db.alter(table: "persons") { t in
+                t.add(column: "centroid", .blob)
+                t.add(column: "anchor_radius", .double)
+                t.add(column: "last_clustered_at", .double)
+            }
+        }
+
         return m
     }
 

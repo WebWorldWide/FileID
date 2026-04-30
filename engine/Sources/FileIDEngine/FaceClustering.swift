@@ -1,34 +1,34 @@
 // Face clustering — runs after each scan and on demand.
 //
-// Phase 1 — extract Vision face prints lazily for any rows that only
-//           have a bbox. Bounded concurrency avoids ANE thrash.
-// Phase 2 — greedy HNSW clustering + rebuild of the persons table.
+// Phase 1 — extract ArcFace embeddings lazily for any face_prints rows
+//           that only have a bbox + crop. Bounded concurrency avoids
+//           ANE thrash.
+// Phase 2 — load every embedded, non-excluded row.
+// Phase 3 — IdentityClustering: two-pass density + Pass 3 quality
+//           validation. Replaces Chinese Whispers.
+// Phase 4 — persist persons + face_prints.person_id assignments.
+// Phase 5 — tightPairAutoMerge centroid polish on ArcFace cosine.
 //
-// Memory: ~2 KB per face print; 50K faces ≈ 100 MB peak.
+// Memory: ~2 KB per ArcFace embedding; 50K faces ≈ 100 MB peak.
 import Foundation
 import GRDB
-import Vision
-import CoreImage
 import ImageIO
+import CoreGraphics
 import FileIDShared
 
 public enum FaceClustering {
 
-    /// Tight bootstrap threshold — over-clusters on purpose so the VLM
-    /// pass can confidently merge. A higher value (0.50+) false-merges
-    /// similar-looking different people, which can't be undone without
-    /// re-scanning.
-    public static let distanceThreshold: Float = 0.30
+    /// Centroid cosine ≥ this triggers auto-merge regardless of cluster
+    /// size — same person with very high confidence. Compare to ArcFace
+    /// verification literature: 0.40 is the FAR=10⁻⁴ threshold for
+    /// individual face pairs; centroid-to-centroid is denoised, so we
+    /// can pull this stricter without losing recall.
+    public static let tightAutoMergeCos: Float = 0.65
 
-    /// Centroid distance below which two clusters are auto-merged with
-    /// no VLM check, regardless of size. At < 0.40 it is virtually
-    /// always the same person (siblings start at ~0.50).
-    public static let tightAutoMergeL2: Float = 0.40
-
-    /// Looser threshold used only when at least one cluster is a single
-    /// face — those are almost always fragments of an existing person,
-    /// not a real distinct identity.
-    public static let smallClusterAutoMergeL2: Float = 0.50
+    /// Looser cosine threshold used only when at least one cluster is
+    /// a single face — those are almost always fragments of an existing
+    /// person, not a distinct identity.
+    public static let smallClusterAutoMergeCos: Float = 0.55
 
     /// Cap so a corrupt DB can't spawn arbitrarily many person rows.
     public static let maxPersons: Int = 8000
@@ -44,34 +44,63 @@ public enum FaceClustering {
     ) async -> FaceClusteringResult {
         let started = Date()
 
-        // PHASE 1 — extract any pending face prints (and ArcFace embeddings
-        // if the model is loaded). Idempotent — re-running just picks up
-        // new rows from prior scans.
-        await extractPendingPrints(database: database, sink: sink)
-
-        // PHASE 2 — load every face_prints row that has an embedding AND
-        // wasn't excluded by the quality filter. Prefer ArcFace; fall
-        // back to the legacy Vision feature print when ArcFace is empty
-        // (model not installed yet, or migration hasn't run).
-        struct FaceRow: Sendable {
-            let id: Int64
-            let arcFace: Data?
-            let visionPrint: Data
+        // ArcFace is a hard requirement — no Vision-print fallback. Vision
+        // feature prints aren't face-identity-trained; clustering on them
+        // produces mega-clusters at scale (the bug we're fixing). If the
+        // model isn't installed we surface an actionable error and exit.
+        if !ArcFaceService.shared.isReady {
+            for kind in FaceEmbedderKind.installedKinds() {
+                _ = ArcFaceService.shared.load(kind)
+                break
+            }
         }
+        guard ArcFaceService.shared.isReady else {
+            JSONLog.shared.warn(ev: "face_cluster_skipped_no_model",
+                                error: "ArcFace model not installed; cannot cluster.")
+            await sink.emit(.error(EngineError(
+                kind: "face_cluster_no_model",
+                message: "Face-recognition model not installed. Open Settings → AI Models — face recognition to install ArcFace iResNet50 (166 MB) or MobileFace (13 MB)."
+            )))
+            return FaceClusteringResult(personCount: 0, faceCount: 0,
+                                        unmatchedFaces: 0,
+                                        durationSeconds: Date().timeIntervalSince(started))
+        }
+
+        // PHASE 0 — snapshot prior anchors. Two reasons to do this BEFORE
+        // extraction + clustering: (1) we filter unknown-person face_ids
+        // out of both extraction and clustering pools so they're not
+        // re-embedded or re-assigned to named clusters; (2) the inheritance
+        // logic later in PHASE 4 reads the same snapshot.
+        let priorAnchors = await snapshotPriorAnchors(database: database)
+        let unknownFaceIDs: Set<Int64> = Set(
+            priorAnchors.filter { $0.isUnknown }.flatMap { $0.faceIDs }
+        )
+
+        // PHASE 1 — extract any pending ArcFace embeddings. Idempotent.
+        await extractPendingPrints(database: database, sink: sink,
+                                    skipFaceIDs: unknownFaceIDs)
+
+        // PHASE 2 — load every face_prints row with an ArcFace embedding
+        // and not excluded by the quality filter. Unknown-person face_ids
+        // are filtered out: the user explicitly said "don't cluster these",
+        // so they stay attached to their existing unknown person row and
+        // never participate in a re-cluster pass.
+        struct FaceRow: Sendable { let id: Int64; let arcFace: Data }
         let rows: [FaceRow]
         do {
             rows = try await database.pool.read { db in
                 let r = try GRDB.Row.fetchAll(db, sql: """
-                    SELECT id, print_data, arcface_embedding
+                    SELECT id, arcface_embedding
                     FROM face_prints
                     WHERE excluded = 0
-                      AND (LENGTH(print_data) > 0 OR LENGTH(arcface_embedding) > 0)
+                      AND LENGTH(arcface_embedding) > 0
                     ORDER BY id ASC LIMIT \(maxFacesPerRun)
                     """)
-                return r.map { row in
-                    FaceRow(id: row["id"] ?? 0,
-                            arcFace: row["arcface_embedding"],
-                            visionPrint: row["print_data"] ?? Data())
+                return r.compactMap { row -> FaceRow? in
+                    let id: Int64 = row["id"] ?? 0
+                    if unknownFaceIDs.contains(id) { return nil }
+                    return FaceRow(id: id,
+                                   arcFace: row["arcface_embedding"] ?? Data())
                 }
             }
         } catch {
@@ -92,26 +121,13 @@ public enum FaceClustering {
                                         durationSeconds: Date().timeIntervalSince(started))
         }
 
-        // Decide which embedding family to cluster on. If MOST rows have
-        // ArcFace, use ArcFace (drop Vision-only rows from this pass —
-        // they'll get embedded on the next migration run). Otherwise fall
-        // back to Vision feature prints. Mixing the two is forbidden:
-        // they live in different metric spaces, so cosine similarity
-        // between them is meaningless.
-        let arcFaceCount = rows.reduce(0) { $0 + (($1.arcFace?.count ?? 0) > 0 ? 1 : 0) }
-        let useArcFace = arcFaceCount * 2 >= rows.count   // ≥ 50% threshold
-
         struct DecodedFace { let id: Int64; let vec: [Float] }
         var decoded: [DecodedFace] = []
         decoded.reserveCapacity(rows.count)
         for row in rows {
-            if useArcFace, let blob = row.arcFace, blob.count > 0 {
-                let vec = ArcFaceService.blobToEmbedding(blob)
-                if !vec.isEmpty { decoded.append(DecodedFace(id: row.id, vec: vec)) }
-            } else if !useArcFace, row.visionPrint.count > 0 {
-                if let vec = decodePrint(row.visionPrint) {
-                    decoded.append(DecodedFace(id: row.id, vec: vec))
-                }
+            let vec = ArcFaceService.blobToEmbedding(row.arcFace)
+            if !vec.isEmpty {
+                decoded.append(DecodedFace(id: row.id, vec: vec))
             }
         }
         guard let firstDim = decoded.first?.vec.count else {
@@ -125,13 +141,17 @@ public enum FaceClustering {
         JSONLog.shared.info(ev: "face_cluster_decoded",
                             extra: ["raw": AnyCodable(rows.count),
                                     "decoded": AnyCodable(decoded.count),
-                                    "dim": AnyCodable(firstDim),
-                                    "embedder": AnyCodable(useArcFace ? "arcface" : "vision_print")])
+                                    "dim": AnyCodable(firstDim)])
 
-        // PHASE 3 — Chinese Whispers over a kNN cosine graph.
-        // Build an HNSW index for the kNN search; each face becomes a
-        // dense node index (insert order). HNSW returns L2 distances;
-        // for L2-normalized embeddings cosine_sim = 1 - L2² / 2.
+        // PHASE 3 — IdentityClustering: two-pass density + Pass 3 quality
+        // validation. Pass 1 forms tight identity cores at cosine ≥ 0.55;
+        // Pass 2 assigns outliers with a margin rule preventing bridge-face
+        // collapse; Pass 3 splits any cluster whose intra-cluster variance
+        // exceeds 0.05 or mean cosine to centroid drops below 0.50.
+        //
+        // HNSW supplies the kNN graph. Insert order = dense node index.
+        // HNSW returns L2 distances; for L2-normalized embeddings
+        // cosine_sim = 1 - L2²/2.
         let index = HNSWIndex(dim: firstDim, M: 16, efConstruction: 200, efSearch: 50)
         var denseToFaceID: [Int64] = []
         var vecsByDense: [[Float]] = []
@@ -153,30 +173,28 @@ public enum FaceClustering {
                                         durationSeconds: Date().timeIntervalSince(started))
         }
 
-        let cwParams = ChineseWhispers.Hyperparameters(
-            kNN: 20, cosineThreshold: 0.40, maxIter: 20)
-        let adjacency = ChineseWhispers.buildKNNGraph(
-            nodeCount: n,
-            params: cwParams
-        ) { idx -> [(neighbor: Int, similarity: Float)] in
-            let hits = index.search(vecsByDense[idx], k: cwParams.kNN + 1)
-            return hits.compactMap { (rawID, l2dist) -> (neighbor: Int, similarity: Float)? in
-                let nID = Int(rawID)
-                guard nID >= 0 && nID < n && nID != idx else { return nil }
-                let cosine = 1.0 - (l2dist * l2dist) / 2.0
-                return (neighbor: nID, similarity: cosine)
-            }
-        }
+        let icParams = IdentityClustering.Hyperparameters()
+        let icResult = IdentityClustering.cluster(
+            embeddings: vecsByDense,
+            searcher: { idx -> [(neighbor: Int, similarity: Float)] in
+                let hits = index.search(vecsByDense[idx], k: icParams.kNN + 1)
+                return hits.compactMap { (rawID, l2dist) -> (neighbor: Int, similarity: Float)? in
+                    let nID = Int(rawID)
+                    guard nID >= 0 && nID < n && nID != idx else { return nil }
+                    let cosine = 1.0 - (l2dist * l2dist) / 2.0
+                    return (neighbor: nID, similarity: cosine)
+                }
+            },
+            params: icParams
+        )
 
-        let cwResult = ChineseWhispers.cluster(adjacency: adjacency, params: cwParams)
-        // Group dense nodes by cluster id.
+        // Group dense nodes by cluster id (IdentityClustering returns
+        // dense IDs from 0).
         var byCluster: [Int: [Int]] = [:]
-        for (denseIdx, cid) in cwResult.clusterIDs.enumerated() {
+        for (denseIdx, cid) in icResult.clusterIDs.enumerated() {
             byCluster[cid, default: []].append(denseIdx)
         }
-        // Cap at maxPersons. If CW produced more clusters than the cap,
-        // keep the largest N and absorb the rest as "unmatched". Real
-        // libraries rarely hit this — caps catch corruption.
+        // Cap at maxPersons (catches DB corruption, not normal libraries).
         var truncatedAtCap = 0
         if byCluster.count > maxPersons {
             let sorted = byCluster.sorted { $0.value.count > $1.value.count }
@@ -189,44 +207,116 @@ public enum FaceClustering {
         }
         if truncatedAtCap > 0 {
             JSONLog.shared.warn(ev: "face_cluster_truncated",
-                                error: "Chinese Whispers produced \(byCluster.count + truncatedAtCap) clusters > maxPersons (\(maxPersons)); \(truncatedAtCap) faces unclustered.")
+                                error: "IdentityClustering produced \(byCluster.count + truncatedAtCap) clusters > maxPersons (\(maxPersons)); \(truncatedAtCap) faces unclustered.")
         }
 
         JSONLog.shared.info(ev: "face_cluster_built",
                             extra: ["faces": AnyCodable(decoded.count),
                                     "clusters": AnyCodable(byCluster.count),
+                                    "cores": AnyCodable(icResult.coreCount),
+                                    "outliersAssigned": AnyCodable(icResult.outliersAssigned),
+                                    "outliersAsSingletons": AnyCodable(icResult.outliersAsSingletons),
+                                    "splitsApplied": AnyCodable(icResult.splitsApplied),
                                     "unmatched": AnyCodable(unmatched),
-                                    "iterations": AnyCodable(cwResult.iterations),
-                                    "buildSeconds": AnyCodable(Date().timeIntervalSince(started))])
+                                    "buildSeconds": AnyCodable(icResult.durationSeconds)])
 
-        // PHASE 4 — Persist persons + face_prints.person_id assignment.
+        // PHASE 4 — Compute new-cluster centroids + anchor radii, snapshot
+        // prior anchors, match new clusters to old ones, persist with
+        // inherited names. Identity persistence — names survive re-clustering.
         struct ClusterPersist: Sendable {
             let repFaceID: Int64
             let faceIDs: [Int64]
             let count: Int
+            let centroid: [Float]
+            let anchorRadius: Float
+            let inherited: PriorAnchorMatch?
         }
-        let personsList: [ClusterPersist] = byCluster.map { _, denseIdxs in
-            // Pick the first dense index as representative — CW preserves
-            // insert order within a cluster, so this is stable across
-            // re-runs (with the same seed).
-            let faceIDs = denseIdxs.map { denseToFaceID[$0] }
-            return ClusterPersist(
-                repFaceID: faceIDs.first ?? 0,
-                faceIDs: faceIDs,
-                count: faceIDs.count
+        let nextClusters: [(centroid: [Float], radius: Float, faceIDs: [Int64], denseIdxs: [Int])] =
+            byCluster.values.map { denseIdxs in
+                let centroid = computeNormalizedCentroid(
+                    denseIdxs: denseIdxs, vecsByDense: vecsByDense, dim: firstDim
+                )
+                let radius = computeAnchorRadius(
+                    denseIdxs: denseIdxs, vecsByDense: vecsByDense, centroid: centroid
+                )
+                return (centroid, radius,
+                        denseIdxs.map { denseToFaceID[$0] }, denseIdxs)
+            }
+
+        // priorAnchors was loaded in PHASE 0; reuse it here. Unknown anchors
+        // are excluded from name-inheritance matching: their face_ids weren't
+        // in the clustering pool, so their faces stay attached to the
+        // existing unknown person row. Wave-2 cosine matching could
+        // otherwise transfer is_unknown=true onto a new cluster whose
+        // centroid happened to land near the unknown anchor's centroid.
+        let inheritanceCandidates = priorAnchors.filter { !$0.isUnknown }
+        let matches = matchClustersToPriorAnchors(
+            newClusters: nextClusters.map { ($0.centroid, $0.faceIDs) },
+            priorAnchors: inheritanceCandidates
+        )
+        let priorsWithNames = inheritanceCandidates.filter { $0.hasName }.count
+        let claimedPriorIDs = Set(matches.compactMap { $0?.priorPersonID })
+        let lostAnchorCount = max(0, priorsWithNames - claimedPriorIDs.count)
+        let unknownPriorIDs = priorAnchors.filter { $0.isUnknown }.map { $0.id }
+
+        let personsList: [ClusterPersist] = nextClusters.enumerated().map { idx, c in
+            ClusterPersist(
+                repFaceID: c.faceIDs.first ?? 0,
+                faceIDs: c.faceIDs,
+                count: c.faceIDs.count,
+                centroid: c.centroid,
+                anchorRadius: c.radius,
+                inherited: matches[idx]
             )
         }
+
         do {
             try await database.pool.write { db in
-                try db.execute(sql: "UPDATE face_prints SET person_id = NULL")
-                try db.execute(sql: "DELETE FROM persons")
+                // Preserve unknown persons in place. Their face_ids stay
+                // bound to their existing row; only non-unknown rows get
+                // wiped + recreated.
+                if unknownPriorIDs.isEmpty {
+                    try db.execute(sql: "UPDATE face_prints SET person_id = NULL")
+                    try db.execute(sql: "DELETE FROM persons")
+                } else {
+                    let placeholders = unknownPriorIDs.map { _ in "?" }.joined(separator: ",")
+                    let unknownArgs = StatementArguments(unknownPriorIDs.map { Int($0) })
+                    try db.execute(
+                        sql: """
+                            UPDATE face_prints SET person_id = NULL
+                            WHERE person_id IS NULL OR person_id NOT IN (\(placeholders))
+                            """,
+                        arguments: unknownArgs
+                    )
+                    try db.execute(
+                        sql: "DELETE FROM persons WHERE id NOT IN (\(placeholders))",
+                        arguments: unknownArgs
+                    )
+                }
 
                 let now = Date().timeIntervalSinceReferenceDate
                 for p in personsList {
+                    let blob = ArcFaceService.embeddingToBlob(p.centroid)
+                    let inherited = p.inherited
                     try db.execute(sql: """
-                        INSERT INTO persons (name, representative_face_id, file_count, created_at)
-                        VALUES (NULL, ?, ?, ?)
-                        """, arguments: [p.repFaceID, p.count, now])
+                        INSERT INTO persons (
+                            name, representative_face_id, file_count, created_at,
+                            title, first_name, middle_name, last_name, suffix, is_unknown,
+                            centroid, anchor_radius, last_clustered_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, arguments: [
+                            inherited?.legacyName,
+                            p.repFaceID, p.count, now,
+                            inherited?.title,
+                            inherited?.firstName,
+                            inherited?.middleName,
+                            inherited?.lastName,
+                            inherited?.suffix,
+                            inherited?.isUnknown == true ? 1 : 0,
+                            blob,
+                            Double(p.anchorRadius),
+                            now
+                        ])
                     let personID = db.lastInsertedRowID
                     for chunk in stride(from: 0, to: p.faceIDs.count, by: 500).map({
                         Array(p.faceIDs[$0..<min($0 + 500, p.faceIDs.count)])
@@ -258,7 +348,14 @@ public enum FaceClustering {
                                         unmatchedFaces: unmatched,
                                         durationSeconds: Date().timeIntervalSince(started))
         }
-        let postCWPersonCount = byCluster.count
+        let prePolishPersonCount = byCluster.count
+        let inheritedCount = matches.compactMap { $0 }.count
+        if inheritedCount > 0 || lostAnchorCount > 0 {
+            JSONLog.shared.info(ev: "face_cluster_anchor_match",
+                                extra: ["priors": AnyCodable(priorAnchors.count),
+                                        "inherited": AnyCodable(inheritedCount),
+                                        "lostNames": AnyCodable(lostAnchorCount)])
+        }
 
         // PHASE 4 — centroid-only auto-merge polish. CW with cosine ≥ 0.40
         // is already conservative; this pass catches any residual
@@ -266,15 +363,14 @@ public enum FaceClustering {
         // just below the kNN threshold). Cheap insurance.
         let autoMergedSources = await tightPairAutoMerge(database: database)
 
-        let finalPersonCount = max(0, postCWPersonCount - autoMergedSources)
+        let finalPersonCount = max(0, prePolishPersonCount - autoMergedSources)
         let dur = Date().timeIntervalSince(started)
         JSONLog.shared.info(ev: "face_cluster_done",
                             extra: ["persons": AnyCodable(finalPersonCount),
-                                    "personsBeforeAutoMerge": AnyCodable(postCWPersonCount),
+                                    "personsBeforeAutoMerge": AnyCodable(prePolishPersonCount),
                                     "autoMerged": AnyCodable(autoMergedSources),
                                     "faces": AnyCodable(decoded.count),
                                     "unmatched": AnyCodable(unmatched),
-                                    "embedder": AnyCodable(useArcFace ? "arcface" : "vision_print"),
                                     "seconds": AnyCodable(dur)])
         return FaceClusteringResult(
             personCount: finalPersonCount,
@@ -292,21 +388,23 @@ public enum FaceClustering {
     /// pathological wall-time hit on corrupted DBs.
     private static let autoMergePersonCap = 5000
 
-    /// Read centroids per person, find pairs that pass the
-    /// tight-or-small-cluster predicate, union-find chain them, apply
-    /// in one transaction. Returns the number of source persons absorbed.
+    /// Read ArcFace embeddings per person, build L2-normalized centroids,
+    /// find centroid pairs above the cosine cutoff, union-find chain them,
+    /// apply in one transaction. Returns the number of source persons
+    /// absorbed. Uses ArcFace cosine consistently with the primary
+    /// clustering pass — no embedding-space mismatch.
     static func tightPairAutoMerge(database: Database) async -> Int {
         struct PrintRow: Sendable { let personID: Int64; let blob: Data; let fileCount: Int }
         let rows: [PrintRow]
         do {
             rows = try await database.pool.read { db in
                 let r = try GRDB.Row.fetchAll(db, sql: """
-                    SELECT fp.person_id AS pid, fp.print_data AS blob,
+                    SELECT fp.person_id AS pid, fp.arcface_embedding AS blob,
                            p.file_count AS fc
                     FROM face_prints fp
                     INNER JOIN persons p ON p.id = fp.person_id
                     WHERE fp.person_id IS NOT NULL
-                      AND LENGTH(fp.print_data) > 0
+                      AND LENGTH(fp.arcface_embedding) > 0
                     """)
                 return r.map { PrintRow(personID: $0["pid"] ?? 0,
                                          blob: $0["blob"] ?? Data(),
@@ -318,12 +416,13 @@ public enum FaceClustering {
         }
         guard !rows.isEmpty else { return 0 }
 
-        // Group prints by person, decode, compute centroid.
+        // Group embeddings by person, build L2-normalized centroid.
         struct Cluster { let id: Int64; let centroid: [Float]; let fileCount: Int }
         var byPerson: [Int64: (vecs: [[Float]], fileCount: Int)] = [:]
         var firstDim = 0
         for row in rows {
-            guard let v = decodePrint(row.blob) else { continue }
+            let v = ArcFaceService.blobToEmbedding(row.blob)
+            guard !v.isEmpty else { continue }
             if firstDim == 0 { firstDim = v.count }
             guard v.count == firstDim else { continue }
             byPerson[row.personID, default: ([], row.fileCount)].vecs.append(v)
@@ -344,16 +443,19 @@ public enum FaceClustering {
             for v in payload.vecs {
                 for i in 0..<firstDim { sum[i] += v[i] }
             }
-            let n = Float(payload.vecs.count)
-            clusters.append(Cluster(id: pid,
-                                     centroid: sum.map { $0 / n },
+            // L2-normalize so cosine = dot product downstream.
+            var norm: Float = 0
+            for x in sum { norm += x * x }
+            let invN = Float(1) / max(.leastNonzeroMagnitude, norm.squareRoot())
+            for i in 0..<firstDim { sum[i] *= invN }
+            clusters.append(Cluster(id: pid, centroid: sum,
                                      fileCount: payload.fileCount))
         }
 
-        // O(N²) pairwise. Cluster i is "small" if file_count <= 1.
+        // O(N²) pairwise cosine. Cluster i is "small" if file_count <= 1.
         // Auto-merge predicate:
-        //   dist < tightAutoMergeL2          (always)  OR
-        //   dist < smallClusterAutoMergeL2 AND (i.small OR j.small)
+        //   cos(ci, cj) >= tightAutoMergeCos                    (always)  OR
+        //   cos(ci, cj) >= smallClusterAutoMergeCos AND (i.small OR j.small)
         var parent: [Int64: Int64] = [:]
         for c in clusters { parent[c.id] = c.id }
         func find(_ x: Int64) -> Int64 {
@@ -382,9 +484,9 @@ public enum FaceClustering {
             for j in (i + 1)..<clusters.count {
                 let cj = clusters[j]
                 let smallJ = cj.fileCount <= 1
-                let d = l2(ci.centroid, cj.centroid)
-                let isTight = d < tightAutoMergeL2
-                let isSmallPair = d < smallClusterAutoMergeL2 && (smallI || smallJ)
+                let cos = dotProduct(ci.centroid, cj.centroid)
+                let isTight = cos >= tightAutoMergeCos
+                let isSmallPair = cos >= smallClusterAutoMergeCos && (smallI || smallJ)
                 if isTight || isSmallPair {
                     union(ci.id, cj.id)
                     pairCount += 1
@@ -462,14 +564,232 @@ public enum FaceClustering {
         return totalSources
     }
 
-    private static func l2(_ a: [Float], _ b: [Float]) -> Float {
-        guard a.count == b.count else { return .infinity }
-        var sum: Float = 0
-        for i in 0..<a.count {
-            let d = a[i] - b[i]
-            sum += d * d
+    @inline(__always)
+    private static func dotProduct(_ a: [Float], _ b: [Float]) -> Float {
+        let n = min(a.count, b.count)
+        var s: Float = 0
+        for i in 0..<n { s += a[i] * b[i] }
+        return s
+    }
+
+    // MARK: - Phase 4: identity persistence (anchors)
+
+    /// Names + anchor-match metadata transferred from a prior person to
+    /// a new cluster.
+    fileprivate struct PriorAnchorMatch: Sendable {
+        let priorPersonID: Int64
+        let title: String?
+        let firstName: String?
+        let middleName: String?
+        let lastName: String?
+        let suffix: String?
+        let legacyName: String?
+        let isUnknown: Bool
+    }
+
+    /// Snapshot of an existing persons row + the face_ids that were
+    /// assigned to it in the prior clustering run. Drives name
+    /// inheritance after a re-cluster.
+    fileprivate struct PriorAnchor: Sendable {
+        let id: Int64
+        let centroid: [Float]?
+        let anchorRadius: Float?
+        let faceIDs: Set<Int64>
+        let title: String?
+        let firstName: String?
+        let middleName: String?
+        let lastName: String?
+        let suffix: String?
+        let legacyName: String?
+        let isUnknown: Bool
+        var hasName: Bool {
+            isUnknown ||
+            !(title ?? "").isEmpty ||
+            !(firstName ?? "").isEmpty ||
+            !(middleName ?? "").isEmpty ||
+            !(lastName ?? "").isEmpty ||
+            !(suffix ?? "").isEmpty ||
+            !(legacyName ?? "").isEmpty
         }
-        return sum.squareRoot()
+    }
+
+    /// L2-normalized mean of the embeddings indexed by `denseIdxs`.
+    fileprivate static func computeNormalizedCentroid(
+        denseIdxs: [Int], vecsByDense: [[Float]], dim: Int
+    ) -> [Float] {
+        var sum = [Float](repeating: 0, count: dim)
+        for idx in denseIdxs {
+            let v = vecsByDense[idx]
+            for d in 0..<dim { sum[d] += v[d] }
+        }
+        var norm: Float = 0
+        for d in 0..<dim { norm += sum[d] * sum[d] }
+        let invN = Float(1) / max(.leastNonzeroMagnitude, norm.squareRoot())
+        for d in 0..<dim { sum[d] *= invN }
+        return sum
+    }
+
+    /// 10th percentile cosine sim from cluster members to centroid,
+    /// clamped to [0.45, 0.85]. Singleton clusters use a default 0.50.
+    /// See plan: anchor radius is the cosine threshold at which we
+    /// believe a new face/centroid likely IS this person.
+    fileprivate static func computeAnchorRadius(
+        denseIdxs: [Int], vecsByDense: [[Float]], centroid: [Float]
+    ) -> Float {
+        guard denseIdxs.count >= 2 else { return 0.50 }
+        var sims: [Float] = []
+        sims.reserveCapacity(denseIdxs.count)
+        for idx in denseIdxs {
+            sims.append(dotProduct(vecsByDense[idx], centroid))
+        }
+        sims.sort()
+        // 10th percentile = the least-typical member's similarity.
+        let p10Index = max(0, Int((Float(sims.count) * 0.10).rounded(.down)))
+        let raw = sims[p10Index]
+        return min(0.85, max(0.45, raw))
+    }
+
+    /// Read every existing persons row + its face_id set + any prior
+    /// anchor data. Called BEFORE we wipe the persons table.
+    fileprivate static func snapshotPriorAnchors(database: Database) async -> [PriorAnchor] {
+        do {
+            return try await database.pool.read { db in
+                let personRows = try GRDB.Row.fetchAll(db, sql: """
+                    SELECT id, centroid, anchor_radius, title, first_name,
+                           middle_name, last_name, suffix, name, is_unknown
+                    FROM persons
+                    """)
+                let faceRows = try GRDB.Row.fetchAll(db, sql: """
+                    SELECT id, person_id FROM face_prints
+                    WHERE person_id IS NOT NULL
+                    """)
+                var faceIDsByPerson: [Int64: Set<Int64>] = [:]
+                for r in faceRows {
+                    let pid: Int64 = r["person_id"] ?? 0
+                    let fid: Int64 = r["id"] ?? 0
+                    if pid != 0 && fid != 0 {
+                        faceIDsByPerson[pid, default: []].insert(fid)
+                    }
+                }
+                return personRows.map { r -> PriorAnchor in
+                    let pid: Int64 = r["id"] ?? 0
+                    let centroid: [Float]? = (r["centroid"] as Data?).flatMap { blob in
+                        let v = ArcFaceService.blobToEmbedding(blob)
+                        return v.isEmpty ? nil : v
+                    }
+                    let radius: Float? = (r["anchor_radius"] as Double?).map { Float($0) }
+                    let isUnknownInt: Int = r["is_unknown"] ?? 0
+                    return PriorAnchor(
+                        id: pid,
+                        centroid: centroid,
+                        anchorRadius: radius,
+                        faceIDs: faceIDsByPerson[pid] ?? [],
+                        title: r["title"], firstName: r["first_name"],
+                        middleName: r["middle_name"], lastName: r["last_name"],
+                        suffix: r["suffix"], legacyName: r["name"],
+                        isUnknown: isUnknownInt != 0
+                    )
+                }
+            }
+        } catch {
+            JSONLog.shared.warn(ev: "face_cluster_anchor_snapshot_failed",
+                                error: "\(error)")
+            return []
+        }
+    }
+
+    /// For each new cluster, find the prior person it should inherit
+    /// names from. Two-wave matching:
+    ///
+    ///   Wave 1 (face-id overlap): when the SAME library is re-clustered,
+    ///     most face_ids carry over. Prior persons match the new cluster
+    ///     containing the most of their face_ids, requiring overlap
+    ///     ≥ 50% of the prior's face count. Highest priority.
+    ///
+    ///   Wave 2 (centroid cosine): for any prior with a stored anchor
+    ///     centroid that didn't match by face IDs (e.g. the user added
+    ///     entirely new photos), match new clusters whose centroid is
+    ///     within the prior's anchor_radius cosine. Lower priority.
+    ///
+    /// Each prior person matches at most one new cluster; each new
+    /// cluster gets at most one inherited identity. Conflicts resolve
+    /// by larger overlap / higher cosine.
+    fileprivate static func matchClustersToPriorAnchors(
+        newClusters: [(centroid: [Float], faceIDs: [Int64])],
+        priorAnchors: [PriorAnchor]
+    ) -> [PriorAnchorMatch?] {
+        var matches: [PriorAnchorMatch?] = Array(repeating: nil, count: newClusters.count)
+        guard !priorAnchors.isEmpty else { return matches }
+
+        // Only persons with a structured-name field set (or marked unknown)
+        // are worth inheriting. Empty rows just bloat conflict resolution.
+        let candidates = priorAnchors.filter { $0.hasName }
+        guard !candidates.isEmpty else { return matches }
+
+        let newFaceSets: [Set<Int64>] = newClusters.map { Set($0.faceIDs) }
+
+        // Wave 1: face-id overlap. Each candidate scores all new clusters.
+        var claimedByPrior = [Int64: Int]()  // priorID → newClusterIndex
+        var claimedByCluster = [Int: Int64]() // newClusterIndex → priorID
+        var bestOverlap = [Int: Int]()        // newClusterIndex → overlap count
+        for prior in candidates where !prior.faceIDs.isEmpty {
+            var bestIdx = -1
+            var bestCount = 0
+            for (idx, faceSet) in newFaceSets.enumerated() {
+                let overlap = prior.faceIDs.intersection(faceSet).count
+                if overlap > bestCount { bestCount = overlap; bestIdx = idx }
+            }
+            // Require ≥ 50% of the prior's faces in this cluster.
+            let threshold = max(1, prior.faceIDs.count / 2)
+            guard bestIdx >= 0, bestCount >= threshold else { continue }
+            // Conflict: another prior already claimed this cluster?
+            if let otherPriorID = claimedByCluster[bestIdx] {
+                let otherOverlap = bestOverlap[bestIdx] ?? 0
+                if bestCount > otherOverlap {
+                    claimedByPrior.removeValue(forKey: otherPriorID)
+                    claimedByPrior[prior.id] = bestIdx
+                    claimedByCluster[bestIdx] = prior.id
+                    bestOverlap[bestIdx] = bestCount
+                }
+            } else {
+                claimedByPrior[prior.id] = bestIdx
+                claimedByCluster[bestIdx] = prior.id
+                bestOverlap[bestIdx] = bestCount
+            }
+        }
+
+        // Wave 2: centroid cosine for unclaimed priors with stored anchors.
+        for prior in candidates where claimedByPrior[prior.id] == nil {
+            guard let priorCentroid = prior.centroid else { continue }
+            let radius = prior.anchorRadius ?? 0.50
+            var bestIdx = -1
+            var bestSim: Float = -2
+            for (idx, c) in newClusters.enumerated() where claimedByCluster[idx] == nil {
+                let s = dotProduct(priorCentroid, c.centroid)
+                if s >= radius && s > bestSim { bestSim = s; bestIdx = idx }
+            }
+            if bestIdx >= 0 {
+                claimedByPrior[prior.id] = bestIdx
+                claimedByCluster[bestIdx] = prior.id
+            }
+        }
+
+        // Materialize matches.
+        let priorByID = Dictionary(uniqueKeysWithValues: candidates.map { ($0.id, $0) })
+        for (clusterIdx, priorID) in claimedByCluster {
+            guard let prior = priorByID[priorID] else { continue }
+            matches[clusterIdx] = PriorAnchorMatch(
+                priorPersonID: prior.id,
+                title: prior.title,
+                firstName: prior.firstName,
+                middleName: prior.middleName,
+                lastName: prior.lastName,
+                suffix: prior.suffix,
+                legacyName: prior.legacyName,
+                isUnknown: prior.isUnknown
+            )
+        }
+        return matches
     }
 
     // MARK: - Phase 1: lazy print extraction
@@ -484,48 +804,44 @@ public enum FaceClustering {
     /// is enough to keep ANE busy without saturating; tested safe.
     private static let extractionConcurrency = 4
 
-    /// One face_prints row that's missing an embedding. Each row knows
-    /// which of the two embeddings it still needs so `extractOneFile` only
-    /// runs the work that hasn't been done — important on persisted DBs
-    /// where Vision feature prints exist from earlier runs and only the
-    /// new ArcFace embedding is missing.
+    /// One face_prints row that's missing its ArcFace embedding.
     fileprivate struct PendingRow: Sendable {
         let id: Int64
         let bbox: String
         let path: String
-        let needsVision: Bool
-        let needsArcFace: Bool
     }
 
-    /// Extract face prints for any face_prints row that's missing EITHER
-    /// the legacy Vision feature print OR the ArcFace embedding. Excluded
-    /// rows are skipped entirely. Idempotent.
-    static func extractPendingPrints(database: Database, sink: IPCSink) async {
+    /// Extract ArcFace embeddings for any face_prints row that's missing
+    /// one. Excluded rows are skipped entirely. `skipFaceIDs` lets callers
+    /// pass the face_ids of unknown-person rows so we don't waste ANE
+    /// inference on faces the user has explicitly opted out of clustering.
+    /// Idempotent. Skips work silently if the model isn't loaded —
+    /// runClustering surfaces that upstream.
+    static func extractPendingPrints(
+        database: Database, sink: IPCSink,
+        skipFaceIDs: Set<Int64> = []
+    ) async {
+        guard ArcFaceService.shared.isReady else { return }
         let pending: [PendingRow]
         do {
             pending = try await database.pool.read { db in
                 let rows = try GRDB.Row.fetchAll(db, sql: """
                     SELECT face_prints.id, face_prints.bbox,
-                           files.path_text AS path,
-                           CASE WHEN LENGTH(face_prints.print_data) = 0
-                                THEN 1 ELSE 0 END AS needs_vision,
-                           CASE WHEN LENGTH(COALESCE(face_prints.arcface_embedding, X'')) = 0
-                                THEN 1 ELSE 0 END AS needs_arcface
+                           files.path_text AS path
                     FROM face_prints
                     INNER JOIN files ON files.id = face_prints.file_id
                     WHERE files.failed = 0
                       AND face_prints.excluded = 0
-                      AND (LENGTH(face_prints.print_data) = 0
-                           OR LENGTH(COALESCE(face_prints.arcface_embedding, X'')) = 0)
+                      AND LENGTH(COALESCE(face_prints.arcface_embedding, X'')) = 0
                     ORDER BY face_prints.id ASC
                     LIMIT \(maxExtractionsPerRun)
                     """)
-                return rows.map { r in
-                    PendingRow(id: r["id"] ?? 0,
-                               bbox: r["bbox"] ?? "",
-                               path: r["path"] ?? "",
-                               needsVision: ((r["needs_vision"] as Int?) ?? 0) != 0,
-                               needsArcFace: ((r["needs_arcface"] as Int?) ?? 0) != 0)
+                return rows.compactMap { r -> PendingRow? in
+                    let id: Int64 = r["id"] ?? 0
+                    if skipFaceIDs.contains(id) { return nil }
+                    return PendingRow(id: id,
+                                       bbox: r["bbox"] ?? "",
+                                       path: r["path"] ?? "")
                 }
             }
         } catch {
@@ -540,19 +856,13 @@ public enum FaceClustering {
                             extra: ["pending": AnyCodable(pending.count)])
         let start = Date()
 
-        // Group rows by source file so we open each image once and run all
-        // its face prints in a single Vision pass.
+        // Group rows by source file so we open each image once for all
+        // of its faces.
         var byPath: [String: [PendingRow]] = [:]
         byPath.reserveCapacity(pending.count / 3)
         for row in pending { byPath[row.path, default: []].append(row) }
 
-        // Bounded concurrency via TaskGroup + semaphore. We use a simple
-        // counting actor instead of DispatchSemaphore to avoid blocking
-        // cooperative threads.
         let limiter = AsyncSemaphore(value: extractionConcurrency)
-        // Each extracted face yields (id, Vision-feature-print blob, ArcFace blob).
-        // ArcFace blob is nil when the .mlpackage isn't installed yet; the
-        // Stage D clustering then falls back to the Vision feature print.
         let extracted: [PendingExtract] = await withTaskGroup(of: [PendingExtract].self,
                                                                returning: [PendingExtract].self) { group in
             for (path, rows) in byPath {
@@ -567,41 +877,19 @@ public enum FaceClustering {
             return out
         }
 
-        // Persist extracted prints in chunks. Only update columns we
-        // actually computed for each row — leaves existing values alone
-        // when the row already had them.
         let extractedSnapshot = extracted   // Sendable capture
-        let arcFaceCount = extractedSnapshot.reduce(0) { $0 + ($1.arcFace != nil ? 1 : 0) }
-        let visionCount = extractedSnapshot.reduce(0) { $0 + ($1.visionPrint != nil ? 1 : 0) }
         do {
             try await database.pool.write { db in
                 for face in extractedSnapshot {
-                    switch (face.visionPrint, face.arcFace) {
-                    case let (vp?, af?):
-                        try db.execute(
-                            sql: "UPDATE face_prints SET print_data = ?, arcface_embedding = ? WHERE id = ?",
-                            arguments: [vp, af, face.id]
-                        )
-                    case let (vp?, nil):
-                        try db.execute(
-                            sql: "UPDATE face_prints SET print_data = ? WHERE id = ?",
-                            arguments: [vp, face.id]
-                        )
-                    case let (nil, af?):
-                        try db.execute(
-                            sql: "UPDATE face_prints SET arcface_embedding = ? WHERE id = ?",
-                            arguments: [af, face.id]
-                        )
-                    case (nil, nil):
-                        break
-                    }
+                    try db.execute(
+                        sql: "UPDATE face_prints SET arcface_embedding = ? WHERE id = ?",
+                        arguments: [face.arcFace, face.id]
+                    )
                 }
             }
             JSONLog.shared.info(ev: "face_print_extract_done",
                                 extra: ["pending": AnyCodable(pending.count),
                                         "extracted": AnyCodable(extractedSnapshot.count),
-                                        "vision_extracted": AnyCodable(visionCount),
-                                        "arcface_extracted": AnyCodable(arcFaceCount),
                                         "files": AnyCodable(byPath.count),
                                         "seconds": AnyCodable(Date().timeIntervalSince(start))])
         } catch {
@@ -613,11 +901,9 @@ public enum FaceClustering {
         }
     }
 
-    /// Open one image and produce only the embeddings each row is missing.
-    /// Vision feature print runs only for rows where `needsVision == true`;
-    /// ArcFace runs only for rows where `needsArcFace == true` AND the
-    /// .mlpackage is loaded. Always saves a face crop for downstream VLM
-    /// use (idempotent on disk).
+    /// Open one image, crop each requested face, run ArcFace on each crop.
+    /// Always saves a face crop JPEG for downstream VLM use (idempotent
+    /// on disk).
     private static func extractOneFile(
         path: String, rows: [PendingRow]
     ) async -> [PendingExtract] {
@@ -626,57 +912,14 @@ public enum FaceClustering {
                 let result = autoreleasepool { () -> [PendingExtract] in
                     let url = URL(fileURLWithPath: path)
                     guard let cg = loadCGImage(url: url) else { return [] }
-
-                    // Run Vision feature-print extraction only for rows
-                    // that need it. Aligned by index with `visionRows`.
-                    let visionRows = rows.filter { $0.needsVision }
-                    var visionByID: [Int64: Data] = [:]
-                    if !visionRows.isEmpty {
-                        let handler = VNImageRequestHandler(cgImage: cg, options: [:])
-                        var requests: [VNGenerateImageFeaturePrintRequest] = []
-                        requests.reserveCapacity(visionRows.count)
-                        for row in visionRows {
-                            guard let roi = parseBBox(row.bbox) else { continue }
-                            let req = VNGenerateImageFeaturePrintRequest()
-                            req.imageCropAndScaleOption = .scaleFill
-                            req.regionOfInterest = roi
-                            requests.append(req)
-                        }
-                        if !requests.isEmpty {
-                            do { try handler.perform(requests) } catch { /* best-effort */ }
-                            for (i, req) in requests.enumerated() {
-                                guard i < visionRows.count, let fp = req.results?.first else { continue }
-                                if let data = try? NSKeyedArchiver.archivedData(
-                                    withRootObject: fp, requiringSecureCoding: true
-                                ) {
-                                    visionByID[visionRows[i].id] = data
-                                }
-                            }
-                        }
-                    }
-
-                    let arcFaceReady = ArcFaceService.shared.isReady
                     var out: [PendingExtract] = []
                     out.reserveCapacity(rows.count)
                     for row in rows {
-                        // Crop once per face; saves the JPEG (idempotent)
-                        // and feeds ArcFace if needed.
-                        let crop = cropFaceCGImage(cgImage: cg, bboxString: row.bbox)
-                        if let crop {
-                            saveFaceCrop(faceID: row.id, croppedCGImage: crop)
-                        }
-                        var arcFaceBlob: Data? = nil
-                        if row.needsArcFace, arcFaceReady, let crop,
-                           let vec = ArcFaceService.shared.embed(crop) {
-                            arcFaceBlob = ArcFaceService.embeddingToBlob(vec)
-                        }
-                        let visionBlob = visionByID[row.id]
-                        // Skip rows where neither computation produced
-                        // anything new — no DB write needed.
-                        if visionBlob == nil && arcFaceBlob == nil { continue }
+                        guard let crop = cropFaceCGImage(cgImage: cg, bboxString: row.bbox) else { continue }
+                        saveFaceCrop(faceID: row.id, croppedCGImage: crop)
+                        guard let vec = ArcFaceService.shared.embed(crop) else { continue }
                         out.append(PendingExtract(id: row.id,
-                                                  visionPrint: visionBlob,
-                                                  arcFace: arcFaceBlob))
+                                                  arcFace: ArcFaceService.embeddingToBlob(vec)))
                     }
                     return out
                 }
@@ -687,14 +930,18 @@ public enum FaceClustering {
 
     fileprivate struct PendingExtract: Sendable {
         let id: Int64
-        let visionPrint: Data?     // nil = the row already had this; don't overwrite
-        let arcFace: Data?         // nil = the row already had this OR model unavailable
+        let arcFace: Data
     }
 
     /// Crop the bbox region (with padding) out of the source CGImage and
     /// return the cropped CGImage. Vision bboxes are normalized with
     /// bottom-left origin; CGImage cropping uses top-left, so we flip Y.
-    /// Returns nil if the resulting crop is too small to be useful.
+    ///
+    /// Pixel minimum is 8x8 — ArcFace internally scales to 112×112, so
+    /// even tiny crops produce a usable (if slightly noisier) embedding.
+    /// The bbox-area filter at insertion time already drops obvious
+    /// background extras; this is the catch-net for low-res source
+    /// images where 0.5% area = ~30px on a 400px frame.
     static func cropFaceCGImage(cgImage: CGImage, bboxString: String) -> CGImage? {
         guard let roi = parseBBox(bboxString) else { return nil }
         let imgW = CGFloat(cgImage.width)
@@ -705,7 +952,7 @@ public enum FaceClustering {
             width: roi.size.width * imgW,
             height: roi.size.height * imgH
         ).integral
-        guard pixelRect.width >= 32, pixelRect.height >= 32 else { return nil }
+        guard pixelRect.width >= 8, pixelRect.height >= 8 else { return nil }
         return cgImage.cropping(to: pixelRect)
     }
 
@@ -769,26 +1016,4 @@ public enum FaceClustering {
         return CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary)
     }
 
-    // MARK: - Decoding
-
-    /// Decode a face_prints.print_data BLOB back to a Float vector. Returns
-    /// nil if the data isn't a valid VNFeaturePrintObservation archive or
-    /// the embedded vector is too small/large to be sane.
-    private static func decodePrint(_ data: Data) -> [Float]? {
-        guard let obs = try? NSKeyedUnarchiver.unarchivedObject(
-            ofClass: VNFeaturePrintObservation.self, from: data
-        ) else { return nil }
-        let count = obs.elementCount
-        // Vision face prints are 512-d for the current revision. Sanity-clamp.
-        guard count >= 64, count <= 4096 else { return nil }
-        let requiredBytes = count * MemoryLayout<Float>.size
-        guard obs.data.count >= requiredBytes else { return nil }
-        var out = [Float](repeating: 0, count: count)
-        obs.data.withUnsafeBytes { ptr in
-            let fp = ptr.bindMemory(to: Float.self)
-            let n = min(count, fp.count)
-            for i in 0..<n { out[i] = fp[i] }
-        }
-        return out
-    }
 }

@@ -74,7 +74,7 @@ public enum Tagging {
 
                     let loadStart = CFAbsoluteTimeGetCurrent()
                     guard let cgImage = loadCGImage(url: url) else {
-                        JSONLog.shared.warn(ev: "image_decode_failed", path: url.path)
+                        JSONLog.shared.warn(ev: "image_decode_failed", path: redactPathForLog(url.path))
                         return TaggedFile(
                             url: url, kind: "image", extension: ext,
                             sizeBytes: discovered.sizeBytes,
@@ -116,12 +116,26 @@ public enum Tagging {
                         .map { MobileCLIPService.embeddingToBlob($0) }
                     let clipMs = (CFAbsoluteTimeGetCurrent() - clipStart) * 1000
 
+                    // Enrich Vision-classified tags with EXIF + dimension
+                    // signals we already have for free. Cheap, sync,
+                    // gives the Library tile chips real value beyond
+                    // the Vision classifier's narrow vocabulary.
+                    var enrichedTags = pass.classifyTags
+                    enrichedTags.append(contentsOf: extraTags(
+                        cgImage: cgImage,
+                        cameraModel: exif.cameraModel,
+                        creationDate: discovered.creationDate,
+                        hasFaces: pass.faceCount > 0,
+                        hasOCR: ocr?.isEmpty == false,
+                        hasLocation: exif.lat != nil && exif.lon != nil
+                    ))
+
                     var tagged = TaggedFile(
                         url: url, kind: "image", extension: ext,
                         sizeBytes: discovered.sizeBytes,
                         createdAt: discovered.creationDate,
                         modifiedAt: discovered.modificationDate,
-                        visionTags: pass.classifyTags,
+                        visionTags: enrichedTags,
                         phash: phash,
                         aestheticScore: aesthetic,
                         hasFaces: pass.faceCount > 0,
@@ -312,6 +326,59 @@ public enum Tagging {
         let sizeScore = min(fileSizeMB / 5.0, 1.0)
         let resScore  = min(mp / 12.0, 1.0)
         return min(1.0, sizeScore * 0.5 + resScore * 0.5)
+    }
+
+    /// Free-from-the-data tags layered on top of Vision's classifier
+    /// output. Year (so users can search "2024"), camera family
+    /// ("iPhone" / "Canon"), aspect orientation (Wide / Tall / Square),
+    /// and capability flags ("Has Faces", "Has Text"). Sync — these
+    /// don't add measurable per-file cost.
+    private static func extraTags(
+        cgImage: CGImage,
+        cameraModel: String?,
+        creationDate: Date?,
+        hasFaces: Bool,
+        hasOCR: Bool,
+        hasLocation: Bool = false
+    ) -> [String] {
+        var out: [String] = []
+        // Year tag from creation date.
+        if let d = creationDate {
+            let cal = Calendar(identifier: .gregorian)
+            let y = cal.component(.year, from: d)
+            if y > 1990 && y < 2100 { out.append("Year_\(y)") }
+        }
+        // Camera family — collapse "Apple iPhone 15 Pro Max" → "iPhone",
+        // "Canon EOS R5" → "Canon", etc. Helps users filter by gear.
+        if let cm = cameraModel, !cm.isEmpty {
+            let lower = cm.lowercased()
+            let family: String?
+            if lower.contains("iphone") { family = "iPhone" }
+            else if lower.contains("ipad") { family = "iPad" }
+            else if lower.contains("canon") { family = "Canon" }
+            else if lower.contains("nikon") { family = "Nikon" }
+            else if lower.contains("sony") { family = "Sony" }
+            else if lower.contains("fuji") { family = "Fuji" }
+            else if lower.contains("leica") { family = "Leica" }
+            else if lower.contains("gopro") { family = "GoPro" }
+            else if lower.contains("samsung") { family = "Samsung" }
+            else if lower.contains("pixel") { family = "Pixel" }
+            else { family = nil }
+            if let family { out.append(family) }
+        }
+        // Orientation/aspect tag — instantly groupable in the Library.
+        let w = cgImage.width
+        let h = cgImage.height
+        if w > 0 && h > 0 {
+            let ratio = Double(w) / Double(h)
+            if ratio > 1.30 { out.append("Wide") }
+            else if ratio < 0.77 { out.append("Tall") }
+            else { out.append("Square") }
+        }
+        if hasFaces { out.append("Has Faces") }
+        if hasOCR { out.append("Has Text") }
+        if hasLocation { out.append("Has Location") }
+        return out
     }
 
     /// Read EXIF camera model + GPS coords from the image's metadata.

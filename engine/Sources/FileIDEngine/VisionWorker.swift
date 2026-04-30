@@ -88,14 +88,13 @@ public final class VisionWorker: @unchecked Sendable {
 
     // Result of the bundled primary pass.
     public struct PrimaryPass: Sendable {
-        public var classifyTags: [String]      // labels with confidence >= 0.5
+        public var classifyTags: [String]      // labels with confidence >= 0.30, top-8 by confidence
         public var faceCount: Int
         public var faceBBoxes: [String]        // "x,y,w,h" normalized
         public var faceQualities: [Double]     // 0..1, parallel to faceBBoxes; -1 if not measured
         public var faceYaws: [Double?]         // radians, parallel to faceBBoxes; nil if missing
         public var facePitches: [Double?]      // radians, parallel to faceBBoxes; nil if missing
         public var facePrints: [Data]          // EMPTY here — extracted lazily in Stage D
-        public var hasSalientObject: Bool      // unused — kept for source-compat
     }
 
     /// Bundled face/scene/saliency Vision pass over `cgImage`.
@@ -108,7 +107,7 @@ public final class VisionWorker: @unchecked Sendable {
         var pass = PrimaryPass(classifyTags: [], faceCount: 0,
                                faceBBoxes: [], faceQualities: [],
                                faceYaws: [], facePitches: [],
-                               facePrints: [], hasSalientObject: false)
+                               facePrints: [])
 
         let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
         visionConcurrencyGate.wait()
@@ -127,9 +126,19 @@ public final class VisionWorker: @unchecked Sendable {
         }
 
         if let results = classifyReq.results {
-            pass.classifyTags = results
-                .filter { $0.confidence >= 0.5 }
-                .map { $0.identifier }
+            // 0.30 confidence floor: VNClassifyImageRequest emits ~1300
+            // hierarchical labels; at 0.5 most photos cleared 0-2 tags
+            // (the user complaint was "tagging seems pointless"). 0.30
+            // is the typical recall sweet spot — surfaces multiple
+            // useful labels per image without the noise floor of 0.20.
+            // Cap at top 8 to keep the per-file payload bounded; results
+            // are pre-sorted by confidence descending.
+            pass.classifyTags = Array(
+                results
+                    .filter { $0.confidence >= 0.30 }
+                    .prefix(8)
+                    .map { $0.identifier }
+            )
         }
         // Index quality observations by bbox so we can align them with the
         // face-rects observations after sorting (the two requests detect

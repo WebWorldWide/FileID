@@ -75,7 +75,7 @@ struct DeepAnalyzeModelPickerCard: View {
                     Text("Recommended for this Mac (\(Int(ramGB)) GB RAM)")
                         .font(.caption.monospaced()).foregroundStyle(.secondary)
                 }
-                Text("On-demand local VLM. Generates human-readable captions + smart filenames. Privacy-first — nothing leaves the device.")
+                Text("On-device AI that reads images and writes captions + smart filenames. Nothing leaves your Mac.")
                     .font(.callout).foregroundStyle(.secondary)
                 Divider().opacity(0.3)
                 ForEach(top3, id: \.rawValue) { kind in
@@ -237,28 +237,50 @@ enum ModelInstallStatus {
 struct DeepAnalyzeView: View {
     let engine: EngineClient
     let store: ReadStore
+    var onSwitchTab: (MainWindow.Tab) -> Void = { _ in }
     @State private var settings = DeepAnalyzeSettings.shared
     @State private var skipExisting = true
-    @State private var showUnnamedConfirm = false
+    @State private var bulkRenameSheetOpen = false
+    @State private var pendingRenameCount: Int = 0
 
     private var pendingTotals: (total: Int, pending: Int) {
         store.deepAnalyzePending(modelKey: settings.activeKind.rawValue)
     }
 
-    /// Drives the "name people first" confirm dialog.
-    private func hasUnnamedClusters() -> Bool {
-        let rows = store.persons()
-        guard !rows.isEmpty else { return false }
-        return rows.contains { !$0.hasAnyName }
+    /// True when at least one person cluster has been given a name.
+    /// Hard requirement before Deep Analyze can run — the VLM uses the
+    /// names in captions, and "a person doing X" captions are nearly
+    /// useless. User must visit People and name at least one cluster.
+    private var hasNamedAnyone: Bool {
+        store.namedPersonCount() > 0
     }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 header
+                if !engine.deepAnalyzeAvailable {
+                    unavailableCard
+                }
                 statusCard
                 actionsCard
-                if engine.deepAnalyzeInFlight || engine.deepAnalyzeProgress != nil {
+                // Smart names produced by Deep Analyze stack up here for
+                // bulk apply. Lives in this tab (not Library) because
+                // smart names ARE Deep Analyze's output — putting the
+                // bulk-rename trigger anywhere else split the workflow.
+                if pendingRenameCount > 0 {
+                    smartNamesCard
+                }
+                // Show a "Starting…" card the instant Deep Analyze is
+                // requested, even before the first progress event lands.
+                // Without this, hitting Skip from the People tab feels
+                // like a 10s freeze (the wait for the VLM model to load).
+                if engine.deepAnalyzeInFlight, engine.deepAnalyzeProgress == nil {
+                    startingCard
+                        .animation(.spring(response: 0.35, dampingFraction: 0.78),
+                                   value: engine.deepAnalyzeInFlight)
+                }
+                if engine.deepAnalyzeProgress != nil {
                     progressCard
                 }
                 if let lastDone = engine.deepAnalyzeComplete {
@@ -272,18 +294,80 @@ struct DeepAnalyzeView: View {
             .padding(24)
         }
         .background(Color.clear)
+        .onAppear { refreshPendingRenameCount() }
+        .onChange(of: engine.deepAnalyzeComplete?.processed ?? -1) { _, _ in
+            refreshPendingRenameCount()
+        }
+        .onChange(of: store.version) { _, _ in
+            refreshPendingRenameCount()
+        }
+        .sheet(isPresented: $bulkRenameSheetOpen, onDismiss: refreshPendingRenameCount) {
+            BulkRenameSheet(store: store)
+        }
+    }
+
+    private func refreshPendingRenameCount() {
+        pendingRenameCount = store.filesWithProposedNames(limit: 5000).count
+    }
+
+    private var smartNamesCard: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: "wand.and.rays").foregroundStyle(Theme.gold)
+                    Text("Smart names ready").font(.headline)
+                    Spacer()
+                    Text("\(pendingRenameCount) file\(pendingRenameCount == 1 ? "" : "s")")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+                Text("Deep Analyze suggested new filenames for these images. Review and apply them in one batch — original names remain in Finder's metadata until you Apply.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button {
+                    bulkRenameSheetOpen = true
+                } label: {
+                    Label("Review and apply…", systemImage: "wand.and.rays")
+                        .font(.callout.bold())
+                        .padding(.horizontal, 14).padding(.vertical, 8)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.gold))
+                        .foregroundStyle(.black)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var unavailableCard: some View {
+        GlassCard {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.title2)
+                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Deep Analyze isn't available on this build")
+                        .font(.headline)
+                    Text(engine.deepAnalyzeUnavailableReason ??
+                         "mlx.metallib was not compiled. Run ./run.sh — it will fail with install instructions if cmake or the Metal Toolchain is missing.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+        }
     }
 
     private var header: some View {
         HStack(alignment: .top, spacing: 14) {
-            Image(systemName: "sparkles")
+            Image(systemName: "text.below.photo")
                 .font(.system(size: 30))
                 .foregroundStyle(Theme.gold)
                 .frame(width: 36, alignment: .center)
                 .padding(.top, 4)
             VStack(alignment: .leading, spacing: 4) {
-                Text("Deep Analyze").font(.title.bold())
-                Text("Local VLM. Generates human-readable captions + filename suggestions for your images. Privacy-first — nothing leaves the device.")
+                Text("Deep Analyze").font(.largeTitle.bold())
+                Text("Reads your images with an on-device AI and writes a sentence about each one plus a smart filename. Nothing leaves your Mac.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -302,7 +386,7 @@ struct DeepAnalyzeView: View {
                     BadgePill(label: "\(Int(settings.systemRAMGB)) GB Mac",
                                color: .secondary)
                 }
-                Text("Smart names + captions come from THIS step. The basic scan only produces tags + face detection — filenames stay as-is until you run Deep Analyze.")
+                Text("Run a scan first (in the Sidebar). Then come back here — Deep Analyze adds human-readable captions and suggests smart filenames for every image. Without it, files keep their original names.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.bottom, 2)
@@ -332,45 +416,36 @@ struct DeepAnalyzeView: View {
 
     private var actionsCard: some View {
         let activeFits = settings.activeKind.fits(ramGB: settings.systemRAMGB)
+        let canRun = engine.deepAnalyzeAvailable && activeFits && hasNamedAnyone
         return GlassCard {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Run Deep Analyze").font(.headline)
+                // Banner only when there's nothing in flight — once a
+                // run is going (e.g. user hit Skip from People), the
+                // banner is stale noise; the progress card + Cancel
+                // button below are what they need to see.
+                if !hasNamedAnyone, !engine.deepAnalyzeInFlight {
+                    namingRequiredBanner
+                }
                 Toggle("Skip files already analyzed by \(settings.activeKind.displayName)",
                        isOn: $skipExisting)
                     .font(.callout)
                 HStack(spacing: 10) {
                     Button {
-                        // For best results, faces should be clustered AND
-                        // named before Deep Analyze — the VLM uses names
-                        // in captions ("the kid playing piano" → "Mia
-                        // playing piano"). Warn the user if they're about
-                        // to run with unnamed clusters so they can pause
-                        // and name first.
-                        if hasUnnamedClusters() {
-                            showUnnamedConfirm = true
-                        } else {
-                            engine.deepAnalyzeAll(modelKind: settings.activeKind.rawValue,
-                                                  skipExisting: skipExisting)
-                        }
+                        engine.deepAnalyzeAll(modelKind: settings.activeKind.rawValue,
+                                              skipExisting: skipExisting)
                     } label: {
                         Label("Analyze entire library", systemImage: "wand.and.stars")
                             .padding(.horizontal, 14).padding(.vertical, 8)
-                            .background(RoundedRectangle(cornerRadius: 8).fill(activeFits ? Theme.gold : Color.gray))
+                            .background(RoundedRectangle(cornerRadius: 8).fill(canRun ? Theme.gold : Color.gray))
                             .foregroundStyle(.black)
                             .font(.callout.bold())
                     }
                     .buttonStyle(.plain)
-                    .disabled(engine.deepAnalyzeInFlight || !activeFits)
-                    .alert("Name your people first?",
-                           isPresented: $showUnnamedConfirm) {
-                        Button("Cancel — let me name them", role: .cancel) {}
-                        Button("Run anyway") {
-                            engine.deepAnalyzeAll(modelKind: settings.activeKind.rawValue,
-                                                  skipExisting: skipExisting)
-                        }
-                    } message: {
-                        Text("Face clustering has run, but some people clusters don't have names yet. Captions will use generic descriptions like \"a person\" instead of real names. Naming a few of the most-photographed people in the People tab takes ~30 seconds and makes captions much more useful.")
-                    }
+                    .disabled(engine.deepAnalyzeInFlight || !canRun)
+                    .help(hasNamedAnyone
+                          ? "Run the on-device VLM on every image and write captions + smart filenames."
+                          : "Name at least one person in the People tab first — captions need real names to be useful.")
 
                     if engine.deepAnalyzeInFlight {
                         Button("Cancel", role: .destructive) {
@@ -396,6 +471,112 @@ struct DeepAnalyzeView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
+    }
+
+    /// Soft-block banner shown when no person has been named yet.
+    /// Two paths out: the recommended one (name people, get good
+    /// captions) and the escape hatch (skip and run with generic
+    /// captions). The escape hatch lives RIGHT NEXT to the recommended
+    /// path so the user knows it's an option they're explicitly
+    /// choosing, not a hidden default.
+    @ViewBuilder
+    private var namingRequiredBanner: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "person.crop.circle.badge.exclamationmark.fill")
+                .font(.title3)
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Name your people first (recommended)").font(.callout.bold())
+                Text("Deep Analyze writes captions like \"Mia playing piano\" — that needs at least one named person. Without names, captions fall back to generic descriptions like \"a person playing piano.\"")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    Button {
+                        onSwitchTab(.people)
+                    } label: {
+                        Label("Go to People", systemImage: "arrow.right.circle.fill")
+                            .font(.caption.bold())
+                            .padding(.horizontal, 10).padding(.vertical, 5)
+                            .background(Capsule().fill(Theme.gold))
+                            .foregroundStyle(.black)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Open the People tab, name the most-photographed faces (~30 seconds), then come back.")
+
+                    Text("or")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+
+                    Button {
+                        engine.deepAnalyzeAll(modelKind: settings.activeKind.rawValue,
+                                              skipExisting: skipExisting)
+                    } label: {
+                        Label("Skip — run without names", systemImage: "forward.fill")
+                            .font(.caption.bold())
+                            .padding(.horizontal, 10).padding(.vertical, 5)
+                            .background(Capsule().stroke(Color.secondary.opacity(0.6), lineWidth: 1))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(engine.deepAnalyzeInFlight
+                              || !engine.deepAnalyzeAvailable
+                              || !settings.activeKind.fits(ramGB: settings.systemRAMGB))
+                    .help("Run Deep Analyze right now without naming people. Captions will use generic descriptions (\"a person\", \"two people\") instead of real names. You can run again later after naming.")
+                }
+                .padding(.top, 2)
+            }
+            Spacer()
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.12)))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.orange.opacity(0.4), lineWidth: 1))
+    }
+
+    /// Shown the moment Deep Analyze is kicked off but before the
+    /// first per-file progress event arrives. The Qwen / Gemma VLM
+    /// container takes ~10s to load on first call; without this card
+    /// the user sees an empty page after hitting Skip and assumes
+    /// nothing happened. The subtitle is driven by the engine's
+    /// `deepAnalyzeStarting` event so it advances "Queued" → "Loading
+    /// <model>…" → "Finding files to analyze…" as the runner moves
+    /// through each phase.
+    @ViewBuilder
+    private var startingCard: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 12) {
+                    ProgressView()
+                        .controlSize(.regular)
+                        .tint(Theme.gold)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Starting Deep Analyze…").font(.headline)
+                        Text(startingSubtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .contentTransition(.opacity)
+                            .animation(.easeInOut(duration: 0.18),
+                                       value: engine.deepAnalyzeStarting?.message)
+                    }
+                    Spacer()
+                    Button("Cancel", role: .destructive) {
+                        engine.deepAnalyzeCancel()
+                    }
+                    .buttonStyle(.bordered)
+                }
+                ShimmerView(cornerRadius: 3)
+                    .frame(height: 4)
+            }
+        }
+        .transition(.opacity.combined(with: .move(edge: .top)))
+    }
+
+    /// Human-readable subtitle for `startingCard`. Falls back to the
+    /// generic "Loading…" copy when the engine hasn't emitted a phase
+    /// label yet (e.g. older engine binary).
+    private var startingSubtitle: String {
+        engine.deepAnalyzeStarting?.message
+            ?? "Loading the on-device model. First file usually appears in 5–15 seconds."
     }
 
     @ViewBuilder
@@ -450,7 +631,7 @@ struct DeepAnalyzeView: View {
                 if let n = d.proposedName {
                     HStack {
                         Image(systemName: "wand.and.rays").foregroundStyle(Theme.gold)
-                        Text("Suggested name: ")
+                        Text("Smart name: ")
                             .font(.caption.bold())
                             .foregroundStyle(.secondary)
                         Text(n).font(.caption.monospaced()).foregroundStyle(Theme.gold)

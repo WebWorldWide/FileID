@@ -10,27 +10,68 @@ struct LibraryView: View {
     let store: ReadStore
 
     @State private var rows: [FileRow] = []
+    /// V4: precomputed [fileID: top vision tags] for the visible rows.
+    /// Replaces per-tile SQL queries that fired 1000× when 1000 tiles
+    /// were visible. Built once per `reload()`, passed into each tile.
+    @State private var tagsByFile: [Int64: [String]] = [:]
     @State private var searchText: String = ""
-    @State private var kindFilter: String? = nil
+    @FocusState private var searchFocused: Bool
+    /// Debounce timer for searchText changes — avoids reload-per-keystroke
+    /// when CLIP semantic search is active (each query is ~50ms of work).
+    @State private var searchDebounce: Task<Void, Never>?
+    /// V2.0 visual similarity search — when set, the grid shows photos
+    /// most-similar to this seed (by CLIP image embedding cosine).
+    @State private var similarSeed: FileRow? = nil
+    /// Persisted across launches. Empty string means "no filter" since
+    /// AppStorage doesn't support optional bindings cleanly.
+    @AppStorage("library.kindFilter") private var kindFilterRaw: String = ""
+    private var kindFilter: String? {
+        get { kindFilterRaw.isEmpty ? nil : kindFilterRaw }
+    }
     @State private var lastSeenVersion: Int = -1
     @State private var lastSeenBatchIndex: Int = -1
     @State private var lastReloadAt: Date = .distantPast
     @State private var selected: FileRow?
+    @State private var bulkRenameSheetOpen: Bool = false
+    @State private var pendingRenameCount: Int = 0
+    @State private var lastBatchAvailable: Bool = false
+    @State private var undoStatus: String?
+
+    // Multi-select tag mode (P4).
+    @State private var selectMode: Bool = false
+    @State private var checkedFileIDs: Set<Int64> = []
+    @State private var bulkTagSheetOpen: Bool = false
 
     private let columns = [
         GridItem(.adaptive(minimum: 160, maximum: 220), spacing: 12)
     ]
 
     var body: some View {
-        VStack(spacing: 0) {
+        VStack(alignment: .leading, spacing: 0) {
             header
             Divider().opacity(0.4)
             if let p = engine.lastProgress,
                p.phase == .discovering || p.phase == .tagging || p.phase == .postScan {
                 inFlightHeadline(p)
             }
+            // V3: post-scan stage banner — concise, not a takeover. Lives
+            // INSIDE Library so progress is visible while the user
+            // browses what's already loaded.
+            if engine.faceClusteringInFlight {
+                postScanBanner(
+                    icon: "person.2.crop.square.stack",
+                    title: "Grouping faces…",
+                    detail: "On-device AI is matching faces to people. Cards will appear in the People tab."
+                )
+            }
             if engine.deepAnalyzeInFlight {
                 deepAnalyzeHeadline()
+            }
+            if let seed = similarSeed {
+                similaritySeedBanner(seed)
+            }
+            if shouldHintCLIPInstall {
+                clipInstallHint
             }
             if rows.isEmpty {
                 empty
@@ -38,9 +79,20 @@ struct LibraryView: View {
                 grid
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        // Hidden ⌘F button focuses the search field. SwiftUI doesn't
+        // attach keyboardShortcut directly to TextField focus, so this
+        // is the standard idiom.
+        .background(
+            Button("") { searchFocused = true }
+                .keyboardShortcut("f", modifiers: .command)
+                .opacity(0)
+                .frame(width: 0, height: 0)
+        )
         .onAppear {
             store.openIfPossible()
             reload()
+            refreshBulkState()
         }
         .onChange(of: engine.lastBatch?.batchIndex ?? -1) { _, new in
             if new != lastSeenBatchIndex {
@@ -49,10 +101,108 @@ struct LibraryView: View {
                 lastReloadAt = Date()
                 store.notifyChanged()
                 reload()
+                refreshBulkState()
             }
         }
-        .onChange(of: searchText) { _, _ in reload() }
-        .onChange(of: kindFilter) { _, _ in reload() }
+        .onChange(of: engine.deepAnalyzeComplete?.processed ?? -1) { _, _ in
+            refreshBulkState()
+        }
+        .onChange(of: searchText) { _, _ in
+            similarSeed = nil   // typing exits similarity mode
+            // Debounce: cancel any pending reload, schedule a new one.
+            // The DB hit + optional CLIP encode is ~50-100ms; without
+            // debounce, fast typers stutter their own keystrokes.
+            searchDebounce?.cancel()
+            searchDebounce = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                guard !Task.isCancelled else { return }
+                reload()
+            }
+        }
+        .onChange(of: kindFilterRaw) { _, _ in reload() }
+        .onChange(of: similarSeed?.id) { _, _ in reload() }
+    }
+
+    /// V3 post-scan banner — slim, inline, dismissible-feeling. Used
+    /// for "Grouping faces…" and "Writing captions…" while the engine
+    /// chains stages after the main scan completes.
+    @ViewBuilder
+    private func postScanBanner(icon: String, title: String, detail: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .foregroundStyle(Theme.ai)
+                .font(.callout)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.callout.bold())
+                Text(detail).font(.caption2).foregroundStyle(.secondary)
+            }
+            Spacer()
+            ProgressView().controlSize(.small).tint(Theme.ai)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.ai.opacity(0.08)))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.ai.opacity(0.30), lineWidth: 1))
+        .padding(.horizontal, 20)
+        .padding(.top, 8)
+    }
+
+    /// True when the user has typed a non-trivial query and the CLIP
+    /// text encoder isn't installed — semantic search is degraded to
+    /// keyword search and the user has no way to know why without a
+    /// pointer to Settings.
+    private var shouldHintCLIPInstall: Bool {
+        let trimmed = searchText.trimmingCharacters(in: .whitespaces)
+        return trimmed.count >= 3
+            && similarSeed == nil
+            && !CLIPTextEncoder.shared.isReady
+    }
+
+    /// One-line discoverability pointer when CLIP is missing during a
+    /// search. Tappable, but doesn't switch tabs (avoids extra wiring);
+    /// just points the user at Settings.
+    @ViewBuilder
+    private var clipInstallHint: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "sparkle.magnifyingglass")
+                .foregroundStyle(Theme.ai)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Showing keyword matches.")
+                    .font(.callout.bold())
+                Text("Install CLIP in Settings → AI Models for visual semantic search (\"sunset at the beach\", \"red car\", etc.).")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.ai.opacity(0.08)))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.ai.opacity(0.30), lineWidth: 1))
+        .padding(.horizontal, 20)
+        .padding(.top, 8)
+    }
+
+    /// Banner shown when the user enters similarity-search mode.
+    @ViewBuilder
+    private func similaritySeedBanner(_ seed: FileRow) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "sparkle.magnifyingglass")
+                .foregroundStyle(Theme.ai)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Photos similar to \(seed.url.lastPathComponent)")
+                    .font(.callout.bold())
+                Text("Ranked by visual similarity using on-device CLIP embeddings.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Clear") { similarSeed = nil }
+                .buttonStyle(.bordered)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.ai.opacity(0.10)))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.ai.opacity(0.4), lineWidth: 1))
+        .padding(.horizontal, 20)
+        .padding(.top, 8)
     }
 
     // MARK: - Live progress headline
@@ -87,21 +237,19 @@ struct LibraryView: View {
                     .tint(Theme.gold)
             }
             HStack(spacing: 16) {
-                Text(String(format: "%.1f files/s", p.filesPerSecond))
+                Text(String(format: "%.0f files per second", p.filesPerSecond))
                     .foregroundStyle(Theme.gold)
                 if let eta = p.etaSeconds, eta > 0 {
-                    Text("ETA \(formatETA(eta))")
+                    Text("about \(formatETA(eta)) left")
+                        .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Text("\(p.residentMB) MB resident")
-                    .foregroundStyle(p.residentMB > 1200 ? .orange : .secondary)
-                Text("\(p.availableMB) MB free")
-                    .foregroundStyle(.secondary)
                 if p.failed > 0 {
-                    Text("\(p.failed) failed").foregroundStyle(.red)
+                    Text("\(p.failed) couldn't be read").foregroundStyle(.red)
                 }
             }
             .font(.caption.monospacedDigit())
+            .help("Memory and resource details are in Settings → Advanced.")
         }
         .padding(16)
         .background(
@@ -132,13 +280,13 @@ struct LibraryView: View {
         let last = engine.deepAnalyzeLast
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
-                Image(systemName: "sparkles")
-                    .foregroundStyle(Theme.gold)
+                Image(systemName: "wand.and.rays")
+                    .foregroundStyle(Theme.ai)
                     .font(.title3)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Deep Analyze running…")
                         .font(.headline)
-                    Text("Local VLM is captioning images and proposing smart filenames.")
+                    Text("On-device AI is captioning images and proposing smart filenames.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -210,36 +358,134 @@ struct LibraryView: View {
 
     @ViewBuilder
     private var header: some View {
-        HStack(alignment: .center, spacing: 12) {
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("Search filenames + OCR text…", text: $searchText)
-                    .textFieldStyle(.plain)
-                    .frame(minWidth: 220)
-                if !searchText.isEmpty {
-                    Button { searchText = "" } label: {
-                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Clear search")
-                }
+        VStack(alignment: .leading, spacing: 12) {
+            // Title row — matches the rhythm of every other primary tab.
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text("Library").font(.largeTitle.bold())
+                Text("\(rows.count) of \(store.totalFiles)")
+                    .font(.callout.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Spacer()
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .frame(maxWidth: 360)
-            .background(.ultraThinMaterial)
-            .clipShape(Capsule())
+            // Action row — search, filter, bulk actions.
+            HStack(alignment: .center, spacing: 12) {
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                    TextField("Search filenames, captions, tags, people, text in photos…",
+                               text: $searchText)
+                        .textFieldStyle(.plain)
+                        .frame(minWidth: 220)
+                        .focused($searchFocused)
+                    if !searchText.isEmpty {
+                        Button { searchText = "" } label: {
+                            Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Clear search")
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .frame(maxWidth: 360)
+                .background(.ultraThinMaterial)
+                .clipShape(Capsule())
 
-            Spacer(minLength: 8)
+                Spacer(minLength: 8)
 
-            kindPicker
+                kindPicker
 
-            Text("\(rows.count) of \(store.totalFiles)")
-                .font(.caption.monospaced())
-                .foregroundStyle(.secondary)
-                .frame(minWidth: 80, alignment: .trailing)
+            // P4 — multi-select mode toggle. Tiles render with check-
+            // boxes; "Tag selected" + "Done" appear in place of the
+            // normal action set.
+            if selectMode {
+                Text("\(checkedFileIDs.count) selected")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                Button {
+                    if !checkedFileIDs.isEmpty { bulkTagSheetOpen = true }
+                } label: {
+                    Label("Tag selected", systemImage: "tag.fill")
+                        .font(.caption.bold())
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(Capsule().fill(Theme.gold))
+                        .foregroundStyle(.black)
+                }
+                .buttonStyle(.plain)
+                .disabled(checkedFileIDs.isEmpty)
+                Button("Done") {
+                    selectMode = false
+                    checkedFileIDs.removeAll()
+                }
+                .buttonStyle(.bordered)
+                .keyboardShortcut(.escape, modifiers: [])
+            } else {
+                Button {
+                    selectMode = true
+                } label: {
+                    Label("Select", systemImage: "checkmark.square")
+                        .font(.caption.bold())
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(Capsule().stroke(.secondary.opacity(0.5), lineWidth: 1))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Enter multi-select mode to apply tags to many files at once")
+            }
+
+            // Bulk-rename trigger lives in the Deep Analyze tab now —
+            // that's where smart names come from in the workflow. Keep
+            // only the per-row "Undo last rename" affordance here.
+            if lastBatchAvailable {
+                Button(action: undoLastBatch) {
+                    Label("Undo last rename", systemImage: "arrow.uturn.backward")
+                        .font(.caption.bold())
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(Capsule().stroke(Theme.gold, lineWidth: 1))
+                        .foregroundStyle(Theme.gold)
+                }
+                .buttonStyle(.plain)
+                .help("Reverse the most recent rename batch")
+            }
+
+            }
         }
         .padding(20)
+        .sheet(isPresented: $bulkRenameSheetOpen, onDismiss: refreshBulkState) {
+            BulkRenameSheet(store: store)
+        }
+        .sheet(isPresented: $bulkTagSheetOpen) {
+            BulkTagSheet(
+                files: rows.filter { checkedFileIDs.contains($0.id) },
+                store: store,
+                onComplete: {
+                    selectMode = false
+                    checkedFileIDs.removeAll()
+                }
+            )
+        }
+    }
+
+    private func refreshBulkState() {
+        pendingRenameCount = store.filesWithProposedNames(limit: 5000).count
+        lastBatchAvailable = (BulkRenameSheet.loadLastBatch()?.isEmpty == false)
+    }
+
+    private func undoLastBatch() {
+        guard let batch = BulkRenameSheet.loadLastBatch(), !batch.isEmpty else { return }
+        let storeRef = store
+        Task.detached(priority: .userInitiated) {
+            let result = storeRef.undoRenames(batch)
+            await MainActor.run {
+                if result.failed == 0 && result.skipped == 0 {
+                    BulkRenameSheet.clearLastBatch()
+                }
+                undoStatus = "Reverted \(result.undone) rename\(result.undone == 1 ? "" : "s")"
+                    + (result.skipped > 0 ? " · skipped \(result.skipped)" : "")
+                    + (result.failed > 0 ? " · failed \(result.failed)" : "")
+                refreshBulkState()
+                reload()
+            }
+        }
     }
 
     @ViewBuilder
@@ -256,7 +502,9 @@ struct LibraryView: View {
             ForEach(Array(kinds.enumerated()), id: \.offset) { _, k in
                 let active = kindFilter == k.value
                 Button {
-                    withAnimation(.easeInOut(duration: 0.15)) { kindFilter = k.value }
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        kindFilterRaw = k.value ?? ""
+                    }
                 } label: {
                     Text(k.label)
                         .font(.system(size: 11, weight: active ? .bold : .medium))
@@ -277,16 +525,53 @@ struct LibraryView: View {
         ScrollView {
             LazyVGrid(columns: columns, spacing: 12) {
                 ForEach(rows) { row in
-                    FileTile(row: row, store: store)
-                        .onTapGesture { selected = row }
+                    FileTile(row: row, store: store,
+                             selectMode: selectMode,
+                             isChecked: checkedFileIDs.contains(row.id),
+                             topTags: tagsByFile[row.id] ?? [])
+                        .onTapGesture {
+                            if selectMode {
+                                if checkedFileIDs.contains(row.id) {
+                                    checkedFileIDs.remove(row.id)
+                                } else {
+                                    checkedFileIDs.insert(row.id)
+                                }
+                            } else {
+                                selected = row
+                            }
+                        }
+                        .contextMenu {
+                            Button {
+                                similarSeed = row
+                            } label: {
+                                Label("Find similar photos", systemImage: "sparkle.magnifyingglass")
+                            }
+                            Button {
+                                NSWorkspace.shared.activateFileViewerSelecting([row.url])
+                            } label: {
+                                Label("Show in Finder", systemImage: "folder")
+                            }
+                        }
                         .background(
                             RoundedRectangle(cornerRadius: Theme.Radius.m)
-                                .stroke(selected?.id == row.id ? Theme.gold : Color.clear,
+                                .stroke(selected?.id == row.id && !selectMode
+                                        ? Theme.gold : Color.clear,
                                         lineWidth: 2)
                         )
+                        // V3: tiles fade + scale in when they first
+                        // appear, so the grid "fills the room" during
+                        // a live scan instead of popping items.
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .scale(scale: 0.96)),
+                            removal: .opacity
+                        ))
                 }
             }
             .padding(20)
+            // V4: animation key on rows.count instead of rows.map(\.id).
+            // The map allocates a new array on every render — for big
+            // grids (1000+) that's measurable. count is a single Int.
+            .animation(.easeOut(duration: 0.30), value: rows.count)
         }
         .sheet(item: $selected) { file in
             FilePreviewSheet(file: file, store: store, engine: engine,
@@ -296,29 +581,50 @@ struct LibraryView: View {
 
     @ViewBuilder
     private var empty: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "photo.on.rectangle.angled")
-                .font(.system(size: 56, weight: .light))
-                .foregroundStyle(Theme.gold.opacity(0.5))
-            if store.totalFiles == 0 {
-                Text("No files in the library yet")
-                    .font(.title3.bold())
-                Text("Tagged files appear here in real time once a scan runs.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 400)
-            } else {
-                Text("No files match the current filter")
-                    .foregroundStyle(.secondary)
-            }
+        if store.totalFiles == 0 {
+            // V3 home: warm + minimal. One sentence, no claims.
+            // Animated arrow pointing toward the sidebar's Start Scan.
+            EmptyStateView(
+                icon: "arrow.left.circle",
+                title: "Ready when you are",
+                message: "Click Start Scan in the sidebar to begin."
+            )
+        } else {
+            EmptyStateView(
+                icon: "magnifyingglass",
+                title: "No matches",
+                message: "Try a different search or clear the filter."
+            )
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - Data
 
     private func reload() {
+        defer {
+            // V4: one SQL query batches every visible tile's chip tags
+            // instead of N+1. The dictionary is small enough (≤ 60-200
+            // entries × ≤ 2 strings) that diffing it doesn't dominate.
+            tagsByFile = store.topVisionTagsBulk(
+                forFileIDs: rows.map { $0.id }, limit: 2
+            )
+        }
+        if let seed = similarSeed {
+            rows = store.similarFiles(toFileID: seed.id, limit: 60)
+            return
+        }
+        // V2.1 — when CLIP text encoder is installed AND user has a
+        // non-trivial query, try semantic search first. Result is
+        // ranked by visual relevance to the text. Fall through to
+        // keyword search when the model isn't installed (or query is
+        // empty).
+        let trimmed = searchText.trimmingCharacters(in: .whitespaces)
+        if trimmed.count >= 3, CLIPTextEncoder.shared.isReady,
+           let semantic = store.semanticSearch(query: trimmed, limit: 60),
+           !semantic.isEmpty {
+            rows = semantic
+            return
+        }
         rows = store.files(search: searchText, kindFilter: kindFilter)
     }
 }
@@ -328,9 +634,26 @@ struct LibraryView: View {
 struct FileTile: View {
     let row: FileRow
     let store: ReadStore
+    var selectMode: Bool = false
+    var isChecked: Bool = false
+    /// V4: tags arrive as a prop from the parent's batch query — no
+    /// per-tile SQL. Empty array if the file has no vision tags yet.
+    var topTags: [String] = []
 
     @State private var thumb: NSImage?
     @State private var hovering = false
+
+    /// Shorten Vision's hierarchical labels for the chip ("animal_water_aquatic"
+    /// → "Aquatic", "Year_2024" → "2024"). Last underscore segment wins,
+    /// with first letter capitalized. Multi-word labels added by `extraTags`
+    /// like "Has Faces" pass through unchanged.
+    private static func formatTag(_ raw: String) -> String {
+        if raw.contains(" ") { return raw }   // pre-formatted (Has Faces, etc.)
+        let last = raw.split(separator: "_").last.map(String.init) ?? raw
+        let withSpaces = last.replacingOccurrences(of: "-", with: " ")
+        guard let first = withSpaces.first else { return withSpaces }
+        return first.uppercased() + withSpaces.dropFirst()
+    }
 
     private var kindColor: Color {
         switch row.kind {
@@ -346,47 +669,84 @@ struct FileTile: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             // 1:1 carrier + overlay image: stable across portrait/landscape.
+            // V3 polish: thumb crossfades when it arrives instead of
+            // popping in, hover uses elevation instead of border swap
+            // (the Things-style "thoughtful tile" treatment).
             Color.white.opacity(0.04)
                 .aspectRatio(1, contentMode: .fit)
                 .overlay(thumbContent)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
                 .overlay(
                     RoundedRectangle(cornerRadius: 10)
-                        .stroke(
-                            hovering ? Theme.gold.opacity(0.65) : Color.white.opacity(0.10),
-                            lineWidth: hovering ? 1.5 : 1
-                        )
+                        .stroke(Color.white.opacity(hovering ? 0.18 : 0.08),
+                                lineWidth: 1)
                 )
-                .scaleEffect(hovering ? 1.015 : 1.0)
-                .shadow(color: .black.opacity(hovering ? 0.4 : 0.15),
-                        radius: hovering ? 10 : 4, x: 0, y: 2)
-                .animation(.easeInOut(duration: 0.12), value: hovering)
+                .shadow(color: .black.opacity(hovering ? 0.45 : 0.18),
+                        radius: hovering ? 14 : 5, x: 0, y: hovering ? 6 : 3)
+                .scaleEffect(hovering ? 1.012 : 1.0)
+                .animation(.easeOut(duration: 0.18), value: hovering)
+                .animation(.easeOut(duration: 0.40), value: thumb != nil)
                 .onHover { hovering = $0 }
                 .overlay(badgeOverlay)
+                .overlay(selectionOverlay)
 
-            // VLM-suggested name in gold (when present), real filename below.
-            VStack(alignment: .leading, spacing: 2) {
-                if let suggested = row.vlmProposedName, !suggested.isEmpty {
+            // Filename row. When a smart name exists we show
+            //   IMG_5512.jpg → Mia at Beach.jpg
+            // so the user sees both the current name and what Deep Analyze
+            // proposes as a single line. Click anywhere on the tile (existing
+            // behavior) opens the preview where Apply lives.
+            if let suggested = row.vlmProposedName, !suggested.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(row.url.lastPathComponent)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .strikethrough(true, color: .secondary.opacity(0.6))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     HStack(spacing: 3) {
-                        Image(systemName: "sparkles")
+                        Image(systemName: "wand.and.rays")
                             .font(.system(size: 9))
                             .foregroundStyle(Theme.gold)
-                        Text(suggested)
-                            .font(.system(size: 10, weight: .semibold))
+                        Text("\(suggested).\(row.extension)")
+                            .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(Theme.gold)
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
-                    .help("Smart name from Deep Analyze. Open the file to apply.")
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .help("Click to apply the smart name. Original name shown crossed out.")
+            } else {
                 Text(row.url.lastPathComponent)
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(row.vlmProposedName == nil ? Color.primary : Color.secondary)
+                    .foregroundStyle(.primary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            // Vision tag chips — at-a-glance content cues. Informational,
+            // not actionable, so they use a neutral secondary tint
+            // (gold is reserved for primary actions + the Smart name
+            // result). Up to 2 highest-confidence labels.
+            // Uses .caption2 (semantic, scales with Dynamic Type) instead
+            // of fixed .system(size: 9) for accessibility.
+            if !topTags.isEmpty {
+                HStack(spacing: 3) {
+                    ForEach(topTags.prefix(2), id: \.self) { tag in
+                        Text(Self.formatTag(tag))
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 5).padding(.vertical, 2)
+                            .background(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(Color.secondary.opacity(0.10))
+                            )
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
             HStack(spacing: 4) {
                 Text(formatBytes(row.sizeBytes))
                     .font(.system(size: 9, design: .monospaced))
@@ -399,9 +759,52 @@ struct FileTile: View {
                 }
             }
         }
-        .task {
+        .task(id: row.id) {
+            // V4: only the thumbnail is fetched per-tile now. Vision
+            // tags arrive as a prop (parent batches them). Finder
+            // xattr reads were dropped — Finder shows tags natively
+            // and per-tile xattr reads were ~1000 disk hits per scroll.
             thumb = await ThumbnailService.shared.thumbnail(for: row.url, size: 264)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityDescription)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityHint("Opens the file preview")
+    }
+
+    @ViewBuilder
+    private var selectionOverlay: some View {
+        if selectMode {
+            ZStack(alignment: .topLeading) {
+                if isChecked {
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Theme.gold.opacity(0.18))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(Theme.gold, lineWidth: 3)
+                        )
+                }
+                Image(systemName: isChecked ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 22))
+                    .foregroundStyle(isChecked ? Theme.gold : Color.white.opacity(0.85))
+                    .background(Circle().fill(.black.opacity(0.45)))
+                    .padding(8)
+            }
+        }
+    }
+
+    /// Spoken description for VoiceOver: filename, kind, optional date,
+    /// face indicator, OCR indicator, tag count.
+    private var accessibilityDescription: String {
+        var parts: [String] = []
+        parts.append(row.url.lastPathComponent)
+        parts.append(row.kind.capitalized)
+        if let date = row.displayDate {
+            parts.append(date.formatted(date: .abbreviated, time: .omitted))
+        }
+        if row.hasFaces { parts.append("contains faces") }
+        if row.hasText { parts.append("contains text") }
+        return parts.joined(separator: ", ")
     }
 
     @ViewBuilder
@@ -410,7 +813,14 @@ struct FileTile: View {
             Image(nsImage: thumb)
                 .resizable()
                 .scaledToFill()
+                .transition(.opacity)
+        } else if row.kind == "image" {
+            // Show a shimmer while the thumbnail loads — feels more
+            // alive than a static placeholder, signals "something is
+            // arriving".
+            ShimmerView(cornerRadius: 10)
         } else {
+            // Non-image kinds get the icon placeholder (no thumb pending).
             VStack(spacing: 4) {
                 Image(systemName: kindIcon)
                     .font(.system(size: 36))
@@ -434,7 +844,7 @@ struct FileTile: View {
                 .background(Capsule().fill(kindColor.opacity(0.95)))
                 .padding(6)
 
-            // Faces / OCR-text indicators top-right.
+            // Faces / OCR-text / Finder-tag indicators top-right.
             VStack(spacing: 4) {
                 if row.hasFaces {
                     Image(systemName: "person.crop.circle.fill")
@@ -448,6 +858,11 @@ struct FileTile: View {
                         .foregroundStyle(.white, .black.opacity(0.6))
                         .help("OCR text available")
                 }
+                // V4: Finder-tag count badge removed. It required a
+                // synchronous xattr disk read per visible tile; for a
+                // 1000-tile grid that was 1000 disk hits per scroll
+                // and per store.version bump. Finder shows tags
+                // natively in column view if users want that signal.
             }
             .padding(6)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
@@ -653,7 +1068,7 @@ private struct FilePreviewSheet: View {
                                             Image(systemName: "wand.and.rays")
                                                 .foregroundStyle(Theme.gold)
                                             VStack(alignment: .leading, spacing: 2) {
-                                                Text("Suggested name")
+                                                Text("Smart name")
                                                     .font(.caption.bold())
                                                     .foregroundStyle(.secondary)
                                                 Text("\(proposed).\(file.extension)")
@@ -662,11 +1077,28 @@ private struct FilePreviewSheet: View {
                                             }
                                             Spacer()
                                             Button("Apply") {
-                                                _ = store.applyProposedName(file: file)
+                                                let oldPath = file.pathText
+                                                if let newURL = store.applyProposedName(file: file),
+                                                   newURL.path != oldPath {
+                                                    // P6 — record the single-file rename so the
+                                                    // Library "Undo last rename" button can revert
+                                                    // it. Uses the same UserDefaults slot the
+                                                    // bulk-rename sheet writes to.
+                                                    let outcome = ReadStore.RenameOutcome(
+                                                        fileID: file.id,
+                                                        oldPath: oldPath,
+                                                        newPath: newURL.path
+                                                    )
+                                                    if let data = try? JSONEncoder().encode([outcome]) {
+                                                        UserDefaults.standard.set(
+                                                            data, forKey: BulkRenameSheet.lastBatchKey
+                                                        )
+                                                    }
+                                                }
                                                 dismiss()
                                             }
                                             .buttonStyle(.bordered)
-                                            .help("Renames the file on disk and updates the library row.")
+                                            .help("Renames the file on disk and updates the library row. Undo from the Library header if you change your mind.")
                                         }
                                     }
                                 }
@@ -685,6 +1117,7 @@ private struct FilePreviewSheet: View {
                                 }
                             }
                         }
+                        FinderTagsEditor(file: file, store: store)
                     }
                     .padding(16)
                 }
@@ -707,6 +1140,114 @@ private struct FilePreviewSheet: View {
             Text(v).font(.caption.monospaced()).textSelection(.enabled).lineLimit(3)
             Spacer()
         }
+    }
+}
+
+// MARK: - Finder tags editor
+
+/// Inline tag editor — reads the file's current macOS Finder tags
+/// (URLResourceKey.tagNamesKey), shows them as pills, lets the user
+/// add new tags via a text field. Writes go straight to the file via
+/// TagWriter so they show up everywhere macOS exposes Finder tags
+/// (Finder sidebar, Spotlight, Smart Folders).
+private struct FinderTagsEditor: View {
+    let file: FileRow
+    let store: ReadStore
+    @State private var tags: [String] = []
+    @State private var draft: String = ""
+    @State private var error: String?
+
+    var body: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "tag.fill")
+                        .foregroundStyle(Theme.gold)
+                    Text("Finder tags").font(.headline)
+                    Spacer()
+                    Text("(visible in Finder + Spotlight)")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                if tags.isEmpty {
+                    Text("None yet — add a tag below.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    FlowLayout(spacing: 6) {
+                        ForEach(tags, id: \.self) { tag in
+                            tagPill(tag)
+                        }
+                    }
+                }
+                HStack(spacing: 6) {
+                    TextField("Add tag…", text: $draft, onCommit: addDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.caption)
+                    Button(action: addDraft) {
+                        Image(systemName: "plus.circle.fill")
+                            .foregroundStyle(Theme.gold)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                if let e = error {
+                    Text(e).font(.caption2).foregroundStyle(.orange)
+                }
+            }
+        }
+        .task(id: file.id) { reload() }
+    }
+
+    private func reload() {
+        tags = TagWriter.readTags(at: file.url)
+        error = nil
+    }
+
+    private func addDraft() {
+        let trimmed = draft.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        do {
+            tags = try TagWriter.addTags([trimmed], at: file.url)
+            draft = ""
+            error = nil
+            store.notifyChanged()  // refresh Library tile tag-count
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    private func remove(_ tag: String) {
+        do {
+            tags = try TagWriter.removeTags([tag], at: file.url)
+            error = nil
+            store.notifyChanged()
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    @ViewBuilder
+    private func tagPill(_ tag: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: "tag.fill")
+                .font(.system(size: 9))
+            Text(tag).font(.caption)
+            Button {
+                remove(tag)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Remove this tag")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(Capsule().fill(Theme.gold.opacity(0.15)))
+        .overlay(Capsule().stroke(Theme.gold.opacity(0.3), lineWidth: 1))
+        .foregroundStyle(Theme.gold)
     }
 }
 

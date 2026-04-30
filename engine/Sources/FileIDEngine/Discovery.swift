@@ -85,7 +85,7 @@ public actor Discovery {
             includingPropertiesForKeys: resourceKeys,
             options: skipHidden ? [.skipsHiddenFiles] : []
         ) else {
-            JSONLog.shared.error(ev: "discovery_enumerator_nil", path: root.path)
+            JSONLog.shared.error(ev: "discovery_enumerator_nil", path: redactPathForLog(root.path))
             return []
         }
 
@@ -107,7 +107,7 @@ public actor Discovery {
             guard FileTypes.isTaggable(ext) else { continue }
             let size = Int64(values?.fileSize ?? 0)
             if size > maxBytes {
-                JSONLog.shared.info(ev: "skip_large_file", path: url.path,
+                JSONLog.shared.info(ev: "skip_large_file", path: redactPathForLog(url.path),
                                     extra: ["sizeMB": AnyCodable(size / 1_048_576)])
                 continue
             }

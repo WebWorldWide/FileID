@@ -17,10 +17,11 @@ public enum DeepAnalyzeScope: Sendable {
 
 public enum DeepAnalyzeRunner {
 
-    /// Resolve scope → ordered list of (id, path) pairs. Limited to images
-    /// (kind = 'image') with `failed = 0`. WholeLibrary skips files that
-    /// already have a description for the requested model when
-    /// `skipExisting=true`.
+    /// Resolve scope → ordered list of (id, path) pairs. Targets images,
+    /// videos, and PDFs — for videos we extract a keyframe; for PDFs we
+    /// render the first page; for images we feed the file directly. The
+    /// VLM captions all three. WholeLibrary skips files already
+    /// described by the requested model when `skipExisting=true`.
     public static func resolveTargets(
         database: Database,
         scope: DeepAnalyzeScope,
@@ -32,7 +33,7 @@ public enum DeepAnalyzeRunner {
             case .singleFile(let id):
                 let r = try GRDB.Row.fetchOne(db, sql: """
                     SELECT id, path_text FROM files
-                    WHERE id = ? AND kind = 'image' AND failed = 0
+                    WHERE id = ? AND kind IN ('image', 'pdf', 'video', 'doc') AND failed = 0
                     """, arguments: [id])
                 if let r { return [Target(id: r["id"] ?? 0, path: r["path_text"] ?? "")] }
                 return []
@@ -40,7 +41,7 @@ public enum DeepAnalyzeRunner {
                 let p = prefix.hasSuffix("/") ? prefix : prefix + "/"
                 let r = try GRDB.Row.fetchAll(db, sql: """
                     SELECT id, path_text FROM files
-                    WHERE kind = 'image' AND failed = 0
+                    WHERE kind IN ('image', 'pdf', 'video', 'doc') AND failed = 0
                       AND (path_text = ? OR path_text LIKE ?)
                     ORDER BY scanned_at ASC
                     """, arguments: [prefix, p + "%"])
@@ -51,7 +52,7 @@ public enum DeepAnalyzeRunner {
                 if skipExisting {
                     sql = """
                         SELECT id, path_text FROM files
-                        WHERE kind = 'image' AND failed = 0
+                        WHERE kind IN ('image', 'pdf', 'video', 'doc') AND failed = 0
                           AND (vlm_model IS NULL OR vlm_model != ?)
                         ORDER BY scanned_at ASC
                         """
@@ -59,7 +60,7 @@ public enum DeepAnalyzeRunner {
                 } else {
                     sql = """
                         SELECT id, path_text FROM files
-                        WHERE kind = 'image' AND failed = 0
+                        WHERE kind IN ('image', 'pdf', 'video', 'doc') AND failed = 0
                         ORDER BY scanned_at ASC
                         """
                     args = []
@@ -82,14 +83,12 @@ public enum DeepAnalyzeRunner {
         let started = Date()
         let modelKey = modelKind.rawValue
 
-        // Pre-flight: cluster faces inline if any are still bbox-only.
-        // This is what lets the VLM caption "Adam playing basketball"
-        // instead of "child playing basketball" — DeepAnalyzeRunner pulls
-        // person names per file via fetchFaceNames(). The clustering job
-        // runs synchronously here (not via the queue) because we already
-        // hold the queue's slot via JobQueue, so re-enqueueing would
-        // deadlock. Idempotent: skips if no work to do.
-        await ensureFacesClustered(database: database, sink: sink)
+        // V2 change: no inline pre-flight face clustering. Face clustering
+        // runs as its own job (auto-triggered after scan or on demand);
+        // when clusters are present, captions reference person names. When
+        // clusters aren't present yet (or face recognition isn't installed),
+        // captions just say "person" — degrades gracefully instead of
+        // hanging Deep Analyze on a long synchronous clustering pass.
 
         SleepGuard.shared.begin(reason: "Deep Analyze (\(modelKind.displayName))")
         defer { SleepGuard.shared.end() }
@@ -119,6 +118,15 @@ public enum DeepAnalyzeRunner {
         await DeepAnalyze.shared.clearCancel()
 
         // 1. Load the model (download if needed, with progress events).
+        // Tell the UI we're entering the multi-second cold-load window
+        // so the startingCard can update its label from "Queued" to
+        // "Loading <model>…". Without this the user stares at the same
+        // "Queued" message for 10s.
+        await sink.emit(.deepAnalyzeStarting(DeepAnalyzeStarting(
+            modelKind: modelKey,
+            phase: .loadingModel,
+            message: "Loading \(modelKind.displayName)…"
+        )))
         do {
             try await DeepAnalyze.shared.ensureLoaded(kind: modelKind) { frac, msg in
                 Task {
@@ -141,6 +149,11 @@ public enum DeepAnalyzeRunner {
         }
 
         // 2. Resolve targets.
+        await sink.emit(.deepAnalyzeStarting(DeepAnalyzeStarting(
+            modelKind: modelKey,
+            phase: .resolvingTargets,
+            message: "Finding files to analyze…"
+        )))
         let targets: [(id: Int64, path: String)]
         do {
             targets = try await resolveTargets(database: database,
@@ -252,19 +265,6 @@ public enum DeepAnalyzeRunner {
 
     /// Run face clustering inline if any face_prints lack an assignment.
     /// Cheap COUNT first — most repeat Deep Analyze runs will see zero.
-    private static func ensureFacesClustered(database: Database, sink: IPCSink) async {
-        let unassigned: Int = (try? await database.pool.read { db in
-            try Int.fetchOne(db, sql: """
-                SELECT COUNT(*) FROM face_prints WHERE person_id IS NULL
-                """) ?? 0
-        }) ?? 0
-        guard unassigned > 0 else { return }
-        JSONLog.shared.info(ev: "deep_pre_cluster_faces",
-                            extra: ["unassigned": AnyCodable(unassigned)])
-        let summary = await FaceClustering.runClustering(database: database, sink: sink)
-        await sink.emit(.faceClusteringComplete(summary))
-    }
-
     /// Format the structured naming columns into the [Title] [First name]
     /// reference Deep Analyze prompts use. Falls back to first name only,
     /// or to the legacy single-field `name`. Skips clusters flagged as

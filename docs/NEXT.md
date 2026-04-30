@@ -4,11 +4,37 @@
 
 ---
 
+## V8 — v1.0 release readiness (queued, not started)
+
+The V7 audit surfaced 54 gaps for an open-source v1.0 release. **15 must-haves**, ~6 working days total. See `~/.claude/plans/in-media-library-i-temporal-acorn.md` for the full inventory + the 39 nice-to-haves.
+
+Top of the queue, in priority order:
+
+1. **`.photoslibrary` / `.aplibrary` exclude rules** in `engine/Sources/FileIDEngine/Discovery.swift:80-126` — Discovery currently descends into Apple Photos packages, which is a corruption risk. Treat them as opaque files.
+2. **Crash recovery completion** — `last_file_index` is written to `scan_sessions` but never read at startup, so a resumed scan re-scans from zero. `engine/Sources/FileIDEngine/FileIDEngineMain.swift:560-585` is where the read should land.
+3. **DB backup / export** — users spend hours naming faces; a single corruption = trust loss. Add a "Back up library" button in Settings + an "Import" path. `~/Library/Application Support/FileID/fileid.sqlite` + the WAL/SHM files.
+4. **First-run privacy/consent panel** — backs the "100 % on-device" pitch. Should show what gets read (filenames, EXIF, image bytes for AI), what doesn't (network, telemetry), and where data lives.
+5. **Distribution basics** — `LICENSE`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `.github/` issue templates, README screenshots + GIFs. Currently absent.
+6. **DMG packaging + codesign + notarize** workflow.
+7. **Sparkle auto-update** integration.
+8. **Help menu** with keyboard shortcut cheat sheet (currently only About dialog).
+9. **Diagnostic bundle export** (logs + DB schema, no PII) for OSS support.
+10. **Per-folder exclude rules** (Time-Machine-style).
+11. **Quick Look extension** — currently source-only scaffolding; either ship as Xcode subproject or remove the README claim.
+12. **Spotlight incremental indexing** — currently re-indexes everything on every launch (wastes battery + I/O).
+13. **RAW + JPEG pair handling** — don't dedupe siblings. Common photographer use case.
+
+Items 1–4 are critical safety/correctness. Items 5–7 are required for any "trustable open-source release." Items 8–13 are polish.
+
+---
+
+## Recently shipped (history)
+
 ## Done in the late-evening hardening pass (2026-04-25)
 
 Continuation of the autonomous loop from the user's "keep working till it's perfect" directive. **All M4-cut features that were deferred in the original plan are now landed.** v2 is daily-usable end-to-end.
 
-- **People tab end-to-end** — per-face `VNGenerateImageFeaturePrintRequest` (5-face cap, area-sorted) feeds NSKeyedArchiver-encoded prints into `face_prints.print_data`. New `runFaceClustering` IPC command runs HNSW clustering (L2 < 0.50, port of `Sources/Services/HNSWIndex.swift`), persists `persons` + `face_prints.person_id` idempotently. PeopleView shows person cards with face-cropped representative thumbnails (cropped from the rep file's QL thumbnail using the stored bbox), tap → sheet with all photos for that person + rename field. `engine.lastFaceClustering` summary surfaces in the header.
+- **People tab end-to-end** — face detection in the per-file scan emits bbox + quality + landmarks. Stage D's lazy ArcFace embedder writes 512-d L2-normalized face IDs into `face_prints.arcface_embedding`. The `runFaceClustering` IPC command then runs IdentityClustering (two-pass density + Pass 3 quality validation; cosine ≥ 0.55 cores, margin-rule outlier assignment, 2-means split for mixed clusters) and persists `persons` + `face_prints.person_id` idempotently. PeopleView shows person cards with face-cropped representative thumbnails, tap → sheet with all photos for that person + rename field. `engine.lastFaceClustering` summary surfaces in the header.
 - **Engine auto-respawn** — `EngineClient.handleEngineExit` schedules up to 3 attempts with 1s/4s/16s backoff over a 60s window. Successful `.ready` resets the budget. Manual "Restart Engine" button in Settings recovers from budget exhaustion.
 - **Post-scan orphan sweep** — `FileIDEngineMain.sweepOrphans` deletes up to 5000 rows under the scan root whose file no longer exists on disk (rows with `scanned_at < scanStart`). ON DELETE CASCADE handles the joined tables. Skipped on cancelled scans.
 - **MediaPreviewOverlay parity** — added prev/next sibling navigation with ← → keyboard shortcuts and AVKit `VideoPlayer` for `kind == "video"` files in `LibraryView.FilePreviewSheet`. Uses the current `rows` array as the navigable list.
@@ -84,7 +110,7 @@ The whole v2 stack — engine binary, IPC, schema, pipeline, UI shell, Library/C
 
 These are intentional cuts from the M3→M5 first pass, ranked by user-visible value:
 
-1. **People tab** — face prints (512-d vectors) are captured per file and land in `face_prints`. Need: HNSW index over `print_data` (vectorlite extension OR pure-Swift `HNSWIndex` we have in v1); clustering algorithm to assign `person_id`; UI for naming clusters and merging them. ~6 hours of focused work.
+1. ~~**People tab**~~ — ✅ DONE (V2 face-clustering rewrite, 2026-04-29). ArcFace 512-d L2-normalized embeddings in `face_prints.arcface_embedding`; pure-Swift `HNSWIndex` builds the kNN graph; `IdentityClustering.swift` (two-pass density + Pass 3 quality validation) replaces Chinese Whispers. Identity persistence via centroid + anchor radius on the persons row.
 2. **AI Models picker UI** — Settings tab acknowledges it but currently swap is manual (replace `~/Library/Application Support/FileID/Models/mobileclip_image/` contents). Need: per-model download flow, license-acceptance sheet, ANE warmup on swap. Reuse v1's `AIModelDownloadService` pattern. ~3 hours.
 3. **SigLIP 2 SO400M (accuracy embedder)** — accuracy-tier image embedding for "find me photos of dogs at the beach" semantic search. Needs ONNX Runtime SwiftPM dep, ~1.5 GB model download, lazy-on-viewed embed path. ~4 hours, ~10 GB disk for the model + cache.
 4. **vectorlite (HNSW SQLite extension)** — sub-50ms k-NN queries at ≥500K vectors. Compile from source as a `.dylib`, vendor in `engine/Resources/`, load via `sqlite3_load_extension`. ~2 hours.

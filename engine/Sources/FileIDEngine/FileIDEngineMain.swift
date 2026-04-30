@@ -80,6 +80,21 @@ struct FileIDEngineMain {
                             extra: ["pid": AnyCodable(ProcessInfo.processInfo.processIdentifier),
                                     "workers": AnyCodable(Hardware.workerCap)])
 
+        // Capability check: Deep Analyze needs mlx.metallib next to the
+        // engine binary (run.sh copies it in from .build/cache). Without
+        // it, MLX would crash deep in GPU kernel load with an opaque
+        // error during the first VLM inference. Surface this immediately
+        // so the UI can disable Deep Analyze with a clear message instead
+        // of letting the user wait for the crash.
+        if !DeepAnalyzeCapability.metallibPresent() {
+            JSONLog.shared.warn(ev: "engine_capability_warning",
+                                error: "mlx.metallib missing — Deep Analyze unavailable")
+            await sink.emit(.error(EngineError(
+                kind: "deep_analyze_unavailable",
+                message: "Deep Analyze isn't available on this build because mlx.metallib wasn't compiled. Run ./run.sh — it will fail with install instructions if cmake or the Metal Toolchain are missing."
+            )))
+        }
+
         // Periodic progress emitter — 1 Hz until the program exits.
         let progressTicker = Task.detached(priority: .background) {
             while !Task.isCancelled {
@@ -192,6 +207,13 @@ struct FileIDEngineMain {
                 )))
                 return
             }
+            // Immediate "received" signal — the UI's startingCard listens
+            // for this so the user sees acknowledgement the moment they
+            // click. Without it, there's a multi-second silent gap while
+            // the runner waits its turn in JobQueue + cold-loads the VLM.
+            await sink.emit(.deepAnalyzeStarting(DeepAnalyzeStarting(
+                modelKind: modelKind, phase: .queued, message: "Queued"
+            )))
             await JobQueue.shared.enqueue(.init(
                 category: .deepAnalyze,
                 title: "Deep Analyze 1 file (\(kind.displayName))",
@@ -209,6 +231,9 @@ struct FileIDEngineMain {
                 )))
                 return
             }
+            await sink.emit(.deepAnalyzeStarting(DeepAnalyzeStarting(
+                modelKind: modelKind, phase: .queued, message: "Queued"
+            )))
             await JobQueue.shared.enqueue(.init(
                 category: .deepAnalyze,
                 title: "Deep Analyze folder (\(kind.displayName))",
@@ -226,6 +251,9 @@ struct FileIDEngineMain {
                 )))
                 return
             }
+            await sink.emit(.deepAnalyzeStarting(DeepAnalyzeStarting(
+                modelKind: modelKind, phase: .queued, message: "Queued"
+            )))
             await JobQueue.shared.enqueue(.init(
                 category: .deepAnalyze,
                 title: "Deep Analyze entire library (\(kind.displayName))",
@@ -238,28 +266,6 @@ struct FileIDEngineMain {
         case .deepAnalyzeCancel:
             await DeepAnalyze.shared.requestCancel()
             JSONLog.shared.info(ev: "deep_analyze_cancel_requested")
-        case .runVLMFaceVerification(let modelKind):
-            guard let database, let kind = AIModelKind(rawValue: modelKind) else {
-                await sink.emit(.error(EngineError(
-                    kind: "vlm_verify_invalid",
-                    message: "Database unavailable or unknown model kind \(modelKind)."
-                )))
-                return
-            }
-            await JobQueue.shared.enqueue(.init(
-                category: .deepAnalyze,
-                title: "Verify face clusters with \(kind.displayName)",
-                etaSeconds: nil
-            ) {
-                JSONLog.shared.info(ev: "vlm_face_verify_requested",
-                                    extra: ["model": AnyCodable(kind.rawValue)])
-                SleepGuard.shared.begin(reason: "VLM face verification")
-                let result = await FaceVerification.run(
-                    database: database, sink: sink, modelKind: kind
-                )
-                SleepGuard.shared.end()
-                await sink.emit(.vlmFaceVerificationComplete(result))
-            })
         }
     }
 
@@ -297,13 +303,13 @@ struct FileIDEngineMain {
                     kind: "bookmark_invalid",
                     message: "Could not resolve bookmark for \(displayPath): \(error) / fallback: \(secondError)"
                 )))
-                JSONLog.shared.error(ev: "bookmark_invalid", path: displayPath,
+                JSONLog.shared.error(ev: "bookmark_invalid", path: redactPathForLog(displayPath),
                                      error: "withScope=\(error) noScope=\(secondError)")
                 return
             }
         }
         if stale {
-            JSONLog.shared.warn(ev: "bookmark_stale", path: url.path)
+            JSONLog.shared.warn(ev: "bookmark_stale", path: redactPathForLog(url.path))
         }
         // Security-scoped access only matters inside an app sandbox (where
         // the bookmark MUST carry scope, granted via NSOpenPanel). Outside
@@ -312,7 +318,7 @@ struct FileIDEngineMain {
         let hasScope = url.startAccessingSecurityScopedResource()
         defer { if hasScope { url.stopAccessingSecurityScopedResource() } }
         if !hasScope {
-            JSONLog.shared.info(ev: "no_security_scope", path: url.path,
+            JSONLog.shared.info(ev: "no_security_scope", path: redactPathForLog(url.path),
                                 extra: ["reason": AnyCodable("ok in unsandboxed contexts")])
         }
 
@@ -323,7 +329,7 @@ struct FileIDEngineMain {
 
         let session = await coordinator.startSession(rootDisplayPath: url.lastPathComponent)
         await sink.emit(.phaseChanged(.discovering))
-        JSONLog.shared.info(ev: "scan_started", sess: session.id, path: url.path)
+        JSONLog.shared.info(ev: "scan_started", sess: session.id, path: redactPathForLog(url.path))
 
         // Database is the engine-shared instance (opened once at engine
         // startup). Create a row in scan_sessions so a crash mid-scan can be
@@ -376,11 +382,17 @@ struct FileIDEngineMain {
         }
         await sink.emit(.phaseChanged(.tagging))
 
-        // Pre-warm CLIP on the main task before workers start so all
-        // workers don't race the cold-start slow path simultaneously.
-        // No-op if the model isn't downloaded.
+        // Pre-warm both ANE-bound models on the main task before workers
+        // start so all workers don't race the cold-start slow path
+        // simultaneously. Each is a no-op if the model isn't installed.
         await Task.detached(priority: .userInitiated) {
             MobileCLIPService.shared.preWarm()
+            // Pick whichever ArcFace variant the user has on disk —
+            // iResNet50 takes precedence when both are present.
+            for kind in FaceEmbedderKind.installedKinds() {
+                ArcFaceService.shared.preWarm(kind)
+                break
+            }
         }.value
 
         // Bounded async channels — discovery 1024 (matches batch size),

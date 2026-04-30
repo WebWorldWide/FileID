@@ -12,6 +12,7 @@ struct CleanupView: View {
     @State private var groups: [DuplicateGroup] = []
     @State private var lastSeenBatchIndex: Int = -1
     @State private var status: String?
+    @State private var confirmDelete: Bool = false
 
     /// Initialized lazily on first reload to non-keepers per group.
     @State private var selection: Set<Int64> = []
@@ -62,7 +63,7 @@ struct CleanupView: View {
     private var header: some View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Cleanup").font(.title.bold())
+                Text("Cleanup").font(.largeTitle.bold())
                 Text(headerSubtitle)
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -98,6 +99,18 @@ struct CleanupView: View {
                 .buttonStyle(.plain)
                 .disabled(totalSelected == 0)
                 .help("Move every selected copy to Trash. The keeper of each group is preserved unless you explicitly checked it.")
+                .confirmationDialog(
+                    "Move \(totalSelected) file\(totalSelected == 1 ? "" : "s") to Trash?",
+                    isPresented: $confirmDelete,
+                    titleVisibility: .visible
+                ) {
+                    Button("Move to Trash", role: .destructive) {
+                        Task { await trashSelected(across: visibleGroups) }
+                    }
+                    Button("Cancel", role: .cancel) { }
+                } message: {
+                    Text(confirmDeleteMessage)
+                }
             }
         }
         .padding(20)
@@ -115,31 +128,48 @@ struct CleanupView: View {
 
     @ViewBuilder
     private var empty: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "checkmark.seal.fill")
-                .font(.system(size: 56))
-                .foregroundStyle(.green.opacity(0.6))
-            if store.totalImages == 0 {
-                Text("No images scanned yet").font(.title3.bold())
-                Text("Run a scan first — duplicates appear here once images are tagged.")
-                    .font(.callout).foregroundStyle(.secondary)
-            } else if !skippedGroups.isEmpty {
-                Text("All groups skipped").font(.title3.bold())
+        if store.totalImages == 0 {
+            EmptyStateView(
+                icon: "trash.slash",
+                title: "Nothing to clean up yet",
+                message: "Pick a folder in the sidebar and click Start Scan. Once images are tagged, any visual duplicates show up here grouped together — pick which copy to keep."
+            )
+        } else if !skippedGroups.isEmpty {
+            VStack(spacing: 14) {
+                EmptyStateView(
+                    icon: "checkmark.seal.fill",
+                    title: "All duplicate groups skipped",
+                    message: "You've hidden every group from this view. Want to revisit them?"
+                )
                 Button("Show skipped groups again") { skippedGroups.removeAll() }
                     .buttonStyle(.bordered)
-            } else {
-                Text("No duplicates found").font(.title3.bold())
-                Text("Files were compared by perceptual hash (dHash). \(store.totalImages) images checked.")
-                    .font(.callout).foregroundStyle(.secondary)
             }
+        } else {
+            EmptyStateView(
+                icon: "checkmark.seal.fill",
+                title: "No duplicates found",
+                message: "All \(store.totalImages) images compared — none look visually identical."
+            )
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder
     private var list: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 16) {
+                // First-timer explainer above the groups. Inline (not a
+                // tooltip) so the keeper concept is impossible to miss.
+                HStack(spacing: 8) {
+                    Image(systemName: "info.circle")
+                        .foregroundStyle(.green)
+                    Text("Each group is a set of duplicate copies. The **KEEPER** is the copy we recommend you keep — usually the largest. Click another tile in a group to make it the keeper instead. Selected copies move to Trash; you can restore them if you change your mind.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.green.opacity(0.08)))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.green.opacity(0.3), lineWidth: 1))
+                .padding(.bottom, 4)
                 ForEach(visibleGroups) { group in
                     GroupCard(
                         group: group,
@@ -153,7 +183,29 @@ struct CleanupView: View {
                     )
                 }
                 if let s = status {
-                    Text(s).font(.caption).foregroundStyle(.secondary)
+                    HStack(spacing: 10) {
+                        Image(systemName: "trash.fill")
+                            .foregroundStyle(.green)
+                        Text(s)
+                            .font(.callout)
+                        Spacer()
+                        Button("Open Trash") {
+                            // Reveal the user's Trash in Finder. macOS
+                            // Cmd+Z in Finder restores the most recent
+                            // trash operation — that's the undo path.
+                            NSWorkspace.shared.open(
+                                URL(fileURLWithPath: NSHomeDirectory())
+                                    .appendingPathComponent(".Trash")
+                            )
+                        }
+                        .buttonStyle(.bordered)
+                        Button("Dismiss") { status = nil }
+                            .buttonStyle(.borderless)
+                    }
+                    .padding(12)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.green.opacity(0.10)))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.green.opacity(0.4), lineWidth: 1))
+                    .help("Files moved to Trash can be restored. In Finder, open Trash and press ⌘Z (or right-click → Put Back) to restore the most recent items.")
                 }
             }
             .padding(20)
@@ -188,16 +240,13 @@ struct CleanupView: View {
 
     // MARK: - Trash actions
 
-    private func confirmDeleteSelected() {
-        let alert = NSAlert()
-        alert.messageText = "Delete \(totalSelected) file\(totalSelected == 1 ? "" : "s")?"
+    private var confirmDeleteMessage: String {
         let mb = String(format: "%.1f MB", totalSelectedMB)
-        alert.informativeText = "Moves the selected duplicates to Trash. Frees ~\(mb). You can restore from Trash."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Move to Trash")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        Task { await trashSelected(across: visibleGroups) }
+        return "Moves the selected copies to Trash. Frees about \(mb). You can restore them from Trash if you change your mind."
+    }
+
+    private func confirmDeleteSelected() {
+        confirmDelete = true
     }
 
     private func trashSelectedInGroup(_ g: DuplicateGroup) async {
@@ -207,21 +256,55 @@ struct CleanupView: View {
     private func trashSelected(across groupsToScan: [DuplicateGroup]) async {
         var trashedIDs: [Int64] = []
         var freedBytes: Int64 = 0
+        // Track which duplicate groups had at least one file trashed —
+        // their KEEPERS (the un-trashed survivors) are candidates for
+        // the auto-tag step below.
+        var keeperURLsToTag: [URL] = []
         for group in groupsToScan {
+            var groupHadTrash = false
             for f in group.files where selection.contains(f.id) {
                 do {
                     try FileManager.default.trashItem(at: f.url, resultingItemURL: nil)
                     trashedIDs.append(f.id)
                     freedBytes += f.sizeBytes
+                    groupHadTrash = true
                 } catch {
                     NSLog("FileID v2 cleanup: could not trash %@: %@", f.url.path, "\(error)")
+                }
+            }
+            if groupHadTrash {
+                // Keepers: anything in this group we did NOT trash.
+                for f in group.files where !selection.contains(f.id) {
+                    keeperURLsToTag.append(f.url)
                 }
             }
         }
         let mb = Double(freedBytes) / 1_048_576
         let pruned = store.deleteFiles(ids: trashedIDs)
         for id in trashedIDs { selection.remove(id) }
-        status = "Trashed \(trashedIDs.count) file\(trashedIDs.count == 1 ? "" : "s") · freed \(String(format: "%.1f", mb)) MB · pruned \(pruned) DB rows"
+
+        // P5 — auto-tag keepers (Settings toggle, default on). Useful so
+        // the user can find "files I deduped this session" in Finder.
+        var tagSummary = ""
+        let autoTagOn = UserDefaults.standard.object(forKey: AppSettings.cleanupAutoTagKey) == nil
+            ? AppSettings.cleanupAutoTagDefault
+            : UserDefaults.standard.bool(forKey: AppSettings.cleanupAutoTagKey)
+        if autoTagOn, !keeperURLsToTag.isEmpty {
+            let result = TagWriter.addTagsBulk([AppSettings.cleanupAutoTagName],
+                                                 to: keeperURLsToTag)
+            if result.added > 0 {
+                tagSummary = " · tagged \(result.added) keeper\(result.added == 1 ? "" : "s") with \"\(AppSettings.cleanupAutoTagName)\""
+            }
+            store.notifyChanged()
+        }
+
+        // Plain-language status. "DB rows pruned" is internal noise —
+        // users care about file count + reclaimed space. Tag summary
+        // appended only when the auto-tag toggle did something.
+        _ = pruned // intentionally not surfaced in the UI string
+        status = "Trashed \(trashedIDs.count) file\(trashedIDs.count == 1 ? "" : "s")"
+            + " · freed \(String(format: "%.1f", mb)) MB"
+            + tagSummary
         reload()
     }
 
@@ -391,6 +474,20 @@ private struct CopyTile: View {
             .frame(width: 132)
         }
         .task { thumb = await ThumbnailService.shared.thumbnail(for: file.url, size: 264) }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityDescription)
+        .accessibilityAddTraits([.isButton, isSelected ? .isSelected : []])
+        .accessibilityHint(isSelected
+            ? "Selected. Will be moved to Trash on Delete. Tap to deselect."
+            : isKeeper
+                ? "Recommended copy to keep. Tap to override and select for deletion instead."
+                : "Tap to select for moving to Trash.")
+    }
+
+    private var accessibilityDescription: String {
+        let mb = String(format: "%.1f megabytes", file.sizeMB)
+        let role = isKeeper ? "Keeper. " : ""
+        return "\(role)\(file.url.lastPathComponent), \(mb)"
     }
 
     @ViewBuilder
@@ -408,6 +505,7 @@ private struct CopyTile: View {
             if isKeeper {
                 BadgePill(label: "KEEPER", color: .green)
                     .padding(6)
+                    .help("This is the copy we recommend you keep — usually the largest / highest-resolution one. The other copies in this group are duplicates of it. You can override by clicking another tile to make it the keeper instead.")
             }
             // Top-right checkbox.
             Button(action: onToggle) {

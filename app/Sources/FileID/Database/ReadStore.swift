@@ -20,8 +20,7 @@ public final class ReadStore: @unchecked Sendable {
     }
 
     public static var defaultDBURL: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("FileID/fileid.sqlite")
+        AppSupportPath.fileID.appendingPathComponent("fileid.sqlite")
     }
 
     /// Idempotent. Safe to call after engine creates / migrates the DB.
@@ -115,9 +114,33 @@ public final class ReadStore: @unchecked Sendable {
             return try q.read { db in
                 var sql = "SELECT * FROM files WHERE failed = 0"
                 var args: StatementArguments = []
-                if !search.trimmingCharacters(in: .whitespaces).isEmpty {
-                    sql += " AND (id IN (SELECT rowid FROM ocr_fts WHERE ocr_fts MATCH ?) OR path_text LIKE ?)"
-                    args += [search, "%\(search)%"]
+                let trimmedSearch = search.trimmingCharacters(in: .whitespaces)
+                if !trimmedSearch.isEmpty {
+                    // V2 semantic-feeling search: query matches across
+                    // filename, full OCR text, vision/EXIF tags, smart
+                    // names, AND VLM captions. The user types "sunset"
+                    // and gets every photo classified as a sunset, every
+                    // photo with a sunset caption, every photo whose
+                    // smart name contains it. No CLIP text encoder yet —
+                    // this is the keyword-aggregating equivalent.
+                    let like = "%\(trimmedSearch)%"
+                    sql += """
+                         AND (
+                              id IN (SELECT rowid FROM ocr_fts WHERE ocr_fts MATCH ?)
+                              OR path_text LIKE ?
+                              OR vlm_proposed_name LIKE ?
+                              OR vlm_description LIKE ?
+                              OR id IN (SELECT file_id FROM tags WHERE tag LIKE ?)
+                              OR id IN (
+                                  SELECT face_prints.file_id FROM face_prints
+                                  INNER JOIN persons ON persons.id = face_prints.person_id
+                                  WHERE persons.name LIKE ?
+                                     OR persons.first_name LIKE ?
+                                     OR persons.last_name LIKE ?
+                              )
+                            )
+                        """
+                    args += [trimmedSearch, like, like, like, like, like, like, like]
                 }
                 if let k = kindFilter {
                     sql += " AND kind = ?"
@@ -134,11 +157,176 @@ public final class ReadStore: @unchecked Sendable {
         }
     }
 
+    /// V2.1 CLIP text → image semantic search. Embeds the query via
+    /// the CLIP text encoder, then ranks every photo's CLIP image
+    /// embedding by cosine. Returns nil when the text encoder isn't
+    /// installed (caller falls back to keyword search).
+    public func semanticSearch(query: String, limit: Int = 60) -> [FileRow]? {
+        guard let textVec = CLIPTextEncoder.shared.embedText(query) else { return nil }
+        return rankByCosine(against: textVec, limit: limit)
+    }
+
+    /// V2.0 visual similarity search. Returns the top-K most-similar
+    /// photos to the given seed file by cosine over CLIP image
+    /// embeddings (already stored in clip_embeddings). Unlike text-
+    /// search (which needs a CLIP text encoder), this uses the
+    /// embeddings honestly: "more photos like this one."
+    public func similarFiles(toFileID seedID: Int64, limit: Int = 24) -> [FileRow] {
+        guard let q = queue else { return [] }
+        let seedVec: [Float] = (try? q.read { db -> [Float] in
+            guard let blob = try Data.fetchOne(db, sql:
+                "SELECT embedding FROM clip_embeddings WHERE file_id = ?",
+                arguments: [seedID]) else { return [] }
+            return blobToFloats(blob)
+        }) ?? []
+        guard !seedVec.isEmpty else { return [] }
+        return rankByCosine(against: seedVec, limit: limit, excludeID: seedID)
+    }
+
+    /// Top-K files ranked by cosine similarity to the given query
+    /// vector (in CLIP image-embedding space). Used by both visual
+    /// similarity (seed = a file's embedding) and semantic search
+    /// (seed = a CLIP text embedding).
+    public func rankByCosine(against query: [Float], limit: Int = 60,
+                              excludeID: Int64? = nil) -> [FileRow] {
+        guard let q = queue, !query.isEmpty else { return [] }
+        return (try? q.read { db -> [FileRow] in
+            let sql: String
+            let args: StatementArguments
+            if let exclude = excludeID {
+                sql = "SELECT file_id, embedding FROM clip_embeddings WHERE file_id != ?"
+                args = [exclude]
+            } else {
+                sql = "SELECT file_id, embedding FROM clip_embeddings"
+                args = []
+            }
+            let rows = try Row.fetchAll(db, sql: sql, arguments: args)
+            struct Scored { let id: Int64; let score: Float }
+            var scored: [Scored] = []
+            scored.reserveCapacity(rows.count)
+            for r in rows {
+                guard let fid: Int64 = r["file_id"],
+                      let blob: Data = r["embedding"] else { continue }
+                let v = blobToFloats(blob)
+                guard v.count == query.count else { continue }
+                var s: Float = 0
+                for i in 0..<v.count { s += query[i] * v[i] }
+                scored.append(Scored(id: fid, score: s))
+            }
+            scored.sort { $0.score > $1.score }
+            let topIDs = scored.prefix(limit).map { $0.id }
+            guard !topIDs.isEmpty else { return [] }
+            let placeholders = topIDs.map { _ in "?" }.joined(separator: ",")
+            let fileArgs: [DatabaseValueConvertible] = topIDs.map { Int($0) }
+            let fileRows = try Row.fetchAll(db, sql: """
+                SELECT * FROM files WHERE id IN (\(placeholders)) AND failed = 0
+                """, arguments: StatementArguments(fileArgs))
+            let byID = Dictionary(uniqueKeysWithValues: fileRows.map {
+                (Int64($0["id"] ?? 0), Self.toFileRow($0))
+            })
+            return topIDs.compactMap { byID[$0] }
+        }) ?? []
+    }
+
+    private func blobToFloats(_ data: Data) -> [Float] {
+        let count = data.count / MemoryLayout<Float>.stride
+        guard count > 0 else { return [] }
+        return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> [Float] in
+            let base = raw.baseAddress!.assumingMemoryBound(to: Float.self)
+            return Array(UnsafeBufferPointer(start: base, count: count))
+        }
+    }
+
+    /// Bulk fetch FileRows for a list of ids, preserving the input
+    /// order. Used by Memory detail to render the photos in the order
+    /// the memory builder produced them (chronological).
+    public func files(forFileIDs ids: [Int64]) -> [FileRow] {
+        guard let q = queue, !ids.isEmpty else { return [] }
+        return (try? q.read { db -> [FileRow] in
+            let placeholders = ids.map { _ in "?" }.joined(separator: ",")
+            let args: [DatabaseValueConvertible] = ids.map { Int($0) }
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT * FROM files WHERE id IN (\(placeholders)) AND failed = 0
+                """, arguments: StatementArguments(args))
+            let byID = Dictionary(uniqueKeysWithValues: rows.map {
+                (Int64($0["id"] ?? 0), Self.toFileRow($0))
+            })
+            return ids.compactMap { byID[$0] }
+        }) ?? []
+    }
+
+    /// Path → URL lookup for a single file id. Used by Memories +
+    /// Spotlight indexing to find a thumbnail for a hero image without
+    /// fetching the whole FileRow.
+    public func fileURL(forID id: Int64) -> URL? {
+        guard let q = queue else { return nil }
+        return (try? q.read { db in
+            try String.fetchOne(db, sql: "SELECT path_text FROM files WHERE id = ?",
+                                  arguments: [id])
+        })
+        .flatMap { $0 }
+        .map { URL(fileURLWithPath: $0) }
+    }
+
     public func tags(forFileID id: Int64) -> [String] {
         guard let q = queue else { return [] }
         return (try? q.read { db in
             try String.fetchAll(db, sql: "SELECT tag FROM tags WHERE file_id = ? ORDER BY tag", arguments: [id])
         }) ?? []
+    }
+
+    /// Top vision-classified tags by confidence (insert order preserved by
+    /// rowid; VisionWorker emits results pre-sorted descending). Used by
+    /// Library tiles for at-a-glance content cues — no need to open the
+    /// preview sheet to see what a photo contains.
+    public func topVisionTags(forFileID id: Int64, limit: Int) -> [String] {
+        guard let q = queue, limit > 0 else { return [] }
+        return (try? q.read { db in
+            try String.fetchAll(db, sql: """
+                SELECT tag FROM tags
+                WHERE file_id = ? AND source = 'vision'
+                ORDER BY rowid
+                LIMIT ?
+                """, arguments: [id, limit])
+        }) ?? []
+    }
+
+    /// V4: bulk-fetch top vision tags for many files in one SQL query.
+    /// Replaces the per-tile `topVisionTags(forFileID:)` that issued
+    /// 1000+ queries when 1000 tiles were visible — collapses to one.
+    /// Each file gets at most `limit` tags, in confidence-descending
+    /// order (rowid asc).
+    public func topVisionTagsBulk(forFileIDs ids: [Int64], limit: Int = 2)
+        -> [Int64: [String]]
+    {
+        guard let q = queue, !ids.isEmpty, limit > 0 else { return [:] }
+        return (try? q.read { db -> [Int64: [String]] in
+            let placeholders = ids.map { _ in "?" }.joined(separator: ",")
+            let args: [DatabaseValueConvertible] = ids.map { Int($0) }
+            // Window-function ranking to keep only the top `limit` per
+            // file_id. Single round-trip; result post-processed by
+            // grouping in Swift.
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT file_id, tag, rowid_rank FROM (
+                    SELECT t.file_id, t.tag,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY t.file_id
+                               ORDER BY t.rowid ASC
+                           ) AS rowid_rank
+                    FROM tags t
+                    WHERE t.file_id IN (\(placeholders))
+                      AND t.source = 'vision'
+                ) WHERE rowid_rank <= ?
+                """, arguments: StatementArguments(args + [limit]))
+            var out: [Int64: [String]] = [:]
+            out.reserveCapacity(ids.count)
+            for r in rows {
+                guard let fid: Int64 = r["file_id"],
+                      let tag: String = r["tag"] else { continue }
+                out[fid, default: []].append(tag)
+            }
+            return out
+        }) ?? [:]
     }
 
     // MARK: - Cleanup queries
@@ -255,8 +443,9 @@ public final class ReadStore: @unchecked Sendable {
         }
     }
 
-    public func persons() -> [PersonRow] {
+    public func persons(includeUnknown: Bool = false) -> [PersonRow] {
         guard let q = queue else { return [] }
+        let where_ = includeUnknown ? "" : "WHERE IFNULL(p.is_unknown, 0) = 0"
         do {
             return try q.read { db in
                 let rows = try Row.fetchAll(db, sql: """
@@ -270,6 +459,7 @@ public final class ReadStore: @unchecked Sendable {
                     FROM persons p
                     LEFT JOIN face_prints f ON f.id = p.representative_face_id
                     LEFT JOIN files ON files.id = f.file_id
+                    \(where_)
                     ORDER BY p.is_unknown ASC, p.file_count DESC, p.id ASC
                     """)
                 return rows.map { r in
@@ -295,6 +485,48 @@ public final class ReadStore: @unchecked Sendable {
             self.lastError = "People query failed: \(error)"
             return []
         }
+    }
+
+    /// Count of persons currently marked as unknown — for the
+    /// "X hidden, show them" footer on the People tab.
+    public func hiddenUnknownCount() -> Int {
+        guard let q = queue else { return 0 }
+        return (try? q.read { db in
+            try Int.fetchOne(db, sql:
+                "SELECT COUNT(*) FROM persons WHERE IFNULL(is_unknown, 0) = 1") ?? 0
+        }) ?? 0
+    }
+
+    /// Persons with at least one name field populated and not marked
+    /// unknown. Drives the sidebar pipeline indicator + the Deep
+    /// Analyze gating ("you must name at least one person first").
+    public func namedPersonCount() -> Int {
+        guard let q = queue else { return 0 }
+        return (try? q.read { db in
+            try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM persons
+                WHERE IFNULL(is_unknown, 0) = 0
+                  AND (
+                    (name IS NOT NULL AND name <> '')
+                    OR (first_name IS NOT NULL AND first_name <> '')
+                    OR (last_name  IS NOT NULL AND last_name  <> '')
+                  )
+            """) ?? 0
+        }) ?? 0
+    }
+
+    /// Files that have a VLM-generated caption / proposed name. Used
+    /// by the sidebar pipeline to know whether Deep Analyze has run.
+    public func totalCaptioned() -> Int {
+        guard let q = queue else { return 0 }
+        return (try? q.read { db in
+            try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM files
+                WHERE failed = 0
+                  AND vlm_proposed_name IS NOT NULL
+                  AND vlm_proposed_name <> ''
+            """) ?? 0
+        }) ?? 0
     }
 
     public func updatePerson(id: Int64, title: String?, firstName: String?,
@@ -323,6 +555,52 @@ public final class ReadStore: @unchecked Sendable {
     private func nilIfBlank(_ s: String?) -> String? {
         guard let s, !s.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
         return s.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Move every face_print belonging to `source` person AND any of
+    /// `fileIDs` to belong to `target` person instead. Used by the
+    /// People-tab "Move to another person" multi-select action: when
+    /// the clusterer wrongly assigned a photo of Adam to Jack's
+    /// cluster, the user picks Adam in Jack's sheet and reassigns
+    /// just those photos.
+    ///
+    /// File-level granularity (not face-print-level): if a file has
+    /// multiple faces matched to `source`, all of them move. The
+    /// common case is one face per file per person; the edge case is
+    /// already a clusterer mistake the user is correcting.
+    public func movePersonFaces(fromPersonID source: Int64,
+                                  toPersonID target: Int64,
+                                  fileIDs: [Int64]) -> Int {
+        guard !fileIDs.isEmpty, source != target else { return 0 }
+        do {
+            let queue = try DatabaseQueue(path: dbURL.path)
+            let moved = try queue.write { db -> Int in
+                let placeholders = fileIDs.map { _ in "?" }.joined(separator: ",")
+                var args: [DatabaseValueConvertible] = [target, source]
+                args.append(contentsOf: fileIDs.map { Int($0) })
+                try db.execute(
+                    sql: """
+                        UPDATE face_prints SET person_id = ?
+                        WHERE person_id = ? AND file_id IN (\(placeholders))
+                        """,
+                    arguments: StatementArguments(args)
+                )
+                let changes = db.changesCount
+                // Recount file_count for both source and target.
+                try db.execute(sql: """
+                    UPDATE persons SET file_count = (
+                        SELECT COUNT(DISTINCT file_id) FROM face_prints
+                        WHERE person_id = persons.id
+                    ) WHERE id IN (?, ?)
+                    """, arguments: [source, target])
+                return changes
+            }
+            self.notifyChanged()
+            return moved
+        } catch {
+            self.lastError = "Move person faces failed: \(error)"
+            return 0
+        }
     }
 
     public func files(forPersonID personID: Int64, limit: Int = 200) -> [FileRow] {
@@ -512,10 +790,11 @@ public final class ReadStore: @unchecked Sendable {
     public func deepAnalyzePending(modelKey: String) -> (total: Int, pending: Int) {
         guard let q = queue else { return (0, 0) }
         return (try? q.read { db in
-            let total = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'image' AND failed = 0") ?? 0
+            let total = try Int.fetchOne(db, sql:
+                "SELECT COUNT(*) FROM files WHERE kind IN ('image', 'pdf') AND failed = 0") ?? 0
             let pending = try Int.fetchOne(db, sql: """
                 SELECT COUNT(*) FROM files
-                WHERE kind = 'image' AND failed = 0
+                WHERE kind IN ('image', 'pdf') AND failed = 0
                   AND (vlm_model IS NULL OR vlm_model != ?)
                 """, arguments: [modelKey]) ?? 0
             return (total, pending)
@@ -539,6 +818,101 @@ public final class ReadStore: @unchecked Sendable {
         } catch {
             self.lastError = "Path update failed: \(error)"
         }
+    }
+
+    /// All non-failed image files that have a non-empty
+    /// `vlm_proposed_name`. Used by the bulk-rename UI.
+    public func filesWithProposedNames(limit: Int = 1000) -> [FileRow] {
+        guard let q = queue else { return [] }
+        do {
+            return try q.read { db in
+                let rows = try Row.fetchAll(db, sql: """
+                    SELECT * FROM files
+                    WHERE failed = 0
+                      AND vlm_proposed_name IS NOT NULL
+                      AND vlm_proposed_name != ''
+                    ORDER BY scanned_at DESC LIMIT ?
+                    """, arguments: [limit])
+                return rows.map { Self.toFileRow($0) }
+            }
+        } catch {
+            self.lastError = "Proposed-name query failed: \(error)"
+            return []
+        }
+    }
+
+    /// Apply renames to many files. Returns per-file results; the
+    /// caller persists `oldByID` to UserDefaults so the last batch can
+    /// be undone.
+    public struct RenameOutcome: Sendable, Codable {
+        public let fileID: Int64
+        public let oldPath: String
+        public let newPath: String
+    }
+
+    public struct BulkRenameResult: Sendable {
+        public let renamed: [RenameOutcome]
+        public let failed: Int
+        public let firstError: String?
+    }
+
+    public func applyProposedNamesBulk(_ files: [FileRow]) -> BulkRenameResult {
+        var renamed: [RenameOutcome] = []
+        var failed = 0
+        var firstError: String?
+        for f in files {
+            let oldPath = f.pathText
+            if let newURL = applyProposedName(file: f) {
+                if newURL.path != oldPath {
+                    renamed.append(RenameOutcome(fileID: f.id,
+                                                  oldPath: oldPath,
+                                                  newPath: newURL.path))
+                }
+            } else {
+                failed += 1
+                if firstError == nil { firstError = self.lastError }
+            }
+        }
+        return BulkRenameResult(renamed: renamed, failed: failed, firstError: firstError)
+    }
+
+    /// Reverse a previously-applied rename batch. Walks each entry
+    /// backwards: `mv newPath oldPath`. Skips entries whose newPath no
+    /// longer exists (user already moved them again somewhere) — these
+    /// are reported as `skipped`.
+    public func undoRenames(_ outcomes: [RenameOutcome]) -> (undone: Int, skipped: Int, failed: Int) {
+        var undone = 0
+        var skipped = 0
+        var failed = 0
+        let fm = FileManager.default
+        for r in outcomes.reversed() {
+            let newURL = URL(fileURLWithPath: r.newPath)
+            let oldURL = URL(fileURLWithPath: r.oldPath)
+            guard fm.fileExists(atPath: newURL.path) else {
+                skipped += 1; continue
+            }
+            if fm.fileExists(atPath: oldURL.path) {
+                // The old path is now occupied — bail rather than clobber.
+                skipped += 1; continue
+            }
+            do {
+                try fm.moveItem(at: newURL, to: oldURL)
+                undone += 1
+                // Restore path_text in the DB.
+                if let q = try? DatabaseQueue(path: dbURL.path) {
+                    try? q.write { db in
+                        try db.execute(
+                            sql: "UPDATE files SET path_text = ? WHERE id = ?",
+                            arguments: [oldURL.path, r.fileID]
+                        )
+                    }
+                }
+            } catch {
+                failed += 1
+            }
+        }
+        self.notifyChanged()
+        return (undone, skipped, failed)
     }
 
     /// Rename the file on disk to its proposed VLM name and update the

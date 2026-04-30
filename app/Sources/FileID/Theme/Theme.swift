@@ -3,8 +3,29 @@ import SwiftUI
 // MARK: - Theme
 
 enum Theme {
+    // Primary accent — pulled from the FileID logo's caution-yellow
+    // triangle. Reserved for primary actions (Apply, Start Scan, Pick a
+    // folder), value-prop moments (Smart name results), tab selection.
     static let gold    = Color(red: 1.0, green: 0.8, blue: 0.0)
     static let goldDim = Color(red: 0.8, green: 0.64, blue: 0.0)
+
+    // Iridescent palette — pulled from the rainbow gradient backing
+    // the logo. Each color has a *meaning*:
+    //
+    //   ai      → an on-device AI is doing work right now (Deep Analyze,
+    //             face clustering, ArcFace embedding, Verify with AI).
+    //             Lavender / iridescent purple.
+    //   info    → secondary status / information (selected count,
+    //             "what just happened" banners). Soft cyan.
+    //   delight → success / completion / "nice job" moments (renamed,
+    //             grouped, moved). Soft pink — used briefly, never as
+    //             a permanent fixture.
+    //
+    // Apply sparingly — gold remains the primary CTA color. These are
+    // for *moments* not surfaces.
+    static let ai      = Color(red: 0.69, green: 0.61, blue: 0.81)  // #B19BCE
+    static let info    = Color(red: 0.63, green: 0.89, blue: 0.92)  // #A0E2EA
+    static let delight = Color(red: 0.95, green: 0.65, blue: 0.75)  // #F2A6C0
 
     static let surfaceBase     = Color.black.opacity(0.3)
     static let surfaceCard     = Color.white.opacity(0.06)

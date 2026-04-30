@@ -26,14 +26,43 @@ public final class EngineClient {
     public private(set) var deepAnalyzeComplete: DeepAnalyzeComplete?
     public private(set) var modelDownloadProgress: ModelDownloadProgress?
     public private(set) var deepAnalyzeInFlight: Bool = false
+    /// Streamed by the engine between command-receipt and the first
+    /// per-file `deepAnalyzeProgress`, so the UI can show progressive
+    /// labelling during the ~10s VLM cold-load window. Cleared when the
+    /// first progress event arrives or the run completes.
+    public private(set) var deepAnalyzeStarting: DeepAnalyzeStarting?
+    /// False when engine reports mlx.metallib is missing — Deep Analyze
+    /// would crash on first VLM call. UI should disable + explain.
+    public private(set) var deepAnalyzeAvailable: Bool = true
+    public private(set) var deepAnalyzeUnavailableReason: String?
+
+    // MARK: - Auto-pilot ("Organize Everything")
+    //
+    // When the user clicks "Organize Everything" instead of plain
+    // "Start Scan", the engine chains all four stages automatically:
+    //   1. Scan (already runs)
+    //   2. Face clustering (already auto-triggered after scan)
+    //   3. Deep Analyze on every image  ← NEW chain link
+    //   4. UI flips to Restructure tab with auto-loaded proposals  ← NEW
+    //
+    // The flag persists across stage transitions; each event handler
+    // checks it and kicks the next stage. Cleared on autoPilotCancel
+    // or after the final stage finishes.
+    public private(set) var autoPilotActive: Bool = false
+    public private(set) var autoPilotStage: AutoPilotStage = .idle
+
+    public enum AutoPilotStage: Sendable, Equatable {
+        case idle
+        case scanning
+        case grouping       // face clustering
+        case captioning     // deep analyze
+        case proposing      // restructure proposals (handled by UI)
+        case ready          // user can review + apply
+    }
 
     public private(set) var queueState: QueueState = QueueState(
         running: nil, pending: [], totalEtaSeconds: nil
     )
-
-    public private(set) var lastVLMFaceVerification: VLMFaceVerificationResult?
-    public private(set) var vlmFaceVerifyInFlight: Bool = false
-    public private(set) var vlmFaceVerifyProgress: VLMFaceVerificationProgress?
 
     private var process: Process?
     private var stdinPipe: Pipe?
@@ -138,18 +167,21 @@ public final class EngineClient {
 
     /// Debug log at ~/Library/Application Support/FileID/logs/app.log.
     nonisolated public static func debug(_ msg: String) {
-        let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("FileID/logs/app.log")
+        let url = AppSupportPath.fileID.appendingPathComponent("logs/app.log")
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                   withIntermediateDirectories: true)
         let stamp = ISO8601DateFormatter().string(from: Date())
         let line = "\(stamp) \(msg)\n"
+        let payload = Data(line.utf8)
         if let h = try? FileHandle(forWritingTo: url) {
-            try? h.seekToEnd()
-            try? h.write(contentsOf: Data(line.utf8))
-            try? h.close()
+            // Discarding errors here is intentional — debug logging
+            // must not crash the app. `_ = try?` silences the unused-
+            // result warning while keeping the no-throw guarantee.
+            _ = try? h.seekToEnd()
+            _ = try? h.write(contentsOf: payload)
+            _ = try? h.close()
         } else {
-            try? Data(line.utf8).write(to: url)
+            _ = try? payload.write(to: url)
         }
     }
 
@@ -162,6 +194,16 @@ public final class EngineClient {
             respawnAttempts.removeAll()   // reset budget on a clean handshake
         case .progress(let p):
             lastProgress = p
+            // Auto-pilot: cancel + failed phases must release the
+            // assistant view, otherwise the user is stuck looking at
+            // "Finding people…" or similar with no way forward. The
+            // explicit Cancel button on the assistant view also calls
+            // cancelAutoPilot(), but a phase change from any other
+            // source (e.g. engine-level cancel) needs to land here.
+            if autoPilotActive, p.phase == .cancelled || p.phase == .failed {
+                autoPilotActive = false
+                autoPilotStage = .idle
+            }
         case .phaseChanged:
             break  // phase is encoded in lastProgress.phase
         case .discoveryComplete:
@@ -172,10 +214,58 @@ public final class EngineClient {
             lastBatch = b
         case .scanComplete:
             lastTerminalEventAt = Date()
+            // Auto-pilot: scan ➜ face clustering already auto-fires from
+            // the engine itself, so just update the visible stage.
+            // BUT: if there are no faces in the scanned library, the
+            // engine won't fire clustering at all and we'd hang on
+            // .grouping. Watchdog kicks the next stage after 6s if no
+            // clustering activity is seen.
+            if autoPilotActive {
+                autoPilotStage = .grouping
+                let stamp = lastTerminalEventAt
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: 6_000_000_000)
+                    guard let self else { return }
+                    // Still in auto-pilot, still on grouping, and no
+                    // clustering even started (no inflight + no result):
+                    // skip ahead.
+                    if self.autoPilotActive,
+                       self.autoPilotStage == .grouping,
+                       !self.faceClusteringInFlight,
+                       self.lastFaceClustering == nil,
+                       self.lastTerminalEventAt == stamp {
+                        if self.deepAnalyzeAvailable {
+                            self.autoPilotStage = .captioning
+                            let activeKind = UserDefaults.standard.string(forKey: "deepAnalyzeActiveModel")
+                                ?? AIModelKind.qwen2VL3B.rawValue
+                            self.deepAnalyzeAll(modelKind: activeKind, skipExisting: true)
+                        } else {
+                            self.autoPilotStage = .ready
+                        }
+                    }
+                }
+            }
         case .error(let e):
+            // Engine startup capability warning: not a real error, just a
+            // signal that Deep Analyze can't run on this build.
+            if e.kind == "deep_analyze_unavailable" {
+                deepAnalyzeAvailable = false
+                deepAnalyzeUnavailableReason = e.message
+                return
+            }
             lastError = e
             if e.kind.hasPrefix("face_cluster") {
                 faceClusteringInFlight = false
+                // Auto-pilot: a clustering error means we won't get
+                // .faceClusteringComplete. Skip captioning and flip to
+                // ready so the user can still see what was scanned.
+                if autoPilotActive {
+                    autoPilotStage = .ready
+                }
+            }
+            if e.kind.hasPrefix("deep") && autoPilotActive {
+                // Deep Analyze failure during auto-pilot — same idea.
+                autoPilotStage = .ready
             }
         case .log:
             break
@@ -183,15 +273,22 @@ public final class EngineClient {
             lastFaceClustering = summary
             faceClusteringInFlight = false
             lastTerminalEventAt = Date()
-            // Qwen auto-chain removed in M4. With ArcFace + Chinese
-            // Whispers as the primary clustering pipeline, the borderline
-            // band is small and dominated by genuinely-ambiguous cases
-            // (twins, age gaps). Run "Verify with AI" manually from the
-            // Suggested Merges sheet when you actually want the VLM's
-            // judgment on a specific subset.
+            // Auto-pilot used to chain straight into Deep Analyze here.
+            // That's gone now — Deep Analyze waits until the user has
+            // named at least one person. Auto-pilot just flips to ready
+            // and the user takes over.
+            if autoPilotActive {
+                autoPilotStage = .ready
+            }
+        case .deepAnalyzeStarting(let s):
+            deepAnalyzeStarting = s
+            deepAnalyzeInFlight = true
         case .deepAnalyzeProgress(let p):
             deepAnalyzeProgress = p
             deepAnalyzeInFlight = true
+            // First per-file progress arrived — clear the "Starting…"
+            // card so the progress card can take over without overlap.
+            deepAnalyzeStarting = nil
         case .deepAnalyzeFileDone(let d):
             // 500 ms throttle — otherwise SwiftUI's AttributeGraph
             // overflows over a fast Deep Analyze run.
@@ -205,18 +302,26 @@ public final class EngineClient {
             deepAnalyzeInFlight = false
             lastTerminalEventAt = Date()
             deepAnalyzeProgress = nil
+            deepAnalyzeStarting = nil
+            // Auto-pilot: captioning ➜ proposing ➜ ready, with a tiny
+            // delay so SwiftUI animates the stage transition. Re-checks
+            // autoPilotActive after the sleep so a Cancel between the
+            // two transitions doesn't snap the user back into the
+            // assistant view post-cancel.
+            if autoPilotActive {
+                autoPilotStage = .proposing
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: 600_000_000)
+                    guard let self else { return }
+                    if self.autoPilotActive {
+                        self.autoPilotStage = .ready
+                    }
+                }
+            }
         case .modelDownloadProgress(let p):
             modelDownloadProgress = p
         case .queueState(let q):
             queueState = q
-        case .vlmFaceVerificationComplete(let r):
-            lastVLMFaceVerification = r
-            vlmFaceVerifyInFlight = false
-            vlmFaceVerifyProgress = nil
-            lastTerminalEventAt = Date()
-        case .vlmFaceVerificationProgress(let p):
-            vlmFaceVerifyProgress = p
-            vlmFaceVerifyInFlight = true
         }
     }
 
@@ -303,18 +408,46 @@ public final class EngineClient {
 
     public func clearLastError() { lastError = nil }
 
+    /// V3: Start Scan is the single CTA and auto-chains by default.
+    /// Sets `autoPilotActive` so faceClusteringComplete kicks off Deep
+    /// Analyze automatically. Bookmark serialization is moved off the
+    /// main thread — the caller doesn't await it; the engine receives
+    /// the startScan command as soon as the bookmark resolves.
     public func startScan(rootURL: URL) {
-        do {
-            let bookmark = try rootURL.bookmarkData(
-                options: [],
-                includingResourceValuesForKeys: nil,
-                relativeTo: nil
-            )
-            isPaused = false
-            send(.startScan(rootBookmark: bookmark, rootPathDisplay: rootURL.path))
-        } catch {
-            lastError = EngineError(kind: "bookmark_create_failed", message: "\(error)", path: rootURL.path)
+        autoPilotActive = true
+        autoPilotStage = .scanning
+        isPaused = false
+        let path = rootURL.path
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                let bookmark = try rootURL.bookmarkData(
+                    options: [],
+                    includingResourceValuesForKeys: nil,
+                    relativeTo: nil
+                )
+                await MainActor.run {
+                    self?.send(.startScan(rootBookmark: bookmark, rootPathDisplay: path))
+                }
+            } catch {
+                await MainActor.run {
+                    self?.lastError = EngineError(
+                        kind: "bookmark_create_failed",
+                        message: "\(error)", path: path
+                    )
+                    self?.autoPilotActive = false
+                    self?.autoPilotStage = .idle
+                }
+            }
         }
+    }
+
+    /// Cancel any in-flight stage chain. The current stage's data
+    /// stays intact; subsequent stage-complete events won't kick off
+    /// the next stage. The Sidebar's Cancel button calls this in
+    /// addition to engine.cancel().
+    public func cancelAutoPilot() {
+        autoPilotActive = false
+        autoPilotStage = .idle
     }
 
     public func pause()    { isPaused = true;  send(.pauseScan)  }
@@ -335,6 +468,7 @@ public final class EngineClient {
         deepAnalyzeInFlight = true
         deepAnalyzeProgress = nil
         deepAnalyzeComplete = nil
+        deepAnalyzeStarting = nil
         send(.deepAnalyzeFile(fileID: fileID, modelKind: modelKind))
     }
 
@@ -342,6 +476,7 @@ public final class EngineClient {
         deepAnalyzeInFlight = true
         deepAnalyzeProgress = nil
         deepAnalyzeComplete = nil
+        deepAnalyzeStarting = nil
         send(.deepAnalyzeFolder(pathPrefix: prefix, modelKind: modelKind))
     }
 
@@ -349,17 +484,12 @@ public final class EngineClient {
         deepAnalyzeInFlight = true
         deepAnalyzeProgress = nil
         deepAnalyzeComplete = nil
+        deepAnalyzeStarting = nil
         send(.deepAnalyzeAll(modelKind: modelKind, skipExisting: skipExisting))
     }
 
     public func deepAnalyzeCancel() {
         send(.deepAnalyzeCancel)
-    }
-
-    public func runVLMFaceVerification(modelKind: String) {
-        guard !vlmFaceVerifyInFlight else { return }
-        vlmFaceVerifyInFlight = true
-        send(.runVLMFaceVerification(modelKind: modelKind))
     }
 }
 

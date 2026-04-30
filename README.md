@@ -90,9 +90,9 @@ The user-facing pipeline, in order:
 | **1** | **Scan** | Apple Vision finds faces (with capture-quality scores), EXIF, OCR text, perceptual hashes. ~150 files/s on Apple Silicon. |
 | **2** | **Embed** | Each face is L2-normalized via **ArcFace iResNet50** (Buffalo-L) on the ANE — the same identity-trained model Immich uses. Quality filter drops blur / profile / tiny faces. |
 | **3** | **Cluster** | **Chinese Whispers** on a cosine-kNN graph. No fixed global threshold; local density decides cluster boundaries. Same person at age 5 vs 12 clusters together; siblings stay apart. |
-| **4** | **Name** | You name the most-photographed people. One-time, ~30 seconds. |
-| **5** | **Deep Analyze** | Local VLM writes a caption + suggested filename for every photo, using the names you provided. |
-| **6** | **Restructure** | Propose a clean folder layout. Apply via symlinks (reversible) or commit to real moves when you're sure. |
+| **4** | **Name & tag** | Name the most-photographed people. One click tags every photo of that person with macOS Finder tags (visible in Finder, Spotlight, Smart Folders). |
+| **5** | **Deep Analyze** | Local VLM writes a caption + suggested filename for every photo, using the names you provided. Bulk-rename in one batch with one-click undo. |
+| **6** | **Restructure** | Assistant-mode reorganizer keeps your meaningfully-named folders intact, dissolves only the junk-named ones. Symlink mode is reversible; convert to real moves when you're satisfied. |
 
 The splash screen shows this verbatim before you pick a folder.
 
@@ -147,7 +147,37 @@ Face cards backed by ArcFace 512-d identity embeddings. **Run face clustering** 
 
 Tap a card to see every photo for that person, name them with structured fields (Title / First / Middle / Last / Suffix), or mark **I don't know** to exclude from clustering and Deep Analyze captions. **Verify with AI** in the Suggested Merges sheet runs Qwen on a specific subset when you want a VLM's judgment on borderline cases (twins, age gaps).
 
+Each named cluster has a **"Tag all N photos"** button that writes the person's display name as a Finder tag onto every photo of them. If you later edit the name, an inline **"Replace 'old' with 'new'"** affordance appears so the on-disk tags stay in sync.
+
 No migration ceremony — face recognition uses whichever ArcFace `.mlpackage` is on disk. Run a fresh scan (or click **Run face clustering**) and any face_prints row missing an embedding gets caught up in Stage D's lazy-extraction step.
+
+### Tags (macOS Finder integration)
+
+Every file's preview sheet has a **Finder tags** card — add tags inline; they write straight to the file via `URLResourceKey.tagNamesKey` and show up everywhere macOS shows tags:
+
+- Finder sidebar (filter by tag)
+- Spotlight (`tag:Mom` queries)
+- Smart Folders (build saved searches around tags)
+
+Bulk-apply paths:
+- **Per-person**: People tab → person card → Tag all N photos.
+- **Per-photo**: Library tile → preview sheet → Finder tags card.
+- **Cleanup auto-tag**: when you trash a duplicate group, the keepers can be auto-tagged `duplicate-resolved` (Settings toggle, default on).
+- (Future: multi-select tile mode with bulk tag apply.)
+
+Library tiles show a small tag-count badge top-right when a file has any Finder tags. Tags are reversible — there's no FileID-only state; if you uninstall, your tags stay in Finder.
+
+### Names
+
+Deep Analyze produces a caption + suggested filename per image. To apply them in bulk:
+
+1. Library header shows **Rename suggestions (N)** when N > 0.
+2. Click → preview list of `IMG_8473.HEIC → mom_playing_piano.heic`, default-selects all.
+3. Above 50 files, you get a confirmation dialog before applying.
+4. Apply runs all renames in one pass with collision-safe `_2`, `_3`, … suffixes.
+5. The batch is recorded — **Undo last rename** appears in the header until cleared.
+
+The undo refuses to clobber: if you've moved a renamed file again since, that one is skipped (the rest still revert).
 
 ### Deep Analyze
 
@@ -161,7 +191,17 @@ Pick a model in **Settings → AI Models — accuracy tier**. The top three are 
 
 Run on a single file from the preview sheet, or **Analyze entire library** from the Deep Analyze tab. Sleep prevention keeps the engine running with the lid closed (on AC). Caption + suggested name land in the metadata panel — click **Apply** to rename on disk.
 
-### Restructure
+### Restructure (assistant mode)
+
+Restructure respects your existing organization. It classifies every source folder into one of three tiers:
+
+| Tier | Examples | What happens |
+|------|----------|--------------|
+| **Anchor** | `Albert Einstein/`, `2019/`, `Hawaii/` (when most contents share a signal) | Folder + contents stay exactly where they are. |
+| **Mixed** | `Marie Curie's Laboratory/` with 2 Curie photos + 1 stray Einstein | Folder kept; only the outlier moves to its proper bucket. |
+| **Junk** | `Untitled folder`, `DCIM`, `Camera Roll`, `Photos (1) (copy)` | Dissolved. Contents re-bucket via the heuristic below. |
+
+For files that DO move (Mixed outliers and Junk contents), the heuristic destination is:
 
 ```
 People/Mom/2018/             ← named face clusters
@@ -171,7 +211,9 @@ Photos/2020/05-May/          ← year/month fallback
 Misc/                        ← uncategorizable
 ```
 
-VLM-suggested filenames become the new basenames. Diff preview groups by destination bucket; per-row checkboxes let you accept piecemeal. **Symlink mode** (default) leaves originals in place — try the new layout risk-free, then **Convert to real moves** when you're satisfied.
+VLM-suggested filenames become the new basenames during the move. The diff preview groups by impact (Stays Put count, Reorganized count, Moved count) so you only see what's actually changing. **Symlink mode** (default) leaves originals in place — try the new layout risk-free, then **Convert to real moves** when you're satisfied.
+
+The folder classifier is a deterministic, unit-tested ~150-LOC pure-Swift module (`FolderClassifier.swift`) — it's not LLM-driven. Stable across re-runs given the same library state.
 
 ---
 
