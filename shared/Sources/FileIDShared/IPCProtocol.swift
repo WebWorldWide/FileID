@@ -207,7 +207,7 @@ public enum JobCategory: String, Codable, Sendable {
 public struct QueuedJob: Codable, Sendable, Identifiable {
     public let id: String
     public let category: JobCategory
-    public let title: String          // human-readable, e.g. "Scan TrueNAS"
+    public let title: String          // human-readable, e.g. "Scan Library"
     public let etaSeconds: Double?    // optional estimated wall time when queued
 
     public init(id: String, category: JobCategory, title: String, etaSeconds: Double?) {

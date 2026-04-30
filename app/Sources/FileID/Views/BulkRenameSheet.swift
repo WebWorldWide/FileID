@@ -190,7 +190,7 @@ struct BulkRenameSheet: View {
     // MARK: - Person tag history (P10)
     //
     // Track which Finder tag we last applied per person so that when
-    // the user renames a cluster ("Adam" → "Adam Nolle") we can offer
+    // the user renames a cluster ("Alex" → "Alex Doe") we can offer
     // to retag previously-tagged photos. Stored as a tiny JSON dict in
     // UserDefaults — `[Int64-as-string : last-tag]`. Engineering-wise
     // this lives next to lastBatchKey because both are "remembering

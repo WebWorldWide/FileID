@@ -116,13 +116,10 @@ public final class ReadStore: @unchecked Sendable {
                 var args: StatementArguments = []
                 let trimmedSearch = search.trimmingCharacters(in: .whitespaces)
                 if !trimmedSearch.isEmpty {
-                    // V2 semantic-feeling search: query matches across
-                    // filename, full OCR text, vision/EXIF tags, smart
-                    // names, AND VLM captions. The user types "sunset"
-                    // and gets every photo classified as a sunset, every
-                    // photo with a sunset caption, every photo whose
-                    // smart name contains it. No CLIP text encoder yet —
-                    // this is the keyword-aggregating equivalent.
+                    // Keyword search across filename, OCR text,
+                    // vision tags, smart names, and VLM captions.
+                    // CLIP semantic search runs separately when
+                    // the encoder is installed.
                     let like = "%\(trimmedSearch)%"
                     sql += """
                          AND (
@@ -157,20 +154,17 @@ public final class ReadStore: @unchecked Sendable {
         }
     }
 
-    /// V2.1 CLIP text → image semantic search. Embeds the query via
-    /// the CLIP text encoder, then ranks every photo's CLIP image
-    /// embedding by cosine. Returns nil when the text encoder isn't
+    /// CLIP text → image semantic search. Embeds the query via the
+    /// CLIP text encoder, ranks files by cosine over their stored
+    /// image embeddings. Returns nil when the text encoder isn't
     /// installed (caller falls back to keyword search).
     public func semanticSearch(query: String, limit: Int = 60) -> [FileRow]? {
         guard let textVec = CLIPTextEncoder.shared.embedText(query) else { return nil }
         return rankByCosine(against: textVec, limit: limit)
     }
 
-    /// V2.0 visual similarity search. Returns the top-K most-similar
-    /// photos to the given seed file by cosine over CLIP image
-    /// embeddings (already stored in clip_embeddings). Unlike text-
-    /// search (which needs a CLIP text encoder), this uses the
-    /// embeddings honestly: "more photos like this one."
+    /// "More photos like this one" — top-K by cosine over CLIP
+    /// image embeddings. Doesn't need the text encoder.
     public func similarFiles(toFileID seedID: Int64, limit: Int = 24) -> [FileRow] {
         guard let q = queue else { return [] }
         let seedVec: [Float] = (try? q.read { db -> [Float] in
@@ -291,11 +285,9 @@ public final class ReadStore: @unchecked Sendable {
         }) ?? []
     }
 
-    /// V4: bulk-fetch top vision tags for many files in one SQL query.
-    /// Replaces the per-tile `topVisionTags(forFileID:)` that issued
-    /// 1000+ queries when 1000 tiles were visible — collapses to one.
-    /// Each file gets at most `limit` tags, in confidence-descending
-    /// order (rowid asc).
+    /// Bulk-fetch top vision tags for many files in one SQL query
+    /// (the per-tile call would fire 1000+ queries on a large grid).
+    /// Each file gets at most `limit` tags in confidence-descending order.
     public func topVisionTagsBulk(forFileIDs ids: [Int64], limit: Int = 2)
         -> [Int64: [String]]
     {
@@ -525,6 +517,20 @@ public final class ReadStore: @unchecked Sendable {
                 WHERE failed = 0
                   AND vlm_proposed_name IS NOT NULL
                   AND vlm_proposed_name <> ''
+            """) ?? 0
+        }) ?? 0
+    }
+
+    /// Files Deep Analyze can target (image / pdf / video / doc).
+    /// Used by the Restructure tab's hint banner to decide whether to
+    /// nudge the user toward running Deep Analyze for sharper proposals.
+    public func totalAnalyzableFiles() -> Int {
+        guard let q = queue else { return 0 }
+        return (try? q.read { db in
+            try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM files
+                WHERE failed = 0
+                  AND kind IN ('image', 'pdf', 'video', 'doc')
             """) ?? 0
         }) ?? 0
     }

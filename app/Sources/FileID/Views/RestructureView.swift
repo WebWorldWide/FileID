@@ -25,6 +25,10 @@ struct RestructureView: View {
     @State private var proposals: [Proposal] = []
     @State private var summary: AssistantSummary = .empty
     @State private var groups: [Group] = []
+    /// Per-outcome groups precomputed in `regenerate()` so
+    /// `inlineFileList(for:)` doesn't rebuild them on every render.
+    @State private var inlineGroupsByOutcome: [RestructureOutcome: [Group]] = [:]
+    @State private var inlineMatchedCountByOutcome: [RestructureOutcome: Int] = [:]
     @State private var selectedIDs: Set<Int64> = []
     @State private var loading = false
     @State private var status: String?
@@ -32,33 +36,21 @@ struct RestructureView: View {
     @State private var staysPutExpanded: Bool = false
     @State private var confirmConvertToRealMoves: Bool = false
 
-    // V7 — view-mode toggle (cards / tree), per-card approval state,
-    // drill-down sheet scope.
     @AppStorage("restructure.viewMode") private var viewModeRaw: String = ViewMode.cards.rawValue
-    private var viewMode: ViewMode {
-        ViewMode(rawValue: viewModeRaw) ?? .cards
-    }
+    private var viewMode: ViewMode { ViewMode(rawValue: viewModeRaw) ?? .cards }
     enum ViewMode: String { case cards, tree }
 
-    /// Outcomes the user has explicitly skipped from the apply pass.
-    /// Default = empty (everything approved). Cards visually de-emphasize
-    /// skipped outcomes and the Apply button respects the filter.
     @State private var skippedOutcomes: Set<RestructureOutcome> = []
-    /// Single-card expand: at most one recommendation card shows its
-    /// inline file list at a time. Click another card to switch.
-    @State private var expandedOutcome: RestructureOutcome? = nil
-    @State private var drillDown: DrillDownScope? = nil
+    @State private var expandedOutcome: RestructureOutcome?
+    @State private var drillDown: DrillDownScope?
 
-    /// Hover bus shared by Sankey, recommendation cards, tree, and
-    /// the staysPut disclosure. Hovering any folder or card surfaces
-    /// the same context — every connected ribbon, card, and row
-    /// highlights together. Lifted from SankeyFlowView's local @State
-    /// so cross-highlight isn't trapped inside one view.
+    /// Shared hover state used by the Sankey, recommendation rows,
+    /// tree, and staysPut disclosure to drive cross-highlight.
     @State private var hoverBus = RestructureHoverBus()
-    /// Drives the gold one-shot pulse on the Apply button when
-    /// proposals first become non-empty after computation. Single-fire
-    /// per session — re-arming the trigger requires `hasPulsed` reset.
-    @State private var hasPulsed: Bool = false
+    @State private var hasPulsed = false
+    @State private var captionedFraction: Double = 0
+    @State private var totalAnalyzableFiles = 0
+    @State private var dismissedDeepAnalyzeHint = false
 
     /// Which subset of proposals the drill-down sheet renders.
     enum DrillDownScope: Identifiable, Hashable {
@@ -66,12 +58,21 @@ struct RestructureView: View {
         case outcome(RestructureOutcome)
         case sourceFolder(String)
         case destBucket(String)
+        /// Rollup of long-tail source folders that were collapsed into
+        /// the Sankey's "+ N more folders" node. Tapping the rollup
+        /// node should drill into every proposal whose source folder
+        /// is in this list — not into a literal "+ N more folders"
+        /// folder, which doesn't exist.
+        case sourceFolders([String])
+        case destBuckets([String])
         var id: String {
             switch self {
             case .all:                       return "all"
             case .outcome(let o):            return "outcome:\(o.rawValue)"
             case .sourceFolder(let f):       return "src:\(f)"
             case .destBucket(let b):         return "dst:\(b)"
+            case .sourceFolders(let fs):     return "srcs:" + fs.sorted().joined(separator: "\u{1F}")
+            case .destBuckets(let bs):       return "dsts:" + bs.sorted().joined(separator: "\u{1F}")
             }
         }
     }
@@ -123,40 +124,74 @@ struct RestructureView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                header
-                if libraryRoot == nil || (!summary.hasContent && proposals.isEmpty && !loading) {
-                    emptyState
-                } else {
-                    // View-mode toggle — Cards (Sankey + recommendations,
-                    // mom-friendly) vs Tree (dual-pane, power-user).
-                    if !proposals.isEmpty || summary.hasContent {
-                        viewModeToggle
-                    }
-                    if !proposals.isEmpty {
-                        actionsBar
-                        if viewMode == .cards {
-                            sankeyCard
-                            recommendationsStack
-                        } else {
-                            treeCard
+        ZStack(alignment: .bottom) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    header
+                    if libraryRoot == nil
+                        || (!summary.hasContent && proposals.isEmpty) {
+                        emptyState
+                    } else {
+                        if !proposals.isEmpty || summary.hasContent {
+                            RestructureStatHero(summary: summary,
+                                                  hoverBus: hoverBus)
+                            if shouldShowDeepAnalyzeHint {
+                                deepAnalyzeHintBanner
+                            }
+                            HStack {
+                                viewModeToggle
+                                Spacer()
+                            }
                         }
-                    } else if summary.hasContent {
-                        nothingToMoveCard
+                        if !proposals.isEmpty {
+                            if viewMode == .cards {
+                                unifiedHeroSurface
+                            } else {
+                                treeCard
+                            }
+                        } else if summary.hasContent {
+                            nothingToMoveCard
+                        }
+                        if summary.staysPutFiles > 0 {
+                            staysPutSection
+                        }
                     }
-                    if summary.staysPutFiles > 0 {
-                        staysPutSection
+                    if let s = status {
+                        statusBanner(s)
                     }
+                    // Reserve room for the floating apply bar.
+                    Color.clear.frame(height: applyBarVisible ? 96 : 0)
                 }
-                if let s = status {
-                    GlassCard {
-                        Text(s).font(.callout)
+                .padding(.horizontal, 18)
+                .padding(.top, 18)
+                .padding(.bottom, 12)
+            }
+            if applyBarVisible {
+                RestructureApplyBar(
+                    selectedCount: selectedIDs.count,
+                    totalCount: proposals.count,
+                    canApply: !selectedIDs.isEmpty,
+                    onApplyShortcuts: { applySelected(mode: .symlink) },
+                    onConvertToMoves: { confirmConvertToRealMoves = true }
+                )
+                .padding(.horizontal, 18)
+                .padding(.bottom, 14)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .confirmationDialog(
+                    "Convert all shortcuts to real moves?",
+                    isPresented: $confirmConvertToRealMoves,
+                    titleVisibility: .visible
+                ) {
+                    Button("Convert to real moves", role: .destructive) {
+                        convertAllToRealMoves()
                     }
+                    Button("Cancel", role: .cancel) { }
+                } message: {
+                    Text("Every shortcut in the new tree will be replaced with the actual file moved into place. This isn't reversible inside the app — only do this once you've reviewed the structure.")
                 }
             }
-            .padding(20)
         }
+        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: applyBarVisible)
         .sheet(item: $drillDown) { scope in
             drillDownSheet(scope)
         }
@@ -201,6 +236,245 @@ struct RestructureView: View {
         }
     }
 
+    // MARK: - Unified surface
+
+    private var applyBarVisible: Bool {
+        libraryRoot != nil && !proposals.isEmpty
+    }
+
+    private var shouldShowDeepAnalyzeHint: Bool {
+        guard !dismissedDeepAnalyzeHint else { return false }
+        guard engine.deepAnalyzeAvailable else { return false }
+        guard !engine.deepAnalyzeInFlight else { return false }
+        guard totalAnalyzableFiles > 0 else { return false }
+        return captionedFraction < 0.4
+    }
+
+    @ViewBuilder
+    private var deepAnalyzeHintBanner: some View {
+        let captioned = Int((captionedFraction * Double(totalAnalyzableFiles)).rounded())
+        let pct = Int((captionedFraction * 100).rounded())
+        HStack(alignment: .center, spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Theme.ai.opacity(0.18))
+                    .frame(width: 38, height: 38)
+                Image(systemName: "sparkles")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(Theme.ai)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Sharper proposals with Deep Analyze")
+                    .font(.callout.weight(.semibold))
+                Text(captioned == 0
+                      ? "Right now we're sorting by folder name + people only. Running Deep Analyze reads the contents of each file (captions, OCR text, scene tags) so receipts go to Documents, screenshots to Photos, and so on."
+                      : "Captioned \(captioned) of \(totalAnalyzableFiles) (\(pct)%). Running Deep Analyze on the rest gives bucketing more to work with.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            VStack(alignment: .trailing, spacing: 6) {
+                Button {
+                    let modelKind = DeepAnalyzeSettings.shared.activeKind.rawValue
+                    engine.deepAnalyzeAll(modelKind: modelKind, skipExisting: true)
+                } label: {
+                    Label("Run Deep Analyze", systemImage: "sparkles")
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(
+                            Capsule().fill(Theme.ai.opacity(0.85))
+                        )
+                        .foregroundStyle(.black)
+                }
+                .buttonStyle(.plain)
+                Button("Dismiss") {
+                    dismissedDeepAnalyzeHint = true
+                }
+                .buttonStyle(.plain)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 14)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14)
+                        .stroke(Theme.ai.opacity(0.30), lineWidth: 1)
+                )
+        )
+    }
+
+    @ViewBuilder
+    private var unifiedHeroSurface: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sankeyHeroSection
+            Divider().opacity(0.18)
+            recommendationsList
+        }
+        // Background lives on its own subtree so the cached blur +
+        // shadow don't re-rasterize when interactive children update.
+        .background(
+            RoundedRectangle(cornerRadius: 18)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18)
+                        .stroke(Color.white.opacity(0.07), lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.28), radius: 22, y: 8)
+        )
+    }
+
+    @ViewBuilder
+    private var sankeyHeroSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "arrow.triangle.branch")
+                    .foregroundStyle(Theme.gold)
+                    .font(.callout.weight(.semibold))
+                Text("Folder map")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                Text(sankeyHeaderStat)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+            Text("Hover any folder, ribbon, or card to trace where its files are going. Tap to drill into the exact list.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            SankeyFlowView(
+                proposals: proposals,
+                onTapSource: { folder in
+                    let match = proposals.first(where: {
+                        ($0.sourceFolder as NSString).lastPathComponent == folder
+                    })?.sourceFolder ?? folder
+                    drillDown = .sourceFolder(match)
+                },
+                onTapDestination: { bucket in
+                    drillDown = .destBucket(bucket)
+                },
+                onTapSourceRollup: { folders in
+                    drillDown = .sourceFolders(folders)
+                },
+                onTapDestRollup: { buckets in
+                    drillDown = .destBuckets(buckets)
+                },
+                hoverBus: hoverBus
+            )
+            .padding(.top, 4)
+        }
+        .padding(.horizontal, 18).padding(.top, 18).padding(.bottom, 14)
+    }
+
+    @ViewBuilder
+    private var recommendationsList: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "sparkles")
+                    .foregroundStyle(Theme.gold)
+                    .font(.callout.weight(.semibold))
+                Text("Recommendations")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                Text("Tap Skip to exclude a group from the next apply.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 22).padding(.top, 18).padding(.bottom, 12)
+
+            VStack(spacing: 0) {
+                if summary.anchorFolders > 0 {
+                    RestructureRecommendationRow(
+                        outcome: .keep,
+                        headline: "Keep \(summary.anchorFolders) folder\(summary.anchorFolders == 1 ? "" : "s") untouched",
+                        bodyText: "These folders already have clear names and matching contents. \(summary.staysPutFiles) file\(summary.staysPutFiles == 1 ? "" : "s") staying exactly where they are.",
+                        fileCount: summary.staysPutFiles,
+                        folderCount: summary.anchorFolders,
+                        isApproved: true,
+                        isInformational: true,
+                        isHighlighted: hoverBus.touchesOutcome(.keep),
+                        onHover: { hovering in
+                            hoverBus.set(hovering ? .outcome(.keep) : nil)
+                        },
+                        expandedContent: { EmptyView() }
+                    )
+                }
+                if summary.mixedFolders > 0 {
+                    if summary.anchorFolders > 0 {
+                        Divider().opacity(0.14).padding(.leading, 76)
+                    }
+                    let approved = !skippedOutcomes.contains(.tidy)
+                    let expanded = expandedOutcome == .tidy
+                    RestructureRecommendationRow(
+                        outcome: .tidy,
+                        headline: "Tidy \(summary.mixedFolders) folder\(summary.mixedFolders == 1 ? "" : "s") — move \(summary.movedOutFiles) misplaced file\(summary.movedOutFiles == 1 ? "" : "s")",
+                        bodyText: "Mostly-organized folders with a few files that don't fit the theme. The folder stays; the misplaced files go to where they belong.",
+                        fileCount: summary.movedOutFiles,
+                        folderCount: summary.mixedFolders,
+                        isApproved: approved,
+                        isExpanded: expanded,
+                        isHighlighted: hoverBus.touchesOutcome(.tidy),
+                        onToggleApproval: { toggleSkip(.tidy) },
+                        onToggleExpand: { toggleExpand(.tidy) },
+                        onHover: { hovering in
+                            hoverBus.set(hovering ? .outcome(.tidy) : nil)
+                        },
+                        expandedContent: { inlineFileList(for: .outcome(.tidy)) }
+                    )
+                }
+                if summary.junkFolders > 0 {
+                    if summary.anchorFolders > 0 || summary.mixedFolders > 0 {
+                        Divider().opacity(0.14).padding(.leading, 76)
+                    }
+                    let approved = !skippedOutcomes.contains(.reorganize)
+                    let expanded = expandedOutcome == .reorganize
+                    RestructureRecommendationRow(
+                        outcome: .reorganize,
+                        headline: "Reorganize \(summary.junkFolders) folder\(summary.junkFolders == 1 ? "" : "s") — sort \(summary.dissolvedFiles) file\(summary.dissolvedFiles == 1 ? "" : "s")",
+                        bodyText: "Folders with generic names like \"Untitled\" or \"Camera Roll\" — files will be sorted into clear categories: People, Places, Documents, or Photos by year.",
+                        fileCount: summary.dissolvedFiles,
+                        folderCount: summary.junkFolders,
+                        isApproved: approved,
+                        isExpanded: expanded,
+                        isHighlighted: hoverBus.touchesOutcome(.reorganize),
+                        onToggleApproval: { toggleSkip(.reorganize) },
+                        onToggleExpand: { toggleExpand(.reorganize) },
+                        onHover: { hovering in
+                            hoverBus.set(hovering ? .outcome(.reorganize) : nil)
+                        },
+                        expandedContent: { inlineFileList(for: .outcome(.reorganize)) }
+                    )
+                }
+            }
+        }
+    }
+
+    /// Status banner shown after an apply / convert run. Quiet pill
+    /// at the bottom of the page — replaces the prior GlassCard so
+    /// it doesn't compete with the unified surface above.
+    @ViewBuilder
+    private func statusBanner(_ message: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "checkmark.seal.fill")
+                .foregroundStyle(Theme.gold)
+            Text(message)
+                .font(.callout)
+            Spacer()
+        }
+        .padding(.horizontal, 16).padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.ultraThinMaterial)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Theme.gold.opacity(0.25), lineWidth: 1)
+        )
+    }
+
     // MARK: - Header
 
     private var header: some View {
@@ -235,91 +509,6 @@ struct RestructureView: View {
                         .lineLimit(1).truncationMode(.head)
                 }
             }
-        }
-    }
-
-    /// At-a-glance "what will happen" card. Plain English with action
-    /// verbs ("staying put", "being tidied", "being reorganized")
-    /// instead of the previous data-analyst language ("anchor",
-    /// "outliers extracted", "dissolved"). Lead with the outcome the
-    /// user cares about, then the count + concrete description.
-    private var assistantSummaryCard: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(spacing: 8) {
-                    Image(systemName: "sparkles")
-                        .foregroundStyle(Theme.gold)
-                        .font(.title3)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Here's what will happen").font(.headline)
-                        Text("FileID looked at every folder and decided what to do with each one. Nothing moves until you click Apply.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    Spacer()
-                }
-                Divider().opacity(0.3)
-                if summary.anchorFolders > 0 {
-                    outcomeRow(
-                        icon: "lock.fill", tint: .green,
-                        headline: stayingPutHeadline,
-                        body: "These folders already have clear names and the right contents — FileID won't touch them."
-                    )
-                }
-                if summary.mixedFolders > 0 {
-                    outcomeRow(
-                        icon: "tray.and.arrow.up.fill", tint: .orange,
-                        headline: tidyingHeadline,
-                        body: "Mostly-organized folders that have a few files that don't fit the folder's theme. The folder stays; the misplaced files move to where they belong."
-                    )
-                }
-                if summary.junkFolders > 0 {
-                    outcomeRow(
-                        icon: "arrow.triangle.branch", tint: Theme.gold,
-                        headline: reorganizingHeadline,
-                        body: "Folders with generic names like \"Untitled\" or \"Camera Roll\" — FileID will sort their files into clear categories: People, Places, Documents, or Photos by year."
-                    )
-                }
-            }
-        }
-    }
-
-    private var stayingPutHeadline: String {
-        let f = summary.anchorFolders
-        return "Staying put: \(f) folder\(f == 1 ? "" : "s")"
-    }
-    private var tidyingHeadline: String {
-        let f = summary.mixedFolders
-        let m = summary.movedOutFiles
-        return "Being tidied: \(f) folder\(f == 1 ? "" : "s") (moving \(m) misplaced file\(m == 1 ? "" : "s") out)"
-    }
-    private var reorganizingHeadline: String {
-        let f = summary.junkFolders
-        let d = summary.dissolvedFiles
-        return "Being reorganized: \(f) folder\(f == 1 ? "" : "s") (\(d) file\(d == 1 ? "" : "s") will be re-sorted)"
-    }
-
-    /// Single outcome row in the assistant summary. Bigger headline,
-    /// secondary body text wrapped to its own line — gives each
-    /// outcome enough room to read like a sentence, not a label.
-    @ViewBuilder
-    private func outcomeRow(icon: String, tint: Color,
-                              headline: String, body: String) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: icon)
-                .foregroundStyle(tint)
-                .font(.title3)
-                .frame(width: 22, alignment: .center)
-                .padding(.top, 2)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(headline).font(.callout.bold())
-                Text(body)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
         }
     }
 
@@ -443,376 +632,7 @@ struct RestructureView: View {
         }
     }
 
-    private var actionsBar: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 10) {
-                // Selection summary + bulk select/clear (left), apply
-                // CTA (right).
-                HStack(alignment: .center, spacing: 8) {
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("\(selectedIDs.count) of \(proposals.count) file\(proposals.count == 1 ? "" : "s") selected")
-                            .font(.callout.bold())
-                        Text("Tap any row below to include or skip it.")
-                            .font(.caption2).foregroundStyle(.tertiary)
-                    }
-                    Spacer()
-                    Button("Select all") { selectedIDs = Set(proposals.map(\.fileID)) }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    Button("Clear") { selectedIDs.removeAll() }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                }
-                Divider().opacity(0.3)
-                // Two-step apply workflow — labeled so the user
-                // understands shortcuts come first (safe preview),
-                // then optionally a real-move commit. Both buttons
-                // sit on the same row but the secondary is visually
-                // de-emphasized.
-                HStack(alignment: .center, spacing: 12) {
-                    stepBadge(number: "1", tint: Theme.gold)
-                    Button {
-                        applySelected(mode: .symlink)
-                    } label: {
-                        Label("Apply as shortcuts (\(selectedIDs.count))",
-                              systemImage: "link")
-                            .padding(.horizontal, 14).padding(.vertical, 7)
-                            .background(RoundedRectangle(cornerRadius: 8).fill(Theme.gold))
-                            .foregroundStyle(.black)
-                            .font(.callout.bold())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(selectedIDs.isEmpty)
-                    .scaleEffect(hasPulsed ? 1.0 : (proposals.isEmpty ? 1.0 : 1.04))
-                    .animation(.spring(response: 0.45, dampingFraction: 0.55), value: hasPulsed)
-                    .onChange(of: proposals.isEmpty) { _, isEmpty in
-                        // Single subtle pulse the first time proposals
-                        // arrive — signals "ready to act" without the
-                        // showy, repeating bounce that wears thin.
-                        if !isEmpty && !hasPulsed {
-                            withAnimation(.spring(response: 0.45, dampingFraction: 0.55)) {
-                                hasPulsed = false
-                            }
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                                hasPulsed = true
-                            }
-                        }
-                    }
-                    .help("Creates shortcuts at the new paths pointing back to the original files. Originals stay put — fully reversible by deleting the shortcuts.")
-                    Text("Safe preview — originals don't move.")
-                        .font(.caption2).foregroundStyle(.secondary)
-                    Spacer()
-                }
-                HStack(alignment: .center, spacing: 12) {
-                    stepBadge(number: "2", tint: .secondary)
-                    Button {
-                        confirmConvertToRealMoves = true
-                    } label: {
-                        Label("Convert to real moves",
-                              systemImage: "arrow.triangle.swap")
-                            .padding(.horizontal, 14).padding(.vertical, 7)
-                            .background(RoundedRectangle(cornerRadius: 8)
-                                .stroke(Theme.gold.opacity(0.6), lineWidth: 1))
-                            .foregroundStyle(Theme.gold)
-                            .font(.callout)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Once the structure looks right, this replaces every shortcut with a real on-disk move. Not reversible in-app.")
-                    .confirmationDialog(
-                        "Convert all shortcuts to real moves?",
-                        isPresented: $confirmConvertToRealMoves,
-                        titleVisibility: .visible
-                    ) {
-                        Button("Convert to real moves", role: .destructive) {
-                            convertAllToRealMoves()
-                        }
-                        Button("Cancel", role: .cancel) { }
-                    } message: {
-                        Text("Every shortcut in the new tree will be replaced with the actual file moved into place. This isn't reversible inside the app — only do this once you've reviewed the structure.")
-                    }
-                    Text("After you're happy with the preview.")
-                        .font(.caption2).foregroundStyle(.secondary)
-                    Spacer()
-                }
-            }
-        }
-    }
-
-    /// Small numbered circle used to label the two apply steps. Visual
-    /// affordance for "do this first, then this" workflows.
-    @ViewBuilder
-    private func stepBadge(number: String, tint: Color) -> some View {
-        Text(number)
-            .font(.caption.bold().monospacedDigit())
-            .foregroundStyle(tint == .secondary ? Color.secondary : .black)
-            .frame(width: 20, height: 20)
-            .background(Circle().fill(tint == .secondary ? Color.secondary.opacity(0.15) : tint))
-    }
-
-    // MARK: - Before / after visualization
-
-    /// Single-column flow card. Each row is one of your current
-    /// folders, and the row tells the WHOLE story for that folder:
-    /// how many files are staying, how many are moving, and where
-    /// they're going (with destination chips). Replaces the previous
-    /// two-column "Today | arrow | Proposed" layout — that visual
-    /// looked tidy but never connected sources to destinations, so a
-    /// user couldn't actually trace where any one folder's files
-    /// would land.
-    private var beforeAfterCard: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 6) {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                        .foregroundStyle(Theme.gold)
-                    Text("Folder map").font(.headline)
-                    Spacer()
-                    Text("\(flowRows.count) folder\(flowRows.count == 1 ? "" : "s") in your library")
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                }
-                // Legend — three states a folder can be in, with the
-                // exact icon + color used in the rows below. Removes
-                // the "what does the green dot mean?" question.
-                legendStrip
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(Array(flowRows.enumerated()), id: \.element.id) { idx, row in
-                        if idx > 0 { Divider().opacity(0.18) }
-                        flowRowView(row)
-                    }
-                }
-                .padding(.top, 4)
-            }
-        }
-    }
-
-    /// Per-source-folder flow record: total file count, kind, how
-    /// many are staying inside this folder, and the breakdown of
-    /// destinations the rest are going to.
-    private struct FlowRow: Identifiable {
-        let id: String
-        let folder: String
-        let totalFiles: Int
-        let kind: BeforeKind
-        let staying: Int
-        let destinations: [(bucket: String, count: Int)]
-    }
-
-    /// Compute one FlowRow per current folder. Anchor folders show
-    /// "all staying"; mixed folders show the staying count + each
-    /// destination; junk folders show only destinations (everything
-    /// is leaving).
-    private var flowRows: [FlowRow] {
-        // Anchor folders — directly from the staysPutBreakdown.
-        var rows: [FlowRow] = summary.staysPutBreakdown.map { entry in
-            FlowRow(id: "anchor:\(entry.folder)",
-                    folder: entry.folder,
-                    totalFiles: entry.count,
-                    kind: .anchor,
-                    staying: entry.count,
-                    destinations: [])
-        }
-        // Mixed / junk folders — group proposals by sourceFolder, then
-        // within each, group by bucket. Display name is the last path
-        // component of sourceFolder.
-        let bySource = Dictionary(grouping: proposals, by: { $0.sourceFolder })
-        for (sourceFolder, sourceProposals) in bySource {
-            let display = (sourceFolder as NSString).lastPathComponent
-            // Re-group by destination bucket, keep the most-files-first.
-            let byBucket = Dictionary(grouping: sourceProposals, by: { $0.bucket })
-            let destinations = byBucket
-                .map { (bucket: $0.key, count: $0.value.count) }
-                .sorted { $0.count > $1.count }
-            // Junk if all proposals from this folder are .dissolved.
-            let isJunk = sourceProposals.allSatisfy { $0.kind == .dissolved }
-            let kind: BeforeKind = isJunk ? .junk : .mixed
-            // For mixed folders, "staying" is the difference between
-            // the folder's total file count today and the number of
-            // outliers leaving. We don't have a global file count
-            // per source folder here, so use the proposal count as
-            // the moving count and treat the rest of the folder as
-            // staying (anchor entries already captured those).
-            let movingCount = sourceProposals.count
-            // For mixed folders, files NOT in proposals stay put.
-            // We don't have that count directly; show the moving
-            // count + label "moving out" as the action verb.
-            rows.append(FlowRow(
-                id: "src:\(sourceFolder)",
-                folder: display.isEmpty ? sourceFolder : display,
-                totalFiles: movingCount,
-                kind: kind,
-                staying: 0,
-                destinations: destinations
-            ))
-        }
-        return rows.sorted { (a, b) -> Bool in
-            // Anchors first (the user knows these are safe), then
-            // mixed, then junk. Within each kind, alphabetical.
-            let order: [BeforeKind: Int] = [.anchor: 0, .mixed: 1, .junk: 2]
-            if order[a.kind, default: 0] != order[b.kind, default: 0] {
-                return order[a.kind, default: 0] < order[b.kind, default: 0]
-            }
-            return a.folder.localizedCaseInsensitiveCompare(b.folder) == .orderedAscending
-        }
-    }
-
-    /// Render one source folder's flow as a single self-contained
-    /// row: header line + destination chips below.
-    @ViewBuilder
-    private func flowRowView(_ row: FlowRow) -> some View {
-        let style = beforeRowStyle(row.kind)
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Image(systemName: style.icon)
-                    .foregroundStyle(style.tint)
-                    .font(.callout)
-                    .frame(width: 16, alignment: .center)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(row.folder)
-                        .font(.callout.bold())
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Text(flowSubtitle(for: row))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 6)
-            }
-            if !row.destinations.isEmpty {
-                // Destination chips — one per bucket files are going to.
-                // Each chip carries the bucket name + count, so the user
-                // can see "5 files to People/Mom, 3 to Documents" at a
-                // glance without reading paragraph text. Horizontal
-                // scroll handles the rare case of many destinations
-                // without breaking the row layout.
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(Array(row.destinations.enumerated()), id: \.offset) { _, dest in
-                            destinationChip(bucket: dest.bucket, count: dest.count)
-                        }
-                    }
-                }
-                .padding(.leading, 24)
-            }
-        }
-        .padding(.vertical, 4)
-    }
-
-    /// One destination pill: arrow + bucket icon + bucket name +
-    /// count. Tints match the existing bucket-icon convention
-    /// (gold-on-translucent gold, secondary text).
-    @ViewBuilder
-    private func destinationChip(bucket: String, count: Int) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: "arrow.right")
-                .font(.caption2)
-                .foregroundStyle(Theme.gold.opacity(0.6))
-            Image(systemName: bucketIcon(bucket))
-                .font(.caption2)
-                .foregroundStyle(Theme.gold)
-            Text(bucket)
-                .font(.caption2.monospaced())
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-            Text("(\(count))")
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 8).padding(.vertical, 4)
-        .background(RoundedRectangle(cornerRadius: 6).fill(Theme.gold.opacity(0.08)))
-        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.gold.opacity(0.25), lineWidth: 0.5))
-    }
-
-    private func flowSubtitle(for row: FlowRow) -> String {
-        switch row.kind {
-        case .anchor:
-            return "\(row.totalFiles) file\(row.totalFiles == 1 ? "" : "s") · staying put"
-        case .mixed:
-            let plural = row.totalFiles == 1 ? "" : "s"
-            let dests = row.destinations.count
-            return "\(row.totalFiles) file\(plural) moving out → \(dests) destination\(dests == 1 ? "" : "s")"
-        case .junk:
-            let plural = row.totalFiles == 1 ? "" : "s"
-            return "\(row.totalFiles) file\(plural) being reorganized"
-        }
-    }
-
-    /// Tiny three-chip legend showing what each color/icon means.
-    /// Rendered inline at the top of the folder map so the user
-    /// doesn't have to memorize the convention.
-    @ViewBuilder
-    private var legendStrip: some View {
-        HStack(spacing: 8) {
-            legendChip(icon: "lock.fill", tint: .green,
-                       label: "Stays put",
-                       hint: "Meaningful name + matching contents")
-            legendChip(icon: "tray.and.arrow.up", tint: .orange,
-                       label: "Has outliers",
-                       hint: "Most files stay, a few move")
-            legendChip(icon: "tray.2", tint: Theme.gold,
-                       label: "Dissolves",
-                       hint: "Generic name → files re-bucket")
-            Spacer()
-        }
-    }
-
-    @ViewBuilder
-    private func legendChip(icon: String, tint: Color, label: String, hint: String) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: icon)
-                .foregroundStyle(tint)
-                .font(.caption)
-            VStack(alignment: .leading, spacing: 0) {
-                Text(label).font(.caption2.bold())
-                Text(hint).font(.system(size: 9)).foregroundStyle(.tertiary)
-            }
-        }
-        .padding(.horizontal, 8).padding(.vertical, 4)
-        .background(RoundedRectangle(cornerRadius: 6).fill(tint.opacity(0.06)))
-        .overlay(RoundedRectangle(cornerRadius: 6).stroke(tint.opacity(0.20), lineWidth: 0.5))
-    }
-
-    private enum BeforeKind: Hashable {
-        case anchor             // stays put intact
-        case mixed              // some outliers leaving
-        case junk               // dissolved entirely
-    }
-
-    private func beforeRowStyle(_ kind: BeforeKind) -> (icon: String, tint: Color) {
-        switch kind {
-        case .anchor: return ("lock.fill",         .green)
-        case .mixed:  return ("tray.and.arrow.up", .orange)
-        case .junk:   return ("tray.2",            Theme.gold)
-        }
-    }
-
-    /// Single unified card showing every proposed move grouped by
-    /// destination folder. Files are indented under their destination
-    /// folder header with a thin tree guide on the left — same visual
-    /// idiom as Finder column view / VS Code's file tree, so it's
-    /// immediately legible as "files inside this folder".
-    private var proposalsPreviewCard: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 6) {
-                    Image(systemName: "list.bullet.indent")
-                        .foregroundStyle(Theme.gold)
-                    Text("Per-file detail").font(.headline)
-                    Spacer()
-                    Text("Tap a row to include or skip it.")
-                        .font(.caption2).foregroundStyle(.tertiary)
-                }
-                .padding(.bottom, 12)
-                ForEach(Array(groups.enumerated()), id: \.element.id) { idx, g in
-                    if idx > 0 {
-                        Divider().opacity(0.25)
-                            .padding(.vertical, 10)
-                    }
-                    bucketSection(g)
-                }
-            }
-        }
-    }
+    // MARK: - File list
 
     /// Render a destination bucket + its file list. The inline
     /// preview card and the inline expanded recommendation card cap
@@ -939,13 +759,7 @@ struct RestructureView: View {
         }
     }
 
-    private func bucketIcon(_ bucket: String) -> String {
-        if bucket.hasPrefix("People")    { return "person.crop.circle.fill" }
-        if bucket.hasPrefix("Places")    { return "mappin.circle.fill" }
-        if bucket.hasPrefix("Documents") { return "doc.text.fill" }
-        if bucket.hasPrefix("Photos")    { return "photo.stack.fill" }
-        return "tray.fill"
-    }
+    private func bucketIcon(_ bucket: String) -> String { bucketIconName(bucket) }
 
     // MARK: - Compute
 
@@ -959,11 +773,39 @@ struct RestructureView: View {
         }.value
         proposals = result.proposals
         summary = result.summary
-        // Bucketed for display, sorted by bucket size descending.
         let by = Dictionary(grouping: result.proposals, by: { $0.bucket })
         groups = by.map { Group(bucket: $0.key, proposals: $0.value) }
             .sorted { $0.proposals.count > $1.proposals.count }
-        selectedIDs = Set(result.proposals.map(\.fileID))   // default: select all moves
+        selectedIDs = Set(result.proposals.map(\.fileID))
+
+        // Per-outcome groupings the recommendation row's expand-in-
+        // place file list reads from. Built here so the render path
+        // can return cached values without re-running filter/groupBy.
+        let totalCap = 30
+        let bucketCap = 4
+        var byOutcome: [RestructureOutcome: [Group]] = [:]
+        var matchedCount: [RestructureOutcome: Int] = [:]
+        for outcome in [RestructureOutcome.tidy, .reorganize] {
+            let matched = result.proposals.filter { outcomeFor($0) == outcome }
+            matchedCount[outcome] = matched.count
+            let buckets = Dictionary(grouping: matched, by: \.bucket)
+            let order = buckets.keys.sorted {
+                (buckets[$0]?.count ?? 0) > (buckets[$1]?.count ?? 0)
+            }
+            byOutcome[outcome] = order.prefix(bucketCap).map { bucket in
+                Group(
+                    bucket: bucket,
+                    proposals: Array((buckets[bucket] ?? []).prefix(totalCap))
+                )
+            }
+        }
+        inlineGroupsByOutcome = byOutcome
+        inlineMatchedCountByOutcome = matchedCount
+
+        let total = store.totalAnalyzableFiles()
+        let captioned = store.totalCaptioned()
+        totalAnalyzableFiles = total
+        captionedFraction = total > 0 ? Double(captioned) / Double(total) : 0
     }
 
     private func applySelected(mode: RestructureEngine.ApplyMode) {
@@ -989,7 +831,7 @@ struct RestructureView: View {
         }
     }
 
-    // MARK: - V7 view-mode toggle + Sankey + recommendations
+    // MARK: - View-mode toggle + Sankey + recommendations
 
     /// Cards/Tree segmented toggle in a glass pill. Always visible
     /// when there's content to show.
@@ -1029,121 +871,10 @@ struct RestructureView: View {
         .buttonStyle(.plain)
     }
 
-    /// Sankey-style "where is everything going?" flow diagram.
-    private var sankeyCard: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 6) {
-                    Image(systemName: "arrow.triangle.branch")
-                        .foregroundStyle(Theme.gold)
-                    Text("Folder map").font(.headline)
-                    Spacer()
-                    Text(sankeyHeaderStat)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                }
-                Text("Each ribbon shows files moving from a current folder (left) to a destination (right). Hover a ribbon to follow it; tap any folder to see the exact files.")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-                SankeyFlowView(
-                    proposals: proposals,
-                    onTapSource: { folder in
-                        // Find the original sourceFolder full path that
-                        // matched this display name, then scope the sheet.
-                        let match = proposals.first(where: {
-                            ($0.sourceFolder as NSString).lastPathComponent == folder
-                        })?.sourceFolder ?? folder
-                        drillDown = .sourceFolder(match)
-                    },
-                    onTapDestination: { bucket in
-                        drillDown = .destBucket(bucket)
-                    },
-                    hoverBus: hoverBus
-                )
-            }
-        }
-    }
-
     private var sankeyHeaderStat: String {
         let srcCount = Set(proposals.map(\.sourceFolder)).count
         let dstCount = Set(proposals.map(\.bucket)).count
         return "\(srcCount) source\(srcCount == 1 ? "" : "s") → \(dstCount) destination\(dstCount == 1 ? "" : "s")"
-    }
-
-    /// Stack of recommendation cards — one per outcome class.
-    /// Spacing bumped to 14pt + per-card outer shadow so each card
-    /// reads as its own surface even when the .ultraThinMaterial blur
-    /// of an adjacent card runs close. Skipped cards keep 0.55 opacity
-    /// so the user can still see what they passed on.
-    @ViewBuilder
-    private var recommendationsStack: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 6) {
-                Image(systemName: "sparkles")
-                    .foregroundStyle(Theme.gold)
-                Text("Recommendations").font(.headline)
-                Spacer()
-                Text("Tap Skip to exclude a group from the next apply.")
-                    .font(.caption2).foregroundStyle(.tertiary)
-            }
-            if summary.anchorFolders > 0 {
-                RecommendationCard(
-                    outcome: .keep,
-                    headline: "Keep \(summary.anchorFolders) folder\(summary.anchorFolders == 1 ? "" : "s") untouched",
-                    bodyText: "These folders already have clear names and matching contents. \(summary.staysPutFiles) file\(summary.staysPutFiles == 1 ? "" : "s") staying exactly where they are.",
-                    fileCount: summary.staysPutFiles,
-                    folderCount: summary.anchorFolders,
-                    isApproved: true,
-                    isInformational: true,
-                    isHighlighted: hoverBus.touchesOutcome(.keep),
-                    onHover: { hovering in
-                        hoverBus.set(hovering ? .outcome(.keep) : nil)
-                    },
-                    expandedContent: { EmptyView() }
-                )
-            }
-            if summary.mixedFolders > 0 {
-                let approved = !skippedOutcomes.contains(.tidy)
-                let expanded = expandedOutcome == .tidy
-                RecommendationCard(
-                    outcome: .tidy,
-                    headline: "Tidy \(summary.mixedFolders) folder\(summary.mixedFolders == 1 ? "" : "s") — move \(summary.movedOutFiles) misplaced file\(summary.movedOutFiles == 1 ? "" : "s")",
-                    bodyText: "Mostly-organized folders with a few files that don't fit the theme. The folder stays; the misplaced files go to where they belong.",
-                    fileCount: summary.movedOutFiles,
-                    folderCount: summary.mixedFolders,
-                    isApproved: approved,
-                    isExpanded: expanded,
-                    isHighlighted: hoverBus.touchesOutcome(.tidy),
-                    onToggleApproval: { toggleSkip(.tidy) },
-                    onToggleExpand: { toggleExpand(.tidy) },
-                    onHover: { hovering in
-                        hoverBus.set(hovering ? .outcome(.tidy) : nil)
-                    },
-                    expandedContent: { inlineFileList(for: .outcome(.tidy)) }
-                )
-            }
-            if summary.junkFolders > 0 {
-                let approved = !skippedOutcomes.contains(.reorganize)
-                let expanded = expandedOutcome == .reorganize
-                RecommendationCard(
-                    outcome: .reorganize,
-                    headline: "Reorganize \(summary.junkFolders) folder\(summary.junkFolders == 1 ? "" : "s") — sort \(summary.dissolvedFiles) file\(summary.dissolvedFiles == 1 ? "" : "s")",
-                    bodyText: "Folders with generic names like \"Untitled\" or \"Camera Roll\" — files will be sorted into clear categories: People, Places, Documents, or Photos by year.",
-                    fileCount: summary.dissolvedFiles,
-                    folderCount: summary.junkFolders,
-                    isApproved: approved,
-                    isExpanded: expanded,
-                    isHighlighted: hoverBus.touchesOutcome(.reorganize),
-                    onToggleApproval: { toggleSkip(.reorganize) },
-                    onToggleExpand: { toggleExpand(.reorganize) },
-                    onHover: { hovering in
-                        hoverBus.set(hovering ? .outcome(.reorganize) : nil)
-                    },
-                    expandedContent: { inlineFileList(for: .outcome(.reorganize)) }
-                )
-            }
-        }
     }
 
     private func toggleExpand(_ outcome: RestructureOutcome) {
@@ -1156,39 +887,40 @@ struct RestructureView: View {
         }
     }
 
-    /// Inline file-list view for a recommendation card. Shows the
-    /// first few buckets of files affected. Capped at ~30 rows; a
-    /// "See all in detail" button still opens the full sheet for
-    /// deep review.
+    /// Inline file-list view for a recommendation card. Reads from
+    /// the precomputed `inlineGroupsByOutcome` cache populated in
+    /// `regenerate()` — no `proposals.filter` or `Dictionary(grouping:)`
+    /// runs on the render path. The cache covers `.outcome(...)`
+    /// scopes, which are the only scopes inline lists ever receive.
     @ViewBuilder
     private func inlineFileList(for scope: DrillDownScope) -> some View {
-        let matched = proposals.filter { matches(scope, $0) }
-        let byBucket = Dictionary(grouping: matched, by: { $0.bucket })
-        let bucketOrder = byBucket.keys.sorted {
-            (byBucket[$0]?.count ?? 0) > (byBucket[$1]?.count ?? 0)
-        }
-        let totalCap = 30
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(bucketOrder.prefix(4).enumerated()), id: \.element) { idx, bucket in
-                if idx > 0 { Divider().opacity(0.18) }
-                let g = Group(bucket: bucket, proposals: Array((byBucket[bucket] ?? []).prefix(totalCap)))
-                bucketSection(g)
-            }
-            if matched.count > totalCap {
-                HStack {
-                    Spacer()
-                    Button {
-                        drillDown = scope
-                    } label: {
-                        Label("See all \(matched.count) files in detail",
-                              systemImage: "arrow.up.right.square")
-                            .font(.caption.bold())
-                    }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(.secondary)
+        if case .outcome(let outcome) = scope,
+           let cachedGroups = inlineGroupsByOutcome[outcome] {
+            let matchedCount = inlineMatchedCountByOutcome[outcome] ?? 0
+            let totalCap = 30
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array(cachedGroups.enumerated()), id: \.element.id) { idx, g in
+                    if idx > 0 { Divider().opacity(0.18) }
+                    bucketSection(g)
                 }
-                .padding(.top, 4)
+                if matchedCount > totalCap {
+                    HStack {
+                        Spacer()
+                        Button {
+                            drillDown = scope
+                        } label: {
+                            Label("See all \(matchedCount) files in detail",
+                                  systemImage: "arrow.up.right.square")
+                                .font(.caption.bold())
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.secondary)
+                    }
+                    .padding(.top, 4)
+                }
             }
+        } else {
+            EmptyView()
         }
     }
 
@@ -1307,6 +1039,8 @@ struct RestructureView: View {
         case .outcome(let o):            return outcomeFor(p) == o
         case .sourceFolder(let f):       return p.sourceFolder == f
         case .destBucket(let b):         return p.bucket == b
+        case .sourceFolders(let fs):     return fs.contains(p.sourceFolder)
+        case .destBuckets(let bs):       return bs.contains(p.bucket)
         }
     }
 
@@ -1324,6 +1058,10 @@ struct RestructureView: View {
             return "From \((f as NSString).lastPathComponent)"
         case .destBucket(let b):
             return "Going to \(b)"
+        case .sourceFolders(let fs):
+            return "From \(fs.count) smaller folder\(fs.count == 1 ? "" : "s")"
+        case .destBuckets(let bs):
+            return "Going to \(bs.count) smaller bucket\(bs.count == 1 ? "" : "s")"
         }
     }
 
@@ -1333,6 +1071,8 @@ struct RestructureView: View {
         case .outcome(let o):            return o.icon
         case .sourceFolder:              return "folder.fill"
         case .destBucket:                return "tray.and.arrow.down.fill"
+        case .sourceFolders:             return "rectangle.3.offgrid.fill"
+        case .destBuckets:               return "rectangle.3.offgrid.fill"
         }
     }
 }
@@ -1437,23 +1177,36 @@ enum RestructureEngine {
             }
             guard let proposalKind = kind else { continue }
 
-            // Compute the destination via the existing heuristic.
-            let bucket = Self.bucketForFile(f, nameMap: nameMap, cal: cal)
+            // Sanitize bucket + baseName so a malicious vlm_proposed_name
+            // (e.g. "../../etc/passwd") can't escape the library root.
+            let bucket = sanitizePathSegment(
+                Self.bucketForFile(f, nameMap: nameMap, cal: cal)
+            )
             let oldURL = f.url
             let ext = oldURL.pathExtension
-            let baseName: String
+            let rawBase: String
             if let p = f.vlmProposedName, !p.isEmpty {
-                baseName = ext.isEmpty ? p : "\(p).\(ext)"
+                rawBase = ext.isEmpty ? p : "\(p).\(ext)"
             } else {
-                baseName = oldURL.lastPathComponent
+                rawBase = oldURL.lastPathComponent
             }
+            let baseName = sanitizeFilename(rawBase)
             let target = root
                 .appendingPathComponent(bucket, isDirectory: true)
                 .appendingPathComponent(baseName)
-            // Skip if the destination is identical to the source (e.g. file
-            // already lives where the heuristic would put it). Counts as
-            // staysPut for summary purposes.
-            guard target.path != f.pathText else {
+
+            // Containment check: even with sanitization, verify the
+            // resolved target sits inside the library root before we
+            // record a proposal. Drop anything that doesn't.
+            let resolvedTarget = target.standardizedFileURL.path
+            let resolvedRoot = root.standardizedFileURL.path
+            guard resolvedTarget.hasPrefix(resolvedRoot + "/") else {
+                continue
+            }
+
+            // Skip if the destination is identical to the source (file
+            // already lives where the heuristic would put it).
+            guard resolvedTarget != f.pathText else {
                 if proposalKind == .movedOutAsOutlier { movedOut -= 1; staysPut += 1 }
                 if proposalKind == .dissolved        { dissolved -= 1; staysPut += 1 }
                 continue
@@ -1461,7 +1214,7 @@ enum RestructureEngine {
             out.append(RestructureView.Proposal(
                 fileID: f.id,
                 oldPath: f.pathText,
-                newPath: target.path,
+                newPath: resolvedTarget,
                 bucket: bucket,
                 sourceFolder: parent,
                 kind: proposalKind
@@ -1491,6 +1244,12 @@ enum RestructureEngine {
         let date = f.displayDate
         let year = date.map { String(cal.component(.year, from: $0)) }
         let month = date.map { Self.monthName(cal.component(.month, from: $0)) }
+        // VLM-driven document subcategory wins over the
+        // people/places/year heuristics when DA has captioned the
+        // file — keeps a screenshot or receipt out of People/<face>.
+        if let vlmSubcategory = vlmDocumentSubcategory(for: f) {
+            return "Documents/" + vlmSubcategory + (year.map { "/\($0)" } ?? "")
+        }
         if let names = nameMap[f.id], let first = names.first, !first.isEmpty {
             return "People/\(first)" + (year.map { "/\($0)" } ?? "")
         } else if let lat = f.locationLat, let lon = f.locationLon {
@@ -1504,6 +1263,49 @@ enum RestructureEngine {
         } else {
             return "Misc"
         }
+    }
+
+    /// If the VLM caption strongly identifies this image as a kind of
+    /// document (receipt, screenshot, diagram, scanned form, etc.),
+    /// return the appropriate Documents subcategory. Otherwise nil and
+    /// the original heuristic takes over.
+    private static func vlmDocumentSubcategory(for f: FileRow) -> String? {
+        guard let desc = f.vlmDescription?.lowercased(), !desc.isEmpty else {
+            return nil
+        }
+        // Receipt / invoice / bill / order
+        if desc.contains("receipt") || desc.contains("invoice")
+            || desc.contains("bill") || desc.contains("order confirmation") {
+            return "Receipts"
+        }
+        // Screenshot
+        if desc.contains("screenshot") || desc.contains("screen capture")
+            || desc.contains("screen recording") {
+            return "Screenshots"
+        }
+        // Forms / contracts / official paperwork
+        if desc.contains("form") || desc.contains("contract")
+            || desc.contains("agreement") || desc.contains("application")
+            || desc.contains("license") {
+            return "Forms"
+        }
+        // Tickets / boarding passes / itineraries
+        if desc.contains("ticket") || desc.contains("boarding pass")
+            || desc.contains("itinerary") {
+            return "Travel"
+        }
+        // ID cards / passport / driver's license
+        if desc.contains("passport") || desc.contains("driver's license")
+            || desc.contains("id card") || desc.contains("identification") {
+            return "ID"
+        }
+        // Diagrams / charts / whiteboards
+        if desc.contains("whiteboard") || desc.contains("diagram")
+            || desc.contains("chart") || desc.contains("flowchart")
+            || desc.contains("mind map") {
+            return "Diagrams"
+        }
+        return nil
     }
 
     private static func fileToPersonNames(store: ReadStore) -> [Int64: [String]] {
@@ -1559,9 +1361,10 @@ enum RestructureEngine {
             } catch {
                 failed += 1; continue
             }
-            if fm.fileExists(atPath: newURL.path) {
-                conflicts.append(p.newPath); skipped += 1; continue
-            }
+            // Skip the fileExists pre-check: it opens a TOCTOU window
+            // where an attacker can create the path between the check
+            // and the create. createSymbolicLink / moveItem already
+            // throw on existing destination — that's the atomic test.
             do {
                 switch mode {
                 case .symlink:
@@ -1571,8 +1374,19 @@ enum RestructureEngine {
                     pathUpdates.append((p.fileID, newURL.path))
                 }
                 moved += 1
+            } catch CocoaError.fileWriteFileExists {
+                conflicts.append(p.newPath); skipped += 1
+            } catch let err as NSError where err.domain == NSPOSIXErrorDomain && err.code == EEXIST {
+                conflicts.append(p.newPath); skipped += 1
             } catch {
-                failed += 1
+                // Some FileManager errors surface as generic NSErrors;
+                // treat any "file exists at destination" indicator as
+                // a conflict, otherwise count as failed.
+                if fm.fileExists(atPath: newURL.path) {
+                    conflicts.append(p.newPath); skipped += 1
+                } else {
+                    failed += 1
+                }
             }
         }
         if !pathUpdates.isEmpty {
@@ -1600,6 +1414,15 @@ enum RestructureEngine {
                   type == .typeSymbolicLink else {
                 skipped += 1; continue
             }
+            // Verify the symlink still points where we created it.
+            // An attacker with local filesystem access could swap the
+            // link to redirect a "convert to real move" toward a
+            // sensitive file (e.g. /etc/passwd).
+            let destPath = (try? fm.destinationOfSymbolicLink(atPath: newURL.path))
+                .map { resolveSymlinkDestination(linkPath: newURL.path, relative: $0) }
+            guard let resolvedDest = destPath, resolvedDest == p.oldPath else {
+                skipped += 1; continue
+            }
             do {
                 try fm.removeItem(at: newURL)
                 try fm.moveItem(at: oldURL, to: newURL)
@@ -1614,5 +1437,42 @@ enum RestructureEngine {
         }
         return ApplyResult(moved: moved, skipped: skipped, failed: failed,
                            conflicts: [], mode: .realMove)
+    }
+
+    /// Strip path separators and `..` segments from a single bucket
+    /// path (which itself may be multi-level like `Documents/Receipts`).
+    /// Drops empty components so a leading slash can't escape root.
+    static func sanitizePathSegment(_ raw: String) -> String {
+        let parts = raw.split(separator: "/", omittingEmptySubsequences: true)
+            .map { String($0) }
+            .filter { $0 != "." && $0 != ".." && !$0.isEmpty }
+            .map { sanitizeFilename($0) }
+        return parts.joined(separator: "/")
+    }
+
+    /// Sanitize a filename: strip `/`, leading dots, NUL, and trim.
+    /// Falls back to a default if everything would be stripped.
+    static func sanitizeFilename(_ raw: String) -> String {
+        var s = raw
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "\0", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        while s.hasPrefix(".") { s.removeFirst() }
+        if s.isEmpty || s == "." || s == ".." { return "untitled" }
+        return s
+    }
+
+    /// Resolve a symlink target that may be relative to the link's
+    /// containing directory; returns an absolute path with `..`
+    /// segments collapsed for safe equality comparison against the
+    /// original `oldPath`.
+    private static func resolveSymlinkDestination(linkPath: String,
+                                                    relative target: String) -> String {
+        if target.hasPrefix("/") {
+            return URL(fileURLWithPath: target).standardizedFileURL.path
+        }
+        let dir = (linkPath as NSString).deletingLastPathComponent
+        let combined = (dir as NSString).appendingPathComponent(target)
+        return URL(fileURLWithPath: combined).standardizedFileURL.path
     }
 }

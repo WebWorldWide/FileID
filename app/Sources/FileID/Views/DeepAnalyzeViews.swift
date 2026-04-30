@@ -1,57 +1,9 @@
 // Deep Analyze UI: model picker card, dedicated tab, per-file button,
-// status bar. Active model persists in UserDefaults; the engine reads
-// the same key.
+// status bar. Active model selection lives in `DeepAnalyzeSettings`
+// (Services/), which the engine reads from UserDefaults at spawn.
 import SwiftUI
 import AppKit
 import FileIDShared
-
-// MARK: - Active-model singleton (UserDefaults-backed)
-
-@Observable
-final class DeepAnalyzeSettings: @unchecked Sendable {
-    static let shared = DeepAnalyzeSettings()
-    private let key = "deepAnalyzeActiveModel"
-
-    var activeKind: AIModelKind {
-        didSet {
-            UserDefaults.standard.set(activeKind.rawValue, forKey: key)
-        }
-    }
-
-    let systemRAMGB: Double
-
-    private init() {
-        let ram = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
-        self.systemRAMGB = ram
-        // Demote a persisted model that no longer fits the RAM tier,
-        // and prefer a downloaded model when the persisted one isn't
-        // local (MLX HubApi rejects offline fetches when NetworkMonitor
-        // misreports connectivity).
-        let persisted: AIModelKind? = UserDefaults.standard.string(forKey: "deepAnalyzeActiveModel")
-            .flatMap { AIModelKind(rawValue: $0) }
-        if let p = persisted, p.fits(ramGB: ram) {
-            if ModelInstallStatus.isInstalled(kind: p) {
-                self.activeKind = p
-            } else {
-                let downloaded = AIModelKind.recommendedFor(ramGB: ram)
-                    .first(where: { $0.fits(ramGB: ram) && ModelInstallStatus.isInstalled(kind: $0) })
-                self.activeKind = downloaded ?? p
-            }
-        } else {
-            self.activeKind = Self.preferredDefault(ramGB: ram)
-        }
-    }
-
-    /// First downloaded recommendation, else the safest fits-this-Mac pick.
-    static func preferredDefault(ramGB: Double) -> AIModelKind {
-        for kind in AIModelKind.recommendedFor(ramGB: ramGB) where kind.fits(ramGB: ramGB) {
-            if ModelInstallStatus.isInstalled(kind: kind) {
-                return kind
-            }
-        }
-        return AIModelKind.safeDefaultFor(ramGB: ramGB)
-    }
-}
 
 // MARK: - Settings card
 
@@ -114,10 +66,6 @@ struct DeepAnalyzeModelPickerCard: View {
         )
     }
 
-    private func formatBytes(_ b: Int64) -> String {
-        let gb = Double(b) / 1_073_741_824
-        return String(format: "%.1f GB", gb)
-    }
 }
 
 // Extracted from DeepAnalyzeModelPickerCard to keep the type-checker happy.

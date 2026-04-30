@@ -1,16 +1,12 @@
 #!/bin/bash
-# FileID v2 builder — DEFAULT LAUNCHER (replaces the old v1 run script;
-# the v1 launcher is preserved as `run-v1.sh` for fallback).
-#
-# Assembles FileIDv2.app with the engine binary embedded inside
-# Contents/MacOS/. Fresh-state on every run: wipes the v2 SQLite DB +
-# transient caches; preserves model weights (multi-GB).
+# FileID launcher — wipes SQLite + transient caches, rebuilds release,
+# bundles into FileID.app/, opens. Preserves downloaded model weights.
 #
 # Layout produced:
-#   FileIDv2.app/
+#   FileID.app/
 #     Contents/
 #       MacOS/
-#         FileIDv2     ← SwiftUI app, located via Bundle.main
+#         FileID       ← SwiftUI app, located via Bundle.main
 #         FileIDEngine ← spawned as child by EngineClient.locateEngineBinary()
 #       Resources/
 #         FileID.icns

@@ -11,10 +11,9 @@ struct Detail: View {
     /// When the sidebar is hidden, Detail shows a toggle button in the
     /// top safe-area inset to bring it back.
     @Binding var sidebarVisible: Bool
-    /// Reserved for future cross-tab navigation needs. V3 removed
-    /// AssistantOrganizeView's "Review" hand-off so this is currently
-    /// unused — kept on the API surface so future inter-tab flows
-    /// don't need to re-thread it through MainWindow.
+    /// Reserved for future cross-tab navigation. Currently unused
+    /// but kept on the API surface so wiring it up later doesn't
+    /// require threading a new closure through MainWindow.
     var onSwitchTab: (MainWindow.Tab) -> Void = { _ in }
 
     var body: some View {
@@ -22,16 +21,11 @@ struct Detail: View {
             if pickedURL == nil && store.totalFiles == 0 {
                 EmptyState(onPickFolder: pickFolder)
             } else {
-                // V3: Library is always home. No more takeover screen.
-                // Sidebar's Start Scan is the single CTA; the Library
-                // tab shows scan progress + tile fill-in directly.
-                tabContent
-                    .transition(.opacity)
+                tabContent.transition(.opacity)
             }
         }
-        // V2.0 Spotlight integration — re-index FileID's photos with
-        // their smart names + captions + tags whenever a scan or Deep
-        // Analyze batch completes. Cheap (single bulk write); keeps the
+        // Re-index Spotlight whenever a scan or Deep Analyze batch
+        // completes — cheap (single bulk write) and keeps the
         // ⌘Space search results fresh.
         .onChange(of: engine.lastProgress?.phase) { _, new in
             if new == .completed {

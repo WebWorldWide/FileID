@@ -325,14 +325,6 @@ struct PeopleView: View {
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.20), lineWidth: 0.5))
     }
 
-    private func formatETA(_ seconds: Double) -> String {
-        let s = max(0, Int(seconds.rounded()))
-        let h = s / 3600; let m = (s % 3600) / 60; let sec = s % 60
-        if h > 0 { return String(format: "%dh %dm", h, m) }
-        if m > 0 { return String(format: "%dm %ds", m, sec) }
-        return "\(sec)s"
-    }
-
     private var headerSubtitle: String {
         let f = totalFacePrints
         let p = persons.count
@@ -457,8 +449,8 @@ struct PeopleView: View {
                     }
                 }
                 .padding(16)
-                // V4: animate on count, not the mapped ID array.
-                // Avoids per-render allocation in big libraries.
+                // Animate on count to avoid the per-render array
+                // allocation that mapping IDs would cause.
                 .animation(reduceMotion
                     ? .easeOut(duration: 0.15)
                     : .spring(response: 0.35, dampingFraction: 0.78),
@@ -926,7 +918,7 @@ private struct PersonDetailSheet: View {
 
                 // P10 — re-tag affordance. Shows only when this person
                 // was previously tagged with a DIFFERENT name (e.g. user
-                // renamed "Adam" → "Adam Nolle" after a tag pass).
+                // renamed "Alex" → "Alex Doe" after a tag pass).
                 if let oldTag = previousTagIfDifferent(currentTag: tagName) {
                     Button {
                         retagAllPhotos(removing: oldTag, adding: tagName)

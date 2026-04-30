@@ -1,15 +1,8 @@
-// V2.0 motion primitives — small reusable building blocks that give
-// the UI an Apple-quality polish layer.
-//
-//   ShimmerView — gold/lavender highlight sweeps across a placeholder
-//                 while data loads. Replaces the silent "spinner" feel.
-//   CompletionRipple — gold ring that pulses outward from a point on
-//                      successful completion (clustering, scan done,
-//                      caption batch finished).
-//   .iridescentBorder() — a thin animated gradient border for hero
-//                         cards. Matches the splash shimmer.
-//
-// All respect reduceMotion automatically.
+// Shared motion primitives:
+//   ShimmerView         — gold/lavender sweep over a loading placeholder.
+//   CompletionRipple    — gold ring pulse on successful completion.
+//   .iridescentBorder() — thin animated gradient border for hero cards.
+// All respect reduceMotion.
 import SwiftUI
 
 // MARK: - Shimmer

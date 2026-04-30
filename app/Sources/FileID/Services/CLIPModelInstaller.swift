@@ -337,8 +337,18 @@ public final class CLIPModelInstaller {
             return
         }
 
-        // Use /usr/bin/unzip — supports .mlpackage subdirectories
-        // natively, no third-party dependency.
+        // Zip-bomb defense: ensure we have meaningful headroom on the
+        // target volume before extraction. CLIP models extract to
+        // ~250 MB; we require ≥1 GB free as a safety margin.
+        let minFreeBytes: Int64 = 1_073_741_824
+        if let fsAttrs = try? FileManager.default.attributesOfFileSystem(forPath: modelsRoot.path),
+           let free = (fsAttrs[.systemFreeSize] as? NSNumber)?.int64Value,
+           free < minFreeBytes {
+            let freeMB = free / 1_048_576
+            status = .installFailed("Need at least 1 GB free to extract; only \(freeMB) MB available.")
+            return
+        }
+
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
         proc.arguments = ["-o", "-q", zipURL.path, "-d", modelsRoot.path]
@@ -348,9 +358,24 @@ public final class CLIPModelInstaller {
 
         do {
             try proc.run()
-            // Wait off-MainActor.
+            // Bound the extract by 5 minutes — a degenerate archive
+            // shouldn't hang the installer indefinitely. The watchdog
+            // task races against the natural exit; whichever wins,
+            // we resume once.
+            let resumed = MutexBox(false)
             await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                proc.terminationHandler = { _ in cont.resume() }
+                proc.terminationHandler = { _ in
+                    if resumed.withLock({ if $0 { return false } else { $0 = true; return true } }) {
+                        cont.resume()
+                    }
+                }
+                Task.detached {
+                    try? await Task.sleep(nanoseconds: 300 * 1_000_000_000)
+                    if proc.isRunning { proc.terminate() }
+                    if resumed.withLock({ if $0 { return false } else { $0 = true; return true } }) {
+                        cont.resume()
+                    }
+                }
             }
         } catch {
             status = .installFailed("Couldn't run unzip: \(error.localizedDescription)")

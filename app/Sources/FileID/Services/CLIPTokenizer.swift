@@ -1,18 +1,9 @@
-// OpenAI CLIP byte-pair encoding tokenizer — pure Swift port.
-//
-// The tokenizer's only job: take a search query like "sunset at the
-// beach" and produce the integer token IDs CLIP's text transformer
-// expects. We then feed those IDs to CLIPTextEncoder which produces a
-// 512-d embedding aligned with the image-side embeddings stored in
-// `clip_embeddings`. Cosine on those two vectors = "find images
-// matching this text query."
-//
+// Pure-Swift port of OpenAI's CLIP BPE tokenizer.
 // Reference: github.com/openai/CLIP/blob/main/clip/simple_tokenizer.py
 //
-// The vocabulary + merges files come from OpenAI's CLIP release. Run
-// `scripts/fetch_clip_vocab.sh` once to download them. They land at
-// ~/Library/Application Support/FileID/Models/clip_text/{vocab.json,
-// merges.txt}.
+// Reads `vocab.json` + `merges.txt` from OpenAI's CLIP release at
+// ~/Library/Application Support/FileID/Models/clip_text/ (run
+// scripts/fetch_clip_vocab.sh once to download).
 import Foundation
 
 public final class CLIPTokenizer: @unchecked Sendable {

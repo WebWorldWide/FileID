@@ -27,9 +27,9 @@ The v2 rewrite supersedes the per-batch v1 work. These decisions are the load-be
 
 **8. `MLModel.compileModel(at:)` then load the .mlmodelc.** Skipping the explicit compile step caused `MLModel(contentsOf:)` to fail silently on the .mlpackage in M3 testing. Compiling first and loading the cached .mlmodelc is the documented path; CoreML's transparent compile inside `MLModel(contentsOf:)` is unreliable for sandboxed binaries.
 
-**9. Structured JSONL log (`scan.jsonl`), not freeform text.** v1's `scan.log` was partially batched, partially immediate, parseable only with `grep`, and silently swallowed errors via `try?`. v2's `JSONLog.shared` writes one JSON object per line — `{"t":..., "lvl":..., "ev":..., "sess":..., "extra":{...}}`. Every error gets logged with file path. Future "scan got slow" investigations start with one `jq` query.
+**9. Structured JSONL log (`scan.jsonl`), not freeform text.** `JSONLog.shared` writes one JSON object per line — `{"t":..., "lvl":..., "ev":..., "sess":..., "extra":{...}}`. Every error gets logged with redacted file path. Future "scan got slow" investigations start with one `jq` query. (Replaced an earlier freeform `scan.log`.)
 
-**10. Verbatim port of v1's design language.** `LavaLampAesthetics.swift`, `Theme.swift`, and the NavigationSplitView shell were copied directly into `app/Sources/FileIDv2/Theme/`. AppDelegate transparent-titlebar trick preserved (keeps traffic-light buttons while letting the LavaLamp extend to the top edge). The user said they like the v1 look; that's a non-negotiable preservation.
+**10. Design language carried forward from the early FileID prototype.** `LavaLampBackground.swift`, `Theme.swift`, and the NavigationSplitView shell came from the original single-process prototype. AppDelegate transparent-titlebar trick preserved (keeps traffic-light buttons while letting the LavaLamp extend to the top edge). Non-negotiable preservation per user preference.
 
 **Things explicitly cut (documented in `docs/NEXT.md` for the next session):** SigLIP 2 accuracy embedder, vectorlite HNSW extension, AI Models picker UI, face clustering, Restructure proposal engine, full crash-resume read path, MediaPreviewOverlay full port, soak test + CI perf bench, notarization. Each cut is an intentional scope decision, not an omission.
 
@@ -59,7 +59,7 @@ b) **FileIDDataStore @ModelActor insert.** Per-file `await store.insertScanResul
 
 c) **Result-loop iteration cost itself.** Beyond `store.insertScanResult`, the body does a dict removal, calls `viewModel.recordFileCompleted`, optionally flushes faces, optionally commits a batch save. Each of these is fast individually but they all run serially in the same task.
 
-d) **NAS I/O.** TrueNAS over SMB. CGImageSource reads are synchronous; 14 concurrent reads may serialize at the network layer. Not in-app fixable; only diagnosable by re-running on a local SSD.
+d) **NAS I/O.** SMB NAS over SMB. CGImageSource reads are synchronous; 14 concurrent reads may serialize at the network layer. Not in-app fixable; only diagnosable by re-running on a local SSD.
 
 **Alternatives considered.**
 
@@ -69,7 +69,7 @@ d) **NAS I/O.** TrueNAS over SMB. CGImageSource reads are synchronous; 14 concur
 
 **Decision.** Add a per-batch `PHASE-PROFILE` line to `scan.log` that captures p50/p95/total wall time for the three measurable spans inside the result loop (`workerWith` = time inside `pool.with { ... }`, `storeInsert` = time on the data-store actor write, `resultLoopIter` = time per `for await` iteration body), plus a derived `workerWall  workers × Xs = Ys   utilization=Z%` line and `availMB`/`residentMB`. The scan-log buffer pattern from Batch 11 is reused (`nonisolated(unsafe) static` + `NSLock`); snapshot is flushed at `commitBatchSave` time so it appears chronologically after the per-file rows for that batch.
 
-**Why this beats guessing.** Two minutes of instrumentation in the user's next TrueNAS scan tells us which span dominates `batchDur`. If `storeInsert.total ≈ batchDur`, the data store is the funnel and the next batch moves writes off the per-file critical path. If `workerWith.total / (batchDur × 14) < 0.4`, the worker pool is starved — look upstream at the result-loop dispatch. If neither, we're bottlenecked on something the profiler doesn't cover yet (NAS I/O is the prime remaining suspect) and the next batch adds a per-file `loadCGImage` span.
+**Why this beats guessing.** Two minutes of instrumentation in the user's next SMB NAS scan tells us which span dominates `batchDur`. If `storeInsert.total ≈ batchDur`, the data store is the funnel and the next batch moves writes off the per-file critical path. If `workerWith.total / (batchDur × 14) < 0.4`, the worker pool is starved — look upstream at the result-loop dispatch. If neither, we're bottlenecked on something the profiler doesn't cover yet (NAS I/O is the prime remaining suspect) and the next batch adds a per-file `loadCGImage` span.
 
 **Honest retraction.** The "13.8 files/s is within expected band" line in the prior batch's STATE.md was wrong. 14 workers on M1 Pro should be far closer to 100 files/s; the gap was real and present, and the right move was instrumentation, not narrative.
 
@@ -78,7 +78,7 @@ d) **NAS I/O.** TrueNAS over SMB. CGImageSource reads are synchronous; 14 concur
 User reported Discovery taking 15+ minutes on a 58K-file library — far too slow for what should be enumerator + filter. Investigation found three compounded causes:
 
 1. **Per-file `await viewModel.isCancelled` and `await viewModel.isPaused`.** Both are @Published on a @MainActor class. Each call hops to MainActor's executor. On a busy run loop (drain timer at 80 ms, Library grid re-renders, tooltip decoration), each hop can serialize for several ms behind UI work. 58K files × 5 ms × 2 hops = ~10 minutes of pure scheduling.
-2. **Per-file `resourceValues(forKeys: [.creationDateKey, .fileSizeKey])`.** Needed a stat() per URL to read creation date and file size for the FileRecord init. On TrueNAS / SMB / network volumes, that's a network round-trip per file. 58K × 10 ms = ~10 minutes of blocking I/O.
+2. **Per-file `resourceValues(forKeys: [.creationDateKey, .fileSizeKey])`.** Needed a stat() per URL to read creation date and file size for the FileRecord init. On SMB NAS / SMB / network volumes, that's a network round-trip per file. 58K × 10 ms = ~10 minutes of blocking I/O.
 3. **`includingPropertiesForKeys: [..., .contentTypeKey]` on the enumerator.** `.contentTypeKey` forces UTType / Spotlight metadata resolution per URL on network volumes, adding more per-file latency.
 
 **Decision.** Three coordinated changes:
@@ -365,11 +365,11 @@ User said "I am confused by the date and best thing just does not make sense to 
 
 ## 2026-04-24 — Batch 10: no live tree rebuilds during scan (SwiftUI AttributeGraph ceiling, not memory)
 
-User hit a SIGABRT after a 76-minute TrueNAS scan that had reached ~29 K of ~58 K files. Symptoms read as OOM ("ran for a very long time then started beach balling a lot then crashed outright") and the user asked for "some kind of temp file or database system … not everything is loaded in." Investigation found the crash is **not** a memory problem, and the "new DB layer" is the wrong abstraction.
+User hit a SIGABRT after a 76-minute SMB NAS scan that had reached ~29 K of ~58 K files. Symptoms read as OOM ("ran for a very long time then started beach balling a lot then crashed outright") and the user asked for "some kind of temp file or database system … not everything is loaded in." Investigation found the crash is **not** a memory problem, and the "new DB layer" is the wrong abstraction.
 
 **Evidence.** `~/Library/Logs/DiagnosticReports/FileID-2026-04-24-163532.ips` — `EXC_CRASH / SIGABRT`, fault-thread top-down: `__pthread_kill → abort → AG::precondition_failure → AG::data::table::grow_region() (.cold.1) → AG::data::table::alloc_page → AG::Graph::add_attribute → ModifiedElements → TransitionBox → ForEachState → OutlineGroup → DynamicContainerInfo.updateItems → GraphHost.flushTransactions → NSHostingView.beginTransaction → NSRunLoop.flushObservers`. Fires on the **main thread** inside SwiftUI's own AttributeGraph, not a Jetsam SIGKILL (no kernel-panic thread, no Jetsam summary). The `.cold.1` variant of `grow_region` is Apple's slow-path for "the dynamic-attribute page table hit its internal precondition cap."
 
-**Root cause.** `AppViewModel.rebuildTreeFromAccumulator()` ran every 500 ms during the scan (6th drain-timer tick). It rebuilds a brand-new tree of value-type `FileTreeNode` instances from `treeAccumulator`; the tree is rendered by `OutlineGroup(viewModel.fileTree, children: \.children)` inside `List { Section { … } }`, which SwiftUI wraps in `TransitionBox` for section animations. On the TrueNAS library, `treeAccumulator` had thousands of entries (one per sub-path). Every 500 ms SwiftUI diffed the previous tree against a freshly-minted one — all-new value-type instances, wide and deep — and allocated AG attributes for the churn. At ~9 000 rebuilds × thousands of rows × a `TransitionBox` diff context, AttributeGraph's internal page table saturates. Rebuilding less often doesn't help because the cap is on total allocations during the view's lifetime, not on rate.
+**Root cause.** `AppViewModel.rebuildTreeFromAccumulator()` ran every 500 ms during the scan (6th drain-timer tick). It rebuilds a brand-new tree of value-type `FileTreeNode` instances from `treeAccumulator`; the tree is rendered by `OutlineGroup(viewModel.fileTree, children: \.children)` inside `List { Section { … } }`, which SwiftUI wraps in `TransitionBox` for section animations. On the SMB NAS library, `treeAccumulator` had thousands of entries (one per sub-path). Every 500 ms SwiftUI diffed the previous tree against a freshly-minted one — all-new value-type instances, wide and deep — and allocated AG attributes for the churn. At ~9 000 rebuilds × thousands of rows × a `TransitionBox` diff context, AttributeGraph's internal page table saturates. Rebuilding less often doesn't help because the cap is on total allocations during the view's lifetime, not on rate.
 
 **Alternatives considered.**
 

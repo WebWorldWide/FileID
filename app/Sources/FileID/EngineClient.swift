@@ -1,6 +1,7 @@
 // Spawns + supervises the engine child process. Auto-respawns with
 // backoff. State and events are observable on MainActor.
 import Foundation
+import Security
 import FileIDShared
 
 @MainActor
@@ -78,6 +79,11 @@ public final class EngineClient {
     private var expectedExit: Bool = false
     private var lastTerminalEventAt: Date = .distantPast
 
+    /// When non-nil, the next engine exit deletes the SQLite library
+    /// before the respawn, and the next `.ready` event auto-starts a
+    /// scan against this URL. Drives `wipeAndRescan(rootURL:)`.
+    private var pendingWipeAndRescanRoot: URL?
+
     /// 2 Hz throttle on `deepAnalyzeLast`; otherwise SwiftUI's
     /// AttributeGraph overflows on a fast Deep Analyze run.
     private var lastDeepAnalyzeFileDoneAt: Date = .distantPast
@@ -103,7 +109,83 @@ public final class EngineClient {
             state = .crashed(reason: "Engine binary not found next to app executable")
             return
         }
+        // Refuse to spawn an engine binary that didn't ship with this
+        // app. Prevents a malicious process from dropping a payload at
+        // FileID.app/Contents/MacOS/FileIDEngine and getting full FS
+        // access via IPC. In dev (ad-hoc signing) and notarized
+        // builds (Developer ID), both binaries share a signing
+        // identity — we require it to match the app's.
+        if let reason = Self.engineIntegrityFailure(binary: binURL) {
+            state = .crashed(reason: reason)
+            return
+        }
         spawn(binary: binURL)
+    }
+
+    /// Returns a non-nil failure reason when the engine binary
+    /// shouldn't be spawned. Two checks are mandatory:
+    ///
+    ///   1. The engine path resolves inside the running app bundle's
+    ///      `Contents/MacOS/`. This blocks the "drop a payload at
+    ///      FileID.app/Contents/MacOS/FileIDEngine" attack at the
+    ///      symlink level too — symlinks that escape the bundle fail.
+    ///   2. The engine's signing identity (Team ID for Developer ID
+    ///      builds, or both being unsigned/ad-hoc for dev builds)
+    ///      matches the app's. Each binary gets its own cdhash so a
+    ///      strict designated-requirement match against the app
+    ///      never works for dev — we compare team identifiers
+    ///      instead, which is what realistically catches a swapped
+    ///      binary signed by a different developer.
+    private static func engineIntegrityFailure(binary: URL) -> String? {
+        let resolved = binary.resolvingSymlinksInPath().standardizedFileURL
+        let bundleMacOS = (Bundle.main.executableURL ?? URL(fileURLWithPath: ""))
+            .resolvingSymlinksInPath()
+            .deletingLastPathComponent()
+            .standardizedFileURL
+        guard resolved.path.hasPrefix(bundleMacOS.path + "/") else {
+            return "Engine binary outside app bundle: \(resolved.lastPathComponent)"
+        }
+
+        let appTeam = appTeamIdentifier()
+        let engineTeam = teamIdentifier(forBinaryAt: resolved)
+
+        // Both signed by the same Team ID — Developer ID release path.
+        if let a = appTeam, let e = engineTeam, a == e {
+            return nil
+        }
+        // Both ad-hoc / unsigned — dev path (`bash run.sh`). Path
+        // containment above is the only realistic guarantee here, and
+        // an attacker who can write inside Contents/MacOS/ already has
+        // enough access to swap the app itself.
+        if appTeam == nil && engineTeam == nil {
+            return nil
+        }
+        return "Engine signing identity does not match app (engine: \(engineTeam ?? "<unsigned>"), app: \(appTeam ?? "<unsigned>"))"
+    }
+
+    /// Team Identifier of the running app, or nil if ad-hoc / unsigned.
+    private static func appTeamIdentifier() -> String? {
+        var appCode: SecCode?
+        guard SecCodeCopySelf([], &appCode) == errSecSuccess,
+              let appCodeUnwrapped = appCode else { return nil }
+        var appStatic: SecStaticCode?
+        guard SecCodeCopyStaticCode(appCodeUnwrapped, [], &appStatic) == errSecSuccess,
+              let appStaticUnwrapped = appStatic else { return nil }
+        return teamIdentifier(of: appStaticUnwrapped)
+    }
+
+    private static func teamIdentifier(forBinaryAt url: URL) -> String? {
+        var staticCode: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(url as CFURL, [], &staticCode) == errSecSuccess,
+              let s = staticCode else { return nil }
+        return teamIdentifier(of: s)
+    }
+
+    private static func teamIdentifier(of code: SecStaticCode) -> String? {
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(code, [], &info) == errSecSuccess,
+              let dict = info as? [String: Any] else { return nil }
+        return dict[kSecCodeInfoTeamIdentifier as String] as? String
     }
 
     private func spawn(binary: URL) {
@@ -192,6 +274,12 @@ public final class EngineClient {
         case .ready(let info):
             state = .ready(info)
             respawnAttempts.removeAll()   // reset budget on a clean handshake
+            // If we just came back from a wipe-and-rescan, auto-start
+            // the scan against the user's chosen root.
+            if let root = pendingWipeAndRescanRoot {
+                pendingWipeAndRescanRoot = nil
+                startScan(rootURL: root)
+            }
         case .progress(let p):
             lastProgress = p
             // Auto-pilot: cancel + failed phases must release the
@@ -326,11 +414,6 @@ public final class EngineClient {
     }
 
     @MainActor
-    private func markCrashed(reason: String) {
-        state = .crashed(reason: reason)
-    }
-
-    @MainActor
     private func handleEngineExit() {
         // Nil pipe handlers so any in-flight GCD callback short-circuits.
         if let proc = process {
@@ -347,6 +430,13 @@ public final class EngineClient {
         if expectedExit || recentClean {
             Self.debug("exit: clean (expectedExit=\(expectedExit) recentClean=\(recentClean))")
             expectedExit = false
+            // Wipe the SQLite library before the respawn — this is
+            // the only safe window to delete it; the engine holds
+            // the WAL lock while it's running.
+            if pendingWipeAndRescanRoot != nil {
+                Self.deleteLibraryFiles()
+                clearProgress()
+            }
             state = .starting
             pendingRespawn?.cancel()
             pendingRespawn = Task { @MainActor [weak self] in
@@ -408,11 +498,10 @@ public final class EngineClient {
 
     public func clearLastError() { lastError = nil }
 
-    /// V3: Start Scan is the single CTA and auto-chains by default.
-    /// Sets `autoPilotActive` so faceClusteringComplete kicks off Deep
-    /// Analyze automatically. Bookmark serialization is moved off the
-    /// main thread — the caller doesn't await it; the engine receives
-    /// the startScan command as soon as the bookmark resolves.
+    /// Start Scan auto-chains by default — sets `autoPilotActive`
+    /// so faceClusteringComplete kicks off Deep Analyze. Bookmark
+    /// serialization is moved off the main thread; the engine
+    /// receives the startScan command as soon as the bookmark resolves.
     public func startScan(rootURL: URL) {
         autoPilotActive = true
         autoPilotStage = .scanning
@@ -456,6 +545,45 @@ public final class EngineClient {
     public func shutdown() {
         expectedExit = true
         send(.shutdown)
+    }
+
+    /// Wipes the SQLite library + scan logs and triggers a fresh
+    /// scan against `rootURL` once the engine has restarted. Cancels
+    /// any in-flight scan first. The engine has to exit before we
+    /// can delete the SQLite files (it holds the WAL lock), so the
+    /// flow is: shutdown → engine exit → handleEngineExit deletes
+    /// the files → engine respawn → on `.ready` event we trigger
+    /// the new scan.
+    public func wipeAndRescan(rootURL: URL) {
+        if let p = lastProgress, p.phase == .discovering || p.phase == .tagging || p.phase == .postScan {
+            send(.cancelScan)
+        }
+        // Snapshot the bookmark + display path NOW — by the time the
+        // restarted engine is ready, the security-scoped resource
+        // would have to be re-acquired. We rely on the same
+        // bookmark-resolve path as `startScan`.
+        pendingWipeAndRescanRoot = rootURL
+        expectedExit = true
+        send(.shutdown)
+    }
+
+    /// Deletes the SQLite library + WAL/SHM siblings + scan log.
+    /// Safe to call only when the engine isn't running — SQLite
+    /// holds the lock otherwise.
+    private static func deleteLibraryFiles() {
+        let fm = FileManager.default
+        let root = AppSupportPath.fileID
+        let candidates = [
+            "fileid.sqlite",
+            "fileid.sqlite-wal",
+            "fileid.sqlite-shm",
+            "logs/scan.jsonl",
+            "logs/app.log"
+        ]
+        for name in candidates {
+            let url = root.appendingPathComponent(name)
+            try? fm.removeItem(at: url)
+        }
     }
 
     public func runFaceClustering() {

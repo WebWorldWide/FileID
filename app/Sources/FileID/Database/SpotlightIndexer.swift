@@ -1,13 +1,7 @@
-// V2.0 Spotlight integration — registers FileID's enriched metadata
-// (smart names, captions, tags) with CoreSpotlight so a user can find
-// their photos via ⌘Space from anywhere on macOS.
-//
-// Apple Photos doesn't expose its smart-name layer to Spotlight; FileID
-// can. Type "Adam beach" in Spotlight → the app's photos with Adam's
-// face + a beach-classified scene show up.
-//
-// Items are scoped to the domain "com.fileid.photos" so we can wipe /
-// reindex cleanly.
+// CoreSpotlight bridge — registers FileID's enriched metadata
+// (smart names, captions, tags) so a ⌘Space query finds the photos
+// from anywhere on macOS. Items are scoped to "com.fileid.photos"
+// for clean wipe/reindex.
 import Foundation
 import CoreSpotlight
 import UniformTypeIdentifiers

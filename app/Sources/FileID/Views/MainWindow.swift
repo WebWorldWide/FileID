@@ -152,9 +152,8 @@ struct MainWindow: View {
             UserDefaults.standard.removeObject(forKey: Self.pickedFolderBookmarkKey)
             return
         }
-        // V3: bookmarkData can do filesystem I/O — for slow disks /
-        // network volumes it'd hang the main thread for seconds (the
-        // beach-ball the user reported). Move it off-thread.
+        // bookmarkData can do filesystem I/O on slow disks / network
+        // volumes, hanging the main thread for seconds. Off-thread.
         let key = Self.pickedFolderBookmarkKey
         Task.detached(priority: .utility) {
             if let data = try? url.bookmarkData(options: [],
@@ -171,9 +170,9 @@ struct MainWindow: View {
         guard pickedURL == nil,
               let data = UserDefaults.standard.data(forKey: Self.pickedFolderBookmarkKey)
         else { return }
-        // V3: also resolve off-thread. URL(resolvingBookmarkData:) can
-        // round-trip to disk and was contributing to slow first-launch
-        // when the previous folder lived on a sleeping NAS.
+        // Resolve off-thread too — URL(resolvingBookmarkData:) can
+        // round-trip to disk (slow first-launch when the previous
+        // folder lives on a sleeping NAS).
         let key = Self.pickedFolderBookmarkKey
         Task.detached(priority: .utility) {
             do {

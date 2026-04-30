@@ -1,12 +1,7 @@
-// V7 — Beyond-Compare-style dual-pane tree view for the Restructure
-// tab. Power-user toggle from the Cards/Sankey default. Left pane:
-// current state grouped by source folder. Right pane: proposed state
-// grouped by destination bucket. Each row shows a status letter
-// (M=moved, =unchanged, +=new dest folder) borrowed from git.
-//
-// Filter chips along the top let the user jump straight to moves /
-// new folders / everything. Row alignment is opportunistic — anchor
-// folders sit at the top of both panes; mixed/junk fan out below.
+// Beyond-Compare-style dual-pane tree view: current state on the
+// left, proposed state on the right. Each row carries a git-style
+// status letter (M=moved, =unchanged, +=new folder). Filter chips
+// jump to moves / new folders / everything.
 import SwiftUI
 
 struct TreeDiffView: View {
@@ -319,11 +314,5 @@ struct TreeDiffView: View {
         }
     }
 
-    private func bucketIcon(_ bucket: String) -> String {
-        if bucket.hasPrefix("People")    { return "person.crop.circle.fill" }
-        if bucket.hasPrefix("Places")    { return "mappin.circle.fill" }
-        if bucket.hasPrefix("Documents") { return "doc.text.fill" }
-        if bucket.hasPrefix("Photos")    { return "photo.stack.fill" }
-        return "tray.fill"
-    }
+    private func bucketIcon(_ bucket: String) -> String { bucketIconName(bucket) }
 }

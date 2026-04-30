@@ -10,17 +10,16 @@ struct LibraryView: View {
     let store: ReadStore
 
     @State private var rows: [FileRow] = []
-    /// V4: precomputed [fileID: top vision tags] for the visible rows.
-    /// Replaces per-tile SQL queries that fired 1000× when 1000 tiles
-    /// were visible. Built once per `reload()`, passed into each tile.
+    /// Top vision tags per visible file, batched in one SQL query
+    /// per reload so tiles don't re-fire 1000× when 1000 are onscreen.
     @State private var tagsByFile: [Int64: [String]] = [:]
     @State private var searchText: String = ""
     @FocusState private var searchFocused: Bool
-    /// Debounce timer for searchText changes — avoids reload-per-keystroke
-    /// when CLIP semantic search is active (each query is ~50ms of work).
+    /// Debounce against per-keystroke reloads while CLIP semantic
+    /// search is active (~50ms per query).
     @State private var searchDebounce: Task<Void, Never>?
-    /// V2.0 visual similarity search — when set, the grid shows photos
-    /// most-similar to this seed (by CLIP image embedding cosine).
+    /// When set, the grid shows photos most-similar to this seed
+    /// (CLIP image-embedding cosine).
     @State private var similarSeed: FileRow? = nil
     /// Persisted across launches. Empty string means "no filter" since
     /// AppStorage doesn't support optional bindings cleanly.
@@ -54,9 +53,8 @@ struct LibraryView: View {
                p.phase == .discovering || p.phase == .tagging || p.phase == .postScan {
                 inFlightHeadline(p)
             }
-            // V3: post-scan stage banner — concise, not a takeover. Lives
-            // INSIDE Library so progress is visible while the user
-            // browses what's already loaded.
+            // Post-scan stage banner — visible while the user
+            // continues browsing what's already loaded.
             if engine.faceClusteringInFlight {
                 postScanBanner(
                     icon: "person.2.crop.square.stack",
@@ -123,9 +121,8 @@ struct LibraryView: View {
         .onChange(of: similarSeed?.id) { _, _ in reload() }
     }
 
-    /// V3 post-scan banner — slim, inline, dismissible-feeling. Used
-    /// for "Grouping faces…" and "Writing captions…" while the engine
-    /// chains stages after the main scan completes.
+    /// Inline post-scan banner used for "Grouping faces…" and
+    /// "Writing captions…" while the engine chains stages.
     @ViewBuilder
     private func postScanBanner(icon: String, title: String, detail: String) -> some View {
         HStack(spacing: 10) {
@@ -558,9 +555,9 @@ struct LibraryView: View {
                                         ? Theme.gold : Color.clear,
                                         lineWidth: 2)
                         )
-                        // V3: tiles fade + scale in when they first
-                        // appear, so the grid "fills the room" during
-                        // a live scan instead of popping items.
+                        // Tiles fade + scale in so the grid "fills
+                        // the room" during a live scan instead of
+                        // popping items.
                         .transition(.asymmetric(
                             insertion: .opacity.combined(with: .scale(scale: 0.96)),
                             removal: .opacity
@@ -568,9 +565,8 @@ struct LibraryView: View {
                 }
             }
             .padding(20)
-            // V4: animation key on rows.count instead of rows.map(\.id).
-            // The map allocates a new array on every render — for big
-            // grids (1000+) that's measurable. count is a single Int.
+            // Animate on rows.count, not rows.map(\.id) — the map
+            // allocates a new array per render and adds up at 1000+ tiles.
             .animation(.easeOut(duration: 0.30), value: rows.count)
         }
         .sheet(item: $selected) { file in
@@ -582,8 +578,6 @@ struct LibraryView: View {
     @ViewBuilder
     private var empty: some View {
         if store.totalFiles == 0 {
-            // V3 home: warm + minimal. One sentence, no claims.
-            // Animated arrow pointing toward the sidebar's Start Scan.
             EmptyStateView(
                 icon: "arrow.left.circle",
                 title: "Ready when you are",
@@ -602,9 +596,8 @@ struct LibraryView: View {
 
     private func reload() {
         defer {
-            // V4: one SQL query batches every visible tile's chip tags
-            // instead of N+1. The dictionary is small enough (≤ 60-200
-            // entries × ≤ 2 strings) that diffing it doesn't dominate.
+            // Batch chip tags for every visible tile in one SQL
+            // query — was N+1 across the grid before.
             tagsByFile = store.topVisionTagsBulk(
                 forFileIDs: rows.map { $0.id }, limit: 2
             )
@@ -613,11 +606,9 @@ struct LibraryView: View {
             rows = store.similarFiles(toFileID: seed.id, limit: 60)
             return
         }
-        // V2.1 — when CLIP text encoder is installed AND user has a
-        // non-trivial query, try semantic search first. Result is
-        // ranked by visual relevance to the text. Fall through to
-        // keyword search when the model isn't installed (or query is
-        // empty).
+        // CLIP text→image semantic search when the encoder is
+        // installed and the query is non-trivial; otherwise fall
+        // through to keyword search.
         let trimmed = searchText.trimmingCharacters(in: .whitespaces)
         if trimmed.count >= 3, CLIPTextEncoder.shared.isReady,
            let semantic = store.semanticSearch(query: trimmed, limit: 60),
@@ -636,8 +627,8 @@ struct FileTile: View {
     let store: ReadStore
     var selectMode: Bool = false
     var isChecked: Bool = false
-    /// V4: tags arrive as a prop from the parent's batch query — no
-    /// per-tile SQL. Empty array if the file has no vision tags yet.
+    /// Top vision tags injected from the parent's batch query —
+    /// avoids N+1 SQL across visible tiles.
     var topTags: [String] = []
 
     @State private var thumb: NSImage?
@@ -668,10 +659,9 @@ struct FileTile: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            // 1:1 carrier + overlay image: stable across portrait/landscape.
-            // V3 polish: thumb crossfades when it arrives instead of
-            // popping in, hover uses elevation instead of border swap
-            // (the Things-style "thoughtful tile" treatment).
+            // 1:1 carrier + overlay image so portrait/landscape
+            // sources stay aligned. Thumbs crossfade instead of
+            // popping; hover lifts via elevation.
             Color.white.opacity(0.04)
                 .aspectRatio(1, contentMode: .fit)
                 .overlay(thumbContent)
@@ -760,10 +750,8 @@ struct FileTile: View {
             }
         }
         .task(id: row.id) {
-            // V4: only the thumbnail is fetched per-tile now. Vision
-            // tags arrive as a prop (parent batches them). Finder
-            // xattr reads were dropped — Finder shows tags natively
-            // and per-tile xattr reads were ~1000 disk hits per scroll.
+            // Only the thumbnail is fetched per-tile; vision tags
+            // arrive as a prop and Finder shows native xattr tags.
             thumb = await ThumbnailService.shared.thumbnail(for: row.url, size: 264)
         }
         .accessibilityElement(children: .combine)
@@ -858,11 +846,6 @@ struct FileTile: View {
                         .foregroundStyle(.white, .black.opacity(0.6))
                         .help("OCR text available")
                 }
-                // V4: Finder-tag count badge removed. It required a
-                // synchronous xattr disk read per visible tile; for a
-                // 1000-tile grid that was 1000 disk hits per scroll
-                // and per store.version bump. Finder shows tags
-                // natively in column view if users want that signal.
             }
             .padding(6)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)

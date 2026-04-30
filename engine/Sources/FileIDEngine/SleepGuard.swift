@@ -1,20 +1,12 @@
-// SleepGuard — prevents the system from sleeping during long-running engine
-// jobs (scan, Deep Analyze, clustering). Lets the user close the laptop lid
-// and walk away while a multi-hour scan or Deep Analyze runs.
+// Reference-counted IOPMAssertion that keeps the system awake
+// during long-running jobs (scan, Deep Analyze, clustering).
 //
-// Caveats (Apple Silicon hardware-level constraints — we cannot work around):
-//  - On battery, lid-closed always sleeps. Power MUST be connected for
-//    lid-closed scans to keep running. The IOPMAssertion below tells the
-//    OS to ignore idle-sleep timers, but a MacBook on battery without
-//    external display also forcibly sleeps when the lid closes — Apple
-//    hardware-level decision, not software.
-//  - With AC power and `kIOPMAssertPreventSystemSleep`, the system stays
-//    awake even with the lid closed. This is what we want for overnight
-//    Deep Analyze.
+// Apple-Silicon hardware constraint: on battery without an external
+// display, lid-close still sleeps — `kIOPMAssertPreventSystemSleep`
+// only overrides idle-sleep timers. Lid-closed runs require AC power.
 //
-// The assertion is reference-counted: every begin() call must be matched
-// by an end(). We use a single named assertion so multiple jobs running
-// simultaneously coexist without tripping over each other.
+// Every begin() must be balanced by an end(); a single named
+// assertion lets concurrent jobs coexist.
 import Foundation
 import IOKit
 import IOKit.pwr_mgt

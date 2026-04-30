@@ -61,3 +61,24 @@ Tests/Corpus/*
 
 # Test driver compiled artifact
 scripts/make_bookmark
+
+# Claude Code session state + local settings.
+.claude/
+
+# Zed editor personal settings.
+.zed/
+.zed*
+
+# Personal scripts hardcoded to the maintainer's NAS path / home.
+# Re-add per-developer copies if needed; don't commit them.
+scripts/iterate_truenas.sh
+scripts/perfharness.swift
+scripts/deepharness.swift
+
+# Local user overrides — never commit.
+*.local.json
+.env
+.env.local
+
+# DMG build output.
+dist/
