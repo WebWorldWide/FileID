@@ -43,9 +43,101 @@ if [ "${1:-}" = "--rebuild" ]; then
     echo "🔨 Building release binaries…"
     DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c release --product FileID
     DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c release --product FileIDEngine
+
+    echo "📦 Assembling FileID.app bundle…"
+    rm -rf "$APP"
+    mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
     cp .build/release/FileID       "$APP/Contents/MacOS/FileID"
     cp .build/release/FileIDEngine "$APP/Contents/MacOS/FileIDEngine"
     chmod +x "$APP/Contents/MacOS/"{FileID,FileIDEngine}
+
+    METALLIB_CACHE="$PROJECT_DIR/.build/cache/mlx.metallib"
+    if [ -f "$METALLIB_CACHE" ]; then
+        cp "$METALLIB_CACHE" "$APP/Contents/MacOS/mlx.metallib"
+        cp "$METALLIB_CACHE" "$APP/Contents/MacOS/default.metallib"
+    else
+        echo "⚠️  $METALLIB_CACHE missing — Deep Analyze will fail at runtime."
+        echo "   Run bash run.sh once to build it, then re-run this script."
+    fi
+
+    cat > "$APP/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key><string>com.fileid.app</string>
+    <key>CFBundleName</key><string>FileID</string>
+    <key>CFBundleDisplayName</key><string>FileID</string>
+    <key>CFBundleExecutable</key><string>FileID</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleIconFile</key><string>FileID</string>
+    <key>CFBundleIconName</key><string>FileID</string>
+    <key>CFBundleShortVersionString</key><string>1.0</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>LSMinimumSystemVersion</key><string>15.0</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSDesktopFolderUsageDescription</key><string>FileID needs to read your folders to tag, dedupe, and reorganize files.</string>
+    <key>NSDocumentsFolderUsageDescription</key><string>FileID needs to read your folders to tag, dedupe, and reorganize files.</string>
+    <key>NSDownloadsFolderUsageDescription</key><string>FileID needs to read your folders to tag, dedupe, and reorganize files.</string>
+</dict>
+</plist>
+PLIST
+    cp "$PROJECT_DIR/Resources/FileID.icns" "$APP/Contents/Resources/FileID.icns"
+
+    # Strip DWARF debug info. clang embeds absolute compile-time
+    # source paths there, which would otherwise leak the maintainer's
+    # home directory into public artifacts.
+    echo "🧹 Stripping debug symbols…"
+    strip -S "$APP/Contents/MacOS/FileID"
+    strip -S "$APP/Contents/MacOS/FileIDEngine"
+
+    # Sanitize leftover __cstring paths from MLX's vendored C++ —
+    # `__FILE__` macros bake the source path into the binary, which
+    # `strip` doesn't touch. Replace each occurrence with a same-
+    # length placeholder so the binary stays valid.
+    echo "🧹 Rewriting embedded source paths…"
+    python3 - <<'PY' "$APP/Contents/MacOS/FileID" "$APP/Contents/MacOS/FileIDEngine"
+import sys, os
+real = os.path.expanduser("~").encode()
+generic = b"/Users/developer"
+if len(real) != len(generic):
+    pad = generic + b"_" * (len(real) - len(generic)) if len(real) > len(generic) else generic[:len(real)]
+else:
+    pad = generic
+for path in sys.argv[1:]:
+    with open(path, "rb") as f:
+        data = f.read()
+    new = data.replace(real, pad)
+    if new != data:
+        with open(path, "wb") as f:
+            f.write(new)
+PY
+
+    # Re-sign. `swift build -c release` ad-hoc-signs the binaries;
+    # both `strip -S` and the byte-rewrite above invalidate that
+    # cdhash. macOS silently refuses to spawn a tampered ad-hoc
+    # binary, which presents in the UI as a permanent "Starting…"
+    # state because the engine never reaches its IPC handshake.
+    echo "🔐 Re-signing bundle (ad-hoc)…"
+    # iCloud's FileProvider re-injects com.apple.FinderInfo on
+    # bundles inside synced folders (Desktop / Documents) the
+    # instant we strip them, which causes codesign to refuse.
+    # Move the bundle to /tmp (non-iCloud), sign there, move back.
+    SIGN_TMP=$(mktemp -d /tmp/fileid-sign.XXXXXX)
+    mv "$APP" "$SIGN_TMP/$APP"
+    find "$SIGN_TMP/$APP" -exec xattr -c {} \; 2>/dev/null || true
+    # `--deep` recurses into Contents/MacOS/ and signs every Mach-O
+    # plus the bundle wrapper. Ad-hoc identity ("-") leaves both
+    # binaries with no Team ID, which the runtime integrity check
+    # in EngineClient treats as the dev/unsigned path (matches).
+    codesign --force --sign - --deep --timestamp=none "$SIGN_TMP/$APP" 2>&1 | sed 's/^/    /'
+    if ! codesign --verify --deep --strict "$SIGN_TMP/$APP"; then
+        echo "❌ codesign verify failed — refusing to package."
+        rm -rf "$SIGN_TMP"
+        exit 1
+    fi
+    mv "$SIGN_TMP/$APP" "$APP"
+    rm -rf "$SIGN_TMP"
 fi
 
 [ -d "$APP" ] || { echo "❌ $APP not found. Run with --rebuild or run.sh first."; exit 1; }
