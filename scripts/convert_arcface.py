@@ -174,7 +174,10 @@ def convert(variant: str, out_dir: Path) -> Path:
         rng2 = np.random.default_rng(seed=100 + s)
         rand = rng2.random((in_size, in_size, 3), dtype=np.float32)
         pil2 = Image.fromarray((rand * 255).astype(np.uint8), "RGB")
-        out2 = list(mlmodel.predict({g_input.name: pil2}).values())[0].squeeze()
+        # CoreML side uses the input name we set on ImageType ("input"),
+        # not the original ONNX name (which can be e.g. "input.1" after
+        # PyTorch tracing renames it).
+        out2 = list(mlmodel.predict({"input": pil2}).values())[0].squeeze()
         nrm = float(np.linalg.norm(out2))
         if nrm > 0:
             out2 = out2 / nrm

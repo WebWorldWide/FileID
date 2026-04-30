@@ -452,50 +452,157 @@ struct CLIPSemanticSearchCard: View {
 
 // MARK: - Face embedder card
 
-/// Settings card for the face-recognition tier. Passive install-status
-/// display only — the engine picks up whichever .mlpackage is present
-/// the next time face clustering runs.
+/// Settings card for the face-recognition tier. Per-variant install
+/// state with Download/Uninstall buttons. The engine picks up whichever
+/// .mlpackage is on disk the next time face clustering runs.
 struct FaceEmbedderCard: View {
     let engine: EngineClient
     let store: ReadStore
+    @State private var installer = ArcFaceModelInstaller.shared
+    @State private var confirmUninstall: FaceEmbedderKind?
 
     var body: some View {
         GlassCard {
             VStack(alignment: .leading, spacing: 10) {
                 Text("AI Models — face recognition").font(.headline)
-                Text("On-device face embedder for clustering people. Convert from Buffalo (Immich) ONNX once via `scripts/convert_arcface.py`; the engine uses whichever variant is present.")
+                Text("On-device face embedder for clustering people. Pre-converted from Buffalo (Immich) ONNX — install with one click, no Python required.")
                     .font(.callout).foregroundStyle(.secondary)
                 Divider().opacity(0.3)
                 ForEach(FaceEmbedderKind.allCases, id: \.rawValue) { kind in
                     embedderRow(kind)
+                    if kind != FaceEmbedderKind.allCases.last {
+                        Divider().opacity(0.2)
+                    }
                 }
             }
+        }
+        .onAppear { installer.refreshStatus() }
+        .confirmationDialog(
+            "Remove face model?",
+            isPresented: Binding(
+                get: { confirmUninstall != nil },
+                set: { if !$0 { confirmUninstall = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: confirmUninstall
+        ) { kind in
+            Button("Remove", role: .destructive) {
+                installer.uninstall(kind)
+                confirmUninstall = nil
+            }
+            Button("Keep", role: .cancel) { confirmUninstall = nil }
+        } message: { kind in
+            let mb = kind.approxBytes / 1_048_576
+            Text("Frees ~\(mb) MB. Face clustering will fall back to whichever other variant is installed, or pause if none are.")
         }
     }
 
     @ViewBuilder
     private func embedderRow(_ kind: FaceEmbedderKind) -> some View {
-        let installed = kind.isInstalled()
         let path = FaceEmbedderKind.modelsDirectory.appendingPathComponent(kind.modelFileName).path
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: installed ? "checkmark.circle.fill" : "xmark.circle")
-                .foregroundStyle(installed ? .green : .orange)
-                .padding(.top, 2)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(kind.displayName).font(.callout.bold())
-                Text(kind.subtitle).font(.caption).foregroundStyle(.secondary)
-                if !installed {
-                    Text("Not installed. Run: python3 scripts/convert_arcface.py --variant \(kind == .arcfaceIResNet50 ? "iresnet50" : "mobileface")")
+        let status = installer.status[kind] ?? .unknown
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: 8) {
+                statusIcon(status)
+                    .padding(.top, 2)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(kind.displayName).font(.callout.bold())
+                    Text(kind.subtitle).font(.caption).foregroundStyle(.secondary)
+                    Text(path)
                         .font(.caption2.monospaced())
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
-                Text(path)
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                Spacer()
             }
-            Spacer()
+            statusFooter(for: kind, status: status)
+                .padding(.leading, 24)
+        }
+    }
+
+    @ViewBuilder
+    private func statusIcon(_ status: ArcFaceModelInstaller.Status) -> some View {
+        switch status {
+        case .installed:
+            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+        case .downloading, .extracting:
+            Image(systemName: "arrow.down.circle.fill").foregroundStyle(Theme.gold)
+        case .installFailed:
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+        default:
+            Image(systemName: "xmark.circle").foregroundStyle(.orange)
+        }
+    }
+
+    @ViewBuilder
+    private func statusFooter(for kind: FaceEmbedderKind,
+                              status: ArcFaceModelInstaller.Status) -> some View {
+        switch status {
+        case .unknown:
+            EmptyView()
+
+        case .missing:
+            HStack(spacing: 8) {
+                Button {
+                    installer.install(kind)
+                } label: {
+                    Label("Install (~\(kind.approxBytes / 1_048_576) MB)",
+                          systemImage: "arrow.down.circle.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.gold)
+                .controlSize(.small)
+                Spacer()
+            }
+
+        case .downloading(let frac, let msg):
+            VStack(alignment: .leading, spacing: 4) {
+                if frac > 0 {
+                    ProgressView(value: frac)
+                } else {
+                    ProgressView()
+                }
+                HStack {
+                    Text(msg).font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Cancel") { installer.cancel(kind) }
+                        .buttonStyle(.borderless)
+                        .controlSize(.small)
+                }
+            }
+
+        case .extracting:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Extracting…").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+            }
+
+        case .installed(let bytes):
+            HStack(spacing: 8) {
+                Text("\(bytes / 1_048_576) MB installed")
+                    .font(.caption2).foregroundStyle(.secondary)
+                Spacer()
+                Button("Uninstall") { confirmUninstall = kind }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .foregroundStyle(.red)
+            }
+
+        case .installFailed(let why):
+            VStack(alignment: .leading, spacing: 4) {
+                Text(why).font(.caption2)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    Button("Retry") { installer.install(kind) }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    Spacer()
+                }
+            }
         }
     }
 }

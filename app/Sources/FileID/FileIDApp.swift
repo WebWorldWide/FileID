@@ -9,6 +9,8 @@ import FileIDShared
 struct FileIDApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @State private var engine = EngineClient()
+    @State private var showWelcome = false
+    @AppStorage("welcomeSheetSeen") private var welcomeSheetSeen: Bool = false
 
     var body: some Scene {
         WindowGroup("FileID") {
@@ -28,8 +30,19 @@ struct FileIDApp: App {
                     // matching when the CLIP text encoder isn't installed.
                     Task.detached { _ = CLIPTextEncoder.shared.load() }
                     CLIPModelInstaller.shared.refreshStatus()
+                    ArcFaceModelInstaller.shared.refreshStatus()
+                    // Show the welcome sheet on first launch, or any
+                    // launch where required on-device models are still
+                    // missing — both surfaces install nudges in one
+                    // place instead of leaving them as mystery warnings
+                    // scattered across tabs.
+                    if shouldShowWelcome() { showWelcome = true }
                 }
                 .onDisappear { engine.shutdown() }
+                .sheet(isPresented: $showWelcome) {
+                    WelcomeSheet()
+                        .onDisappear { welcomeSheetSeen = true }
+                }
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
@@ -49,6 +62,20 @@ struct FileIDApp: App {
                 }
             }
         }
+    }
+
+    /// Show the welcome sheet on the very first launch, or on any
+    /// subsequent launch if a recommended model is still missing —
+    /// the sheet itself acts as the missing-model installer surface.
+    private func shouldShowWelcome() -> Bool {
+        if !welcomeSheetSeen { return true }
+        CLIPModelInstaller.shared.refreshStatus()
+        let clipMissing: Bool = {
+            if case .installed = CLIPModelInstaller.shared.status { return false }
+            return true
+        }()
+        let faceMissing = FaceEmbedderKind.installedKinds().isEmpty
+        return clipMissing || faceMissing
     }
 }
 
