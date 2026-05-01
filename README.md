@@ -36,9 +36,9 @@ Nothing leaves the Mac.
 Two binaries, newline-delimited JSON over stdin/stdout.
 
 - **`FileID`** — SwiftUI viewer.
-- **`FileIDEngine`** — Swift CLI spawned as a child of the app. Owns the GRDB / SQLite WAL database, the scan pipeline, and ANE/GPU model loading. Auto-respawns with bounded backoff on crash.
+- **`FileIDEngine`** — Swift CLI spawned as a child of the app. Owns the GRDB / SQLite WAL database, the scan pipeline, CLIP image embedding (CoreML), face embedding (ONNX Runtime via the CoreML execution provider — ANE acceleration), and VLM inference (MLX). Auto-respawns with bounded backoff on crash.
 
-Models live under `~/Library/Application Support/FileID/Models/` (ArcFace + CLIP) and `~/Documents/huggingface/models/` (VLMs via swift-transformers).
+Models live under `~/Library/Application Support/FileID/Models/` (CLIP `.mlpackage` + ArcFace `.onnx`) and `~/Documents/huggingface/models/` (VLMs via swift-transformers).
 
 ## Requirements
 
@@ -76,7 +76,21 @@ bash scripts/iterate.sh     # corpus regression harness
 
 ## Privacy
 
-Every operation runs locally. Models download from HuggingFace once at first use; the app then works fully offline. No analytics. No telemetry. No remote logging.
+Every operation runs locally. Models download from their canonical upstream HuggingFace repos on first launch; the app then works fully offline. No analytics. No telemetry. No remote logging.
+
+## Models & licensing
+
+FileID never redistributes model weights. On first launch the welcome sheet pulls each model directly from its upstream repository on HuggingFace — same posture Immich uses for face recognition. If you don't want a model, skip it; the rest of the app works without it.
+
+| Model | Used for | Source | Licence |
+|---|---|---|---|
+| MobileCLIP-S2 image + text encoders | Semantic search | [`apple/coreml-mobileclip`](https://huggingface.co/apple/coreml-mobileclip) | Apple Sample Code License |
+| OpenAI CLIP BPE vocab (`vocab.json`, `merges.txt`) | Tokeniser for the text encoder | [`openai/clip-vit-base-patch32`](https://huggingface.co/openai/clip-vit-base-patch32) | MIT |
+| InsightFace Buffalo-L (`recognition/model.onnx`) | Face embeddings (default ≥16 GB) | [`immich-app/buffalo_l`](https://huggingface.co/immich-app/buffalo_l) | InsightFace pre-trained weights — **non-commercial research only** |
+| InsightFace Buffalo-S (`recognition/model.onnx`) | Face embeddings (default <16 GB) | [`immich-app/buffalo_s`](https://huggingface.co/immich-app/buffalo_s) | InsightFace pre-trained weights — **non-commercial research only** |
+| Qwen 3 VL · Gemma 3 · SmolVLM 2 · PaliGemma | Deep Analyze captions + filenames | Each model's own HF repo (fetched by swift-transformers) | See each model card |
+
+> **Heads-up — face recognition.** The InsightFace pre-trained weights (Buffalo-L / Buffalo-S) are explicitly licensed for **non-commercial research only**, even though InsightFace's own code is MIT. FileID is a personal, non-commercial app and pulls the weights directly from the upstream Immich-hosted mirror at runtime — exactly how Immich itself ships face recognition. If you plan to use FileID commercially you must obtain weights under appropriate terms from InsightFace directly, or swap in a permissively-licensed face embedder.
 
 ## Security
 
@@ -84,7 +98,7 @@ See [`docs/SECURITY.md`](docs/SECURITY.md) for the threat model, audit findings,
 
 ## License
 
-TBD.
+TBD. (App code is yours to keep / re-license; model weights remain governed by the licences above.)
 
 ---
 

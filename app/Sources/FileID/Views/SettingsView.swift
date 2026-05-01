@@ -526,7 +526,7 @@ struct FaceEmbedderCard: View {
         switch status {
         case .installed:
             Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-        case .downloading, .extracting:
+        case .downloading:
             Image(systemName: "arrow.down.circle.fill").foregroundStyle(Theme.gold)
         case .installFailed:
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
@@ -571,13 +571,6 @@ struct FaceEmbedderCard: View {
                         .buttonStyle(.borderless)
                         .controlSize(.small)
                 }
-            }
-
-        case .extracting:
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.small)
-                Text("Extracting…").font(.caption).foregroundStyle(.secondary)
-                Spacer()
             }
 
         case .installed(let bytes):

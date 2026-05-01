@@ -47,26 +47,30 @@ let innerPath = CGPath(roundedRect: innerRect,
                         cornerHeight: innerCorner,
                         transform: nil)
 
-// MARK: - Iridescent centre
+// MARK: - Iridescent background (full bitmap)
 
+// Paint iridescent across the entire canvas — no rounded outer clip.
+// Finder's window mask handles its own corner rounding on top of this,
+// so the visible window interior shows iridescent gradient all the way
+// into every corner. Without the full-bitmap fill, the corners outside
+// the hazard ring stay transparent and the volume's white default bg
+// bleeds through as triangular gaps.
 ctx.saveGState()
-ctx.addPath(innerPath)
-ctx.clip()
 
 ctx.setFillColor(CGColor(red: 0.86, green: 0.86, blue: 0.88, alpha: 1.0))
-ctx.fill(innerRect)
+ctx.fill(outerRect)
 
 struct Blob { let x: CGFloat; let y: CGFloat; let r: CGFloat; let color: CGColor }
 let blobs: [Blob] = [
-    Blob(x: innerRect.midX - 110, y: innerRect.midY + 60, r: 200,
+    Blob(x: outerRect.midX - 110, y: outerRect.midY + 60, r: 200,
          color: CGColor(red: 0.55, green: 0.95, blue: 0.75, alpha: 0.55)),
-    Blob(x: innerRect.midX + 130, y: innerRect.midY - 50, r: 220,
+    Blob(x: outerRect.midX + 130, y: outerRect.midY - 50, r: 220,
          color: CGColor(red: 0.65, green: 0.85, blue: 1.00, alpha: 0.55)),
-    Blob(x: innerRect.midX - 80,  y: innerRect.midY - 90, r: 180,
+    Blob(x: outerRect.midX - 80,  y: outerRect.midY - 90, r: 180,
          color: CGColor(red: 1.00, green: 0.75, blue: 0.90, alpha: 0.55)),
-    Blob(x: innerRect.midX + 70,  y: innerRect.midY + 80, r: 200,
+    Blob(x: outerRect.midX + 70,  y: outerRect.midY + 80, r: 200,
          color: CGColor(red: 1.00, green: 0.78, blue: 0.55, alpha: 0.50)),
-    Blob(x: innerRect.midX,       y: innerRect.midY,      r: 260,
+    Blob(x: outerRect.midX,       y: outerRect.midY,      r: 260,
          color: CGColor(red: 1.00, green: 1.00, blue: 1.00, alpha: 0.45))
 ]
 for b in blobs {
@@ -81,8 +85,8 @@ for b in blobs {
     )
 }
 
-// Soft inner vignette so the border reads as a frame rather than
-// stripes painted on top of the centre.
+// Soft outer vignette so the centre reads as a focused area; the
+// gradient stretches to the full bitmap so corners darken naturally.
 let vignette = CGGradient(
     colorsSpace: colorSpace,
     colors: [
@@ -93,10 +97,10 @@ let vignette = CGGradient(
 )!
 ctx.drawRadialGradient(
     vignette,
-    startCenter: CGPoint(x: innerRect.midX, y: innerRect.midY),
+    startCenter: CGPoint(x: outerRect.midX, y: outerRect.midY),
     startRadius: 0,
-    endCenter: CGPoint(x: innerRect.midX, y: innerRect.midY),
-    endRadius: max(innerRect.width, innerRect.height) * 0.55,
+    endCenter: CGPoint(x: outerRect.midX, y: outerRect.midY),
+    endRadius: max(outerRect.width, outerRect.height) * 0.6,
     options: []
 )
 

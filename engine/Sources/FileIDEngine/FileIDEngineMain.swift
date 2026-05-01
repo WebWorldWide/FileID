@@ -266,6 +266,43 @@ struct FileIDEngineMain {
         case .deepAnalyzeCancel:
             await DeepAnalyze.shared.requestCancel()
             JSONLog.shared.info(ev: "deep_analyze_cancel_requested")
+        case .prewarmModel(let modelKey):
+            // Onboarding-time download. Loads the requested VLM through
+            // the same swift-transformers HF path Deep Analyze uses, but
+            // doesn't run inference. Progress reuses the existing
+            // modelDownloadProgress event stream so the welcome sheet
+            // sees the same fractional progress as the settings card.
+            guard let kind = AIModelKind(rawValue: modelKey) else {
+                await sink.emit(.error(EngineError(
+                    kind: "prewarm_invalid_kind",
+                    message: "Unknown model kind \(modelKey)."
+                )))
+                return
+            }
+            JSONLog.shared.info(ev: "prewarm_model_started",
+                                extra: ["kind": AnyCodable(kind.rawValue)])
+            do {
+                try await DeepAnalyze.shared.ensureLoaded(kind: kind) { frac, msg in
+                    Task {
+                        await sink.emit(.modelDownloadProgress(ModelDownloadProgress(
+                            modelKind: kind.rawValue, fraction: frac, message: msg
+                        )))
+                    }
+                }
+                // Emit a final 1.0 progress event so the UI flips to
+                // "installed" without waiting for the next event.
+                await sink.emit(.modelDownloadProgress(ModelDownloadProgress(
+                    modelKind: kind.rawValue, fraction: 1.0,
+                    message: "\(kind.displayName) ready."
+                )))
+                JSONLog.shared.info(ev: "prewarm_model_done",
+                                    extra: ["kind": AnyCodable(kind.rawValue)])
+            } catch {
+                await sink.emit(.error(EngineError(
+                    kind: "prewarm_failed",
+                    message: "Prewarm \(kind.displayName) failed: \(error.localizedDescription)"
+                )))
+            }
         }
     }
 

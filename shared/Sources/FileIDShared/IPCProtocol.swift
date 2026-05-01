@@ -27,6 +27,11 @@ public struct IPCCommand: Codable, Sendable {
         case deepAnalyzeFolder(pathPrefix: String, modelKind: String)
         case deepAnalyzeAll(modelKind: String, skipExisting: Bool)
         case deepAnalyzeCancel
+        /// Pre-fetch a VLM's weights into the swift-transformers HF
+        /// cache without running inference. Used by the welcome-sheet
+        /// onboarding flow to download the recommended VLM up front
+        /// instead of having the user wait at first Deep Analyze run.
+        case prewarmModel(modelKind: String)
     }
 }
 

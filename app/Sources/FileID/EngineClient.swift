@@ -619,6 +619,16 @@ public final class EngineClient {
     public func deepAnalyzeCancel() {
         send(.deepAnalyzeCancel)
     }
+
+    /// Pre-fetch a VLM's weights without running inference. Used by the
+    /// welcome-sheet onboarding flow so first-launch downloads happen
+    /// up front instead of stalling the first Deep Analyze run. The
+    /// engine emits `modelDownloadProgress` events identical to the
+    /// in-Deep-Analyze flow; bind to `engine.modelDownloadProgress`
+    /// for live progress.
+    public func prewarmModel(_ modelKind: String) {
+        send(.prewarmModel(modelKind: modelKind))
+    }
 }
 
 /// Lock-protected box: concurrent closures capture a reference instead

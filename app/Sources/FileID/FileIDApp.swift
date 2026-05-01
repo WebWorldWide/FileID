@@ -40,7 +40,7 @@ struct FileIDApp: App {
                 }
                 .onDisappear { engine.shutdown() }
                 .sheet(isPresented: $showWelcome) {
-                    WelcomeSheet()
+                    WelcomeSheet(engine: engine)
                         .onDisappear { welcomeSheetSeen = true }
                 }
         }

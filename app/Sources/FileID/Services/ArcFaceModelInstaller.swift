@@ -1,11 +1,11 @@
-// In-app downloader for ArcFace face-recognition .mlpackages. Mirrors
-// CLIPModelInstaller's pattern: a single zip per variant fetched from
-// the GitHub release, streamed in 64 KB chunks, atomic-replaced into
-// ~/Library/Application Support/FileID/Models/.
+// In-app downloader for the ArcFace face-recognition ONNX models.
+// Pulls the original Buffalo ONNX from Immich's HuggingFace repo at
+// runtime — same legal posture Immich itself uses, no redistribution
+// of the InsightFace pre-trained weights on our part.
 //
-// The zips are produced once per release by `scripts/build_arcface_assets.sh`
-// (which runs convert_arcface.py and zips the output). Hosting them on
-// the GitHub release means users never need Python locally.
+// Mirrors CLIPModelInstaller's chunk-streaming pattern: async
+// URLSession.bytes, 64 KB chunks written to a `.partial` temp file,
+// atomic replace into the destination. Single file per variant.
 import Foundation
 import AppKit
 import FileIDShared
@@ -21,7 +21,6 @@ public final class ArcFaceModelInstaller {
         case missing(reason: String)
         case installed(sizeBytes: Int64)
         case downloading(fraction: Double, message: String)
-        case extracting
         case installFailed(String)
     }
 
@@ -36,21 +35,25 @@ public final class ArcFaceModelInstaller {
 
     // MARK: - Asset URLs
 
-    /// Where on disk each variant's .mlpackage lives.
+    /// Where on disk each variant's ONNX file lives.
     public static func destination(for kind: FaceEmbedderKind) -> URL {
         FaceEmbedderKind.modelsDirectory.appendingPathComponent(kind.modelFileName)
     }
 
-    /// GitHub release asset for each variant. Must match the asset name
-    /// used by `scripts/build_arcface_assets.sh` when uploading.
-    private static func assetURL(for kind: FaceEmbedderKind) -> URL {
-        let base = "https://github.com/AdamNolle/FileID/releases/download/v0.1.0"
-        let name: String
+    /// Upstream ONNX URL for each variant. Immich hosts the same model
+    /// they ship with their own self-hosted server — InsightFace's
+    /// original ONNX, untouched. We fetch it byte-for-byte at first
+    /// launch.
+    private static func sourceURL(for kind: FaceEmbedderKind) -> URL {
+        let base = "https://huggingface.co"
+        let path: String
         switch kind {
-        case .arcfaceIResNet50:  name = "arcface_iresnet50.mlpackage.zip"
-        case .arcfaceMobileFace: name = "arcface_mobileface.mlpackage.zip"
+        case .arcfaceIResNet50:
+            path = "/immich-app/buffalo_l/resolve/main/recognition/model.onnx"
+        case .arcfaceMobileFace:
+            path = "/immich-app/buffalo_s/resolve/main/recognition/model.onnx"
         }
-        return URL(string: "\(base)/\(name)")!
+        return URL(string: "\(base)\(path)")!
     }
 
     // MARK: - Status
@@ -59,10 +62,10 @@ public final class ArcFaceModelInstaller {
         for kind in FaceEmbedderKind.allCases {
             let url = Self.destination(for: kind)
             if FileManager.default.fileExists(atPath: url.path) {
-                status[kind] = .installed(sizeBytes: directorySize(url))
+                let sz = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
+                status[kind] = .installed(sizeBytes: sz)
             } else {
                 if case .downloading = status[kind] { continue }
-                if case .extracting  = status[kind] { continue }
                 status[kind] = .missing(reason: "Not installed.")
             }
         }
@@ -95,49 +98,29 @@ public final class ArcFaceModelInstaller {
         let modelsRoot = FaceEmbedderKind.modelsDirectory
         try? FileManager.default.createDirectory(at: modelsRoot, withIntermediateDirectories: true)
 
+        // Pre-flight: need ~2x the approximate model size free.
         if let free = freeDiskBytes(at: modelsRoot),
-           free < kind.approxBytes * 3 {
+           free < kind.approxBytes * 2 {
             status[kind] = .installFailed("Not enough free space.")
             return
         }
 
-        let remote = Self.assetURL(for: kind)
-        let tmpZip = modelsRoot.appendingPathComponent(".\(kind.rawValue).download.zip")
-        try? FileManager.default.removeItem(at: tmpZip)
-
+        let dest = Self.destination(for: kind)
+        let remote = Self.sourceURL(for: kind)
         status[kind] = .downloading(fraction: 0, message: "Connecting…")
 
         do {
-            try await downloadZip(remote: remote, dest: tmpZip, kind: kind)
+            try await downloadFile(remote: remote, dest: dest, kind: kind)
         } catch is CancellationError {
-            try? FileManager.default.removeItem(at: tmpZip)
             status[kind] = .missing(reason: "Cancelled.")
             return
         } catch let DownloadError.failed(msg) {
-            try? FileManager.default.removeItem(at: tmpZip)
             status[kind] = .installFailed(msg)
             return
         } catch {
-            try? FileManager.default.removeItem(at: tmpZip)
             status[kind] = .installFailed("Download failed: \(error.localizedDescription)")
             return
         }
-
-        status[kind] = .extracting
-        let extracted = await extractZip(zipURL: tmpZip, into: modelsRoot, kind: kind)
-        try? FileManager.default.removeItem(at: tmpZip)
-
-        if !extracted {
-            // status already set to installFailed inside extractZip
-            return
-        }
-
-        let dest = Self.destination(for: kind)
-        guard FileManager.default.fileExists(atPath: dest.path) else {
-            status[kind] = .installFailed("Extracted archive didn't contain \(kind.modelFileName).")
-            return
-        }
-
         refreshStatus()
     }
 
@@ -145,9 +128,9 @@ public final class ArcFaceModelInstaller {
         case failed(String)
     }
 
-    /// Stream the release asset into `dest`. Updates per-variant status
+    /// Stream the ONNX file into `dest`. Updates per-variant status
     /// every ~256 KB. Atomic-replaces on completion.
-    private func downloadZip(remote: URL, dest: URL, kind: FaceEmbedderKind) async throws {
+    private func downloadFile(remote: URL, dest: URL, kind: FaceEmbedderKind) async throws {
         let partial = dest.appendingPathExtension("partial")
         try? FileManager.default.removeItem(at: partial)
         FileManager.default.createFile(atPath: partial.path, contents: nil)
@@ -199,79 +182,11 @@ public final class ArcFaceModelInstaller {
         }
     }
 
-    /// Run /usr/bin/unzip with a 5-minute watchdog, same pattern the
-    /// CLIP installer uses for its offline-zip path.
-    private func extractZip(zipURL: URL, into target: URL, kind: FaceEmbedderKind) async -> Bool {
-        // Pre-clear any prior install so the new package replaces it
-        // wholesale rather than getting merged on top.
-        let dest = Self.destination(for: kind)
-        try? FileManager.default.removeItem(at: dest)
-
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-        proc.arguments = ["-o", "-q", zipURL.path, "-d", target.path]
-        let stderr = Pipe()
-        proc.standardError = stderr
-        proc.standardOutput = Pipe()
-
-        do {
-            try proc.run()
-        } catch {
-            status[kind] = .installFailed("Couldn't run unzip: \(error.localizedDescription)")
-            return false
-        }
-
-        // Bound at 5 minutes. iresnet50 unzips in <30 s in practice; the
-        // watchdog protects against a degenerate archive.
-        let resumed = MutexBox(false)
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            proc.terminationHandler = { _ in
-                if resumed.withLock({ if $0 { return false } else { $0 = true; return true } }) {
-                    cont.resume()
-                }
-            }
-            Task.detached {
-                try? await Task.sleep(nanoseconds: 300 * 1_000_000_000)
-                if proc.isRunning { proc.terminate() }
-                if resumed.withLock({ if $0 { return false } else { $0 = true; return true } }) {
-                    cont.resume()
-                }
-            }
-        }
-
-        guard proc.terminationStatus == 0 else {
-            let errData: Data = ((try? stderr.fileHandleForReading.readToEnd()) ?? nil) ?? Data()
-            let errStr = String(data: errData, encoding: .utf8) ?? ""
-            status[kind] = .installFailed("Extract failed (\(proc.terminationStatus)): \(errStr.trimmingCharacters(in: .whitespacesAndNewlines))")
-            return false
-        }
-        return true
-    }
-
     // MARK: - Utilities
 
     private func freeDiskBytes(at url: URL) -> Int64? {
         guard let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
               let avail = values.volumeAvailableCapacityForImportantUsage else { return nil }
         return avail
-    }
-
-    private func directorySize(_ url: URL) -> Int64 {
-        var total: Int64 = 0
-        let fm = FileManager.default
-        var isDir: ObjCBool = false
-        guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else { return 0 }
-        if !isDir.boolValue {
-            if let v = try? url.resourceValues(forKeys: [.fileSizeKey]),
-               let s = v.fileSize { return Int64(s) }
-            return 0
-        }
-        if let en = fm.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) {
-            for case let f as URL in en {
-                if let v = try? f.resourceValues(forKeys: [.fileSizeKey]),
-                   let s = v.fileSize { total += Int64(s) }
-            }
-        }
-        return total
     }
 }

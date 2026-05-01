@@ -134,11 +134,14 @@ public enum FaceEmbedderKind: String, CaseIterable, Sendable, Codable {
         }
     }
 
-    /// Where the converted .mlpackage lives on disk.
+    /// Where the ONNX model file lives on disk. We pull the original
+    /// Buffalo ONNX from Immich's HF mirror at runtime — no on-device
+    /// conversion, no redistribution of the InsightFace pre-trained
+    /// weights on our part.
     public var modelFileName: String {
         switch self {
-        case .arcfaceIResNet50:  return "arcface_iresnet50.mlpackage"
-        case .arcfaceMobileFace: return "arcface_mobileface.mlpackage"
+        case .arcfaceIResNet50:  return "arcface_iresnet50.onnx"
+        case .arcfaceMobileFace: return "arcface_mobileface.onnx"
         }
     }
 

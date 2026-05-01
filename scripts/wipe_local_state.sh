@@ -3,17 +3,43 @@
 # behaves like a brand-new install. Use it before testing a release
 # DMG to verify the empty-state UI.
 #
-# Removes:
+# Removes (always):
 #   - ~/Library/Application Support/FileID/   (SQLite, WAL/SHM, Models, logs)
 #   - com.fileid.app UserDefaults             (folder bookmark, prefs)
 #
-# Preserves:
-#   - ~/Documents/huggingface/   (multi-GB MLX VLM weights)
+# Removes (with --purge-models):
+#   - ~/Documents/huggingface/                (multi-GB MLX VLM weights —
+#                                              forces the welcome-sheet's
+#                                              VLM download path to fire
+#                                              on the next launch)
 #
 # Run.sh does the same thing as part of its rebuild loop; this is
 # the standalone wipe for when you don't want to rebuild.
 
 set -e
+
+PURGE_MODELS=0
+for arg in "$@"; do
+    case "$arg" in
+        --purge-models|-p)
+            PURGE_MODELS=1
+            ;;
+        --help|-h)
+            cat <<'EOF'
+Usage: bash scripts/wipe_local_state.sh [--purge-models]
+
+  --purge-models   Also rm -rf ~/Documents/huggingface/. Multi-GB.
+                   Use when validating the welcome-sheet onboarding
+                   flow on a truly fresh DMG install.
+EOF
+            exit 0
+            ;;
+        *)
+            echo "Unknown flag: $arg (try --help)"
+            exit 1
+            ;;
+    esac
+done
 
 osascript -e 'tell application "FileID" to quit' >/dev/null 2>&1 || true
 sleep 0.5
@@ -29,4 +55,16 @@ rm -rf "$HOME/Library/Application Support/FileID"
 defaults delete com.fileid.app >/dev/null 2>&1 || true
 killall cfprefsd >/dev/null 2>&1 || true
 
-echo "✅ Local FileID state wiped. Next launch will start fresh."
+if [ "$PURGE_MODELS" = "1" ]; then
+    if [ -d "$HOME/Documents/huggingface" ]; then
+        SIZE=$(du -sh "$HOME/Documents/huggingface" 2>/dev/null | cut -f1)
+        echo "🧨 Purging ~/Documents/huggingface ($SIZE)…"
+        rm -rf "$HOME/Documents/huggingface"
+    fi
+fi
+
+if [ "$PURGE_MODELS" = "1" ]; then
+    echo "✅ Local FileID state + VLM cache wiped. Next launch redownloads everything via the welcome sheet."
+else
+    echo "✅ Local FileID state wiped. ~/Documents/huggingface preserved (use --purge-models to nuke it)."
+fi
