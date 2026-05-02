@@ -1,16 +1,13 @@
 // CLIP text encoder — produces a 512-d embedding from a search query
-// in the same space as the image embeddings already stored in
-// `clip_embeddings`. Cosine on the two vectors gives semantic search
-// — type "sunset at the beach" and rank every photo by how well it
-// matches that concept.
+// in the same space as the image embeddings stored in `clip_embeddings`.
+// Cosine over the two vectors gives semantic search.
 //
-// Pairs with CLIPTokenizer (BPE → token IDs) and a CoreML .mlpackage
-// of OpenAI's CLIP text transformer. The model isn't bundled — the
-// user runs scripts/build_clip_text_encoder.py once to convert and
-// install. Without the model, isReady returns false and the search
-// bar quietly falls back to keyword search.
+// Pairs with CLIPTokenizer (BPE → token IDs) and the CoreML .mlpackage
+// installed by CLIPModelInstaller. Without the model, isReady returns
+// false and the search bar falls back to keyword matching.
 import Foundation
 import CoreML
+import FileIDShared
 
 public final class CLIPTextEncoder: @unchecked Sendable {
 
@@ -44,12 +41,12 @@ public final class CLIPTextEncoder: @unchecked Sendable {
         let dir = Self.defaultDirectory
         guard FileManager.default.fileExists(atPath: dir.path) else { return false }
         guard CLIPTokenizer.shared.loadVocabulary(modelDirectory: dir) else {
-            NSLog("FileID CLIP text: vocab.json or merges.txt not found in \(dir.path)")
+            NSLog("FileID CLIP text: vocab.json or merges.txt not found in %@", redactPathForLog(dir.path))
             return false
         }
         let modelURL = Self.defaultModelURL
         guard FileManager.default.fileExists(atPath: modelURL.path) else {
-            NSLog("FileID CLIP text: clip_text.mlpackage not found at \(modelURL.path)")
+            NSLog("FileID CLIP text: clip_text.mlpackage not found at %@", redactPathForLog(modelURL.path))
             return false
         }
         do {
@@ -58,10 +55,10 @@ public final class CLIPTextEncoder: @unchecked Sendable {
             config.computeUnits = .all
             model = try MLModel(contentsOf: compiled, configuration: config)
             loadedURL = modelURL
-            NSLog("FileID CLIP text: loaded from \(modelURL.path)")
+            NSLog("FileID CLIP text: loaded from %@", redactPathForLog(modelURL.path))
             return true
         } catch {
-            NSLog("FileID CLIP text load failed: \(error)")
+            NSLog("FileID CLIP text load failed: %@", "\(error)")
             return false
         }
     }

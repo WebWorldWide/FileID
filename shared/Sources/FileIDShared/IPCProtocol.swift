@@ -32,6 +32,11 @@ public struct IPCCommand: Codable, Sendable {
         /// onboarding flow to download the recommended VLM up front
         /// instead of having the user wait at first Deep Analyze run.
         case prewarmModel(modelKind: String)
+        /// Cancel an in-flight prewarmModel. Lands at the next
+        /// Task.checkCancellation point inside swift-transformers'
+        /// fetch loop — usually within ~1 s. Safe no-op if no prewarm
+        /// is active.
+        case cancelPrewarm
     }
 }
 
@@ -310,11 +315,24 @@ public struct ModelDownloadProgress: Codable, Sendable {
     public let modelKind: String
     public let fraction: Double           // 0..1
     public let message: String
+    /// Real bytes downloaded so far. Sourced from swift-transformers'
+    /// `Progress.completedUnitCount`. Optional because some progress
+    /// callbacks (e.g. legacy ones, or non-byte-unit progresses) may
+    /// not have meaningful byte counts.
+    public let bytesDone: Int64?
+    /// Real total bytes for the download. Sourced from swift-transformers'
+    /// `Progress.totalUnitCount`. The welcome sheet's ETA math uses this
+    /// instead of the hardcoded `AIModelKind.approxBytes` estimate so
+    /// rates and ETAs match reality.
+    public let totalBytes: Int64?
 
-    public init(modelKind: String, fraction: Double, message: String) {
+    public init(modelKind: String, fraction: Double, message: String,
+                bytesDone: Int64? = nil, totalBytes: Int64? = nil) {
         self.modelKind = modelKind
         self.fraction = fraction
         self.message = message
+        self.bytesDone = bytesDone
+        self.totalBytes = totalBytes
     }
 }
 

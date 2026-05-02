@@ -105,7 +105,10 @@ public enum Restructure {
                     .first
                     .map { String($0).trimmingCharacters(in: .whitespaces) }
                     ?? "Unknown"
-                bucket = "People/\(first.isEmpty ? "Unknown" : first)"
+                let safeFirst = FilesystemNameSafe.componentSafe(
+                    first.isEmpty ? "Unknown" : first
+                )
+                bucket = "People/\(safeFirst)"
             } else if let lat = s.lat, let lon = s.lon {
                 // 0.5° bucket ≈ ~50 km cells. Names like "37.5,-122.0".
                 let latB = (lat * 2).rounded() / 2
@@ -119,15 +122,19 @@ public enum Restructure {
                 bucket = "Misc"
             }
 
-            // Filename: keep original or use VLM suggestion.
+            // Filename: keep original or use VLM suggestion. The
+            // VLM-proposed name is already slug-sanitized by
+            // DeepAnalyze.sanitize; the extension is sanitized here in
+            // case the source filename was malformed (a `.<weird>`
+            // ext would otherwise break Windows targets).
             let oldURL = URL(fileURLWithPath: s.path)
             let baseName = oldURL.deletingPathExtension().lastPathComponent
-            let ext = oldURL.pathExtension
+            let ext = FilesystemNameSafe.componentSafe(oldURL.pathExtension, maxLength: 16)
             let newName: String
             if let p = s.vlmProposed, !p.isEmpty {
-                newName = ext.isEmpty ? p : "\(p).\(ext)"
+                newName = ext.isEmpty || ext == "_" ? p : "\(p).\(ext)"
             } else {
-                newName = oldURL.lastPathComponent
+                newName = FilesystemNameSafe.componentSafe(oldURL.lastPathComponent)
             }
             // Compose target.
             var target = libraryRoot.appendingPathComponent(bucket, isDirectory: true)
@@ -197,7 +204,7 @@ public enum Restructure {
             } catch {
                 failed += 1
                 JSONLog.shared.warn(ev: "restructure_move_failed",
-                                    path: oldURL.path, error: "\(error)")
+                                    path: redactPathForLog(oldURL.path), error: "\(error)")
             }
         }
         JSONLog.shared.info(ev: "restructure_applied",

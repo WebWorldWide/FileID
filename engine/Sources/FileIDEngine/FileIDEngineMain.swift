@@ -1,13 +1,11 @@
-// FileIDEngine — `fileidd`
+// FileIDEngine — child process spawned by the FileID SwiftUI app.
+// Reads IPC commands from stdin (newline-delimited JSON), emits events
+// to stdout in the same format. Owns the SQLite database, scan
+// pipeline, ANE/GPU model loading, and all on-device inference
+// (MobileCLIP, ArcFace, MLX VLMs).
 //
-// Spawned as a child process by the FileID SwiftUI app. Reads commands from
-// stdin (newline-delimited JSON), writes events to stdout (same).
-//
-// Lifetime: bound to the parent process. When the app exits, the pipe closes,
-// the LineReader stream finishes, the engine exits cleanly.
-//
-// Milestone 1 scope: discovery only. No tagging, no DB, no embeddings.
-// Future milestones add Stage B (tagging), Stage C (DB writer), Stage D (post-scan).
+// Lifetime: bound to the parent. Pipe close → LineReader EOF → clean
+// exit. A getppid() poll catches force-quits where the pipe lingers.
 import Foundation
 import Darwin
 import FileIDShared
@@ -105,28 +103,35 @@ struct FileIDEngineMain {
             }
         }
 
-        // Command loop. Blocks reading stdin via LineReader; for each command,
-        // dispatches in a detached task so long-running scans don't block
-        // subsequent commands (pause/cancel must be responsive).
+        // Per-line decode errors get logged and skipped — a single
+        // rogue line shouldn't kill the engine when a slightly-newer
+        // app sends an IPCCommand case the engine doesn't know yet.
         let stdin = FileHandle.standardInput
-        let commands = LineReader.read(from: stdin, as: IPCCommand.self)
-        do {
-            for try await cmd in commands {
+        let commands = LineReader.readResults(from: stdin, as: IPCCommand.self)
+        for await item in commands {
+            switch item {
+            case .success(let cmd):
                 await dispatch(cmd, coordinator: coordinator, sink: sink, database: database)
                 if case .shutdown = cmd.payload { break }
+            case .failure(let err):
+                JSONLog.shared.warn(ev: "command_decode_failed", error: "\(err)")
+                await sink.emit(.error(EngineError(kind: "command_decode_failed",
+                                                    message: "\(err)")))
             }
-        } catch {
-            JSONLog.shared.error(ev: "command_stream_error", error: "\(error)")
-            await sink.emit(.error(EngineError(kind: "ipc_failed", message: "\(error)")))
         }
 
-        // Wait for any in-flight scan to finish before exiting. Without this,
-        // the detached scan task would be killed when main returns, stranding
-        // the parent without scanComplete events. If shutdown was requested,
-        // the scan should have observed coordinator.isCancelled and bailed
-        // quickly; if stdin EOF'd because the parent died, we just wait it out.
         await coordinator.awaitActiveScan()
         progressTicker.cancel()
+
+        // GRDB checkpoints on connection close (via atexit handlers we
+        // skip). Force one before fast-exit so the WAL doesn't carry
+        // late writes into the next launch.
+        if let database {
+            try? await database.pool.write { db in
+                try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)")
+            }
+        }
+
         JSONLog.shared.info(ev: "engine_exit")
         JSONLog.shared.flush()
 
@@ -267,11 +272,6 @@ struct FileIDEngineMain {
             await DeepAnalyze.shared.requestCancel()
             JSONLog.shared.info(ev: "deep_analyze_cancel_requested")
         case .prewarmModel(let modelKey):
-            // Onboarding-time download. Loads the requested VLM through
-            // the same swift-transformers HF path Deep Analyze uses, but
-            // doesn't run inference. Progress reuses the existing
-            // modelDownloadProgress event stream so the welcome sheet
-            // sees the same fractional progress as the settings card.
             guard let kind = AIModelKind(rawValue: modelKey) else {
                 await sink.emit(.error(EngineError(
                     kind: "prewarm_invalid_kind",
@@ -279,30 +279,50 @@ struct FileIDEngineMain {
                 )))
                 return
             }
+            // Prewarm runs OUTSIDE JobQueue. JobQueue serializes
+            // user-facing pipeline jobs (scan, cluster, analyze) that
+            // touch the database; a multi-GB model download has no
+            // such conflict and would otherwise block Start Scan
+            // behind a download that takes hours.
             JSONLog.shared.info(ev: "prewarm_model_started",
                                 extra: ["kind": AnyCodable(kind.rawValue)])
-            do {
-                try await DeepAnalyze.shared.ensureLoaded(kind: kind) { frac, msg in
-                    Task {
-                        await sink.emit(.modelDownloadProgress(ModelDownloadProgress(
-                            modelKind: kind.rawValue, fraction: frac, message: msg
-                        )))
+            let work = Task.detached(priority: .userInitiated) {
+                do {
+                    try await DeepAnalyze.shared.ensureLoaded(kind: kind) { frac, msg, done, total in
+                        Task {
+                            await sink.emit(.modelDownloadProgress(ModelDownloadProgress(
+                                modelKind: kind.rawValue, fraction: frac, message: msg,
+                                bytesDone: done > 0 ? done : nil,
+                                totalBytes: total > 0 ? total : nil
+                            )))
+                        }
                     }
+                    await DeepAnalyze.shared.markInstalledSentinel(kind: kind)
+                    await sink.emit(.modelDownloadProgress(ModelDownloadProgress(
+                        modelKind: kind.rawValue, fraction: 1.0,
+                        message: "\(kind.displayName) ready."
+                    )))
+                    JSONLog.shared.info(ev: "prewarm_model_done",
+                                        extra: ["kind": AnyCodable(kind.rawValue)])
+                } catch is CancellationError {
+                    await sink.emit(.error(EngineError(
+                        kind: "prewarm_cancelled",
+                        message: "Prewarm \(kind.displayName) cancelled."
+                    )))
+                    JSONLog.shared.info(ev: "prewarm_model_cancelled",
+                                        extra: ["kind": AnyCodable(kind.rawValue)])
+                } catch {
+                    await sink.emit(.error(EngineError(
+                        kind: "prewarm_failed",
+                        message: "Prewarm \(kind.displayName) failed: \(error.localizedDescription)"
+                    )))
                 }
-                // Emit a final 1.0 progress event so the UI flips to
-                // "installed" without waiting for the next event.
-                await sink.emit(.modelDownloadProgress(ModelDownloadProgress(
-                    modelKind: kind.rawValue, fraction: 1.0,
-                    message: "\(kind.displayName) ready."
-                )))
-                JSONLog.shared.info(ev: "prewarm_model_done",
-                                    extra: ["kind": AnyCodable(kind.rawValue)])
-            } catch {
-                await sink.emit(.error(EngineError(
-                    kind: "prewarm_failed",
-                    message: "Prewarm \(kind.displayName) failed: \(error.localizedDescription)"
-                )))
+                await DeepAnalyze.shared.setPrewarmTask(nil)
             }
+            await DeepAnalyze.shared.setPrewarmTask(work)
+        case .cancelPrewarm:
+            await DeepAnalyze.shared.cancelPrewarm()
+            JSONLog.shared.info(ev: "prewarm_cancel_requested")
         }
     }
 
@@ -625,7 +645,7 @@ struct FileIDEngineMain {
                 JSONLog.shared.warn(
                     ev: "crash_recovery_detected",
                     sess: row.id,
-                    path: row.rootPath,
+                    path: redactPathForLog(row.rootPath),
                     error: "Previous run died mid-scan; \(row.lastFileIndex ?? 0) files completed before the crash."
                 )
             }

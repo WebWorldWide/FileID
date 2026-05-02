@@ -13,6 +13,7 @@
 // flooding from 14 workers thrashes the ANE.
 import Foundation
 import CoreML
+import FileIDShared
 
 public final class MobileCLIPService: @unchecked Sendable {
     public static let shared = MobileCLIPService()

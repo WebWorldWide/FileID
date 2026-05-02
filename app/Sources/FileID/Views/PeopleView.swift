@@ -82,12 +82,28 @@ struct PeopleView: View {
                         let target = preferredTarget(a, b) ?? a ?? b
                         let source = (target?.id == a?.id) ? b : a
                         if let t = target, let s = source {
-                            if let n = store.mergePersons(target: t.id, sources: [s.id]) {
-                                mergeStatus = "Merged into \"\(t.displayName)\" (\(n) photos)."
+                            // Run on a detached task — the mergePersons
+                            // SQL touches face_prints + persons in a
+                            // transaction; on libraries with thousands
+                            // of clusters this can take 5–15 s and would
+                            // freeze the UI on the main thread.
+                            let storeRef = store
+                            let candidateID = candidate.id
+                            let displayName = t.displayName
+                            Task.detached(priority: .userInitiated) {
+                                let n = storeRef.mergePersons(target: t.id, sources: [s.id])
+                                await MainActor.run {
+                                    if let n {
+                                        mergeStatus = "Merged into \"\(displayName)\" (\(n) photos)."
+                                    }
+                                    suggestions.removeAll { $0.id == candidateID }
+                                    reload()
+                                }
                             }
+                        } else {
+                            suggestions.removeAll { $0.id == candidate.id }
+                            reload()
                         }
-                        suggestions.removeAll { $0.id == candidate.id }
-                        reload()
                     },
                     onAcceptMany: { batch in
                         // One transaction for the whole batch. ReadStore's
@@ -122,16 +138,27 @@ struct PeopleView: View {
                         .sorted { $0.displayName < $1.displayName },
                     onPick: { target in
                         let sources = mergeChecked.filter { $0 != target.id }
-                        if let newCount = store.mergePersons(target: target.id,
-                                                              sources: Array(sources)) {
-                            mergeStatus = "Merged \(sources.count + 1) clusters into \"\(target.displayName)\" (\(newCount) photos)."
-                        } else {
-                            mergeStatus = "Merge failed — see logs."
-                        }
+                        let storeRef = store
+                        let displayName = target.displayName
+                        let sourceCount = sources.count
+                        // Off the main thread — large merges hit
+                        // face_prints + persons in a transaction and
+                        // can take seconds.
                         mergeMode = false
                         mergeChecked.removeAll()
                         activeSheet = nil
-                        reload()
+                        Task.detached(priority: .userInitiated) {
+                            let newCount = storeRef.mergePersons(target: target.id,
+                                                                  sources: Array(sources))
+                            await MainActor.run {
+                                if let newCount {
+                                    mergeStatus = "Merged \(sourceCount + 1) clusters into \"\(displayName)\" (\(newCount) photos)."
+                                } else {
+                                    mergeStatus = "Merge failed — see logs."
+                                }
+                                reload()
+                            }
+                        }
                     },
                     onCancel: { activeSheet = nil }
                 )

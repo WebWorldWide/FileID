@@ -8,7 +8,7 @@
       "blur-material" : null,
       "layers" : [
         {
-          "image-name" : "?.svg",
+          "image-name" : "question.svg",
           "name" : "?",
           "position" : {
             "scale" : 0.41,

@@ -254,30 +254,59 @@ struct CleanupView: View {
     }
 
     private func trashSelected(across groupsToScan: [DuplicateGroup]) async {
-        var trashedIDs: [Int64] = []
-        var freedBytes: Int64 = 0
-        // Track which duplicate groups had at least one file trashed —
-        // their KEEPERS (the un-trashed survivors) are candidates for
-        // the auto-tag step below.
+        // Build the parallel work list first: every (id, url, size) we
+        // intend to trash. Doing this on the main actor up front keeps
+        // SwiftUI selection/state reads off the concurrent path.
+        struct TrashItem: Sendable { let id: Int64; let url: URL; let size: Int64 }
+        var work: [TrashItem] = []
         var keeperURLsToTag: [URL] = []
         for group in groupsToScan {
-            var groupHadTrash = false
-            for f in group.files where selection.contains(f.id) {
-                do {
-                    try FileManager.default.trashItem(at: f.url, resultingItemURL: nil)
-                    trashedIDs.append(f.id)
-                    freedBytes += f.sizeBytes
-                    groupHadTrash = true
-                } catch {
-                    NSLog("FileID v2 cleanup: could not trash %@: %@", f.url.path, "\(error)")
-                }
+            let trashed = group.files.filter { selection.contains($0.id) }
+            let kept    = group.files.filter { !selection.contains($0.id) }
+            for f in trashed {
+                work.append(TrashItem(id: f.id, url: f.url, size: f.sizeBytes))
             }
-            if groupHadTrash {
-                // Keepers: anything in this group we did NOT trash.
-                for f in group.files where !selection.contains(f.id) {
-                    keeperURLsToTag.append(f.url)
-                }
+            if !trashed.isEmpty {
+                keeperURLsToTag.append(contentsOf: kept.map(\.url))
             }
+        }
+
+        // Trash up to 8 files concurrently. Foundation's trashItem isn't
+        // thread-hostile (Finder serializes journaling underneath), but
+        // doing them sequentially on a 10K dedup pass = 10–50 s freeze.
+        struct TrashResult: Sendable { let id: Int64; let size: Int64; let success: Bool }
+        let results: [TrashResult] = await withTaskGroup(of: TrashResult.self) { group in
+            var inFlight = 0
+            var i = 0
+            var collected: [TrashResult] = []
+            collected.reserveCapacity(work.count)
+            let maxConcurrency = 8
+            while i < work.count {
+                if inFlight >= maxConcurrency {
+                    if let r = await group.next() { collected.append(r); inFlight -= 1 }
+                }
+                let item = work[i]
+                group.addTask {
+                    do {
+                        try FileManager.default.trashItem(at: item.url, resultingItemURL: nil)
+                        return TrashResult(id: item.id, size: item.size, success: true)
+                    } catch {
+                        NSLog("FileID v2 cleanup: could not trash %@: %@", redactPathForLog(item.url.path), "\(error)")
+                        return TrashResult(id: item.id, size: item.size, success: false)
+                    }
+                }
+                inFlight += 1
+                i += 1
+            }
+            for await r in group { collected.append(r) }
+            return collected
+        }
+
+        var trashedIDs: [Int64] = []
+        var freedBytes: Int64 = 0
+        for r in results where r.success {
+            trashedIDs.append(r.id)
+            freedBytes += r.size
         }
         let mb = Double(freedBytes) / 1_048_576
         let pruned = store.deleteFiles(ids: trashedIDs)

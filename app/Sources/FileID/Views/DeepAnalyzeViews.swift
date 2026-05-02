@@ -169,13 +169,17 @@ private struct ModelOptionRow: View {
     }
 }
 
-// Mirrors the engine's "config.json on disk?" install check.
+// Sentinel-based install check. The engine writes
+// `.fileid-installed` only after ensureLoaded succeeded — i.e. every
+// weight shard is on disk AND MLX successfully built a ModelContainer.
+// Checking config.json (which Hub creates very early) flips green
+// while gigabytes of safetensors are still streaming in.
 enum ModelInstallStatus {
     static func isInstalled(kind: AIModelKind) -> Bool {
         let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
             .appendingPathComponent("huggingface/models", isDirectory: true)
             .appendingPathComponent(kind.sourceRepo, isDirectory: true)
-            .appendingPathComponent("config.json")
+            .appendingPathComponent(".fileid-installed")
         return FileManager.default.fileExists(atPath: url.path)
     }
 }

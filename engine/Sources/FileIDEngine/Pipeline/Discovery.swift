@@ -9,6 +9,7 @@
 // huge videos / archives and decode can OOM on 16 GB), and
 // non-regular files.
 import Foundation
+import FileIDShared
 
 public struct DiscoveredFile: Sendable {
     public let url: URL

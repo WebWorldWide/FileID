@@ -29,6 +29,10 @@ public actor DeepAnalyze {
     private var container: ModelContainer?
     private var loadedKind: AIModelKind?
     private var cancelRequested: Bool = false
+    private var prewarmTask: Task<Void, Never>?
+    /// Honored by setPrewarmTask if a Cancel arrives before the
+    /// JobQueue dispatches the work.
+    private var prewarmCancelPending: Bool = false
 
     private let generateParams = MLXLMCommon.GenerateParameters(
         maxTokens: 320,
@@ -43,6 +47,23 @@ public actor DeepAnalyze {
     public func requestCancel() { cancelRequested = true }
     public func clearCancel()   { cancelRequested = false }
     public func isCancelled() -> Bool { cancelRequested }
+
+    public func cancelPrewarm() {
+        if let task = prewarmTask {
+            task.cancel()
+        } else {
+            prewarmCancelPending = true
+        }
+    }
+
+    public func setPrewarmTask(_ task: Task<Void, Never>?) {
+        self.prewarmTask = task
+        if let task, prewarmCancelPending {
+            prewarmCancelPending = false
+            task.cancel()
+        }
+        if task == nil { prewarmCancelPending = false }
+    }
 
     // MARK: - Model lifecycle
 
@@ -67,26 +88,26 @@ public actor DeepAnalyze {
         }
     }
 
-    /// Idempotent: ensures the requested model is loaded and ready.
-    /// Calls back into `progress` for download fraction (0..1).
+    /// Idempotent. Progress callback receives (fraction, message,
+    /// bytesDone, totalBytes) — last two are swift-transformers'
+    /// per-file Progress unit counts (see WelcomeSheet for the
+    /// per-file vs aggregate caveat).
     public func ensureLoaded(
         kind: AIModelKind,
-        progress: (@Sendable (Double, String) -> Void)? = nil
+        progress: (@Sendable (Double, String, Int64, Int64) -> Void)? = nil
     ) async throws {
         if container != nil, loadedKind == kind {
             loadState = .ready(kind)
             return
         }
-        // Drop a previously-loaded different model.
         if container != nil {
             container = nil
             loadedKind = nil
-            MLX.GPU.clearCache()  // safe; just frees scratch buffers
+            MLX.GPU.clearCache()
         }
         loadState = .loading(progress: 0, message: "Preparing \(kind.displayName)…")
-        // Avoid `MLX.GPU.set(cacheLimit:)` — calling it from the engine's
-        // CLI process context terminates the process silently. Default
-        // cache management is fine.
+        // Avoid MLX.GPU.set(cacheLimit:) — calling it from the engine's
+        // CLI context terminates the process silently.
         JSONLog.shared.info(ev: "deep_load_about_to_loadcontainer",
                             extra: ["kind": AnyCodable(kind.rawValue),
                                     "repo": AnyCodable(kind.sourceRepo)])
@@ -94,30 +115,52 @@ public actor DeepAnalyze {
 
         do {
             let config = Self.vlmConfig(for: kind)
-            // HuggingFace cache at `~/Documents/huggingface` (swift-transformers
-            // default) so any prior downloads are reused.
-            // `useOfflineMode: false` disables the auto-detect that
-            // sometimes flakes after sleep/wake and refuses downloads
-            // with `offlineModeError("Repository not available locally")`.
             let documentsHF = FileManager.default
                 .urls(for: .documentDirectory, in: .userDomainMask).first!
                 .appending(component: "huggingface")
-            // Self-heal v1 model directories: a model downloaded by an
-            // older swift-transformers version may be missing some
-            // .metadata sidecars (e.g. v1's Qwen 2.5-VL 3B is missing
-            // merges.txt.metadata). The newer Hub in offline mode
-            // refuses to load without them. Generate them on demand.
+
+            // 1. Pre-fetch every file in the repo via 12-way parallel
+            //    range GETs. swift-transformers' built-in Hub is
+            //    single-stream and dies at ~500 KB/s on per-IP-throttled
+            //    CDNs; doing it ourselves multiplies effective throughput.
+            let throttle = ProgressThrottle()
+            try await VLMDownloader.shared.fetchRepo(
+                repo: kind.sourceRepo,
+                documentsHF: documentsHF
+            ) { frac, done, total in
+                let isBoundary = frac <= 0.0 || frac >= 1.0
+                guard throttle.shouldPass(boundary: isBoundary) else { return }
+                progress?(frac,
+                         "Downloading \(kind.displayName) (\(Int(frac * 100))%)",
+                         done, total)
+            }
+
+            // 2. Files are confirmed on disk. Write the install
+            //    sentinel NOW — before any subsequent step (metadata
+            //    synthesis, MLX load) that could throw. The user has
+            //    paid the cost of the multi-GB download; the install
+            //    flow is "done" from their perspective. A later
+            //    failure to load into MLX will be retried on first
+            //    actual Deep Analyze use, with a focused error
+            //    message in the right context.
+            Self.writeInstalledSentinel(kind: kind, documentsHF: documentsHF)
+
+            // 3. v1 model dirs may be missing .metadata sidecars (e.g.
+            //    Qwen 2.5-VL 3B lacks merges.txt.metadata) which the
+            //    newer Hub refuses to load without.
             Self.synthesizeMissingMetadata(
                 modelDir: documentsHF.appending(component: "models")
                     .appending(component: kind.sourceRepo)
             )
-            let hub = HubApi(downloadBase: documentsHF, useOfflineMode: false)
+
+            // 4. Files are local; HubApi.useOfflineMode = true skips
+            //    swift-transformers' slow single-stream fetcher.
+            let hub = HubApi(downloadBase: documentsHF, useOfflineMode: true)
             let loaded = try await VLMModelFactory.shared.loadContainer(
                 hub: hub,
                 configuration: config
-            ) { p in
-                let frac = p.fractionCompleted
-                progress?(frac, "Downloading \(kind.displayName) (\(Int(frac * 100))%)")
+            ) { _ in
+                // Loading from local files; no remote download.
             }
             JSONLog.shared.info(ev: "deep_loadcontainer_returned",
                                 extra: ["kind": AnyCodable(kind.rawValue)])
@@ -144,6 +187,30 @@ public actor DeepAnalyze {
         loadedKind = nil
         loadState = .notLoaded
         MLX.GPU.clearCache()
+    }
+
+    /// Mark a model dir "fully installed" by writing a sentinel file.
+    /// Called as soon as VLMDownloader.fetchRepo confirms every file
+    /// is on disk — i.e. the user has finished paying the multi-GB
+    /// download cost. A later failure inside `loadContainer` doesn't
+    /// invalidate the install; first Deep Analyze use will retry the
+    /// MLX load and surface the error in context.
+    public func markInstalledSentinel(kind: AIModelKind) {
+        let documentsHF = FileManager.default
+            .urls(for: .documentDirectory, in: .userDomainMask).first!
+            .appending(component: "huggingface")
+        Self.writeInstalledSentinel(kind: kind, documentsHF: documentsHF)
+    }
+
+    /// Static, nonisolated variant — callable from inside ensureLoaded
+    /// without an actor hop. Behavior identical to markInstalledSentinel.
+    nonisolated static func writeInstalledSentinel(kind: AIModelKind, documentsHF: URL) {
+        let modelDir = documentsHF.appending(component: "models")
+            .appending(component: kind.sourceRepo)
+        let sentinel = modelDir.appendingPathComponent(".fileid-installed")
+        try? FileManager.default.createDirectory(
+            at: modelDir, withIntermediateDirectories: true)
+        try? Data().write(to: sentinel)
     }
 
     // MARK: - Inference
@@ -429,12 +496,12 @@ public actor DeepAnalyze {
                 synthesized.append(file.lastPathComponent)
             } catch {
                 JSONLog.shared.warn(ev: "metadata_synth_failed",
-                                    path: metaURL.path, error: "\(error)")
+                                    path: redactPathForLog(metaURL.path), error: "\(error)")
             }
         }
         if !synthesized.isEmpty {
             JSONLog.shared.info(ev: "metadata_synthesized",
-                                extra: ["dir": AnyCodable(modelDir.path),
+                                extra: ["dir": AnyCodable(redactPathForLog(modelDir.path)),
                                         "files": AnyCodable(synthesized.joined(separator: ","))])
         }
     }
@@ -606,4 +673,22 @@ private final class TokenCollector: @unchecked Sendable {
     private let lock = NSLock()
     func append(_ s: String) { lock.lock(); buffer += s; lock.unlock() }
     func snapshot() -> String { lock.lock(); defer { lock.unlock() }; return buffer }
+}
+
+/// 100ms gate. Caps progress emit rate at ~10 Hz; boundary events
+/// (frac == 0 or >= 1) always pass.
+private final class ProgressThrottle: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lastEmitAt: TimeInterval = 0
+    private static let intervalSec: TimeInterval = 0.1
+
+    func shouldPass(boundary: Bool) -> Bool {
+        let now = Date().timeIntervalSinceReferenceDate
+        lock.lock(); defer { lock.unlock() }
+        if boundary || (now - lastEmitAt) >= Self.intervalSec {
+            lastEmitAt = now
+            return true
+        }
+        return false
+    }
 }

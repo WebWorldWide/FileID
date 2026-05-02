@@ -125,10 +125,12 @@ public enum DeepAnalyzeRunner {
             message: "Loading \(modelKind.displayName)…"
         )))
         do {
-            try await DeepAnalyze.shared.ensureLoaded(kind: modelKind) { frac, msg in
+            try await DeepAnalyze.shared.ensureLoaded(kind: modelKind) { frac, msg, done, total in
                 Task {
                     await sink.emit(.modelDownloadProgress(ModelDownloadProgress(
-                        modelKind: modelKey, fraction: frac, message: msg
+                        modelKind: modelKey, fraction: frac, message: msg,
+                        bytesDone: done > 0 ? done : nil,
+                        totalBytes: total > 0 ? total : nil
                     )))
                 }
             }

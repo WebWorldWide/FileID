@@ -130,7 +130,7 @@ public enum FaceEmbedderKind: String, CaseIterable, Sendable, Codable {
         case .arcfaceIResNet50:
             return "Industry standard. Same model Immich uses; tightest same-person clusters across age, lighting, and pose."
         case .arcfaceMobileFace:
-            return "Compact alternative. Near-equal accuracy, 12× smaller. Use on 8 GB Macs."
+            return "Compact (~13 MB) alternative — small by design, not by mistake. Near-equal accuracy, picked automatically on 8 GB Macs."
         }
     }
 

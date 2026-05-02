@@ -132,13 +132,29 @@ struct MainWindow: View {
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
                 guard let url else { return }
                 var isDir: ObjCBool = false
-                if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
+                guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir),
+                      isDir.boolValue else { return }
+                // Pre-validate read access. NSOpenPanel + drag-drop both
+                // accept folders the user can't actually read (network
+                // shares offline, restricted system folders). Without
+                // this check the engine fails opaquely on bookmark
+                // resolve; surface a user-friendly error here instead.
+                guard FileManager.default.isReadableFile(atPath: url.path) else {
+                    let folderName = url.lastPathComponent
                     DispatchQueue.main.async {
-                        if pickedURL != url {
-                            engine.clearProgress()
-                        }
-                        pickedURL = url
+                        let alert = NSAlert()
+                        alert.messageText = "Folder isn't readable"
+                        alert.informativeText = "\"\(folderName)\" can't be read. If it's a network share, mount it and try again. If it's a system folder, pick a folder you own."
+                        alert.alertStyle = .warning
+                        alert.runModal()
                     }
+                    return
+                }
+                DispatchQueue.main.async {
+                    if pickedURL != url {
+                        engine.clearProgress()
+                    }
+                    pickedURL = url
                 }
             }
             return true

@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/macOS-14%2B-blue?style=flat-square">
+  <img src="https://img.shields.io/badge/macOS-15%2B-blue?style=flat-square">
   <img src="https://img.shields.io/badge/Apple%20Silicon-required-orange?style=flat-square">
   <img src="https://img.shields.io/badge/Swift-6-fa7343?style=flat-square">
   <img src="https://img.shields.io/badge/100%25-on--device-green?style=flat-square">
@@ -42,7 +42,7 @@ Models live under `~/Library/Application Support/FileID/Models/` (CLIP `.mlpacka
 
 ## Requirements
 
-- macOS 14+, Apple Silicon
+- macOS 15+, Apple Silicon
 - Xcode 16+ (Swift 6)
 - `cmake` and Xcode's Metal Toolchain (for the MLX `.metallib` Deep Analyze needs)
 

@@ -1,15 +1,9 @@
-// In-app downloader for the CLIP semantic-search models. Pulls a
-// single zip containing both the MobileCLIP-S2 image encoder and the
-// text encoder + BPE vocab, extracts to ~/Library/Application Support/
-// FileID/Models/, then re-loads CLIPTextEncoder so semantic search
-// activates without an app restart.
-//
-// Mirrors the chunk-streaming download pattern from v1's
-// AIModelDownloadService — async URLSession.bytes, 64 KB chunks
-// written to a `.partial` temp file, atomic replace into the cache
-// directory, native /usr/bin/unzip for extraction.
+// In-app downloader for MobileCLIP-S2 (image encoder + text encoder +
+// BPE vocab). Files come straight from Apple/OpenAI HF repos —
+// per-file streaming with up to 3 concurrent fetches.
 import Foundation
 import AppKit
+import FileIDShared
 
 @MainActor
 @Observable
@@ -21,7 +15,8 @@ public final class CLIPModelInstaller {
         case unknown
         case missing(reason: String)
         case installed(sizeBytes: Int64)
-        case downloading(fraction: Double, message: String)
+        case downloading(fraction: Double, message: String,
+                         bytesPerSecond: Double, etaSeconds: Double)
         case extracting
         case installFailed(String)
     }
@@ -47,28 +42,27 @@ public final class CLIPModelInstaller {
 
     public static var modelsRoot: URL { AppSupportPath.models }
 
-    /// Per-file fetch plan. Each entry is (sourceURL, destination
-    /// path on disk). Apple hosts the .mlpackage files; OpenAI hosts
-    /// the BPE vocabulary. Both repos are public + stable, so this is
-    /// the source of truth — no need for a self-hosted release artifact.
     private static var fetchPlan: [(remote: URL, dest: URL)] {
         let m = modelsRoot
         let imgPkg = m.appendingPathComponent("mobileclip_image/mobileclip_s2_image.mlpackage")
-        // CLIPTextEncoder.swift looks for clip_text/clip_text.mlpackage —
-        // Apple's file is named mobileclip_s2_text.mlpackage, but we land
-        // it under the expected filename so the loader picks it up.
+        // Apple's file is mobileclip_s2_text.mlpackage; CLIPTextEncoder
+        // looks under clip_text.mlpackage, so we rename on landing.
         let txtPkg = m.appendingPathComponent("clip_text/clip_text.mlpackage")
         let txtDir = m.appendingPathComponent("clip_text")
-        func appleImg(_ rel: String) -> URL {
-            URL(string: "https://huggingface.co/apple/coreml-mobileclip/resolve/main/mobileclip_s2_image.mlpackage/\(rel)")!
+        func appleImg(_ rel: String) -> URL? {
+            URL(string: "https://huggingface.co/apple/coreml-mobileclip/resolve/main/mobileclip_s2_image.mlpackage/\(rel)")
         }
-        func appleTxt(_ rel: String) -> URL {
-            URL(string: "https://huggingface.co/apple/coreml-mobileclip/resolve/main/mobileclip_s2_text.mlpackage/\(rel)")!
+        func appleTxt(_ rel: String) -> URL? {
+            URL(string: "https://huggingface.co/apple/coreml-mobileclip/resolve/main/mobileclip_s2_text.mlpackage/\(rel)")
         }
-        func openaiBpe(_ name: String) -> URL {
-            URL(string: "https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/\(name)")!
+        func openaiBpe(_ name: String) -> URL? {
+            URL(string: "https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/\(name)")
         }
-        return [
+        // compactMap drops any entry whose URL doesn't parse — currently
+        // never possible since all paths are static literals, but the
+        // compactMap means a future typo or accidental whitespace can't
+        // crash the installer.
+        let pairs: [(URL?, URL)] = [
             (appleImg("Manifest.json"),
              imgPkg.appendingPathComponent("Manifest.json")),
             (appleImg("Data/com.apple.CoreML/model.mlmodel"),
@@ -84,6 +78,9 @@ public final class CLIPModelInstaller {
             (openaiBpe("vocab.json"), txtDir.appendingPathComponent("vocab.json")),
             (openaiBpe("merges.txt"), txtDir.appendingPathComponent("merges.txt")),
         ]
+        return pairs.compactMap { remote, dest in
+            remote.map { (remote: $0, dest: dest) }
+        }
     }
 
     // MARK: - Status
@@ -103,8 +100,6 @@ public final class CLIPModelInstaller {
 
     // MARK: - Install paths
 
-    /// Download every required file from the canonical hosts (Apple
-    /// for the .mlpackage encoders, OpenAI for the BPE vocabulary).
     public func install() {
         guard task == nil else { return }
         task = Task { [weak self] in
@@ -113,9 +108,8 @@ public final class CLIPModelInstaller {
         }
     }
 
-    /// Install from a pre-built zip on disk (offline / air-gapped
-    /// fallback). Expects the same layout the hub fetch would produce —
-    /// `mobileclip_image/...` and `clip_text/...` at the top level.
+    /// Air-gapped fallback. Expects the same layout the hub fetch
+    /// produces — mobileclip_image/… and clip_text/… at the top.
     public func installFromLocalZip(_ zipURL: URL) {
         guard task == nil else { return }
         task = Task { [weak self] in
@@ -142,75 +136,71 @@ public final class CLIPModelInstaller {
 
     // MARK: - Implementation
 
-    /// Multi-file fetch from HuggingFace. Pre-sizes the whole job via
-    /// HEAD requests so progress reads accurately end-to-end, then
-    /// streams each file in 64 KB chunks to a `.partial` temp before
-    /// atomic-replacing into place.
+    /// Concurrent per-file fetch from HF (3 streams). Each file's
+    /// tick lands in the shared tracker; the global Status.downloading
+    /// reads sum-of-writtens / sum-of-totals + summed bandwidth.
+    /// Files stage into a sibling dir and atomic-promote on full
+    /// success — a partial install never poisons the production tree.
     private func runHubFetch() async {
-        // Pre-flight: need ~250 MB free for the .mlpackage files +
-        // tokenizer.
-        if let free = freeDiskBytes(), free < 250 * 1024 * 1024 {
-            status = .installFailed("Not enough free space (need ~250 MB).")
+        let approxBytes: Int64 = 250 * 1024 * 1024
+        if let free = freeDiskBytes(), free < approxBytes * 2 {
+            status = .installFailed("Not enough free space (need ~\(approxBytes * 2 / 1_048_576) MB).")
             return
         }
 
+        let modelsRoot = Self.modelsRoot
+        let stagingRoot = modelsRoot
+            .appendingPathComponent(".clip-staging-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: stagingRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: stagingRoot) }
+
         let plan = Self.fetchPlan
-        status = .downloading(fraction: 0, message: "Checking sizes…")
+        let stagedPlan: [(remote: URL, staged: URL, finalDest: URL)] = plan.map { item in
+            let rel = item.dest.path.dropFirst(modelsRoot.path.count + 1)
+            let staged = stagingRoot.appendingPathComponent(String(rel))
+            return (item.remote, staged, item.dest)
+        }
 
-        // 1. HEAD every URL to compute total bytes for an accurate bar.
-        var sizes: [Int64] = []
-        var grandTotal: Int64 = 0
-        for (remote, _) in plan {
-            do {
-                var req = URLRequest(url: remote)
-                req.httpMethod = "HEAD"
-                let (_, resp) = try await URLSession.shared.data(for: req)
-                if let http = resp as? HTTPURLResponse {
-                    if !(200..<400).contains(http.statusCode) {
-                        status = .installFailed("Couldn't reach \(remote.lastPathComponent) (HTTP \(http.statusCode)).")
-                        return
-                    }
-                    if let lenStr = http.value(forHTTPHeaderField: "Content-Length"),
-                       let len = Int64(lenStr) {
-                        sizes.append(len); grandTotal += len
-                    } else {
-                        sizes.append(0)
-                    }
+        status = .downloading(fraction: 0, message: "Connecting…",
+                              bytesPerSecond: 0, etaSeconds: 0)
+        let tracker = ProgressTracker(fileCount: plan.count)
+
+        do {
+            try await runParallelDownloads(
+                plan: stagedPlan.map { (remote: $0.remote, dest: $0.staged) },
+                // Each file uses up to 8-way ranged GETs internally,
+                // so 2 concurrent files = ~16 TCP connections to HF.
+                // More than that and Cloudflare starts rate-limiting.
+                tracker: tracker, maxConcurrency: 2
+            )
+        } catch is CancellationError {
+            status = .missing(reason: "Cancelled.")
+            return
+        } catch let StreamingDownloadError.http(code) {
+            status = .installFailed("Server returned HTTP \(code). Couldn't reach the model server.")
+            return
+        } catch {
+            status = .installFailed("Download failed: \(error.localizedDescription)")
+            return
+        }
+
+        status = .extracting
+        do {
+            for item in stagedPlan {
+                try FileManager.default.createDirectory(
+                    at: item.finalDest.deletingLastPathComponent(),
+                    withIntermediateDirectories: true)
+                if FileManager.default.fileExists(atPath: item.finalDest.path) {
+                    _ = try FileManager.default.replaceItemAt(item.finalDest, withItemAt: item.staged)
                 } else {
-                    sizes.append(0)
+                    try FileManager.default.moveItem(at: item.staged, to: item.finalDest)
                 }
-            } catch is CancellationError {
-                status = .missing(reason: "Cancelled.")
-                return
-            } catch {
-                status = .installFailed("Couldn't reach the model server. Check your connection.")
-                return
             }
+        } catch {
+            status = .installFailed("Couldn't promote staged files: \(error.localizedDescription)")
+            return
         }
 
-        // 2. Stream each file. Running total + accurate per-file
-        // progress is shown as "MB / total MB".
-        var running: Int64 = 0
-        for (idx, entry) in plan.enumerated() {
-            do {
-                try await downloadOne(remote: entry.remote, dest: entry.dest,
-                                       fileIndex: idx + 1, totalFiles: plan.count,
-                                       runningStart: running, grandTotal: grandTotal)
-            } catch is CancellationError {
-                status = .missing(reason: "Cancelled.")
-                return
-            } catch let DownloadError.failed(msg) {
-                status = .installFailed(msg)
-                return
-            } catch {
-                status = .installFailed("Download failed: \(error.localizedDescription)")
-                return
-            }
-            running += sizes[idx]
-        }
-
-        status = .extracting   // brief — final validation is fast.
-        // Validate every required file landed.
         for f in Self.requiredFiles {
             if !FileManager.default.fileExists(atPath: f.path) {
                 status = .installFailed("Missing after install: \(f.lastPathComponent).")
@@ -218,96 +208,141 @@ public final class CLIPModelInstaller {
             }
         }
 
-        // Eagerly load the text encoder so search activates now.
-        // Engine-side image encoder picks up the new file on next start.
+        // Eager text-encoder load so search activates without restart.
         Task.detached(priority: .utility) { _ = CLIPTextEncoder.shared.load() }
         refreshStatus()
     }
 
-    private enum DownloadError: Error {
-        case failed(String)
+    /// Body lives outside the TaskGroup closure so the Swift 6 region
+    /// isolation checker sees Sendable parameters instead of capture
+    /// inference on the closure's implicit set.
+    private func runParallelDownloads(
+        plan: [(remote: URL, dest: URL)],
+        tracker: ProgressTracker,
+        maxConcurrency: Int
+    ) async throws {
+        let count = plan.count
+        let remotes: [URL] = plan.map(\.remote)
+        let dests:   [URL] = plan.map(\.dest)
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            var inFlight = 0
+            var i = 0
+            while i < count {
+                if inFlight >= maxConcurrency {
+                    try await group.next()
+                    inFlight -= 1
+                }
+                let idx = i
+                let remote = remotes[idx]
+                let dest = dests[idx]
+                group.addTask {
+                    try await Self.runOneFile(index: idx, remote: remote,
+                                              dest: dest, tracker: tracker)
+                }
+                inFlight += 1
+                i += 1
+            }
+            try await group.waitForAll()
+        }
     }
 
-    /// Stream one file from `remote` into `dest`, atomic-replace on
-    /// completion. Updates `status` with overall progress (running
-    /// bytes / grand total) every 256 KB.
-    private func downloadOne(remote: URL, dest: URL,
-                              fileIndex: Int, totalFiles: Int,
-                              runningStart: Int64, grandTotal: Int64) async throws {
+    private static func runOneFile(
+        index: Int, remote: URL, dest: URL, tracker: ProgressTracker
+    ) async throws {
+        try Task.checkCancellation()
         try FileManager.default.createDirectory(
             at: dest.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        let tmp = dest.appendingPathExtension("partial")
-        try? FileManager.default.removeItem(at: tmp)
-        FileManager.default.createFile(atPath: tmp.path, contents: nil)
-        guard let handle = try? FileHandle(forWritingTo: tmp) else {
-            throw DownloadError.failed("Couldn't create temp file for \(dest.lastPathComponent).")
+        // parallelStreamingDownload HEADs first, decides parts based
+        // on Content-Length, and falls back to single-stream when the
+        // host doesn't expose ranges or the file is small. weight.bin
+        // (~80 MB) gets 8-way; Manifest.json (~few KB) stays single.
+        try await parallelStreamingDownload(remote: remote, dest: dest, parts: 12) { tick in
+            tracker.update(index: index, tick: tick)
+            Task { @MainActor in
+                Self.shared.publishFromTracker(tracker)
+            }
+        }
+        tracker.markComplete(index: index)
+        await MainActor.run { Self.shared.publishFromTracker(tracker) }
+    }
+
+    @MainActor
+    private func publishFromTracker(_ tracker: ProgressTracker) {
+        let snap = tracker.snapshot()
+        let total = snap.totalBytes
+        let written = snap.writtenBytes
+        let frac = total > 0 ? min(1.0, Double(written) / Double(total)) : 0
+        let mb = Double(written) / 1_048_576.0
+        let totalMB = Double(total) / 1_048_576.0
+        let activeCount = snap.activeFiles
+        let activeLabel = activeCount > 1 ? " (\(activeCount) files in parallel)" : ""
+        let msg = total > 0
+            ? String(format: "Downloading… %.0f / %.0f MB%@", mb, totalMB, activeLabel)
+            : String(format: "Downloading… %.0f MB%@", mb, activeLabel)
+        status = .downloading(
+            fraction: frac, message: msg,
+            bytesPerSecond: snap.combinedBytesPerSec,
+            etaSeconds: snap.combinedETASec
+        )
+    }
+
+    /// Lock-protected aggregator. NSLock + `@unchecked Sendable` rather
+    /// than `@MainActor` because Swift 6's region isolation checker
+    /// can't see through the `addTask { @MainActor in … }` closure.
+    private final class ProgressTracker: @unchecked Sendable {
+        struct FileState { var written: Int64; var total: Int64; var bps: Double; var done: Bool }
+        struct Snapshot {
+            let writtenBytes: Int64
+            let totalBytes: Int64
+            let combinedBytesPerSec: Double
+            let combinedETASec: Double
+            let activeFiles: Int
+        }
+        private let lock = NSLock()
+        private var states: [FileState]
+
+        init(fileCount: Int) {
+            self.states = Array(repeating: FileState(written: 0, total: 0, bps: 0, done: false),
+                                count: fileCount)
         }
 
-        let label = dest.lastPathComponent
-        status = .downloading(
-            fraction: grandTotal > 0 ? Double(runningStart) / Double(grandTotal) : 0,
-            message: "Downloading \(label) (\(fileIndex)/\(totalFiles))…"
-        )
+        func update(index: Int, tick: DownloadTick) {
+            lock.lock(); defer { lock.unlock() }
+            guard states.indices.contains(index) else { return }
+            states[index].written = tick.written
+            if tick.total > 0 { states[index].total = tick.total }
+            states[index].bps = tick.bytesPerSecond
+        }
 
-        do {
-            let (bytes, response) = try await URLSession.shared.bytes(from: remote)
-            guard let http = response as? HTTPURLResponse,
-                  (200..<300).contains(http.statusCode) else {
-                try? handle.close()
-                try? FileManager.default.removeItem(at: tmp)
-                let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-                throw DownloadError.failed("Download failed (HTTP \(code)) for \(label).")
+        func markComplete(index: Int) {
+            lock.lock(); defer { lock.unlock() }
+            guard states.indices.contains(index) else { return }
+            states[index].done = true
+            if states[index].total > 0 {
+                states[index].written = states[index].total
             }
+            states[index].bps = 0
+        }
 
-            var chunk = Data()
-            chunk.reserveCapacity(64 * 1024)
-            var fileWritten: Int64 = 0
-            var sinceUI = 0
-            for try await byte in bytes {
-                try Task.checkCancellation()
-                chunk.append(byte)
-                if chunk.count >= 64 * 1024 {
-                    try handle.write(contentsOf: chunk)
-                    fileWritten += Int64(chunk.count)
-                    sinceUI += chunk.count
-                    chunk.removeAll(keepingCapacity: true)
-                    if sinceUI >= 256 * 1024 {
-                        let totalDone = runningStart + fileWritten
-                        let frac = grandTotal > 0
-                            ? min(1.0, Double(totalDone) / Double(grandTotal)) : 0
-                        let mb = Double(totalDone) / 1_048_576.0
-                        let totalMB = Double(grandTotal) / 1_048_576.0
-                        let msg = grandTotal > 0
-                            ? String(format: "Downloading… %.0f / %.0f MB", mb, totalMB)
-                            : String(format: "Downloading… %.0f MB", mb)
-                        status = .downloading(fraction: frac, message: msg)
-                        sinceUI = 0
-                    }
-                }
+        func snapshot() -> Snapshot {
+            lock.lock(); defer { lock.unlock() }
+            var written: Int64 = 0
+            var total: Int64 = 0
+            var bps: Double = 0
+            var active = 0
+            for s in states {
+                written += s.written
+                total += s.total
+                if !s.done && s.bps > 0 { bps += s.bps; active += 1 }
+                if !s.done && s.bps == 0 && s.written > 0 { active += 1 }
             }
-            if !chunk.isEmpty {
-                try handle.write(contentsOf: chunk)
-            }
-            try handle.close()
-
-            // Atomic replace.
-            if (try? FileManager.default.replaceItemAt(dest, withItemAt: tmp)) == nil {
-                try FileManager.default.moveItem(at: tmp, to: dest)
-            }
-        } catch is CancellationError {
-            try? handle.close()
-            try? FileManager.default.removeItem(at: tmp)
-            throw CancellationError()
-        } catch let e as DownloadError {
-            try? handle.close()
-            try? FileManager.default.removeItem(at: tmp)
-            throw e
-        } catch {
-            try? handle.close()
-            try? FileManager.default.removeItem(at: tmp)
-            throw DownloadError.failed("\(label): \(error.localizedDescription)")
+            let remaining = max(0, total - written)
+            let eta = bps > 0 ? Double(remaining) / bps : 0
+            return Snapshot(writtenBytes: written, totalBytes: total,
+                            combinedBytesPerSec: bps, combinedETASec: eta,
+                            activeFiles: active)
         }
     }
 
@@ -316,11 +351,6 @@ public final class CLIPModelInstaller {
         let modelsRoot = Self.modelsRoot
         try? FileManager.default.createDirectory(at: modelsRoot, withIntermediateDirectories: true)
 
-        // Validate the zip path before invoking unzip. `Process` arg
-        // arrays don't go through a shell so command injection isn't
-        // possible, but a missing/non-zip/symlinked path could confuse
-        // unzip or leak unintended behavior. Hard-fail early with a
-        // clear error.
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: zipURL.path, isDirectory: &isDir),
               !isDir.boolValue else {
@@ -337,9 +367,7 @@ public final class CLIPModelInstaller {
             return
         }
 
-        // Zip-bomb defense: ensure we have meaningful headroom on the
-        // target volume before extraction. CLIP models extract to
-        // ~250 MB; we require ≥1 GB free as a safety margin.
+        // Zip-bomb safety margin: extract is ~250 MB, require 1 GB free.
         let minFreeBytes: Int64 = 1_073_741_824
         if let fsAttrs = try? FileManager.default.attributesOfFileSystem(forPath: modelsRoot.path),
            let free = (fsAttrs[.systemFreeSize] as? NSNumber)?.int64Value,
@@ -358,10 +386,7 @@ public final class CLIPModelInstaller {
 
         do {
             try proc.run()
-            // Bound the extract by 5 minutes — a degenerate archive
-            // shouldn't hang the installer indefinitely. The watchdog
-            // task races against the natural exit; whichever wins,
-            // we resume once.
+            // 5 min watchdog — degenerate archive shouldn't hang.
             let resumed = MutexBox(false)
             await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
                 proc.terminationHandler = { _ in
@@ -389,7 +414,6 @@ public final class CLIPModelInstaller {
             return
         }
 
-        // Validate every required file landed.
         for f in Self.requiredFiles {
             if !FileManager.default.fileExists(atPath: f.path) {
                 status = .installFailed("Zip didn't contain \(f.lastPathComponent).")
@@ -401,10 +425,7 @@ public final class CLIPModelInstaller {
             try? FileManager.default.removeItem(at: zipURL)
         }
 
-        // Eagerly load the text encoder so search activates now.
-        // Engine-side image encoder picks up the new file on next start.
         Task.detached(priority: .utility) { _ = CLIPTextEncoder.shared.load() }
-
         refreshStatus()
     }
 

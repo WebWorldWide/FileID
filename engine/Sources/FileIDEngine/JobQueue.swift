@@ -39,6 +39,8 @@ public actor JobQueue {
     private var running: Job?
     private var drainerStarted = false
     private weak var sink: IPCSink?
+    /// Drainer parks here when the queue is empty; enqueue resumes it.
+    private var drainerWaiter: CheckedContinuation<Void, Never>?
 
     private init() {}
 
@@ -46,12 +48,14 @@ public actor JobQueue {
         self.sink = s
     }
 
-    /// Add a job. Starts the drainer the first time anything's enqueued.
-    /// Emits a queueState event so the UI sees the new entry immediately.
     public func enqueue(_ job: Job) async {
         pending.append(job)
         await emitState()
         startDrainerIfNeeded()
+        if let waiter = drainerWaiter {
+            drainerWaiter = nil
+            waiter.resume()
+        }
     }
 
     /// Cancel a queued (not-yet-running) job. The currently-running job
@@ -91,14 +95,13 @@ public actor JobQueue {
                 return j
             }()
             guard let job = next else {
-                // Nothing to do — sleep briefly + recheck. The next
-                // enqueue() doesn't actively wake us, but the cost of a
-                // 250 ms tick when the queue is empty is negligible
-                // and avoids a continuation-based wake/notify dance.
-                try? await Task.sleep(nanoseconds: 250_000_000)
-                // If still nothing AND drainer hasn't been re-armed,
-                // we'd loop forever — but enqueue() always sets pending
-                // before returning, so on the next iteration we pick up.
+                await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                    if pending.isEmpty {
+                        drainerWaiter = cont
+                    } else {
+                        cont.resume()
+                    }
+                }
                 continue
             }
             await emitState()

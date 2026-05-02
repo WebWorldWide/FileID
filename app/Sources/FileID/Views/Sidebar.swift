@@ -256,6 +256,21 @@ struct Sidebar: View {
         panel.allowsMultipleSelection = false
         panel.message = "Pick a folder to scan"
         if panel.runModal() == .OK, let url = panel.url {
+            // Pre-validate readability. NSOpenPanel happily returns
+            // folders the user can't read (e.g. restricted system
+            // dirs, offline network mounts), and the engine then fails
+            // opaquely on bookmark resolve. Surface a clear NSAlert
+            // here instead of letting it bubble up as a generic IPC
+            // error.
+            guard FileManager.default.isReadableFile(atPath: url.path) else {
+                let alert = NSAlert()
+                alert.messageText = "Can't read \(url.lastPathComponent)"
+                alert.informativeText = "FileID doesn't have permission to read this folder. Pick a different folder or grant Full Disk Access in System Settings → Privacy & Security."
+                alert.alertStyle = .warning
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
+                return
+            }
             if pickedURL != url {
                 engine.clearProgress()
             }

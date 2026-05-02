@@ -26,16 +26,11 @@ struct FileIDApp: App {
                 .ignoresSafeArea()
                 .onAppear {
                     engine.start()
-                    // Best-effort load: search falls back to keyword
-                    // matching when the CLIP text encoder isn't installed.
+                    // Search falls back to keyword matching if CLIP
+                    // isn't installed yet.
                     Task.detached { _ = CLIPTextEncoder.shared.load() }
                     CLIPModelInstaller.shared.refreshStatus()
                     ArcFaceModelInstaller.shared.refreshStatus()
-                    // Show the welcome sheet on first launch, or any
-                    // launch where required on-device models are still
-                    // missing — both surfaces install nudges in one
-                    // place instead of leaving them as mystery warnings
-                    // scattered across tabs.
                     if shouldShowWelcome() { showWelcome = true }
                 }
                 .onDisappear { engine.shutdown() }
@@ -64,12 +59,10 @@ struct FileIDApp: App {
         }
     }
 
-    /// Show the welcome sheet on the very first launch, or on any
-    /// subsequent launch if a recommended model is still missing —
-    /// the sheet itself acts as the missing-model installer surface.
+    /// First launch, or any subsequent launch where a recommended
+    /// model is missing — the sheet doubles as the install surface.
     private func shouldShowWelcome() -> Bool {
         if !welcomeSheetSeen { return true }
-        CLIPModelInstaller.shared.refreshStatus()
         let clipMissing: Bool = {
             if case .installed = CLIPModelInstaller.shared.status { return false }
             return true

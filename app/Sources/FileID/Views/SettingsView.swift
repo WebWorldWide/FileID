@@ -350,7 +350,7 @@ struct CLIPSemanticSearchCard: View {
                 Spacer()
             }
 
-        case .downloading(let frac, let msg):
+        case .downloading(let frac, let msg, let bps, let eta):
             VStack(alignment: .leading, spacing: 6) {
                 if frac > 0 {
                     ProgressView(value: frac)
@@ -358,8 +358,17 @@ struct CLIPSemanticSearchCard: View {
                     ProgressView()
                 }
                 HStack {
-                    Text(msg).font(.caption2.monospaced())
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(msg).font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                        let rateETA = DownloadFormat.rateAndETA(
+                            DownloadTick(written: 0, total: 0,
+                                          bytesPerSecond: bps, etaSeconds: eta))
+                        if !rateETA.isEmpty {
+                            Text(rateETA).font(.caption2.monospaced())
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
                     Spacer()
                     Button("Cancel") { installer.cancel() }
                         .buttonStyle(.borderless)
@@ -556,7 +565,7 @@ struct FaceEmbedderCard: View {
                 Spacer()
             }
 
-        case .downloading(let frac, let msg):
+        case .downloading(let frac, let msg, let bps, let eta):
             VStack(alignment: .leading, spacing: 4) {
                 if frac > 0 {
                     ProgressView(value: frac)
@@ -564,8 +573,17 @@ struct FaceEmbedderCard: View {
                     ProgressView()
                 }
                 HStack {
-                    Text(msg).font(.caption2.monospaced())
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(msg).font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                        let rateETA = DownloadFormat.rateAndETA(
+                            DownloadTick(written: 0, total: 0,
+                                          bytesPerSecond: bps, etaSeconds: eta))
+                        if !rateETA.isEmpty {
+                            Text(rateETA).font(.caption2.monospaced())
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
                     Spacer()
                     Button("Cancel") { installer.cancel(kind) }
                         .buttonStyle(.borderless)

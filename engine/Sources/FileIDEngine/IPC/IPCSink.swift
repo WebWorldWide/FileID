@@ -154,15 +154,22 @@ public actor IPCSink {
         }
     }
 
-    /// Heuristic: spot a serialized critical event by string match. Fast
-    /// enough — only used during eviction under buffer pressure.
+    /// Heuristic: spot a serialized critical event by byte-level needle
+    /// search instead of UTF-8 decode + 6 substring scans. Called in the
+    /// hot path of buffer eviction — `Data.range(of:)` matches the bytes
+    /// directly without allocating a String.
+    private static let criticalNeedles: [Data] = [
+        Data("\"ready\"".utf8),
+        Data("\"error\"".utf8),
+        Data("\"scanComplete\"".utf8),
+        Data("\"faceClusteringComplete\"".utf8),
+        Data("\"discoveryComplete\"".utf8),
+        Data("\"phaseChanged\"".utf8),
+    ]
     private static func entryLooksCritical(_ data: Data) -> Bool {
-        guard let s = String(data: data, encoding: .utf8) else { return false }
-        return s.contains("\"ready\"")
-            || s.contains("\"error\"")
-            || s.contains("\"scanComplete\"")
-            || s.contains("\"faceClusteringComplete\"")
-            || s.contains("\"discoveryComplete\"")
-            || s.contains("\"phaseChanged\"")
+        for needle in criticalNeedles {
+            if data.range(of: needle) != nil { return true }
+        }
+        return false
     }
 }

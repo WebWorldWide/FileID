@@ -8,18 +8,7 @@
 // can call without races. Single fsync per N lines (default 1) — caller can
 // flush explicitly at phase boundaries.
 import Foundation
-
-/// Redact a user file path for logs. Keeps the last two path
-/// components ("…/2024/IMG_0001.jpg") so failures stay debuggable
-/// while folder names like "Mom_Birthday_2024" don't end up in
-/// scan.jsonl. Does NOT redact paths under Application Support
-/// (model files, DBs) — those are structural and useful verbatim.
-public func redactPathForLog(_ path: String) -> String {
-    if path.contains("/Library/Application Support/") { return path }
-    let parts = (path as NSString).pathComponents
-    let tail = parts.suffix(2).joined(separator: "/")
-    return tail.isEmpty ? "…" : "…/\(tail)"
-}
+import FileIDShared
 
 public final class JSONLog: @unchecked Sendable {
     public static let shared = JSONLog()

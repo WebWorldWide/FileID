@@ -192,6 +192,12 @@ public final class EngineClient {
         Self.debug("spawn: starting engine at \(binary.path)")
         let proc = Process()
         proc.executableURL = binary
+        // swift-transformers' NetworkMonitor reports offline until its
+        // first NWPathMonitor update arrives, racing welcome-sheet
+        // "Install all" clicks. Its escape hatch (HubApi.swift:822).
+        var env = ProcessInfo.processInfo.environment
+        env["CI_DISABLE_NETWORK_MONITOR"] = "1"
+        proc.environment = env
         let inPipe = Pipe()
         let outPipe = Pipe()
         let errPipe = Pipe()
@@ -481,11 +487,33 @@ public final class EngineClient {
     public func send(_ payload: IPCCommand.Payload) {
         guard let pipe = stdinPipe else { return }
         let cmd = IPCCommand(payload: payload)
+        let data: Data
         do {
-            let data = try IPCCoder.encodeLine(cmd)
-            try pipe.fileHandleForWriting.write(contentsOf: data)
+            data = try IPCCoder.encodeLine(cmd)
         } catch {
-            FileHandle.standardError.write(Data("EngineClient send failed: \(error)\n".utf8))
+            FileHandle.standardError.write(Data("EngineClient send encode failed: \(error)\n".utf8))
+            return
+        }
+
+        // Off the main thread with a 10 s deadline. FileHandle.write
+        // blocks if the engine is dead with a full stdin buffer; on
+        // timeout we kill the engine to trigger handleEngineExit's
+        // respawn.
+        let writeHandle = pipe.fileHandleForWriting
+        let procBox = MutexBox<Process?>(self.process)
+        let done = MutexBox(false)
+        DispatchQueue.global(qos: .userInitiated).async {
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 10.0) {
+                guard !done.withLock({ $0 }) else { return }
+                FileHandle.standardError.write(Data("EngineClient send timed out (engine stdin blocked)\n".utf8))
+                procBox.withLock { $0?.terminate() }
+            }
+            do {
+                try writeHandle.write(contentsOf: data)
+            } catch {
+                FileHandle.standardError.write(Data("EngineClient send failed: \(error)\n".utf8))
+            }
+            done.withLock { $0 = true }
         }
     }
 
@@ -628,6 +656,12 @@ public final class EngineClient {
     /// for live progress.
     public func prewarmModel(_ modelKind: String) {
         send(.prewarmModel(modelKind: modelKind))
+    }
+
+    /// Cancel a running prewarm. Lands at the next Task.checkCancellation
+    /// inside swift-transformers' Hub fetcher (typically <1 s).
+    public func cancelPrewarm() {
+        send(.cancelPrewarm)
     }
 }
 

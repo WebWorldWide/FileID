@@ -31,6 +31,10 @@ struct LibraryView: View {
     @State private var lastSeenBatchIndex: Int = -1
     @State private var lastReloadAt: Date = .distantPast
     @State private var selected: FileRow?
+    /// Siblings frozen at preview-open time so live-scan updates to
+    /// `rows` don't yank the file the user is looking at out of the
+    /// nav context (the LIMIT 200 query reorders by scanned_at).
+    @State private var previewSiblings: [FileRow] = []
     @State private var bulkRenameSheetOpen: Bool = false
     @State private var pendingRenameCount: Int = 0
     @State private var lastBatchAvailable: Bool = false
@@ -534,6 +538,7 @@ struct LibraryView: View {
                                     checkedFileIDs.insert(row.id)
                                 }
                             } else {
+                                previewSiblings = rows
                                 selected = row
                             }
                         }
@@ -571,7 +576,7 @@ struct LibraryView: View {
         }
         .sheet(item: $selected) { file in
             FilePreviewSheet(file: file, store: store, engine: engine,
-                              siblings: rows, onSelect: { selected = $0 })
+                              siblings: previewSiblings, onSelect: { selected = $0 })
         }
     }
 
@@ -1110,6 +1115,18 @@ private struct FilePreviewSheet: View {
         .frame(minWidth: 960, minHeight: 600)
         .background(LavaLampBackground())
         .preferredColorScheme(.dark)
+        .focusable()
+        .focusEffectDisabled()
+        // Sheet-level key handler — beats Button.keyboardShortcut for
+        // arrows because text fields inside the sheet (tag editor) can
+        // steal focus from the buttons. .onKeyPress runs whenever the
+        // sheet's focus subtree handles a key.
+        .onKeyPress(.leftArrow) {
+            step(-1); return .handled
+        }
+        .onKeyPress(.rightArrow) {
+            step(1); return .handled
+        }
         .task {
             // Generate a larger preview for the sheet (640px).
             preview = await ThumbnailService.shared.thumbnail(for: file.url, size: 640)
@@ -1183,8 +1200,17 @@ private struct FinderTagsEditor: View {
     }
 
     private func reload() {
-        tags = TagWriter.readTags(at: file.url)
-        error = nil
+        // Read xattr off the main thread — for files on slow / network
+        // volumes the read can stall the preview sheet for hundreds of
+        // milliseconds while the user is trying to scrub through.
+        let url = file.url
+        Task.detached {
+            let result = TagWriter.readTags(at: url)
+            await MainActor.run {
+                tags = result
+                error = nil
+            }
+        }
     }
 
     private func addDraft() {

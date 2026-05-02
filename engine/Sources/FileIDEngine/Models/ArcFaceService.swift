@@ -80,7 +80,7 @@ public final class ArcFaceService: @unchecked Sendable {
         let url = Self.modelURL(for: kind)
         guard FileManager.default.fileExists(atPath: url.path) else {
             JSONLog.shared.warn(ev: "arcface_model_missing",
-                                path: url.path,
+                                path: redactPathForLog(url.path),
                                 error: "ArcFace .onnx not present; face embedding skipped")
             return false
         }
@@ -107,7 +107,7 @@ public final class ArcFaceService: @unchecked Sendable {
             let inputs = try session.inputNames()
             guard let firstInput = inputs.first else {
                 JSONLog.shared.error(ev: "arcface_model_load_failed",
-                                     path: url.path,
+                                     path: redactPathForLog(url.path),
                                      error: "ONNX session reports no inputs")
                 return false
             }
@@ -119,12 +119,12 @@ public final class ArcFaceService: @unchecked Sendable {
             lock.unlock()
             JSONLog.shared.info(ev: "arcface_model_loaded",
                                 extra: ["kind": AnyCodable(kind.rawValue),
-                                        "path": AnyCodable(url.path),
+                                        "path": AnyCodable(redactPathForLog(url.path)),
                                         "input": AnyCodable(firstInput)])
             return true
         } catch {
             JSONLog.shared.error(ev: "arcface_model_load_failed",
-                                 path: url.path, error: "\(error)")
+                                 path: redactPathForLog(url.path), error: "\(error)")
             return false
         }
     }
@@ -149,14 +149,22 @@ public final class ArcFaceService: @unchecked Sendable {
         let name = inputName
         lock.unlock()
         guard let s, let name else { return nil }
-        guard var tensor = makeNCHWTensor(crop, side: 112) else { return nil }
+        guard let tensor = makeNCHWTensor(crop, side: 112) else { return nil }
 
         inferenceSem.wait()
         defer { inferenceSem.signal() }
 
         do {
-            // ORTValue takes ownership of the underlying Data via NSMutableData.
-            let nsData = NSMutableData(bytes: &tensor, length: tensor.count * MemoryLayout<Float>.stride)
+            // Hand ORT a heap-allocated NSMutableData seeded with a copy
+            // of the tensor bytes. The previous shape — `NSMutableData(
+            // bytes: &tensor, length: …)` over a stack-allocated [Float]
+            // — relied on ORTValue retaining the buffer for the lifetime
+            // of the call. ORT's Swift bindings don't document copy-vs-
+            // alias semantics, so we copy explicitly. ~150 KB extra per
+            // face inference; immeasurable next to the ANE work.
+            let nsData = tensor.withUnsafeBufferPointer { buf -> NSMutableData in
+                NSMutableData(bytes: buf.baseAddress, length: buf.count * MemoryLayout<Float>.stride)
+            }
             let shape: [NSNumber] = [1, 3, 112, 112]
             let value = try ORTValue(tensorData: nsData,
                                      elementType: .float,

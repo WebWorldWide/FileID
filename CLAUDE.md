@@ -1,6 +1,6 @@
 # FileID
 
-macOS 14+ SwiftUI app that tags, renames, and restructures local file libraries on-device using Apple's Neural Engine and MLX VLMs. Sole dev on M1 Pro 16 GB testing against ~50K files. GitHub-targeted.
+macOS 15+ SwiftUI app that tags, renames, and restructures local file libraries on-device using Apple's Neural Engine and MLX VLMs. Sole dev on M1 Pro 16 GB testing against ~50K files. GitHub-targeted.
 
 ## Architecture
 
