@@ -1,0 +1,23 @@
+# Cargo target-specific config.
+#
+# x86_64-pc-windows-msvc enables AVX2 baseline (Haswell, 2013) — universal in
+# any machine that runs modern Windows + the kind of GPU-accel workload FileID
+# does. Rules out very old Sandy Bridge (2011) but those won't be running our
+# llama.cpp / ORT DirectML pipeline at usable speeds anyway.
+#
+# aarch64-pc-windows-msvc gets ARMv8.2-A which Snapdragon X Elite supports.
+
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-C", "target-feature=+avx2,+fma,+bmi1,+bmi2",
+    # Position-independent code is the default; fat LTO is in profile.release.
+]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = [
+    "-C", "target-feature=+neon,+fp16,+dotprod",
+]
+
+[build]
+# Default to native target unless overridden by --target.
+# CI sets this explicitly.

@@ -1,0 +1,473 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fileid.local/ipc.schema.json",
+  "title": "FileID IPC protocol",
+  "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object keys are emitted in alphabetical order for byte-deterministic round-trips.\n\nGenerator targets: Swift (platforms/apple/shared/Sources/FileIDShared/IPCProtocol_Generated.swift), Rust (platforms/windows/src/engine/src/ipc/generated.rs), C# (platforms/windows/src/FileID.IpcSchema/Generated.cs).",
+  "version": "1.0.0",
+
+  "$defs": {
+    "IPCCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "payload"],
+      "properties": {
+        "id": { "type": "string", "description": "App-assigned UUID; engine echoes in any reply." },
+        "payload": { "$ref": "#/$defs/CommandPayload" }
+      }
+    },
+
+    "IPCEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["t", "payload"],
+      "properties": {
+        "t":       { "type": "string", "format": "date-time", "description": "ISO8601 timestamp the engine emitted the event." },
+        "payload": { "$ref": "#/$defs/EventPayload" }
+      }
+    },
+
+    "CommandPayload": {
+      "description": "Externally-tagged union. Exactly one key matching a variant name.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["startScan"],
+          "additionalProperties": false,
+          "properties": {
+            "startScan": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["rootPath"],
+              "properties": {
+                "rootPath":    { "type": "string", "description": "Absolute filesystem path to the folder root to scan." },
+                "rootDisplay": { "type": ["string", "null"], "description": "Optional human-readable label (defaults to rootPath if omitted)." }
+              }
+            }
+          }
+        },
+        { "type": "object", "required": ["pauseScan"],          "additionalProperties": false, "properties": { "pauseScan":          { "type": "object", "additionalProperties": false } } },
+        { "type": "object", "required": ["resumeScan"],         "additionalProperties": false, "properties": { "resumeScan":         { "type": "object", "additionalProperties": false } } },
+        { "type": "object", "required": ["cancelScan"],         "additionalProperties": false, "properties": { "cancelScan":         { "type": "object", "additionalProperties": false } } },
+        { "type": "object", "required": ["requestStatus"],      "additionalProperties": false, "properties": { "requestStatus":      { "type": "object", "additionalProperties": false } } },
+        { "type": "object", "required": ["shutdown"],           "additionalProperties": false, "properties": { "shutdown":           { "type": "object", "additionalProperties": false } } },
+        { "type": "object", "required": ["runFaceClustering"],  "additionalProperties": false, "properties": { "runFaceClustering":  { "type": "object", "additionalProperties": false } } },
+        {
+          "type": "object",
+          "required": ["deepAnalyzeFile"],
+          "additionalProperties": false,
+          "properties": {
+            "deepAnalyzeFile": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["fileID", "modelKind"],
+              "properties": {
+                "fileID":    { "type": "integer", "description": "files.id row to analyze." },
+                "modelKind": { "type": "string", "description": "VLM identifier (e.g. qwen2_5_vl_3b)." }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["deepAnalyzeFolder"],
+          "additionalProperties": false,
+          "properties": {
+            "deepAnalyzeFolder": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["pathPrefix", "modelKind"],
+              "properties": {
+                "pathPrefix": { "type": "string", "description": "Absolute path prefix; engine matches files.path_text LIKE prefix%." },
+                "modelKind":  { "type": "string" }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["deepAnalyzeAll"],
+          "additionalProperties": false,
+          "properties": {
+            "deepAnalyzeAll": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["modelKind", "skipExisting"],
+              "properties": {
+                "modelKind":    { "type": "string" },
+                "skipExisting": { "type": "boolean", "description": "If true, skip files where vlm_description IS NOT NULL for this model." }
+              }
+            }
+          }
+        },
+        { "type": "object", "required": ["deepAnalyzeCancel"], "additionalProperties": false, "properties": { "deepAnalyzeCancel": { "type": "object", "additionalProperties": false } } },
+        {
+          "type": "object",
+          "required": ["prewarmModel"],
+          "additionalProperties": false,
+          "properties": {
+            "prewarmModel": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["modelKind"],
+              "properties": {
+                "modelKind": { "type": "string", "description": "Pre-fetch a VLM's weights into the local HF cache without running inference." }
+              }
+            }
+          }
+        },
+        { "type": "object", "required": ["cancelPrewarm"], "additionalProperties": false, "properties": { "cancelPrewarm": { "type": "object", "additionalProperties": false } } }
+      ]
+    },
+
+    "EventPayload": {
+      "description": "Externally-tagged union. Exactly one key matching a variant name. The associated value is wrapped in {\"_0\": ...} when Swift's auto-synthesis treats the case as a single-positional argument; for cases where Swift uses named parameters, the wrapping object's keys are the parameter names directly.",
+      "oneOf": [
+        { "type": "object", "required": ["ready"],                   "additionalProperties": false, "properties": { "ready":                   { "$ref": "#/$defs/SinglePositional/EngineInfo" } } },
+        { "type": "object", "required": ["progress"],                "additionalProperties": false, "properties": { "progress":                { "$ref": "#/$defs/SinglePositional/ScanProgress" } } },
+        { "type": "object", "required": ["phaseChanged"],            "additionalProperties": false, "properties": { "phaseChanged":            { "$ref": "#/$defs/SinglePositional/ScanPhase" } } },
+        {
+          "type": "object",
+          "required": ["discoveryComplete"],
+          "additionalProperties": false,
+          "properties": {
+            "discoveryComplete": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["totalFiles"],
+              "properties": { "totalFiles": { "type": "integer" } }
+            }
+          }
+        },
+        { "type": "object", "required": ["fileDone"],                "additionalProperties": false, "properties": { "fileDone":                { "$ref": "#/$defs/SinglePositional/FileDoneEvent" } } },
+        { "type": "object", "required": ["batchSummary"],            "additionalProperties": false, "properties": { "batchSummary":            { "$ref": "#/$defs/SinglePositional/BatchSummary" } } },
+        { "type": "object", "required": ["scanComplete"],            "additionalProperties": false, "properties": { "scanComplete":            { "$ref": "#/$defs/SinglePositional/ScanComplete" } } },
+        { "type": "object", "required": ["error"],                   "additionalProperties": false, "properties": { "error":                   { "$ref": "#/$defs/SinglePositional/EngineError" } } },
+        { "type": "object", "required": ["log"],                     "additionalProperties": false, "properties": { "log":                     { "$ref": "#/$defs/SinglePositional/LogLine" } } },
+        { "type": "object", "required": ["faceClusteringComplete"],  "additionalProperties": false, "properties": { "faceClusteringComplete":  { "$ref": "#/$defs/SinglePositional/FaceClusteringResult" } } },
+        { "type": "object", "required": ["deepAnalyzeStarting"],     "additionalProperties": false, "properties": { "deepAnalyzeStarting":     { "$ref": "#/$defs/SinglePositional/DeepAnalyzeStarting" } } },
+        { "type": "object", "required": ["deepAnalyzeProgress"],     "additionalProperties": false, "properties": { "deepAnalyzeProgress":     { "$ref": "#/$defs/SinglePositional/DeepAnalyzeProgress" } } },
+        { "type": "object", "required": ["deepAnalyzeFileDone"],     "additionalProperties": false, "properties": { "deepAnalyzeFileDone":     { "$ref": "#/$defs/SinglePositional/DeepAnalyzeFileDone" } } },
+        { "type": "object", "required": ["deepAnalyzeComplete"],     "additionalProperties": false, "properties": { "deepAnalyzeComplete":     { "$ref": "#/$defs/SinglePositional/DeepAnalyzeComplete" } } },
+        { "type": "object", "required": ["modelDownloadProgress"],   "additionalProperties": false, "properties": { "modelDownloadProgress":   { "$ref": "#/$defs/SinglePositional/ModelDownloadProgress" } } },
+        { "type": "object", "required": ["queueState"],              "additionalProperties": false, "properties": { "queueState":              { "$ref": "#/$defs/SinglePositional/QueueState" } } }
+      ]
+    },
+
+    "SinglePositional": {
+      "description": "Helpers for Swift's Codable auto-synthesis: a case with a single unnamed associated value encodes as {\"_0\": <encoded value>}. Each generator unwraps appropriately.",
+
+      "EngineInfo": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["_0"],
+        "properties": {
+          "_0": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["version", "pid", "workerCap", "physicalMemoryGB"],
+            "properties": {
+              "version":          { "type": "string" },
+              "pid":              { "type": "integer", "minimum": 0, "description": "Engine process ID (Int32 on macOS; positive on all OSes for our use)." },
+              "workerCap":        { "type": "integer", "minimum": 1 },
+              "physicalMemoryGB": { "type": "number", "minimum": 0 }
+            }
+          }
+        }
+      },
+
+      "ScanProgress": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["_0"],
+        "properties": {
+          "_0": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["sessionID", "phase", "total", "discovered", "processed", "failed", "filesPerSecond", "residentMB", "availableMB"],
+            "properties": {
+              "sessionID":      { "type": "string" },
+              "phase":          { "$ref": "#/$defs/ScanPhase" },
+              "total":          { "type": "integer", "minimum": 0, "description": "0 until discovery completes." },
+              "discovered":     { "type": "integer", "minimum": 0 },
+              "processed":      { "type": "integer", "minimum": 0 },
+              "failed":         { "type": "integer", "minimum": 0 },
+              "filesPerSecond": { "type": "number" },
+              "etaSeconds":     { "type": ["number", "null"] },
+              "residentMB":     { "type": "integer", "minimum": 0 },
+              "availableMB":    { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      },
+
+      "ScanPhase": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["_0"],
+        "properties": { "_0": { "$ref": "#/$defs/ScanPhase" } }
+      },
+
+      "FileDoneEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["_0"],
+        "properties": {
+          "_0": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "kind", "totalMs", "failed"],
+            "properties": {
+              "path":         { "type": "string" },
+              "kind":         { "type": "string", "enum": ["image", "video", "pdf", "doc", "audio", "other"] },
+              "totalMs":      { "type": "number", "minimum": 0 },
+              "failed":       { "type": "boolean" },
+              "errorMessage": { "type": ["string", "null"] }
+            }
+          }
+        }
+      },
+
+      "BatchSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["_0"],
+        "properties": {
+          "_0": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["batchIndex", "filesInBatch", "processedTotal", "wallSeconds", "filesPerSecond", "utilization", "visionP50Ms", "visionP95Ms", "clipP50Ms", "clipP95Ms", "storeInsertP50Ms", "storeInsertP95Ms", "residentMB", "availableMB"],
+            "properties": {
+              "batchIndex":       { "type": "integer", "minimum": 0 },
+              "filesInBatch":     { "type": "integer", "minimum": 0 },
+              "processedTotal":   { "type": "integer", "minimum": 0 },
+              "wallSeconds":      { "type": "number", "minimum": 0 },
+              "filesPerSecond":   { "type": "number" },
+              "utilization":      { "type": "number", "minimum": 0, "description": "sum(workerWith) / (wallSeconds * workerCap)" },
+              "visionP50Ms":      { "type": "number", "minimum": 0 },
+              "visionP95Ms":      { "type": "number", "minimum": 0 },
+              "clipP50Ms":        { "type": "number", "minimum": 0 },
+              "clipP95Ms":        { "type": "number", "minimum": 0 },
+              "storeInsertP50Ms": { "type": "number", "minimum": 0 },
+              "storeInsertP95Ms": { "type": "number", "minimum": 0 },
+              "residentMB":       { "type": "integer", "minimum": 0 },
+              "availableMB":      { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      },
+
+      "ScanComplete": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["_0"],
+        "properties": {
+          "_0": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["sessionID", "totalFiles", "processedFiles", "failedFiles", "totalSeconds"],
+            "properties": {
+              "sessionID":      { "type": "string" },
+              "totalFiles":     { "type": "integer", "minimum": 0 },
+              "processedFiles": { "type": "integer", "minimum": 0 },
+              "failedFiles":    { "type": "integer", "minimum": 0 },
+              "totalSeconds":   { "type": "number", "minimum": 0 }
+            }
+          }
+        }
+      },
+
+      "EngineError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["_0"],
+        "properties": {
+          "_0": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "message"],
+            "properties": {
+              "kind":    { "type": "string", "description": "discovery_failed | vision_failed | db_failed | model_load_failed | unknown | ..." },
+              "message": { "type": "string" },
+              "path":    { "type": ["string", "null"] }
+            }
+          }
+        }
+      },
+
+      "LogLine": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["_0"],
+        "properties": {
+          "_0": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["level", "message"],
+            "properties": {
+              "level":   { "type": "string", "enum": ["debug", "info", "warn", "error"] },
+              "message": { "type": "string" }
+            }
+          }
+        }
+      },
+
+      "FaceClusteringResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["_0"],
+        "properties": {
+          "_0": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["personCount", "faceCount", "unmatchedFaces", "durationSeconds"],
+            "properties": {
+              "personCount":     { "type": "integer", "minimum": 0 },
+              "faceCount":       { "type": "integer", "minimum": 0 },
+              "unmatchedFaces":  { "type": "integer", "minimum": 0 },
+              "durationSeconds": { "type": "number", "minimum": 0 }
+            }
+          }
+        }
+      },
+
+      "DeepAnalyzeStarting": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["_0"],
+        "properties": {
+          "_0": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["modelKind", "phase", "message"],
+            "properties": {
+              "modelKind": { "type": "string" },
+              "phase":     { "type": "string", "enum": ["queued", "loadingModel", "resolvingTargets"] },
+              "message":   { "type": "string" }
+            }
+          }
+        }
+      },
+
+      "DeepAnalyzeProgress": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["_0"],
+        "properties": {
+          "_0": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["processed", "total", "modelKind"],
+            "properties": {
+              "processed":   { "type": "integer", "minimum": 0 },
+              "total":       { "type": "integer", "minimum": 0 },
+              "etaSeconds":  { "type": ["number", "null"] },
+              "currentPath": { "type": ["string", "null"] },
+              "modelKind":   { "type": "string" }
+            }
+          }
+        }
+      },
+
+      "DeepAnalyzeFileDone": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["_0"],
+        "properties": {
+          "_0": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["fileID", "description", "modelKind"],
+            "properties": {
+              "fileID":       { "type": "integer" },
+              "description":  { "type": "string" },
+              "proposedName": { "type": ["string", "null"] },
+              "modelKind":    { "type": "string" }
+            }
+          }
+        }
+      },
+
+      "DeepAnalyzeComplete": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["_0"],
+        "properties": {
+          "_0": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["processed", "failed", "totalSeconds", "modelKind", "cancelled"],
+            "properties": {
+              "processed":    { "type": "integer", "minimum": 0 },
+              "failed":       { "type": "integer", "minimum": 0 },
+              "totalSeconds": { "type": "number", "minimum": 0 },
+              "modelKind":    { "type": "string" },
+              "cancelled":    { "type": "boolean" }
+            }
+          }
+        }
+      },
+
+      "ModelDownloadProgress": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["_0"],
+        "properties": {
+          "_0": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["modelKind", "fraction", "message"],
+            "properties": {
+              "modelKind":  { "type": "string" },
+              "fraction":   { "type": "number", "minimum": 0, "maximum": 1 },
+              "message":    { "type": "string" },
+              "bytesDone":  { "type": ["integer", "null"], "minimum": 0 },
+              "totalBytes": { "type": ["integer", "null"], "minimum": 0 }
+            }
+          }
+        }
+      },
+
+      "QueueState": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["_0"],
+        "properties": {
+          "_0": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["pending"],
+            "properties": {
+              "running":          { "anyOf": [ { "type": "null" }, { "$ref": "#/$defs/QueuedJob" } ] },
+              "pending":          { "type": "array", "items": { "$ref": "#/$defs/QueuedJob" } },
+              "totalEtaSeconds":  { "type": ["number", "null"] }
+            }
+          }
+        }
+      }
+    },
+
+    "ScanPhase": {
+      "type": "string",
+      "enum": ["idle", "discovering", "tagging", "postScan", "completed", "cancelled", "failed"]
+    },
+
+    "QueuedJob": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "category", "title"],
+      "properties": {
+        "id":         { "type": "string" },
+        "category":   { "type": "string", "enum": ["scan", "faceCluster", "deepAnalyze"] },
+        "title":      { "type": "string" },
+        "etaSeconds": { "type": ["number", "null"] }
+      }
+    }
+  },
+
+  "type": "object",
+  "description": "The wire is a sequence of newline-delimited JSON values, each conforming to either IPCCommand (app→engine) or IPCEvent (engine→app). The schema's root permits either as the canonical anchor; per-direction validation is the consumer's responsibility.",
+  "oneOf": [
+    { "$ref": "#/$defs/IPCCommand" },
+    { "$ref": "#/$defs/IPCEvent"   }
+  ]
+}

@@ -1,0 +1,132 @@
+name: Windows engine
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'platforms/windows/**'
+      - 'shared/ipc-schema/**'
+      - '.github/workflows/windows-engine.yml'
+  pull_request:
+    paths:
+      - 'platforms/windows/**'
+      - 'shared/ipc-schema/**'
+      - '.github/workflows/windows-engine.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  engine:
+    name: Build engine — ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Primary x64 target. windows-latest = windows-2022 as of 2026.
+          - label: x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            cross: false
+
+          # ARM64 native target. GitHub's `windows-11-arm` runner has been
+          # available since late 2024. If the runner shape changes, update
+          # this entry rather than the matrix structure.
+          - label: arm64-native
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            cross: false
+
+          # ARM64 cross-compile from x64 — proves the toolchain works for
+          # devs without ARM64 hardware. Tests are skipped (cross-runs).
+          - label: arm64-cross
+            runner: windows-latest
+            target: aarch64-pc-windows-msvc
+            cross: true
+
+    runs-on: ${{ matrix.runner }}
+
+    defaults:
+      run:
+        working-directory: platforms/windows/src/engine
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.78
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            platforms/windows/src/engine/target
+          key: cargo-${{ matrix.label }}-${{ hashFiles('platforms/windows/src/engine/Cargo.lock', 'platforms/windows/src/engine/Cargo.toml') }}
+          restore-keys: |
+            cargo-${{ matrix.label }}-
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --target ${{ matrix.target }} --all-targets -- -D warnings
+
+      - name: Build (release)
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Test
+        if: matrix.cross == false
+        run: cargo test --target ${{ matrix.target }}
+
+      - name: Verify binary exists
+        shell: pwsh
+        run: |
+          $exe = "target/${{ matrix.target }}/release/FileIDEngine.exe"
+          if (-not (Test-Path $exe)) { throw "Engine binary missing: $exe" }
+          $size = (Get-Item $exe).Length / 1MB
+          Write-Host ("FileIDEngine.exe size: {0:F1} MB" -f $size)
+
+      # Privacy gate: shipped binary must NOT contain telemetry SDK strings.
+      # Failing this is a release blocker — no exception.
+      - name: Privacy — telemetry-string scan
+        if: matrix.label != 'arm64-cross'
+        shell: pwsh
+        run: |
+          $exe = "target/${{ matrix.target }}/release/FileIDEngine.exe"
+          $forbidden = @(
+            "sentry.io",
+            "applicationinsights",
+            "googletagmanager",
+            "google-analytics.com",
+            "segment.io",
+            "segment.com",
+            "mixpanel.com",
+            "amplitude.com",
+            "posthog.com",
+            "datadoghq",
+            "bugsnag",
+            "rollbar.com",
+            "honeycomb.io",
+            "newrelic.com",
+            "raygun.io"
+          )
+          $bytes = [System.IO.File]::ReadAllBytes($exe)
+          $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+          $hits = @()
+          foreach ($needle in $forbidden) {
+            if ($text -match [regex]::Escape($needle)) {
+              $hits += $needle
+            }
+          }
+          if ($hits.Count -gt 0) {
+            Write-Error "Telemetry strings found in shipped binary: $($hits -join ', ')"
+            exit 1
+          }
+          Write-Host "No telemetry strings detected. ✅"

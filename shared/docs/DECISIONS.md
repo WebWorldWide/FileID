@@ -620,3 +620,53 @@ The knowledge-graph canvas was O(N×M) connection lines + a 6000×6000 DotGridCa
 **Why HNSW is rebuilt every clustering run (vs persistent + incremental):** Clustering runs are user-initiated and the data shape changes (new prints, deleted files). A from-scratch HNSW build over 50K face prints takes ~1-2 seconds on M1 — not worth the complexity of a persistent index file + invalidation logic + corruption recovery. If clustering ever exceeds 10s on a real library, persistent HNSW becomes worth it; until then, build-once-per-job is right.
 
 **Why ThumbnailService stays single-shot QL API (`generateBestRepresentation`), not the multi-rep one:** `generateRepresentations(for: .all)` calls the update block once per representation type — and our `CheckedContinuation.resume` was firing on each, hence the 2026-04-25 SIGTRAP crash. The single-shot API gives us one callback, one resume, no race. The quality difference at 192px tile size is invisible.
+
+---
+
+## 2026-05-02 — Multi-platform repo restructure (Phase 0 of Windows port)
+
+**Decision:** Move every macOS source file into `platforms/apple/` (one mechanical commit), reserve `platforms/windows/` and `platforms/linux/` as siblings, and hoist a top-level `shared/` directory holding `ipc-schema/`, `docs/` (this file lives there now), `test-corpus/`, and `scripts/`. Each platform's CLAUDE.md lives next to its code; the root `CLAUDE.md` is a router.
+
+**Why this layout (vs keeping macOS at root + adding `windows/` sibling):** Symmetry. The moment cross-platform work lands, asymmetric layouts force readers and tooling to special-case "the original platform" — every doc would say "see app/ on macOS, src/FileID.App/ on Windows" and pattern-matching breaks. Symmetric `platforms/<os>/` lets every reference disambiguate by prefix and lets future-Linux slot in with no further restructure.
+
+**Cost paid:** every macOS path in `run.sh`, `iterate.sh`, `Package.swift`, scripts, and docs ostensibly changed. In practice the script paths use `$(dirname "$0")`-derived `PROJECT_DIR` and Package.swift's `path:` strings are relative — both auto-resolved correctly under the new root. Only doc cross-references and gitignore patterns needed manual updates.
+
+## 2026-05-02 — Windows engine in Rust + UI in WinUI 3, with WinAppSDK 1.6+
+
+**Decision:** Windows engine binary is Rust (`fileid-engine`, `cargo build --release`); Windows UI is WinUI 3 unpackaged desktop app (.NET 8/9, C#, XAML). Two binaries shipped together via WiX MSI installer. Both built for `x86_64-pc-windows-msvc` AND `aarch64-pc-windows-msvc` from day one.
+
+**Why Rust for the engine (vs C# .NET 8):** ONNX Runtime DirectML / CUDA / OpenVINO / QNN bindings via the `ort` crate are best-in-class on Rust; `llama-cpp-2` gives clean Rust→llama.cpp bindings; `rusqlite` with bundled SQLite + FTS5 matches the macOS GRDB schema byte-faithfully; `tokio` channels translate the Swift `AsyncChannel` + actor scan pipeline 1:1; no GC pauses on the hot path; release builds with `lto = "fat"` produce a single 15–25 MB statically-linked .exe with zero runtime. Cross-compile from x64 to ARM64 is `cargo build --target aarch64-pc-windows-msvc` with no friction. Same crate compiles unchanged for Linux when Phase 5 lands.
+
+**Why WinUI 3 for the UI (vs Avalonia):** User explicitly chose max-native Windows fidelity over cross-platform UI reuse. WinUI 3 gives DWM-rendered Mica + Acrylic (not a software approximation), `SpringScalarNaturalMotionAnimation` from `Microsoft.UI.Composition` (real GPU spring physics — no math port from SwiftUI's `.spring(response:dampingFraction:)` needed), Win2D for hardware-accelerated custom canvas (LavaLamp + Sankey port), and the same Composition pipeline DWM uses. Linux UI is now a clean-slate decision in Phase 5 rather than a constrained extension of an Avalonia codebase. Tradeoff accepted: the Linux UI will be a separate codebase, not a reuse of the Windows one.
+
+**Why unpackaged + WiX MSI (vs MSIX):** Standard `C:\Program Files\FileID\` install. No Microsoft Store dependency, no MSIX sandbox restrictions on file access. WiX v4 produces both `FileID-x64.msi` and `FileID-arm64.msi` from the same project. Self-contained .NET publish (`--self-contained true`) bundles the runtime so users don't need .NET installed; users get a single `FileID.exe` + companion DLLs.
+
+## 2026-05-02 — IPC schema canonicalization + breaking change to startScan
+
+**Decision:** The wire protocol moves to `shared/ipc-schema/ipc.schema.json` as the single source of truth. Per-platform DTO files (Swift `IPCProtocol.swift`, Rust `ipc/mod.rs`, future C# `Generated.cs`) are hand-maintained mirrors of the schema until codegen lands. The `IPCCommand.startScan` payload changes from `(rootBookmark: Data, rootPathDisplay: String)` to `(rootPath: String, rootDisplay: String?)` — security-scoped bookmarks have no Windows analog and the macOS app is unsandboxed today.
+
+**Why a JSON Schema rather than a Codable-first or proto-first approach:** JSON Schema is language-neutral, the macOS engine already speaks JSON Codable, and the schema documents the existing Swift Codable wire format precisely (externally-tagged unions with `_0` wrappers for single-positional cases). Future codegen can target it without a wire-format renegotiation. Cap'n Proto / FlatBuffers were rejected: too much schema-evolution ceremony for our IPC volume, and they'd force a wire breaking change.
+
+**Why hand-maintained mirrors:** Phase 0's scope is "stand up the contract and prove cross-platform compatibility." A real codegen toolchain (quicktype, custom Python, etc.) is a Phase 4 polish item. Until then, every PR that touches `ipc.schema.json` must update all three DTO files in the same commit and run round-trip tests on each platform.
+
+**The breaking change is staged:** the macOS engine + app still use the legacy `rootBookmark` payload as of this commit (the user verifies Swift compiles on a Mac). The Rust engine implements the NEW payload from day one. A follow-up commit (clearly labeled, Mac-side only) deletes the bookmark code path.
+
+## 2026-05-02 — Zero telemetry, ever, as a product feature
+
+**Decision:** No analytics SDK, no crash-reporting service, no update pings, no model-download instrumentation. Local-only logs to `%LOCALAPPDATA%\FileID\logs\` (Windows) / `~/Library/Logs/FileID/` (macOS). The only network code in the engine is the user-initiated HuggingFace model downloader. CI grep-gates every shipped binary for telemetry-related strings (Sentry, Application Insights, GA, Segment, Mixpanel, Amplitude, PostHog, Datadog, Bugsnag, Rollbar, Honeycomb, NewRelic, Raygun) — zero hits required for release.
+
+**Why this is a feature not an oversight:** Users open FileID against their personal photos, work documents, financial scans. Even "anonymous" telemetry leaks structure ("user X scanned 47K files in folder Y, used Deep Analyze 3 times"). The product proposition is on-device privacy; telemetry would compromise the proposition. Documented in `shared/docs/PRIVACY.md` and surfaced in the Settings tab "What we don't do" panel.
+
+## 2026-05-02 — GPU acceleration: DirectML + Vulkan baseline, optional Performance Packs
+
+**Decision:** Out-of-the-box install ships ONNX Runtime with DirectML EP + CPU EP, and llama.cpp with Vulkan + DirectML + CPU backends. This covers NVIDIA, AMD, Intel discrete, Intel iGPU, AMD iGPU, and Snapdragon Adreno without any extra runtime install. Power users opt into Performance Packs via Settings: NVIDIA CUDA Pack (~600 MB), Intel OpenVINO Pack (~300 MB), Snapdragon NPU Pack (~150 MB). Auto-suggested when matching hardware is detected.
+
+**Why DirectML universal default (vs CUDA-required):** CUDA + cuDNN runtime is a 600 MB+ download and only benefits NVIDIA users. DirectML ships in Windows, works on every D3D12-capable GPU, and gets within 10–20% of CUDA for our model sizes. Bundling CUDA by default would bloat the install for the majority of users (Intel + AMD + Adreno) who don't benefit. Performance Packs pattern lets us serve the long tail without weighing down the base case.
+
+**Why Vulkan for llama.cpp baseline:** Vulkan in llama.cpp is mature and runs at 80–95% of CUDA perf on NVIDIA, full-tilt on AMD (where ROCm on Windows is unreliable), and full-tilt on Intel Arc + iGPU. Single backend covers all three vendors. CUDA backend remains opt-in for NVIDIA users who want maximum throughput.
+
+## 2026-05-02 — Windows on ARM (Snapdragon) is first-class from day one
+
+**Decision:** Build matrix includes `aarch64-pc-windows-msvc` from Phase 0; CI runs on `windows-11-arm` runners; ship `FileID-arm64.msi` alongside `FileID-x64.msi`. Snapdragon X Elite Hexagon NPU access via ONNX Runtime QNN EP (Snapdragon NPU Performance Pack).
+
+**Why first-class (vs ship x64 only and let WoA emulate):** The Hexagon NPU is the closest hardware analog to Apple's Neural Engine on Windows. Native ARM64 + QNN EP gives Snapdragon WoA users the same power-efficient ML inference profile macOS users get on M-series. x64 emulation on WoA loses both performance and power efficiency for what is otherwise a compelling "M1-like" Windows machine. All our deps (ORT, llama.cpp, pdfium, Win2D, windows-rs, WinAppSDK, .NET 8/9 self-contained) have ARM64 builds — no blockers found at plan time.

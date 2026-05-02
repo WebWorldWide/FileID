@@ -2,6 +2,50 @@
 
 > Snapshot of what's working and where we left off. Update at the end of every working session.
 
+## V10 (2026-05-02) — Multi-platform repo restructure + Phase 0 of Windows port
+
+**Repo restructure (one mechanical commit, history preserved):**
+- macOS code moved to `platforms/apple/` (`app/`, `engine/`, `shared/`, `Tests/`, `Package.swift`, `Package.resolved`, `run.sh`, `scripts/`, `FileID.icon/`, `Resources/`).
+- `docs/` hoisted to `shared/docs/` (cross-platform).
+- New `shared/ipc-schema/`, `shared/test-corpus/`, `shared/scripts/install-models/` directories.
+- New `platforms/windows/` and `platforms/linux/` (placeholder).
+- Root `CLAUDE.md` becomes a router; per-platform `CLAUDE.md` lives next to its code.
+- Root `README.md` rewritten as multi-platform overview.
+- Root `.gitignore` updated for the new layout (Apple, Windows, Rust, .NET, WiX patterns).
+
+**Verified:** `Package.swift`'s `path:` strings are relative — they resolve correctly under `platforms/apple/` with no edits needed. `run.sh`, `iterate.sh`, `build_corpus.sh`, `build_dmg.sh` all use `$(dirname "$0")`-derived `PROJECT_DIR` — they auto-resolve correctly under the new root. **The user must verify on Mac that `swift build` + `swift test` still pass before merging.** No Swift code was modified in Phase 0.
+
+**Canonical IPC schema:** `shared/ipc-schema/ipc.schema.json` documents the exact wire format Swift's auto-synthesized Codable produces (externally-tagged unions; `_0` wrappers for single-positional cases; `{}` for empty payloads). README at `shared/ipc-schema/README.md` explains the contract + extension workflow.
+
+**Documented breaking change deferred to a follow-up commit (Mac-side only):** `IPCCommand.startScan` payload changes from `(rootBookmark: Data, rootPathDisplay: String)` to `(rootPath: String, rootDisplay: String?)`. The Rust engine implements the new payload from day one; macOS engine + app + `iterate.sh` need updating in a clearly-labeled commit the user can verify on a Mac.
+
+**Rust engine (Phase 0 scaffold):**
+- `platforms/windows/src/engine/` — Cargo workspace, `rust-toolchain.toml` pinning Rust 1.78 with `x86_64-pc-windows-msvc` + `aarch64-pc-windows-msvc` targets, `.cargo/config.toml` enabling AVX2/FMA on x64 and NEON/dotprod on arm64.
+- `Cargo.toml` with locked-down deps: tokio + rusqlite (bundled + FTS5) + serde + tracing + reqwest (rustls-tls, no openssl) + image-rs + windows-rs.
+- Release profile `lto = "fat"`, `codegen-units = 1`, `strip = "symbols"`, `panic = "abort"` for a single ~15–25 MB statically-linked .exe.
+- `src/main.rs` — entrypoint with stdio IPC loop, parent-PID watchdog, structured local-only tracing (rolling daily JSON to `%LOCALAPPDATA%\FileID\logs\`), WAL checkpoint at shutdown. Currently emits `ready`, responds to `requestStatus` and `shutdown`; every other command returns a structured `not_implemented` error so Phase 1 surfaces it visibly.
+- `src/ipc/mod.rs` + `src/ipc/sink.rs` — full IpcCommand / IpcEvent type tree mirroring `ipc.schema.json`. Bounded mpsc channel (capacity 4096) for backpressure on event emission.
+- `src/db/mod.rs` + `src/db/migrations.rs` — rusqlite-based connection mgmt + byte-faithful Rust port of GRDB's v1–v7 migrations. Uses the same `grdb_migrations` tracking table so DBs are cross-platform-compatible. Inline tests verify all 7 apply, the schema cardinals match, FTS5 round-trips, and migrations are idempotent.
+- `src/paths.rs` — `%LOCALAPPDATA%\FileID\` directory layout (logs, Models, HuggingFace, thumbs, face_crops, settings).
+- `src/platform.rs` — parent-PID watchdog (`OpenProcess` + `WaitForSingleObject` polling), `default_worker_cap` = `physical_cores * 1.7`, `physical_memory_gb` via sysinfo, `SleepGuard` RAII wrapping `SetThreadExecutionState`. Linux fallbacks gated behind `#[cfg(not(windows))]` for Phase 5 portability.
+
+**Build scripts:**
+- `platforms/windows/build/build.ps1` — x64 release build, optional clean + tests.
+- `platforms/windows/build/build-arm64.ps1` — ARM64 cross-compile from x64 host (auto-installs the rustup target if missing); native ARM64 host runs tests, x64 host skips them.
+
+**CI:**
+- `.github/workflows/windows-engine.yml` — three-way matrix: x64 native (`windows-latest`), arm64 native (`windows-11-arm`), arm64 cross from x64. Runs `cargo fmt --check`, `cargo clippy -D warnings`, `cargo build --release`, `cargo test` (skipped on cross). Includes a privacy gate that scans the shipped binary for telemetry-related strings (Sentry, AppInsights, GA, Segment, Mixpanel, Amplitude, PostHog, Datadog, Bugsnag, Rollbar, Honeycomb, NewRelic, Raygun) — zero hits required for the build to pass.
+
+**Cross-platform docs:**
+- New `shared/docs/PRIVACY.md` — explicit "what we don't do" guarantees (no analytics SDK, no crash service, no update pings, no model-download telemetry, no license server, no DRM phone-home). Verification path documented (source audit, binary scan, network capture, path redaction).
+- New `shared/docs/ARCHITECTURE.md` — cross-platform overview (process model, storage, IPC contract, scan pipeline, ML stack per platform, GPU acceleration strategy).
+- New `shared/docs/VISUAL-LANGUAGE.md` — palette (gold #FFCC00, lavender #B19BCE, cyan #A0E2EA, pink #F2A6C0), surface tokens, spacing scale, materials, LavaLamp parameters, motion durations + easings, spring-ODE math for platforms without native springs, reduced-motion behavior.
+- New `shared/docs/MODELS.md` — canonical model registry per platform (MobileCLIP, CLIP text, ArcFace, SCRFD, PaddleOCR, the 5 Windows VLMs, the 6 macOS VLMs), Performance Pack registry (CUDA, OpenVINO, QNN), licensing notes (InsightFace non-commercial flag).
+- New `platforms/windows/CLAUDE.md` + `platforms/windows/README.md` — Windows-specific dev guide.
+- `shared/docs/DECISIONS.md` appended with 5 entries documenting: repo restructure choice, Rust + WinUI 3 stack choice, IPC canonicalization + breaking change, no-telemetry-as-feature, GPU acceleration strategy + Performance Packs, Windows-on-ARM first-class commitment.
+
+**What does NOT ship in Phase 0:** WinUI 3 app (gated on user installing Visual Studio + Windows App SDK), ML pipeline (ORT + llama.cpp wiring), scan pipeline (discovery / tagging / dbwriter), Deep Analyze, Restructure, WiX MSI installer.
+
 ## V9 (2026-04-30) — V1 deletion, organizational pass, security audit
 
 **V1 cleanup**

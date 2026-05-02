@@ -1,0 +1,132 @@
+[package]
+name = "fileid-engine"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.78"
+description = "FileID engine — owns DB, scan pipeline, ML inference. Spawned as a child of the FileID app and talks newline-delimited JSON over stdio."
+license = "TBD"
+publish = false
+
+[[bin]]
+name = "FileIDEngine"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime + bounded channels — direct analog of Swift's AsyncChannel + actors.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io-std", "sync", "time", "signal", "fs", "process"] }
+tokio-util = { version = "0.7", features = ["io"] }
+async-channel = "2"
+parking_lot = "0.12"
+
+# Serialization — IPC protocol, settings, structured logs.
+serde      = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+base64     = "0.22"
+uuid       = { version = "1", features = ["v4", "serde"] }
+chrono     = { version = "0.4", features = ["serde"] }
+
+# SQLite — drop-in for GRDB. Bundled libsqlite3 + FTS5 for byte-faithful schema with macOS.
+rusqlite = { version = "0.31", features = ["bundled", "blob", "chrono", "limits", "modern_sqlite"] }
+# FTS5 ships in `bundled` since rusqlite 0.31; explicit feature flag isn't needed but documented here.
+
+# Logs — structured local-only tracing. Replaces JSONLog.swift. NEVER goes off-device.
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender   = "0.2"
+
+# Errors.
+anyhow    = "1"
+thiserror = "1"
+
+# Filesystem walk + path utilities. Faster than std::fs::read_dir at scale.
+walkdir   = "2"
+
+# CPU/system info for worker count + memory probes.
+num_cpus  = "1"
+sysinfo   = "0.30"
+
+# HTTP — only network surface, used by downloader.rs for HuggingFace model fetches.
+# rustls-tls so we don't pull openssl. http2 for parallel range-GETs.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2"] }
+futures-util = "0.3"
+
+# Hex / SHA256 for model integrity verification.
+sha2 = "0.10"
+hex  = "0.4"
+
+# Image pipeline — replaces CGImage / ImageIO on macOS.
+# image-rs covers JPEG/PNG/WebP/TIFF; HEIC needs the libheif feature gated by libheif-rs separately.
+image            = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "bmp", "tiff", "gif"] }
+fast_image_resize = "4"
+kamadak-exif     = "0.5"
+
+# Memory mapping for large image reads.
+memmap2 = "0.9"
+
+# Lock-free queues for the hottest hot paths if benchmarks justify it.
+crossbeam-channel = "0.5"
+
+[target.'cfg(windows)'.dependencies]
+# Windows-rs — IFileOperation, IFileOpenDialog, Windows.Media.Ocr (WinRT), IThumbnailProvider,
+# SetThreadExecutionState, WinVerifyTrust, Media Foundation IMFSourceReader, IPropertyStore,
+# Authenticode, GlobalMemoryStatusEx.
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Threading",
+    "Win32_System_Power",
+    "Win32_System_SystemInformation",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_Storage_FileSystem",
+    "Win32_Security_WinTrust",
+    "Win32_Security_Cryptography",
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Media_MediaFoundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Media_Ocr",
+    "Storage_Streams",
+    "Graphics_Imaging",
+    "Foundation",
+    "Foundation_Collections",
+] }
+windows-core = "0.58"
+
+[profile.release]
+opt-level     = 3
+lto           = "fat"
+codegen-units = 1
+strip         = "symbols"
+panic         = "abort"
+
+[profile.release-debuginfo]
+inherits = "release"
+debug    = "limited"
+strip    = "none"
+
+[profile.dev]
+opt-level = 1            # 0 is too slow for image-heavy hot paths even in dev
+debug     = true
+
+[profile.bench]
+inherits = "release"
+debug    = "limited"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_imports         = "warn"
+dead_code              = "warn"
+
+[lints.clippy]
+pedantic   = { level = "warn", priority = -1 }
+# Pragmatic exceptions — these fire constantly on idiomatic windows-rs / serde code.
+module_name_repetitions = "allow"
+missing_errors_doc      = "allow"
+missing_panics_doc      = "allow"
+must_use_candidate      = "allow"
+return_self_not_must_use = "allow"
