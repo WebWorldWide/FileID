@@ -6,7 +6,6 @@
 //! gated behind `#[cfg(windows)]`.
 
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::Notify;
 
 /// Number of tagging workers to spin up by default. Mirrors the macOS
@@ -82,16 +81,24 @@ pub async fn watch_parent(parent_pid: u32, shutdown: Arc<Notify>) {
         }
     };
 
+    // HANDLE wraps *mut c_void which the windows crate doesn't mark Send.
+    // Smuggle it across the closure boundary as a usize — integers are
+    // always Send. SAFETY: a Win32 HANDLE is opaque; CloseHandle and
+    // WaitForSingleObject can be called from any thread once the handle
+    // exists. This task is the sole owner of the value across the move.
+    let handle_addr = handle.0 as usize;
+
     // Spawn a blocking task that waits on the handle. WaitForSingleObject
     // returns WAIT_OBJECT_0 when the parent exits.
     let result = tokio::task::spawn_blocking(move || {
-        let r = unsafe { WaitForSingleObject(handle, u32::MAX) };
-        unsafe { let _ = CloseHandle(handle); }
+        let h = HANDLE(handle_addr as *mut core::ffi::c_void);
+        let r = unsafe { WaitForSingleObject(h, u32::MAX) };
+        unsafe { let _ = CloseHandle(h); }
         r
     })
     .await;
 
-    if let Ok(_) = result {
+    if result.is_ok() {
         tracing::info!("parent process exited; signaling shutdown");
         shutdown.notify_waiters();
     } else {
@@ -106,7 +113,7 @@ pub async fn watch_parent(parent_pid: u32, shutdown: Arc<Notify>) {
     let _ = parent_pid;
     let _ = shutdown;
     loop {
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         // Stub: real implementation lands in Phase 5 alongside Linux work.
     }
 }
@@ -145,6 +152,51 @@ impl Drop for SleepGuard {
         if self.set {
             use windows::Win32::System::Power::{SetThreadExecutionState, ES_CONTINUOUS};
             unsafe { SetThreadExecutionState(ES_CONTINUOUS); }
+        }
+    }
+}
+
+// ─── Process priority ───────────────────────────────────────────────────────
+//
+// During scans the engine bumps to ABOVE_NORMAL so the OS scheduler
+// preempts background services (Defender, OneDrive sync, Windows
+// Search) and our worker pool stays saturated. Restored to NORMAL on
+// scan end so the user's foreground apps (Zoom, browser) don't stutter.
+//
+// We deliberately stay BELOW HIGH_PRIORITY_CLASS — that level is for
+// real-time workloads and starves the rest of the system. ABOVE_NORMAL
+// is enough to win against Defender + sync clients without being
+// antisocial.
+
+/// RAII guard. While alive, the engine process runs at ABOVE_NORMAL
+/// priority. Drop = restore NORMAL.
+pub struct PriorityBoost {
+    #[cfg(windows)]
+    boosted: bool,
+}
+
+impl PriorityBoost {
+    #[cfg(windows)]
+    pub fn acquire() -> Self {
+        use windows::Win32::System::Threading::{
+            GetCurrentProcess, SetPriorityClass, ABOVE_NORMAL_PRIORITY_CLASS,
+        };
+        let ok = unsafe { SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS) };
+        Self { boosted: ok.is_ok() }
+    }
+
+    #[cfg(not(windows))]
+    pub fn acquire() -> Self { Self {} }
+}
+
+#[cfg(windows)]
+impl Drop for PriorityBoost {
+    fn drop(&mut self) {
+        if self.boosted {
+            use windows::Win32::System::Threading::{
+                GetCurrentProcess, SetPriorityClass, NORMAL_PRIORITY_CLASS,
+            };
+            unsafe { let _ = SetPriorityClass(GetCurrentProcess(), NORMAL_PRIORITY_CLASS); }
         }
     }
 }

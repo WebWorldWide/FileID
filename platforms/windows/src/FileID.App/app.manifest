@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0" xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
+  <assemblyIdentity version="1.0.0.0" name="com.fileid.app" />
+
+  <!-- Targeted OS list. The Win11 22000 GUID covers Win10 + Win11.
+       Older OS GUIDs explicitly omitted — we target Win10 22H2+. -->
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 / 11 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" />
+    </application>
+  </compatibility>
+
+  <!-- Per-Monitor V2 DPI awareness. Required for sharp text + thumbnails on
+       multi-monitor setups + display-config changes (laptop dock/undock). -->
+  <asmv3:application>
+    <asmv3:windowsSettings xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">
+      <dpiAwareness>PerMonitorV2</dpiAwareness>
+    </asmv3:windowsSettings>
+    <!-- Segment Heap opt-in intentionally omitted. WinAppSDK 1.8's
+         CoreMessagingXP runtime fast-fails (exception 0xc0000602) on
+         Windows 11 build 26200+ when the process runs under Segment
+         Heap. Default Low-Fragmentation Heap works. -->
+  </asmv3:application>
+
+  <!-- Modern Common Controls (visual styles, shell APIs render correctly). -->
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32"
+                        name="Microsoft.Windows.Common-Controls"
+                        version="6.0.0.0"
+                        processorArchitecture="*"
+                        publicKeyToken="6595b64144ccf1df"
+                        language="*" />
+    </dependentAssembly>
+  </dependency>
+
+  <!-- Long path support — we navigate user libraries that can blow past
+       MAX_PATH (260 chars). Required when Windows 10 1607+ has long-path
+       enabled in the registry. Doesn't hurt on machines that don't. -->
+  <asmv3:application>
+    <asmv3:windowsSettings>
+      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
+    </asmv3:windowsSettings>
+  </asmv3:application>
+</assembly>

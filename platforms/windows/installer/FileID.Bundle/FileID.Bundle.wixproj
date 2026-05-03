@@ -1,0 +1,43 @@
+<Project Sdk="WixToolset.Sdk/4.0.5">
+  <!--
+    FileID Burn bootstrapper.
+
+    Wraps the per-arch MSIs (FileID-x64.msi + FileID-arm64.msi) into a
+    single FileIDSetup.exe. At install time the bootstrapper detects the
+    user's CPU and chains exactly one MSI. User downloads ONE .exe and
+    gets the right install regardless of x64 vs ARM64.
+
+    Build order (enforced by publish-bundle.ps1):
+      1. cargo build engine for both arches
+      2. dotnet publish app for both arches
+      3. dotnet build installer/FileID.Msi -p:Platform=x64
+      4. dotnet build installer/FileID.Msi -p:Platform=arm64
+      5. dotnet build installer/FileID.Bundle -c Release    ← this project
+
+    Outputs: dist/installer/FileIDSetup.exe (~150-250 MB once Phase 6 ships).
+  -->
+  <PropertyGroup>
+    <OutputType>Bundle</OutputType>
+    <OutputName>FileIDSetup</OutputName>
+    <OutputPath>$(MSBuildThisFileDirectory)..\..\dist\installer\</OutputPath>
+    <IntermediateOutputPath>$(MSBuildThisFileDirectory)obj\</IntermediateOutputPath>
+
+    <!-- Bundle UpgradeCode: must NEVER change. Distinct from per-arch MSI codes. -->
+    <BundleUpgradeCode>3D7091C2-6E64-6C8F-BC34-91BC1BF3D7E6</BundleUpgradeCode>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Bundle.wxs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <DefineConstants Include="BundleUpgradeCode=$(BundleUpgradeCode)" />
+    <DefineConstants Include="MsiX64Path=$(MSBuildThisFileDirectory)..\..\dist\installer\FileID-x64.msi" />
+    <DefineConstants Include="MsiArm64Path=$(MSBuildThisFileDirectory)..\..\dist\installer\FileID-arm64.msi" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.Bal.wixext" />
+    <PackageReference Include="WixToolset.Util.wixext" />
+  </ItemGroup>
+</Project>

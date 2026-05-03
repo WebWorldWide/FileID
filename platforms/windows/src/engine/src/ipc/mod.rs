@@ -75,6 +75,40 @@ pub enum CommandPayload {
     PrewarmModel(PrewarmModelPayload),
     #[serde(rename = "cancelPrewarm")]
     CancelPrewarm(Empty),
+
+    #[serde(rename = "planRestructure")]
+    PlanRestructure(PlanRestructurePayload),
+    #[serde(rename = "applyRestructure")]
+    ApplyRestructure(ApplyRestructurePayload),
+
+    /// AutoPilot: scan → cluster → caption → restructure plan, in that
+    /// order, on the same session. Each phase emits its existing IPC
+    /// events; AutoPilot just orchestrates the chain. Real wiring depends
+    /// on Phase 2.6 ML; the engine acks today and emits a friendly
+    /// `error` event explaining what's pending.
+    #[serde(rename = "autoPilot")]
+    AutoPilot(AutoPilotPayload),
+
+    /// Bulk-tag a set of files. Tags persist via shell::tags sidecar +
+    /// the DB `tags` table.
+    #[serde(rename = "applyTags")]
+    ApplyTags(ApplyTagsPayload),
+
+    /// Bulk-rename a set of files. Each entry is (file_id, new_name).
+    /// Engine moves on disk + updates DB row in same tx; emits
+    /// renameResult per file.
+    #[serde(rename = "renameFiles")]
+    RenameFiles(RenameFilesPayload),
+
+    /// Trash a set of files via shell::trash IFileOperation. 8-parallel
+    /// COM-apartment pool. Emits trashResult per file.
+    #[serde(rename = "trashFiles")]
+    TrashFiles(TrashFilesPayload),
+
+    /// Merge two person clusters. All face_prints with person_id = src
+    /// are reassigned to dst; src person row is deleted.
+    #[serde(rename = "mergeClusters")]
+    MergeClusters(MergeClustersPayload),
 }
 
 /// Empty object — `{}`. Serde encodes a unit struct as `null`, which is wrong;
@@ -118,6 +152,91 @@ pub struct DeepAnalyzeAllPayload {
 #[serde(rename_all = "camelCase")]
 pub struct PrewarmModelPayload {
     pub model_kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanRestructurePayload {
+    /// Absolute path of the user's library root. Every proposed
+    /// destination is canonicalized + verified to fall inside this root
+    /// (path-traversal guard before apply).
+    pub library_root: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyRestructurePayload {
+    pub library_root: String,
+    pub moves: Vec<RestructureMove>,
+    /// `false` (default): real `MoveFileExW` move on disk + DB update.
+    /// `true`: create a `CreateSymbolicLinkW` next to the original so the
+    /// user can preview the layout without touching their files.
+    #[serde(default)]
+    pub use_symlinks: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestructureMove {
+    pub file_id: i64,
+    pub source: String,
+    pub destination: String,
+    pub category: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoPilotPayload {
+    pub library_root: String,
+    /// Optional VLM model id for the captioning phase. Skipped if None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vlm_model_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyTagsPayload {
+    pub file_ids: Vec<i64>,
+    pub tags: Vec<String>,
+    /// "add" (default) appends; "replace" overwrites.
+    #[serde(default)]
+    pub mode: TagMode,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TagMode {
+    #[default]
+    Add,
+    Replace,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameFilesPayload {
+    pub renames: Vec<RenameEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameEntry {
+    pub file_id: i64,
+    /// New filename only (no directory components). Engine resolves the
+    /// destination as `dirname(current) + new_name`.
+    pub new_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashFilesPayload {
+    pub file_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeClustersPayload {
+    pub source_person_id: i64,
+    pub destination_person_id: i64,
 }
 
 // ─── Event payload ──────────────────────────────────────────────────────────
@@ -176,6 +295,15 @@ pub enum EventPayload {
 
     #[serde(rename = "queueState")]
     QueueState(Wrap<QueueState>),
+
+    #[serde(rename = "restructurePlan")]
+    RestructurePlan(Wrap<RestructurePlan>),
+
+    #[serde(rename = "restructureApplyResult")]
+    RestructureApplyResult(Wrap<RestructureApplyResult>),
+
+    #[serde(rename = "bulkActionResult")]
+    BulkActionResult(Wrap<BulkActionResult>),
 }
 
 /// Wraps a single positional value in `{"_0": ...}` to match Swift Codable
@@ -200,6 +328,39 @@ pub struct EngineInfo {
     pub worker_cap: u32,
     #[serde(rename = "physicalMemoryGB")]
     pub physical_memory_gb: f64,
+    /// CPU + GPU detection result the engine made on startup. The app's
+    /// Settings tab surfaces this so the user knows which acceleration
+    /// path is in use, and which Performance Pack would unlock more.
+    /// Optional so older clients of this schema don't break.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hardware: Option<HardwareInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HardwareInfo {
+    /// "nvidia" / "amd" / "intel" / "qualcomm" / "other" / "none".
+    pub gpu_vendor: String,
+    /// Friendly adapter name as reported by DXGI ("NVIDIA GeForce RTX 4070",
+    /// "AMD Radeon RX 7900 XT", "Intel(R) Arc(TM) A380 Graphics", etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_name: Option<String>,
+    /// EP the engine picked: "cuda" / "tensorrt" / "directml" / "openvino"
+    /// / "qnn" / "cpu". This is what ML inference will use unless the
+    /// user overrides via Settings.
+    pub execution_provider: String,
+    /// Number of physical CPU cores.
+    pub physical_cpu_cores: u32,
+    /// Whether each Performance Pack is detected on this machine.
+    pub cuda_pack_present: bool,
+    pub openvino_pack_present: bool,
+    pub qnn_pack_present: bool,
+    /// "Install the NVIDIA CUDA Pack for ~30% faster inference" — the
+    /// engine writes a contextual recommendation here based on detected
+    /// vendor + already-installed packs. Empty string when the user is
+    /// already on the optimal path.
+    #[serde(default)]
+    pub recommendation: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -402,6 +563,54 @@ pub struct QueuedJob {
 #[serde(rename_all = "camelCase")]
 pub enum JobCategory { Scan, FaceCluster, DeepAnalyze }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestructurePlan {
+    pub library_root: String,
+    pub moves: Vec<RestructureMove>,
+    pub category_counts: Vec<RestructureCategoryCount>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestructureCategoryCount {
+    pub category: String,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestructureApplyResult {
+    pub applied: u32,
+    pub failed: u32,
+    /// Empty unless the user opted into symlink mode AND the call lacked
+    /// SeCreateSymbolicLinkPrivilege (Developer Mode off, non-admin shell).
+    /// Surfaces a clear "enable Developer Mode or run as admin" message
+    /// to the user via a one-shot dialog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privilege_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkActionResult {
+    /// "applyTags" | "renameFiles" | "trashFiles" | "mergeClusters".
+    pub action: String,
+    pub succeeded: u32,
+    pub failed: u32,
+    pub messages: Vec<BulkActionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkActionItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_id: Option<i64>,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -421,6 +630,7 @@ mod tests {
                 pid: 12345,
                 worker_cap: 14,
                 physical_memory_gb: 16.0,
+                hardware: None,
             })),
         };
         let j = serde_json::to_value(&evt).unwrap();

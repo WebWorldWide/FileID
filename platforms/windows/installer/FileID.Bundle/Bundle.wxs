@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    FileIDSetup.exe — single-EXE bootstrapper bundling x64 + ARM64 MSIs.
+
+    Architecture detection chain:
+      - On x64 host (NativeMachine == AMD64 || ProcessorArchitecture == x64) → install FileID-x64.msi
+      - On ARM64 host (NativeMachine == ARM64)                              → install FileID-arm64.msi
+      - On x86-only or older 32-bit hosts                                   → refuse (FileID requires 64-bit)
+
+    NativeMachine reflects the *physical* CPU even when the bootstrapper
+    runs under x64 emulation on ARM64 — so an ARM64 box running the x64
+    bootstrapper still installs the ARM64 MSI. WiX gives us
+    `NativeMachine` as a built-in variable since v4.
+
+    Windows version gate: 10.0.19045 (Windows 10 22H2) minimum. WinUI 3 +
+    self-contained .NET 8 publishing requires it; older builds bail with
+    a clear message instead of installing and failing at first launch.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <Bundle
+      Name="FileID"
+      Manufacturer="FileID"
+      Version="0.1.0"
+      UpgradeCode="$(var.BundleUpgradeCode)"
+      AboutUrl="https://fileid.app"
+      HelpUrl="https://fileid.app/help"
+      Compressed="yes"
+      DisableModify="yes">
+
+    <!-- WiX v4 standard branded UI: WixStandardBootstrapperApplication
+         (RTF license + Welcome/Progress/Finished pages). LogoFile is
+         deliberately omitted in v0.1 — the standard bootstrapper falls
+         back to a generic logo. Phase 11 polish drops a proper FileID
+         logo PNG into theme/ + adds LogoFile="theme\logo.png". -->
+    <BootstrapperApplication>
+      <bal:WixStandardBootstrapperApplication
+          LicenseFile="theme\license.rtf"
+          Theme="hyperlinkLicense"
+          ShowVersion="yes"
+          SuppressOptionsUI="yes" />
+    </BootstrapperApplication>
+
+    <!-- Refuse to install on Win10 < 22H2 (build 19045) or any earlier
+         major release. Surfaces a localized message in the bootstrapper UI. -->
+    <bal:Condition Message="FileID requires Windows 10 22H2 or newer.">
+      <![CDATA[WindowsBuildNumber >= 19045]]>
+    </bal:Condition>
+
+    <!-- Refuse 32-bit hosts cleanly (rather than silently picking x64
+         which fails to launch on x86). -->
+    <bal:Condition Message="FileID requires a 64-bit edition of Windows.">
+      <![CDATA[VersionNT64 OR NativeMachine = 43620]]>
+      <!-- 43620 == 0xAA64 == IMAGE_FILE_MACHINE_ARM64. -->
+    </bal:Condition>
+
+    <Chain>
+      <!-- x64 MSI: install when running on AMD64 host. NativeMachine
+           34404 (0x8664) is IMAGE_FILE_MACHINE_AMD64. -->
+      <MsiPackage
+          Id="FileIDx64"
+          SourceFile="$(var.MsiX64Path)"
+          DisplayInternalUI="no"
+          Compressed="yes"
+          Visible="no"
+          InstallCondition="NativeMachine = 34404 OR (VersionNT64 AND NOT NativeMachine = 43620)" />
+
+      <!-- ARM64 MSI: install when on ARM64. -->
+      <MsiPackage
+          Id="FileIDarm64"
+          SourceFile="$(var.MsiArm64Path)"
+          DisplayInternalUI="no"
+          Compressed="yes"
+          Visible="no"
+          InstallCondition="NativeMachine = 43620" />
+    </Chain>
+  </Bundle>
+</Wix>

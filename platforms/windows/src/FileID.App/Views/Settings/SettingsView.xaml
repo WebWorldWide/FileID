@@ -1,0 +1,269 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    SettingsView — model installer cards, engine info, GPU EP override,
+    privacy panel, Performance Pack downloader, system info.
+
+    Mirror of macOS Settings/SettingsView.swift. Hosts six panels:
+      1. Models — install / re-install ArcFace, MobileCLIP, OCR
+      2. Engine — version, PID, worker cap, "open log folder"
+      3. Performance — GPU EP picker + Performance Pack downloader
+      4. Privacy — "What we don't do" panel (zero-telemetry contract)
+      5. Storage — DB path, thumbs cache, model cache
+      6. About — version + open-source credits
+-->
+<UserControl
+    x:Class="FileID.Views.Settings.SettingsView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto"
+                  HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Padding="32,28,32,32" Spacing="20" MaxWidth="820" HorizontalAlignment="Stretch">
+
+            <StackPanel Spacing="4">
+                <TextBlock Text="Settings" Style="{StaticResource TitleTextBlockStyle}"/>
+                <TextBlock Text="Models, GPU acceleration, privacy. All settings are local."
+                           Style="{StaticResource BodyTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </StackPanel>
+
+            <!-- Privacy panel — what we don't do. This is a product feature,
+                 surfaced as a contract the user can read. -->
+            <Border CornerRadius="12"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    Padding="20">
+                <StackPanel Spacing="8">
+                    <TextBlock Text="What we don't do"
+                               Style="{StaticResource SubtitleTextBlockStyle}"/>
+                    <TextBlock Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap">
+                        <Run FontWeight="SemiBold">No telemetry, ever.</Run>
+                        <LineBreak/>
+                        FileID has no analytics SDK. No crash-reporting service. No update pings.
+                        No license-server check. The only network egress is when YOU explicitly
+                        download an ML model — every other byte stays on your machine.
+                    </TextBlock>
+                    <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               TextWrapping="Wrap">
+                        We grep our shipped binaries on every release for telemetry strings (Sentry,
+                        Application Insights, Firebase, Segment, Mixpanel, Google Analytics) — zero
+                        hits required to ship. Source: shared/docs/PRIVACY.md.
+                    </TextBlock>
+                </StackPanel>
+            </Border>
+
+            <!-- Engine info. -->
+            <Border CornerRadius="12"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    Padding="20">
+                <StackPanel Spacing="6">
+                    <TextBlock Text="Engine" Style="{StaticResource SubtitleTextBlockStyle}"/>
+                    <TextBlock Text="{x:Bind EngineVersionText, Mode=OneWay}"
+                               Style="{StaticResource BodyTextBlockStyle}"/>
+                    <TextBlock Text="{x:Bind WorkerCapText, Mode=OneWay}"
+                               Style="{StaticResource BodyTextBlockStyle}"/>
+                    <Button Content="Open log folder"
+                            Click="OnOpenLogsClicked"
+                            Margin="0,8,0,0"/>
+                </StackPanel>
+            </Border>
+
+            <!-- Performance — detected hardware + EP override. -->
+            <Border CornerRadius="12"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    Padding="20">
+                <StackPanel Spacing="14">
+                    <TextBlock Text="Performance" Style="{StaticResource SubtitleTextBlockStyle}"/>
+
+                    <!-- Detected GPU + adapter name. -->
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="Detected GPU"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   FontWeight="SemiBold"
+                                   CharacterSpacing="40" />
+                        <TextBlock Text="{x:Bind GpuSummaryText, Mode=OneWay}"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+
+                    <!-- Active execution provider. -->
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="Active acceleration"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   FontWeight="SemiBold"
+                                   CharacterSpacing="40" />
+                        <TextBlock Text="{x:Bind ExecutionProviderText, Mode=OneWay}"
+                                   Style="{StaticResource BodyTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+
+                    <!-- Contextual recommendation banner — gold-tinted when present. -->
+                    <Border Padding="14,10"
+                            CornerRadius="10"
+                            Background="{ThemeResource GoldSelectedBackgroundBrush}"
+                            BorderBrush="{ThemeResource GoldSelectedStrokeBrush}"
+                            BorderThickness="1"
+                            Visibility="{x:Bind RecommendationVisibility, Mode=OneWay}">
+                        <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Top">
+                            <FontIcon Glyph="&#xE945;"
+                                      FontSize="14"
+                                      Foreground="{ThemeResource GoldBrush}"
+                                      VerticalAlignment="Top"
+                                      Margin="0,2,0,0" />
+                            <TextBlock Text="{x:Bind RecommendationText, Mode=OneWay}"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Performance Pack rows. The "Install" buttons stay
+                         disabled until the engine ships pack manifest URLs
+                         (canonical SHA256-pinned ZIPs). UX surface is here
+                         so the affordance is visible from day one. -->
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="Performance Packs"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   FontWeight="SemiBold"
+                                   CharacterSpacing="40" />
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" VerticalAlignment="Center"
+                                       Style="{StaticResource BodyTextBlockStyle}"
+                                       Text="NVIDIA CUDA Pack — ~600 MB. Unlocks ~30% faster ML inference on RTX-class GPUs."/>
+                            <Button Grid.Column="1" Content="Install" IsEnabled="False"
+                                    ToolTipService.ToolTip="Pack hosting lands in V14.7 once the manifest URLs are pinned in MODELS.md."/>
+                        </Grid>
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" VerticalAlignment="Center"
+                                       Style="{StaticResource BodyTextBlockStyle}"
+                                       Text="Intel OpenVINO Pack — ~300 MB. Vendor-tuned EP for Intel iGPU + Arc."/>
+                            <Button Grid.Column="1" Content="Install" IsEnabled="False"
+                                    ToolTipService.ToolTip="Pack hosting lands in V14.7 once the manifest URLs are pinned in MODELS.md."/>
+                        </Grid>
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" VerticalAlignment="Center"
+                                       Style="{StaticResource BodyTextBlockStyle}"
+                                       Text="Snapdragon QNN Pack — ~150 MB. Hexagon NPU acceleration for WoA."/>
+                            <Button Grid.Column="1" Content="Install" IsEnabled="False"
+                                    ToolTipService.ToolTip="Pack hosting lands in V14.7 once the manifest URLs are pinned in MODELS.md."/>
+                        </Grid>
+                    </StackPanel>
+
+                    <!-- Manual override. Auto-detect is the default; Settings.json
+                         persistence lands when the engine wires the override
+                         consumer (Phase 2.6). -->
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="Override"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   FontWeight="SemiBold"
+                                   CharacterSpacing="40" />
+                        <ComboBox x:Name="ProviderCombo"
+                                  Width="240"
+                                  SelectedIndex="0"
+                                  SelectionChanged="OnProviderOverrideChanged">
+                            <ComboBoxItem Content="Auto-detect (recommended)" Tag="auto"/>
+                            <ComboBoxItem Content="DirectML — universal" Tag="directml"/>
+                            <ComboBoxItem Content="CUDA — NVIDIA only" Tag="cuda"/>
+                            <ComboBoxItem Content="OpenVINO — Intel only" Tag="openvino"/>
+                            <ComboBoxItem Content="QNN — Snapdragon NPU" Tag="qnn"/>
+                            <ComboBoxItem Content="CPU only" Tag="cpu"/>
+                        </ComboBox>
+                        <TextBlock x:Name="OverrideHelpText"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   TextWrapping="Wrap"
+                                   Text="Persisted across launches. The engine consumes this once Phase 2.6 (real ML inference) lands; today the override is saved but not applied." />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Behavior toggles. Each binds to a key in app-settings.json
+                 and persists across launches. -->
+            <Border CornerRadius="12"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    Padding="20">
+                <StackPanel Spacing="14">
+                    <TextBlock Text="Behavior" Style="{StaticResource SubtitleTextBlockStyle}"/>
+
+                    <ToggleSwitch x:Name="HideUnknownToggle"
+                                  Header="Hide unknown clusters in People"
+                                  OffContent="Show every face cluster"
+                                  OnContent="Hide clusters marked 'unknown'"
+                                  Toggled="OnHideUnknownToggled" />
+
+                    <ToggleSwitch x:Name="CleanupAutoTagToggle"
+                                  Header="Tag kept files after Cleanup auto-trash"
+                                  OffContent="Don't change tags on the keeper"
+                                  OnContent="Add a 'kept' tag to the keeper"
+                                  Toggled="OnCleanupAutoTagToggled" />
+
+                    <ToggleSwitch x:Name="RestructureTreeModeToggle"
+                                  Header="Restructure tree-diff view"
+                                  OffContent="Show per-category cards (default)"
+                                  OnContent="Show side-by-side tree diff"
+                                  Toggled="OnRestructureTreeModeToggled" />
+                </StackPanel>
+            </Border>
+
+            <!-- Models — install state. -->
+            <Border CornerRadius="12"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    Padding="20">
+                <StackPanel Spacing="8">
+                    <TextBlock Text="Models" Style="{StaticResource SubtitleTextBlockStyle}"/>
+                    <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               TextWrapping="Wrap"
+                               Text="ArcFace (face matching), MobileCLIP-S2 (image search), and SCRFD (face detection) are downloaded from HuggingFace on first use. Audit-able URLs in shared/docs/MODELS.md."/>
+                </StackPanel>
+            </Border>
+
+            <!-- About. -->
+            <Border CornerRadius="12"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    Padding="20">
+                <StackPanel Spacing="6">
+                    <TextBlock Text="About" Style="{StaticResource SubtitleTextBlockStyle}"/>
+                    <TextBlock Style="{StaticResource BodyTextBlockStyle}"
+                               Text="{x:Bind AppVersionText, Mode=OneWay}"/>
+                    <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               TextWrapping="Wrap"
+                               Text="On-device AI file organizer. No cloud. No telemetry. Open audit trail."/>
+                </StackPanel>
+            </Border>
+
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

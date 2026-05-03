@@ -1,0 +1,94 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    FileID — WinUI 3 unpackaged desktop app.
+
+    Unpackaged means we ship as a folder of .exe + DLLs (installed by WiX
+    MSI), not as MSIX. Rationale in shared/docs/DECISIONS.md (2026-05-02
+    "Windows engine in Rust + UI in WinUI 3" entry):
+      - No Microsoft Store dependency
+      - No MSIX file-system sandbox restrictions
+      - Standard `C:\Program Files\FileID\` install
+      - Self-contained .NET publish — users do NOT install .NET themselves
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <RootNamespace>FileID</RootNamespace>
+    <AssemblyName>FileID</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- Application icon lands in Phase 4 (installer). For dev builds the
+         default WinUI 3 icon is fine. -->
+    <!-- <ApplicationIcon>Assets/FileID.ico</ApplicationIcon> -->
+
+    <UseWinUI>true</UseWinUI>
+    <EnableMsixTooling>false</EnableMsixTooling>
+    <WindowsPackageType>None</WindowsPackageType>
+    <!-- Framework-dependent mode. Self-contained mode (the inverse) bundles
+         the WinAppSDK runtime into the publish folder, but on Windows 11
+         build 26200+ the bundled Microsoft.UI.Xaml.dll fast-fails (0xC000027B)
+         when an installed framework package of a different patch version is
+         also present. End users get the WinAppSDK runtime via the Microsoft
+         Store auto-install, the WiX bundle (publish-bundle.ps1) chains it as
+         a prerequisite, or `winget install Microsoft.WindowsAppRuntime.1.8`. -->
+    <WindowsAppSDKSelfContained>false</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+
+    <!-- We provide our own [STAThread] Main in Program.cs so we can run the
+         WinAppSDK bootstrapper before XAML touches anything. The XAML
+         generator's auto-Main wraps in #if !DISABLE_XAML_GENERATED_MAIN;
+         define the constant to skip its generation. -->
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+
+    <!-- Performance: ReadyToRun pre-JITs IL on publish. Native AOT for
+         WinUI 3 still has rough edges as of WinAppSDK 1.6 (XAML compiler +
+         COM activation), so R2R is the pragmatic max-perf default. -->
+    <PublishReadyToRun Condition="'$(Configuration)' == 'Release'">true</PublishReadyToRun>
+
+    <!-- DPI awareness comes from app.manifest (PerMonitorV2). -->
+
+    <!-- WinUI sources — Generators write into obj/, exclude from compile. -->
+    <DefaultLanguage>en-US</DefaultLanguage>
+
+    <!-- Application identity — surfaces in About + the user's Apps & Features list. -->
+    <AssemblyTitle>FileID</AssemblyTitle>
+    <Description>On-device AI file organization for Windows.</Description>
+    <Version>0.1.0</Version>
+    <FileVersion>0.1.0.0</FileVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" />
+    <PackageReference Include="Microsoft.Graphics.Win2D" />
+    <PackageReference Include="System.Reactive" />
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+    <PackageReference Include="Microsoft.Extensions.Caching.Memory" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FileID.Theme\FileID.Theme.csproj" />
+    <ProjectReference Include="..\FileID.IpcSchema\FileID.IpcSchema.csproj" />
+  </ItemGroup>
+
+  <!-- WinUI 3 SDK auto-includes XAML via Microsoft.WinUI.targets globs.
+       App.xaml is recognized as ApplicationDefinition; the rest become
+       Page items. We deliberately do NOT list them here — duplicate
+       Page items break the build (NETSDK1022). -->
+
+  <!-- WinAppSDK 1.7+ on .NET 8 strips the main app's `.pri` file
+       (FileID.pri) + the WinAppSDK component PRIs from `dotnet publish`
+       output. Without FileID.pri, `ms-appx:///MainWindow.xaml` can't
+       resolve and the XAML loader fast-fails (0xC000027B) when the
+       MainWindow constructor calls InitializeComponent(). Force the
+       missing PRIs into the publish folder. -->
+  <Target Name="CopyPriFilesToPublish" AfterTargets="Publish">
+    <ItemGroup>
+      <_PriToPublish Include="$(OutputPath)*.pri" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_PriToPublish)"
+          DestinationFolder="$(PublishDir)"
+          SkipUnchangedFiles="true"
+          OverwriteReadOnlyFiles="true" />
+  </Target>
+</Project>

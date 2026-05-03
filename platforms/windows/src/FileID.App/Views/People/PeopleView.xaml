@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    PeopleView — face cluster cards in a wrap layout.
+
+    Mirror of macOS People/PeopleView.swift. Cards show the cluster's
+    anchor face crop + a caption. Phase 3 cut: card grid + load on tab
+    activation. Phase 3.x adds drag-merge + person-detail sheet.
+-->
+<UserControl
+    x:Class="FileID.Views.People.PeopleView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:FileID.ViewModels"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Grid Padding="32,28,32,20" RowSpacing="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <Grid Grid.Row="0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <StackPanel Grid.Column="0" Spacing="4">
+                <TextBlock Text="People" Style="{StaticResource TitleTextBlockStyle}"/>
+                <TextBlock Text="Faces clustered into named cards. Drag to merge."
+                           Style="{StaticResource BodyTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </StackPanel>
+            <Button Grid.Column="1"
+                    x:Name="RefreshButton"
+                    VerticalAlignment="Center"
+                    Click="OnRefreshClicked"
+                    ToolTipService.ToolTip="Re-cluster faces using current ArcFace embeddings.">
+                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <FontIcon FontSize="13" Glyph="&#xE72C;" />
+                    <TextBlock Text="Re-cluster" />
+                </StackPanel>
+            </Button>
+        </Grid>
+
+        <ScrollViewer Grid.Row="1"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled">
+            <ItemsRepeater ItemsSource="{x:Bind ViewModel.Clusters, Mode=OneWay}">
+                <ItemsRepeater.Layout>
+                    <UniformGridLayout MinItemWidth="180"
+                                       MinItemHeight="220"
+                                       MinRowSpacing="12"
+                                       MinColumnSpacing="12"
+                                       ItemsStretch="Fill"/>
+                </ItemsRepeater.Layout>
+                <ItemsRepeater.ItemTemplate>
+                    <DataTemplate x:DataType="vm:PersonCluster">
+                        <Grid CornerRadius="12"
+                              Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                              BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                              BorderThickness="1"
+                              Padding="12"
+                              Tag="{x:Bind ClusterId}"
+                              CanDrag="True"
+                              AllowDrop="True"
+                              DragStarting="OnClusterDragStarting"
+                              DragOver="OnClusterDragOver"
+                              DragLeave="OnClusterDragLeave"
+                              Drop="OnClusterDrop">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <Border Grid.Row="0"
+                                    Background="{ThemeResource SubtleFillColorTertiaryBrush}"
+                                    CornerRadius="100"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center"
+                                    Width="120" Height="120"/>
+                            <TextBlock Grid.Row="1"
+                                       Text="{x:Bind Caption}"
+                                       Margin="0,8,0,0"
+                                       Style="{StaticResource BodyTextBlockStyle}"
+                                       TextAlignment="Center"
+                                       TextTrimming="CharacterEllipsis"/>
+                        </Grid>
+                    </DataTemplate>
+                </ItemsRepeater.ItemTemplate>
+            </ItemsRepeater>
+        </ScrollViewer>
+
+        <StackPanel Grid.Row="2"
+                    Orientation="Horizontal"
+                    Spacing="12"
+                    Visibility="{x:Bind FooterVisibility, Mode=OneWay}">
+            <ProgressRing IsActive="{x:Bind ViewModel.IsLoading, Mode=OneWay}"
+                          Width="16" Height="16"/>
+            <TextBlock Text="{x:Bind StatusText, Mode=OneWay}"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+        </StackPanel>
+    </Grid>
+</UserControl>

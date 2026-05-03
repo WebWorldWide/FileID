@@ -2,7 +2,7 @@
 name = "fileid-engine"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.78"
+rust-version = "1.90"
 description = "FileID engine — owns DB, scan pipeline, ML inference. Spawned as a child of the FileID app and talks newline-delimited JSON over stdio."
 license = "TBD"
 publish = false
@@ -66,6 +66,27 @@ memmap2 = "0.9"
 # Lock-free queues for the hottest hot paths if benchmarks justify it.
 crossbeam-channel = "0.5"
 
+# ONNX Runtime bindings + ndarray for tensor wrangling. Both crates pinned
+# to EXACT versions (no caret) because the 2.0 RC line had ABI churn
+# between rc.10 / rc.11 / rc.12 (rc.12 dropped a function rc.10's API
+# referenced). Exact pins prevent silent breakage on `cargo update`.
+#
+# `download-binaries` ships prebuilt ORT DLLs (DirectML + CPU work out of
+# the box). CUDA / OpenVINO / QNN are enabled as feature gates so the
+# session-creation API surface compiles; their actual runtime support
+# requires the matching Performance Pack DLLs alongside the engine
+# (Settings → Performance → Install Pack delivers those in V14.7+).
+ort = { version = "=2.0.0-rc.10", default-features = false, features = [
+    "load-dynamic",
+    "ndarray",
+    "directml",
+    "cuda",
+    "openvino",
+    "qnn",
+] }
+ort-sys = "=2.0.0-rc.10"
+ndarray = "0.16"
+
 [target.'cfg(windows)'.dependencies]
 # Windows-rs — IFileOperation, IFileOpenDialog, Windows.Media.Ocr (WinRT), IThumbnailProvider,
 # SetThreadExecutionState, WinVerifyTrust, Media Foundation IMFSourceReader, IPropertyStore,
@@ -74,6 +95,7 @@ windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Threading",
     "Win32_System_Power",
     "Win32_System_SystemInformation",
@@ -89,6 +111,7 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Direct3D12",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
     "Media_Ocr",
     "Storage_Streams",
     "Graphics_Imaging",

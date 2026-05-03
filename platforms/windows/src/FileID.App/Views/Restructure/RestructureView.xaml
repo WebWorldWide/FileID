@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    RestructureView — plan + apply UI.
+
+    Plan: button → engine planRestructure IPC → category-summary list.
+    Apply: floating bar → engine applyRestructure IPC → result count.
+    Phase 7.x adds the Win2D Sankey + tree-diff drill-down; today the
+    plan summary is a per-category card list which is fully functional
+    and renders in any device-agnostic environment.
+-->
+<UserControl
+    x:Class="FileID.Views.Restructure.RestructureView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:FileID.ViewModels"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Grid Padding="32,28,32,20" RowSpacing="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Spacing="4">
+            <TextBlock Text="Restructure" Style="{StaticResource TitleTextBlockStyle}"/>
+            <TextBlock TextWrapping="Wrap"
+                       Style="{StaticResource BodyTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       Text="Plan a folder reorganization. Photos by year/month, videos by year, documents flat. Preview as symlinks first; commit as moves when you're happy."/>
+        </StackPanel>
+
+        <ScrollViewer Grid.Row="1"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled">
+            <StackPanel Spacing="14">
+                <Border CornerRadius="12"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1"
+                        Padding="20">
+                    <StackPanel Spacing="12">
+                        <TextBlock Text="Plan summary" Style="{StaticResource SubtitleTextBlockStyle}"/>
+                        <TextBlock x:Name="PlanStatusText"
+                                   TextWrapping="Wrap"
+                                   Style="{StaticResource BodyTextBlockStyle}"
+                                   Text="No plan generated yet. Click Generate plan to compute the proposed reorganization for your library."/>
+                        <Button x:Name="GeneratePlanButton"
+                                Content="Generate plan"
+                                Click="OnPlanClicked"
+                                Style="{StaticResource GoldButtonStyle}"
+                                Height="40"
+                                HorizontalAlignment="Left" />
+                    </StackPanel>
+                </Border>
+
+                <Border x:Name="CategoryListCard"
+                        CornerRadius="12"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1"
+                        Padding="20"
+                        Visibility="Collapsed">
+                    <StackPanel Spacing="12">
+                        <TextBlock Text="By category" Style="{StaticResource SubtitleTextBlockStyle}"/>
+                        <ItemsRepeater x:Name="CategoryRepeater">
+                            <ItemsRepeater.Layout>
+                                <StackLayout Orientation="Vertical" Spacing="8"/>
+                            </ItemsRepeater.Layout>
+                            <ItemsRepeater.ItemTemplate>
+                                <DataTemplate x:DataType="vm:RestructureCategoryRow">
+                                    <Grid Padding="14,10"
+                                          CornerRadius="8"
+                                          Background="{ThemeResource SubtleFillColorSecondaryBrush}">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0"
+                                                   Text="{x:Bind CategoryDisplay}"
+                                                   Style="{StaticResource BodyStrongTextBlockStyle}"
+                                                   VerticalAlignment="Center"/>
+                                        <TextBlock Grid.Column="1"
+                                                   Text="{x:Bind CountDisplay}"
+                                                   Style="{StaticResource BodyTextBlockStyle}"
+                                                   Foreground="{ThemeResource GoldBrush}"
+                                                   VerticalAlignment="Center"/>
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsRepeater.ItemTemplate>
+                        </ItemsRepeater>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+
+        <Grid Grid.Row="2"
+              Padding="16,12"
+              CornerRadius="12"
+              Background="{ThemeResource AccentFillColorDefaultBrush}">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0"
+                       x:Name="ApplyStatusText"
+                       Text="Plan empty — generate one above."
+                       VerticalAlignment="Center"
+                       Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}"/>
+            <Button x:Name="ApplySymlinkButton"
+                    Grid.Column="1"
+                    Content="Preview as symlinks"
+                    IsEnabled="False"
+                    Click="OnApplySymlinksClicked"
+                    Margin="0,0,8,0"/>
+            <Button x:Name="ApplyMovesButton"
+                    Grid.Column="2"
+                    Content="Apply (move)"
+                    IsEnabled="False"
+                    Click="OnApplyMovesClicked"
+                    Style="{StaticResource AccentButtonStyle}"/>
+        </Grid>
+
+    </Grid>
+</UserControl>

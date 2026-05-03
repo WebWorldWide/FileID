@@ -1,0 +1,184 @@
+// CleanupViewModel — backs the Cleanup tab duplicate groups list.
+//
+// Mirror of macOS app/Sources/FileID/Cleanup/CleanupViewModel.swift.
+// Groups files by matching `phash` (perceptual hash, 64-bit) to find
+// near-duplicate images. Each group lets the user mark one keeper and
+// trash the others (engine `trashFiles` IPC command, parallel
+// IFileOperation::DeleteItem with FOF_ALLOWUNDO).
+
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.CompilerServices;
+using System.Threading;
+using System.Threading.Tasks;
+using FileID.Services;
+using Microsoft.Data.Sqlite;
+using Microsoft.UI.Dispatching;
+
+namespace FileID.ViewModels;
+
+internal sealed class CleanupViewModel : INotifyPropertyChanged
+{
+    private readonly string _dbPath;
+    private readonly DispatcherQueue _ui;
+    private bool _isLoading;
+    private string? _errorMessage;
+
+    public CleanupViewModel(string dbPath, DispatcherQueue ui)
+    {
+        _dbPath = dbPath;
+        _ui = ui;
+    }
+
+    public ObservableCollection<DuplicateGroup> Groups { get; } = new();
+
+    public bool IsLoading
+    {
+        get => _isLoading;
+        private set { if (_isLoading != value) { _isLoading = value; OnPropertyChanged(); } }
+    }
+
+    public string? ErrorMessage
+    {
+        get => _errorMessage;
+        private set { if (_errorMessage != value) { _errorMessage = value; OnPropertyChanged(); } }
+    }
+
+    public async Task RefreshAsync(CancellationToken ct)
+    {
+        IsLoading = true;
+        ErrorMessage = null;
+        try
+        {
+            var groups = await Task.Run(() => Load(ct), ct).ConfigureAwait(false);
+            ApplyOnUi(groups);
+        }
+        catch (OperationCanceledException) { /* expected */ }
+        catch (Exception ex) { ErrorMessage = ex.Message; }
+        finally { IsLoading = false; }
+    }
+
+    private List<DuplicateGroup> Load(CancellationToken ct)
+    {
+        // First-launch guard: the engine creates the DB on first scan.
+        if (!File.Exists(_dbPath))
+        {
+            return new List<DuplicateGroup>();
+        }
+        var connString = new SqliteConnectionStringBuilder
+        {
+            DataSource = _dbPath,
+            Mode = SqliteOpenMode.ReadOnly,
+        }.ToString();
+        using var conn = new SqliteConnection(connString);
+        conn.Open();
+        // Group files by exact phash match. Phase 4.x extends to fuzzy
+        // matches via Hamming distance ≤ 4 bits using the same approach
+        // macOS uses (64-bit popcount on XOR of hash pairs).
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT phash, COUNT(*) AS cnt,
+                   GROUP_CONCAT(id, char(10)) AS ids,
+                   GROUP_CONCAT(path_text, char(10)) AS paths,
+                   GROUP_CONCAT(size_bytes, char(10)) AS sizes
+            FROM files
+            WHERE phash IS NOT NULL AND kind = 'image'
+            GROUP BY phash
+            HAVING cnt > 1
+            ORDER BY cnt DESC
+            LIMIT 200
+            """;
+        var groups = new List<DuplicateGroup>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            ct.ThrowIfCancellationRequested();
+            var phash = reader.GetInt64(0);
+            var ids = reader.GetString(2).Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            var paths = reader.GetString(3).Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            var sizes = reader.GetString(4).Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            int n = Math.Min(Math.Min(ids.Length, paths.Length), sizes.Length);
+            var members = new List<DuplicateMember>(n);
+            for (int i = 0; i < n; i++)
+            {
+                if (!long.TryParse(ids[i], out var id)) continue;
+                if (!long.TryParse(sizes[i], out var size)) size = 0;
+                members.Add(new DuplicateMember
+                {
+                    Id = id,
+                    Path = paths[i],
+                    FileName = System.IO.Path.GetFileName(paths[i]),
+                    SizeBytes = size,
+                    IsKeeper = i == 0, // first member defaults to keeper
+                });
+            }
+            groups.Add(new DuplicateGroup
+            {
+                PerceptualHash = phash,
+                Members = members,
+            });
+        }
+        return groups;
+    }
+
+    private void ApplyOnUi(IReadOnlyList<DuplicateGroup> rows)
+    {
+        if (_ui.HasThreadAccess) Replace(rows);
+        else _ui.TryEnqueue(() => Replace(rows));
+    }
+
+    private void Replace(IReadOnlyList<DuplicateGroup> rows)
+    {
+        Groups.Clear();
+        foreach (var r in rows) Groups.Add(r);
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+    private void OnPropertyChanged([CallerMemberName] string? name = null)
+        => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name ?? string.Empty));
+}
+
+internal sealed class DuplicateGroup
+{
+    public required long PerceptualHash { get; init; }
+    public required IReadOnlyList<DuplicateMember> Members { get; init; }
+    public int MemberCount => Members.Count;
+    public string Caption => $"{MemberCount} duplicates · phash {PerceptualHash:X16}";
+}
+
+internal sealed class DuplicateMember : INotifyPropertyChanged
+{
+    public required long Id { get; init; }
+    public required string Path { get; init; }
+    public required string FileName { get; init; }
+    public required long SizeBytes { get; init; }
+
+    public string SizeDisplay
+    {
+        get
+        {
+            var b = SizeBytes;
+            if (b < 1024) return $"{b} B";
+            if (b < 1024 * 1024) return $"{b / 1024.0:0.#} KB";
+            if (b < 1024L * 1024 * 1024) return $"{b / (1024.0 * 1024):0.#} MB";
+            return $"{b / (1024.0 * 1024 * 1024):0.##} GB";
+        }
+    }
+
+    private bool _isKeeper;
+    public bool IsKeeper
+    {
+        get => _isKeeper;
+        set
+        {
+            if (_isKeeper == value) return;
+            _isKeeper = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsKeeper)));
+        }
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+}

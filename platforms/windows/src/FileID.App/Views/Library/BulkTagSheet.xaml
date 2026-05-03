@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    BulkTagSheet — modal that takes a comma-separated tag list and
+    applies it to a set of files via engine `applyTags`. Confirms when
+    the count is >= 50 (typo guard). Tags persist via the engine sidecar
+    JSON + the DB `tags` table; Explorer Details column reads the
+    sidecar via the macOS-cross-platform contract.
+-->
+<UserControl
+    x:Class="FileID.Views.Library.BulkTagSheet"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    MinWidth="540">
+
+    <Grid RowSpacing="14" Padding="4,4,4,4">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   x:Name="HeaderText"
+                   Style="{StaticResource SubtitleTextBlockStyle}"
+                   Text="Tag selected files" />
+
+        <TextBlock Grid.Row="1"
+                   x:Name="SelectionText"
+                   Style="{StaticResource CaptionTextBlockStyle}"
+                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+
+        <TextBox Grid.Row="2"
+                 x:Name="TagsInput"
+                 PlaceholderText="vacation, italy, family"
+                 KeyDown="OnTagsKeyDown"
+                 Header="Tags (comma-separated)" />
+
+        <StackPanel Grid.Row="3"
+                    Orientation="Horizontal"
+                    Spacing="20"
+                    VerticalAlignment="Center">
+            <RadioButton x:Name="AddRadio"
+                         GroupName="TagMode"
+                         Content="Add to existing"
+                         IsChecked="True" />
+            <RadioButton x:Name="ReplaceRadio"
+                         GroupName="TagMode"
+                         Content="Replace existing"
+                         ToolTipService.ToolTip="Removes any existing user tags first" />
+        </StackPanel>
+
+        <TextBlock Grid.Row="4"
+                   x:Name="StatusText"
+                   Style="{StaticResource CaptionTextBlockStyle}"
+                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                   TextWrapping="Wrap" />
+    </Grid>
+</UserControl>

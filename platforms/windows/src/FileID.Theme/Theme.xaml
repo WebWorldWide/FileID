@@ -1,0 +1,193 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    FileID — Theme tokens.
+
+    1:1 port of platforms/apple/app/Sources/FileID/Theme/Theme.swift. Every
+    color, spacing scalar, and radius corresponds to a constant on the macOS
+    side. When this file and Theme.swift disagree, Theme.swift wins —
+    the macOS app is the canonical visual reference.
+
+    Token semantics (don't lose this in the noise):
+      Gold     — primary CTA (Apply, Start Scan, Pick a folder), tab selection,
+                 value-prop moments. Apply sparingly.
+      Ai       — lavender. "An on-device AI is doing work right now." Deep
+                 Analyze running, face clustering, ArcFace embed, Verify with AI.
+      Info     — soft cyan. Secondary status / informational banners.
+      Delight  — soft pink. Success / completion / "nice job" — used briefly,
+                 never as a permanent fixture.
+
+    Surface tokens layer on a fully-blurred Mica/Acrylic background — the
+    SurfaceBase (#000 @ 30%) muting + 1px white-8% borders are what give
+    the cards their depth. Adjust opacities together; they're tuned.
+-->
+<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- ─── Color literals ───────────────────────────────────────────── -->
+    <!--
+        Kept as <Color> resources separately from the brushes so animations
+        + Win2D rendering paths can grab the raw value. Gold = #FFCC00 from
+        Theme.swift Color(red: 1.0, green: 0.8, blue: 0.0). NOT #FFD700 even
+        though some docs mention that — the actual SwiftUI literal is #FFCC00.
+    -->
+    <Color x:Key="GoldColor">#FFFFCC00</Color>
+    <Color x:Key="GoldDimColor">#FFCCA300</Color>
+    <Color x:Key="AiColor">#FFB19BCE</Color>
+    <Color x:Key="InfoColor">#FFA0E2EA</Color>
+    <Color x:Key="DelightColor">#FFF2A6C0</Color>
+
+    <Color x:Key="LavaLampBaseColor">#FF141414</Color>      <!-- Color(white: 0.08) -->
+    <Color x:Key="LavaLampGoldEllipseColor">#FFFFCC00</Color>
+    <Color x:Key="LavaLampOrangeEllipseColor">#FFFF6600</Color>
+    <Color x:Key="LavaLampDarkEllipseColor">#FF0D0D0D</Color>
+
+    <!-- ─── Brushes ───────────────────────────────────────────────────── -->
+    <SolidColorBrush x:Key="GoldBrush"     Color="{StaticResource GoldColor}" />
+    <SolidColorBrush x:Key="GoldDimBrush"  Color="{StaticResource GoldDimColor}" />
+    <SolidColorBrush x:Key="AiBrush"       Color="{StaticResource AiColor}" />
+    <SolidColorBrush x:Key="InfoBrush"     Color="{StaticResource InfoColor}" />
+    <SolidColorBrush x:Key="DelightBrush"  Color="{StaticResource DelightColor}" />
+
+    <!-- Translucent fills used by the GlassCard + segmented controls + dividers. -->
+    <SolidColorBrush x:Key="SurfaceBaseBrush"   Color="#000000" Opacity="0.30" />
+    <SolidColorBrush x:Key="SurfaceCardBrush"   Color="#FFFFFF" Opacity="0.06" />
+    <SolidColorBrush x:Key="SurfaceBorderBrush" Color="#FFFFFF" Opacity="0.08" />
+
+    <!-- Gold tint variants for selected / hover states. -->
+    <SolidColorBrush x:Key="GoldSelectedBackgroundBrush" Color="{StaticResource GoldColor}" Opacity="0.18" />
+    <SolidColorBrush x:Key="GoldSelectedStrokeBrush"     Color="{StaticResource GoldColor}" Opacity="0.55" />
+    <SolidColorBrush x:Key="WhiteSubtleFillBrush"        Color="#FFFFFF" Opacity="0.08" />
+    <SolidColorBrush x:Key="WhiteSubtleStrokeBrush"      Color="#FFFFFF" Opacity="0.10" />
+
+    <!-- ─── Spacing scale (Theme.Space.*) ────────────────────────────── -->
+    <x:Double x:Key="SpaceXs">4</x:Double>
+    <x:Double x:Key="SpaceS">8</x:Double>
+    <x:Double x:Key="SpaceM">16</x:Double>
+    <x:Double x:Key="SpaceL">24</x:Double>
+    <x:Double x:Key="SpaceXl">40</x:Double>
+
+    <!-- Pre-baked Thickness so Margin/Padding bindings don't need a converter. -->
+    <Thickness x:Key="PaddingS">8</Thickness>
+    <Thickness x:Key="PaddingM">16</Thickness>
+    <Thickness x:Key="PaddingL">24</Thickness>
+
+    <!-- ─── Corner radii (Theme.Radius.*) ────────────────────────────── -->
+    <x:Double x:Key="RadiusS">8</x:Double>
+    <x:Double x:Key="RadiusM">12</x:Double>
+    <x:Double x:Key="RadiusL">16</x:Double>
+
+    <CornerRadius x:Key="CornerRadiusS">8</CornerRadius>
+    <CornerRadius x:Key="CornerRadiusM">12</CornerRadius>
+    <CornerRadius x:Key="CornerRadiusL">16</CornerRadius>
+
+    <!-- ─── Type ramp ─────────────────────────────────────────────────── -->
+    <!--
+        Map directly onto the macOS sizes from Theme.swift + Theme.Caption /
+        BadgePill. WinUI's stock TextBlock styles are close but not identical;
+        we stamp explicit sizes so the visual densities match.
+    -->
+    <x:Double x:Key="FontSizeBadge">10</x:Double>
+    <x:Double x:Key="FontSizeCaption">11</x:Double>
+    <x:Double x:Key="FontSizeBody">13</x:Double>
+    <x:Double x:Key="FontSizeTitle">17</x:Double>
+    <x:Double x:Key="FontSizeHero">24</x:Double>
+
+    <!-- ─── Motion durations ────────────────────────────────────────── -->
+    <!--
+        Centralized so we never end up with a 0.41s spring on one card and
+        a 0.4s spring on another. Motion primitives reference these keys.
+    -->
+    <x:Double x:Key="DurationShimmerSeconds">1.6</x:Double>
+    <x:Double x:Key="DurationCompletionRippleSeconds">0.9</x:Double>
+    <x:Double x:Key="DurationIridescentBorderSeconds">14</x:Double>
+    <x:Double x:Key="DurationTabCrossfadeSeconds">0.22</x:Double>
+    <x:Double x:Key="DurationSidebarToggleSeconds">0.20</x:Double>
+    <x:Double x:Key="DurationStatTileHoverSeconds">0.18</x:Double>
+    <x:Double x:Key="DurationApplyBarEntranceSeconds">0.40</x:Double>
+    <x:Double x:Key="DurationSankeyEntranceSeconds">0.55</x:Double>
+    <x:Double x:Key="DurationStartingCardEntranceSeconds">0.35</x:Double>
+
+    <!-- Spring parameters: response = period of one oscillation, damping
+         in [0..1] where 1.0 = critically damped (no overshoot). Match the
+         SwiftUI .spring(response:dampingFraction:) calls 1:1. -->
+    <x:Double x:Key="SpringResponseStandard">0.40</x:Double>
+    <x:Double x:Key="SpringDampingStandard">0.80</x:Double>
+    <x:Double x:Key="SpringResponseTight">0.35</x:Double>
+    <x:Double x:Key="SpringDampingTight">0.78</x:Double>
+
+    <!-- ─── Gold button style (Theme.GoldButton) ────────────────────── -->
+    <!--
+        Primary CTA. Applied via Style="{StaticResource GoldButtonStyle}".
+        Mirrors macOS GoldButton: gold fill, black text, semibold. Borderless
+        prominent visual weight. Hover + pressed states modulate the fill.
+
+        The hover state grows opacity 0.0 → 0.08 of black overlay (subtle
+        darkening), pressed state goes 0.16. Matches SwiftUI's
+        .borderedProminent .tint(Theme.gold) feel without needing a custom
+        VisualState chain — the button's own FocusVisual + control template
+        handles focus rings.
+    -->
+    <Style x:Key="GoldButtonStyle" TargetType="Button">
+        <Setter Property="Background" Value="{StaticResource GoldBrush}" />
+        <Setter Property="Foreground" Value="Black" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
+        <Setter Property="Padding" Value="16,8,16,8" />
+        <Setter Property="MinHeight" Value="36" />
+        <Setter Property="CornerRadius" Value="{StaticResource CornerRadiusS}" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Grid x:Name="RootGrid"
+                          Background="{TemplateBinding Background}"
+                          CornerRadius="{TemplateBinding CornerRadius}">
+                        <ContentPresenter x:Name="ContentPresenter"
+                                          Foreground="{TemplateBinding Foreground}"
+                                          Content="{TemplateBinding Content}"
+                                          ContentTemplate="{TemplateBinding ContentTemplate}"
+                                          HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                          VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                                          Padding="{TemplateBinding Padding}"
+                                          AutomationProperties.AccessibilityView="Raw" />
+                        <!-- HoverOverlay must be declared BEFORE the
+                             VisualStateManager.VisualStateGroups block;
+                             XamlCompiler Pass 1 silently exits 1 (no
+                             diagnostic) on `<Setter Target="...">`
+                             references to elements that appear later in
+                             document order. -->
+                        <Rectangle x:Name="HoverOverlay"
+                                   Fill="Black"
+                                   Opacity="0"
+                                   IsHitTestVisible="False"
+                                   RadiusX="{StaticResource RadiusS}"
+                                   RadiusY="{StaticResource RadiusS}" />
+                        <VisualStateManager.VisualStateGroups>
+                            <VisualStateGroup x:Name="CommonStates">
+                                <VisualState x:Name="Normal" />
+                                <VisualState x:Name="PointerOver">
+                                    <VisualState.Setters>
+                                        <Setter Target="HoverOverlay.Opacity" Value="0.08" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Pressed">
+                                    <VisualState.Setters>
+                                        <Setter Target="HoverOverlay.Opacity" Value="0.16" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Disabled">
+                                    <VisualState.Setters>
+                                        <Setter Target="RootGrid.Opacity" Value="0.45" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                            </VisualStateGroup>
+                        </VisualStateManager.VisualStateGroups>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+</ResourceDictionary>

@@ -41,6 +41,16 @@ if (-not ($installed -contains "aarch64-pc-windows-msvc")) {
     rustup target add aarch64-pc-windows-msvc
 }
 
+# ARM64 cross-compile requires the MSVC ARM64 build tools (cl.exe). They
+# are NOT installed by default with Visual Studio. Install via:
+#   Visual Studio Installer → Modify → Individual Components →
+#   "MSVC v143 - VS 2022 C++ ARM64/ARM64EC build tools (Latest)"
+# Or with the unattended switch:
+#   vs_buildtools.exe modify --add Microsoft.VisualStudio.Component.VC.Tools.ARM64
+# Bundled-SQLite (rusqlite) compiles a C amalgamation; without ARM64
+# cl.exe it fails the cc-rs probe. CI's windows-11-arm runner builds
+# ARM64 natively so it sidesteps this; local devs need the build tools.
+
 if ($Clean) {
     Write-Host "Cleaning previous build artifacts..." -ForegroundColor Yellow
     Push-Location $EngineDir; cargo clean; Pop-Location

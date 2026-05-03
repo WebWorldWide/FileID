@@ -1,0 +1,188 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    SidebarProcessingControl — Start Scan / Pause / Resume / Cancel + ETA
+    + 4-stat grid (discovered / tagged / memory MB / failures).
+
+    Three states:
+      • Pre-scan: idle pill + "Start Scan" gold button (Ctrl+R).
+      • In-flight: phase badge + progress bar + stat grid + Pause/Cancel.
+      • Completed: summary line + Rescan button.
+
+    All FontIcon glyphs use numeric XML escapes so the bytes survive
+    encoding pipelines.
+-->
+<UserControl
+    x:Class="FileID.Views.Sidebar.SidebarProcessingControl"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <StackPanel Spacing="10">
+        <!-- Section header — uppercase muted caption, Fluent Settings pattern. -->
+        <TextBlock Text="PROCESSING"
+                   Style="{StaticResource CaptionTextBlockStyle}"
+                   FontWeight="SemiBold"
+                   CharacterSpacing="40"
+                   Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+
+        <!-- Pre-scan: idle pill + Start Scan -->
+        <StackPanel x:Name="IdlePanel" Spacing="8">
+            <Grid Padding="12,9"
+                  CornerRadius="8"
+                  BorderThickness="1"
+                  BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                  Background="{ThemeResource ControlFillColorDefaultBrush}">
+                <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                    <FontIcon Glyph="&#xE916;" FontSize="14" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                    <TextBlock x:Name="IdleStatusText"
+                               Text="Idle. Pick a folder to begin."
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               TextWrapping="Wrap"
+                               VerticalAlignment="Center" />
+                </StackPanel>
+            </Grid>
+            <Button x:Name="StartScanButton"
+                    HorizontalAlignment="Stretch"
+                    Click="OnStartScanClicked"
+                    Style="{StaticResource GoldButtonStyle}"
+                    Height="40"
+                    AccessKey="R"
+                    ToolTipService.ToolTip="Start scan (Ctrl+R)">
+                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <FontIcon FontSize="13" Glyph="&#xE768;" />
+                    <TextBlock Text="Start Scan" FontWeight="SemiBold" />
+                </StackPanel>
+            </Button>
+        </StackPanel>
+
+        <!-- In-flight: phase + progress + stats + Pause/Cancel -->
+        <StackPanel x:Name="ScanningPanel" Spacing="10" Visibility="Collapsed">
+            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                <FontIcon x:Name="PhaseIcon" Glyph="&#xE895;" FontSize="13" Foreground="{ThemeResource GoldBrush}" />
+                <TextBlock x:Name="PhaseText"
+                           Text="Discovering…"
+                           Style="{StaticResource BodyStrongTextBlockStyle}" />
+            </StackPanel>
+
+            <ProgressBar x:Name="ScanProgressBar"
+                         IsIndeterminate="False"
+                         Maximum="100"
+                         Value="0"
+                         Foreground="{ThemeResource GoldBrush}" />
+
+            <Grid ColumnSpacing="6" RowSpacing="6">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <Border Grid.Row="0" Grid.Column="0" Padding="10,8"
+                        Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                        CornerRadius="8">
+                    <StackPanel Spacing="2">
+                        <TextBlock Text="Discovered"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                        <TextBlock x:Name="StatDiscovered" Text="—"
+                                   FontSize="15" FontWeight="SemiBold"
+                                   Foreground="{ThemeResource GoldBrush}" />
+                    </StackPanel>
+                </Border>
+                <Border Grid.Row="0" Grid.Column="1" Padding="10,8"
+                        Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                        CornerRadius="8">
+                    <StackPanel Spacing="2">
+                        <TextBlock Text="Tagged"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                        <TextBlock x:Name="StatTagged" Text="—"
+                                   FontSize="15" FontWeight="SemiBold"
+                                   Foreground="{ThemeResource GoldBrush}" />
+                    </StackPanel>
+                </Border>
+                <Border Grid.Row="1" Grid.Column="0" Padding="10,8"
+                        Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                        CornerRadius="8">
+                    <StackPanel Spacing="2">
+                        <TextBlock Text="Memory"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                        <TextBlock x:Name="StatMemory" Text="—"
+                                   FontSize="15" FontWeight="SemiBold" />
+                    </StackPanel>
+                </Border>
+                <Border Grid.Row="1" Grid.Column="1" Padding="10,8"
+                        Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                        CornerRadius="8">
+                    <StackPanel Spacing="2">
+                        <TextBlock Text="Failures"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                        <TextBlock x:Name="StatFailures" Text="0"
+                                   FontSize="15" FontWeight="SemiBold" />
+                    </StackPanel>
+                </Border>
+            </Grid>
+
+            <TextBlock x:Name="EtaText"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       Text="ETA: —" />
+
+            <Grid ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Button x:Name="PauseResumeButton" Grid.Column="0"
+                        Click="OnPauseResumeClicked"
+                        HorizontalAlignment="Stretch"
+                        Padding="12,8"
+                        BorderThickness="1"
+                        BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                        Background="{ThemeResource ControlFillColorDefaultBrush}"
+                        CornerRadius="8">
+                    <TextBlock x:Name="PauseResumeText"
+                               Text="Pause"
+                               Style="{StaticResource CaptionTextBlockStyle}" />
+                </Button>
+                <Button Grid.Column="1"
+                        Click="OnCancelClicked"
+                        HorizontalAlignment="Stretch"
+                        Padding="12,8"
+                        BorderThickness="1"
+                        BorderBrush="#552B0000"
+                        Background="#222B0000"
+                        CornerRadius="8">
+                    <TextBlock Text="Cancel"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="#FFE5A5A5" />
+                </Button>
+            </Grid>
+        </StackPanel>
+
+        <!-- Completed: Rescan -->
+        <StackPanel x:Name="CompletedPanel" Spacing="8" Visibility="Collapsed">
+            <TextBlock x:Name="CompletedSummary"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       TextWrapping="Wrap" />
+            <Button HorizontalAlignment="Stretch"
+                    Click="OnStartScanClicked"
+                    Height="40"
+                    Style="{StaticResource GoldButtonStyle}">
+                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <FontIcon FontSize="13" Glyph="&#xE72C;" />
+                    <TextBlock Text="Rescan" FontWeight="SemiBold" />
+                </StackPanel>
+            </Button>
+        </StackPanel>
+    </StackPanel>
+</UserControl>

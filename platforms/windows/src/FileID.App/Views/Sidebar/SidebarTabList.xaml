@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    SidebarTabList — six tab buttons. Active tab gets gold @ 18% background
+    + gold @ 55% stroke (matches macOS Sidebar.swift:143-150). Tabs are
+    disabled when no folder is picked, except Settings which is always on.
+
+    Keyboard: each button accepts Alt+1..6 via the WinUI accelerator stack
+    (registered in MainWindow). Click flips AppViewModel.ActiveTab; the
+    button styling reacts via the binding chain.
+-->
+<UserControl
+    x:Class="FileID.Views.Sidebar.SidebarTabList"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <StackPanel x:Name="ButtonsHost" Spacing="2">
+        <!-- Buttons constructed in code-behind so we can wire Click + style
+             updates per-tab without repeating XAML. -->
+    </StackPanel>
+</UserControl>

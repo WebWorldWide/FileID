@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    EmptyStateView — reusable empty-state template. Mirror of macOS
+    Views/EmptyStateView.swift:7. Big gold icon, title, body callout,
+    optional secondary message, optional primary action button.
+
+    Usage:
+        <views:EmptyStateView
+            Glyph=""
+            Title="No images yet"
+            Body="Pick a folder above to begin."
+            ActionLabel="Pick a folder"
+            ActionGlyph=""
+            ActionInvoked="OnPickInvoked" />
+-->
+<UserControl
+    x:Class="FileID.Views.EmptyStateView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <StackPanel HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                Spacing="14"
+                MaxWidth="440">
+        <FontIcon x:Name="GlyphIcon"
+                  FontSize="56"
+                  HorizontalAlignment="Center"
+                  Foreground="{ThemeResource GoldBrush}"
+                  Opacity="0.55" />
+        <TextBlock x:Name="TitleText"
+                   FontSize="22"
+                   FontWeight="Bold"
+                   HorizontalAlignment="Center"
+                   TextAlignment="Center" />
+        <TextBlock x:Name="BodyText"
+                   FontSize="13"
+                   Opacity="0.7"
+                   HorizontalAlignment="Center"
+                   TextAlignment="Center"
+                   TextWrapping="Wrap" />
+        <TextBlock x:Name="SecondaryText"
+                   FontSize="11"
+                   Opacity="0.45"
+                   HorizontalAlignment="Center"
+                   TextAlignment="Center"
+                   TextWrapping="Wrap"
+                   Visibility="Collapsed" />
+        <Button x:Name="ActionButton"
+                Click="OnActionClicked"
+                Style="{StaticResource GoldButtonStyle}"
+                HorizontalAlignment="Center"
+                Visibility="Collapsed">
+            <StackPanel Orientation="Horizontal" Spacing="6">
+                <FontIcon x:Name="ActionGlyphIcon" FontSize="11" />
+                <TextBlock x:Name="ActionLabelText" />
+            </StackPanel>
+        </Button>
+    </StackPanel>
+</UserControl>

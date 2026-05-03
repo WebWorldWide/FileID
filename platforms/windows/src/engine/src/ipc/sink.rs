@@ -103,6 +103,7 @@ mod tests {
             pid: 1,
             worker_cap: 1,
             physical_memory_gb: 1.0,
+            hardware: None,
         })))).await;
         drop(sink);
         // Writer task drains and exits.

@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    MainWindow — root window. LavaLamp behind everything; sidebar | divider |
+    detail in a horizontal split; drag-drop overlay laid on top of the
+    content row.
+
+    The drag-drop overlay only renders when DragOver is in flight; ditto a
+    "drop a folder to scan" message. Mirror of macOS MainWindow.swift's
+    drop overlay.
+-->
+<Window
+    x:Class="FileID.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:motion="using:FileID.Theme.Motion"
+    xmlns:sidebar="using:FileID.Views.Sidebar"
+    xmlns:views="using:FileID.Views"
+    Title="FileID"
+    mc:Ignorable="d">
+
+    <Grid x:Name="RootLayout"
+          AllowDrop="True"
+          DragOver="OnDragOver"
+          DragLeave="OnDragLeave"
+          Drop="OnDrop">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="32" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- LavaLamp restored in V14.6 via a pure Microsoft.UI.Composition
+             rewrite (no Win2D). Composition is the right primitive: vsync-
+             driven, GPU-resident, no extra render target, no Win2D dep,
+             and works on every Windows build (the Win2D + CoreMessagingXP
+             interaction that bit us in V12.2 doesn't apply here). -->
+        <motion:LavaLampBackground Grid.RowSpan="2" />
+
+        <Grid x:Name="AppTitleBar"
+              Grid.Row="0"
+              Background="Transparent">
+            <TextBlock Text="FileID"
+                       VerticalAlignment="Center"
+                       Margin="16,0,0,0"
+                       FontSize="13"
+                       FontWeight="SemiBold"
+                       Opacity="0.55" />
+        </Grid>
+
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition x:Name="SidebarColumn" Width="260" />
+                <ColumnDefinition Width="1" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <sidebar:Sidebar x:Name="SidebarHost" Grid.Column="0" />
+
+            <Border Grid.Column="1"
+                    Background="{ThemeResource SurfaceBorderBrush}" />
+
+            <Grid x:Name="DetailHost" Grid.Column="2">
+                <views:DetailHostView />
+            </Grid>
+        </Grid>
+
+        <!-- Drag-drop overlay (visible only while a drag is in flight) -->
+        <Grid x:Name="DragOverlay"
+              Grid.RowSpan="2"
+              Background="#990D0D14"
+              Visibility="Collapsed"
+              IsHitTestVisible="False">
+            <Border Padding="40,32"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    BorderThickness="2"
+                    BorderBrush="{ThemeResource GoldBrush}"
+                    CornerRadius="{StaticResource CornerRadiusL}"
+                    Background="{ThemeResource SurfaceBaseBrush}">
+                <StackPanel Spacing="12" HorizontalAlignment="Center">
+                    <FontIcon Glyph="&#xE8B7;" FontSize="48" Foreground="{ThemeResource GoldBrush}" />
+                    <TextBlock Text="Drop folder to scan"
+                               FontSize="20" FontWeight="SemiBold"
+                               HorizontalAlignment="Center" />
+                    <TextBlock Text="FileID will read every file inside, on this machine."
+                               FontSize="12" Opacity="0.65"
+                               HorizontalAlignment="Center" />
+                </StackPanel>
+            </Border>
+        </Grid>
+    </Grid>
+</Window>

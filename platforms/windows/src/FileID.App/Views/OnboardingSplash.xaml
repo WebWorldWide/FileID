@@ -1,0 +1,163 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    OnboardingSplash — 6-step pipeline diagram on the empty Detail when no
+    folder is picked. Mirror of macOS Detail.swift:104-199.
+
+    All FontIcon glyphs use numeric XML escapes so the bytes survive
+    encoding pipelines.
+-->
+<UserControl
+    x:Class="FileID.Views.OnboardingSplash"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Grid Padding="60,80">
+        <StackPanel HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    Spacing="24"
+                    MaxWidth="560">
+
+            <StackPanel Spacing="8" HorizontalAlignment="Center">
+                <TextBlock Text="FileID"
+                           FontSize="36"
+                           FontWeight="Bold"
+                           HorizontalAlignment="Center"
+                           Foreground="{ThemeResource GoldBrush}" />
+                <TextBlock Text="On-device AI file organization."
+                           Style="{StaticResource SubtitleTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                           HorizontalAlignment="Center" />
+            </StackPanel>
+
+            <StackPanel Spacing="10">
+                <!-- Step 1 — Pick a folder (current next action, gold accent) -->
+                <Border Padding="16,14"
+                        CornerRadius="12"
+                        BorderBrush="{ThemeResource GoldSelectedStrokeBrush}"
+                        BorderThickness="1"
+                        Background="{ThemeResource GoldSelectedBackgroundBrush}">
+                    <StackPanel Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
+                        <FontIcon Glyph="&#xE8B7;" FontSize="20" Foreground="{ThemeResource GoldBrush}" />
+                        <StackPanel Spacing="3" VerticalAlignment="Center">
+                            <TextBlock Text="1.   Pick a folder" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <TextBlock Text="Choose a library on your machine. FileID won't touch the files."
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- Step 2 — Scan -->
+                <Border Padding="16,14"
+                        CornerRadius="12"
+                        BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                        BorderThickness="1"
+                        Background="{ThemeResource ControlFillColorDefaultBrush}">
+                    <StackPanel Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
+                        <FontIcon Glyph="&#xE773;" FontSize="20" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                        <StackPanel Spacing="3" VerticalAlignment="Center">
+                            <TextBlock Text="2.   Scan" Style="{StaticResource BodyStrongTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Text="FileID reads every image, video, PDF, and document inside."
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- Step 3 — Group people -->
+                <Border Padding="16,14"
+                        CornerRadius="12"
+                        BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                        BorderThickness="1"
+                        Background="{ThemeResource ControlFillColorDefaultBrush}">
+                    <StackPanel Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
+                        <FontIcon Glyph="&#xE716;" FontSize="20" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                        <StackPanel Spacing="3" VerticalAlignment="Center">
+                            <TextBlock Text="3.   Group people" Style="{StaticResource BodyStrongTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Text="Faces cluster into cards. Name them once and they stay named."
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- Step 4 — Find duplicates -->
+                <Border Padding="16,14"
+                        CornerRadius="12"
+                        BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                        BorderThickness="1"
+                        Background="{ThemeResource ControlFillColorDefaultBrush}">
+                    <StackPanel Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
+                        <FontIcon Glyph="&#xE74D;" FontSize="20" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                        <StackPanel Spacing="3" VerticalAlignment="Center">
+                            <TextBlock Text="4.   Find duplicates" Style="{StaticResource BodyStrongTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Text="Visually-similar files get grouped. Pick the keepers, trash the rest."
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- Step 5 — Deep Analyze (AI accent) -->
+                <Border Padding="16,14"
+                        CornerRadius="12"
+                        BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                        BorderThickness="1"
+                        Background="{ThemeResource ControlFillColorDefaultBrush}">
+                    <StackPanel Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
+                        <FontIcon Glyph="&#xE945;" FontSize="20" Foreground="{ThemeResource AiBrush}" />
+                        <StackPanel Spacing="3" VerticalAlignment="Center">
+                            <TextBlock Text="5.   Deep Analyze" Style="{StaticResource BodyStrongTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Text="A local vision-language model writes captions and proposes filenames."
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- Step 6 — Reorganize -->
+                <Border Padding="16,14"
+                        CornerRadius="12"
+                        BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                        BorderThickness="1"
+                        Background="{ThemeResource ControlFillColorDefaultBrush}">
+                    <StackPanel Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
+                        <FontIcon Glyph="&#xED25;" FontSize="20" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                        <StackPanel Spacing="3" VerticalAlignment="Center">
+                            <TextBlock Text="6.   Reorganize" Style="{StaticResource BodyStrongTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Text="Folder reorganization previews as shortcuts before anything moves."
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+
+            <!-- Privacy stamp -->
+            <Border Padding="14,9"
+                    CornerRadius="20"
+                    Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                    HorizontalAlignment="Center">
+                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <FontIcon Glyph="&#xE946;" FontSize="13" Foreground="{ThemeResource AiBrush}" />
+                    <TextBlock Text="Nothing leaves your machine."
+                               Style="{StaticResource CaptionTextBlockStyle}" />
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </Grid>
+</UserControl>

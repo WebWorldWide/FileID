@@ -1,0 +1,57 @@
+# EditorConfig for FileID Windows. Sets baseline formatting + C# code style.
+# C# rules taken directly from .NET runtime + WinUI conventions.
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = crlf
+indent_style = space
+indent_size = 4
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{json,xml,xaml,csproj,props,targets,manifest,config,toml}]
+indent_size = 2
+
+[*.{ps1,psm1,psd1}]
+indent_size = 4
+
+[*.cs]
+# C# language conventions: this project uses modern features.
+csharp_style_namespace_declarations = file_scoped:warning
+csharp_style_expression_bodied_methods = when_on_single_line:silent
+csharp_style_expression_bodied_properties = when_on_single_line:suggestion
+csharp_style_var_for_built_in_types = true:silent
+csharp_style_var_when_type_is_apparent = true:silent
+csharp_prefer_braces = when_multiline:warning
+
+# Naming: PascalCase for types/methods/properties; camelCase for locals;
+# _camelCase for private fields.
+dotnet_naming_rule.private_fields_should_be_camel_case_with_underscore.severity = warning
+dotnet_naming_rule.private_fields_should_be_camel_case_with_underscore.symbols = private_fields
+dotnet_naming_rule.private_fields_should_be_camel_case_with_underscore.style = camel_case_underscore_style
+
+dotnet_naming_symbols.private_fields.applicable_kinds = field
+dotnet_naming_symbols.private_fields.applicable_accessibilities = private
+
+dotnet_naming_style.camel_case_underscore_style.required_prefix = _
+dotnet_naming_style.camel_case_underscore_style.capitalization = camel_case
+
+# this. and Me. qualifiers — none, names disambiguate.
+dotnet_style_qualification_for_field = false:warning
+dotnet_style_qualification_for_property = false:warning
+dotnet_style_qualification_for_method = false:warning
+dotnet_style_qualification_for_event = false:warning
+
+# Modern null handling.
+dotnet_style_coalesce_expression = true:suggestion
+dotnet_style_null_propagation = true:suggestion
+dotnet_style_prefer_is_null_check_over_reference_equality_method = true:warning
+
+# Diagnostic severities — TreatWarningsAsErrors=true at the MSBuild level
+# means most analyzer warnings become hard errors. The exceptions here
+# are pragmatic carve-outs for noisy rules that don't pay rent.
+dotnet_diagnostic.IDE0046.severity = none   # "use conditional expression for return" — readability cost
+dotnet_diagnostic.CA1303.severity = none    # localized strings — we ship en-US only at v1
+dotnet_diagnostic.CA1707.severity = none    # underscores in identifiers — we use them in test names

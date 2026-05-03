@@ -1,0 +1,69 @@
+<Project>
+  <!--
+    Shared MSBuild properties for every project in platforms/windows/.
+    Keep this lean — anything project-specific (TargetFramework, OutputType,
+    UseWinUI, etc.) lives in the individual .csproj.
+
+    The bar this project holds itself to:
+      - nullable reference types ENABLED, warnings ARE errors
+      - latest C# language features
+      - implicit usings on (less ceremony in small files; readability wins)
+      - latest analyzer level, treat warnings as errors
+      - lockfile mode locked — builds are reproducible byte-for-byte
+  -->
+
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <NeutralLanguage>en-US</NeutralLanguage>
+
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <WarningsAsErrors>nullable</WarningsAsErrors>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+
+    <!--
+      Pedantic CA rule carve-outs. These either fire on framework patterns
+      we deliberately use (CA1001 false-positive on classes with
+      Disposed-in-OnClosed Composition objects) or are stylistic noise that
+      doesn't catch real bugs (CA1305 locale-aware ToString on internal log
+      timestamps; CA1822 'can be static' on event handlers WinUI binds by
+      instance; CA1859 'concrete return type' on UIElement returns where
+      polymorphism is the point; CA1805 explicit defaults aid grep-ability).
+      All re-evaluatable in Phase 8 polish.
+    -->
+    <NoWarn>$(NoWarn);CA1001;CA1305;CA1805;CA1822;CA1859</NoWarn>
+
+    <!-- Reproducible restores: any drift in transitive deps fails the build. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreLockedMode Condition="'$(ContinuousIntegrationBuild)' == 'true'">true</RestoreLockedMode>
+
+    <!-- Symbols + sourcelink for crash log readability. Local-only logs;
+         no external symbol server. -->
+    <DebugType>portable</DebugType>
+    <DebugSymbols>true</DebugSymbols>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+
+    <!-- Build determinism. -->
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+
+    <!-- The Windows project tree pins to .NET 8 LTS. The SDK pin lives
+         in global.json (8.0.100, rollForward = latestFeature) so any
+         bug-fix release of 8.0.x picks up automatically. -->
+    <Copyright>© FileID</Copyright>
+    <Company>FileID</Company>
+    <Product>FileID</Product>
+
+    <!--
+      WinAppSDK's MrtCore.PriGen.targets resolves Microsoft.Build.Packaging.Pri.Tasks.dll
+      from $(AppxMSBuildToolsPath), which defaults to a path under the .NET SDK's
+      Microsoft\VisualStudio\v17.0\AppxPackage subdirectory — which doesn't exist
+      unless Visual Studio (or Build Tools with the UWP MSBuild component) puts
+      it there. We point directly at the VS Build Tools install. Required for
+      `dotnet build` of unpackaged WinUI 3 projects from CLI.
+    -->
+    <AppxMSBuildToolsPath Condition="'$(AppxMSBuildToolsPath)' == '' AND Exists('C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Microsoft\VisualStudio\v17.0\AppxPackage')">C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Microsoft\VisualStudio\v17.0\AppxPackage\</AppxMSBuildToolsPath>
+  </PropertyGroup>
+</Project>

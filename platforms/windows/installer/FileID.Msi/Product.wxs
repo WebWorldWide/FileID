@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    FileID MSI definition.
+
+    Per-machine install under Program Files. No per-user install (which
+    would land under %LOCALAPPDATA% and split user data from app code —
+    we keep `%LOCALAPPDATA%\FileID\` for runtime data only: DB, models,
+    logs, thumbs cache).
+
+    Upgrade behavior: replace older versions cleanly. The Burn bootstrapper
+    above will detect a newer bundle and remove the older MSI before
+    installing the new one — but as a safety net, MajorUpgrade element
+    declares any older version is replaceable in-place.
+
+    Components:
+      - PublishedFiles: every file from `dotnet publish` (auto-harvested by
+        wixproj's HarvestDirectory). Includes FileID.exe, FileIDEngine.exe
+        (staged into publish/ by publish-bundle.ps1), the entire .NET
+        runtime, WinAppSDK runtime, Win2D, etc.
+      - StartMenuShortcut: one shortcut under "FileID".
+
+    Properties:
+      - ARPNOMODIFY=1: hides the "Modify" button in Apps & Features
+        (we don't ship optional features that could be added/removed).
+      - ARPHELPLINK / ARPURLINFOABOUT: documented in MODELS.md / PRIVACY.md.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <Package
+      Name="FileID"
+      Manufacturer="FileID"
+      Version="0.1.0"
+      UpgradeCode="$(var.UpgradeCode)"
+      InstallerVersion="500"
+      Compressed="yes"
+      Scope="perMachine">
+
+    <!-- Single .cab, embedded in the .msi so the artifact is one file. -->
+    <Media Id="1" Cabinet="FileID.cab" EmbedCab="yes" />
+
+    <!-- Replace any older version. Schedule afterInstallExecute so files
+         from the new install land before old files come out — minimizes
+         flicker if the user has the app open. -->
+    <MajorUpgrade
+        Schedule="afterInstallExecute"
+        DowngradeErrorMessage="A newer version of FileID is already installed." />
+
+    <!-- Per-machine install with arch-aware Program Files target. -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="FileID" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="StartMenuDir" Name="FileID" />
+    </StandardDirectory>
+
+    <!-- Apps & Features metadata. -->
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPPRODUCTICON" Value="FileIDIcon" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/anthropics/claude-code/issues" />
+    <Property Id="ARPURLINFOABOUT" Value="https://fileid.app" />
+    <!-- Privacy posture is a product feature; surface it in Apps & Features. -->
+    <Property Id="ARPCOMMENTS" Value="On-device AI file organizer. No telemetry. No cloud." />
+
+    <!-- Icon used everywhere ARPPRODUCTICON references it. The actual
+         .ico file lands once Phase 11 ships an app icon; for now this is
+         a placeholder reference Burn doesn't choke on. -->
+    <Icon Id="FileIDIcon" SourceFile="$(var.PublishRoot)\FileID.exe" />
+
+    <!-- Start Menu shortcut. -->
+    <DirectoryRef Id="StartMenuDir">
+      <Component Id="StartMenuShortcut" Guid="*">
+        <Shortcut Id="StartMenuLink"
+                  Name="FileID"
+                  Description="On-device AI file organizer"
+                  Target="[INSTALLFOLDER]FileID.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="FileIDIcon" />
+        <RemoveFolder Id="RemoveStartMenuDir" Directory="StartMenuDir" On="uninstall" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\FileID\Installed"
+                       Name="StartMenuShortcut"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- Feature: bundles every component above into the only feature the
+         installer offers. We don't expose optional features (per ARPNOMODIFY). -->
+    <Feature Id="MainFeature" Title="FileID" Level="1" AllowAdvertise="no" Display="expand">
+      <ComponentGroupRef Id="PublishedFiles" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+  </Package>
+</Wix>

@@ -1,5 +1,8 @@
 [toolchain]
-channel = "1.78"
+# Pinned to 1.90. Floor is 1.88 — transitive deps (image, time, icu_*)
+# bumped their MSRVs that high. 1.90 gives a small margin without
+# tracking nightly. Bump in a single commit when the floor moves again.
+channel = "1.90"
 targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]
 profile = "minimal"
 components = ["rustfmt", "clippy"]

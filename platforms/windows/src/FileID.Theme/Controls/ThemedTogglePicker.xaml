@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    ThemedTogglePicker — two-state pill picker. Mirror of macOS
+    ThemedTogglePicker (Theme.swift:178). Used for binary mode toggles
+    where labels are clearer than a switch (e.g. "Cards / Tree" in
+    Restructure, "Image / Video" filters).
+
+    Usage:
+        <theme:ThemedTogglePicker
+            FalseLabel="Cards"
+            TrueLabel="Tree"
+            Selection="{x:Bind ViewModel.IsTreeMode, Mode=TwoWay}" />
+-->
+<UserControl
+    x:Class="FileID.Theme.Controls.ThemedTogglePicker"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Border Padding="3"
+            CornerRadius="20"
+            Background="{ThemeResource WhiteSubtleFillBrush}"
+            BorderBrush="{ThemeResource WhiteSubtleStrokeBrush}"
+            BorderThickness="1">
+        <StackPanel Orientation="Horizontal" Spacing="2">
+            <Button x:Name="FalseButton"
+                    Click="OnFalseClicked"
+                    Background="Transparent"
+                    BorderThickness="0"
+                    Padding="12,6"
+                    FontSize="{StaticResource FontSizeBody}"
+                    FontWeight="Medium"
+                    CornerRadius="20" />
+            <Button x:Name="TrueButton"
+                    Click="OnTrueClicked"
+                    Background="Transparent"
+                    BorderThickness="0"
+                    Padding="12,6"
+                    FontSize="{StaticResource FontSizeBody}"
+                    FontWeight="Medium"
+                    CornerRadius="20" />
+        </StackPanel>
+    </Border>
+</UserControl>

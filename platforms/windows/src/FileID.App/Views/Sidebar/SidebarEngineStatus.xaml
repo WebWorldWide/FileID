@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    SidebarEngineStatus — engine state banner anchored at the bottom of
+    the sidebar. Three states:
+
+      Starting → soft gold dot + glow, "Engine starting…"
+      Ready    → soft green dot + glow, "Engine ready" (tooltip has details)
+      Crashed  → soft red dot + glow,   last error message
+
+    Layout: full-width Fluent pill with a 10 px status dot inside a
+    subtle 16 px glow ring. Text right of the dot, vertically centered.
+    Tooltip on the whole control surfaces the detail line.
+
+    Sized so the row's intrinsic height is exactly 32 px (matches sidebar
+    spacing scale). CornerRadius=16 is half the row height — perfect pill.
+-->
+<UserControl
+    x:Class="FileID.Views.Sidebar.SidebarEngineStatus"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Border Padding="12,7"
+            Height="32"
+            CornerRadius="16"
+            HorizontalAlignment="Stretch"
+            Background="{ThemeResource ControlFillColorSecondaryBrush}"
+            BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+            BorderThickness="1">
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <!-- Status dot + glow ring. The ring is a slightly larger
+                 ellipse with the same fill at 22% opacity, giving the dot
+                 a soft Fluent reveal-style glow. -->
+            <Grid Grid.Column="0"
+                  Width="18" Height="18"
+                  Margin="0,0,10,0"
+                  VerticalAlignment="Center">
+                <Ellipse x:Name="StatusGlow"
+                         Width="18" Height="18"
+                         Fill="#33FFCC00" />
+                <Ellipse x:Name="StatusDot"
+                         Width="10" Height="10"
+                         Fill="#FFFFCC00"
+                         HorizontalAlignment="Center"
+                         VerticalAlignment="Center" />
+            </Grid>
+
+            <TextBlock x:Name="StatusText"
+                       Grid.Column="1"
+                       Text="Engine starting…"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                       VerticalAlignment="Center"
+                       TextTrimming="CharacterEllipsis" />
+        </Grid>
+    </Border>
+</UserControl>

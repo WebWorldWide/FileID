@@ -1,0 +1,234 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    WelcomeSheet — first-launch onboarding modal. Three model rows + a
+    privacy banner + Install all / Skip actions.
+
+    All FontIcon glyphs use numeric XML escapes (&#xE896;) so the bytes
+    survive any source-control / editor encoding pass; raw glyph chars
+    don't. Status icons are rewritten programmatically by the code-behind
+    based on per-row install state.
+-->
+<UserControl
+    x:Class="FileID.Views.WelcomeSheet"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Grid Padding="36" Background="{ThemeResource SurfaceBaseBrush}" MinWidth="540" MaxWidth="680" CornerRadius="16">
+        <!-- Top-right close (X) so the user always has an escape, even
+             mid-download. Skip for now in the footer remains the canonical
+             "I'll do this later" affordance. -->
+        <Button x:Name="CloseButton"
+                HorizontalAlignment="Right"
+                VerticalAlignment="Top"
+                Margin="0,-12,-12,0"
+                Padding="6"
+                Width="32" Height="32"
+                CornerRadius="16"
+                Background="Transparent"
+                BorderThickness="0"
+                Click="OnSkipClicked"
+                ToolTipService.ToolTip="Close (Esc) — install models later from Settings.">
+            <FontIcon Glyph="&#xE711;" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+        </Button>
+
+        <StackPanel Spacing="24">
+            <!-- Hero. -->
+            <StackPanel Spacing="8">
+                <TextBlock Text="Welcome to FileID"
+                           Style="{StaticResource TitleTextBlockStyle}" />
+                <TextBlock Text="To get started, FileID needs three on-device models. They run locally; nothing leaves your machine."
+                           Style="{StaticResource BodyTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                           TextWrapping="Wrap" />
+            </StackPanel>
+
+            <!-- Model rows. -->
+            <StackPanel Spacing="10">
+
+                <!-- CLIP — semantic search. -->
+                <Grid x:Name="ClipRow"
+                      Padding="18,14"
+                      CornerRadius="12"
+                      BorderThickness="1"
+                      BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                      Background="{ThemeResource ControlFillColorDefaultBrush}">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <FontIcon x:Name="ClipStatusIcon"
+                              Grid.Column="0"
+                              FontSize="18"
+                              Margin="0,0,14,0"
+                              VerticalAlignment="Center"
+                              Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                              Glyph="&#xE896;" />
+                    <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center">
+                        <TextBlock Text="Semantic search (CLIP)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <TextBlock Text="MobileCLIP-S2 + OpenAI text encoder. Lets you search 'a dog at the beach'."
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   TextWrapping="Wrap" />
+                        <ProgressBar x:Name="ClipProgressBar"
+                                     Margin="0,8,0,0"
+                                     Maximum="1"
+                                     Value="0"
+                                     Visibility="Collapsed"
+                                     Foreground="{ThemeResource GoldBrush}" />
+                    </StackPanel>
+                    <TextBlock Grid.Column="2"
+                               Text="210 MB"
+                               Margin="14,0,0,0"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                               VerticalAlignment="Center" />
+                </Grid>
+
+                <!-- ArcFace — face recognition. -->
+                <Grid x:Name="ArcfaceRow"
+                      Padding="18,14"
+                      CornerRadius="12"
+                      BorderThickness="1"
+                      BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                      Background="{ThemeResource ControlFillColorDefaultBrush}">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <FontIcon x:Name="ArcfaceStatusIcon"
+                              Grid.Column="0"
+                              FontSize="18"
+                              Margin="0,0,14,0"
+                              VerticalAlignment="Center"
+                              Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                              Glyph="&#xE896;" />
+                    <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center">
+                        <TextBlock Text="Face recognition (ArcFace)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <TextBlock Text="InsightFace Buffalo. Clusters faces into named people."
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   TextWrapping="Wrap" />
+                        <ProgressBar x:Name="ArcfaceProgressBar"
+                                     Margin="0,8,0,0"
+                                     Maximum="1"
+                                     Value="0"
+                                     Visibility="Collapsed"
+                                     Foreground="{ThemeResource GoldBrush}" />
+                    </StackPanel>
+                    <TextBlock Grid.Column="2"
+                               Text="~13 MB"
+                               Margin="14,0,0,0"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                               VerticalAlignment="Center" />
+                </Grid>
+
+                <!-- Qwen 2.5-VL 3B — Deep Analyze. -->
+                <Grid x:Name="VlmRow"
+                      Padding="18,14"
+                      CornerRadius="12"
+                      BorderThickness="1"
+                      BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                      Background="{ThemeResource ControlFillColorDefaultBrush}">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <FontIcon x:Name="VlmStatusIcon"
+                              Grid.Column="0"
+                              FontSize="18"
+                              Margin="0,0,14,0"
+                              VerticalAlignment="Center"
+                              Foreground="{ThemeResource AiBrush}"
+                              Glyph="&#xE945;" />
+                    <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center">
+                        <TextBlock Text="Deep Analyze (Qwen 2.5-VL 3B)"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <TextBlock Text="Local vision-language model. Writes captions and proposes filenames. Recommended on machines with 8 GB+ RAM."
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   TextWrapping="Wrap" />
+                        <ProgressBar x:Name="VlmProgressBar"
+                                     Margin="0,8,0,0"
+                                     Maximum="1"
+                                     Value="0"
+                                     Visibility="Collapsed"
+                                     Foreground="{ThemeResource AiBrush}" />
+                    </StackPanel>
+                    <TextBlock Grid.Column="2"
+                               Text="~1.5 GB"
+                               Margin="14,0,0,0"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                               VerticalAlignment="Center" />
+                </Grid>
+            </StackPanel>
+
+            <!-- Privacy banner. Wraps text within the parent's MaxWidth so it
+                 never bleeds outside the modal. -->
+            <Border Padding="14,12"
+                    CornerRadius="10"
+                    Background="{ThemeResource SubtleFillColorSecondaryBrush}">
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <FontIcon Grid.Column="0"
+                              Glyph="&#xE946;"
+                              FontSize="14"
+                              Foreground="{ThemeResource AiBrush}"
+                              VerticalAlignment="Top"
+                              Margin="0,2,0,0" />
+                    <TextBlock Grid.Column="1"
+                               Text="No analytics. No telemetry. No remote logging. Models download once from HuggingFace; after that, FileID is fully offline."
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                               TextWrapping="Wrap" />
+                </Grid>
+            </Border>
+
+            <TextBlock x:Name="StatusMessage"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       TextWrapping="Wrap"
+                       Visibility="Collapsed" />
+
+            <!-- Actions. -->
+            <Grid ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Button Grid.Column="0"
+                        Click="OnSkipClicked"
+                        HorizontalAlignment="Stretch"
+                        Height="40"
+                        Background="Transparent"
+                        BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                        BorderThickness="1"
+                        CornerRadius="10">
+                    <TextBlock Text="Skip for now"
+                               Style="{StaticResource BodyTextBlockStyle}" />
+                </Button>
+                <Button x:Name="InstallAllButton"
+                        Grid.Column="1"
+                        Click="OnInstallAllClicked"
+                        Style="{StaticResource GoldButtonStyle}"
+                        HorizontalAlignment="Stretch"
+                        Height="40">
+                    <TextBlock Text="Install all"
+                               FontWeight="SemiBold" />
+                </Button>
+            </Grid>
+        </StackPanel>
+    </Grid>
+</UserControl>

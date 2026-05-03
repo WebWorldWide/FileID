@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Application
+    x:Class="FileID.App"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:conv="using:FileID.Converters"
+    RequestedTheme="Dark">
+
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <!-- WinUI 3 stock styles. Must be first so our overrides win. -->
+                <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
+                <!-- FileID palette + tokens (gold/lavender/cyan/pink, surface,
+                     spacing, radii, motion durations). Lives in FileID.Theme;
+                     loaded via the assembly's ms-appx:/// URI. -->
+                <ResourceDictionary Source="ms-appx:///FileID.Theme/Theme.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+
+            <conv:BoolToVisibilityConverter x:Key="BoolToVisibility" />
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>

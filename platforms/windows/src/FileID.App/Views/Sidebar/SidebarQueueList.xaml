@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    SidebarQueueList — pending background jobs (scan / faceCluster /
+    deepAnalyze). Hidden when the queue is empty. Each row: category icon,
+    title, optional ETA. Total ETA at the top.
+
+    Mirror of macOS Sidebar/SidebarQueueList.swift.
+-->
+<UserControl
+    x:Class="FileID.Views.Sidebar.SidebarQueueList"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <StackPanel x:Name="Root" Spacing="8" Visibility="Collapsed">
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0"
+                       Text="UP NEXT"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       FontWeight="SemiBold"
+                       CharacterSpacing="40"
+                       Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+            <TextBlock x:Name="TotalEtaText"
+                       Grid.Column="1"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+        </Grid>
+
+        <ItemsRepeater x:Name="JobsRepeater" />
+    </StackPanel>
+</UserControl>

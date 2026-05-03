@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    FilePreviewSheet — modal sheet showing a single file's preview +
+    metadata + a toolbar with reveal/open/copy actions. Hosted via
+    ContentDialog so the close-on-Esc + click-outside-to-dismiss come
+    free.
+
+    Phase 2.6 swaps the placeholder Border for the real preview:
+        * Image: <Image Source="{path}" />
+        * Video: keyframe-at-25% via shell/video.rs → SoftwareBitmapSource
+        * PDF: page-1 render via pdfium → SoftwareBitmapSource
+        * Audio: cover art if embedded, else the audio kind glyph
+        * Other: generic file-kind glyph
+-->
+<UserControl
+    x:Class="FileID.Views.Library.FilePreviewSheet"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    MinWidth="640"
+    MinHeight="520">
+
+    <Grid RowSpacing="14" Padding="4,4,4,4">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- Preview surface. Image source binds in code-behind once the
+             file resolves. Falls back to a kind-glyph if the preview
+             can't be rendered (Phase 2.6 hooks the real renderer). -->
+        <Grid Grid.Row="0"
+              Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+              CornerRadius="12">
+            <Image x:Name="PreviewImage"
+                   Stretch="Uniform"
+                   HorizontalAlignment="Center"
+                   VerticalAlignment="Center"
+                   Visibility="Collapsed" />
+            <StackPanel x:Name="PlaceholderPanel"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Spacing="14">
+                <FontIcon x:Name="KindGlyphIcon"
+                          Glyph="&#xE8B7;"
+                          FontSize="64"
+                          Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                          HorizontalAlignment="Center" />
+                <TextBlock x:Name="PlaceholderText"
+                           Text="Preview rendering lands in Phase 2.6 (real ML + thumbnail wiring)."
+                           Style="{StaticResource CaptionTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                           HorizontalAlignment="Center"
+                           TextAlignment="Center"
+                           MaxWidth="380"
+                           TextWrapping="Wrap" />
+            </StackPanel>
+        </Grid>
+
+        <!-- Metadata strip. -->
+        <StackPanel Grid.Row="1" Spacing="4">
+            <TextBlock x:Name="FileNameText"
+                       Style="{StaticResource SubtitleTextBlockStyle}"
+                       TextTrimming="CharacterEllipsis" />
+            <TextBlock x:Name="MetadataText"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <TextBlock x:Name="PathText"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                       TextTrimming="CharacterEllipsis" />
+        </StackPanel>
+
+        <!-- Toolbar. -->
+        <Grid Grid.Row="2" ColumnSpacing="8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <Grid Grid.Column="0">
+                <!-- Empty spacer; left side reserved for future
+                     prev/next nav between sibling tiles. -->
+            </Grid>
+
+            <Button Grid.Column="1"
+                    Click="OnRevealClicked"
+                    ToolTipService.ToolTip="Show in Explorer">
+                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                    <FontIcon Glyph="&#xE838;" FontSize="13" />
+                    <TextBlock Text="Show in Explorer" />
+                </StackPanel>
+            </Button>
+            <Button Grid.Column="2"
+                    Click="OnOpenClicked"
+                    ToolTipService.ToolTip="Open with the system default app">
+                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                    <FontIcon Glyph="&#xE8E5;" FontSize="13" />
+                    <TextBlock Text="Open" />
+                </StackPanel>
+            </Button>
+            <Button Grid.Column="3"
+                    Click="OnCopyPathClicked"
+                    ToolTipService.ToolTip="Copy absolute path to clipboard">
+                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                    <FontIcon Glyph="&#xE8C8;" FontSize="13" />
+                    <TextBlock Text="Copy path" />
+                </StackPanel>
+            </Button>
+        </Grid>
+    </Grid>
+</UserControl>

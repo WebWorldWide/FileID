@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    SidebarPipelineProgress — five-stage workflow visualization.
+    Scan → Tag → People → Captions → Done. Filled / active / inactive
+    dots with connecting segments. Gold for filled+active.
+
+    Mirror of macOS Sidebar/SidebarPipelineProgress.swift.
+-->
+<UserControl
+    x:Class="FileID.Views.Sidebar.SidebarPipelineProgress"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <StackPanel Spacing="10">
+        <TextBlock Text="PIPELINE"
+                   Style="{StaticResource CaptionTextBlockStyle}"
+                   FontWeight="SemiBold"
+                   CharacterSpacing="40"
+                   Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+
+        <Grid x:Name="DotsRow" ColumnSpacing="0" Height="22" />
+
+        <!-- Stage labels under the dots. Caption style so they ride the
+             same baseline grid as the rest of the sidebar. -->
+        <Grid x:Name="LabelsRow" ColumnSpacing="0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0" Text="Scan"     HorizontalAlignment="Center"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+            <TextBlock Grid.Column="1" Text="Tag"      HorizontalAlignment="Center"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+            <TextBlock Grid.Column="2" Text="People"   HorizontalAlignment="Center"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+            <TextBlock Grid.Column="3" Text="Captions" HorizontalAlignment="Center"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+            <TextBlock Grid.Column="4" Text="Done"     HorizontalAlignment="Center"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+        </Grid>
+    </StackPanel>
+</UserControl>

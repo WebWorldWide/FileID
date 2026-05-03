@@ -4,47 +4,56 @@
 
 ---
 
-## 1. Verify Phase 0 Windows port commit on a Mac
+## 1. User-side Phase 1 verification on real Windows hardware
 
-The Phase 0 commit moves every macOS file into `platforms/apple/` and adds Windows scaffolding. None of the Swift code is modified, but `Package.swift`, `run.sh`, and `iterate.sh` paths need a real-Mac validation pass since I can't compile Swift on the user's Windows host.
+Phase 1 (V11) ships a feature-rich UI shell but I haven't run any of it. The primary blocker is verifying the build is clean on a real Windows host.
 
 **Acceptance:**
-- `cd platforms/apple && bash run.sh` builds + bundles + opens FileID.app cleanly.
-- `cd platforms/apple && swift test` is 28/28 GREEN.
-- `cd platforms/apple && bash scripts/iterate.sh` is 11/11 GREEN.
+- Open `platforms/windows/FileID.sln` in Visual Studio 2022 17.11+. NuGet restore succeeds.
+- `dotnet build platforms/windows/FileID.sln -c Debug` succeeds with zero errors. (Warnings expected; we treat warnings as errors in CI but local-build warnings can leak through XAML codegen.)
+- `dotnet run --project platforms/windows/src/FileID.App` launches the app:
+  - Mica/Acrylic chrome with a dark title bar.
+  - LavaLamp animating behind a sidebar + detail layout.
+  - First-launch Welcome sheet appears (since no models installed yet); Skip dismisses cleanly.
+  - Sidebar shows folder picker placeholder + the 6 disabled tabs + an "Engine starting…" pill at the bottom.
+  - The engine pill flips to "Engine ready" within 1–2 seconds (because the Rust engine emits `ready` on stdin/stdout). If it stays "Starting…" or goes "Crashed", check `%LOCALAPPDATA%\FileID\logs\app.log`.
+- `dotnet test platforms/windows/Tests/FileID.IpcSchema.Tests` is GREEN.
+- Side-by-side LavaLamp video review at 1080p against macOS reference: the three-ellipse drift + 120 px Gaussian + 35 % darken overlay should look indistinguishable. Frame-by-frame ideally, but a 30 s recording is sufficient for sign-off.
+- Hit Ctrl+O. Folder picker opens. Pick a folder. Sidebar header switches to "<parent>/leaf" with leaf in gold, Change/Clear/Wipe actions appear, tabs become enabled.
+- Hit Ctrl+R after picking a folder. Sidebar processing control flips to in-flight state with progress bar (which will sit at 0 because the engine returns `not_implemented` for startScan in Phase 0 — that's expected; Phase 2 wires the real scan).
+- Ctrl+Shift+S toggles the sidebar.
+- Alt+1..6 jumps tabs.
+- Drag a folder onto the window. Gold-bordered overlay appears. Drop accepts the folder.
+- Reduce-motion verification: Settings → Accessibility → Visual effects → Animation effects OFF. LavaLamp halves rate; Shimmer freezes; CompletionRipple becomes inert; IridescentBorder freezes gold.
+- Accessibility Insights audit ≥ 0 critical issues. Tab key reaches every interactive element.
 
-If anything fails at this step, the most likely culprit is a hardcoded `cd "$PROJECT_DIR"` reference that I missed — `grep` for any remaining `app/`, `engine/`, `shared/` paths inside `platforms/apple/scripts/` to find them.
+**Likely first-run hiccups (in priority order):**
+1. WinAppSDK 1.6 runtime not installed: surface error MessageBox at launch. Install via `winget install Microsoft.WindowsAppRuntime.1.6` and relaunch.
+2. NuGet restore fails: probably the `nuget.config` carve-out — re-run `dotnet restore platforms/windows/FileID.sln`.
+3. XAML compilation errors I missed: most likely candidates are the IridescentBorder template (Win2D namespace), the DetailHostView swap pattern, and the templated control attached property registrations. If a build error references one of those, paste it and I'll fix.
+4. Engine doesn't spawn: the C# app expects `FileIDEngine.exe` either alongside `FileID.exe` or under `engine/target/{x86_64,aarch64}-pc-windows-msvc/release/`. Run `pwsh platforms/windows/build/build.ps1` first to produce the engine binary.
 
 ## 2. Apply the `startScan` IPC breaking change on the macOS side
 
-The Rust engine implements the new payload `startScan(rootPath: String, rootDisplay: String?)` from day one. The macOS engine + app + iterate.sh still use the legacy `(rootBookmark: Data, rootPathDisplay: String)` payload. One coordinated commit:
+Carried over from V10. The Rust engine implements the new payload from day one. The macOS engine + app + iterate.sh still use the legacy `(rootBookmark: Data, rootPathDisplay: String)` payload. One coordinated commit on a Mac:
 
-- Edit `platforms/apple/shared/Sources/FileIDShared/IPCProtocol.swift` — change the case associated values.
-- Edit `platforms/apple/engine/Sources/FileIDEngine/FileIDEngineMain.swift` — accept `rootPath` directly (drop the bookmark resolve branch). Mac is unsandboxed so this is a path-string `URL(fileURLWithPath:)` swap.
+- Edit `platforms/apple/shared/Sources/FileIDShared/IPCProtocol.swift` — change the case associated values to `(rootPath: String, rootDisplay: String?)`.
+- Edit `platforms/apple/engine/Sources/FileIDEngine/FileIDEngineMain.swift` — accept `rootPath` directly (drop the bookmark resolve branch).
 - Edit `platforms/apple/app/Sources/FileID/EngineClient.swift` — stop creating a security-scoped bookmark; send the path directly.
 - Edit `platforms/apple/scripts/iterate.sh` line 128 — change the IPC frame to `{"startScan":{"rootPath":"$CORPUS"}}`.
-- Verify `swift test` passes (round-trip test in `IPCProtocolTests.swift`).
-- Run `bash scripts/iterate.sh` for end-to-end validation.
+- Verify `swift test` passes. Run `bash scripts/iterate.sh`.
 
-After this, both engines speak the same IPC.
+After this, both engines speak the same IPC. Nothing else cross-platform-breaking is queued.
 
-## 3. Phase 1 — Library tab end-to-end on Windows
+## 3. Phase 2 — Library tab end-to-end on Windows
 
-Per `~/.claude/plans/okay-so-this-is-dynamic-sparkle.md` Phase 1.
+Per `platforms/windows/PHASES.md` Phase 2. Big chunk: scan pipeline (walkdir, EXIF, phash, MobileCLIP scan-time embed, OCR via Windows.Media.Ocr, SCRFD+ArcFace face detect+embed, DBWriter), Library tab UI (search, multi-select, file preview sheet, tag editor, bulk actions). 4–5 weeks of work.
 
-**Acceptance** (excerpt):
-- WinUI 3 unpackaged app shell with Mica + Acrylic backdrop, dark mode forced, min size 1200×800.
-- Theme port: GlassCard, GoldButton, BadgePill, SettingToggleRow, ThemedSegmentedControl in `FileID.Theme`.
-- LavaLampBackground via Win2D, vsync-driven, paused when occluded — visually indistinguishable from macOS at 1080p.
-- Library tab: folder pick → engine scan → progress + thumbnail grid.
-- Engine pipeline: walkdir → kind detection → EXIF → phash → MobileCLIP scan-time embed → FTS5 OCR insert via `Windows.Media.Ocr`.
-- Inline tag editing → `IPropertyStore` `System.Keywords` (round-trips via Explorer).
-- Preview sheet: image (image-rs), video (Media Foundation thumbnail @ 25% duration), PDF (pdfium-render), audio (`symphonia` metadata).
-- Cold scan ≥ 140 files/s on Ryzen 7 / RTX 3060-class with DirectML.
+Don't start until item 1 above passes.
 
 ## 4. Lingering macOS work (deferred during the port)
 
-Carried over from V9. Pick up after Phase 1 Windows ships, or interleave if scope allows.
+Carried over from V9/V10. Pick up after Phase 1 Windows ships, or interleave if scope allows.
 
 - **Soak Restructure tab** on real ~50K library (Sankey, hover bus, drill-down, floating apply bar).
 - **Engine perf sweep** — audit `ScanCoordinator`, `JobQueue`, `IPCSink` for strict-concurrency warnings; sustain ≥140 files/s on M1 Pro.

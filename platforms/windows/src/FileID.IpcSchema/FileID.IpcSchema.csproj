@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    FileID.IpcSchema — C# DTOs mirroring shared/ipc-schema/ipc.schema.json.
+
+    Hand-maintained against the schema (codegen lands later; see
+    shared/ipc-schema/README.md). Every PR that edits the schema must
+    update these types in lockstep, with round-trip tests that prove the
+    encode/decode bytes match the Rust + Swift implementations.
+
+    Separated from FileID.App so the engine-side test harness can ALSO
+    reference it (FileID.App is a WinExe and not project-referenceable for
+    test purposes).
+
+    Note: this is a plain net8.0 library — NOT WinUI. The IPC types have
+    no UI dependency.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>FileID.IpcSchema</RootNamespace>
+    <AssemblyName>FileID.IpcSchema</AssemblyName>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Sidebar — composition root. 260 DIP fixed width. Hosts:
+      • SidebarFolderHeader     (folder picker + change/clear/wipe actions)
+      • SidebarTabList          (the six tab buttons)
+      • SidebarProcessingControl (Start Scan / Pause / Resume / Cancel + ETA + stats)
+      • SidebarPipelineProgress  (5-stage Scan→Tag→People→Captions→Done dots)
+      • SidebarQueueList        (pending jobs)
+      • SidebarEngineStatus     (engine PID/version/RAM tooltip + state pill)
+-->
+<UserControl
+    x:Class="FileID.Views.Sidebar.Sidebar"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FileID.Views.Sidebar"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <!-- 16-px outer padding + 16-px row spacing matches Fluent's 8-px
+         baseline grid (multiples of 8). The bottom padding is doubled
+         (24-px) so the engine pill never touches the window edge. -->
+    <Grid Padding="16,12,16,24" RowSpacing="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" /> <!-- Folder header -->
+            <RowDefinition Height="Auto" /> <!-- Tab list -->
+            <RowDefinition Height="Auto" /> <!-- Processing control -->
+            <RowDefinition Height="Auto" /> <!-- Pipeline progress -->
+            <RowDefinition Height="Auto" /> <!-- Queue list -->
+            <RowDefinition Height="*" />    <!-- Spacer -->
+            <RowDefinition Height="Auto" /> <!-- Engine status -->
+        </Grid.RowDefinitions>
+
+        <local:SidebarFolderHeader     Grid.Row="0" />
+        <local:SidebarTabList          Grid.Row="1" />
+        <local:SidebarProcessingControl Grid.Row="2" />
+        <local:SidebarPipelineProgress Grid.Row="3" />
+        <local:SidebarQueueList        Grid.Row="4" />
+        <local:SidebarEngineStatus     Grid.Row="6" />
+    </Grid>
+</UserControl>

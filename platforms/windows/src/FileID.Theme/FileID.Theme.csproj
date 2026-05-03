@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    FileID.Theme — visual language as a class library.
+    Owns: Theme.xaml (brushes + tokens), GlassCard / GoldButton / BadgePill /
+    SettingToggleRow / ThemedSegmentedControl reusable components, motion
+    primitives (Shimmer, CompletionRipple, IridescentBorder, LavaLamp,
+    SpringEasing), and the ReducedMotion bridge.
+
+    Separated from FileID.App so the theme can be unit-tested + visually
+    audited in isolation (a future Theme Gallery debug app references this).
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <RootNamespace>FileID.Theme</RootNamespace>
+    <AssemblyName>FileID.Theme</AssemblyName>
+    <UseWinUI>true</UseWinUI>
+    <EnableMsixTooling>false</EnableMsixTooling>
+    <WindowsPackageType>None</WindowsPackageType>
+    <!--
+      CS8305 = "API marked Experimental". Win2D's CanvasAnimatedControl
+      carries that attribute even though it's the canonical
+      hardware-accelerated 2D-canvas API for WinUI 3. Suppressing here is
+      a deliberate accept-the-risk; an alternative API doesn't exist.
+    -->
+    <NoWarn>$(NoWarn);CS8305</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" />
+    <PackageReference Include="Microsoft.Graphics.Win2D" />
+  </ItemGroup>
+
+  <!-- WinUI 3 SDK auto-globs every .xaml file under the project as a
+       Page. Theme.xaml + Themes/Generic.xaml come along for free. We
+       must NOT list them explicitly — duplicates fail the build with
+       NETSDK1022. -->
+</Project>

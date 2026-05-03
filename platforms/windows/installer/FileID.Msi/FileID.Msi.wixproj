@@ -1,0 +1,78 @@
+<Project Sdk="WixToolset.Sdk/4.0.5">
+  <!--
+    FileID per-architecture MSI.
+
+    Builds either FileID-x64.msi or FileID-arm64.msi depending on the
+    Platform property at invocation time:
+
+      dotnet build installer/FileID.Msi -c Release -p:Platform=x64
+      dotnet build installer/FileID.Msi -c Release -p:Platform=arm64
+
+    The MSI installs:
+      - FileID.exe + the entire dotnet publish output (self-contained .NET +
+        WinAppSDK runtime + Win2D + every project DLL).
+      - FileIDEngine.exe colocated with FileID.exe so the C# spawn path
+        (AppPaths.EngineExePath) finds it without falling back to the dev
+        layout.
+
+    Outputs to platforms/windows/dist/installer/FileID-<arch>.msi.
+
+    The Burn bootstrapper (../FileID.Bundle) consumes both per-arch MSIs
+    and chains exactly one at install time based on NativeMachine.
+  -->
+  <PropertyGroup>
+    <OutputType>Package</OutputType>
+    <OutputName Condition="'$(Platform)' == 'x64'">FileID-x64</OutputName>
+    <OutputName Condition="'$(Platform)' == 'arm64'">FileID-arm64</OutputName>
+
+    <!-- Stage everything from the publish folder of the matching arch.
+         Pre-condition: dotnet publish FileID.App with the matching RID
+         and self-contained=true has already produced the layout.
+         publish-bundle.ps1 enforces the order. -->
+    <PublishRoot Condition="'$(Platform)' == 'x64'">$(MSBuildThisFileDirectory)..\..\src\FileID.App\bin\x64\Release\net8.0-windows10.0.19041.0\win-x64\publish</PublishRoot>
+    <PublishRoot Condition="'$(Platform)' == 'arm64'">$(MSBuildThisFileDirectory)..\..\src\FileID.App\bin\arm64\Release\net8.0-windows10.0.19041.0\win-arm64\publish</PublishRoot>
+
+    <OutputPath>$(MSBuildThisFileDirectory)..\..\dist\installer\</OutputPath>
+    <IntermediateOutputPath>$(MSBuildThisFileDirectory)obj\$(Platform)\</IntermediateOutputPath>
+
+    <!-- Per-arch upgrade codes — must NEVER change between releases.
+         Different arches get different upgrade codes so the Burn bundle
+         can install both side-by-side if needed (it never does — chain
+         picks one — but the GUIDs stay distinct for safety). -->
+    <UpgradeCodeX64>1B5E7FA0-4C42-4A6E-9A12-7F9AE9E1B5C4</UpgradeCodeX64>
+    <UpgradeCodeArm64>2C6F80B1-5D53-5B7F-AB23-80AB0AF2C6D5</UpgradeCodeArm64>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Product.wxs is auto-discovered by the WiX SDK; explicitly listing
+         it would double-compile and trigger duplicate-symbol errors.
+         PublishedFiles.wxs lives in obj/ which is NOT auto-discovered, so
+         we add it explicitly. -->
+    <Compile Include="$(IntermediateOutputPath)PublishedFiles.wxs" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <!-- Surface PublishRoot + UpgradeCode to the .wxs preprocessor. WiX 4
+         takes DefineConstants as a semicolon-separated PropertyGroup
+         entry, NOT an ItemGroup like older versions. -->
+    <DefineConstants Condition="'$(Platform)' == 'x64'"
+        >PublishRoot=$(PublishRoot);UpgradeCode=$(UpgradeCodeX64)</DefineConstants>
+    <DefineConstants Condition="'$(Platform)' == 'arm64'"
+        >PublishRoot=$(PublishRoot);UpgradeCode=$(UpgradeCodeArm64)</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.UI.wixext" />
+  </ItemGroup>
+
+  <!-- Generate the PublishedFiles.wxs component fragment from the publish/
+       directory. Replaces heat.exe (HEAT5151 on .NET 8 self-contained
+       satellite resource DLLs is unfixable upstream-side). PowerShell
+       walks the tree + writes a deterministic .wxs with stable Component
+       Ids + GUIDs derived from each file's relative path so upgrade
+       behavior stays correct across versions. -->
+  <Target Name="GeneratePublishedFiles" BeforeTargets="CoreCompile">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)Generate-Components.ps1&quot; -PublishRoot &quot;$(PublishRoot)&quot; -OutputFile &quot;$(IntermediateOutputPath)PublishedFiles.wxs&quot;"
+          ConsoleToMSBuild="true" />
+  </Target>
+</Project>

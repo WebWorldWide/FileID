@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    SidebarFolderHeader — folder display + actions row.
+
+    Layout matches macOS Sidebar.swift:164. When no folder picked: shows
+    a "Pick a folder to begin" pill with a Pick button. When picked: shows
+    parent-path (secondary) + leaf-name (gold), plus three actions:
+        • Change folder…    (Ctrl+O)
+        • Clear folder
+        • Wipe library + rescan (destructive red, confirmation)
+
+    The collapse/expand sidebar toggle lives in MainWindow as a global
+    Ctrl+Shift+S accelerator + a button in this header for mouse users.
+-->
+<UserControl
+    x:Class="FileID.Views.Sidebar.SidebarFolderHeader"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <StackPanel Spacing="10">
+        <!-- Section header + collapse button. Section header uses the
+             standard "muted caption" pattern from Fluent's Settings UX. -->
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0"
+                       Text="LIBRARY FOLDER"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       FontWeight="SemiBold"
+                       CharacterSpacing="40"
+                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                       VerticalAlignment="Center" />
+            <Button Grid.Column="1"
+                    x:Name="CollapseButton"
+                    Click="OnCollapseClicked"
+                    Background="Transparent"
+                    BorderThickness="0"
+                    Padding="6,4"
+                    CornerRadius="6"
+                    ToolTipService.ToolTip="Hide sidebar (Ctrl+Shift+S)">
+                <FontIcon FontSize="12" Glyph="&#xE76B;" />
+            </Button>
+        </Grid>
+
+        <!-- Folder display: parent path muted, leaf gold. -->
+        <Grid x:Name="FolderDisplayPanel" Visibility="Collapsed">
+            <StackPanel Spacing="2">
+                <TextBlock x:Name="ParentPathText"
+                           Style="{StaticResource CaptionTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                           TextTrimming="CharacterEllipsis" />
+                <TextBlock x:Name="LeafNameText"
+                           Style="{StaticResource SubtitleTextBlockStyle}"
+                           Foreground="{ThemeResource GoldBrush}"
+                           TextTrimming="CharacterEllipsis" />
+            </StackPanel>
+        </Grid>
+
+        <!-- Empty state: gold pick button. -->
+        <Grid x:Name="EmptyPickerPanel">
+            <Button HorizontalAlignment="Stretch"
+                    Click="OnPickClicked"
+                    Height="40"
+                    Style="{StaticResource GoldButtonStyle}">
+                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <FontIcon FontSize="14" Glyph="&#xE8B7;" />
+                    <TextBlock Text="Pick a folder" FontWeight="SemiBold" />
+                </StackPanel>
+            </Button>
+        </Grid>
+
+        <!-- Action row, only visible when a folder is picked -->
+        <StackPanel x:Name="ActionsPanel" Spacing="6" Visibility="Collapsed">
+            <Button HorizontalAlignment="Stretch"
+                    Click="OnPickClicked"
+                    Padding="12,8"
+                    BorderThickness="1"
+                    BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                    Background="{ThemeResource ControlFillColorDefaultBrush}"
+                    CornerRadius="8"
+                    ToolTipService.ToolTip="Change folder (Ctrl+O)">
+                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <FontIcon FontSize="12" Glyph="&#xE8DA;" Opacity="0.75" />
+                    <TextBlock Text="Change folder…" Style="{StaticResource CaptionTextBlockStyle}" />
+                </StackPanel>
+            </Button>
+            <Button HorizontalAlignment="Stretch"
+                    Click="OnClearClicked"
+                    Padding="12,8"
+                    BorderThickness="1"
+                    BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                    Background="Transparent"
+                    CornerRadius="8">
+                <TextBlock Text="Clear folder"
+                           Style="{StaticResource CaptionTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </Button>
+            <Button HorizontalAlignment="Stretch"
+                    Click="OnWipeClicked"
+                    Padding="12,8"
+                    BorderThickness="1"
+                    BorderBrush="#552B0000"
+                    Background="#222B0000"
+                    CornerRadius="8">
+                <TextBlock Text="Wipe library + rescan"
+                           Style="{StaticResource CaptionTextBlockStyle}"
+                           Foreground="#FFE5A5A5" />
+            </Button>
+        </StackPanel>
+    </StackPanel>
+</UserControl>

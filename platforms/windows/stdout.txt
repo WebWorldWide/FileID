@@ -1,0 +1,1 @@
+Xaml compiler error: Input JSON file "/c/Users/adamm/Desktop/FileID/platforms/windows/src/FileID.Theme/obj/x64/Debug/net8.0-windows10.0.19041.0/input.json" doesn't exist!

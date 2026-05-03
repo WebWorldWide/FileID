@@ -1,0 +1,18 @@
+{
+  "profiles": {
+    "FileID (unpackaged)": {
+      "commandName": "Project",
+      "nativeDebugging": false,
+      "environmentVariables": {
+        "FILEID_LOG": "debug"
+      }
+    },
+    "FileID (unpackaged, native debug)": {
+      "commandName": "Project",
+      "nativeDebugging": true,
+      "environmentVariables": {
+        "FILEID_LOG": "debug"
+      }
+    }
+  }
+}
