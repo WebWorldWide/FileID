@@ -118,6 +118,29 @@ public sealed partial class BulkRenameSheet : UserControl
         StatusText.Text = "Renaming...";
         try
         {
+            // Snapshot the inverse rename (file_id → previous filename) so
+            // Ctrl+Z can undo. We push BEFORE the rename fires so the user
+            // sees the entry available even on partial failure (the engine
+            // emits per-file ok/fail in the BulkActionResult).
+            var inverse = _items
+                .Where(p => p.Include
+                            && !string.IsNullOrWhiteSpace(p.ProposedName)
+                            && !p.ProposedName.Contains('/')
+                            && !p.ProposedName.Contains('\\'))
+                .Select(p => new RenameEntry(p.FileId, System.IO.Path.GetFileName(p.CurrentPath)))
+                .ToArray();
+            Services.UndoStack.Instance.Push(
+                $"rename {entries.Length} file{(entries.Length == 1 ? "" : "s")}",
+                async () =>
+                {
+                    try
+                    {
+                        await EngineClient.Instance.RenameFilesAsync(inverse);
+                        return true;
+                    }
+                    catch { return false; }
+                });
+
             await EngineClient.Instance.RenameFilesAsync(entries);
             StatusText.Text = $"Sent {entries.Length} rename(s).";
             return true;

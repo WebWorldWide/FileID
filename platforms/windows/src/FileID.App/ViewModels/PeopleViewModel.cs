@@ -162,6 +162,36 @@ internal sealed class PersonCluster
     public required int MemberCount { get; init; }
     public string? DisplayName { get; init; }
 
+    private Microsoft.UI.Xaml.Media.Imaging.BitmapImage? _cachedAnchorImage;
+    private bool _anchorImageResolved;
+    /// <summary>
+    /// BitmapImage of the per-face JPEG written by the engine after
+    /// ArcFace embed. Lazily constructed once + cached so the binding
+    /// doesn't rebuild it on every refresh (which would flicker / loop).
+    /// Null if the file doesn't exist (cluster from before V14.4 face-crop
+    /// writes, or AnchorFaceId is 0).
+    /// </summary>
+    public Microsoft.UI.Xaml.Media.Imaging.BitmapImage? AnchorImage
+    {
+        get
+        {
+            if (_anchorImageResolved) return _cachedAnchorImage;
+            _anchorImageResolved = true;
+            if (AnchorFaceId <= 0) return null;
+            try
+            {
+                var path = System.IO.Path.Combine(Services.AppPaths.Root, "face_crops", $"{AnchorFaceId}.jpg");
+                if (!System.IO.File.Exists(path)) return null;
+                _cachedAnchorImage = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(path));
+                return _cachedAnchorImage;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+    }
+
     public string Caption =>
         string.IsNullOrEmpty(DisplayName)
             ? $"Cluster {ClusterId} · {MemberCount} photo{(MemberCount == 1 ? string.Empty : "s")}"

@@ -118,7 +118,10 @@
                       VerticalScrollBarVisibility="Auto"
                       HorizontalScrollBarVisibility="Disabled"
                       ZoomMode="Disabled">
-            <ItemsRepeater x:Name="Repeater" ItemsSource="{x:Bind ViewModel.Items, Mode=OneWay}">
+            <ItemsRepeater x:Name="Repeater"
+                           ItemsSource="{x:Bind ViewModel.Items, Mode=OneWay}"
+                           ElementPrepared="OnRepeaterElementPrepared"
+                           ElementClearing="OnRepeaterElementClearing">
                 <ItemsRepeater.Layout>
                     <UniformGridLayout MinItemWidth="256"
                                        MinItemHeight="256"
@@ -157,6 +160,14 @@
                                             <FontIcon Glyph="&#xE838;" />
                                         </MenuFlyoutItem.Icon>
                                     </MenuFlyoutItem>
+                                    <MenuFlyoutItem Text="Find similar"
+                                                    Click="OnContextFindSimilar"
+                                                    Tag="{x:Bind Id}"
+                                                    ToolTipService.ToolTip="Search for visually similar images via CLIP">
+                                        <MenuFlyoutItem.Icon>
+                                            <FontIcon Glyph="&#xE721;" />
+                                        </MenuFlyoutItem.Icon>
+                                    </MenuFlyoutItem>
                                     <MenuFlyoutSeparator/>
                                     <MenuFlyoutItem Text="Copy path"
                                                     Click="OnContextCopyPath"
@@ -173,7 +184,12 @@
                             </Grid.RowDefinitions>
                             <Border Grid.Row="0"
                                     Background="{ThemeResource SubtleFillColorTertiaryBrush}"
-                                    CornerRadius="8"/>
+                                    CornerRadius="8">
+                                <Image Source="{x:Bind Thumbnail, Mode=OneWay}"
+                                       Stretch="UniformToFill"
+                                       HorizontalAlignment="Stretch"
+                                       VerticalAlignment="Stretch" />
+                            </Border>
                             <Border Grid.Row="0"
                                     BorderBrush="{ThemeResource AccentFillColorDefaultBrush}"
                                     BorderThickness="3"
@@ -187,6 +203,26 @@
                                       Margin="0,4,4,0"
                                       Foreground="{ThemeResource AccentFillColorDefaultBrush}"
                                       Visibility="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource BoolToVisibility}}" />
+                            <!-- Hover badges: face cluster + OCR text indicators top-left. -->
+                            <StackPanel Grid.Row="0"
+                                        Orientation="Horizontal"
+                                        Spacing="4"
+                                        HorizontalAlignment="Left"
+                                        VerticalAlignment="Top"
+                                        Margin="4,4,0,0">
+                                <Border Padding="4,2"
+                                        CornerRadius="4"
+                                        Background="#99000000"
+                                        Visibility="{x:Bind HasFaces, Converter={StaticResource BoolToVisibility}}">
+                                    <FontIcon Glyph="&#xE77B;" FontSize="12" Foreground="{ThemeResource GoldBrush}" />
+                                </Border>
+                                <Border Padding="4,2"
+                                        CornerRadius="4"
+                                        Background="#99000000"
+                                        Visibility="{x:Bind HasText, Converter={StaticResource BoolToVisibility}}">
+                                    <FontIcon Glyph="&#xE8C1;" FontSize="12" Foreground="{ThemeResource AiBrush}" />
+                                </Border>
+                            </StackPanel>
                             <StackPanel Grid.Row="1" Spacing="2" Margin="0,8,0,0">
                                 <TextBlock Text="{x:Bind FileName}"
                                            Style="{StaticResource BodyStrongTextBlockStyle}"

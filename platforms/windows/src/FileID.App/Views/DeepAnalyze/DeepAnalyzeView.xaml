@@ -1,12 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    DeepAnalyzeView — VLM picker + library run controls.
+    DeepAnalyzeView — VLM picker + analyze controls + live caption
+    stream. Mirror of macOS DeepAnalyze/DeepAnalyzeView.swift.
 
-    Mirror of macOS DeepAnalyze/DeepAnalyzeView.swift. Lists the four
-    shippable VLMs (Qwen2.5-VL 3B/7B, Gemma 3 4B, SmolVLM) with disk +
-    RAM budgets, an install button, then a per-library or per-file run
-    control. Phase 6 cut: model picker + placeholder run controls;
-    Phase 6.x wires the IPC `prewarmModel` + `deepAnalyzeAll` round-trips.
+    Layout:
+      Row 0: Page header (title + subtitle)
+      Row 1: llama.cpp runtime banner (visible if missing)
+      Row 2: Model picker — three cards in a UniformGrid
+      Row 3: Active card panel — Analyze whole library / selected / current,
+             Cancel, Skip-existing toggle
+      Row 4: Live caption stream — current file thumb + token RichText +
+             progress bar + N-of-M counter
+      Row 5: Proposed renames footer — link to BulkRenameSheet pre-seeded
 -->
 <UserControl
     x:Class="FileID.Views.DeepAnalyze.DeepAnalyzeView"
@@ -16,94 +21,264 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <ScrollViewer VerticalScrollBarVisibility="Auto"
-                  HorizontalScrollBarVisibility="Disabled">
-        <StackPanel Padding="32,28,32,32" Spacing="20" MaxWidth="820" HorizontalAlignment="Stretch">
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Padding="32,28,32,32" Spacing="20" MaxWidth="980" HorizontalAlignment="Stretch">
 
             <StackPanel Spacing="4">
-                <TextBlock Text="Deep Analyze" Style="{StaticResource TitleTextBlockStyle}"/>
+                <TextBlock Text="Deep Analyze" Style="{StaticResource TitleTextBlockStyle}" />
                 <TextBlock TextWrapping="Wrap"
                            Style="{StaticResource BodyTextBlockStyle}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                           Text="Run a local vision-language model on every image to generate captions and smart names. Whole library, on-device, no cloud calls. Pick one model — switch any time."/>
+                           Text="Run a local vision-language model on every image to write captions and propose smart filenames. Whole library, on-device, no cloud." />
             </StackPanel>
 
-            <!-- Qwen 7B (recommended) -->
-            <Border CornerRadius="12"
-                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+            <!-- llama.cpp runtime banner — visible when not detected. -->
+            <Border x:Name="RuntimeBanner"
+                    CornerRadius="10"
+                    Padding="14,12"
+                    Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                    BorderBrush="{ThemeResource GoldDimBrush}"
                     BorderThickness="1"
-                    Padding="20">
-                <StackPanel Spacing="6">
-                    <TextBlock Text="Qwen2.5-VL 7B (recommended)" Style="{StaticResource BodyStrongTextBlockStyle}"/>
-                    <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
-                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                               Text="≈4.5 GB disk · ≈7.5 GB GPU/RAM at runtime · Q4_K_M quant"/>
-                    <Button Content="Install"
-                            Click="OnInstallClicked"
-                            Tag="qwen2.5-vl-7b"
-                            Margin="0,8,0,0"/>
-                </StackPanel>
+                    Visibility="Collapsed">
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <FontIcon Grid.Column="0"
+                              Glyph="&#xE946;"
+                              FontSize="16"
+                              Foreground="{ThemeResource GoldBrush}"
+                              VerticalAlignment="Top"
+                              Margin="0,2,0,0" />
+                    <TextBlock Grid.Column="1"
+                               x:Name="RuntimeBannerText"
+                               TextWrapping="Wrap"
+                               Style="{StaticResource CaptionTextBlockStyle}" />
+                    <Button Grid.Column="2"
+                            x:Name="InstallRuntimeButton"
+                            Content="Install runtime"
+                            Click="OnInstallRuntimeClicked"
+                            Style="{StaticResource AccentButtonStyle}"
+                            VerticalAlignment="Center" />
+                </Grid>
             </Border>
 
-            <!-- Qwen 3B (lighter) -->
-            <Border CornerRadius="12"
-                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                    BorderThickness="1"
-                    Padding="20">
-                <StackPanel Spacing="6">
-                    <TextBlock Text="Qwen2.5-VL 3B" Style="{StaticResource BodyStrongTextBlockStyle}"/>
-                    <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
-                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                               Text="≈1.9 GB disk · ≈3.5 GB GPU/RAM · faster, lower fidelity"/>
-                    <Button Content="Install"
-                            Click="OnInstallClicked"
-                            Tag="qwen2.5-vl-3b"
-                            Margin="0,8,0,0"/>
-                </StackPanel>
-            </Border>
+            <!-- Model picker — 3 cards. -->
+            <StackPanel Spacing="6">
+                <TextBlock Text="Choose a model"
+                           Style="{StaticResource CaptionTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                           FontWeight="SemiBold"
+                           CharacterSpacing="40" />
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
 
-            <!-- Gemma 3 4B -->
-            <Border CornerRadius="12"
-                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                    BorderThickness="1"
-                    Padding="20">
-                <StackPanel Spacing="6">
-                    <TextBlock Text="Gemma 3 4B" Style="{StaticResource BodyStrongTextBlockStyle}"/>
-                    <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
-                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                               Text="≈2.5 GB disk · ≈4.5 GB GPU/RAM · alternative VLM"/>
-                    <Button Content="Install"
-                            Click="OnInstallClicked"
-                            Tag="gemma-3-4b"
-                            Margin="0,8,0,0"/>
-                </StackPanel>
-            </Border>
+                    <Border Grid.Column="0"
+                            x:Name="QwenSmallCard"
+                            CornerRadius="12"
+                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            Padding="18"
+                            Tag="qwen2_5_vl_3b"
+                            Tapped="OnModelCardTapped">
+                        <StackPanel Spacing="6">
+                            <TextBlock Text="Qwen 2.5-VL 3B" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <TextBlock Text="≈2 GB disk · 3.5 GB RAM · fast"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock x:Name="QwenSmallStatus"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource AiBrush}" />
+                            <ProgressBar x:Name="QwenSmallProgress"
+                                         Value="0" Maximum="1"
+                                         Visibility="Collapsed"
+                                         Foreground="{ThemeResource GoldBrush}" />
+                            <Button Content="Install"
+                                    x:Name="QwenSmallInstallButton"
+                                    Click="OnInstallModelClicked"
+                                    Tag="qwen2_5_vl_3b"
+                                    Margin="0,4,0,0" />
+                        </StackPanel>
+                    </Border>
 
-            <!-- SmolVLM -->
-            <Border CornerRadius="12"
-                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                    BorderThickness="1"
-                    Padding="20">
-                <StackPanel Spacing="6">
-                    <TextBlock Text="SmolVLM 256M" Style="{StaticResource BodyStrongTextBlockStyle}"/>
-                    <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
-                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                               Text="≈700 MB disk · &lt;1 GB GPU/RAM · tiny + CPU-friendly"/>
-                    <Button Content="Install"
-                            Click="OnInstallClicked"
+                    <Border Grid.Column="1"
+                            x:Name="QwenLargeCard"
+                            CornerRadius="12"
+                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            Padding="18"
+                            Tag="qwen2_5_vl_7b"
+                            Tapped="OnModelCardTapped">
+                        <StackPanel Spacing="6">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Qwen 2.5-VL 7B" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                <Border Grid.Column="1"
+                                        Padding="6,2"
+                                        CornerRadius="4"
+                                        Background="{ThemeResource GoldSelectedBackgroundBrush}"
+                                        BorderBrush="{ThemeResource GoldSelectedStrokeBrush}"
+                                        BorderThickness="1">
+                                    <TextBlock Text="Best"
+                                               Style="{StaticResource CaptionTextBlockStyle}"
+                                               Foreground="{ThemeResource GoldBrush}"
+                                               FontWeight="SemiBold" />
+                                </Border>
+                            </Grid>
+                            <TextBlock Text="≈4.7 GB disk · 7.5 GB RAM · best quality"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock x:Name="QwenLargeStatus"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource AiBrush}" />
+                            <ProgressBar x:Name="QwenLargeProgress"
+                                         Value="0" Maximum="1"
+                                         Visibility="Collapsed"
+                                         Foreground="{ThemeResource GoldBrush}" />
+                            <Button Content="Install"
+                                    x:Name="QwenLargeInstallButton"
+                                    Click="OnInstallModelClicked"
+                                    Tag="qwen2_5_vl_7b"
+                                    Margin="0,4,0,0" />
+                        </StackPanel>
+                    </Border>
+
+                    <Border Grid.Column="2"
+                            x:Name="SmolVlmCard"
+                            CornerRadius="12"
+                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            Padding="18"
                             Tag="smolvlm"
-                            Margin="0,8,0,0"/>
+                            Tapped="OnModelCardTapped">
+                        <StackPanel Spacing="6">
+                            <TextBlock Text="SmolVLM 256M" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <TextBlock Text="≈300 MB disk · 0.9 GB RAM · CPU-friendly"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock x:Name="SmolVlmStatus"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource AiBrush}" />
+                            <ProgressBar x:Name="SmolVlmProgress"
+                                         Value="0" Maximum="1"
+                                         Visibility="Collapsed"
+                                         Foreground="{ThemeResource GoldBrush}" />
+                            <Button Content="Install"
+                                    x:Name="SmolVlmInstallButton"
+                                    Click="OnInstallModelClicked"
+                                    Tag="smolvlm"
+                                    Margin="0,4,0,0" />
+                        </StackPanel>
+                    </Border>
+                </Grid>
+            </StackPanel>
+
+            <!-- Run controls. -->
+            <Border CornerRadius="12"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    Padding="20">
+                <StackPanel Spacing="14">
+                    <TextBlock Text="Analyze"
+                               Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <TextBlock x:Name="ActiveModelText"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Text="Active model: Qwen 2.5-VL 3B" />
+                    <Grid ColumnSpacing="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <Button Grid.Column="0"
+                                x:Name="AnalyzeAllButton"
+                                Click="OnAnalyzeAllClicked"
+                                Style="{StaticResource AccentButtonStyle}">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <FontIcon Glyph="&#xE945;" FontSize="13" />
+                                <TextBlock Text="Whole library" />
+                            </StackPanel>
+                        </Button>
+                        <ToggleSwitch Grid.Column="1"
+                                      x:Name="SkipExistingToggle"
+                                      IsOn="True"
+                                      OffContent="Re-analyze all"
+                                      OnContent="Skip already-analyzed"
+                                      Margin="14,0,0,0" />
+                        <CheckBox Grid.Column="3"
+                                  x:Name="ProposeRenamesCheck"
+                                  Content="Propose renames"
+                                  IsChecked="True" />
+                        <Button Grid.Column="4"
+                                x:Name="CancelButton"
+                                Content="Cancel"
+                                Click="OnCancelClicked"
+                                IsEnabled="False" />
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            <!-- Live caption stream. -->
+            <Border x:Name="StreamCard"
+                    CornerRadius="12"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    Padding="20"
+                    Visibility="Collapsed">
+                <StackPanel Spacing="14">
+                    <TextBlock Text="Live caption" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <Grid ColumnSpacing="14">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Border Grid.Column="0"
+                                CornerRadius="8"
+                                Background="{ThemeResource SubtleFillColorTertiaryBrush}"
+                                Width="160" Height="160">
+                            <Image x:Name="StreamImage" Stretch="UniformToFill" Width="160" Height="160" />
+                        </Border>
+                        <StackPanel Grid.Column="1" Spacing="8">
+                            <TextBlock x:Name="StreamFileNameText"
+                                       Style="{StaticResource BodyStrongTextBlockStyle}"
+                                       TextTrimming="CharacterEllipsis" />
+                            <TextBlock x:Name="StreamCaptionText"
+                                       TextWrapping="Wrap"
+                                       Style="{StaticResource BodyTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock x:Name="StreamProposedNameText"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource AiBrush}" />
+                        </StackPanel>
+                    </Grid>
+                    <ProgressBar x:Name="OverallProgress" Value="0" Maximum="1" />
+                    <TextBlock x:Name="OverallProgressText"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
                 </StackPanel>
             </Border>
 
             <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
                        Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                        TextWrapping="Wrap"
-                       Text="Models live in %LOCALAPPDATA%\FileID\Models\VLM\ — uninstall by deleting the folder."/>
+                       Text="Models live under %LOCALAPPDATA%\FileID\Models\ — uninstall by deleting the folder. The llama.cpp runtime is fetched once and lives under %LOCALAPPDATA%\FileID\Models\llama.cpp\." />
 
         </StackPanel>
     </ScrollViewer>

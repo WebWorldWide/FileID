@@ -36,6 +36,18 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         EngineClient.Instance.PropertyChanged += OnEngineClientChanged;
     }
 
+    /// <summary>
+    /// Re-attach the EngineClient.PropertyChanged handler. Called by
+    /// EngineClient after a respawn so a stale subscription against an
+    /// orphaned EngineClient doesn't keep firing.
+    /// </summary>
+    public void Reset()
+    {
+        EngineClient.Instance.PropertyChanged -= OnEngineClientChanged;
+        EngineClient.Instance.PropertyChanged += OnEngineClientChanged;
+        Refresh();
+    }
+
     // Per-model status. Each is bound by the Welcome sheet.
     private ModelInstallStatus _clipStatus;
     public ModelInstallStatus ClipStatus

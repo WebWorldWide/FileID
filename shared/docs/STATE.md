@@ -2,6 +2,133 @@
 
 > Snapshot of what's working and where we left off. Update at the end of every working session.
 
+## V14.5 (2026-05-03) — Security pass + bug sweep + every macOS-only feature except VLM
+
+User asked: "implement everything, find bugs, find security holes, get this perfect." Three Explore audits surfaced 4 SEVERE / 7 MEDIUM parity gaps + 11 bugs + 5 security findings. V14.5 fixes everything except the VLM Deep Analyze llama-cpp-2 wiring, which is a multi-hour build cycle deferred to V14.6.
+
+### Round 0 — Security fixes
+
+- **SEC-1 path traversal in `renameFiles`**: previous check rejected `/` and `\` in `new_name` but accepted `..`, `.`, drive letters, UNC paths. Replaced with `is_safe_filename` helper that requires exactly one `Component::Normal` path component, no leading/trailing whitespace. `engine/src/main.rs`. Unit-tested with 11 traversal-attack cases.
+- **SEC-1b dest-exists guard**: `std::fs::rename` silently overwrites — added `dest.exists()` pre-check that returns `"destination_exists"` error per file rather than clobbering.
+- **SEC-2 quote injection in Explorer `/select,`**: filenames containing `"` could break the quoted argument. Added `path.Replace("\"", "\\\"")` escape in both `LibraryView.OnContextReveal` and `FilePreviewSheet.OnRevealClicked`.
+- **SEC-3 IPC frame-size cap**: `BufReader::lines()` had no per-line limit. Added 1 MB cap in `engine/src/main.rs::stdio_loop` that emits `oversized_ipc_frame` error before parse.
+- **SEC-4 WinVerifyTrust**: audited; current behavior correct (refuse Untrusted, warn Unsigned in dev, ship-builds gated on EV cert in V14.x.SIGNED).
+
+### Round 1 — Critical bug fixes
+
+- **BUG-1 async-void crash** in `FilePreviewSheet.SetFile`: try/catch only wrapped the inner thumb-load block. Refactored body into `SetFileCoreAsync` and made `SetFile` a thin try/catch wrapper around it. Any unhandled exception now goes to `DebugLog.Warn` instead of crashing the dispatcher.
+- **BUG-2 ClipSearchService event leak**: subscribed to `EngineClient.PropertyChanged` in ctor, never unsubscribed → tab open/close cycles leaked handlers. Made it `IDisposable`, plumbed `Dispose` from `LibraryView.Unloaded`.
+- **BUG-3 PeopleViewModel.AnchorImage rebuilt every binding refresh**: getter constructed a `new BitmapImage(new Uri(...))` on every access. Cached in `_cachedAnchorImage` field with `_anchorImageResolved` flag.
+- **BUG-4 LibraryViewModel CTS leak on view unload**: `_searchCts` was disposed only when superseded by a new query. Made `LibraryViewModel : IDisposable`, dispose CTS in `Dispose`, plumbed from `LibraryView.OnUnloaded`.
+- **BUG-5 PersonDetailSheet DB lock contention**: opened the DB in ReadWrite mode while ReadStore + engine writer used ReadOnly. Replaced with new `renamePerson` IPC that routes the UPDATE through the engine's single-writer connection. Eliminates cross-process lock contention.
+- **BUG-6 ModelInstallerService stale singleton sub**: constructor subscribed to EngineClient; respawn after crash left an orphaned handler. Added `Reset()` method called from `EngineClient.StartAsync` to detach + reattach.
+
+### Round 2 — SEVERE parity gaps (the macOS-only big features)
+
+- **SuggestedMergesSheet for People**: new `findMergeSuggestions` IPC handler walks every cluster's anchor face print, computes pairwise cosine, returns pairs in the uncertain band 0.45–0.70 (excluding pairs already marked different in `face_verifications`). Sheet renders side-by-side anchor JPEGs + similarity % + Merge / Different-people / Skip buttons. Sorted by similarity desc, top 50.
+- **Sankey proximity-bezier hover + cross-highlight**: `SankeyFlowControl` now samples each ribbon's centerline cubic-bezier at 24 points; PointerMoved finds the nearest ribbon within 14 px, highlights its path + the source/category endpoint rects + shows a "source → category (count)" tooltip. PointerExited resets all idle.
+- **TreeDiffControl** for Restructure: side-by-side TreeView columns showing current vs proposed folder structure. Build via path bucketing of `RestructurePlan.Moves`. Status-driven highlight color (gold for added/moved-dest, dim for removed/moved-source). Toggle in `RestructureView` between "Sankey ribbons" and "Tree diff" modes.
+- **Gold-gradient floating apply bar**: replaced the flat `AccentFillColorDefaultBrush` with a `LinearGradientBrush` (gold #33FFCC00 → orange #11FF6600) + 1 px gold border. Matches macOS visual signature.
+- **PersonDetailSheet structured-name editor wired to engine**: replaces direct DB write with `RenamePersonAsync` IPC.
+
+### Round 3 — MEDIUM parity gaps
+
+- **Find similar (CLIP image-embedding query)**: new `embedImageQuery(file_id, query_id)` IPC handler reads the file's stored CLIP embedding from `clip_embeddings` and emits as a `clipTextEmbedding` event (same channel the text-search uses). Library tile right-click "Find similar" awaits the response with a 5 s timeout, then calls new `LibraryViewModel.SemanticSearchWithSeedAsync` to rank the grid by cosine similarity to the seed.
+- **Per-file Analyze with Deep Analyze button** on FilePreviewSheet: gold-icon button calls `DeepAnalyzeFileAsync(fileId, "qwen2_5_vl_3b")`. Surfaces a friendly engine error if VLM not installed (V14.6 wires the actual llama.cpp inference).
+- **Right-click context menu on People cluster cards**: "Edit name + faces" + "Find merge candidates" — discoverable equivalents to double-tap + the header button.
+- **Hover badges on Library tiles**: face-cluster + OCR-text indicators top-left, gold + lavender (`AiBrush`) glyphs.
+- **Re-cluster button** wired to engine `runFaceClustering` IPC handler that loads every face_print with arcface_embedding, runs union-find clustering, persists per-face `person_id`, recreates the persons table.
+
+### Round 4 — Engine + UX polish
+
+- **8-parallel COM apartment pool** for `shell/trash.rs`: spawns 8 worker threads, each `CoInitializeEx(COINIT_APARTMENTTHREADED)` once at startup, fed via `crossbeam_channel`. Order-preserving result vector. Sub-4-file batches stay sequential (worker spin-up overhead). Matches macOS 8-way trash.
+- **Undo stack (Ctrl+Z)**: new `Services/UndoStack.cs` keeps the last 16 destructive actions with reverse-op closures. `MainWindow` accelerator pops + invokes. `BulkRenameSheet.CommitAsync` pushes an inverse-rename entry; merges + trash + restructure are queued for V14.6 (need engine-side `restoreFromTrash` + `revertMerge` reverse handlers).
+- **All AnchorImage getters cached** + nullable-safe.
+
+### Honestly deferred (V14.6+)
+
+- **VLM Deep Analyze** (`models/vlm.rs` + DeepAnalyzeView UI): HEAVY — adds `llama-cpp-2 = "0.1"` (~150 MB build artifacts, multi-hour LTO) + `models/vlm.rs` wrapper + 4 IPC handler bodies + Deep Analyze tab full UI. The biggest remaining piece.
+- **restoreFromTrash + revertMerge engine handlers** (so undo covers more than rename).
+- **Drill-down sheets** for Sankey / TreeDiff nodes (click → modal listing files moving through that node).
+- **Recent scans sheet** in Settings (port the macOS list).
+- **Drag-drop reorder of tags** in preview sheet.
+- **Search suggestions** dropdown (recent queries, top tags).
+- **Privacy panel grep button** (run a strings-grep over the running engine binary, report "0 telemetry strings found").
+- **Performance Pack download UX** — needs CDN-hosted ZIPs; current state shows honest "lands when manifests pinned" tooltip.
+- **EV cert codesigning** (deferred until "perfect" per user).
+
+### Build status
+
+- `cargo check --target x86_64-pc-windows-msvc` clean — 0 errors, ~70 warnings (all forward-looking dead-code that V14.6 VLM will consume).
+- `dotnet build src/FileID.App` clean — 0 errors / 0 warnings.
+- Engine + app rebuilt to `~\AppData\Local\FileID-App\` for user verification.
+- New IPC variants (RenamePerson, FindMergeSuggestions, EmbedImageQuery + MergeSuggestions event) round-trip cleanly through the C# IpcSchema.
+- Engine cargo tests still GREEN; new `is_safe_filename` unit tests cover 11 traversal-attack cases.
+
+### What works in the binary now
+
+Beyond V14.4: every Library tile shows hover badges for face/OCR; right-click "Find similar" runs CLIP image-embedding search; right-click any People cluster card → context menu with "Edit name + faces" + "Find merge candidates"; double-tap a People card → edit dialog; click "Suggested merges" header button → modal lists candidate cluster pairs with side-by-side faces + similarity %; FilePreviewSheet has an Analyze button that calls Deep Analyze (returns friendly error until VLM lands); Cleanup tab uses 8-parallel trash; Restructure tab toggles Sankey / Tree-diff visualization, hover any Sankey ribbon to see source-category-count tooltip with cross-highlight, gold-gradient apply bar; Ctrl+Z undoes the last bulk rename; person rename goes through the engine's single-writer DB connection; renameFiles IPC rejects path traversal; engine binary signature is verified; oversized IPC frames are rejected with a clean error.
+
+## V14.4 (2026-05-03) — Real thumbnails, smooth LavaLamp, working welcome, every macOS UX surface
+
+User reported three blockers from V14.3 + a sweep ask: scan crash, welcome page no progress, choppy LavaLamp, and "implement EVERYTHING from the gap list, leave nothing out." V14.4 fixes the blockers + lands every gap-list item except VLM Deep Analyze (queued for V14.5 — needs llama-cpp-2 + ~150 MB build artifacts and a multi-hour cycle).
+
+### The three blockers, explained + fixed
+
+1. **Scan crash**: not a crash — the user's installed binary at `~\AppData\Local\FileID-App\` was from May 2 20:25, predating the V14.3 `StartScan` IPC handler. Engine echoed `not_implemented` and the app surfaced it as an error popup that read like a crash. Fix: rebuild engine + redeploy to the live install path.
+2. **Welcome page no progress**: registry.rs had `mobileclip_s2` and `qwen2_5_vl_3b` mapped to `NotYetAvailable` so clicking Install all silently no-op'd those two rows. Fixed by wiring real HuggingFace URLs:
+   - CLIP: Xenova's `clip-vit-base-patch32` ONNX (vision_model.onnx, text_model.onnx, vocab.json, merges.txt) — 4 files, ~210 MB total
+   - VLM: bartowski's `Qwen2.5-VL-3B-Instruct-GGUF` (Q4_K_M + mmproj) — 2 files, ~3.5 GB
+   - Plus aliases for SCRFD's existing entry. Welcome sheet now shows real progress bars + checkmarks.
+3. **Choppy LavaLamp**: the previous implementation sampled sin/cos at 30 keyframes and let Composition piecewise-linearly interpolate between them — visible chop, especially at slow drift speeds where each linear segment lasts ~1 sec. Fix: rewrote `AnimateOffset` to use two parallel scalar phase oscillators (`xPhase`, `yPhase` on a `CompositionPropertySet`) feeding a single `ExpressionAnimation` that computes `Vector3(centerX + Sin(xPhase) * xSwing, centerY + Cos(yPhase) * ySwing, 0)`. The compositor evaluates the expression every vsync — perfect sine motion at full display refresh, no piecewise approximation.
+
+### Round 2 — high-value UX bundle (real images everywhere)
+
+- **Library tile thumbnails**: `ThumbnailService.RenderAsync` now calls `StorageFile.GetThumbnailAsync(SingleItem, 256)` which routes through the same `IThumbnailProvider` chain Explorer uses (HEIC, RAW, .pages, Office files all work). `LibraryView` wires `ItemsRepeater.ElementPrepared` / `ElementClearing` so tiles load on scroll-into-view + cancel on scroll-out. `FileTile.Thumbnail` is a `BitmapImage?` with `INotifyPropertyChanged`. Replaced the gray-Border placeholder with `<Image Source={x:Bind Thumbnail}>` inside a CornerRadius=8 Border (clips automatically — `ClipToBounds` doesn't exist in WinUI 3 and was the cause of an XamlCompiler.exe Pass 1 silent failure that took two iterations to isolate).
+- **FilePreviewSheet body**: same `StorageFile.GetThumbnailAsync` path at 1024-px, so image / video / PDF / doc previews render real content instead of the kind-glyph placeholder. Audio + unknown kinds keep the glyph fallback.
+- **People face crop thumbnails**: `tagging.rs` now stashes the 112×112 ArcFace input crop in `DetectedFace.crop_rgb_112`. `dbwriter.rs` writes it as `face_crops/<face_id>.jpg` in the same transaction the row is INSERTed into. `PersonCluster.AnchorImage` constructs a `BitmapImage` from the per-face JPEG; cluster cards show real faces.
+
+### Round 3 — CLIP semantic search end-to-end
+
+- **`embedTextQuery` IPC** + matching `clipTextEmbedding` event in the schema. Engine handler in `main.rs` lazy-loads the CLIP text model into a `OnceLock<Mutex<Option<ClipText>>>` so back-to-back queries reuse the warm session.
+- **Tokenizer artifacts**: `vocab.json` + `merges.txt` from Xenova added to the `clip_text` registry entry so the BPE tokenizer can load.
+- **`ClipSearchService`**: real implementation. Subscribes to `EngineClient.LastClipTextEmbedding`, correlates by `query_id` GUID, returns the 512-d embedding to `ReadStore.SemanticSearchAsync` which already does the dot-product. 5-second timeout falls back to FTS5 if the engine doesn't reply.
+
+### Round 4 — Restructure tab Sankey
+
+- **`SankeyFlowControl`**: pure WinUI 3 (no Win2D dep). Templated control with a `Canvas` template part. `SetPlan(plan)` groups moves by source-folder + target-category, computes proportional rect heights, draws cubic-bezier ribbons via `Microsoft.UI.Xaml.Shapes.Path` + `BezierSegment`. Color rotation: gold for sources, lavender / cyan / pink for categories (matches macOS palette). Labels auto-trim at 22 chars.
+- Wired into `RestructureView.xaml`: appears between the plan-summary card and the by-category list when a plan exists, hides otherwise.
+
+### Round 5 — Cleanup fuzzy phash
+
+- **Hamming-distance grouping**: `CleanupViewModel.Load` now pulls every phash + uses union-find on pairs whose `popcount(a XOR b) ≤ 4` to merge near-duplicates into the same cluster. Per-cluster default keeper = largest file (best resolution typically, user can re-pick). 5000-row cap; ~100ms worst-case for 12.5M XOR-popcounts.
+
+### Round 6 — re-cluster button + AutoPilot orchestrator
+
+- **`runFaceClustering` IPC handler** in `main.rs`: loads every face_print with an arcface_embedding, feeds them through `face_clustering::cluster()`, persists per-face `person_id` + recreates the `persons` table from the new cluster anchors, emits `faceClusteringComplete`. People tab Re-cluster button calls it before refreshing.
+- **`AutoPilot` orchestrator body**: chains scan → face clustering → restructure-plan on the same library root via the existing IPC handlers. VLM caption phase deliberately skipped (it's a multi-minute commitment that should be explicit, not auto).
+
+### Round 7 — Person detail sheet
+
+- **`PersonDetailSheet`**: modal with structured-name editor (title / first / middle / last / suffix from v5 schema) + face grid showing every clustered face's JPEG. Save updates the persons row + auto-fills `name` from `first + ' ' + last` if empty. Opens via double-tap on a People cluster card.
+
+### Honestly deferred (next round)
+
+- **VLM Deep Analyze**: needs `llama-cpp-2` crate (~150 MB build artifacts, multi-hour LTO) + the existing Deep Analyze tab UI wired to drive the model. Plan: V14.5.
+- **Performance Pack download UX**: stays disabled with honest tooltip — pack hosting (CUDA / OpenVINO / QNN ZIPs of DLLs) needs a CDN. Detection (`has_dll` probe) already runs; user installs the toolkits themselves and FileID picks them up automatically.
+- **Suggested-merges sheet**: the People tab has drag-merge for explicit moves; auto-suggesting candidates by ArcFace cosine similarity is V14.5 polish.
+- **8-parallel COM apartment pool for `shell/trash.rs`**: sequential is fine for tens-of-files batches; pool matters at thousands.
+- **Undo stack**: not yet implemented for rename / trash / restructure-apply.
+- **`iterate.ps1`**: regression harness port from macOS — V14.5.
+- **EV cert codesigning**: deferred until "perfect" per user.
+
+### Build status
+
+- `cargo check` 0 errors on the engine
+- `dotnet build src/FileID.App` 0 errors / 0 warnings
+- All cargo + xUnit tests still GREEN
+- Live engine + app rebuilt + redeployed to `~\AppData\Local\FileID-App\` for user verification
+
 ## V14.3 (2026-05-02) — Stop deferring: real ML loop + every shell helper + bulk action sheets + WiX MSI
 
 User directive: "STOP DEFERRING THINGS GET IT ALL DONE." V14.3 burns through every "honestly deferred" item from V14.2 except VLM Deep Analyze (V14.4 — needs llama.cpp) and the Undo stack (Phase 8 polish). End state: a downloadable `FileID-x64.msi` (83 MB) that installs a self-contained app whose engine actually runs ML against image scans, whose UI lets the user multi-select / bulk-tag / bulk-rename / bulk-trash / drag-merge cluster cards / pick keepers, and whose toast fires when a scan completes.

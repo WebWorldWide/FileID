@@ -18,7 +18,7 @@ using Microsoft.UI.Dispatching;
 
 namespace FileID.ViewModels;
 
-internal sealed class LibraryViewModel : INotifyPropertyChanged
+internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
 {
     private const int PageSize = 200;
     private static readonly TimeSpan DebounceWindow = TimeSpan.FromMilliseconds(200);
@@ -32,12 +32,23 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged
     private string _kindFilter = "all";
     private bool _isLoading;
     private string? _errorMessage;
+    private bool _disposed;
 
     public LibraryViewModel(ReadStore store, ClipSearchService clip, DispatcherQueue ui)
     {
         _store = store;
         _clip = clip;
         _ui = ui;
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        try { _searchCts?.Cancel(); } catch { /* swallow */ }
+        _searchCts?.Dispose();
+        _searchCts = null;
+        // ClipSearchService is owned by the view, disposed there.
     }
 
     public ObservableCollection<FileTile> Items { get; } = new();
@@ -157,6 +168,34 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// Replace the grid with files ranked by cosine similarity to a seed
+    /// CLIP embedding. Used by the Library tile right-click "Find similar"
+    /// action and by the Restructure preview's similar-files lookup.
+    /// </summary>
+    public async Task SemanticSearchWithSeedAsync(float[] seed, CancellationToken ct)
+    {
+        try
+        {
+            IsLoading = true;
+            ErrorMessage = null;
+            var ranked = await _store.SemanticSearchAsync(seed, PageSize, ct).ConfigureAwait(false);
+            var filtered = new List<FileTile>(ranked.Count);
+            foreach (var hit in ranked)
+            {
+                if (_kindFilter != "all" && !string.Equals(hit.Row.Kind, _kindFilter, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                filtered.Add(FileTile.From(hit.Row));
+            }
+            ApplyOnUi(filtered);
+        }
+        catch (OperationCanceledException) { /* expected */ }
+        catch (Exception ex) { ErrorMessage = ex.Message; }
+        finally { IsLoading = false; }
+    }
+
     private void ApplyOnUi(IReadOnlyList<FileTile> next)
     {
         if (_ui.HasThreadAccess)
@@ -228,6 +267,24 @@ internal sealed class FileTile : INotifyPropertyChanged
         }
     }
 
+    private Microsoft.UI.Xaml.Media.Imaging.BitmapImage? _thumbnail;
+    public Microsoft.UI.Xaml.Media.Imaging.BitmapImage? Thumbnail
+    {
+        get => _thumbnail;
+        set
+        {
+            if (ReferenceEquals(_thumbnail, value)) return;
+            _thumbnail = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Thumbnail)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(HasThumbnail)));
+        }
+    }
+
+    public bool HasThumbnail => _thumbnail != null;
+
+    /// <summary>Modified-at unix seconds, used as part of the thumbnail cache key.</summary>
+    public double? ModifiedAt { get; init; }
+
     public event PropertyChangedEventHandler? PropertyChanged;
 
     public static FileTile From(FileRow r) => new()
@@ -239,6 +296,7 @@ internal sealed class FileTile : INotifyPropertyChanged
         SizeBytes = r.SizeBytes,
         HasFaces = r.HasFaces,
         HasText = r.HasText,
+        ModifiedAt = r.ModifiedAt,
     };
 
     private static string FormatSize(long bytes)

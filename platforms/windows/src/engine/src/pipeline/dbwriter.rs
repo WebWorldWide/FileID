@@ -224,6 +224,13 @@ impl DbWriter {
                                 face.quality as f64,
                             ])
                             .with_context(|| format!("face insert for {}", path_text))?;
+
+                        if let Some(crop) = &face.crop_rgb_112 {
+                            let face_id = tx.last_insert_rowid();
+                            if let Err(err) = save_face_crop(face_id, crop) {
+                                tracing::warn!(?err, face_id, "face crop write failed");
+                            }
+                        }
                     }
                 }
 
@@ -342,4 +349,24 @@ fn floats_to_le_bytes(v: &[f32]) -> Vec<u8> {
         out.extend_from_slice(&f.to_le_bytes());
     }
     out
+}
+
+/// Encode a 112×112 RGB crop as JPEG and write to face_crops/<face_id>.jpg.
+/// Cheap (37 KB raw → ~5 KB JPEG @ q85). Lets the People tab card render
+/// real faces instead of placeholder gray circles.
+fn save_face_crop(face_id: i64, crop_rgb_112: &[u8]) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let dir = crate::paths::faces_dir().context("resolving faces dir")?;
+    std::fs::create_dir_all(&dir).ok();
+    let dest = dir.join(format!("{face_id}.jpg"));
+    let img: image::ImageBuffer<image::Rgb<u8>, _> =
+        image::ImageBuffer::from_raw(112, 112, crop_rgb_112.to_vec())
+            .context("face crop bytes don't match 112x112")?;
+    let dyn_img = image::DynamicImage::ImageRgb8(img);
+    let mut bytes = Vec::with_capacity(8 * 1024);
+    dyn_img
+        .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Jpeg)
+        .context("encode face crop JPEG")?;
+    std::fs::write(&dest, &bytes).with_context(|| format!("write {}", dest.display()))?;
+    Ok(())
 }

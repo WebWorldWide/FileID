@@ -4,7 +4,9 @@
 
 using System;
 using System.ComponentModel;
+using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using FileID.IpcSchema;
 using FileID.Services;
 using FileID.ViewModels;
@@ -63,8 +65,71 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         || ViewModel.Clusters.Count == 0
             ? Visibility.Visible : Visibility.Collapsed;
 
+    private async void OnContextOpenDetails(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuFlyoutItem item || item.Tag is not int cid) return;
+        var cluster = ViewModel.Clusters.FirstOrDefault(c => c.ClusterId == cid);
+        if (cluster is null) return;
+        await OpenDetailSheetAsync(cluster);
+    }
+
+    private void OnContextSuggestedMerges(object sender, RoutedEventArgs e)
+        => OnSuggestedMergesClicked(sender, e);
+
+    private async Task OpenDetailSheetAsync(PersonCluster pc)
+    {
+        var sheet = new PersonDetailSheet();
+        sheet.SetPerson(pc.ClusterId, pc.DisplayName);
+        var dialog = new ContentDialog
+        {
+            XamlRoot = this.XamlRoot,
+            Title = "Person details",
+            Content = sheet,
+            PrimaryButtonText = "Save",
+            CloseButtonText = "Close",
+            DefaultButton = ContentDialogButton.Primary,
+        };
+        dialog.PrimaryButtonClick += async (_, args) =>
+        {
+            var deferral = args.GetDeferral();
+            var ok = await sheet.CommitAsync();
+            if (!ok) args.Cancel = true;
+            deferral.Complete();
+        };
+        try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
+        await ViewModel.RefreshAsync(System.Threading.CancellationToken.None);
+    }
+
+    private async void OnSuggestedMergesClicked(object sender, RoutedEventArgs e)
+    {
+        var sheet = new SuggestedMergesSheet();
+        var dialog = new ContentDialog
+        {
+            XamlRoot = this.XamlRoot,
+            Title = "Suggested merges",
+            Content = sheet,
+            CloseButtonText = "Done",
+            DefaultButton = ContentDialogButton.Close,
+        };
+        try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
+        await ViewModel.RefreshAsync(System.Threading.CancellationToken.None);
+    }
+
     private async void OnRefreshClicked(object sender, RoutedEventArgs e)
     {
+        // Fire the engine's runFaceClustering pass first so the People tab
+        // reflects the latest face_print → person_id assignments. The
+        // engine emits a faceClusteringComplete IPC event when done; we
+        // refresh after our local IPC fire-and-forget to avoid a confusing
+        // "old data shown briefly" flicker.
+        try
+        {
+            await ViewModels.EngineClient.Instance.RunFaceClusteringAsync();
+        }
+        catch
+        {
+            // engine offline — fall through to a plain reload
+        }
         await ViewModel.RefreshAsync(CancellationToken.None);
     }
 
@@ -108,6 +173,32 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             g.BorderBrush = (SolidColorBrush)Application.Current.Resources["CardStrokeColorDefaultBrush"];
             g.BorderThickness = new Thickness(1);
         }
+    }
+
+    private async void OnClusterDoubleTapped(object sender, Microsoft.UI.Xaml.Input.DoubleTappedRoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement el || el.DataContext is not PersonCluster pc) return;
+
+        var sheet = new PersonDetailSheet();
+        sheet.SetPerson(pc.ClusterId, pc.DisplayName);
+        var dialog = new ContentDialog
+        {
+            XamlRoot = this.XamlRoot,
+            Title = "Person details",
+            Content = sheet,
+            PrimaryButtonText = "Save",
+            CloseButtonText = "Close",
+            DefaultButton = ContentDialogButton.Primary,
+        };
+        dialog.PrimaryButtonClick += async (_, args2) =>
+        {
+            var deferral = args2.GetDeferral();
+            var ok = await sheet.CommitAsync();
+            if (!ok) args2.Cancel = true;
+            deferral.Complete();
+        };
+        try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
+        await ViewModel.RefreshAsync(System.Threading.CancellationToken.None);
     }
 
     private async void OnClusterDrop(object sender, DragEventArgs args)

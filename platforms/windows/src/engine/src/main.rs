@@ -100,6 +100,13 @@ async fn main() -> Result<()> {
         Arc::new(parking_lot::Mutex::new(None));
     let dispatch_scan_state = scan_state.clone();
 
+    // Deep Analyze cancel flag. Single-in-flight; deepAnalyzeCancel sets
+    // it; the inner per-file loop polls it between files + during the
+    // VLM caption call.
+    let deep_analyze_cancel: Arc<std::sync::atomic::AtomicBool> =
+        Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dispatch_deep_cancel = deep_analyze_cancel.clone();
+
     let stdio_loop = tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -111,12 +118,25 @@ async fn main() -> Result<()> {
                 line = lines.next_line() => {
                     match line {
                         Ok(Some(text)) if text.trim().is_empty() => continue,
+                        // 1 MB cap on a single IPC frame. The largest legitimate
+                        // command (ApplyRestructure with 50K moves) is <500 KB
+                        // even at 80-char paths — anything larger is malformed
+                        // or hostile. Reject before parsing to bound memory.
+                        Ok(Some(text)) if text.len() > 1024 * 1024 => {
+                            tracing::warn!(bytes = text.len(), "oversized ipc frame; rejecting");
+                            dispatch_sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                                kind: "oversized_ipc_frame".into(),
+                                message: format!("Command frame {} bytes exceeds 1 MB cap.", text.len()),
+                                path: None,
+                            })))).await;
+                        }
                         Ok(Some(text)) => {
                             handle_line(
                                 &dispatch_sink,
                                 &dispatch_shutdown,
                                 dispatch_db.as_ref(),
                                 &dispatch_scan_state,
+                                &dispatch_deep_cancel,
                                 &text,
                             ).await;
                         }
@@ -164,6 +184,7 @@ async fn handle_line(
     shutdown: &Arc<Notify>,
     db: Option<&std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>>,
     scan_state: &Arc<parking_lot::Mutex<Option<coordinator::ScanCoordinator>>>,
+    deep_analyze_cancel: &Arc<std::sync::atomic::AtomicBool>,
     line: &str,
 ) {
     let cmd: IpcCommand = match serde_json::from_str(line) {
@@ -296,22 +317,110 @@ async fn handle_line(
                 handle_merge_clusters(sink_c, db_c, payload).await;
             });
         }
-        CommandPayload::AutoPilot(_) => {
-            // AutoPilot orchestrates scan → cluster → caption → plan in
-            // sequence. Each phase needs real ML (Phase 2.6) for the
-            // chain to actually produce output. Surface a friendly
-            // status event today; Phase 2.6 wires the orchestrator
-            // body that drives the four IPC commands.
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "autopilot_pending".into(),
-                message: "AutoPilot chains scan → face clustering → captions → restructure plan. \
-                          Currently waiting on Phase 2.6 (real ML inference) for the captioning + \
-                          face-clustering phases to produce real output. The IPC plumbing is here; \
-                          wire when ML lands."
-                    .into(),
-                path: None,
-            }))))
-            .await;
+        CommandPayload::EmbedTextQuery(payload) => {
+            let sink_c = sink.clone();
+            tokio::spawn(async move {
+                handle_embed_text_query(sink_c, payload).await;
+            });
+        }
+        CommandPayload::RenamePerson(payload) => {
+            let Some(db) = db else {
+                emit_db_unavailable(sink, "renamePerson").await;
+                return;
+            };
+            let sink_c = sink.clone();
+            let db_c = db.clone();
+            tokio::spawn(async move {
+                handle_rename_person(sink_c, db_c, payload).await;
+            });
+        }
+        CommandPayload::FindMergeSuggestions(_) => {
+            let Some(db) = db else {
+                emit_db_unavailable(sink, "findMergeSuggestions").await;
+                return;
+            };
+            let sink_c = sink.clone();
+            let db_c = db.clone();
+            tokio::spawn(async move {
+                handle_find_merge_suggestions(sink_c, db_c).await;
+            });
+        }
+        CommandPayload::EmbedImageQuery(payload) => {
+            let Some(db) = db else {
+                emit_db_unavailable(sink, "embedImageQuery").await;
+                return;
+            };
+            let sink_c = sink.clone();
+            let db_c = db.clone();
+            tokio::spawn(async move {
+                handle_embed_image_query(sink_c, db_c, payload).await;
+            });
+        }
+        CommandPayload::DeepAnalyzeFile(payload) => {
+            let Some(db) = db else {
+                emit_db_unavailable(sink, "deepAnalyzeFile").await;
+                return;
+            };
+            let sink_c = sink.clone();
+            let db_c = db.clone();
+            let cancel = deep_analyze_cancel.clone();
+            cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+            tokio::spawn(async move {
+                handle_deep_analyze_file(sink_c, db_c, payload, cancel).await;
+            });
+        }
+        CommandPayload::DeepAnalyzeFolder(payload) => {
+            let Some(db) = db else {
+                emit_db_unavailable(sink, "deepAnalyzeFolder").await;
+                return;
+            };
+            let sink_c = sink.clone();
+            let db_c = db.clone();
+            let cancel = deep_analyze_cancel.clone();
+            cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+            tokio::spawn(async move {
+                handle_deep_analyze_folder(sink_c, db_c, payload, cancel).await;
+            });
+        }
+        CommandPayload::DeepAnalyzeAll(payload) => {
+            let Some(db) = db else {
+                emit_db_unavailable(sink, "deepAnalyzeAll").await;
+                return;
+            };
+            let sink_c = sink.clone();
+            let db_c = db.clone();
+            let cancel = deep_analyze_cancel.clone();
+            cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+            tokio::spawn(async move {
+                handle_deep_analyze_all(sink_c, db_c, payload, cancel).await;
+            });
+        }
+        CommandPayload::DeepAnalyzeCancel(_) => {
+            deep_analyze_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            tracing::info!("deep analyze cancel requested");
+        }
+        CommandPayload::RunFaceClustering(_) => {
+            let Some(db) = db else {
+                emit_db_unavailable(sink, "runFaceClustering").await;
+                return;
+            };
+            let sink_c = sink.clone();
+            let db_c = db.clone();
+            tokio::spawn(async move {
+                handle_run_face_clustering(sink_c, db_c).await;
+            });
+        }
+        CommandPayload::AutoPilot(payload) => {
+            let Some(db) = db else {
+                emit_db_unavailable(sink, "autoPilot").await;
+                return;
+            };
+            let sink_c = sink.clone();
+            let db_c = db.clone();
+            let scan_state_c = scan_state.clone();
+            tokio::spawn(async move {
+                handle_autopilot(sink_c, db_c, scan_state_c, payload).await;
+            });
         }
         // Phase 0 stub: every other variant gets a structured "not implemented"
         // error so the app surfaces it visibly during bring-up. Phase 1+ wires
@@ -327,6 +436,34 @@ async fn handle_line(
             .await;
         }
     }
+}
+
+/// Returns true iff `name` is exactly one Normal path component:
+/// no slashes, no "..", no ".", no drive letter, no UNC, no leading/trailing
+/// whitespace that the OS would silently strip. Used as the path-traversal
+/// guard for `renameFiles`. Conservative — extra reject is safer than
+/// extra allow when the destination is computed by joining to a directory.
+fn is_safe_filename(name: &str) -> bool {
+    use std::path::Component;
+    if name.is_empty() || name.trim() != name {
+        return false;
+    }
+    if name == "." || name == ".." {
+        return false;
+    }
+    let p = std::path::Path::new(name);
+    if p.is_absolute() {
+        return false;
+    }
+    let mut comps = p.components();
+    let first = match comps.next() {
+        Some(c) => c,
+        None => return false,
+    };
+    if comps.next().is_some() {
+        return false; // multi-component path — definitely not a filename
+    }
+    matches!(first, Component::Normal(_))
 }
 
 async fn emit_db_unavailable(sink: &Sink, command: &str) {
@@ -600,6 +737,24 @@ async fn handle_prewarm_model(sink: Sink, model_kind: String) {
             .await;
             return;
         }
+
+        // Post-download: extract any .zip in-place.
+        if file.dest.extension().and_then(|s| s.to_str()) == Some("zip") {
+            let dest = file.dest.clone();
+            let extract = tokio::task::spawn_blocking(move || extract_zip_into_parent(&dest)).await;
+            if let Err(err) = extract.unwrap_or(Err(anyhow::anyhow!("zip extract panicked"))) {
+                tracing::warn!(?err, "zip extract failed");
+                sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                    kind: "zip_extract_failed".into(),
+                    message: format!("Couldn't extract {label}: {err}"),
+                    path: Some(file.dest.display().to_string()),
+                }))))
+                .await;
+                return;
+            }
+            // Remove the zip after successful extraction.
+            let _ = std::fs::remove_file(&file.dest);
+        }
         bytes_done_aggregate += file.approx_bytes;
     }
 
@@ -723,13 +878,15 @@ async fn handle_rename_files(
         let conn = db.lock();
         let tx = conn.unchecked_transaction()?;
         for entry in &payload.renames {
-            // Reject path components in new_name to prevent traversal.
-            if entry.new_name.contains('/') || entry.new_name.contains('\\') || entry.new_name.is_empty() {
+            // Reject anything that isn't a single Normal path component.
+            // Catches /, \, "..", ".", absolute paths (drive letters), and
+            // any encoding tricks the OS might still resolve as parent-up.
+            if !is_safe_filename(&entry.new_name) {
                 failed += 1;
                 messages.push(BulkActionItem {
                     file_id: Some(entry.file_id),
                     ok: false,
-                    message: Some("new name must be filename only".into()),
+                    message: Some("new name must be a single filename (no slashes, no '..', no '.', no drive)".into()),
                 });
                 continue;
             }
@@ -763,6 +920,17 @@ async fn handle_rename_files(
                 }
             };
             let dest = dir.join(&entry.new_name);
+            // Refuse to clobber existing files. Bulk rename is an explicit
+            // user action; surprising overwrites = data loss.
+            if dest.exists() {
+                failed += 1;
+                messages.push(BulkActionItem {
+                    file_id: Some(entry.file_id),
+                    ok: false,
+                    message: Some(format!("destination exists: {}", dest.display())),
+                });
+                continue;
+            }
             if let Err(err) = std::fs::rename(&path, &dest) {
                 failed += 1;
                 messages.push(BulkActionItem {
@@ -939,6 +1107,800 @@ async fn emit_bulk_result(
     }
 }
 
+/// Save the structured-name fields (title/first/middle/last/suffix) for a
+/// person cluster through the engine's single-writer connection.
+async fn handle_rename_person(
+    sink: Sink,
+    db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    payload: ipc::RenamePersonPayload,
+) {
+    use crate::ipc::{BulkActionItem, BulkActionResult};
+
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<BulkActionResult> {
+        let conn = db.lock();
+        let tx = conn.unchecked_transaction()?;
+        let title  = payload.title.as_deref().filter(|s| !s.trim().is_empty());
+        let first  = payload.first_name.as_deref().filter(|s| !s.trim().is_empty());
+        let middle = payload.middle_name.as_deref().filter(|s| !s.trim().is_empty());
+        let last   = payload.last_name.as_deref().filter(|s| !s.trim().is_empty());
+        let suffix = payload.suffix.as_deref().filter(|s| !s.trim().is_empty());
+        let display = match (first, last) {
+            (Some(f), Some(l)) => Some(format!("{f} {l}")),
+            (Some(f), None) => Some(f.to_string()),
+            (None, Some(l)) => Some(l.to_string()),
+            _ => None,
+        };
+        tx.execute(
+            "UPDATE persons SET title=?1, first_name=?2, middle_name=?3, last_name=?4, suffix=?5, name=COALESCE(?6, name) WHERE id=?7",
+            rusqlite::params![title, first, middle, last, suffix, display, payload.person_id],
+        )?;
+        tx.commit()?;
+        Ok(BulkActionResult {
+            action: "renamePerson".into(),
+            succeeded: 1,
+            failed: 0,
+            messages: vec![BulkActionItem {
+                file_id: Some(payload.person_id),
+                ok: true,
+                message: display,
+            }],
+        })
+    })
+    .await;
+
+    emit_bulk_result(&sink, "renamePerson", result).await;
+}
+
+/// Find merge-candidate cluster pairs by ArcFace cosine similarity in the
+/// uncertain band (COS_LOW..COS_HIGH from face_clustering). Pairs already
+/// confirmed-different in face_verifications are filtered out so the
+/// suggested-merges sheet doesn't keep re-prompting.
+async fn handle_find_merge_suggestions(
+    sink: Sink,
+    db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+) {
+    use crate::ipc::{MergeSuggestion, MergeSuggestions};
+    use crate::pipeline::face_clustering::{COS_HIGH, COS_LOW};
+
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<MergeSuggestions> {
+        let conn = db.lock();
+        // For each person, take the highest-quality face print as the
+        // anchor embedding. Compare anchor cosines pairwise; emit pairs
+        // in the uncertain band that haven't been marked different.
+        let mut stmt = conn.prepare(
+            "SELECT p.id, p.representative_face_id, COUNT(fp.id),
+                    (SELECT fp2.arcface_embedding FROM face_prints fp2
+                     WHERE fp2.person_id = p.id AND fp2.arcface_embedding IS NOT NULL
+                     ORDER BY COALESCE(fp2.face_quality, 0) DESC LIMIT 1) AS anchor_blob,
+                    (SELECT fp3.id FROM face_prints fp3
+                     WHERE fp3.person_id = p.id AND fp3.arcface_embedding IS NOT NULL
+                     ORDER BY COALESCE(fp3.face_quality, 0) DESC LIMIT 1) AS anchor_id
+             FROM persons p JOIN face_prints fp ON fp.person_id = p.id
+             GROUP BY p.id"
+        )?;
+        let rows: Vec<(i64, i64, i64, Vec<u8>)> = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(4).unwrap_or(0),
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, Vec<u8>>(3).unwrap_or_default(),
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .filter(|(_, _, _, blob)| !blob.is_empty() && blob.len() % 4 == 0)
+            .collect();
+
+        let decode = |blob: &[u8]| -> Vec<f32> {
+            blob.chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect()
+        };
+        let cos = |a: &[f32], b: &[f32]| -> f32 {
+            let mut acc = 0.0;
+            for i in 0..a.len().min(b.len()) {
+                acc += a[i] * b[i];
+            }
+            acc
+        };
+
+        // Pre-load the "verified-different" pair set so we don't suggest them.
+        let mut verified_different: std::collections::HashSet<(i64, i64)> =
+            std::collections::HashSet::new();
+        if let Ok(mut vstmt) = conn.prepare(
+            "SELECT person_a, person_b FROM face_verifications WHERE same_person = 0",
+        ) {
+            let rs = vstmt
+                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
+                .ok();
+            if let Some(rs) = rs {
+                for r in rs.flatten() {
+                    let (a, b) = if r.0 < r.1 { (r.0, r.1) } else { (r.1, r.0) };
+                    verified_different.insert((a, b));
+                }
+            }
+        }
+
+        let embeddings: Vec<(i64, i64, i64, Vec<f32>)> = rows
+            .into_iter()
+            .map(|(pid, anchor_id, count, blob)| (pid, anchor_id, count, decode(&blob)))
+            .collect();
+
+        let mut pairs: Vec<MergeSuggestion> = Vec::new();
+        for i in 0..embeddings.len() {
+            for j in (i + 1)..embeddings.len() {
+                let (pa, anchor_a, count_a, ref ea) = embeddings[i];
+                let (pb, anchor_b, count_b, ref eb) = embeddings[j];
+                let key = if pa < pb { (pa, pb) } else { (pb, pa) };
+                if verified_different.contains(&key) {
+                    continue;
+                }
+                let s = cos(ea, eb);
+                if s >= COS_LOW && s < COS_HIGH {
+                    pairs.push(MergeSuggestion {
+                        source_person_id: pa,
+                        destination_person_id: pb,
+                        similarity: s,
+                        source_anchor_face_id: anchor_a,
+                        destination_anchor_face_id: anchor_b,
+                        source_member_count: count_a,
+                        destination_member_count: count_b,
+                    });
+                }
+            }
+        }
+        pairs.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal));
+        if pairs.len() > 50 { pairs.truncate(50); }
+
+        Ok(MergeSuggestions { pairs })
+    })
+    .await;
+
+    match result {
+        Ok(Ok(s)) => {
+            sink.send(IpcEvent::now(EventPayload::MergeSuggestions(Wrap::new(s))))
+                .await;
+        }
+        Ok(Err(err)) => {
+            tracing::warn!(?err, "find_merge_suggestions failed");
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "find_merge_suggestions_failed".into(),
+                message: format!("Find merge suggestions failed: {err}"),
+                path: None,
+            }))))
+            .await;
+        }
+        Err(err) => {
+            tracing::warn!(?err, "find_merge_suggestions spawn failed");
+        }
+    }
+}
+
+/// Extract every entry of `zip_path` into its parent directory. Used by
+/// the prewarm flow for .zip downloads (llama.cpp runtime, Performance
+/// Packs). Files in nested folders inside the zip land under the same
+/// nested folders next to the zip.
+fn extract_zip_into_parent(zip_path: &std::path::Path) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let parent = zip_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("zip has no parent dir"))?;
+    let file = std::fs::File::open(zip_path).context("opening zip")?;
+    let mut archive = zip::ZipArchive::new(file).context("reading zip directory")?;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).context("zip entry")?;
+        let name = entry.enclosed_name().ok_or_else(|| {
+            anyhow::anyhow!("zip contains an entry with an unsafe name")
+        })?;
+        let dest = parent.join(name);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&dest).ok();
+            continue;
+        }
+        if let Some(p) = dest.parent() {
+            std::fs::create_dir_all(p).ok();
+        }
+        let mut out = std::fs::File::create(&dest).with_context(|| format!("creating {}", dest.display()))?;
+        std::io::copy(&mut entry, &mut out).with_context(|| format!("writing {}", dest.display()))?;
+    }
+    Ok(())
+}
+
+// ─── Deep Analyze handlers ──────────────────────────────────────────
+
+async fn handle_deep_analyze_file(
+    sink: Sink,
+    db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    payload: ipc::DeepAnalyzeFilePayload,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    use crate::ipc::{DeepAnalyzeComplete, DeepAnalyzeFileDone, DeepAnalyzeProgress, DeepAnalyzeStarting, DeepAnalyzeStartingPhase};
+    use crate::pipeline::deep_analyze::{analyze_file, AnalyzeMode};
+
+    sink.send(IpcEvent::now(EventPayload::DeepAnalyzeStarting(Wrap::new(
+        DeepAnalyzeStarting {
+            model_kind: payload.model_kind.clone(),
+            phase: DeepAnalyzeStartingPhase::LoadingModel,
+            message: format!("Captioning file #{}…", payload.file_id),
+        },
+    ))))
+    .await;
+
+    let runner = match crate::models::vlm::VlmRunner::find() {
+        Ok(r) => r,
+        Err(err) => {
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "llama_cpp_missing".into(),
+                message: format!("{err}"),
+                path: None,
+            }))))
+            .await;
+            return;
+        }
+    };
+
+    let sink_c = sink.clone();
+    let model_kind = payload.model_kind.clone();
+    let model_kind_for_progress = model_kind.clone();
+    let file_id = payload.file_id;
+    let started_at = std::time::Instant::now();
+    let outcome = analyze_file(
+        db,
+        &runner,
+        file_id,
+        &model_kind,
+        AnalyzeMode::Both,
+        cancel.clone(),
+        move |_chunk| {
+            // Per-token streaming. Emit a progress event each chunk; the
+            // current_path is the only "what file" channel the schema
+            // gives us, so we leave it None for per-file calls.
+            let s = sink_c.clone();
+            let kind = model_kind_for_progress.clone();
+            tokio::spawn(async move {
+                s.send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(Wrap::new(
+                    DeepAnalyzeProgress {
+                        processed: 0,
+                        total: 1,
+                        eta_seconds: None,
+                        current_path: None,
+                        model_kind: kind,
+                    },
+                ))))
+                .await;
+            });
+        },
+    )
+    .await;
+
+    match outcome {
+        Ok(out) => {
+            sink.send(IpcEvent::now(EventPayload::DeepAnalyzeFileDone(Wrap::new(
+                DeepAnalyzeFileDone {
+                    file_id: out.file_id,
+                    description: out.description.clone().unwrap_or_default(),
+                    proposed_name: out.proposed_name.clone(),
+                    model_kind: model_kind.clone(),
+                },
+            ))))
+            .await;
+            sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
+                DeepAnalyzeComplete {
+                    processed: 1,
+                    failed: 0,
+                    total_seconds: started_at.elapsed().as_secs_f64(),
+                    model_kind,
+                    cancelled: false,
+                },
+            ))))
+            .await;
+        }
+        Err(err) => {
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "deep_analyze_failed".into(),
+                message: format!("{err}"),
+                path: None,
+            }))))
+            .await;
+        }
+    }
+}
+
+async fn handle_deep_analyze_folder(
+    sink: Sink,
+    db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    payload: ipc::DeepAnalyzeFolderPayload,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    let prefix = format!("{}%", payload.path_prefix);
+    let ids = match collect_file_ids(&db, "WHERE path_text LIKE ?1 AND kind IN ('image','video')", &[&prefix]) {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::warn!(?err, "deep_analyze_folder query");
+            return;
+        }
+    };
+    run_deep_analyze_batch(sink, db, &payload.model_kind, ids, cancel, true).await;
+}
+
+async fn handle_deep_analyze_all(
+    sink: Sink,
+    db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    payload: ipc::DeepAnalyzeAllPayload,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    let ids = match collect_file_ids(&db, "WHERE kind IN ('image','video')", &[]) {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::warn!(?err, "deep_analyze_all query");
+            return;
+        }
+    };
+    run_deep_analyze_batch(sink, db, &payload.model_kind, ids, cancel, payload.skip_existing).await;
+}
+
+fn collect_file_ids(
+    db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    where_clause: &str,
+    params: &[&dyn rusqlite::ToSql],
+) -> rusqlite::Result<Vec<i64>> {
+    let conn = db.lock();
+    let sql = format!("SELECT id FROM files {} ORDER BY id", where_clause);
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| r.get::<_, i64>(0))?;
+    rows.collect()
+}
+
+async fn run_deep_analyze_batch(
+    sink: Sink,
+    db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    model_kind: &str,
+    file_ids: Vec<i64>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    skip_existing: bool,
+) {
+    use crate::ipc::{DeepAnalyzeComplete, DeepAnalyzeFileDone, DeepAnalyzeProgress, DeepAnalyzeStarting, DeepAnalyzeStartingPhase};
+    use crate::pipeline::deep_analyze::{analyze_file, AnalyzeMode};
+
+    let runner = match crate::models::vlm::VlmRunner::find() {
+        Ok(r) => r,
+        Err(err) => {
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "llama_cpp_missing".into(),
+                message: format!("{err}"),
+                path: None,
+            }))))
+            .await;
+            return;
+        }
+    };
+
+    sink.send(IpcEvent::now(EventPayload::DeepAnalyzeStarting(Wrap::new(
+        DeepAnalyzeStarting {
+            model_kind: model_kind.to_string(),
+            phase: DeepAnalyzeStartingPhase::LoadingModel,
+            message: format!("Analyzing {} file(s)…", file_ids.len()),
+        },
+    ))))
+    .await;
+
+    let total = file_ids.len() as u64;
+    let mut processed = 0u64;
+    let mut failed = 0u64;
+    let started_at = std::time::Instant::now();
+
+    for (idx, file_id) in file_ids.iter().copied().enumerate() {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
+                DeepAnalyzeComplete {
+                    processed,
+                    failed,
+                    total_seconds: started_at.elapsed().as_secs_f64(),
+                    model_kind: model_kind.to_string(),
+                    cancelled: true,
+                },
+            ))))
+            .await;
+            return;
+        }
+
+        if skip_existing {
+            let already = {
+                let conn = db.lock();
+                conn.query_row(
+                    "SELECT vlm_description FROM files WHERE id = ?1",
+                    rusqlite::params![file_id],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .unwrap_or(None)
+                .is_some()
+            };
+            if already { continue; }
+        }
+
+        // Resolve a display path for the progress event.
+        let current_path: Option<String> = {
+            let conn = db.lock();
+            conn.query_row(
+                "SELECT path_text FROM files WHERE id = ?1",
+                rusqlite::params![file_id],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+        };
+        sink.send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(Wrap::new(
+            DeepAnalyzeProgress {
+                processed: idx as u64,
+                total,
+                eta_seconds: None,
+                current_path,
+                model_kind: model_kind.to_string(),
+            },
+        ))))
+        .await;
+
+        let sink_c = sink.clone();
+        let model_kind_c = model_kind.to_string();
+        let outcome = analyze_file(
+            db.clone(),
+            &runner,
+            file_id,
+            model_kind,
+            AnalyzeMode::Both,
+            cancel.clone(),
+            move |_chunk| {
+                let s = sink_c.clone();
+                let kind = model_kind_c.clone();
+                tokio::spawn(async move {
+                    s.send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(Wrap::new(
+                        DeepAnalyzeProgress {
+                            processed: idx as u64,
+                            total,
+                            eta_seconds: None,
+                            current_path: None,
+                            model_kind: kind,
+                        },
+                    ))))
+                    .await;
+                });
+            },
+        )
+        .await;
+
+        match outcome {
+            Ok(out) => {
+                processed += 1;
+                sink.send(IpcEvent::now(EventPayload::DeepAnalyzeFileDone(Wrap::new(
+                    DeepAnalyzeFileDone {
+                        file_id: out.file_id,
+                        description: out.description.clone().unwrap_or_default(),
+                        proposed_name: out.proposed_name.clone(),
+                        model_kind: model_kind.to_string(),
+                    },
+                ))))
+                .await;
+            }
+            Err(err) => {
+                failed += 1;
+                tracing::warn!(?err, file_id, "deep analyze file failed");
+            }
+        }
+    }
+
+    sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
+        DeepAnalyzeComplete {
+            processed,
+            failed,
+            total_seconds: started_at.elapsed().as_secs_f64(),
+            model_kind: model_kind.to_string(),
+            cancelled: false,
+        },
+    ))))
+    .await;
+}
+
+/// Pull the stored CLIP image embedding for a file_id from
+/// `clip_embeddings` and emit it as a `clipTextEmbedding` event so the
+/// app's existing CLIP-search consumer can use it as a similarity seed.
+async fn handle_embed_image_query(
+    sink: Sink,
+    db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    payload: ipc::EmbedImageQueryPayload,
+) {
+    use crate::ipc::ClipTextEmbedding;
+    let query_id = payload.query_id.clone();
+
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<Vec<f32>>> {
+        let conn = db.lock();
+        let blob: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT embedding FROM clip_embeddings WHERE file_id = ?1",
+                rusqlite::params![payload.file_id],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .ok();
+        Ok(blob.and_then(|b| {
+            if b.is_empty() || b.len() % 4 != 0 {
+                return None;
+            }
+            Some(
+                b.chunks_exact(4)
+                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect(),
+            )
+        }))
+    })
+    .await;
+
+    match result {
+        Ok(Ok(Some(embedding))) => {
+            sink.send(IpcEvent::now(EventPayload::ClipTextEmbedding(Wrap::new(
+                ClipTextEmbedding {
+                    query_id,
+                    query: format!("file:{}", payload.file_id),
+                    embedding,
+                },
+            ))))
+            .await;
+        }
+        Ok(Ok(None)) => {
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "embedding_missing".into(),
+                message: "This file doesn't have a CLIP embedding yet. Re-scan with CLIP installed.".into(),
+                path: None,
+            }))))
+            .await;
+        }
+        Ok(Err(err)) => {
+            tracing::warn!(?err, "embed_image_query failed");
+        }
+        Err(err) => {
+            tracing::warn!(?err, "embed_image_query spawn failed");
+        }
+    }
+}
+
+/// Embed a free-text query through the CLIP text encoder. Loads the
+/// model + tokenizer per-call (cheap after the first call — Session is
+/// kept alive in a thread-local), runs encode → session.run → L2-norm,
+/// emits a `clipTextEmbedding` IPC event with the 512-d float32 vector
+/// for the app to dot-product against `clip_embeddings`.
+/// AutoPilot — chain scan → face clustering → restructure-plan, in that
+/// order, on the same library root. Each stage emits its own IPC event
+/// so the app's existing observers (sidebar pipeline, People tab,
+/// Restructure tab) all light up automatically. The VLM caption step is
+/// gated behind an installed model; if not present we skip it cleanly.
+async fn handle_autopilot(
+    sink: Sink,
+    db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    scan_state: Arc<parking_lot::Mutex<Option<coordinator::ScanCoordinator>>>,
+    payload: ipc::AutoPilotPayload,
+) {
+    use crate::pipeline::tagging::ModelStack;
+    use crate::scan_session::ScanSession;
+    use std::path::PathBuf;
+
+    let already_running = scan_state.lock().is_some();
+    if already_running {
+        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+            kind: "autopilot_busy".into(),
+            message: "A scan is already running. Cancel it before starting AutoPilot.".into(),
+            path: None,
+        }))))
+        .await;
+        return;
+    }
+
+    // Phase 1: scan
+    let coord = coordinator::ScanCoordinator::new();
+    *scan_state.lock() = Some(coord.clone());
+    let models = match tokio::task::spawn_blocking(ModelStack::load_default).await {
+        Ok(m) => Arc::new(m),
+        Err(err) => {
+            tracing::error!(?err, "AutoPilot: model stack load panicked");
+            *scan_state.lock() = None;
+            return;
+        }
+    };
+    let worker_count = platform::default_worker_cap() as usize;
+    let session = ScanSession::new(coord, db.clone(), worker_count, sink.clone(), models);
+    let root = PathBuf::from(payload.library_root.clone());
+    let scan_outcome = session.run(&root, |_| {}).await;
+    *scan_state.lock() = None;
+    if let Err(err) = scan_outcome {
+        tracing::warn!(?err, "AutoPilot: scan failed");
+        return;
+    }
+
+    // Phase 2: face clustering
+    handle_run_face_clustering(sink.clone(), db.clone()).await;
+
+    // Phase 3: restructure plan (apply not invoked — user reviews + commits).
+    handle_plan_restructure(
+        sink.clone(),
+        db,
+        ipc::PlanRestructurePayload {
+            library_root: payload.library_root,
+        },
+    )
+    .await;
+
+    // Note: VLM caption phase intentionally skipped here. Deep Analyze
+    // runs on demand from the user, not as part of AutoPilot, because
+    // captioning every file is a 10+ minute commitment that should be
+    // explicit.
+}
+
+/// Re-cluster every face in the DB. Loads all face_prints with an
+/// arcface_embedding, runs the connected-components algorithm in
+/// `face_clustering`, persists per-face person_id assignments, emits a
+/// `faceClusteringComplete` event the People tab refreshes from.
+async fn handle_run_face_clustering(
+    sink: Sink,
+    db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+) {
+    use crate::ipc::FaceClusteringResult;
+    use crate::pipeline::face_clustering::{cluster, FaceRow};
+    use std::time::Instant;
+
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<FaceClusteringResult> {
+        let started = Instant::now();
+        let conn = db.lock();
+
+        // Load every face that has an ArcFace embedding.
+        let mut faces: Vec<FaceRow> = Vec::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT id, file_id, arcface_embedding, COALESCE(face_quality, 0.0) \
+                 FROM face_prints \
+                 WHERE arcface_embedding IS NOT NULL AND COALESCE(excluded, 0) = 0",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                let id: i64 = r.get(0)?;
+                let file_id: i64 = r.get(1)?;
+                let blob: Vec<u8> = r.get(2)?;
+                let quality: f64 = r.get(3)?;
+                Ok((id, file_id, blob, quality))
+            })?;
+            for row in rows {
+                let (id, file_id, blob, quality) = row?;
+                if blob.len() % 4 != 0 || blob.is_empty() {
+                    continue;
+                }
+                let mut embedding = Vec::with_capacity(blob.len() / 4);
+                for chunk in blob.chunks_exact(4) {
+                    embedding.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+                }
+                faces.push(FaceRow {
+                    face_id: id,
+                    file_id,
+                    embedding,
+                    quality: quality as f32,
+                });
+            }
+        }
+
+        let face_count = faces.len() as u64;
+        let (assignments, anchors) = cluster(&faces);
+
+        let tx = conn.unchecked_transaction()?;
+        // Persist clusters: clear existing person_id assignments + persons,
+        // re-create one persons row per anchor, point face_prints at it.
+        tx.execute("UPDATE face_prints SET person_id = NULL", [])?;
+        tx.execute("DELETE FROM persons", [])?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+
+        // Map cluster_id (1-based) → DB person row id.
+        let mut cid_to_person: std::collections::HashMap<i32, i64> = std::collections::HashMap::new();
+        for anchor in &anchors {
+            tx.execute(
+                "INSERT INTO persons (name, representative_face_id, file_count, created_at) \
+                 VALUES (NULL, ?1, ?2, ?3)",
+                rusqlite::params![anchor.anchor_face_id, anchor.member_count as i64, now],
+            )?;
+            let person_id = tx.last_insert_rowid();
+            cid_to_person.insert(anchor.cluster_id, person_id);
+        }
+
+        let mut update = tx.prepare("UPDATE face_prints SET person_id = ?1 WHERE id = ?2")?;
+        for a in &assignments {
+            if let Some(&pid) = cid_to_person.get(&a.cluster_id) {
+                update.execute(rusqlite::params![pid, a.face_id])?;
+            }
+        }
+        drop(update);
+        tx.commit()?;
+
+        Ok(FaceClusteringResult {
+            person_count: anchors.len() as u32,
+            face_count,
+            unmatched_faces: 0,
+            duration_seconds: started.elapsed().as_secs_f64(),
+        })
+    })
+    .await;
+
+    match result {
+        Ok(Ok(r)) => {
+            sink.send(IpcEvent::now(EventPayload::FaceClusteringComplete(Wrap::new(r))))
+                .await;
+        }
+        Ok(Err(err)) => {
+            tracing::warn!(?err, "face clustering failed");
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "face_clustering_failed".into(),
+                message: format!("Face clustering failed: {err}"),
+                path: None,
+            }))))
+            .await;
+        }
+        Err(err) => {
+            tracing::warn!(?err, "face clustering spawn failed");
+        }
+    }
+}
+
+async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQueryPayload) {
+    use crate::ipc::ClipTextEmbedding;
+    let query = payload.query.clone();
+    let query_id = payload.query_id.clone();
+
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<f32>> {
+        // Tokenizer + model live in a process-static slot so back-to-back
+        // queries reuse them (avoids the 100-300 ms ORT session create on
+        // every keystroke).
+        use std::sync::OnceLock;
+        static TEXT_MODEL: OnceLock<parking_lot::Mutex<Option<crate::models::clip_text::ClipText>>> = OnceLock::new();
+        let cell = TEXT_MODEL.get_or_init(|| parking_lot::Mutex::new(None));
+        let mut guard = cell.lock();
+        if guard.is_none() {
+            let weights = crate::models::clip_text::default_weights_path()?;
+            let dir = weights.parent().ok_or_else(|| anyhow::anyhow!("text weights have no parent dir"))?;
+            let vocab_path = dir.join("vocab.json");
+            let merges_path = dir.join("merges.txt");
+            let vocab = std::fs::read_to_string(&vocab_path)
+                .map_err(|e| anyhow::anyhow!("vocab.json missing at {}: {}", vocab_path.display(), e))?;
+            let merges = std::fs::read_to_string(&merges_path)
+                .map_err(|e| anyhow::anyhow!("merges.txt missing at {}: {}", merges_path.display(), e))?;
+            let tokenizer = crate::models::ClipTokenizer::new(&vocab, &merges)?;
+            let model = crate::models::clip_text::ClipText::load(weights, tokenizer)?;
+            *guard = Some(model);
+        }
+        let model = guard.as_mut().expect("just set");
+        model.embed(&payload.query)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(embedding)) => {
+            sink.send(IpcEvent::now(EventPayload::ClipTextEmbedding(Wrap::new(
+                ClipTextEmbedding {
+                    query_id,
+                    query,
+                    embedding,
+                },
+            ))))
+            .await;
+        }
+        Ok(Err(err)) => {
+            tracing::warn!(?err, "CLIP text embed failed");
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "clip_text_embed_failed".into(),
+                message: format!("CLIP text embed failed: {err}. Install CLIP via Welcome / Settings."),
+                path: None,
+            }))))
+            .await;
+        }
+        Err(err) => {
+            tracing::warn!(?err, "CLIP embed spawn failed");
+        }
+    }
+}
+
 /// Drive an end-to-end scan. Loads ML weights, registers the coordinator
 /// in the shared state slot, runs the pipeline, clears the slot when done.
 async fn handle_start_scan(
@@ -1069,6 +2031,10 @@ fn command_kind(p: &CommandPayload) -> &'static str {
         CommandPayload::RenameFiles(_)       => "renameFiles",
         CommandPayload::TrashFiles(_)        => "trashFiles",
         CommandPayload::MergeClusters(_)     => "mergeClusters",
+        CommandPayload::EmbedTextQuery(_)    => "embedTextQuery",
+        CommandPayload::RenamePerson(_)      => "renamePerson",
+        CommandPayload::FindMergeSuggestions(_) => "findMergeSuggestions",
+        CommandPayload::EmbedImageQuery(_)   => "embedImageQuery",
     }
 }
 
@@ -1107,4 +2073,34 @@ fn init_tracing() -> Result<()> {
         .init();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_safe_filename;
+
+    #[test]
+    fn safe_filenames_accepted() {
+        assert!(is_safe_filename("photo.jpg"));
+        assert!(is_safe_filename("My Vacation Photo (2024).heic"));
+        assert!(is_safe_filename("a"));
+    }
+
+    #[test]
+    fn traversal_rejected() {
+        assert!(!is_safe_filename(".."));
+        assert!(!is_safe_filename("."));
+        assert!(!is_safe_filename("../etc/passwd"));
+        assert!(!is_safe_filename("..\\windows\\system32"));
+        assert!(!is_safe_filename("a/b"));
+        assert!(!is_safe_filename("a\\b"));
+        assert!(!is_safe_filename("/abs"));
+        assert!(!is_safe_filename("\\abs"));
+        assert!(!is_safe_filename("C:\\evil.exe"));
+        assert!(!is_safe_filename("\\\\unc\\share\\evil.exe"));
+        assert!(!is_safe_filename(""));
+        assert!(!is_safe_filename("  "));
+        assert!(!is_safe_filename(" leading-space.jpg"));
+        assert!(!is_safe_filename("trailing-space.jpg "));
+    }
 }

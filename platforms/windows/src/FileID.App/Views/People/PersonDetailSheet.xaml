@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    PersonDetailSheet — modal showing every face in a cluster + a
+    structured-name editor (title / first / middle / last / suffix).
+    Save fires renamePerson IPC; deletes are deferred (split is a
+    People-tab gesture, not a sheet action).
+-->
+<UserControl
+    x:Class="FileID.Views.People.PersonDetailSheet"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    MinWidth="640"
+    MinHeight="480">
+
+    <Grid RowSpacing="14" Padding="4">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Spacing="6">
+            <TextBlock x:Name="HeaderText"
+                       Style="{StaticResource SubtitleTextBlockStyle}"
+                       Text="Person details" />
+            <TextBlock x:Name="MemberCountText"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+        </StackPanel>
+
+        <Grid Grid.Row="1" ColumnSpacing="10" RowSpacing="8">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="80"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="80"/>
+            </Grid.ColumnDefinitions>
+            <TextBox Grid.Row="0" Grid.Column="0" x:Name="TitleBox"  Header="Title"   PlaceholderText="Dr." />
+            <TextBox Grid.Row="0" Grid.Column="1" x:Name="FirstBox"  Header="First"   />
+            <TextBox Grid.Row="0" Grid.Column="2" x:Name="MiddleBox" Header="Middle"  />
+            <TextBox Grid.Row="0" Grid.Column="3" x:Name="LastBox"   Header="Last"    />
+            <TextBox Grid.Row="0" Grid.Column="4" x:Name="SuffixBox" Header="Suffix"  PlaceholderText="Jr." />
+        </Grid>
+
+        <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled">
+            <ItemsRepeater x:Name="FaceGrid">
+                <ItemsRepeater.Layout>
+                    <UniformGridLayout MinItemWidth="100"
+                                       MinItemHeight="100"
+                                       MinRowSpacing="8"
+                                       MinColumnSpacing="8"
+                                       ItemsStretch="Uniform" />
+                </ItemsRepeater.Layout>
+            </ItemsRepeater>
+        </ScrollViewer>
+
+        <TextBlock Grid.Row="3"
+                   x:Name="StatusText"
+                   Style="{StaticResource CaptionTextBlockStyle}"
+                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                   TextWrapping="Wrap" />
+    </Grid>
+</UserControl>

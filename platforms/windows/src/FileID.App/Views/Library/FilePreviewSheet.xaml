@@ -83,10 +83,17 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
 
-            <Grid Grid.Column="0">
-                <!-- Empty spacer; left side reserved for future
-                     prev/next nav between sibling tiles. -->
-            </Grid>
+
+            <Button Grid.Column="0"
+                    x:Name="AnalyzeButton"
+                    Click="OnAnalyzeClicked"
+                    HorizontalAlignment="Left"
+                    ToolTipService.ToolTip="Run Deep Analyze (VLM) on this file">
+                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                    <FontIcon Glyph="&#xE945;" FontSize="13" />
+                    <TextBlock Text="Analyze" />
+                </StackPanel>
+            </Button>
 
             <Button Grid.Column="1"
                     Click="OnRevealClicked"

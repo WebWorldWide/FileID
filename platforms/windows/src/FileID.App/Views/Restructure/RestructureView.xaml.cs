@@ -53,6 +53,9 @@ public sealed partial class RestructureView : UserControl
             ? "Plan ready: nothing to move (already organized!)."
             : $"Plan ready: {moveCount:N0} files across {plan.CategoryCounts.Count} categories.";
         CategoryListCard.Visibility = moveCount > 0 ? Visibility.Visible : Visibility.Collapsed;
+        SankeyCard.Visibility = moveCount > 0 ? Visibility.Visible : Visibility.Collapsed;
+        Sankey.SetPlan(plan);
+        TreeDiff.SetPlan(plan);
 
         var hasWork = moveCount > 0;
         ApplySymlinkButton.IsEnabled = hasWork;
@@ -74,6 +77,19 @@ public sealed partial class RestructureView : UserControl
         ApplyStatusText.Text = r.Failed == 0
             ? $"Applied {r.Applied:N0} moves successfully."
             : $"Applied {r.Applied:N0}, failed {r.Failed:N0}. Check %LOCALAPPDATA%\\FileID\\logs\\.";
+    }
+
+    private void OnVisualizationModeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (VisualizationModeCombo.SelectedItem is ComboBoxItem item && item.Tag is string mode)
+        {
+            var sankey = mode == "sankey";
+            Sankey.Visibility = sankey ? Visibility.Visible : Visibility.Collapsed;
+            TreeDiff.Visibility = sankey ? Visibility.Collapsed : Visibility.Visible;
+            VisualizationHeader.Text = sankey
+                ? "Source folder → category flow"
+                : "Current ↔ proposed folder tree";
+        }
     }
 
     private async void OnPlanClicked(object sender, RoutedEventArgs e)

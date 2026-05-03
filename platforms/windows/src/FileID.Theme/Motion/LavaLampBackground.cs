@@ -178,17 +178,35 @@ public sealed class LavaLampBackground : Control
     private void StopAnimations()
     {
         if (!_animationsRunning) return;
-        _goldVisual?.StopAnimation("Offset");
-        _orangeVisual?.StopAnimation("Offset");
-        _darkVisual?.StopAnimation("Offset");
+        StopVisualAnimations(_goldVisual);
+        StopVisualAnimations(_orangeVisual);
+        StopVisualAnimations(_darkVisual);
         _animationsRunning = false;
     }
 
+    private static void StopVisualAnimations(SpriteVisual? visual)
+    {
+        if (visual is null) return;
+        visual.StopAnimation("Offset");
+        // Phase oscillators live on Properties; stop them too so the
+        // ExpressionAnimation doesn't keep evaluating against drifting
+        // phase values after we re-enter StartAnimations on resize.
+        visual.Properties.StopAnimation("xPhase");
+        visual.Properties.StopAnimation("yPhase");
+    }
+
     /// <summary>
-    /// Animates a SpriteVisual's Offset on a sin/cos loop. The
-    /// `xAmplitude` / `yAmplitude` are fractions of the parent
-    /// width/height, matching the macOS reference's 0.30/0.40/0.20
-    /// scale factors.
+    /// Animates a SpriteVisual's Offset using two parallel scalar phase
+    /// oscillators (xPhase, yPhase) on a CompositionPropertySet, fed
+    /// through an ExpressionAnimation that computes
+    /// <c>Sin(xPhase) * xSwing</c> / <c>Cos(yPhase) * ySwing</c>.
+    ///
+    /// This is true GPU-continuous motion: the compositor evaluates the
+    /// expression every vsync, so the visual moves along a perfect sine
+    /// curve at 60 Hz / 120 Hz / whatever the display runs. The previous
+    /// implementation sampled sin/cos into 30 keyframes and let
+    /// Composition piecewise-linearly interpolate between them — visible
+    /// chop, especially on slow drifts where each segment lasts ~1 sec.
     /// </summary>
     private static void AnimateOffset(
         Compositor compositor,
@@ -207,26 +225,41 @@ public sealed class LavaLampBackground : Control
         var xSwing = parentWidth * xAmplitude;
         var ySwing = parentHeight * yAmplitude;
 
-        var loopPeriod = TimeSpan.FromTicks(Math.Max(xPeriod.Ticks, yPeriod.Ticks));
+        // Drive two scalar phase variables 0 → 2π over xPeriod / yPeriod.
+        // CompositionPropertySet survives the lifetime of the visual; we
+        // attach it to the visual's Properties so disposal is automatic.
+        var props = visual.Properties;
+        props.InsertScalar("xPhase", 0f);
+        props.InsertScalar("yPhase", 0f);
 
-        // Vector3 keyframe animation; we sample sin/cos at 30 frames over
-        // the loop period. Composition interpolates between frames on
-        // the GPU, so 30 keyframes is more than enough for a smooth drift
-        // and keeps the animation tree small.
-        const int frameCount = 30;
-        var anim = compositor.CreateVector3KeyFrameAnimation();
-        anim.Duration = loopPeriod;
-        anim.IterationBehavior = AnimationIterationBehavior.Forever;
-        for (int i = 0; i <= frameCount; i++)
-        {
-            float progress = (float)i / frameCount;
-            // Sample on full 2π so the loop closes cleanly.
-            double angle = progress * 2.0 * Math.PI;
-            float x = centerX + (float)Math.Sin(angle) * xSwing;
-            float y = centerY + (float)Math.Cos(angle * (yPeriod.TotalSeconds / xPeriod.TotalSeconds)) * ySwing;
-            anim.InsertKeyFrame(progress, new Vector3(x, y, 0f));
-        }
-        visual.StartAnimation("Offset", anim);
+        var twoPi = (float)(2.0 * Math.PI);
+
+        var xPhaseAnim = compositor.CreateScalarKeyFrameAnimation();
+        xPhaseAnim.Duration = xPeriod;
+        xPhaseAnim.IterationBehavior = AnimationIterationBehavior.Forever;
+        // Linear ease so dPhase/dt is constant — Sin(linearly-ticking
+        // phase) gives a perfect sine wave.
+        var linear = compositor.CreateLinearEasingFunction();
+        xPhaseAnim.InsertKeyFrame(0f, 0f, linear);
+        xPhaseAnim.InsertKeyFrame(1f, twoPi, linear);
+        props.StartAnimation("xPhase", xPhaseAnim);
+
+        var yPhaseAnim = compositor.CreateScalarKeyFrameAnimation();
+        yPhaseAnim.Duration = yPeriod;
+        yPhaseAnim.IterationBehavior = AnimationIterationBehavior.Forever;
+        yPhaseAnim.InsertKeyFrame(0f, 0f, linear);
+        yPhaseAnim.InsertKeyFrame(1f, twoPi, linear);
+        props.StartAnimation("yPhase", yPhaseAnim);
+
+        var offsetExpr = compositor.CreateExpressionAnimation(
+            "Vector3(centerX + Sin(props.xPhase) * xSwing, " +
+            "centerY + Cos(props.yPhase) * ySwing, 0)");
+        offsetExpr.SetReferenceParameter("props", props);
+        offsetExpr.SetScalarParameter("centerX", centerX);
+        offsetExpr.SetScalarParameter("centerY", centerY);
+        offsetExpr.SetScalarParameter("xSwing", xSwing);
+        offsetExpr.SetScalarParameter("ySwing", ySwing);
+        visual.StartAnimation("Offset", offsetExpr);
     }
 
     private static Color ResolveColor(string key, Color fallback)

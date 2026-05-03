@@ -33,16 +33,24 @@
                            Style="{StaticResource BodyTextBlockStyle}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             </StackPanel>
-            <Button Grid.Column="1"
-                    x:Name="RefreshButton"
-                    VerticalAlignment="Center"
-                    Click="OnRefreshClicked"
-                    ToolTipService.ToolTip="Re-cluster faces using current ArcFace embeddings.">
-                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                    <FontIcon FontSize="13" Glyph="&#xE72C;" />
-                    <TextBlock Text="Re-cluster" />
-                </StackPanel>
-            </Button>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                <Button x:Name="SuggestedMergesButton"
+                        Click="OnSuggestedMergesClicked"
+                        ToolTipService.ToolTip="Find pairs of clusters that might be the same person.">
+                    <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                        <FontIcon FontSize="13" Glyph="&#xE8B6;" />
+                        <TextBlock Text="Suggested merges" />
+                    </StackPanel>
+                </Button>
+                <Button x:Name="RefreshButton"
+                        Click="OnRefreshClicked"
+                        ToolTipService.ToolTip="Re-cluster faces using current ArcFace embeddings.">
+                    <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                        <FontIcon FontSize="13" Glyph="&#xE72C;" />
+                        <TextBlock Text="Re-cluster" />
+                    </StackPanel>
+                </Button>
+            </StackPanel>
         </Grid>
 
         <ScrollViewer Grid.Row="1"
@@ -69,7 +77,25 @@
                               DragStarting="OnClusterDragStarting"
                               DragOver="OnClusterDragOver"
                               DragLeave="OnClusterDragLeave"
-                              Drop="OnClusterDrop">
+                              Drop="OnClusterDrop"
+                              DoubleTapped="OnClusterDoubleTapped">
+                            <Grid.ContextFlyout>
+                                <MenuFlyout>
+                                    <MenuFlyoutItem Text="Edit name + faces"
+                                                    Click="OnContextOpenDetails"
+                                                    Tag="{x:Bind ClusterId}">
+                                        <MenuFlyoutItem.Icon>
+                                            <FontIcon Glyph="&#xE70F;" />
+                                        </MenuFlyoutItem.Icon>
+                                    </MenuFlyoutItem>
+                                    <MenuFlyoutItem Text="Find merge candidates"
+                                                    Click="OnContextSuggestedMerges">
+                                        <MenuFlyoutItem.Icon>
+                                            <FontIcon Glyph="&#xE8B6;" />
+                                        </MenuFlyoutItem.Icon>
+                                    </MenuFlyoutItem>
+                                </MenuFlyout>
+                            </Grid.ContextFlyout>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="*"/>
                                 <RowDefinition Height="Auto"/>
@@ -79,7 +105,11 @@
                                     CornerRadius="100"
                                     HorizontalAlignment="Center"
                                     VerticalAlignment="Center"
-                                    Width="120" Height="120"/>
+                                    Width="120" Height="120">
+                                <Image Source="{x:Bind AnchorImage, Mode=OneTime}"
+                                       Stretch="UniformToFill"
+                                       Width="120" Height="120" />
+                            </Border>
                             <TextBlock Grid.Row="1"
                                        Text="{x:Bind Caption}"
                                        Margin="0,8,0,0"

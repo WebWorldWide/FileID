@@ -78,11 +78,62 @@ pub fn trash_path(_path: &Path) -> Result<()> {
 }
 
 /// Batch wrapper. Trashes each path; returns one bool per input, true = success.
-/// Sequential; the per-file COM cost is small enough that batching helps minimally
-/// at our scale. Phase 4 polish can add an 8-parallel STA worker pool.
+/// 8-parallel STA worker pool: each OS thread initializes COM apartment-
+/// threaded once + stays in the pool for the batch's lifetime, amortizing
+/// the ~1-2 ms CoInitialize cost across N files. Matches macOS's 8-way
+/// async trash pattern. Order of `paths` is preserved in the result.
 pub fn trash(paths: &[std::path::PathBuf]) -> Vec<bool> {
-    paths
-        .iter()
-        .map(|p| trash_path(p).is_ok())
-        .collect()
+    if paths.is_empty() {
+        return Vec::new();
+    }
+    if paths.len() <= 4 {
+        // Tiny batches: sequential is faster than spinning up workers.
+        return paths.iter().map(|p| trash_path(p).is_ok()).collect();
+    }
+
+    const POOL_SIZE: usize = 8;
+    let n = paths.len();
+    let workers = POOL_SIZE.min(n);
+
+    let (input_tx, input_rx) = crossbeam_channel::bounded::<(usize, std::path::PathBuf)>(n);
+    let (output_tx, output_rx) = crossbeam_channel::bounded::<(usize, bool)>(n);
+
+    for _ in 0..workers {
+        let rx = input_rx.clone();
+        let tx = output_tx.clone();
+        std::thread::spawn(move || {
+            // One CoInitializeEx per worker; held for the whole batch.
+            #[cfg(windows)]
+            let init_ok = unsafe {
+                windows::Win32::System::Com::CoInitializeEx(
+                    None,
+                    windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+                )
+                .is_ok()
+            };
+            while let Ok((idx, path)) = rx.recv() {
+                let ok = trash_path(&path).is_ok();
+                let _ = tx.send((idx, ok));
+            }
+            #[cfg(windows)]
+            if init_ok {
+                unsafe { windows::Win32::System::Com::CoUninitialize() };
+            }
+        });
+    }
+    drop(output_tx); // workers hold the only senders now
+
+    for (i, p) in paths.iter().enumerate() {
+        // unbounded relative to capacity since channel is sized to N.
+        let _ = input_tx.send((i, p.clone()));
+    }
+    drop(input_tx); // workers will see channel close + exit
+
+    let mut result = vec![false; n];
+    while let Ok((idx, ok)) = output_rx.recv() {
+        if idx < n {
+            result[idx] = ok;
+        }
+    }
+    result
 }

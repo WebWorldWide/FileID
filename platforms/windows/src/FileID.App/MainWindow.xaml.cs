@@ -227,6 +227,16 @@ public sealed partial class MainWindow : Window
         AddAccelerator(VirtualKey.S, VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift,
             (_, _) => AppViewModel.Instance.ToggleSidebar());
 
+        // Ctrl+Z — undo last destructive action.
+        AddAccelerator(VirtualKey.Z, VirtualKeyModifiers.Control, async (_, _) =>
+        {
+            var label = await Services.UndoStack.Instance.UndoAsync();
+            if (!string.IsNullOrEmpty(label))
+            {
+                Services.DebugLog.Info($"Undid: {label}");
+            }
+        });
+
         // Ctrl+F — focus search. Phase 1 has no search field in the
         // Detail; the accelerator is reserved here so Phase 2 wiring is
         // a one-liner (raise an event the LibraryView subscribes to).

@@ -22,15 +22,19 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 {
     internal LibraryViewModel ViewModel { get; }
     private FileTile? _lastClickedTile;
+    private readonly ThumbnailService _thumbnails = new();
+    private readonly Dictionary<FileTile, CancellationTokenSource> _inflight = new();
+    private readonly ClipSearchService _clip;
 
     public LibraryView()
     {
         var paths = AppPaths.DbPath;
         var store = new ReadStore(paths);
-        var clip = new ClipSearchService(store);
-        ViewModel = new LibraryViewModel(store, clip, Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
+        _clip = new ClipSearchService(store);
+        ViewModel = new LibraryViewModel(store, _clip, Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
 
         InitializeComponent();
+        Unloaded += OnUnloaded;
         ViewModel.PropertyChanged += (_, e) =>
         {
             if (e.PropertyName is nameof(LibraryViewModel.IsLoading)
@@ -59,6 +63,22 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                 // refresh — initial open before scan is allowed to no-op.
             }
         };
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        Unloaded -= OnUnloaded;
+        // Cancel + dispose every in-flight thumb load so closing the tab
+        // doesn't leave background tasks holding BitmapImage refs.
+        foreach (var (_, cts) in _inflight)
+        {
+            try { cts.Cancel(); } catch { /* swallow */ }
+            cts.Dispose();
+        }
+        _inflight.Clear();
+        try { _thumbnails.Dispose(); } catch { /* swallow */ }
+        try { _clip.Dispose(); } catch { /* swallow */ }
+        try { ViewModel.Dispose(); } catch { /* swallow */ }
     }
 
     public string StatusText
@@ -107,6 +127,49 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     private void OnTileRightTapped(object sender, Microsoft.UI.Xaml.Input.RightTappedRoutedEventArgs e)
     {
         e.Handled = false;
+    }
+
+    // ItemsRepeater calls ElementPrepared when a tile scrolls into view +
+    // ElementClearing when it scrolls out. We fire off a thumbnail load on
+    // prepare; cancel + null on clear so the LRU keeps the cache hot but
+    // off-screen tiles don't hold visible BitmapImage refs that block GC.
+    private void OnRepeaterElementPrepared(Microsoft.UI.Xaml.Controls.ItemsRepeater sender,
+                                            Microsoft.UI.Xaml.Controls.ItemsRepeaterElementPreparedEventArgs args)
+    {
+        if (args.Element is not FrameworkElement el || el.DataContext is not FileTile tile) return;
+        if (tile.Thumbnail != null) return; // cached on previous prepare
+
+        var cts = new CancellationTokenSource();
+        _inflight[tile] = cts;
+        _ = LoadThumbAsync(tile, cts.Token);
+    }
+
+    private void OnRepeaterElementClearing(Microsoft.UI.Xaml.Controls.ItemsRepeater sender,
+                                           Microsoft.UI.Xaml.Controls.ItemsRepeaterElementClearingEventArgs args)
+    {
+        if (args.Element is not FrameworkElement el || el.DataContext is not FileTile tile) return;
+        if (_inflight.Remove(tile, out var cts))
+        {
+            try { cts.Cancel(); } catch { /* swallow */ }
+            cts.Dispose();
+        }
+    }
+
+    private async Task LoadThumbAsync(FileTile tile, CancellationToken ct)
+    {
+        try
+        {
+            var bmp = await _thumbnails.RequestAsync(tile.Path, tile.ModifiedAt, ct).ConfigureAwait(true);
+            if (bmp != null && !ct.IsCancellationRequested)
+            {
+                tile.Thumbnail = bmp;
+            }
+        }
+        catch { /* swallow — placeholder stays */ }
+        finally
+        {
+            _inflight.Remove(tile);
+        }
     }
 
     // Single tap toggles selection when Ctrl is held; Shift extends from
@@ -332,7 +395,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         if (tile is null) return;
 
         var sheet = new FilePreviewSheet();
-        sheet.SetFile(tile.Path, tile.Kind, tile.SizeBytes, null);
+        sheet.SetFile(tile.Path, tile.Kind, tile.SizeBytes, tile.ModifiedAt, tile.Id);
         var dialog = new Microsoft.UI.Xaml.Controls.ContentDialog
         {
             XamlRoot = this.XamlRoot,
@@ -365,15 +428,61 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         {
             try
             {
+                // Escape embedded quotes so a filename containing `"` can't
+                // break the explorer argument (defensive; users rarely have
+                // quote-named files but the cost is one Replace).
+                var quoted = path.Replace("\"", "\\\"");
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
                 {
                     FileName = "explorer.exe",
-                    Arguments = $"/select,\"{path}\"",
+                    Arguments = $"/select,\"{quoted}\"",
                     UseShellExecute = true,
                 });
             }
             catch { /* swallow — non-critical */ }
         }
+    }
+
+    // Find similar — pulls the seed file's stored CLIP embedding from the
+    // engine + runs the same dot-product the text-search path uses. The
+    // engine emits a clipTextEmbedding event; ClipSearchService routes it
+    // back to whichever EmbedQueryAsync future is awaiting on the same
+    // queryId. We bypass the search-bar UI and surface results directly
+    // via the existing ViewModel.Items list.
+    private async void OnContextFindSimilar(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuFlyoutItem item || item.Tag is not long fileId) return;
+        var queryId = Guid.NewGuid().ToString("N");
+        var tcs = new System.Threading.Tasks.TaskCompletionSource<float[]?>();
+        EngineClient.Instance.PropertyChanged += OnceHandler;
+        void OnceHandler(object? _, System.ComponentModel.PropertyChangedEventArgs ev)
+        {
+            if (ev.PropertyName != nameof(EngineClient.LastClipTextEmbedding)) return;
+            var emb = EngineClient.Instance.LastClipTextEmbedding;
+            if (emb is null || emb.QueryId != queryId) return;
+            EngineClient.Instance.PropertyChanged -= OnceHandler;
+            tcs.TrySetResult(emb.Embedding?.ToArray());
+        }
+        try
+        {
+            await EngineClient.Instance.EmbedImageQueryAsync(fileId, queryId);
+        }
+        catch
+        {
+            EngineClient.Instance.PropertyChanged -= OnceHandler;
+            return;
+        }
+        // 5-second timeout.
+        var timeoutTask = System.Threading.Tasks.Task.Delay(TimeSpan.FromSeconds(5));
+        var done = await System.Threading.Tasks.Task.WhenAny(tcs.Task, timeoutTask);
+        EngineClient.Instance.PropertyChanged -= OnceHandler;
+        if (done != tcs.Task) return;
+        var seed = await tcs.Task;
+        if (seed == null) return;
+        // Run a semantic search against the existing ReadStore via the
+        // ViewModel's path. We don't need a separate sheet — the Library
+        // grid itself is the result list.
+        await ViewModel.SemanticSearchWithSeedAsync(seed, System.Threading.CancellationToken.None);
     }
 
     private void OnContextCopyPath(object sender, RoutedEventArgs e)

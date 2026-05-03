@@ -41,6 +41,23 @@ public sealed record BulkActionItem(
     bool Ok,
     string? Message = null);
 
+public sealed record ClipTextEmbedding(
+    string QueryId,
+    string Query,
+    System.Collections.Generic.IReadOnlyList<float> Embedding);
+
+public sealed record MergeSuggestion(
+    long SourcePersonId,
+    long DestinationPersonId,
+    float Similarity,
+    long SourceAnchorFaceId,
+    long DestinationAnchorFaceId,
+    long SourceMemberCount,
+    long DestinationMemberCount);
+
+public sealed record MergeSuggestions(
+    System.Collections.Generic.IReadOnlyList<MergeSuggestion> Pairs);
+
 /// <summary>
 /// Hardware probe surfaced by the engine on startup. Settings → Performance
 /// renders this so the user can see which acceleration path is in use and

@@ -63,8 +63,22 @@ kamadak-exif     = "0.5"
 # Memory mapping for large image reads.
 memmap2 = "0.9"
 
+# PDF rendering — for now we route PDF previews through the C# side's
+# Windows.Data.Pdf (bundled in Windows 10+). pdfium-render lives in the
+# plan as a Phase 6 addition for VLM Deep Analyze input where we need
+# headless engine-side rendering.
+
 # Lock-free queues for the hottest hot paths if benchmarks justify it.
 crossbeam-channel = "0.5"
+
+# Zip extraction for the llama.cpp runtime + Performance Pack downloads.
+# `default-features = false` skips bzip2/zstd which we don't need.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# Native llama.cpp bindings (in-process VLM inference, no subprocess).
+# Off by default to keep CI build fast — adds ~150 MB build artifacts +
+# requires cmake at build time. Toggle via `cargo build --features vlm-native`.
+llama-cpp-2 = { version = "0.1", optional = true }
 
 # ONNX Runtime bindings + ndarray for tensor wrangling. Both crates pinned
 # to EXACT versions (no caret) because the 2.0 RC line had ABI churn
@@ -119,6 +133,13 @@ windows = { version = "0.58", features = [
     "Foundation_Collections",
 ] }
 windows-core = "0.58"
+
+[features]
+default = []
+# Native (in-process) llama.cpp VLM inference. Off by default to keep CI
+# build time low — adds ~150 MB build artifacts + needs cmake. Toggle via
+# `cargo build --features vlm-native --release`.
+vlm-native = ["dep:llama-cpp-2"]
 
 [profile.release]
 opt-level     = 3

@@ -79,48 +79,88 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged
         // matches via Hamming distance ≤ 4 bits using the same approach
         // macOS uses (64-bit popcount on XOR of hash pairs).
         using var cmd = conn.CreateCommand();
+        // Pull every image with a phash, then group:
+        //   1. Exact-phash matches (cheap — straight equality).
+        //   2. Near-matches via Hamming distance ≤ 4 bits (fuzzy).
+        // The fuzzy pass is O(n²) on the in-memory candidate list but
+        // we cap at 5000 phashes so worst-case 12.5M XOR-popcounts → ~100ms.
         cmd.CommandText = """
-            SELECT phash, COUNT(*) AS cnt,
-                   GROUP_CONCAT(id, char(10)) AS ids,
-                   GROUP_CONCAT(path_text, char(10)) AS paths,
-                   GROUP_CONCAT(size_bytes, char(10)) AS sizes
+            SELECT id, path_text, size_bytes, phash
             FROM files
             WHERE phash IS NOT NULL AND kind = 'image'
-            GROUP BY phash
-            HAVING cnt > 1
-            ORDER BY cnt DESC
-            LIMIT 200
+            ORDER BY phash
+            LIMIT 5000
             """;
+        var rawMembers = new List<(long Id, string Path, long Size, long Phash)>(2048);
+        using (var reader = cmd.ExecuteReader())
+        {
+            while (reader.Read())
+            {
+                ct.ThrowIfCancellationRequested();
+                rawMembers.Add((reader.GetInt64(0), reader.GetString(1), reader.GetInt64(2), reader.GetInt64(3)));
+            }
+        }
+
         var groups = new List<DuplicateGroup>();
-        using var reader = cmd.ExecuteReader();
-        while (reader.Read())
+        // Use a union-find structure over indices to merge near-matches
+        // into clusters. Two phashes belong to the same cluster if their
+        // popcount(XOR) ≤ FuzzyThreshold.
+        const int FuzzyThreshold = 4;
+        int n = rawMembers.Count;
+        var parent = new int[n];
+        for (int i = 0; i < n; i++) parent[i] = i;
+        int Find(int x) { while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
+        void Union(int a, int b) { int ra = Find(a), rb = Find(b); if (ra != rb) parent[ra] = rb; }
+
+        for (int i = 0; i < n; i++)
         {
             ct.ThrowIfCancellationRequested();
-            var phash = reader.GetInt64(0);
-            var ids = reader.GetString(2).Split('\n', StringSplitOptions.RemoveEmptyEntries);
-            var paths = reader.GetString(3).Split('\n', StringSplitOptions.RemoveEmptyEntries);
-            var sizes = reader.GetString(4).Split('\n', StringSplitOptions.RemoveEmptyEntries);
-            int n = Math.Min(Math.Min(ids.Length, paths.Length), sizes.Length);
-            var members = new List<DuplicateMember>(n);
-            for (int i = 0; i < n; i++)
+            for (int j = i + 1; j < n; j++)
             {
-                if (!long.TryParse(ids[i], out var id)) continue;
-                if (!long.TryParse(sizes[i], out var size)) size = 0;
+                long xor = rawMembers[i].Phash ^ rawMembers[j].Phash;
+                if (System.Numerics.BitOperations.PopCount((ulong)xor) <= FuzzyThreshold)
+                {
+                    Union(i, j);
+                }
+            }
+        }
+
+        var byRoot = new Dictionary<int, List<int>>();
+        for (int i = 0; i < n; i++)
+        {
+            int r = Find(i);
+            if (!byRoot.TryGetValue(r, out var list)) { list = new List<int>(); byRoot[r] = list; }
+            list.Add(i);
+        }
+
+        foreach (var (_, indices) in byRoot)
+        {
+            if (indices.Count < 2) continue;
+            // Pick the largest file as default keeper (best resolution
+            // typically). User can re-pick in the UI.
+            indices.Sort((a, b) => rawMembers[b].Size.CompareTo(rawMembers[a].Size));
+            var members = new List<DuplicateMember>(indices.Count);
+            for (int k = 0; k < indices.Count; k++)
+            {
+                var m = rawMembers[indices[k]];
                 members.Add(new DuplicateMember
                 {
-                    Id = id,
-                    Path = paths[i],
-                    FileName = System.IO.Path.GetFileName(paths[i]),
-                    SizeBytes = size,
-                    IsKeeper = i == 0, // first member defaults to keeper
+                    Id = m.Id,
+                    Path = m.Path,
+                    FileName = System.IO.Path.GetFileName(m.Path),
+                    SizeBytes = m.Size,
+                    IsKeeper = k == 0,
                 });
             }
             groups.Add(new DuplicateGroup
             {
-                PerceptualHash = phash,
+                PerceptualHash = rawMembers[indices[0]].Phash,
                 Members = members,
             });
         }
+
+        groups.Sort((a, b) => b.MemberCount.CompareTo(a.MemberCount));
+        if (groups.Count > 200) groups.RemoveRange(200, groups.Count - 200);
         return groups;
     }
 

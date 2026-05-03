@@ -109,6 +109,47 @@ pub enum CommandPayload {
     /// are reassigned to dst; src person row is deleted.
     #[serde(rename = "mergeClusters")]
     MergeClusters(MergeClustersPayload),
+
+    /// Run CLIP text encoder on a free-text query. Engine emits a
+    /// `clipTextEmbedding` event with the 512-d float32 vector so the
+    /// app can dot-product it against `clip_embeddings` in-process.
+    #[serde(rename = "embedTextQuery")]
+    EmbedTextQuery(EmbedTextQueryPayload),
+
+    /// Save the structured-name fields for a person cluster. Routed
+    /// through the engine's single-writer DB connection so concurrent
+    /// edits don't contend SQLite locks.
+    #[serde(rename = "renamePerson")]
+    RenamePerson(RenamePersonPayload),
+
+    /// Find merge-candidate cluster pairs by ArcFace cosine similarity in
+    /// the uncertain band 0.45–0.70. Engine emits `mergeSuggestions`.
+    #[serde(rename = "findMergeSuggestions")]
+    FindMergeSuggestions(Empty),
+
+    /// Pull a file's stored CLIP image embedding from the DB and emit
+    /// it via `clipTextEmbedding` (reusing the same channel — the app's
+    /// SemanticSearchAsync doesn't care whether the seed is from text or
+    /// from an image). Used by "Find similar" right-click action.
+    #[serde(rename = "embedImageQuery")]
+    EmbedImageQuery(EmbedImageQueryPayload),
+
+    /// Undo a previous trashFiles call. Looks up the trashed paths in
+    /// the trash_log sidecar JSON, calls IFileOperation.MoveItems to
+    /// restore them from the Recycle Bin, re-inserts DB rows.
+    #[serde(rename = "restoreFromTrash")]
+    RestoreFromTrash(RestoreFromTrashPayload),
+
+    /// Undo a mergeClusters call. App passes the original (face_id,
+    /// previous_person_id) pairs it captured at merge time; engine
+    /// re-creates the source person row + reassigns the faces.
+    #[serde(rename = "revertMerge")]
+    RevertMerge(RevertMergePayload),
+
+    /// List the last N scan sessions from the scan_sessions table for
+    /// the Settings → Recent scans panel.
+    #[serde(rename = "recentScans")]
+    RecentScans(RecentScansPayload),
 }
 
 /// Empty object — `{}`. Serde encodes a unit struct as `null`, which is wrong;
@@ -239,6 +280,97 @@ pub struct MergeClustersPayload {
     pub destination_person_id: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbedTextQueryPayload {
+    pub query: String,
+    /// Echoed back on the response event so the caller can correlate
+    /// (multiple in-flight queries won't get crossed).
+    pub query_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbedImageQueryPayload {
+    pub file_id: i64,
+    pub query_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreFromTrashPayload {
+    /// Identifier from the trash_log JSON (UUID emitted by trashFiles).
+    pub batch_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevertMergePayload {
+    pub source_person_id: i64,
+    pub destination_person_id: i64,
+    pub face_ids_to_revert: Vec<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentScansPayload {
+    #[serde(default)]
+    pub limit: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentScans {
+    pub items: Vec<RecentScanItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentScanItem {
+    pub session_id: String,
+    pub root_path: String,
+    pub started_at: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_files: Option<i64>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenamePersonPayload {
+    pub person_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub middle_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suffix: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeSuggestion {
+    pub source_person_id: i64,
+    pub destination_person_id: i64,
+    pub similarity: f32,
+    pub source_anchor_face_id: i64,
+    pub destination_anchor_face_id: i64,
+    pub source_member_count: i64,
+    pub destination_member_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeSuggestions {
+    pub pairs: Vec<MergeSuggestion>,
+}
+
 // ─── Event payload ──────────────────────────────────────────────────────────
 //
 // Variants whose Swift case has a single unnamed associated value encode as
@@ -304,6 +436,12 @@ pub enum EventPayload {
 
     #[serde(rename = "bulkActionResult")]
     BulkActionResult(Wrap<BulkActionResult>),
+
+    #[serde(rename = "clipTextEmbedding")]
+    ClipTextEmbedding(Wrap<ClipTextEmbedding>),
+
+    #[serde(rename = "mergeSuggestions")]
+    MergeSuggestions(Wrap<MergeSuggestions>),
 }
 
 /// Wraps a single positional value in `{"_0": ...}` to match Swift Codable
@@ -609,6 +747,17 @@ pub struct BulkActionItem {
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipTextEmbedding {
+    pub query_id: String,
+    pub query: String,
+    /// 512-d L2-normalized float32 embedding from the CLIP text encoder.
+    /// App dot-products this against `clip_embeddings` to rank Library
+    /// rows by semantic similarity.
+    pub embedding: Vec<f32>,
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    SuggestedMergesSheet — modal listing pairs of clusters whose anchor
+    faces fall in the uncertain similarity band (0.45..0.70). Engine-side
+    `findMergeSuggestions` IPC computes the pairs; we render side-by-side
+    anchor faces + similarity %, with Merge / Different-people / Skip
+    buttons per pair.
+-->
+<UserControl
+    x:Class="FileID.Views.People.SuggestedMergesSheet"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    MinWidth="640"
+    MinHeight="520">
+
+    <Grid RowSpacing="14" Padding="4">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Spacing="6">
+            <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                       Text="Suggested merges" />
+            <TextBlock x:Name="HeaderText"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       TextWrapping="Wrap"
+                       Text="Pairs of clusters that look similar. Confirm a merge if they're the same person, or mark them different so we don't ask again." />
+        </StackPanel>
+
+        <ScrollViewer Grid.Row="1"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollMode="Disabled">
+            <ItemsRepeater x:Name="PairRepeater">
+                <ItemsRepeater.Layout>
+                    <StackLayout Orientation="Vertical" Spacing="10" />
+                </ItemsRepeater.Layout>
+            </ItemsRepeater>
+        </ScrollViewer>
+
+        <TextBlock Grid.Row="2"
+                   x:Name="StatusText"
+                   Style="{StaticResource CaptionTextBlockStyle}"
+                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                   TextWrapping="Wrap" />
+    </Grid>
+</UserControl>

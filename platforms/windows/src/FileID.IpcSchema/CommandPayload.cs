@@ -77,6 +77,24 @@ public sealed record MergeClustersCommand(
     long SourcePersonId,
     long DestinationPersonId) : CommandPayload;
 
+public sealed record EmbedTextQueryCommand(
+    string Query,
+    string QueryId) : CommandPayload;
+
+public sealed record RenamePersonCommand(
+    long PersonId,
+    string? Title = null,
+    string? FirstName = null,
+    string? MiddleName = null,
+    string? LastName = null,
+    string? Suffix = null) : CommandPayload;
+
+public sealed record FindMergeSuggestionsCommand : CommandPayload;
+
+public sealed record EmbedImageQueryCommand(
+    long FileId,
+    string QueryId) : CommandPayload;
+
 /// <summary>
 /// Reads/writes the externally-tagged shape Swift's Codable produces.
 /// One key, value is the body object (or `{}` for empty-payload variants).
@@ -116,6 +134,10 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             "renameFiles"        => JsonSerializer.Deserialize<RenameFilesCommand>(ref reader, options) ?? throw new JsonException("renameFiles: null body"),
             "trashFiles"         => JsonSerializer.Deserialize<TrashFilesCommand>(ref reader, options) ?? throw new JsonException("trashFiles: null body"),
             "mergeClusters"      => JsonSerializer.Deserialize<MergeClustersCommand>(ref reader, options) ?? throw new JsonException("mergeClusters: null body"),
+            "embedTextQuery"     => JsonSerializer.Deserialize<EmbedTextQueryCommand>(ref reader, options) ?? throw new JsonException("embedTextQuery: null body"),
+            "renamePerson"       => JsonSerializer.Deserialize<RenamePersonCommand>(ref reader, options) ?? throw new JsonException("renamePerson: null body"),
+            "findMergeSuggestions" => Empty<FindMergeSuggestionsCommand>(ref reader),
+            "embedImageQuery"    => JsonSerializer.Deserialize<EmbedImageQueryCommand>(ref reader, options) ?? throw new JsonException("embedImageQuery: null body"),
 
             "pauseScan"          => Empty<PauseScanCommand>(ref reader),
             "resumeScan"         => Empty<ResumeScanCommand>(ref reader),
@@ -163,6 +185,10 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             case RenameFilesCommand c:         WriteVariant(writer, "renameFiles", c, options); break;
             case TrashFilesCommand c:          WriteVariant(writer, "trashFiles", c, options); break;
             case MergeClustersCommand c:       WriteVariant(writer, "mergeClusters", c, options); break;
+            case EmbedTextQueryCommand c:      WriteVariant(writer, "embedTextQuery", c, options); break;
+            case RenamePersonCommand c:        WriteVariant(writer, "renamePerson", c, options); break;
+            case FindMergeSuggestionsCommand:  WriteEmpty(writer, "findMergeSuggestions"); break;
+            case EmbedImageQueryCommand c:     WriteVariant(writer, "embedImageQuery", c, options); break;
             default:
                 throw new JsonException($"CommandPayload: unknown C# type {value.GetType().FullName}");
         }

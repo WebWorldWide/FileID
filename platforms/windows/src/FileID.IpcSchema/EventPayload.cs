@@ -40,6 +40,8 @@ public sealed record QueueStateEvent(QueueState State) : EventPayload;
 public sealed record RestructurePlanEvent(RestructurePlan Plan) : EventPayload;
 public sealed record RestructureApplyResultEvent(RestructureApplyResult Result) : EventPayload;
 public sealed record BulkActionResultEvent(BulkActionResult Result) : EventPayload;
+public sealed record ClipTextEmbeddingEvent(ClipTextEmbedding Embedding) : EventPayload;
+public sealed record MergeSuggestionsEvent(MergeSuggestions Suggestions) : EventPayload;
 
 public sealed class EventPayloadJsonConverter : JsonConverter<EventPayload>
 {
@@ -80,6 +82,8 @@ public sealed class EventPayloadJsonConverter : JsonConverter<EventPayload>
             "restructurePlan"        => new RestructurePlanEvent(ReadWrapped<RestructurePlan>(ref reader, options)),
             "restructureApplyResult" => new RestructureApplyResultEvent(ReadWrapped<RestructureApplyResult>(ref reader, options)),
             "bulkActionResult"       => new BulkActionResultEvent(ReadWrapped<BulkActionResult>(ref reader, options)),
+            "clipTextEmbedding"      => new ClipTextEmbeddingEvent(ReadWrapped<ClipTextEmbedding>(ref reader, options)),
+            "mergeSuggestions"       => new MergeSuggestionsEvent(ReadWrapped<MergeSuggestions>(ref reader, options)),
             _ => throw new JsonException($"EventPayload: unknown variant '{variant}'"),
         };
 
@@ -114,6 +118,8 @@ public sealed class EventPayloadJsonConverter : JsonConverter<EventPayload>
             case RestructurePlanEvent v:        WriteWrapped(writer, "restructurePlan", v.Plan, options); break;
             case RestructureApplyResultEvent v: WriteWrapped(writer, "restructureApplyResult", v.Result, options); break;
             case BulkActionResultEvent v:       WriteWrapped(writer, "bulkActionResult", v.Result, options); break;
+            case ClipTextEmbeddingEvent v:      WriteWrapped(writer, "clipTextEmbedding", v.Embedding, options); break;
+            case MergeSuggestionsEvent v:       WriteWrapped(writer, "mergeSuggestions", v.Suggestions, options); break;
             default:
                 throw new JsonException($"EventPayload: unknown C# type {value.GetType().FullName}");
         }

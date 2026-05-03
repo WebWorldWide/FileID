@@ -81,6 +81,11 @@ pub struct DetectedFace {
     pub yaw: f32,
     pub pitch: f32,
     pub quality: f32,
+    /// Tightly-packed RGB8 of the 112×112 ArcFace crop. Written by the
+    /// dbwriter to face_crops/<face_id>.jpg so the People tab cards can
+    /// render real faces instead of gray circles. Cleared after persist
+    /// to avoid holding ~37 KB per face in memory.
+    pub crop_rgb_112: Option<Vec<u8>>,
 }
 
 /// Loaded ML weights shared across tagging workers. Each model is
@@ -294,6 +299,7 @@ async fn process_file(
                                                     yaw: pose.yaw,
                                                     pitch: pose.pitch,
                                                     quality: det.score,
+                                                    crop_rgb_112: Some(crop),
                                                 });
                                             }
                                             Err(err) => {
@@ -560,6 +566,22 @@ mod tests {
         assert_eq!(got.kind, FileKind::Image);
         // File doesn't exist, decode failed → marked failed.
         assert!(got.failed);
+    }
+
+    #[test]
+    fn detected_face_has_crop_field() {
+        // Sanity: the field exists + defaults to None when constructed without it.
+        let f = DetectedFace {
+            bbox: [0.0; 4],
+            landmarks: [[0.0; 2]; 5],
+            embedding: vec![0.0; 512],
+            roll: 0.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            quality: 0.0,
+            crop_rgb_112: None,
+        };
+        assert!(f.crop_rgb_112.is_none());
     }
 
     #[test]

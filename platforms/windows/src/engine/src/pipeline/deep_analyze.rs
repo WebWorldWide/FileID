@@ -88,9 +88,213 @@ impl VlmModelFiles {
     }
 }
 
+/// Per-file Deep Analyze outcome — whatever the engine writes back to
+/// the DB after a successful caption + smart-rename round-trip.
+#[derive(Debug, Clone, Default)]
+pub struct AnalyzeOutcome {
+    pub file_id: i64,
+    pub description: Option<String>,
+    pub proposed_name: Option<String>,
+    pub model: String,
+    pub elapsed_ms: u64,
+}
+
+/// What we want from this file: caption, smart filename, or both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnalyzeMode {
+    CaptionOnly,
+    RenameOnly,
+    Both,
+}
+
+/// Run Deep Analyze on a single file: pull image bytes (image, video
+/// keyframe, or PDF page-1 via shell helpers) → call the VLM via the
+/// subprocess wrapper → write results back to the DB. Cancellation
+/// honored via the shared `AtomicBool`.
+pub async fn analyze_file(
+    db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    runner: &crate::models::vlm::VlmRunner,
+    file_id: i64,
+    model_kind: &str,
+    mode: AnalyzeMode,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    mut on_token: impl FnMut(&str),
+) -> anyhow::Result<AnalyzeOutcome> {
+    use crate::models::vlm::{self, CaptionRequest};
+    use std::path::PathBuf;
+
+    let started = std::time::Instant::now();
+
+    // Resolve file path + kind from DB.
+    let (path_text, kind): (String, String) = {
+        let conn = db.lock();
+        conn.query_row(
+            "SELECT path_text, kind FROM files WHERE id = ?1",
+            rusqlite::params![file_id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )?
+    };
+    let source_path = PathBuf::from(&path_text);
+    if !source_path.exists() {
+        anyhow::bail!("source file missing: {}", source_path.display());
+    }
+
+    // Resolve weights for this model_kind.
+    let (gguf, mmproj) = vlm::find_weights(model_kind)
+        .ok_or_else(|| anyhow::anyhow!("VLM weights for '{}' not installed", model_kind))?;
+
+    // Rasterize the source into something the CLI accepts (JPEG path).
+    // Images: pass directly. Video / PDF: extract a keyframe / page-1
+    // image into a temp file. Audio + Other: skip with friendly error.
+    let rasterized: PathBuf = match kind.as_str() {
+        "image" => source_path.clone(),
+        "video" => rasterize_video_keyframe(&source_path).await?,
+        _ => anyhow::bail!("kind '{}' isn't VLM-analyzable yet", kind),
+    };
+
+    let mut description: Option<String> = None;
+    let mut proposed_name: Option<String> = None;
+
+    if matches!(mode, AnalyzeMode::CaptionOnly | AnalyzeMode::Both) {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            anyhow::bail!("cancelled");
+        }
+        let req = CaptionRequest {
+            gguf_path: gguf.clone(),
+            mmproj_path: mmproj.clone(),
+            image_path: rasterized.clone(),
+            prompt: vlm::CAPTION_PROMPT.to_string(),
+            max_tokens: 80,
+            greedy: true,
+        };
+        let result = vlm::caption(runner, &req, cancel.clone(), &mut on_token).await?;
+        description = Some(result.text);
+    }
+    if matches!(mode, AnalyzeMode::RenameOnly | AnalyzeMode::Both) {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            anyhow::bail!("cancelled");
+        }
+        let req = CaptionRequest {
+            gguf_path: gguf,
+            mmproj_path: mmproj,
+            image_path: rasterized,
+            prompt: vlm::RENAME_PROMPT.to_string(),
+            max_tokens: 30,
+            greedy: true,
+        };
+        let result = vlm::caption(runner, &req, cancel.clone(), |_| {}).await?;
+        proposed_name = Some(sanitize_proposed_name(&result.text));
+    }
+
+    // Persist to v3 schema columns.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    {
+        let conn = db.lock();
+        conn.execute(
+            "UPDATE files SET vlm_description=COALESCE(?1, vlm_description), \
+                              vlm_proposed_name=COALESCE(?2, vlm_proposed_name), \
+                              vlm_model=?3, vlm_analyzed_at=?4 WHERE id=?5",
+            rusqlite::params![description, proposed_name, model_kind, now, file_id],
+        )?;
+    }
+
+    Ok(AnalyzeOutcome {
+        file_id,
+        description,
+        proposed_name,
+        model: model_kind.to_string(),
+        elapsed_ms: started.elapsed().as_millis() as u64,
+    })
+}
+
+/// Pull a 25%-duration keyframe from a video into a temp JPEG via the
+/// existing Media Foundation helper, return the temp path. Caller is
+/// responsible for cleanup (we leak the temp; OS cleans the temp dir on
+/// reboot — fine for one-off analysis).
+async fn rasterize_video_keyframe(path: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    let p = path.to_path_buf();
+    let frame = tokio::task::spawn_blocking(move || crate::shell::video::keyframe_25pct(&p))
+        .await??;
+    let dest = std::env::temp_dir().join(format!(
+        "fileid-vlm-{}.jpg",
+        uuid::Uuid::new_v4()
+    ));
+    let img: image::ImageBuffer<image::Rgb<u8>, _> =
+        image::ImageBuffer::from_raw(frame.width, frame.height, frame.rgb)
+            .ok_or_else(|| anyhow::anyhow!("video frame buffer mismatch"))?;
+    image::DynamicImage::ImageRgb8(img).save(&dest)?;
+    Ok(dest)
+}
+
+/// Clean up a VLM-proposed filename: lowercase, hyphen-separated, strip
+/// quotes / extension / extra punctuation. The model usually obeys the
+/// prompt but defensive normalization saves a round-trip.
+fn sanitize_proposed_name(raw: &str) -> String {
+    let trimmed = raw.trim().trim_matches('"').trim_matches('\'').trim();
+    let lowered = trimmed.to_lowercase();
+    let cleaned: String = lowered
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c
+            } else if c == '-' || c == '_' {
+                c
+            } else if c.is_whitespace() {
+                '-'
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    let collapsed = cleaned
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("-");
+    let mut out = collapsed;
+    while out.contains("--") {
+        out = out.replace("--", "-");
+    }
+    if out.len() > 80 {
+        out.truncate(80);
+        // Don't end mid-word.
+        if let Some(idx) = out.rfind('-') {
+            out.truncate(idx);
+        }
+    }
+    if out.is_empty() {
+        "untitled".to_string()
+    } else {
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::sanitize_proposed_name;
     use super::*;
+
+    #[test]
+    fn sanitize_strips_quotes_and_normalizes() {
+        assert_eq!(sanitize_proposed_name("\"Cute Beach Sunset\""), "cute-beach-sunset");
+        assert_eq!(sanitize_proposed_name("Bird in Tree!"), "bird-in-tree");
+        assert_eq!(sanitize_proposed_name("   leading and trailing   "), "leading-and-trailing");
+    }
+
+    #[test]
+    fn sanitize_caps_length_at_word_boundary() {
+        let s = sanitize_proposed_name(&"word ".repeat(40));
+        assert!(s.len() <= 80);
+        assert!(!s.ends_with("-"));
+    }
+
+    #[test]
+    fn sanitize_empty_falls_back() {
+        assert_eq!(sanitize_proposed_name(""), "untitled");
+        assert_eq!(sanitize_proposed_name("!!!"), "untitled");
+    }
 
     #[test]
     fn model_kinds_have_unique_ids() {

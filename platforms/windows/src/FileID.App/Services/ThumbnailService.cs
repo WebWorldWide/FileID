@@ -104,19 +104,65 @@ internal sealed class ThumbnailService : IDisposable
     }
 
     /// <summary>
-    /// Render a thumbnail via the shell. Phase 2.4 cut: stubs until
-    /// Phase 2.6 ties this to the engine helper or wraps
-    /// IShellItemImageFactory via CsWinRT.
+    /// Render a thumbnail via the Windows.Storage shell-thumbnail API
+    /// (which uses the same IThumbnailProvider chain Explorer does — Office,
+    /// raw, .heic, .pages all work). 256-px request, scaled by the system.
+    /// Returns a BitmapImage with the JPEG bytes set, ready for binding.
     /// </summary>
-    private static Task<BitmapImage?> RenderAsync(string path, CancellationToken ct)
+    private const uint ThumbnailRequestPx = 256;
+
+    private static async Task<BitmapImage?> RenderAsync(string path, CancellationToken ct)
     {
         if (!File.Exists(path))
         {
-            return Task.FromResult<BitmapImage?>(null);
+            return null;
         }
-        // Phase 2.6: SHCreateItemFromParsingName + IShellItemImageFactory::GetImage,
-        // pipe the resulting HBITMAP into a SoftwareBitmap → BitmapImage.
-        return Task.FromResult<BitmapImage?>(null);
+        try
+        {
+            var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(path).AsTask(ct).ConfigureAwait(false);
+            using var thumb = await file
+                .GetThumbnailAsync(
+                    Windows.Storage.FileProperties.ThumbnailMode.SingleItem,
+                    ThumbnailRequestPx,
+                    Windows.Storage.FileProperties.ThumbnailOptions.UseCurrentScale)
+                .AsTask(ct)
+                .ConfigureAwait(false);
+            if (thumb == null || thumb.Size == 0)
+            {
+                return null;
+            }
+            // BitmapImage.SetSourceAsync must run on the UI thread because
+            // BitmapImage is a DispatcherObject. Marshal back via the
+            // current dispatcher; the caller awaits us on the UI thread
+            // typically (FileTile binding) but the worker drains on a
+            // background thread, so we hop explicitly.
+            var bmp = new BitmapImage();
+            var dispatcher = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread()
+                ?? FileID.App.HostWindow?.DispatcherQueue;
+            if (dispatcher != null)
+            {
+                var tcs = new TaskCompletionSource<BitmapImage?>();
+                dispatcher.TryEnqueue(async () =>
+                {
+                    try
+                    {
+                        await bmp.SetSourceAsync(thumb).AsTask(ct);
+                        tcs.TrySetResult(bmp);
+                    }
+                    catch
+                    {
+                        tcs.TrySetResult(null);
+                    }
+                });
+                return await tcs.Task.ConfigureAwait(false);
+            }
+            await bmp.SetSourceAsync(thumb).AsTask(ct);
+            return bmp;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static string CacheKey(string path, double? modifiedAt)

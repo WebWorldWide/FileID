@@ -172,6 +172,20 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
         private set => Set(ref _lastBulkAction, value);
     }
 
+    private ClipTextEmbedding? _lastClipTextEmbedding;
+    public ClipTextEmbedding? LastClipTextEmbedding
+    {
+        get => _lastClipTextEmbedding;
+        private set => Set(ref _lastClipTextEmbedding, value);
+    }
+
+    private MergeSuggestions? _lastMergeSuggestions;
+    public MergeSuggestions? LastMergeSuggestions
+    {
+        get => _lastMergeSuggestions;
+        private set => Set(ref _lastMergeSuggestions, value);
+    }
+
     private DeepAnalyzeStarting? _deepAnalyzeStarting;
     public DeepAnalyzeStarting? DeepAnalyzeStarting
     {
@@ -212,6 +226,11 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
         {
             return;
         }
+
+        // Notify singleton services that any cached engine state is now
+        // stale and they should re-attach to PropertyChanged. Cheap +
+        // idempotent.
+        try { Services.ModelInstallerService.Instance.Reset(); } catch { /* swallow */ }
 
         State = LifecycleState.Starting;
         CrashReason = null;
@@ -481,6 +500,18 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
     public Task MergeClustersAsync(long sourcePersonId, long destinationPersonId) =>
         SendCommandAsync(new MergeClustersCommand(sourcePersonId, destinationPersonId));
 
+    public Task EmbedTextQueryAsync(string query, string queryId) =>
+        SendCommandAsync(new EmbedTextQueryCommand(query, queryId));
+
+    public Task RenamePersonAsync(long personId, string? title, string? first, string? middle, string? last, string? suffix) =>
+        SendCommandAsync(new RenamePersonCommand(personId, title, first, middle, last, suffix));
+
+    public Task FindMergeSuggestionsAsync() =>
+        SendCommandAsync(new FindMergeSuggestionsCommand());
+
+    public Task EmbedImageQueryAsync(long fileId, string queryId) =>
+        SendCommandAsync(new EmbedImageQueryCommand(fileId, queryId));
+
     // ─── Event router ──────────────────────────────────────────────────
 
     private void Apply(IpcEvent ev)
@@ -564,6 +595,12 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
                 break;
             case BulkActionResultEvent bar:
                 LastBulkAction = bar.Result;
+                break;
+            case ClipTextEmbeddingEvent ce:
+                LastClipTextEmbedding = ce.Embedding;
+                break;
+            case MergeSuggestionsEvent ms:
+                LastMergeSuggestions = ms.Suggestions;
                 break;
         }
     }

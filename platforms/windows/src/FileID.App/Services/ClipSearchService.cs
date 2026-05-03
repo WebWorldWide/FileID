@@ -17,34 +17,97 @@
 // (engine ML wiring complete) lights up the real CLIP IPC round-trip.
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.ComponentModel;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using FileID.IpcSchema;
+using FileID.ViewModels;
 
 namespace FileID.Services;
 
-internal sealed class ClipSearchService
+internal sealed class ClipSearchService : IDisposable
 {
     private readonly ReadStore _store;
+    private readonly ConcurrentDictionary<string, TaskCompletionSource<float[]?>> _inflight = new();
+    private bool _disposed;
 
     public ClipSearchService(ReadStore store)
     {
         _store = store;
+        EngineClient.Instance.PropertyChanged += OnEngineClientChanged;
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        EngineClient.Instance.PropertyChanged -= OnEngineClientChanged;
+        // Drain any in-flight requests so callers don't hang.
+        foreach (var kv in _inflight)
+        {
+            kv.Value.TrySetResult(null);
+        }
+        _inflight.Clear();
+    }
+
+    private void OnEngineClientChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(EngineClient.LastClipTextEmbedding)) return;
+        var emb = EngineClient.Instance.LastClipTextEmbedding;
+        if (emb is null) return;
+        if (_inflight.TryRemove(emb.QueryId, out var tcs))
+        {
+            tcs.TrySetResult(emb.Embedding?.ToArray());
+        }
     }
 
     /// <summary>
-    /// Embeds <paramref name="query"/> via the engine's CLIP text encoder
-    /// (Phase 2.6 wires the IPC round-trip). Returns null in Phase 2.4
-    /// — the caller falls back to FTS5 search.
+    /// Sends an `embedTextQuery` IPC command and awaits the engine's
+    /// `clipTextEmbedding` reply (correlated by query_id). Returns null
+    /// if the engine times out or CLIP isn't installed (the caller falls
+    /// back to FTS5 search transparently).
     /// </summary>
-    public Task<float[]?> EmbedQueryAsync(string query, CancellationToken ct)
+    public async Task<float[]?> EmbedQueryAsync(string query, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(query))
         {
-            return Task.FromResult<float[]?>(null);
+            return null;
         }
-        // Phase 2.6: send `embedTextQuery` IPC, await engine reply.
-        return Task.FromResult<float[]?>(null);
+        var queryId = Guid.NewGuid().ToString("N");
+        var tcs = new TaskCompletionSource<float[]?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _inflight[queryId] = tcs;
+        try
+        {
+            await EngineClient.Instance.EmbedTextQueryAsync(query, queryId).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            _inflight.TryRemove(queryId, out _);
+            return null;
+        }
+
+        // 5-second timeout: a healthy CLIP encode is sub-100ms, so 5s is
+        // generous slack for cold-start ORT session create.
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(5));
+        await using var reg = cts.Token.Register(() =>
+        {
+            if (_inflight.TryRemove(queryId, out var t))
+            {
+                t.TrySetResult(null);
+            }
+        });
+        try
+        {
+            return await tcs.Task.ConfigureAwait(false);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     public async Task<IReadOnlyList<FileRow>> SearchAsync(
