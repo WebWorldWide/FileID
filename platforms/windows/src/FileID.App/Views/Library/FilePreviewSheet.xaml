@@ -77,14 +77,31 @@
         <!-- Toolbar. -->
         <Grid Grid.Row="2" ColumnSpacing="8">
             <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
 
-
+            <!-- V14.7.2: sibling navigation. ←/→ keys also trigger via OnKeyDown. -->
             <Button Grid.Column="0"
+                    x:Name="PrevButton"
+                    Click="OnPrevClicked"
+                    ToolTipService.ToolTip="Previous file (←)"
+                    AutomationProperties.Name="Previous file">
+                <FontIcon Glyph="&#xE76B;" FontSize="13"/>
+            </Button>
+            <Button Grid.Column="1"
+                    x:Name="NextButton"
+                    Click="OnNextClicked"
+                    ToolTipService.ToolTip="Next file (→)"
+                    AutomationProperties.Name="Next file">
+                <FontIcon Glyph="&#xE76C;" FontSize="13"/>
+            </Button>
+
+            <Button Grid.Column="2"
                     x:Name="AnalyzeButton"
                     Click="OnAnalyzeClicked"
                     HorizontalAlignment="Left"
@@ -95,7 +112,7 @@
                 </StackPanel>
             </Button>
 
-            <Button Grid.Column="1"
+            <Button Grid.Column="3"
                     Click="OnRevealClicked"
                     ToolTipService.ToolTip="Show in Explorer">
                 <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
@@ -103,7 +120,7 @@
                     <TextBlock Text="Show in Explorer" />
                 </StackPanel>
             </Button>
-            <Button Grid.Column="2"
+            <Button Grid.Column="4"
                     Click="OnOpenClicked"
                     ToolTipService.ToolTip="Open with the system default app">
                 <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
@@ -111,7 +128,7 @@
                     <TextBlock Text="Open" />
                 </StackPanel>
             </Button>
-            <Button Grid.Column="3"
+            <Button Grid.Column="5"
                     Click="OnCopyPathClicked"
                     ToolTipService.ToolTip="Copy absolute path to clipboard">
                 <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">

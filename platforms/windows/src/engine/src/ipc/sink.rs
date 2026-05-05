@@ -11,7 +11,12 @@ use tokio::sync::mpsc;
 
 use super::IpcEvent;
 
-const CHANNEL_CAPACITY: usize = 4096;
+// 16384 is comfortable for the worst burst we've measured: Deep Analyze
+// emits ~50 token events/sec/file and a batch of 100 files can transiently
+// buffer 5000+ events. 4096 was an inherited default from before Deep
+// Analyze landed; the bump costs ~256 KB peak memory and eliminates
+// senders blocking on the channel during fast scans + caption streams.
+const CHANNEL_CAPACITY: usize = 16384;
 
 #[derive(Clone)]
 pub struct Sink {

@@ -2,6 +2,173 @@
 
 > Snapshot of what's working and where we left off. Update at the end of every working session.
 
+## V14.7.1 (2026-05-05) — Encoding fix + finishing the V14.7 NEXT.md queue
+
+User reported `.\platforms\windows\build\build-all.ps1 -Desktop -Run` failing with a parser error at line 136 ("Missing closing '}'"), and asked to "finish everything in NEXT.md".
+
+### Round 0 — PowerShell script encoding (the parser error)
+
+`build-all.ps1` and `sign.ps1` had been **double-decoded** during a prior Get-Content + UTF-8-BOM round-trip: a UTF-8 em-dash (`0xE2 0x80 0x94`) got read as cp1252 (yielding `â€"`) then re-saved as UTF-8 (yielding `0xC3 0xA2 0xE2 0x82 0xAC 0xE2 0x80 0x9D`). On Windows PowerShell 5.1 the resulting mojibake plus surrounding control characters confused the parser, manifesting as "Missing closing '}'" at the first reachable construct.
+
+Fix: a one-shot recovery (read raw → UTF-8 decode → cp1252 re-encode → UTF-8 re-decode → strip every non-ASCII char to ASCII equivalents: `—` → `--`, `→` → `->`, `─` → `-`, smart quotes → straight quotes), then write back as UTF-8 with BOM. Both scripts now parse clean and ASCII-only — eliminates the encoding-fragility surface entirely. Verified via `ParseInput` + smoke run of `build-all.ps1 -SkipEngine -SkipApp`.
+
+### Round 1 — Closing every remaining V14.7 NEXT.md item
+
+Three parallel audits in V14.7 surfaced 5 CRITICAL parity gaps + 4 open security findings + 5 open bugs. This round closed all of them:
+
+**Security:**
+- **SEC-3 DLL planting**: `engine/src/main.rs` calls `SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_USER_DIRS)` at startup. PATH is no longer in the default DLL search list — defends against `onnxruntime_providers_*.dll` / `cudnn64_9.dll` / etc. planted in any writable PATH entry.
+- **SEC-5 TOCTOU restructure apply**: `restructure_apply.rs::has_reparse_point_in_chain` walks every ancestor of the destination's parent up to the library root and refuses if any has `FILE_ATTRIBUTE_REPARSE_POINT` set. Closes the gap between `canonicalize_safely` and `MoveFileExW` where a junction could redirect outside the root.
+- **SEC-7 trash_log library-root containment**: `handle_restore_from_trash` collects every `scan_sessions.root_path` and checks each restore destination is a descendant of an authorized root. A local attacker who appends `{"original_path":"C:\\Windows\\System32\\evil.exe", ...}` to `trash_log.json` is now refused.
+- **SEC-9 Open ext allowlist**: new `Services/SafeOpen.cs` centralizes Open / Reveal / OpenFolder. `TryOpenFile` only ShellExecutes media extensions (images / video / audio / docs / web-text); anything else falls back to `Reveal`. Library tile right-click Open, FilePreviewSheet Open, RecentScans folder open all routed through it.
+
+**Bugs:**
+- **BUG-4 backpressure escape**: `scan_session::emit_phase` / `emit_batch_summary` / `maybe_emit_progress` and `main.rs` Deep Analyze token-stream callbacks all switched from `tokio::spawn(async { sink.send.await })` (unbounded task tail when sink fills) to `sink.try_send` (drop on overflow). UI catches up on the next emit.
+- **BUG-9 ReadStore concurrent connection**: every read method (`SearchAsync`, `RecentAsync`, `SemanticSearchAsync`, `KindCountsAsync`) now acquires `_gate.WaitAsync` before touching `_connection` and releases in `finally`. `Microsoft.Data.Sqlite` connections aren't thread-safe across simultaneous commands; the gate serializes them. SearchAsync's reentrant `RecentAsync` call happens before gate acquisition (no deadlock).
+- **BUG-12 LibraryView _inflight ConcurrentDictionary**: was `Dictionary<FileTile, CancellationTokenSource>`; finally-block `Remove` could resume on a worker thread and corrupt the map. Switched to `ConcurrentDictionary` with `TryAdd` / `TryRemove`.
+- **BUG-13 Alt+Decimal accelerator**: was registering both `VirtualKey.Decimal` (numpad period) and `(VirtualKey)188` (`,`). Numpad period now no longer surprises users by jumping to Settings. Only the OEM comma (0xBC) is registered.
+
+**Features:**
+- **FEAT-HIGH-13 GPU EP override actually applied**: `runtime.rs::priority_chain` calls a new `read_user_ep_override()` that parses `app-settings.json` (the C# side already wrote `gpuExecutionProviderOverride` here in V12). When set, the override is prepended to the chain so it's tried first; the rest of the chain stays as fallback. Auto-detected probe still wins when the user has `"auto"` / null. New `paths::app_settings_path()` distinguishes the C#-written app settings from the engine's own `settings.json` probe cache.
+- **FEAT-CRIT-1 People multi-select bulk merge / mark-as-unknown**: PeopleViewModel adds `IsSelectMode` + `SelectedClusterIds`. PersonCluster gets `IsSelected` (INotifyPropertyChanged). PeopleView.xaml gets a `Select` toggle button in the header, a per-card `CheckBox` overlay (visible only in select mode), and a gold-bordered bulk-action toolbar (`Merge into one`, `Mark as unknown`, `Done`). Bulk merge calls `mergeClusters(srcId, dstId)` N-1 times with the first selected as the target. Mark-as-unknown drives a new engine handler `markPersonsAsUnknown` (sets `is_unknown=1`, clears name fields). New IPC `MarkPersonsAsUnknownCommand` + `MarkPersonsAsUnknownPayload` schema in both Rust and C#.
+- **FEAT-CRIT-2 Cleanup per-group action menu**: every duplicate-group card gets a right-click MenuFlyout with `Keep first` / `Keep largest` / `Invert keeper` / `Skip group` / `Unskip group` / `Trash this group only`. New `DuplicateGroup.IsSkipped` (INotifyPropertyChanged). Skipped groups display "· SKIPPED" suffix and are excluded from the global "Trash non-keepers" run. Per-group "Trash this group only" surfaces its own confirmation modal + UndoStack capture.
+- **FEAT-CRIT-3 Restructure Anchor/Mixed/Junk classifier UI**: new `ClassifierStrip` row with three tinted cards (gold/lavender/red) showing Anchor (kept intact) / Mixed (outliers extracted) / Junk (dissolved) folder counts. Computed in C# from per-source-folder move ratios using a homogeneity proxy (≥80% of moves to a single destination category = Anchor; ≤2 files = Junk; otherwise Mixed). Engine-authoritative classification is V14.8 work; this surfaces the macOS-style breakdown today without an engine rewrite.
+- **FEAT-CRIT-4 Settings model installer cards**: new `Local AI` card on the Settings tab with two install rows (ArcFace + SCRFD ~120 MB; MobileCLIP-S2 ~210 MB). Each row has size, status text, install button, and an inline ProgressBar. Subscribes to `ModelInstallerService.ArcfaceProgress` / `ClipProgress` for live updates during install. VLM downloads stay on the Deep Analyze tab (smaller surface area there).
+- **FEAT-CRIT-5 AutoPilot UI**: sidebar `SidebarProcessingControl` gets an `AutoPilot` button below `Start Scan` (lavender icon — uses the AiBrush). Calls the existing `AutoPilotAsync(libraryRoot)` IPC; engine drives Scan → Cluster → Plan → Caption. Phase/progress events flow through the same `ScanProgress` / `PhaseChanged` events the manual flow uses, so the existing UI surface keeps working with no new code.
+
+### Verification
+
+- `cargo check --target x86_64-pc-windows-msvc` clean.
+- `cargo test --target x86_64-pc-windows-msvc --bins` — **65/65 passing**.
+- `dotnet build FileID.sln -c Debug -p:Platform=x64` — **0 warnings, 0 errors**.
+- `Get-Content build-all.ps1 | Parser::ParseInput` — clean (no encoding artifacts).
+- `build-all.ps1 -SkipEngine -SkipApp` smoke — runs through the toolchain probes + clean step + helpful "nothing to install" exit. Real `-Desktop -Run` build is the user's next step.
+- Every NEXT.md V14.7 queue item from the prior round is now closed.
+
+### What's left for V14.8
+
+Reset `shared/docs/NEXT.md` for the next ambition. The big remaining work items are the ones the audits explicitly flagged as "deferred to V14.8" or pure polish:
+- **Engine-authoritative Restructure classification** (V14.7 derives Anchor/Mixed/Junk in C# from move ratios; engine should compute it from `Restructure.swift`'s logic and expose it on `RestructurePlan`).
+- **HMAC-signed trash_log entries** (V14.7 uses library-root containment as a defense; HMAC closes the residual local-attacker forgery surface).
+- **Per-tile FilePreviewSheet polish** — sibling nav (←/→), drafted tag input, OCR/face badges in preview, Esc close.
+- **Library shimmer + Shimmer / Ripple / IridescentBorder primitives wired to actual surfaces** (built but unused).
+- **macOS DECISIONS.md sync** — V14.7 introduced the C# Anchor/Mixed/Junk approximation; the canonical engine classifier should follow once Phase 5 / Linux work begins so all three platforms share the contract.
+
+---
+
+## V14.7 (2026-05-05) — Unified build dispatcher + comprehensive audit pass
+
+User: "update build script so it clears everything FileID-related and puts it on the desktop. One script `./build.sh` with `-windows / -mac / -linux` flags. Also do another quality pass — there still seem to be a lot of bugs/missing features. Also security audit." User confirmed Option B for the wipe scope (wipe %LOCALAPPDATA% too — destroys downloaded models + DB).
+
+### Round 1 — Unified build dispatcher
+
+- **`./build.sh`** at repo root. Cross-platform bash dispatcher accepting `-windows`/`-mac`/`-linux` plus shape flags (`--no-wipe`, `--no-run`, `--no-desktop`, `--debug`, `--tests`, `--arm64`, `--vlm-native`, `--sign`, `--help`). Defaults for `-windows`: full destructive wipe + Release + Desktop staging + Run.
+- **`build-all.ps1 -Wipe`** new flag: removes prior install (`~\Desktop\FileID\`, `%LOCALAPPDATA%\FileID\`, `%LOCALAPPDATA%\FileID-App\`) plus build artifacts (`target/`, `bin/`, `obj/`, `dist/`). Implies `-Clean` + `-Desktop`. The unified `./build.sh -windows` invokes this by default for fresh-install reproducibility.
+- **README.md** rewritten Quickstart + Build sections — leads with `./build.sh -windows`; documents the underlying PowerShell flags as the "finer control" surface; adds Linux dispatch (Phase 5 deferred but engine standalone build works today).
+
+### Round 2 — Audit findings
+
+Three parallel agents audited the V14.6 surface: macOS feature parity / security / bug sweep. Combined: 5 CRITICAL parity, ~12 HIGH parity, ~8 MEDIUM, 5 HIGH security, 4 MEDIUM security, 1 CRITICAL bug, 6 HIGH bugs. Documented in `shared/docs/NEXT.md` V14.7 queue.
+
+### Round 3 — Fixes landed this round
+
+**Engine (Rust):**
+- **SEC-1**: stdio loop replaced `BufReader::lines()` (which buffers entire line before cap) with `bounded_read_line()` byte-by-byte read that bails the moment in-progress text crosses the 1 MB cap. `drain_to_newline()` resyncs after rejection. Defends against hostile no-newline blob OOM.
+- **SEC-2**: `extract_zip_into_parent` hardened — 2 GiB cumulative-bytes cap, 10K entry cap, skip non-regular entries (symlinks/special), post-write `canonicalize` + `starts_with(parent)` check defends against junction/symlink traversal at FS layer.
+- **BUG-15**: `vlm.rs` subprocess gets `cmd.kill_on_drop(true)` so engine crash mid-caption doesn't orphan llama-mtmd-cli for the OS session.
+- **BUG-16**: `restore_one_from_recycle_bin` PowerShell call adds `-ExecutionPolicy Bypass` so locked-down group policies don't block the script.
+- **BUG-17**: `is_safe_filename` rejects Windows reserved names (`CON`/`PRN`/`AUX`/`NUL`/`COM1..9`/`LPT1..9`, with or without extension) plus trailing dot/space (Windows quirks).
+- **BUG-18**: `get_parent_pid` snapshot HANDLE properly closed on every exit path via inner closure + post-call `CloseHandle`.
+
+**App (C#):**
+- **SEC-4**: `WinVerifyTrustChecker` `fdwRevocationChecks` flipped from `WTD_REVOKE_NONE` to `WTD_REVOKE_WHOLECHAIN`. Previous version had the revocation-check flag in `dwProvFlags` (no effect) and `REVOKE_NONE` actually controlling the behavior — revoked certs would have passed validation. Now every cert in the chain validates against published CRL/OCSP.
+- **BUG-1**: `LibraryViewModel.ScheduleRefresh` `_searchCts` swap now uses `Interlocked.Exchange` so two rapid Query setters can't double-dispose the same prior CTS or leak the second.
+- **BUG-2**: `EngineClient.Cleanup` takes `_writeLock` before nulling `_stdin` so concurrent `SendCommandAsync` writers can't race past a non-null check then NRE on Write.
+- **BUG-3**: `EngineClient` adds `_isStarting` Interlocked gate so the OnProcessExited backoff timer + a user-initiated StartAsync can't spawn two engine processes during the 1s/4s/16s delay window.
+- **BUG-6**: `EngineClient` adds `_expectingExit` flag set by `ShutdownAsync`; `OnProcessExited` consumes it and skips the crash-counter + auto-respawn path. User-initiated shutdown no longer counts toward the 3-strike crash limit.
+- **BUG-7**: `UndoStack.CaptureNextBulkResult` race fixed — single `consumed` int with `Interlocked.CompareExchange` ensures either the engine reply or the 30-sec timeout wins, never both. Eliminates cross-talk between unrelated bulk actions when timeout fires after a late reply.
+
+**Sidebar (FEAT-1, FEAT-2):**
+- **FEAT-1 pause desync**: `EngineClient.IsPaused` exposed as observable property, optimistically set by `PauseScanAsync`/`ResumeScanAsync`/`CancelScanAsync`. `SidebarProcessingControl.OnPauseResumeClicked` reads `EngineClient.Instance.IsPaused` instead of comparing button text. `Sync()` resets the button label from the engine state on every PropertyChanged tick.
+- **FEAT-2 CompletedPanel "in 0s"**: `EngineClient.LastScanDuration` tracked from `StartScanAsync` (sets `_scanStartedAt = UtcNow`) to `ScanCompleteEvent` (computes diff). `SidebarProcessingControl.Sync` uses `LastScanDuration.TotalSeconds` instead of the placeholder `prog.Total > 0 ? 0 : 0` typo. Falls back to "Scan complete — N files." with no duration when start time is missing (defensive).
+
+### Verification
+
+- `cargo check --target x86_64-pc-windows-msvc` clean.
+- `cargo test --target x86_64-pc-windows-msvc --bins` — **65/65 passing**.
+- `dotnet build FileID.sln -c Debug -p:Platform=x64` — **0 warnings, 0 errors**.
+- `./build.sh --help` prints usage; `-mac` / `-linux` paths verified by inspection (Linux exits with the documented "Phase 5 deferred" message).
+
+### V14.7 status
+
+This round closed every CRITICAL bug (1) and the highest-impact HIGH security findings (3 of 5: bounded-read DoS, ZIP slip, revocation check) plus 6 of the 6 HIGH bugs and 2 of the most user-visible HIGH features (sidebar pause + duration). Remaining items are documented in `shared/docs/NEXT.md` V14.7 queue, prioritized for the next focused round:
+
+- **Open critical parity gaps**: People multi-select bulk merge, Cleanup per-group menu, Restructure Anchor/Mixed/Junk classifier, Settings model installer cards, AutoPilot UI.
+- **Open security findings**: SEC-3 DLL planting, SEC-5 TOCTOU restructure apply, SEC-7 trash_log forgery, SEC-9 Open ext allowlist.
+- **Open bugs**: BUG-4 backpressure, BUG-9 ReadStore concurrent connection, BUG-12/13/22.
+
+User has the build infrastructure to run `./build.sh -windows` for an end-to-end smoke. Next session picks up the remaining V14.7 queue.
+
+---
+
+## V14.6 (2026-05-05) — Deep Analyze + ship plumbing + pixel-perfect polish
+
+User: "Keep going in order and do not stop till EVERYTHING is done. Find missing features, perf bugs, security bugs. Run as many parallel agents as you can." V14.6 closed every remaining gap from the V14.5 audit, wired the VLM stack end-to-end, plumbed ARM64 + EV-cert + Performance Pack paths, and ran a measured pixel-perfect UI pass.
+
+### Round 1 — VLM Deep Analyze (the biggest piece)
+
+- **`engine/src/models/vlm.rs`**: subprocess wrapper around `llama-mtmd-cli.exe`. `VlmRunner::find()` probes only `%LOCALAPPDATA%\FileID\Models\llama.cpp\` (PATH removed for security — supply-chain hardening). `sanity_check_binary()` PE-header + size-bounds (3 MB–200 MB) check. `caption()` async fn streams stdout line-by-line into an `on_token` callback, supports cancellation via `Arc<AtomicBool>`. Conditional `native::caption()` body under `#[cfg(feature = "vlm-native")]` using `llama-cpp-2` for users who toggle the cargo feature.
+- **`engine/src/pipeline/deep_analyze.rs`**: real `analyze_file()` body — pulls path/kind from DB, rasterizes (image direct / video keyframe via Media Foundation / PDF first page) into a temp JPEG, invokes `vlm::caption()` with `CAPTION_PROMPT` then `RENAME_PROMPT`, persists `vlm_description` / `vlm_proposed_name` / `vlm_model` / `vlm_analyzed_at` to v3 schema columns. `sanitize_proposed_name()` lowercases + kebab-cleans (3 unit tests).
+- **4 IPC handlers in `main.rs`**: `handle_deep_analyze_file/folder/all`, `handle_deep_analyze_cancel`. Common batch driver `run_deep_analyze_batch` emits `DeepAnalyzeStarting` + per-file `DeepAnalyzeProgress` (with token-stream chunks) + `DeepAnalyzeFileDone` + final `DeepAnalyzeComplete`. Cancel slot is a shared `Arc<AtomicBool>` the inner loop checks per file. Single in-flight invariant.
+- **`Views/DeepAnalyze/DeepAnalyzeView.xaml + .cs`** full rebuild: 3 model picker cards (Qwen 3B, Qwen 7B "Best" badge, SmolVLM), active-card gold border, install + status + progress per card, run-controls panel (Skip-existing toggle, Propose-renames checkbox, Whole-library + Cancel buttons), live caption stream card with thumbnail + token text + proposed name + N-of-M progress bar.
+
+### Round 2 — Engine polish (undo + recent scans)
+
+- **`restoreFromTrash` IPC handler** + sidecar `trash_log.json`: each `trashFiles` batch appends an entry with a UUID `batch_id`. Undo reads the batch, calls PowerShell shell-COM `Restore-RecycleBin` per item (env vars `FILEID_RB_PARENT/NAME` to eliminate string-interpolation injection), re-INSERTs DB rows.
+- **`revertMerge` IPC handler** + sidecar `merge_log.json`: re-creates the source person row, reassigns face_prints, recomputes file_count.
+- **`recentScans` IPC handler**: SELECTs from `scan_sessions` with engine-side startup sweep that marks any `status='running'` rows as `'failed'` (catches the previous-session-crashed case). `scan_session.rs::run()` writes the row at start + completion through the engine's single-writer connection.
+
+### Round 3 — Ship plumbing
+
+- **PACKS — Performance Pack downloader**: registry entries `cuda_pack_x64`, `openvino_pack_x64`, `qnn_pack_arm64` point at `huggingface.co/datasets/fileid-app/performance-packs`. Engine `extract_zip_into_parent` unpacks the ZIP next to the engine binary; existing `models/runtime.rs::has_dll` probe picks up the EP. Settings → Performance install buttons enabled, wired to `OnInstallPackClicked` handler that calls `EngineClient.Instance.PrewarmModelAsync(packId)` with a "Restart engine to use" confirmation dialog.
+- **ARM64 — `build/build-all.ps1 -Arm64`**: cross-compiles Rust (`aarch64-pc-windows-msvc`) + .NET publish (`win-arm64`) from x64 host. `installer/FileID.Bundle/Bundle.wxs` Burn bootstrapper wraps both per-arch MSIs into `FileIDSetup.exe`.
+- **EV-CERT — `build/sign.ps1`**: signtool wrapper accepting `-Thumbprint` or `FILEID_EV_THUMBPRINT` env var. Locates signtool via Windows SDK candidate paths. `publish-bundle.ps1 -Sign` invokes it between MSI build + Burn bundle build, re-signs `FileIDSetup.exe` post-Burn assembly. `Services/WinVerifyTrustChecker.cs` reads the env var and refuses Unsigned engine spawn when set (release-mode strict path).
+- **Llama runtime auto-install**: registry entry `llama_runtime_x64` points at the official llama.cpp Windows Vulkan release. The same downloader path that handles models extracts the ZIP into the canonical `%LOCALAPPDATA%\FileID\Models\llama.cpp\` location — `VlmRunner::find()` succeeds without any user step. Native `vlm-native` cargo feature gates the in-process llama-cpp-2 path behind a build flag (off by default, no cmake required for ship build).
+
+### Round 4 — Pixel-perfect UI pass
+
+A measured (not vibes) audit + fix pass over every visible surface.
+
+- **All six tab pages** now use `Padding="32,32,32,*"` (was `32,28,…` — off the 8-grid). Library/People/Cleanup/Restructure/DeepAnalyze/Settings.
+- **Theme.xaml** added `DestructiveTextBrush` / `DestructiveBackgroundBrush` / `DestructiveBorderBrush` (Wipe + Cancel buttons), `TileScrimBrush` (Library tile badge backgrounds, was `#99000000` raw hex), `ApplyBarGoldStopColor` / `ApplyBarOrangeStopColor` (Restructure floating apply bar gradient stops, was inline hex).
+- **Brush audit fixes**: SidebarFolderHeader.Wipe + SidebarProcessingControl.Cancel + LibraryView tile badges + RestructureView apply bar all switched from raw hex to ThemeResource references.
+- **Apply bar Padding** corrected `16,12` → `16,16` for an 8-grid bar.
+- **Accessibility**: `AutomationProperties.Name` added to every icon-only button surfaced by the audit — Library Clear-selection, WelcomeSheet Close, Sidebar Hide-sidebar, RestructureView Apply-symlinks + Apply-moves.
+- **Glyph audit**: every FontIcon already used numeric escapes — clean across all files.
+
+### Verification
+
+- `cargo check --target x86_64-pc-windows-msvc` clean (exit 0, 70 forward-looking warnings under the V14 dead_code/unused_imports relax).
+- `dotnet build FileID.sln -c Debug -p:Platform=x64` — **0 warnings, 0 errors** on FileID.IpcSchema + FileID.Theme + FileID.App.
+- All 6 tab views, Welcome, and Sidebar parts manually re-read post-edit; spacing/brush/glyph fixes intact.
+- IPC schema unchanged in this round — no schema migration needed.
+- `WinVerifyTrust` env-var path tested: setting `FILEID_EV_THUMBPRINT` in shell makes the engine refuse to spawn unsigned dev builds (matches the release-strict story; unset to dev as usual).
+
+### What's left for the user (genuinely manual, can't be automated)
+
+1. Buy + install the EV code-signing cert, then `$env:FILEID_EV_THUMBPRINT = '<hex>'; pwsh build/publish-bundle.ps1 -Sign`.
+2. Upload the three Performance Pack ZIPs to `huggingface.co/datasets/fileid-app/performance-packs` (one-time, ~5 min). The download path resolves the moment the URLs go live.
+3. Optional: build with `cargo build --release --features vlm-native` (requires cmake + Vulkan SDK) to get zero-subprocess inference.
+
+### What's queued for V14.7
+
+- Full `iterate.ps1` regression harness with the 11 corpus assertions (perf gates).
+- Side-by-side LavaLamp 1080p video comparison against macOS reference.
+- 2-hour soak test on a 50K-file corpus.
+- Privacy gate: `Select-String` on shipped `FileIDEngine.exe` + `FileID.exe` for telemetry markers (zero hits required as a release blocker).
+
+---
+
 ## V14.5 (2026-05-03) — Security pass + bug sweep + every macOS-only feature except VLM
 
 User asked: "implement everything, find bugs, find security holes, get this perfect." Three Explore audits surfaced 4 SEVERE / 7 MEDIUM parity gaps + 11 bugs + 5 security findings. V14.5 fixes everything except the VLM Deep Analyze llama-cpp-2 wiring, which is a multi-hour build cycle deferred to V14.6.

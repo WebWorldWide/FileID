@@ -376,6 +376,22 @@ async fn extract_video_keyframe_blocking(path: PathBuf) -> anyhow::Result<(Vec<u
 
 /// Run OCR on an RGB buffer. Returns None if no text or OCR isn't
 /// available on this system.
+/// Arc-shared OCR variant — avoids cloning a multi-MB RGB buffer when
+/// the caller still holds the original. The shared Arc is dropped on
+/// the worker thread when OCR returns; the original Vec stays untouched.
+async fn run_ocr_blocking_arc(rgb: std::sync::Arc<Vec<u8>>, w: u32, h: u32) -> anyhow::Result<Option<shell::ocr::OcrResult>> {
+    tokio::task::spawn_blocking(move || -> anyhow::Result<Option<shell::ocr::OcrResult>> {
+        match shell::ocr::recognize(&rgb, w, h) {
+            Ok(r) => Ok(Some(r)),
+            Err(err) => {
+                tracing::debug!(?err, "OCR skipped");
+                Ok(None)
+            }
+        }
+    })
+    .await?
+}
+
 async fn run_ocr_blocking(rgb: Vec<u8>, w: u32, h: u32) -> anyhow::Result<Option<shell::ocr::OcrResult>> {
     tokio::task::spawn_blocking(move || -> anyhow::Result<Option<shell::ocr::OcrResult>> {
         match shell::ocr::recognize(&rgb, w, h) {

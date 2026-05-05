@@ -70,4 +70,49 @@ internal sealed class UndoStack : INotifyPropertyChanged
     }
 
     private sealed record UndoEntry(string Label, Func<Task<bool>> Reverse);
+
+    /// <summary>
+    /// Helper: subscribe to the next `BulkActionResult` whose action
+    /// starts with the given prefix (e.g. "trashFiles:") + push an
+    /// undo entry that calls `reverse(batchId)`. Used by Library +
+    /// Cleanup trash buttons + the People merge flows.
+    /// </summary>
+    public static void CaptureNextBulkResult(string actionPrefix, string undoLabel,
+        Func<string, Task<bool>> reverse)
+    {
+        var ec = ViewModels.EngineClient.Instance;
+
+        // BUG-7: previous version had a race — if the timeout fired,
+        // the next BulkActionResult would match the next registered
+        // handler instead, causing cross-talk between unrelated bulk
+        // actions. Use a single guard int that is consumed atomically:
+        // either the engine reply path wins, or the timeout path wins,
+        // and the loser is a no-op.
+        int consumed = 0; // 0 = pending, 1 = consumed
+        System.ComponentModel.PropertyChangedEventHandler? once = null;
+        once = (_, ev) =>
+        {
+            if (ev.PropertyName != nameof(ViewModels.EngineClient.LastBulkAction)) return;
+            var bar = ec.LastBulkAction;
+            if (bar is null) return;
+            if (!bar.Action.StartsWith(actionPrefix, StringComparison.Ordinal)) return;
+
+            if (System.Threading.Interlocked.CompareExchange(ref consumed, 1, 0) != 0) return;
+
+            var colonIdx = bar.Action.IndexOf(':');
+            var batchId = colonIdx >= 0 ? bar.Action.Substring(colonIdx + 1) : string.Empty;
+            ec.PropertyChanged -= once;
+            Instance.Push(undoLabel, () => reverse(batchId));
+        };
+        ec.PropertyChanged += once;
+
+        _ = Task.Delay(TimeSpan.FromSeconds(30)).ContinueWith(_ =>
+        {
+            // Only detach if we haven't already consumed a reply. This
+            // prevents the timeout from racing the reply handler and
+            // erroneously detaching after a successful Push.
+            if (System.Threading.Interlocked.CompareExchange(ref consumed, 1, 0) != 0) return;
+            try { ec.PropertyChanged -= once; } catch { /* swallow */ }
+        });
+    }
 }

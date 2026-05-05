@@ -42,7 +42,8 @@
                     BorderThickness="0"
                     Padding="6,4"
                     CornerRadius="6"
-                    ToolTipService.ToolTip="Hide sidebar (Ctrl+Shift+S)">
+                    ToolTipService.ToolTip="Hide sidebar (Ctrl+Shift+S)"
+                    AutomationProperties.Name="Hide sidebar">
                 <FontIcon FontSize="12" Glyph="&#xE76B;" />
             </Button>
         </Grid>
@@ -104,12 +105,12 @@
                     Click="OnWipeClicked"
                     Padding="12,8"
                     BorderThickness="1"
-                    BorderBrush="#552B0000"
-                    Background="#222B0000"
+                    BorderBrush="{ThemeResource DestructiveBorderBrush}"
+                    Background="{ThemeResource DestructiveBackgroundBrush}"
                     CornerRadius="8">
                 <TextBlock Text="Wipe library + rescan"
                            Style="{StaticResource CaptionTextBlockStyle}"
-                           Foreground="#FFE5A5A5" />
+                           Foreground="{ThemeResource DestructiveTextBrush}" />
             </Button>
         </StackPanel>
     </StackPanel>

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    DrillDownSheet — modal listing every file flowing through a single
+    Sankey ribbon or TreeDiff folder. Each row shows a thumbnail + the
+    pre-move path + the post-move path. Mirror of macOS Restructure
+    drill-down behavior.
+-->
+<UserControl
+    x:Class="FileID.Views.Restructure.DrillDownSheet"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    MinWidth="700"
+    MinHeight="520">
+
+    <Grid RowSpacing="12" Padding="4">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   x:Name="HeaderText"
+                   Style="{StaticResource SubtitleTextBlockStyle}" />
+        <TextBlock Grid.Row="1"
+                   x:Name="CountText"
+                   Style="{StaticResource CaptionTextBlockStyle}"
+                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+
+        <ScrollViewer Grid.Row="2"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollMode="Disabled">
+            <ItemsRepeater x:Name="FileRepeater">
+                <ItemsRepeater.Layout>
+                    <StackLayout Orientation="Vertical" Spacing="6"/>
+                </ItemsRepeater.Layout>
+            </ItemsRepeater>
+        </ScrollViewer>
+    </Grid>
+</UserControl>

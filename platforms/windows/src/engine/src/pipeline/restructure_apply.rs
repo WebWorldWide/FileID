@@ -69,6 +69,19 @@ impl RestructureApply {
                     failed += 1;
                     continue;
                 }
+                // SEC-5: TOCTOU defense. Between canonicalize_safely and
+                // MoveFileExW, a junction at the destination's parent
+                // could redirect outside library_root. Refuse moves
+                // where any ancestor of the destination (up to the
+                // library root) is a reparse point.
+                if has_reparse_point_in_chain(parent, &canonical_root) {
+                    tracing::warn!(
+                        parent=%parent.display(),
+                        "rejecting move: reparse point in destination parent chain"
+                    );
+                    failed += 1;
+                    continue;
+                }
             }
 
             let result = if self.use_symlinks {
@@ -230,6 +243,36 @@ fn ensure_inside_root(dest: &Path, canonical_root: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+/// SEC-5: walk every ancestor of `path` up to (but not including) `root`
+/// and return true if any of them is a reparse point (junction or
+/// symlink). Used as a TOCTOU defense before MoveFileExW: even if the
+/// CANONICAL path checks out, an attacker who plants a junction in the
+/// destination's parent BETWEEN the canonicalize call and the MoveFileExW
+/// call would redirect the write outside library_root. Refusing moves
+/// that pass through reparse points eliminates that surface.
+#[cfg(windows)]
+fn has_reparse_point_in_chain(parent: &Path, root: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    let mut cur = parent.to_path_buf();
+    loop {
+        if let Ok(meta) = std::fs::symlink_metadata(&cur) {
+            if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+                return true;
+            }
+        }
+        // Stop once we reach (or pass) the root.
+        if cur == root || !cur.starts_with(root) {
+            break;
+        }
+        if !cur.pop() { break; }
+    }
+    false
+}
+
+#[cfg(not(windows))]
+fn has_reparse_point_in_chain(_parent: &Path, _root: &Path) -> bool { false }
 
 #[cfg(test)]
 mod tests {

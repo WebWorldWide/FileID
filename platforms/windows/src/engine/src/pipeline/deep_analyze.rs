@@ -151,6 +151,12 @@ pub async fn analyze_file(
         "video" => rasterize_video_keyframe(&source_path).await?,
         _ => anyhow::bail!("kind '{}' isn't VLM-analyzable yet", kind),
     };
+    // Track if we wrote a temp file so we can clean it up at the end.
+    let temp_to_clean: Option<PathBuf> = if rasterized != source_path {
+        Some(rasterized.clone())
+    } else {
+        None
+    };
 
     let mut description: Option<String> = None;
     let mut proposed_name: Option<String> = None;
@@ -199,6 +205,11 @@ pub async fn analyze_file(
                               vlm_model=?3, vlm_analyzed_at=?4 WHERE id=?5",
             rusqlite::params![description, proposed_name, model_kind, now, file_id],
         )?;
+    }
+
+    // Best-effort cleanup of any temp rasterized frame.
+    if let Some(temp) = temp_to_clean {
+        let _ = std::fs::remove_file(&temp);
     }
 
     Ok(AnalyzeOutcome {

@@ -44,30 +44,32 @@ Point FileID at a folder. It reads every file inside — images, video, PDFs, do
 
 ## Quickstart
 
-You're a Windows user who wants to **build and run** locally:
+**One command, every platform.** From the repo root, in any bash shell (Git Bash on Windows, Terminal on macOS, anything on Linux):
 
-```powershell
-# From the repo root, in any PowerShell prompt:
-.\platforms\windows\build\build-all.ps1 -Desktop -Run
+```bash
+./build.sh -windows         # Windows: full fresh-install build + run
+./build.sh -mac             # macOS:   build + launch
+./build.sh -linux           # Linux:   Phase 5 (deferred — engine builds standalone today)
 ```
 
-That builds everything (Rust engine + WinUI 3 app), installs the app under `%LOCALAPPDATA%\FileID-App\`, drops a `FileID` shortcut on your Desktop, and launches it. Future builds — same command. The shortcut always points at the latest build.
+That's the only command you need to remember. Defaults pick a sensible "I want to see this run" path: it wipes any prior install, builds Release, drops a runnable copy at `~/Desktop/FileID/`, and launches the app.
 
-You're a Windows user who wants to **ship a release** to other people:
+If `./build.sh -windows` is too aggressive (it wipes downloaded models — re-downloading is multi-GB), use `--no-wipe`:
+
+```bash
+./build.sh -windows --no-wipe       # iterate without re-downloading models
+./build.sh -windows --no-run        # just build, don't launch
+./build.sh -windows --debug         # debug build (faster cycle)
+./build.sh --help                   # full flag list
+```
+
+**Want a release installer?** Once on Windows:
 
 ```powershell
 .\platforms\windows\build\publish-bundle.ps1 -SkipSign
 ```
 
-Produces `platforms\windows\dist\installer\FileIDSetup.exe` — one downloadable file that auto-detects the user's CPU (x64 or ARM64) and installs the right build. Pass `-SignThumbprint <your-EV-cert-sha1>` (no angle brackets) to produce a signed release.
-
-You're a macOS user:
-
-```bash
-bash platforms/apple/run.sh
-```
-
-Builds the SwiftUI app + engine and launches.
+Produces `platforms\windows\dist\installer\FileIDSetup.exe` — one downloadable file that auto-detects the user's CPU (x64 or ARM64) and installs the right build. Pass `-Sign -Thumbprint <your-EV-cert-sha1>` (no angle brackets) to produce a signed release.
 
 Detailed instructions: [Build from source](#build-from-source).
 
@@ -129,32 +131,58 @@ Release builds aren't yet shipping — see [Build from source](#build-from-sourc
 
 PowerShell — either built-in Windows PowerShell 5.1 or PowerShell 7 (`winget install Microsoft.PowerShell`) works.
 
-**Dev build (debug, your own machine):**
+**Dev build (the unified command):**
 
-```powershell
-.\platforms\windows\build\build-all.ps1 -Desktop -Run
+```bash
+./build.sh -windows
 ```
 
-What that does, step by step:
-1. Probes toolchains; prints the exact `winget` install command if any are missing.
-2. `cargo build --release --target x86_64-pc-windows-msvc` → `FileIDEngine.exe`.
-3. `dotnet publish FileID.App --self-contained` → `FileID.exe` plus its companion DLLs.
-4. Stages `FileIDEngine.exe` alongside `FileID.exe`.
-5. Installs everything under `%LOCALAPPDATA%\FileID-App\`.
-6. Drops a `FileID` shortcut on your Desktop.
-7. (`-Run`) launches the app.
+That maps to `pwsh platforms\windows\build\build-all.ps1 -Wipe -Release -Desktop -Run` and does, in order:
 
-Useful flags:
+1. **Wipe** any prior FileID install — `~\Desktop\FileID\`, `%LOCALAPPDATA%\FileID\` (DB + models + logs), and build artifacts (`target/`, `bin/`, `obj/`, `dist/`). This is the fresh-install path; pass `--no-wipe` to iterate without losing downloaded models.
+2. Probe toolchains; prints the exact `winget` install command if any are missing.
+3. `cargo build --release --target x86_64-pc-windows-msvc` → `FileIDEngine.exe`.
+4. `dotnet publish FileID.App --self-contained` → `FileID.exe` + companion DLLs.
+5. Stage `FileIDEngine.exe` alongside `FileID.exe`.
+6. Copy the publish folder to `~\Desktop\FileID\`.
+7. Launch `FileID.exe`.
+
+Want to call the underlying PowerShell script directly? Equivalent:
+
+```powershell
+.\platforms\windows\build\build-all.ps1 -Wipe -Run
+```
+
+Useful unified-script flags:
 
 | Flag | What it does |
 | --- | --- |
-| `-Desktop` | Install + Desktop shortcut (recommended for "build and run" loops) |
-| `-Run` | Launch the app after building |
-| `-Release` | Release build (vs. default Debug). `-Desktop` implies this. |
-| `-RunTests` | Also run cargo tests + xUnit tests |
-| `-Clean` | Wipe build artifacts first |
-| `-SkipEngine` | Only rebuild the WinUI 3 app (fast iteration) |
+| (default) `-windows` | Wipe + Release + Desktop staging + Run |
+| `--no-wipe` | Skip the destructive wipe (preserves models + DB) |
+| `--no-run` | Build only, don't launch |
+| `--no-desktop` | Build but don't stage to Desktop |
+| `--debug` | Debug build (faster iteration; needs .NET SDK on host to launch) |
+| `--tests` | Run cargo + dotnet tests |
+| `--arm64` | Cross-compile for Snapdragon WoA |
+| `--vlm-native` | Build with native llama.cpp bindings (requires cmake) |
+| `--sign` | Authenticode-sign every binary (needs `FILEID_EV_THUMBPRINT` env var) |
+| `--help` | Full flag list |
+
+Underlying `build-all.ps1` flags (use directly when you want finer control):
+
+| Flag | What it does |
+| --- | --- |
+| `-Wipe` | Full destructive wipe (Desktop + LocalAppData + build artifacts) |
+| `-Clean` | Wipe build artifacts only (preserves user data) |
+| `-Desktop` | Stage to Desktop (implies `-Release`) |
+| `-Run` | Launch the app after build |
+| `-Release` | Release build (default for the unified script) |
+| `-RunTests` | Run cargo + xUnit tests |
+| `-SkipEngine` | Only rebuild the WinUI 3 app |
 | `-SkipApp` | Only rebuild the Rust engine |
+| `-Arm64` | Cross-compile for ARM64 |
+| `-VlmNative` | Native llama.cpp bindings |
+| `-Sign -Thumbprint <hex>` | Authenticode-sign every binary |
 
 **Release build (one downloadable installer for everyone):**
 
@@ -191,10 +219,30 @@ Pass `-SkipArm64` for an x64-only release.
 ### Build — macOS
 
 ```bash
+./build.sh -mac
+```
+
+Or call the underlying script directly:
+
+```bash
 bash platforms/apple/run.sh
 ```
 
-That builds the engine + app and launches. See `platforms/apple/CLAUDE.md` for the macOS-specific dev guide.
+Either builds the engine + app and launches. See `platforms/apple/CLAUDE.md` for the macOS-specific dev guide. Pass `./build.sh -mac --tests` to run `swift test` first.
+
+### Build — Linux
+
+```bash
+./build.sh -linux
+```
+
+Linux is **deferred to Phase 5** — see [`shared/docs/SHIP.md`](shared/docs/SHIP.md). The Rust engine is cross-platform-clean and will build on Linux today; the blocker is the UI (WinUI 3 is Windows-only). Engine-only standalone build:
+
+```bash
+cd platforms/windows/src/engine && cargo build --release
+```
+
+The engine binary at `target/release/fileid-engine` is fully functional headless.
 
 ---
 

@@ -242,6 +242,144 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         await ViewModel.RefreshAsync(CancellationToken.None);
     }
 
+    // ─── FEAT-CRIT-1: People multi-select bulk merge / mark-as-unknown ──
+
+    private void OnToggleSelectMode(object sender, RoutedEventArgs e)
+    {
+        ViewModel.IsSelectMode = !ViewModel.IsSelectMode;
+        SelectButtonText.Text = ViewModel.IsSelectMode ? "Done" : "Select";
+        BulkActionBar.Visibility = ViewModel.IsSelectMode ? Visibility.Visible : Visibility.Collapsed;
+        // Show/hide every per-card checkbox via tag-walk. ItemsRepeater
+        // doesn't ItemContainerStyle, so we walk realized children. The
+        // initial state of newly-realized cards is Collapsed (XAML default);
+        // when we enter select mode this loop reveals them.
+        UpdateCheckboxVisibility();
+        UpdateSelectionCountText();
+        // Wire each cluster's IsSelected change so SelectedCount stays
+        // current. Cheap; PersonCluster instances are stable across
+        // refreshes within select-mode.
+        foreach (var c in ViewModel.Clusters)
+        {
+            c.PropertyChanged -= OnClusterIsSelectedChanged;
+            if (ViewModel.IsSelectMode)
+            {
+                c.PropertyChanged += OnClusterIsSelectedChanged;
+            }
+            else
+            {
+                c.IsSelected = false;
+            }
+        }
+    }
+
+    private void OnClusterIsSelectedChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(PersonCluster.IsSelected))
+        {
+            UpdateSelectionCountText();
+        }
+    }
+
+    private void UpdateSelectionCountText()
+    {
+        var n = ViewModel.SelectedCount;
+        BulkSelectionText.Text = n switch
+        {
+            0 => "Pick clusters to merge or mark as unknown",
+            1 => "1 selected",
+            _ => $"{n} selected",
+        };
+        BulkMergeButton.IsEnabled = n >= 2;
+        BulkUnknownButton.IsEnabled = n >= 1;
+    }
+
+    private void UpdateCheckboxVisibility()
+    {
+        // Walk realized cards, find the CheckBox tagged "select-cb",
+        // toggle its visibility based on IsSelectMode.
+        foreach (var element in EnumerateRepeaterChildren())
+        {
+            if (FindCheckBoxInTree(element) is { } cb)
+            {
+                cb.Visibility = ViewModel.IsSelectMode ? Visibility.Visible : Visibility.Collapsed;
+            }
+        }
+    }
+
+    private System.Collections.Generic.IEnumerable<DependencyObject> EnumerateRepeaterChildren()
+    {
+        // Walk the visual tree of every cluster card. Use VisualTreeHelper.
+        var stack = new System.Collections.Generic.Stack<DependencyObject>();
+        stack.Push(this);
+        while (stack.Count > 0)
+        {
+            var d = stack.Pop();
+            int n = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(d);
+            for (int i = 0; i < n; i++)
+            {
+                var c = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(d, i);
+                yield return c;
+                stack.Push(c);
+            }
+        }
+    }
+
+    private CheckBox? FindCheckBoxInTree(DependencyObject root)
+    {
+        if (root is CheckBox cb && cb.Tag is string tag && tag == "select-cb") return cb;
+        return null;
+    }
+
+    private async void OnBulkMergeClicked(object sender, RoutedEventArgs e)
+    {
+        var ids = ViewModel.SelectedClusterIds;
+        if (ids.Count < 2) return;
+        // Merge cluster ids[1..N] into ids[0] (the first selected).
+        // Engine `mergeClusters` is 1:1; loop the call N-1 times.
+        var dest = ids[0];
+        try
+        {
+            for (int i = 1; i < ids.Count; i++)
+            {
+                await EngineClient.Instance.MergeClustersAsync(ids[i], dest);
+            }
+            DebugLog.Info($"Bulk-merged {ids.Count - 1} clusters into {dest}");
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("BulkMerge IPC failed: " + ex.Message);
+        }
+        // Exit select mode + refresh.
+        ViewModel.IsSelectMode = false;
+        BulkActionBar.Visibility = Visibility.Collapsed;
+        SelectButtonText.Text = "Select";
+        UpdateCheckboxVisibility();
+        await ViewModel.RefreshAsync(CancellationToken.None);
+    }
+
+    private async void OnBulkMarkUnknownClicked(object sender, RoutedEventArgs e)
+    {
+        var ids = ViewModel.SelectedClusterIds;
+        if (ids.Count == 0) return;
+        try
+        {
+            // PersonCluster.ClusterId is int; engine wants long.
+            var longIds = new System.Collections.Generic.List<long>(ids.Count);
+            foreach (var id in ids) longIds.Add(id);
+            await EngineClient.Instance.MarkPersonsAsUnknownAsync(longIds);
+            DebugLog.Info($"Marked {ids.Count} clusters as unknown");
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("BulkMarkUnknown IPC failed: " + ex.Message);
+        }
+        ViewModel.IsSelectMode = false;
+        BulkActionBar.Visibility = Visibility.Collapsed;
+        SelectButtonText.Text = "Select";
+        UpdateCheckboxVisibility();
+        await ViewModel.RefreshAsync(CancellationToken.None);
+    }
+
     public event PropertyChangedEventHandler? PropertyChanged;
     private void OnPropertyChanged(string name)
         => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));

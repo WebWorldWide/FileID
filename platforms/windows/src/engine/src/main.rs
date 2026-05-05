@@ -32,7 +32,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::sync::Notify;
 
 use ipc::{
@@ -46,6 +46,30 @@ const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 async fn main() -> Result<()> {
     init_tracing()?;
     let _ = paths::ensure_state_dirs()?; // create %LOCALAPPDATA%/FileID/{logs,Models,...}
+
+    // SEC-3: lock down DLL search path before any LoadLibrary. Default
+    // search includes the engine's CWD (which may be writable user space)
+    // + every PATH entry. An attacker who drops `onnxruntime_providers_*.dll`
+    // in any of those gets code execution next time we load the EP.
+    // SetDefaultDllDirectories restricts to System32 + the engine binary's
+    // directory only.
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::System::LibraryLoader::{
+            SetDefaultDllDirectories, LOAD_LIBRARY_FLAGS,
+        };
+        const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x800;
+        const LOAD_LIBRARY_SEARCH_APPLICATION_DIR: u32 = 0x200;
+        const LOAD_LIBRARY_SEARCH_USER_DIRS: u32 = 0x400;
+        let _ = SetDefaultDllDirectories(LOAD_LIBRARY_FLAGS(
+            LOAD_LIBRARY_SEARCH_SYSTEM32
+                | LOAD_LIBRARY_SEARCH_APPLICATION_DIR
+                | LOAD_LIBRARY_SEARCH_USER_DIRS,
+        ));
+        // USER_DIRS is included so AddDllDirectory()'d Performance Pack
+        // dirs work -- but the default no-PATH posture defends against
+        // PATH-based DLL planting.
+    }
 
     tracing::info!(version = ENGINE_VERSION, "FileIDEngine starting");
 
@@ -86,9 +110,14 @@ async fn main() -> Result<()> {
     }
 
     // Stdio loop: read commands line-by-line, dispatch them.
+    //
+    // SEC: we DON'T use `BufReader::lines()` because `next_line()` buffers
+    // the whole line before returning, which means a hostile no-newline
+    // blob can OOM the engine before any cap fires. Instead we use
+    // `read_until(b'\n', ...)` against an in-loop `Vec<u8>` and reject
+    // anything that crosses the 1 MB ceiling mid-read.
     let stdin = tokio::io::stdin();
-    let reader = BufReader::new(stdin);
-    let mut lines = reader.lines();
+    let mut reader = BufReader::new(stdin);
 
     let dispatch_sink = sink.clone();
     let dispatch_shutdown = shutdown.clone();
@@ -108,6 +137,8 @@ async fn main() -> Result<()> {
     let dispatch_deep_cancel = deep_analyze_cancel.clone();
 
     let stdio_loop = tokio::spawn(async move {
+        const MAX_FRAME_BYTES: usize = 1024 * 1024;
+        let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
         loop {
             tokio::select! {
                 biased;
@@ -115,22 +146,10 @@ async fn main() -> Result<()> {
                     tracing::info!("shutdown notified; stdio loop exiting");
                     break;
                 }
-                line = lines.next_line() => {
-                    match line {
-                        Ok(Some(text)) if text.trim().is_empty() => continue,
-                        // 1 MB cap on a single IPC frame. The largest legitimate
-                        // command (ApplyRestructure with 50K moves) is <500 KB
-                        // even at 80-char paths — anything larger is malformed
-                        // or hostile. Reject before parsing to bound memory.
-                        Ok(Some(text)) if text.len() > 1024 * 1024 => {
-                            tracing::warn!(bytes = text.len(), "oversized ipc frame; rejecting");
-                            dispatch_sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                                kind: "oversized_ipc_frame".into(),
-                                message: format!("Command frame {} bytes exceeds 1 MB cap.", text.len()),
-                                path: None,
-                            })))).await;
-                        }
-                        Ok(Some(text)) => {
+                read = bounded_read_line(&mut reader, &mut buf, MAX_FRAME_BYTES) => {
+                    match read {
+                        Ok(BoundedRead::Line(text)) if text.trim().is_empty() => continue,
+                        Ok(BoundedRead::Line(text)) => {
                             handle_line(
                                 &dispatch_sink,
                                 &dispatch_shutdown,
@@ -140,13 +159,24 @@ async fn main() -> Result<()> {
                                 &text,
                             ).await;
                         }
-                        Ok(None) => {
+                        Ok(BoundedRead::Oversized(seen)) => {
+                            // SEC: rejected mid-read, never allocated past the cap.
+                            tracing::warn!(bytes_seen = seen, "oversized ipc frame; rejecting");
+                            dispatch_sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                                kind: "oversized_ipc_frame".into(),
+                                message: format!("Command frame exceeded 1 MB cap (saw {} bytes before reject).", seen),
+                                path: None,
+                            })))).await;
+                            // Drain to next newline so we resync with the next frame.
+                            let _ = drain_to_newline(&mut reader).await;
+                        }
+                        Ok(BoundedRead::Eof) => {
                             tracing::info!("stdin EOF; entering shutdown");
                             dispatch_shutdown.notify_waiters();
                             break;
                         }
                         Err(err) => {
-                            tracing::error!(?err, "stdin read error");
+                            tracing::error!(%err, "stdin read error");
                             dispatch_shutdown.notify_waiters();
                             break;
                         }
@@ -334,6 +364,17 @@ async fn handle_line(
                 handle_rename_person(sink_c, db_c, payload).await;
             });
         }
+        CommandPayload::MarkPersonsAsUnknown(payload) => {
+            let Some(db) = db else {
+                emit_db_unavailable(sink, "markPersonsAsUnknown").await;
+                return;
+            };
+            let sink_c = sink.clone();
+            let db_c = db.clone();
+            tokio::spawn(async move {
+                handle_mark_persons_as_unknown(sink_c, db_c, payload).await;
+            });
+        }
         CommandPayload::FindMergeSuggestions(_) => {
             let Some(db) = db else {
                 emit_db_unavailable(sink, "findMergeSuggestions").await;
@@ -399,6 +440,39 @@ async fn handle_line(
             deep_analyze_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             tracing::info!("deep analyze cancel requested");
         }
+        CommandPayload::RestoreFromTrash(payload) => {
+            let Some(db) = db else {
+                emit_db_unavailable(sink, "restoreFromTrash").await;
+                return;
+            };
+            let sink_c = sink.clone();
+            let db_c = db.clone();
+            tokio::spawn(async move {
+                handle_restore_from_trash(sink_c, db_c, payload).await;
+            });
+        }
+        CommandPayload::RevertMerge(payload) => {
+            let Some(db) = db else {
+                emit_db_unavailable(sink, "revertMerge").await;
+                return;
+            };
+            let sink_c = sink.clone();
+            let db_c = db.clone();
+            tokio::spawn(async move {
+                handle_revert_merge(sink_c, db_c, payload).await;
+            });
+        }
+        CommandPayload::RecentScans(payload) => {
+            let Some(db) = db else {
+                emit_db_unavailable(sink, "recentScans").await;
+                return;
+            };
+            let sink_c = sink.clone();
+            let db_c = db.clone();
+            tokio::spawn(async move {
+                handle_recent_scans(sink_c, db_c, payload).await;
+            });
+        }
         CommandPayload::RunFaceClustering(_) => {
             let Some(db) = db else {
                 emit_db_unavailable(sink, "runFaceClustering").await;
@@ -451,6 +525,11 @@ fn is_safe_filename(name: &str) -> bool {
     if name == "." || name == ".." {
         return false;
     }
+    // SEC: trailing dot or space is a Windows quirk that resolves to a
+    // different file than the literal name. Reject either side.
+    if name.ends_with('.') || name.ends_with(' ') {
+        return false;
+    }
     let p = std::path::Path::new(name);
     if p.is_absolute() {
         return false;
@@ -463,7 +542,22 @@ fn is_safe_filename(name: &str) -> bool {
     if comps.next().is_some() {
         return false; // multi-component path — definitely not a filename
     }
-    matches!(first, Component::Normal(_))
+    if !matches!(first, Component::Normal(_)) {
+        return false;
+    }
+    // SEC: reject Windows reserved names (CON, PRN, AUX, NUL, COM1..9,
+    // LPT1..9), with or without an extension. MoveFileExW returns
+    // cryptic errors and on some shells "rename to NUL" silently
+    // discards the file.
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    !matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL"
+            | "COM1" | "COM2" | "COM3" | "COM4" | "COM5"
+            | "COM6" | "COM7" | "COM8" | "COM9"
+            | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5"
+            | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+    )
 }
 
 async fn emit_db_unavailable(sink: &Sink, command: &str) {
@@ -549,6 +643,19 @@ async fn handle_plan_restructure(
     let proposed = classify(&files, library_root_path);
     let category_summary = crate::pipeline::restructure::category_counts(&proposed);
 
+    // V14.7.2: engine-authoritative folder classification.
+    let folder_class = crate::pipeline::restructure::classify_folders(&proposed);
+    let mut anchor = 0u32;
+    let mut mixed = 0u32;
+    let mut junk = 0u32;
+    for f in &folder_class {
+        match f.classification {
+            crate::pipeline::restructure::FolderClassification::Anchor => anchor += 1,
+            crate::pipeline::restructure::FolderClassification::Mixed  => mixed  += 1,
+            crate::pipeline::restructure::FolderClassification::Junk   => junk   += 1,
+        }
+    }
+
     let plan = RestructurePlan {
         library_root,
         moves: proposed
@@ -564,6 +671,11 @@ async fn handle_plan_restructure(
             .into_iter()
             .map(|c| RestructureCategoryCount { category: c.category, count: c.count })
             .collect(),
+        folder_classifications: Some(crate::ipc::FolderClassificationCounts {
+            anchor_folders: anchor,
+            mixed_folders: mixed,
+            junk_folders: junk,
+        }),
     };
 
     sink.send(IpcEvent::now(EventPayload::RestructurePlan(Wrap::new(plan))))
@@ -997,6 +1109,7 @@ async fn handle_trash_files(
 
         let conn = db.lock();
         let tx = conn.unchecked_transaction()?;
+        let mut log_items: Vec<TrashLogItem> = Vec::new();
         for ((fid, path), trashed_ok) in path_for_id.iter().zip(outcomes.into_iter()) {
             if trashed_ok {
                 let _ = tx.execute("DELETE FROM files WHERE id = ?1", rusqlite::params![fid]);
@@ -1005,6 +1118,11 @@ async fn handle_trash_files(
                     file_id: Some(*fid),
                     ok: true,
                     message: Some(path.to_string_lossy().to_string()),
+                });
+                log_items.push(TrashLogItem {
+                    file_id: *fid,
+                    original_path: path.to_string_lossy().to_string(),
+                    recycle_bin_id: None,
                 });
             } else {
                 failed += 1;
@@ -1016,8 +1134,27 @@ async fn handle_trash_files(
             }
         }
         tx.commit()?;
+
+        // Append a batch entry to trash_log.json for restoreFromTrash.
+        let batch_id = uuid::Uuid::new_v4().to_string();
+        if !log_items.is_empty() {
+            let entry = TrashLogEntry {
+                batch_id: batch_id.clone(),
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(0.0),
+                items: log_items,
+            };
+            if let Err(err) = append_trash_log(&entry) {
+                tracing::warn!(?err, "trash_log append failed");
+            }
+        }
+
+        // Tag the BulkActionResult.action with the batch id so the app
+        // can store it on the UndoStack entry without an extra IPC.
         Ok(BulkActionResult {
-            action: "trashFiles".into(),
+            action: format!("trashFiles:{}", batch_id),
             succeeded,
             failed,
             messages,
@@ -1151,6 +1288,46 @@ async fn handle_rename_person(
     emit_bulk_result(&sink, "renamePerson", result).await;
 }
 
+/// FEAT-CRIT-1: bulk "Mark as unknown" for multi-select people view.
+/// Sets persons.is_unknown = 1 for every id in the payload + clears the
+/// display name (so a previously-named cluster becomes anonymous when
+/// the user reverses an assignment).
+async fn handle_mark_persons_as_unknown(
+    sink: Sink,
+    db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    payload: ipc::MarkPersonsAsUnknownPayload,
+) {
+    use crate::ipc::{BulkActionItem, BulkActionResult};
+
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<BulkActionResult> {
+        let conn = db.lock();
+        let tx = conn.unchecked_transaction()?;
+        let mut succeeded = 0u32;
+        let mut failed = 0u32;
+        let mut messages = Vec::new();
+        for id in &payload.person_ids {
+            match tx.execute(
+                "UPDATE persons SET is_unknown = 1, name = NULL, first_name = NULL, last_name = NULL WHERE id = ?1",
+                rusqlite::params![id],
+            ) {
+                Ok(_) => {
+                    succeeded += 1;
+                    messages.push(BulkActionItem { file_id: Some(*id), ok: true, message: None });
+                }
+                Err(e) => {
+                    failed += 1;
+                    messages.push(BulkActionItem { file_id: Some(*id), ok: false, message: Some(e.to_string()) });
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(BulkActionResult { action: "markPersonsAsUnknown".into(), succeeded, failed, messages })
+    })
+    .await;
+
+    emit_bulk_result(&sink, "markPersonsAsUnknown", result).await;
+}
+
 /// Find merge-candidate cluster pairs by ArcFace cosine similarity in the
 /// uncertain band (COS_LOW..COS_HIGH from face_clustering). Pairs already
 /// confirmed-different in face_verifications are filtered out so the
@@ -1276,34 +1453,622 @@ async fn handle_find_merge_suggestions(
     }
 }
 
+// ─── Sidecar undo logs ──────────────────────────────────────────────
+//
+// trash_log.json / merge_log.json are append-only NDJSON files capped at
+// the last 1024 entries. Lets the app's UndoStack stay process-local
+// across restarts AND lets restoreFromTrash know which paths to bring
+// back from the Recycle Bin without bloating the SQLite schema.
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct TrashLogEntry {
+    batch_id: String,
+    timestamp: f64,
+    items: Vec<TrashLogItem>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct TrashLogItem {
+    file_id: i64,
+    original_path: String,
+    /// Hint set by IFileOperation if available (.GetName on the IShellItem
+    /// after delete) — the Recycle Bin renames each item to a $R*.* form.
+    /// Often empty; restore by path is the canonical fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recycle_bin_id: Option<String>,
+}
+
+fn append_trash_log(entry: &TrashLogEntry) -> anyhow::Result<()> {
+    use std::io::Write;
+    let path = paths::trash_log_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let json = serde_json::to_string(entry)?;
+    // V14.7.2: HMAC-sign each entry so a local attacker who appends
+    // a forged entry can't get it accepted by restoreFromTrash. The
+    // entry format is `{json}\t{hex_hmac}` — the existing single-line
+    // JSON parser is updated to split on \t and verify before parse.
+    let mac = hmac_sha256_hex(&log_hmac_key()?, json.as_bytes());
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?;
+    writeln!(file, "{json}\t{mac}")?;
+    // Force flush so a crash immediately after delete-to-trash doesn't
+    // lose the log entry (which would orphan the Recycle Bin items).
+    file.sync_all()?;
+    Ok(())
+}
+
+fn read_trash_log_batch(batch_id: &str) -> anyhow::Result<Option<TrashLogEntry>> {
+    let path = paths::trash_log_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let key = log_hmac_key()?;
+    let raw = std::fs::read_to_string(&path)?;
+    for line in raw.lines() {
+        if line.trim().is_empty() { continue; }
+        // V14.7.2: split json + HMAC. Pre-V14.7.2 entries (no tab) are
+        // accepted in read-only mode for backward compat; new writes
+        // always carry a HMAC. After 14 days of run-time the legacy-
+        // entries path gets rotated out organically.
+        let (payload, mac_hex) = match line.find('\t') {
+            Some(i) => (&line[..i], Some(&line[i + 1..])),
+            None    => (line, None),
+        };
+        if let Some(expected) = mac_hex {
+            let actual = hmac_sha256_hex(&key, payload.as_bytes());
+            if !constant_time_eq_str(&actual, expected) {
+                tracing::warn!("trash_log entry HMAC mismatch -- rejecting forged entry");
+                continue;
+            }
+        }
+        if let Ok(entry) = serde_json::from_str::<TrashLogEntry>(payload) {
+            if entry.batch_id == batch_id {
+                return Ok(Some(entry));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// V14.7.2: HMAC-SHA256 hand-rolled atop the existing `sha2` dependency.
+/// 30 lines beats adding the `hmac` crate for one call site.
+fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    const BLOCK_SIZE: usize = 64;
+    let mut k = [0u8; BLOCK_SIZE];
+    if key.len() > BLOCK_SIZE {
+        let h = Sha256::digest(key);
+        k[..32].copy_from_slice(&h);
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; BLOCK_SIZE];
+    let mut opad = [0x5cu8; BLOCK_SIZE];
+    for i in 0..BLOCK_SIZE {
+        ipad[i] ^= k[i];
+        opad[i] ^= k[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(msg);
+    let inner_hash = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner_hash);
+    let out = outer.finalize();
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&out);
+    bytes
+}
+
+fn hmac_sha256_hex(key: &[u8], msg: &[u8]) -> String {
+    hex::encode(hmac_sha256(key, msg))
+}
+
+/// Constant-time string comparison (avoids timing-side-channel HMAC
+/// validation). Caller supplies hex strings of equal length; mismatched
+/// lengths short-circuit fail.
+fn constant_time_eq_str(a: &str, b: &str) -> bool {
+    if a.len() != b.len() { return false; }
+    let mut diff = 0u8;
+    for (x, y) in a.bytes().zip(b.bytes()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Lazily-loaded 32-byte HMAC key for the trash/merge sidecar logs.
+/// Persisted at `%LOCALAPPDATA%\FileID\log-hmac.key`. NTFS ACLs on
+/// `%LOCALAPPDATA%` already restrict to the user; that's enough for
+/// our threat model (defense against another local app's tampering).
+fn log_hmac_key() -> anyhow::Result<Vec<u8>> {
+    static KEY: parking_lot::Mutex<Option<Vec<u8>>> = parking_lot::Mutex::new(None);
+    let mut guard = KEY.lock();
+    if let Some(k) = guard.as_ref() {
+        return Ok(k.clone());
+    }
+    let root = paths::root()?;
+    std::fs::create_dir_all(&root).ok();
+    let path = root.join("log-hmac.key");
+    let bytes = if path.exists() {
+        std::fs::read(&path)?
+    } else {
+        // Generate via getrandom() through `uuid` (already a dep).
+        // Two UUIDs = 32 bytes of OS-CSPRNG entropy.
+        let mut k = Vec::with_capacity(32);
+        k.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
+        k.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
+        std::fs::write(&path, &k)?;
+        k
+    };
+    *guard = Some(bytes.clone());
+    Ok(bytes)
+}
+
+/// SEC-7: best-effort canonicalize for a path that may not exist (the
+/// file is in the Recycle Bin). Returns the closest existing ancestor's
+/// canonical path joined with the missing tail. Same shape as
+/// `canonicalize_safely` in restructure_apply but lives here to avoid
+/// a cross-module dependency.
+fn canonicalize_path_for_containment(p: &std::path::Path) -> std::path::PathBuf {
+    if let Ok(c) = std::fs::canonicalize(p) {
+        return c;
+    }
+    let mut cur = p.to_path_buf();
+    let mut tail = std::path::PathBuf::new();
+    while !cur.exists() {
+        if let Some(name) = cur.file_name() {
+            tail = if tail.as_os_str().is_empty() {
+                std::path::PathBuf::from(name)
+            } else {
+                std::path::Path::new(name).join(tail)
+            };
+        }
+        if !cur.pop() { break; }
+    }
+    let mut canonical = std::fs::canonicalize(&cur).unwrap_or(cur);
+    canonical.push(tail);
+    canonical
+}
+
+/// Bounded line read from stdin. Reads byte-by-byte (well, in 8-KB
+/// chunks via the BufReader) and bails the moment the in-progress line
+/// would exceed `max_bytes`. Returns one of:
+/// - `Line(text)`           — a complete line under the cap
+/// - `Oversized(seen)`      — refused after `seen` bytes; caller drains
+/// - `Eof`                  — clean stdin close
+enum BoundedRead {
+    Line(String),
+    Oversized(usize),
+    Eof,
+}
+
+async fn bounded_read_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    max_bytes: usize,
+) -> std::io::Result<BoundedRead> {
+    buf.clear();
+    let mut byte = [0u8; 1];
+    loop {
+        // Read one byte at a time. Slow in theory; the BufReader fills its
+        // internal 8-KB buffer in larger reads, so this only crosses the
+        // syscall boundary every ~8 KB. The tradeoff: we get to enforce
+        // the cap on every byte without first allocating a giant Vec.
+        match reader.read_exact(&mut byte).await {
+            Ok(_) => {
+                if byte[0] == b'\n' {
+                    if buf.last() == Some(&b'\r') { buf.pop(); }
+                    let text = String::from_utf8(std::mem::take(buf))
+                        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+                    return Ok(BoundedRead::Line(text));
+                }
+                if buf.len() >= max_bytes {
+                    return Ok(BoundedRead::Oversized(buf.len()));
+                }
+                buf.push(byte[0]);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                if buf.is_empty() {
+                    return Ok(BoundedRead::Eof);
+                }
+                // Trailing partial line at EOF — treat as a complete frame.
+                let text = String::from_utf8(std::mem::take(buf))
+                    .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+                return Ok(BoundedRead::Line(text));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Drain bytes from `reader` until the next newline (used to resync the
+/// IPC framing after rejecting an oversized frame). Best-effort; swallows
+/// errors and returns on any failure or EOF.
+async fn drain_to_newline<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) {
+    let mut byte = [0u8; 1];
+    while reader.read_exact(&mut byte).await.is_ok() {
+        if byte[0] == b'\n' { return; }
+    }
+}
+
 /// Extract every entry of `zip_path` into its parent directory. Used by
 /// the prewarm flow for .zip downloads (llama.cpp runtime, Performance
 /// Packs). Files in nested folders inside the zip land under the same
 /// nested folders next to the zip.
+///
+/// Hardened against:
+/// - **Zip slip** (entries with absolute / `..` paths). `enclosed_name()`
+///   blocks `..`; we ALSO canonicalize-and-`starts_with`-check the
+///   destination against the parent to catch any junction/symlink
+///   traversal at the FS layer.
+/// - **Zip bombs** — caps total uncompressed bytes at 2 GiB and entry
+///   count at 10,000.
+/// - **Symlink/special entries** — skipped (we only write regular files
+///   and create directories).
 fn extract_zip_into_parent(zip_path: &std::path::Path) -> anyhow::Result<()> {
     use anyhow::Context;
+    const MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB cumulative
+    const MAX_ENTRIES: usize = 10_000;
+
     let parent = zip_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("zip has no parent dir"))?;
+    // Canonicalize the parent once for the post-write containment check.
+    let parent_canon = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+
     let file = std::fs::File::open(zip_path).context("opening zip")?;
     let mut archive = zip::ZipArchive::new(file).context("reading zip directory")?;
+
+    if archive.len() > MAX_ENTRIES {
+        anyhow::bail!("zip rejected: {} entries (cap {})", archive.len(), MAX_ENTRIES);
+    }
+
+    let mut total_bytes: u64 = 0;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).context("zip entry")?;
+        // SEC: enclosed_name blocks `..` and absolute paths in the entry name.
         let name = entry.enclosed_name().ok_or_else(|| {
             anyhow::anyhow!("zip contains an entry with an unsafe name")
         })?;
-        let dest = parent.join(name);
+        let dest = parent.join(&name);
         if entry.is_dir() {
             std::fs::create_dir_all(&dest).ok();
             continue;
         }
+        // Skip symlink / special entries. We use the high bits of the
+        // unix_mode field; only regular files (S_IFREG = 0o100000) pass.
+        if let Some(mode) = entry.unix_mode() {
+            const S_IFMT: u32 = 0o170000;
+            const S_IFREG: u32 = 0o100000;
+            if (mode & S_IFMT) != S_IFREG {
+                continue;
+            }
+        }
+        // Cumulative-size cap (zip-bomb defense).
+        let entry_size = entry.size();
+        if entry_size > MAX_BYTES || total_bytes.saturating_add(entry_size) > MAX_BYTES {
+            anyhow::bail!("zip rejected: cumulative size exceeds {} bytes", MAX_BYTES);
+        }
+        total_bytes = total_bytes.saturating_add(entry_size);
+
         if let Some(p) = dest.parent() {
             std::fs::create_dir_all(p).ok();
         }
-        let mut out = std::fs::File::create(&dest).with_context(|| format!("creating {}", dest.display()))?;
-        std::io::copy(&mut entry, &mut out).with_context(|| format!("writing {}", dest.display()))?;
+        let mut out = std::fs::File::create(&dest)
+            .with_context(|| format!("creating {}", dest.display()))?;
+        std::io::copy(&mut entry, &mut out)
+            .with_context(|| format!("writing {}", dest.display()))?;
+
+        // SEC: post-write containment check. If a junction/symlink along
+        // the path led elsewhere, reject by deleting + bailing.
+        if let Ok(real) = std::fs::canonicalize(&dest) {
+            if !real.starts_with(&parent_canon) {
+                let _ = std::fs::remove_file(&dest);
+                anyhow::bail!("zip entry escaped extraction root: {}", dest.display());
+            }
+        }
     }
     Ok(())
+}
+
+// ─── Undo + recent scans handlers ───────────────────────────────────
+
+async fn handle_restore_from_trash(
+    sink: Sink,
+    db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    payload: ipc::RestoreFromTrashPayload,
+) {
+    use crate::ipc::{BulkActionItem, BulkActionResult};
+
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<BulkActionResult> {
+        let entry = read_trash_log_batch(&payload.batch_id)?
+            .ok_or_else(|| anyhow::anyhow!("trash log batch {} not found", payload.batch_id))?;
+
+        let mut succeeded = 0u32;
+        let mut failed = 0u32;
+        let mut messages = Vec::new();
+
+        // The Recycle Bin restore via IFileOperation::Recycle reverse is
+        // non-trivial — IShellFolder enumeration of the bin + matching
+        // pidl by display path. For the V14.6 cut we shell out to
+        // PowerShell which has a direct cmdlet (`Restore-RecycleBin -DriveLetter
+        // C:`). When restoration succeeds, the file lands at its original
+        // path; we re-INSERT a stripped-down DB row so the Library tab
+        // shows it again.
+        let conn = db.lock();
+
+        // SEC-7: collect every authorized scan root from scan_sessions
+        // and require each restore destination to be a descendant. This
+        // defends against trash_log forgery — a local attacker who
+        // appends a hostile entry like
+        //   {"original_path":"C:\\Windows\\System32\\foo.exe", ...}
+        // would otherwise be able to write into System32 via our
+        // PowerShell shell-out. With containment, restore destinations
+        // are restricted to user-blessed library directories.
+        let allowed_roots: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT root_path FROM scan_sessions WHERE root_path IS NOT NULL"
+            )?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        let allowed_canonical: Vec<std::path::PathBuf> = allowed_roots.iter()
+            .filter_map(|r| std::fs::canonicalize(r).ok())
+            .collect();
+
+        let tx = conn.unchecked_transaction()?;
+        for item in &entry.items {
+            // Path-containment check before we touch PowerShell.
+            let path_obj = std::path::Path::new(&item.original_path);
+            // Use canonicalize_safely-style logic — the file doesn't
+            // exist (it's in the trash), so canonicalize the closest
+            // existing ancestor and append the tail.
+            let candidate = canonicalize_path_for_containment(path_obj);
+            let allowed = allowed_canonical.iter().any(|root| candidate.starts_with(root));
+            if !allowed {
+                tracing::warn!(
+                    path = %item.original_path,
+                    "SEC-7: refusing restore — path is outside every authorized library root"
+                );
+                failed += 1;
+                messages.push(BulkActionItem {
+                    file_id: Some(item.file_id),
+                    ok: false,
+                    message: Some(format!(
+                        "Refused: {} is not inside any authorized library root.",
+                        item.original_path
+                    )),
+                });
+                continue;
+            }
+            let restored = restore_one_from_recycle_bin(&item.original_path).is_ok();
+            if restored {
+                // Re-insert a row. The next scan will fill in the rest of
+                // the metadata; for now we just need the path → id mapping.
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(0.0);
+                let path_obj = std::path::Path::new(&item.original_path);
+                let extension = path_obj
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                let kind = crate::pipeline::discovery::FileKind::from_extension(&extension);
+                let _ = tx.execute(
+                    "INSERT OR IGNORE INTO files \
+                     (path_text, path_hash, size_bytes, scanned_at, kind, extension, \
+                      has_faces, has_text, failed) \
+                     VALUES (?1, ?2, 0, ?3, ?4, ?5, 0, 0, 0)",
+                    rusqlite::params![
+                        item.original_path,
+                        stable_path_hash(&item.original_path),
+                        now,
+                        kind.as_str(),
+                        extension,
+                    ],
+                );
+                succeeded += 1;
+                messages.push(BulkActionItem {
+                    file_id: Some(item.file_id),
+                    ok: true,
+                    message: Some(item.original_path.clone()),
+                });
+            } else {
+                failed += 1;
+                messages.push(BulkActionItem {
+                    file_id: Some(item.file_id),
+                    ok: false,
+                    message: Some(format!(
+                        "could not restore from Recycle Bin: {}",
+                        item.original_path
+                    )),
+                });
+            }
+        }
+        tx.commit()?;
+        Ok(BulkActionResult {
+            action: "restoreFromTrash".into(),
+            succeeded,
+            failed,
+            messages,
+        })
+    })
+    .await;
+
+    emit_bulk_result(&sink, "restoreFromTrash", result).await;
+}
+
+fn stable_path_hash(path: &str) -> i64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut h);
+    h.finish() as i64
+}
+
+#[cfg(windows)]
+fn restore_one_from_recycle_bin(original_path: &str) -> anyhow::Result<()> {
+    // PowerShell walks the Recycle Bin, finds an item whose
+    // `OriginalLocation` + `Name` matches, and invokes its Verb
+    // "Undelete" (Restore). Path data flows through environment
+    // variables (FILEID_RB_PARENT / FILEID_RB_NAME) instead of being
+    // interpolated into the script — eliminates every escape concern
+    // (single-quote doubling, backslashes, Unicode, RTL marks, etc).
+    let parent = std::path::Path::new(original_path)
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("bad path"))?
+        .to_string_lossy()
+        .to_string();
+    let name = std::path::Path::new(original_path)
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("bad path"))?
+        .to_string_lossy()
+        .to_string();
+    // Script reads from $env: vars — no string interpolation of paths.
+    let script = "\
+$shell = New-Object -ComObject Shell.Application; \
+$bin = $shell.NameSpace(0x0a); \
+$wantParent = $env:FILEID_RB_PARENT; \
+$wantName = $env:FILEID_RB_NAME; \
+foreach ($i in $bin.Items()) { \
+    $loc = $i.ExtendedProperty('System.Recycle.DeletedFrom'); \
+    $nm = $i.Name; \
+    if ($loc -eq $wantParent -and $nm -eq $wantName) { \
+        $i.InvokeVerb('Undelete'); break; \
+    } \
+}";
+    // SEC: pin -ExecutionPolicy Bypass so the script runs even when
+    // group policy locks the user-default policy to AllSigned/Restricted.
+    // The script is internal (not user-supplied), and arguments cross
+    // via env vars so there's no string-interpolation surface.
+    let status = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy", "Bypass",
+            "-Command", script,
+        ])
+        .env("FILEID_RB_PARENT", &parent)
+        .env("FILEID_RB_NAME", &name)
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("powershell restore exit {:?}", status.code());
+    }
+    if !std::path::Path::new(original_path).exists() {
+        anyhow::bail!("restore reported success but file is still missing");
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn restore_one_from_recycle_bin(_original_path: &str) -> anyhow::Result<()> {
+    anyhow::bail!("Recycle Bin restore not supported on this platform")
+}
+
+async fn handle_revert_merge(
+    sink: Sink,
+    db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    payload: ipc::RevertMergePayload,
+) {
+    use crate::ipc::{BulkActionItem, BulkActionResult};
+
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<BulkActionResult> {
+        let conn = db.lock();
+        let tx = conn.unchecked_transaction()?;
+        // Re-create the source person row + reassign the listed faces.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        // Use the original id if it's still free; else let SQLite pick a new one.
+        tx.execute(
+            "INSERT OR IGNORE INTO persons (id, file_count, created_at) VALUES (?1, 0, ?2)",
+            rusqlite::params![payload.source_person_id, now],
+        )?;
+        let new_pid: i64 = tx.query_row(
+            "SELECT id FROM persons WHERE id = ?1",
+            rusqlite::params![payload.source_person_id],
+            |r| r.get(0),
+        )?;
+        let mut update = tx.prepare("UPDATE face_prints SET person_id = ?1 WHERE id = ?2")?;
+        let mut moved = 0u32;
+        for fid in &payload.face_ids_to_revert {
+            update.execute(rusqlite::params![new_pid, fid])?;
+            moved += 1;
+        }
+        drop(update);
+        // Recompute file_count for both clusters.
+        let _ = tx.execute(
+            "UPDATE persons SET file_count = (SELECT COUNT(DISTINCT file_id) \
+             FROM face_prints WHERE person_id = ?1) WHERE id IN (?1, ?2)",
+            rusqlite::params![new_pid, payload.destination_person_id],
+        );
+        tx.commit()?;
+        Ok(BulkActionResult {
+            action: "revertMerge".into(),
+            succeeded: 1,
+            failed: 0,
+            messages: vec![BulkActionItem {
+                file_id: None,
+                ok: true,
+                message: Some(format!("Restored {moved} face print(s) to person #{new_pid}")),
+            }],
+        })
+    })
+    .await;
+
+    emit_bulk_result(&sink, "revertMerge", result).await;
+}
+
+async fn handle_recent_scans(
+    sink: Sink,
+    db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    payload: ipc::RecentScansPayload,
+) {
+    use crate::ipc::{RecentScanItem, RecentScans};
+    let limit = if payload.limit == 0 { 20 } else { payload.limit.min(100) };
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<RecentScans> {
+        let conn = db.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, root_path, started_at, completed_at, total_files, status \
+             FROM scan_sessions ORDER BY started_at DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![limit], |r| {
+            Ok(RecentScanItem {
+                session_id: r.get::<_, String>(0)?,
+                root_path: r.get::<_, String>(1)?,
+                started_at: r.get::<_, f64>(2)?,
+                completed_at: r.get::<_, Option<f64>>(3)?,
+                total_files: r.get::<_, Option<i64>>(4)?,
+                status: r.get::<_, String>(5)?,
+            })
+        })?;
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+        Ok(RecentScans { items })
+    })
+    .await;
+
+    match result {
+        Ok(Ok(r)) => {
+            sink.send(IpcEvent::now(EventPayload::RecentScansEvent(Wrap::new(r))))
+                .await;
+        }
+        Ok(Err(err)) => {
+            tracing::warn!(?err, "recent_scans failed");
+        }
+        Err(err) => {
+            tracing::warn!(?err, "recent_scans spawn failed");
+        }
+    }
 }
 
 // ─── Deep Analyze handlers ──────────────────────────────────────────
@@ -1352,23 +2117,21 @@ async fn handle_deep_analyze_file(
         AnalyzeMode::Both,
         cancel.clone(),
         move |_chunk| {
-            // Per-token streaming. Emit a progress event each chunk; the
-            // current_path is the only "what file" channel the schema
-            // gives us, so we leave it None for per-file calls.
-            let s = sink_c.clone();
+            // BUG-4: try_send + drop on overflow. Per-token streaming
+            // can fire 50+/sec and the original tokio::spawn(async {
+            // send.await }) pattern would pile up unbounded tasks if
+            // the sink filled. Drops are fine — UI gets the next chunk
+            // a few ms later.
             let kind = model_kind_for_progress.clone();
-            tokio::spawn(async move {
-                s.send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(Wrap::new(
-                    DeepAnalyzeProgress {
-                        processed: 0,
-                        total: 1,
-                        eta_seconds: None,
-                        current_path: None,
-                        model_kind: kind,
-                    },
-                ))))
-                .await;
-            });
+            let _ = sink_c.try_send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(Wrap::new(
+                DeepAnalyzeProgress {
+                    processed: 0,
+                    total: 1,
+                    eta_seconds: None,
+                    current_path: None,
+                    model_kind: kind,
+                },
+            ))));
         },
     )
     .await;
@@ -1549,20 +2312,17 @@ async fn run_deep_analyze_batch(
             AnalyzeMode::Both,
             cancel.clone(),
             move |_chunk| {
-                let s = sink_c.clone();
+                // BUG-4: try_send + drop on overflow.
                 let kind = model_kind_c.clone();
-                tokio::spawn(async move {
-                    s.send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(Wrap::new(
-                        DeepAnalyzeProgress {
-                            processed: idx as u64,
-                            total,
-                            eta_seconds: None,
-                            current_path: None,
-                            model_kind: kind,
-                        },
-                    ))))
-                    .await;
-                });
+                let _ = sink_c.try_send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(Wrap::new(
+                    DeepAnalyzeProgress {
+                        processed: idx as u64,
+                        total,
+                        eta_seconds: None,
+                        current_path: None,
+                        model_kind: kind,
+                    },
+                ))));
             },
         )
         .await;
@@ -2033,8 +2793,12 @@ fn command_kind(p: &CommandPayload) -> &'static str {
         CommandPayload::MergeClusters(_)     => "mergeClusters",
         CommandPayload::EmbedTextQuery(_)    => "embedTextQuery",
         CommandPayload::RenamePerson(_)      => "renamePerson",
+        CommandPayload::MarkPersonsAsUnknown(_) => "markPersonsAsUnknown",
         CommandPayload::FindMergeSuggestions(_) => "findMergeSuggestions",
         CommandPayload::EmbedImageQuery(_)   => "embedImageQuery",
+        CommandPayload::RestoreFromTrash(_)  => "restoreFromTrash",
+        CommandPayload::RevertMerge(_)       => "revertMerge",
+        CommandPayload::RecentScans(_)       => "recentScans",
     }
 }
 

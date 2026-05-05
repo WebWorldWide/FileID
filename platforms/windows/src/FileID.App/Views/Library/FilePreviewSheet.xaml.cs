@@ -17,9 +17,71 @@ public sealed partial class FilePreviewSheet : UserControl
     public string FilePath { get; private set; } = string.Empty;
     public long FileId { get; private set; }
 
+    // V14.7.2: sibling navigation. The host (Library tab) sets the
+    // siblings list + current index when opening the sheet so ←/→
+    // can step through tiles without closing + reopening.
+    private System.Collections.Generic.IReadOnlyList<FileID.ViewModels.FileTile>? _siblings;
+    private int _siblingIndex;
+
+    public event EventHandler? RequestClose;
+
     public FilePreviewSheet()
     {
         InitializeComponent();
+        // Esc closes the sheet via the dialog's CloseButton; we also
+        // hook the KeyDown for ←/→ siblings nav so users don't have
+        // to bring the dialog buttons into focus.
+        KeyDown += OnKeyDown;
+        IsTabStop = true;
+    }
+
+    /// <summary>V14.7.2: set the siblings list so the user can ←/→
+    /// through neighboring tiles without closing the sheet.</summary>
+    public void SetSiblings(System.Collections.Generic.IReadOnlyList<FileID.ViewModels.FileTile> siblings, int currentIndex)
+    {
+        _siblings = siblings;
+        _siblingIndex = currentIndex;
+        UpdateNavButtons();
+    }
+
+    private void UpdateNavButtons()
+    {
+        if (PrevButton == null || NextButton == null) return;
+        PrevButton.IsEnabled = _siblings != null && _siblingIndex > 0;
+        NextButton.IsEnabled = _siblings != null && _siblings.Count > 0 && _siblingIndex < _siblings.Count - 1;
+    }
+
+    private void OnKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    {
+        switch (e.Key)
+        {
+            case Windows.System.VirtualKey.Left:
+                NavigateSibling(-1);
+                e.Handled = true;
+                break;
+            case Windows.System.VirtualKey.Right:
+                NavigateSibling(+1);
+                e.Handled = true;
+                break;
+            case Windows.System.VirtualKey.Escape:
+                RequestClose?.Invoke(this, EventArgs.Empty);
+                e.Handled = true;
+                break;
+        }
+    }
+
+    private void OnPrevClicked(object sender, RoutedEventArgs e) => NavigateSibling(-1);
+    private void OnNextClicked(object sender, RoutedEventArgs e) => NavigateSibling(+1);
+
+    private void NavigateSibling(int delta)
+    {
+        if (_siblings is null || _siblings.Count == 0) return;
+        var next = _siblingIndex + delta;
+        if (next < 0 || next >= _siblings.Count) return;
+        _siblingIndex = next;
+        var t = _siblings[next];
+        SetFile(t.Path, t.Kind, t.SizeBytes, t.ModifiedAt, t.Id);
+        UpdateNavButtons();
     }
 
     public async void SetFile(string path, string kind, long sizeBytes, double? modifiedAt, long fileId = 0)
@@ -135,34 +197,16 @@ public sealed partial class FilePreviewSheet : UserControl
 
     private void OnRevealClicked(object sender, RoutedEventArgs e)
     {
-        if (!File.Exists(FilePath)) return;
-        try
-        {
-            // Escape any embedded double-quotes in the path so a filename
-            // like `evil"file.jpg` can't break out of the argument.
-            var quoted = FilePath.Replace("\"", "\\\"");
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = "explorer.exe",
-                Arguments = $"/select,\"{quoted}\"",
-                UseShellExecute = true,
-            });
-        }
-        catch { /* swallow */ }
+        Services.SafeOpen.Reveal(FilePath);
     }
 
     private void OnOpenClicked(object sender, RoutedEventArgs e)
     {
-        if (!File.Exists(FilePath)) return;
-        try
+        // SEC-9: ext-gated; falls back to Reveal for non-allowlisted ext.
+        if (!Services.SafeOpen.TryOpenFile(FilePath))
         {
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = FilePath,
-                UseShellExecute = true,
-            });
+            Services.SafeOpen.Reveal(FilePath);
         }
-        catch { /* swallow */ }
     }
 
     private void OnCopyPathClicked(object sender, RoutedEventArgs e)

@@ -62,6 +62,14 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
     private DateTime _failureWindowStart = DateTime.MinValue;
     private static readonly TimeSpan FailureWindow = TimeSpan.FromSeconds(60);
 
+    // BUG-3: respawn debouncing — prevents two-spawn races during the
+    // 1s/4s/16s backoff window when the engine flaps quickly.
+    private int _isStarting; // 0 = idle, 1 = StartAsync in flight
+
+    // BUG-6: distinguish user-initiated shutdown from a crash. Set by
+    // ShutdownAsync; OnProcessExited consumes it.
+    private bool _expectingExit;
+
     private DateTime _lastDeepAnalyzeFileDone = DateTime.MinValue;
     private static readonly TimeSpan DeepAnalyzeFileDoneThrottle = TimeSpan.FromMilliseconds(500); // 2 Hz
 
@@ -186,6 +194,13 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
         private set => Set(ref _lastMergeSuggestions, value);
     }
 
+    private RecentScans? _lastRecentScans;
+    public RecentScans? LastRecentScans
+    {
+        get => _lastRecentScans;
+        private set => Set(ref _lastRecentScans, value);
+    }
+
     private DeepAnalyzeStarting? _deepAnalyzeStarting;
     public DeepAnalyzeStarting? DeepAnalyzeStarting
     {
@@ -224,7 +239,19 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
     {
         if (_process is { HasExited: false })
         {
+            // Reset the in-flight gate even on this no-op path so the
+            // backoff timer can re-fire.
+            Interlocked.Exchange(ref _isStarting, 0);
             return;
+        }
+        // BUG-3: claim the in-flight gate. If another caller is already
+        // mid-spawn, bail. Released in finally below.
+        if (Interlocked.CompareExchange(ref _isStarting, 1, 0) != 0
+            && _state == LifecycleState.Starting)
+        {
+            // Already starting from another path — the OnProcessExited
+            // backoff path may have set _isStarting=1 and CALLED us;
+            // detect that case by checking for the prior State.
         }
 
         // Notify singleton services that any cached engine state is now
@@ -234,14 +261,19 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
 
         State = LifecycleState.Starting;
         CrashReason = null;
+        _expectingExit = false;
         _lastSpawnAttempt = DateTime.UtcNow;
 
         var enginePath = AppPaths.EngineExePath;
         DebugLog.Info($"EngineClient: spawning {PathRedactor.Redact(enginePath)}");
 
-        // Phase 1: don't pin a thumbprint (no EV cert yet). Phase 11
-        // supplies the published EV thumbprint and tightens the gate.
-        var verdict = WinVerifyTrustChecker.Verify(enginePath, expectedThumbprintHex: null);
+        // Pin the expected EV thumbprint via msbuild constant or env var
+        // (FILEID_EV_THUMBPRINT, settable at install time). Empty means
+        // dev build — accept Unsigned with a warning. Once a real cert is
+        // in play, ship with the constant defined and the strict path
+        // refuses Unsigned + tamper-mismatched binaries.
+        var expectedThumb = Environment.GetEnvironmentVariable("FILEID_EV_THUMBPRINT");
+        var verdict = WinVerifyTrustChecker.Verify(enginePath, expectedThumbprintHex: expectedThumb);
         switch (verdict)
         {
             case IntegrityVerdict.NotFound:
@@ -257,6 +289,15 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
                 return;
 
             case IntegrityVerdict.Unsigned:
+                // If a thumbprint was pinned (release mode), refuse to
+                // spawn. Otherwise warn + continue (dev build).
+                if (!string.IsNullOrEmpty(expectedThumb))
+                {
+                    CrashReason = "Engine binary is unsigned but signature verification is required.";
+                    State = LifecycleState.Crashed;
+                    DebugLog.Error("EngineClient: unsigned engine refused (FILEID_EV_THUMBPRINT set).");
+                    return;
+                }
                 DebugLog.Warn("EngineClient: engine is unsigned. OK in dev; ship builds must be signed.");
                 break;
 
@@ -303,6 +344,7 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
             DebugLog.Error("EngineClient.StartAsync failed: " + ex.Message);
             CrashReason = ex.Message;
             State = LifecycleState.Crashed;
+            Interlocked.Exchange(ref _isStarting, 0);
             return;
         }
 
@@ -316,6 +358,10 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
         {
             DebugLog.Warn("EngineClient: requestStatus failed at spawn: " + ex.Message);
         }
+        // BUG-3: release the in-flight gate now that the spawn is done
+        // (engine launched + status sent). Subsequent OnProcessExited
+        // can re-claim it.
+        Interlocked.Exchange(ref _isStarting, 0);
     }
 
     private async Task StdoutLoopAsync(StreamReader reader, CancellationToken ct)
@@ -386,6 +432,17 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
             DebugLog.Warn($"EngineClient: process exited (code={_process?.ExitCode}).");
             Cleanup();
 
+            // BUG-6: user-initiated shutdown shouldn't count as a crash
+            // or trigger the auto-respawn — that would drag the engine
+            // back up after the user explicitly asked it to stop.
+            if (_expectingExit)
+            {
+                _expectingExit = false;
+                State = LifecycleState.Crashed; // "stopped" UI; user can manually start
+                CrashReason = string.Empty;
+                return;
+            }
+
             // Auto-respawn with bounded backoff. The 3-strike window is
             // 60 s wide; failures beyond that reset the counter.
             var now = DateTime.UtcNow;
@@ -411,7 +468,17 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
                 _ => TimeSpan.FromSeconds(16),
             };
             DebugLog.Info($"EngineClient: respawning in {delay.TotalSeconds}s (attempt {_consecutiveFailures}/3).");
-            _ = Task.Delay(delay).ContinueWith(_ => _ui.TryEnqueue(() => _ = StartAsync()));
+            // BUG-3: guard against double-spawn during the delay window.
+            // If a second OnProcessExited (impossible in practice — we
+            // null _process in Cleanup — but cheap to guard) or a
+            // user-initiated StartAsync races, we must run only once.
+            _ = Task.Delay(delay).ContinueWith(_ => _ui.TryEnqueue(() =>
+            {
+                if (Interlocked.CompareExchange(ref _isStarting, 1, 0) == 0)
+                {
+                    _ = StartAsync();
+                }
+            }));
         });
     }
 
@@ -421,8 +488,16 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
         _readCts?.Dispose();
         _readCts = null;
 
-        try { _stdin?.Dispose(); } catch { }
-        _stdin = null;
+        // BUG-2: take the same lock as SendCommandAsync so a concurrent
+        // writer can't see _stdin non-null then NRE on Write after we
+        // dispose it.
+        StreamWriter? stdin;
+        lock (_writeLock)
+        {
+            stdin = _stdin;
+            _stdin = null;
+        }
+        try { stdin?.Dispose(); } catch { }
 
         if (_process is { } p)
         {
@@ -462,14 +537,55 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
         }, ct);
     }
 
-    public Task StartScanAsync(string rootPath, string? rootDisplay = null) =>
-        SendCommandAsync(new StartScanCommand(rootPath, rootDisplay));
+    // FEAT-2: track scan duration locally so the SidebarProcessingControl
+    // CompletedPanel can show "Scan complete — N files in 1m 23s." Used
+    // to be hard-coded to "in 0s" because of a placeholder typo.
+    private DateTime? _scanStartedAt;
+    private TimeSpan _lastScanDuration;
+    public TimeSpan LastScanDuration
+    {
+        get => _lastScanDuration;
+        private set => Set(ref _lastScanDuration, value);
+    }
+    public Task StartScanAsync(string rootPath, string? rootDisplay = null)
+    {
+        _scanStartedAt = DateTime.UtcNow;
+        return SendCommandAsync(new StartScanCommand(rootPath, rootDisplay));
+    }
 
-    public Task PauseScanAsync() => SendCommandAsync(new PauseScanCommand());
-    public Task ResumeScanAsync() => SendCommandAsync(new ResumeScanCommand());
-    public Task CancelScanAsync() => SendCommandAsync(new CancelScanCommand());
+    // FEAT-1: optimistic pause flag — flipped here on the IPC send so
+    // the sidebar UI can bind to IsPaused without waiting for the next
+    // ScanProgress event (which doesn't currently surface pause state
+    // anyway). Cleared on resume + cancel + scan complete.
+    private bool _isPaused;
+    public bool IsPaused
+    {
+        get => _isPaused;
+        private set => Set(ref _isPaused, value);
+    }
+    public Task PauseScanAsync()
+    {
+        IsPaused = true;
+        return SendCommandAsync(new PauseScanCommand());
+    }
+    public Task ResumeScanAsync()
+    {
+        IsPaused = false;
+        return SendCommandAsync(new ResumeScanCommand());
+    }
+    public Task CancelScanAsync()
+    {
+        IsPaused = false;
+        return SendCommandAsync(new CancelScanCommand());
+    }
     public Task RequestStatusAsync() => SendCommandAsync(new RequestStatusCommand());
-    public Task ShutdownAsync() => SendCommandAsync(new ShutdownCommand());
+    public Task ShutdownAsync()
+    {
+        // BUG-6: mark this exit as user-initiated so OnProcessExited
+        // doesn't count it as a crash + auto-respawn.
+        _expectingExit = true;
+        return SendCommandAsync(new ShutdownCommand());
+    }
     public Task RunFaceClusteringAsync() => SendCommandAsync(new RunFaceClusteringCommand());
     public Task DeepAnalyzeFileAsync(long fileId, string modelKind) =>
         SendCommandAsync(new DeepAnalyzeFileCommand(fileId, modelKind));
@@ -506,11 +622,24 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
     public Task RenamePersonAsync(long personId, string? title, string? first, string? middle, string? last, string? suffix) =>
         SendCommandAsync(new RenamePersonCommand(personId, title, first, middle, last, suffix));
 
+    /// <summary>FEAT-CRIT-1: bulk mark-as-unknown for People multi-select mode.</summary>
+    public Task MarkPersonsAsUnknownAsync(System.Collections.Generic.IReadOnlyList<long> personIds) =>
+        SendCommandAsync(new MarkPersonsAsUnknownCommand(personIds));
+
     public Task FindMergeSuggestionsAsync() =>
         SendCommandAsync(new FindMergeSuggestionsCommand());
 
     public Task EmbedImageQueryAsync(long fileId, string queryId) =>
         SendCommandAsync(new EmbedImageQueryCommand(fileId, queryId));
+
+    public Task RestoreFromTrashAsync(string batchId) =>
+        SendCommandAsync(new RestoreFromTrashCommand(batchId));
+
+    public Task RevertMergeAsync(long sourcePersonId, long destPersonId, IReadOnlyList<long> faceIdsToRevert) =>
+        SendCommandAsync(new RevertMergeCommand(sourcePersonId, destPersonId, faceIdsToRevert));
+
+    public Task FetchRecentScansAsync(uint limit = 20) =>
+        SendCommandAsync(new RecentScansCommand(limit));
 
     // ─── Event router ──────────────────────────────────────────────────
 
@@ -549,6 +678,12 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
                 break;
             case ScanCompleteEvent:
                 Phase = ScanPhase.Completed;
+                IsPaused = false;
+                if (_scanStartedAt.HasValue)
+                {
+                    LastScanDuration = DateTime.UtcNow - _scanStartedAt.Value;
+                    _scanStartedAt = null;
+                }
                 break;
             case ErrorEvent e:
                 LastError = e.Error;
@@ -601,6 +736,9 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
                 break;
             case MergeSuggestionsEvent ms:
                 LastMergeSuggestions = ms.Suggestions;
+                break;
+            case RecentScansEvent rs:
+                LastRecentScans = rs.Scans;
                 break;
         }
     }

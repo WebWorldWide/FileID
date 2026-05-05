@@ -181,12 +181,34 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged
         => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name ?? string.Empty));
 }
 
-internal sealed class DuplicateGroup
+internal sealed class DuplicateGroup : INotifyPropertyChanged
 {
     public required long PerceptualHash { get; init; }
     public required IReadOnlyList<DuplicateMember> Members { get; init; }
     public int MemberCount => Members.Count;
-    public string Caption => $"{MemberCount} duplicates · phash {PerceptualHash:X16}";
+
+    // FEAT-CRIT-2: per-group skip flag. Members of a skipped group are
+    // excluded from "Trash non-keepers". Mirrors the macOS Cleanup
+    // per-group "Skip" action.
+    private bool _isSkipped;
+    public bool IsSkipped
+    {
+        get => _isSkipped;
+        set
+        {
+            if (_isSkipped == value) return;
+            _isSkipped = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsSkipped)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Caption)));
+        }
+    }
+
+    public string Caption =>
+        IsSkipped
+            ? $"{MemberCount} duplicates · phash {PerceptualHash:X16} · SKIPPED"
+            : $"{MemberCount} duplicates · phash {PerceptualHash:X16}";
+
+    public event PropertyChangedEventHandler? PropertyChanged;
 }
 
 internal sealed class DuplicateMember : INotifyPropertyChanged

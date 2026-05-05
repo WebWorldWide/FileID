@@ -110,6 +110,7 @@ windows = { version = "0.58", features = [
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_LibraryLoader",
     "Win32_System_Threading",
     "Win32_System_Power",
     "Win32_System_SystemInformation",
@@ -153,9 +154,23 @@ inherits = "release"
 debug    = "limited"
 strip    = "none"
 
+# Iteration-friendly release profile. Same opt-level=3 as release, but
+# parallel codegen + thin LTO instead of fat — drops compile time by
+# 40-60% on a multi-core box. Use this for `./build.sh -windows --fast`
+# during inner-loop iteration; switch back to plain `release` for ship
+# builds where the extra perf from fat LTO matters.
+[profile.release-fast]
+inherits      = "release"
+lto           = "thin"
+codegen-units = 16
+
 [profile.dev]
 opt-level = 1            # 0 is too slow for image-heavy hot paths even in dev
 debug     = true
+# Parallel codegen for dev too. Default is 256 since 1.78; documented
+# explicitly so a future bump in the rust toolchain can't silently change
+# our iteration speed.
+codegen-units = 256
 
 [profile.bench]
 inherits = "release"

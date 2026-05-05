@@ -196,6 +196,154 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
+    private async void OnRecentScansClicked(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var sheet = new RecentScansSheet();
+            var dialog = new ContentDialog
+            {
+                XamlRoot = this.XamlRoot,
+                Title = "Recent scans",
+                Content = sheet,
+                CloseButtonText = "Done",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            await dialog.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("RecentScansSheet open failed: " + ex);
+        }
+    }
+
+    private async void OnVerifyPrivacyClicked(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var hits = await PrivacyGrep.RunAsync();
+            var dialog = new ContentDialog
+            {
+                XamlRoot = this.XamlRoot,
+                Title = hits.Count == 0 ? "Privacy verified" : "Suspicious strings found",
+                Content = hits.Count == 0
+                    ? "Scanned the engine binary for telemetry markers (Sentry, AppInsights, Firebase, Segment, Mixpanel, Google Analytics, Amplitude, AppCenter). Zero hits — your engine is telemetry-clean."
+                    : "Found these markers in the engine binary:\n\n" + string.Join("\n", hits),
+                CloseButtonText = "OK",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            await dialog.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("PrivacyGrep failed: " + ex);
+        }
+    }
+
+    /// <summary>FEAT-CRIT-4: install one of the local-AI models from the
+    /// new Settings → Local AI cards. Shares the same engine prewarm path
+    /// as the welcome sheet — the engine downloads + verifies SHA, the
+    /// app surfaces a progress bar via ModelInstallerService.</summary>
+    private async void OnInstallModelClicked(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button button || button.Tag is not string modelKind || string.IsNullOrWhiteSpace(modelKind))
+            return;
+        var (statusText, progressBar, progressProp) = modelKind switch
+        {
+            "arcface_buffalo" => (ArcFaceStatusText, ArcFaceProgress, nameof(Services.ModelInstallerService.ArcfaceProgress)),
+            "mobileclip_s2"   => (ClipStatusText,    ClipProgress,    nameof(Services.ModelInstallerService.ClipProgress)),
+            _ => (null!, null!, string.Empty),
+        };
+        if (statusText is null) return;
+        var originalContent = button.Content;
+        button.IsEnabled = false;
+        button.Content = "Installing…";
+        progressBar.Visibility = Visibility.Visible;
+
+        // Subscribe to ModelInstallerService.<*Progress> for live updates.
+        void OnProgress(object? _, System.ComponentModel.PropertyChangedEventArgs ev)
+        {
+            if (ev.PropertyName != progressProp) return;
+            var pct = modelKind switch
+            {
+                "arcface_buffalo" => Services.ModelInstallerService.Instance.ArcfaceProgress,
+                "mobileclip_s2"   => Services.ModelInstallerService.Instance.ClipProgress,
+                _ => 0.0,
+            };
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                progressBar.Value = pct;
+                statusText.Text = pct > 0 && pct < 1
+                    ? $"Downloading… {pct * 100:0}%"
+                    : (pct >= 1 ? "Installed" : statusText.Text);
+            });
+        }
+        Services.ModelInstallerService.Instance.PropertyChanged += OnProgress;
+        try
+        {
+            await EngineClient.Instance.PrewarmModelAsync(modelKind);
+            button.Content = "Installed";
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"Model install '{modelKind}' failed: {ex}");
+            button.Content = originalContent;
+            button.IsEnabled = true;
+            statusText.Text = $"Failed: {ex.Message}";
+        }
+        finally
+        {
+            Services.ModelInstallerService.Instance.PropertyChanged -= OnProgress;
+            progressBar.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    private async void OnInstallPackClicked(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button button || button.Tag is not string packId || string.IsNullOrWhiteSpace(packId))
+            return;
+        var originalContent = button.Content;
+        try
+        {
+            button.IsEnabled = false;
+            button.Content = "Installing…";
+            await EngineClient.Instance.PrewarmModelAsync(packId);
+            button.Content = "Installed";
+            try
+            {
+                var dialog = new ContentDialog
+                {
+                    XamlRoot = this.XamlRoot,
+                    Title = "Performance Pack installed",
+                    Content = "Restart the engine to start using the new execution provider. Sidebar → Engine → Restart, or just relaunch FileID.",
+                    CloseButtonText = "OK",
+                    DefaultButton = ContentDialogButton.Close,
+                };
+                await dialog.ShowAsync();
+            }
+            catch { /* dialog show is best-effort */ }
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"Pack install '{packId}' failed: {ex}");
+            button.Content = originalContent;
+            button.IsEnabled = true;
+            try
+            {
+                var dialog = new ContentDialog
+                {
+                    XamlRoot = this.XamlRoot,
+                    Title = "Pack install failed",
+                    Content = ex.Message,
+                    CloseButtonText = "OK",
+                    DefaultButton = ContentDialogButton.Close,
+                };
+                await dialog.ShowAsync();
+            }
+            catch { }
+        }
+    }
+
     public event PropertyChangedEventHandler? PropertyChanged;
     private void OnPropertyChanged(string name)
         => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));

@@ -31,7 +31,9 @@ public sealed partial class SidebarProcessingControl : UserControl
     {
         if (e.PropertyName is nameof(EngineClient.LastProgress)
                           or nameof(EngineClient.Phase)
-                          or nameof(EngineClient.State))
+                          or nameof(EngineClient.State)
+                          or nameof(EngineClient.IsPaused)
+                          or nameof(EngineClient.LastScanDuration))
         {
             DispatcherQueue.TryEnqueue(Sync);
         }
@@ -68,23 +70,48 @@ public sealed partial class SidebarProcessingControl : UserControl
         }
     }
 
-    private async void OnPauseResumeClicked(object sender, RoutedEventArgs e)
+    private async void OnAutoPilotClicked(object sender, RoutedEventArgs e)
     {
-        var phase = EngineClient.Instance.LastProgress?.Phase;
+        // FEAT-CRIT-5: AutoPilot — fire-and-forget. The engine drives the
+        // Scan -> Cluster -> Plan -> Caption pipeline; the sidebar shows
+        // phase/progress via the same ScanProgress/PhaseChanged events
+        // the manual flow uses, so the existing UI keeps working.
+        var vm = AppViewModel.Instance;
+        if (!vm.HasFolder)
+        {
+            await ShowAlertAsync("Pick a folder first",
+                "AutoPilot needs a library folder. Use the picker at the top of the sidebar.");
+            return;
+        }
         try
         {
-            // Pause/Resume detection: macOS uses a separate IsPaused flag in
-            // ScanProgress; for our schema, we just toggle and let the engine
-            // ignore irrelevant state. Phase 2 wires a proper IsPaused.
-            if (PauseResumeText.Text == "Pause")
+            await EngineClient.Instance.AutoPilotAsync(vm.FolderPath!);
+            DebugLog.Info($"Sent autoPilot: {PathRedactor.Redact(vm.FolderPath!)}");
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Error("AutoPilot IPC failed: " + ex.Message);
+            await ShowAlertAsync("AutoPilot didn't start",
+                "FileID couldn't tell the engine to start AutoPilot. Engine status: "
+                + EngineClient.Instance.State);
+        }
+    }
+
+    private async void OnPauseResumeClicked(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            // FEAT-1: drive the toggle off EngineClient.IsPaused (set by
+            // PauseScanAsync/ResumeScanAsync optimistically) instead of
+            // reading the visible Text — which desyncs if the engine
+            // emits an unrelated phase update between click + IPC reply.
+            if (EngineClient.Instance.IsPaused)
             {
-                await EngineClient.Instance.PauseScanAsync();
-                PauseResumeText.Text = "Resume";
+                await EngineClient.Instance.ResumeScanAsync();
             }
             else
             {
-                await EngineClient.Instance.ResumeScanAsync();
-                PauseResumeText.Text = "Pause";
+                await EngineClient.Instance.PauseScanAsync();
             }
         }
         catch (Exception ex)
@@ -98,7 +125,6 @@ public sealed partial class SidebarProcessingControl : UserControl
         try
         {
             await EngineClient.Instance.CancelScanAsync();
-            PauseResumeText.Text = "Pause";
         }
         catch (Exception ex)
         {
@@ -120,6 +146,12 @@ public sealed partial class SidebarProcessingControl : UserControl
 
         StartScanButton.IsEnabled = AppViewModel.Instance.HasFolder
                                   && EngineClient.Instance.State == EngineClient.LifecycleState.Ready;
+        // AutoPilot follows the same eligibility — disabled when no folder
+        // picked or engine not ready, plus while a scan/run is in flight.
+        AutoPilotButton.IsEnabled = StartScanButton.IsEnabled && !isInFlight;
+
+        // FEAT-1: Pause/Resume label always reflects engine truth.
+        PauseResumeText.Text = EngineClient.Instance.IsPaused ? "Resume" : "Pause";
 
         if (isInFlight && prog is not null)
         {
@@ -166,7 +198,14 @@ public sealed partial class SidebarProcessingControl : UserControl
         }
         else if (isCompleted && prog is not null)
         {
-            CompletedSummary.Text = $"Scan complete — {prog.Processed:N0} files in {FormatDuration(prog.Total > 0 ? 0 : 0)}.";
+            // FEAT-2: real duration from EngineClient.LastScanDuration
+            // (tracked from StartScanAsync to ScanCompleteEvent). The
+            // previous version showed "in 0s" because of a placeholder
+            // typo `prog.Total > 0 ? 0 : 0`.
+            var elapsed = EngineClient.Instance.LastScanDuration.TotalSeconds;
+            CompletedSummary.Text = elapsed > 0
+                ? $"Scan complete — {prog.Processed:N0} files in {FormatDuration(elapsed)}."
+                : $"Scan complete — {prog.Processed:N0} files.";
         }
         else if (!AppViewModel.Instance.HasFolder)
         {

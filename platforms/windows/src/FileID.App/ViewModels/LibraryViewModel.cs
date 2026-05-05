@@ -219,12 +219,15 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
 
     private void ScheduleRefresh()
     {
-        var prior = _searchCts;
+        // BUG-1: two rapid Query setters from the dispatcher could both
+        // read the same `prior` and double-dispose. Interlocked.Exchange
+        // makes the swap atomic — only one caller ever sees a given old
+        // CTS as `prior`.
         var cts = new CancellationTokenSource();
-        _searchCts = cts;
+        var prior = Interlocked.Exchange(ref _searchCts, cts);
         if (prior != null)
         {
-            prior.Cancel();
+            try { prior.Cancel(); } catch (ObjectDisposedException) { }
             prior.Dispose();
         }
         _ = Task.Run(async () =>

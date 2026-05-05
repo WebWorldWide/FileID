@@ -54,7 +54,13 @@ public sealed class SankeyFlowControl : Control
         SizeChanged += (_, _) => Render();
         PointerMoved += OnPointerMoved;
         PointerExited += OnPointerExited;
+        Tapped += OnTapped;
     }
+
+    /// <summary>Fires (source, category) when the user clicks a ribbon.</summary>
+    public event EventHandler<(string Source, string Category)>? RibbonInvoked;
+
+    private Ribbon? _hovered;
 
     public void SetPlan(RestructurePlan? plan)
     {
@@ -343,8 +349,17 @@ public sealed class SankeyFlowControl : Control
         ApplyHover(null);
     }
 
+    private void OnTapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e)
+    {
+        if (_hovered is { } h)
+        {
+            RibbonInvoked?.Invoke(this, (h.Source, h.Category));
+        }
+    }
+
     private void ApplyHover(Ribbon? hovered)
     {
+        _hovered = hovered;
         // Reset all to idle.
         foreach (var r in _ribbons) r.Path.Fill = r.IdleFill;
         foreach (var (rect, fill) in _rectIdleFill) rect.Fill = fill;

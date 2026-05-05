@@ -68,7 +68,7 @@
         </Style>
     </UserControl.Resources>
 
-    <Grid Padding="32,28,32,20" RowSpacing="20">
+    <Grid Padding="32,32,32,24" RowSpacing="20">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
@@ -98,6 +98,74 @@
                                    TextWrapping="Wrap"
                                    Style="{StaticResource BodyTextBlockStyle}"
                                    Text="No plan generated yet. Click Generate plan to compute the proposed reorganization for your library."/>
+                        <!-- FEAT-CRIT-3: three-tier classifier headline.
+                             Anchor folders (kept intact), Mixed folders (kept,
+                             outliers extracted), Junk folders (dissolved).
+                             Computed from per-source-folder move ratios. -->
+                        <Grid x:Name="ClassifierStrip"
+                              Visibility="Collapsed"
+                              ColumnSpacing="12"
+                              Margin="0,4,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Border Grid.Column="0"
+                                    Padding="14,12"
+                                    CornerRadius="8"
+                                    Background="{ThemeResource SubtleFillColorTertiaryBrush}"
+                                    BorderBrush="{ThemeResource GoldBrush}"
+                                    BorderThickness="1">
+                                <StackPanel Spacing="2">
+                                    <TextBlock x:Name="AnchorCountText"
+                                               Text="0"
+                                               Style="{StaticResource SubtitleTextBlockStyle}"/>
+                                    <TextBlock Text="Anchor folders"
+                                               Style="{StaticResource CaptionTextBlockStyle}"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                                    <TextBlock Text="Kept intact"
+                                               Style="{StaticResource CaptionTextBlockStyle}"
+                                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"/>
+                                </StackPanel>
+                            </Border>
+                            <Border Grid.Column="1"
+                                    Padding="14,12"
+                                    CornerRadius="8"
+                                    Background="{ThemeResource SubtleFillColorTertiaryBrush}"
+                                    BorderBrush="{ThemeResource AiBrush}"
+                                    BorderThickness="1">
+                                <StackPanel Spacing="2">
+                                    <TextBlock x:Name="MixedCountText"
+                                               Text="0"
+                                               Style="{StaticResource SubtitleTextBlockStyle}"/>
+                                    <TextBlock Text="Mixed folders"
+                                               Style="{StaticResource CaptionTextBlockStyle}"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                                    <TextBlock Text="Outliers extracted"
+                                               Style="{StaticResource CaptionTextBlockStyle}"
+                                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"/>
+                                </StackPanel>
+                            </Border>
+                            <Border Grid.Column="2"
+                                    Padding="14,12"
+                                    CornerRadius="8"
+                                    Background="{ThemeResource SubtleFillColorTertiaryBrush}"
+                                    BorderBrush="{ThemeResource DestructiveBorderBrush}"
+                                    BorderThickness="1">
+                                <StackPanel Spacing="2">
+                                    <TextBlock x:Name="JunkCountText"
+                                               Text="0"
+                                               Style="{StaticResource SubtitleTextBlockStyle}"/>
+                                    <TextBlock Text="Junk folders"
+                                               Style="{StaticResource CaptionTextBlockStyle}"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                                    <TextBlock Text="Dissolved"
+                                               Style="{StaticResource CaptionTextBlockStyle}"
+                                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"/>
+                                </StackPanel>
+                            </Border>
+                        </Grid>
                         <Button x:Name="GeneratePlanButton"
                                 Content="Generate plan"
                                 Click="OnPlanClicked"
@@ -178,14 +246,14 @@
         </ScrollViewer>
 
         <Grid Grid.Row="2"
-              Padding="16,12"
+              Padding="16,16"
               CornerRadius="12"
               BorderBrush="{ThemeResource GoldBrush}"
               BorderThickness="1">
             <Grid.Background>
                 <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
-                    <GradientStop Offset="0" Color="#33FFCC00" />
-                    <GradientStop Offset="1" Color="#11FF6600" />
+                    <GradientStop Offset="0" Color="{ThemeResource ApplyBarGoldStopColor}" />
+                    <GradientStop Offset="1" Color="{ThemeResource ApplyBarOrangeStopColor}" />
                 </LinearGradientBrush>
             </Grid.Background>
             <Grid.ColumnDefinitions>
@@ -203,12 +271,16 @@
                     Content="Preview as symlinks"
                     IsEnabled="False"
                     Click="OnApplySymlinksClicked"
+                    ToolTipService.ToolTip="Lay down symlinks instead of moving files. Reversible — delete the symlinked tree to undo."
+                    AutomationProperties.Name="Preview restructure as symlinks"
                     Margin="0,0,8,0"/>
             <Button x:Name="ApplyMovesButton"
                     Grid.Column="2"
                     Content="Apply (move)"
                     IsEnabled="False"
                     Click="OnApplyMovesClicked"
+                    ToolTipService.ToolTip="Move files to their proposed destinations. Recoverable via Ctrl+Z (one undo step)."
+                    AutomationProperties.Name="Apply restructure as real moves"
                     Style="{StaticResource AccentButtonStyle}"/>
         </Grid>
 

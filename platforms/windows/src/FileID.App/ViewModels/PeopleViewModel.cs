@@ -26,6 +26,8 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged
     private readonly DispatcherQueue _ui;
     private bool _isLoading;
     private string? _errorMessage;
+    // FEAT-CRIT-1: multi-select mode for bulk merge / mark-as-unknown.
+    private bool _isSelectMode;
 
     public PeopleViewModel(string dbPath, DispatcherQueue ui)
     {
@@ -34,6 +36,49 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged
     }
 
     public ObservableCollection<PersonCluster> Clusters { get; } = new();
+
+    /// <summary>FEAT-CRIT-1: when true, cluster cards show a checkbox
+    /// overlay and the bulk-action toolbar replaces the page header.</summary>
+    public bool IsSelectMode
+    {
+        get => _isSelectMode;
+        set
+        {
+            if (_isSelectMode == value) return;
+            _isSelectMode = value;
+            // Leaving select mode clears every selection.
+            if (!value)
+            {
+                foreach (var c in Clusters) c.IsSelected = false;
+            }
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(SelectedCount));
+        }
+    }
+
+    /// <summary>FEAT-CRIT-1: count of currently-selected cluster cards.</summary>
+    public int SelectedCount
+    {
+        get
+        {
+            int n = 0;
+            foreach (var c in Clusters) if (c.IsSelected) n++;
+            return n;
+        }
+    }
+
+    /// <summary>FEAT-CRIT-1: cluster IDs of every selected card, in order.</summary>
+    public IReadOnlyList<long> SelectedClusterIds
+    {
+        get
+        {
+            var ids = new List<long>();
+            foreach (var c in Clusters) if (c.IsSelected) ids.Add(c.ClusterId);
+            return ids;
+        }
+    }
+
+    public void NotifySelectedCountChanged() => OnPropertyChanged(nameof(SelectedCount));
 
     public bool IsLoading
     {
@@ -155,12 +200,26 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged
         => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name ?? string.Empty));
 }
 
-internal sealed class PersonCluster
+internal sealed class PersonCluster : INotifyPropertyChanged
 {
     public required int ClusterId { get; init; }
     public required long AnchorFaceId { get; init; }
     public required int MemberCount { get; init; }
     public string? DisplayName { get; init; }
+
+    // FEAT-CRIT-1: per-card selection state for People multi-select.
+    private bool _isSelected;
+    public bool IsSelected
+    {
+        get => _isSelected;
+        set
+        {
+            if (_isSelected == value) return;
+            _isSelected = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsSelected)));
+        }
+    }
+    public event PropertyChangedEventHandler? PropertyChanged;
 
     private Microsoft.UI.Xaml.Media.Imaging.BitmapImage? _cachedAnchorImage;
     private bool _anchorImageResolved;

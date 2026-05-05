@@ -107,16 +107,38 @@ impl ScanSession {
         let sink = self.sink.clone();
 
         let emit_phase = |phase: SessionPhase| {
+            // BUG-4: try_send + drop on overflow. Phase changes are
+            // low-frequency (a few per scan) so the drop is unlikely
+            // in practice, but the original tokio::spawn(async { send })
+            // pattern could pile up unbounded tasks waiting on a full
+            // sink. try_send bounds the engine's worst-case memory.
             let p = phase.as_ipc_phase();
-            let s = sink.clone();
-            tokio::spawn(async move {
-                s.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(p))))
-                    .await;
-            });
+            let _ = sink.try_send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(p))));
         };
 
         on_phase(SessionPhase::Discovering);
         emit_phase(SessionPhase::Discovering);
+
+        // Persist a scan_sessions row so Settings → Recent scans can list
+        // past scans + offer Re-scan. Uses the engine's single-writer
+        // connection — same one DBWriter holds.
+        let started_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        {
+            let conn = self.db_conn.lock();
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO scan_sessions \
+                 (id, root_path, started_at, completed_at, last_file_index, total_files, status) \
+                 VALUES (?1, ?2, ?3, NULL, NULL, NULL, 'running')",
+                rusqlite::params![
+                    session_id,
+                    root.to_string_lossy(),
+                    started_unix,
+                ],
+            );
+        }
 
         // Wire the three pipeline stages with bounded mpsc channels.
         let discovery = Discovery::new(root, self.coordinator.clone());
@@ -150,6 +172,20 @@ impl ScanSession {
             .await?;
 
         let elapsed = started.elapsed().as_secs_f64();
+
+        // Stamp the scan_sessions row with completed_at + status.
+        {
+            let conn = self.db_conn.lock();
+            let final_status = if self.coordinator.is_cancelled() { "cancelled" } else { "completed" };
+            let completed_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            let _ = conn.execute(
+                "UPDATE scan_sessions SET completed_at = ?1, total_files = ?2, status = ?3 WHERE id = ?4",
+                rusqlite::params![completed_unix, total as i64, final_status, session_id],
+            );
+        }
 
         if self.coordinator.is_cancelled() {
             on_phase(SessionPhase::Cancelled);
@@ -213,11 +249,11 @@ fn emit_batch_summary(sink: &Sink, stats: &BatchStats) {
         resident_mb: 0,
         available_mb: 0,
     };
-    let s = sink.clone();
-    tokio::spawn(async move {
-        s.send(IpcEvent::now(EventPayload::BatchSummary(Wrap::new(summary))))
-            .await;
-    });
+    // BUG-4: try_send instead of tokio::spawn(async { send.await }).
+    // Per-batch BatchSummary events (one per ~100 files) are best-effort —
+    // dropping during a sink-full burst is preferable to spawning an
+    // unbounded tail of tasks awaiting capacity.
+    let _ = sink.try_send(IpcEvent::now(EventPayload::BatchSummary(Wrap::new(summary))));
 }
 
 const PROGRESS_THROTTLE_MS: u128 = 100;
@@ -256,11 +292,10 @@ fn maybe_emit_progress(
         resident_mb: 0,
         available_mb: 0,
     };
-    let s = sink.clone();
-    tokio::spawn(async move {
-        s.send(IpcEvent::now(EventPayload::Progress(Wrap::new(progress))))
-            .await;
-    });
+    // BUG-4: try_send. Progress events are throttled to 10 Hz / 1k files,
+    // so dropping is rare in practice — and the next emit (≤100ms later)
+    // brings the UI back in sync.
+    let _ = sink.try_send(IpcEvent::now(EventPayload::Progress(Wrap::new(progress))));
 }
 
 /// Lift the bounded-channel cap (Tagger → DBWriter) out of the

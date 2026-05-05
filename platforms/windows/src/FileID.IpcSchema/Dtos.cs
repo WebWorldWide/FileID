@@ -21,9 +21,17 @@ public sealed record EngineInfo(
 public sealed record RestructurePlan(
     string LibraryRoot,
     System.Collections.Generic.IReadOnlyList<RestructureMove> Moves,
-    System.Collections.Generic.IReadOnlyList<RestructureCategoryCount> CategoryCounts);
+    System.Collections.Generic.IReadOnlyList<RestructureCategoryCount> CategoryCounts,
+    /// <summary>V14.7.2: engine-authoritative Anchor/Mixed/Junk counts.
+    /// Null on plans from older engine builds that didn't compute it.</summary>
+    FolderClassificationCounts? FolderClassifications = null);
 
 public sealed record RestructureCategoryCount(string Category, uint Count);
+
+public sealed record FolderClassificationCounts(
+    uint AnchorFolders,
+    uint MixedFolders,
+    uint JunkFolders);
 
 public sealed record RestructureApplyResult(
     uint Applied,
@@ -57,6 +65,17 @@ public sealed record MergeSuggestion(
 
 public sealed record MergeSuggestions(
     System.Collections.Generic.IReadOnlyList<MergeSuggestion> Pairs);
+
+public sealed record RecentScans(
+    System.Collections.Generic.IReadOnlyList<RecentScanItem> Items);
+
+public sealed record RecentScanItem(
+    string SessionId,
+    string RootPath,
+    double StartedAt,
+    double? CompletedAt,
+    long? TotalFiles,
+    string Status);
 
 /// <summary>
 /// Hardware probe surfaced by the engine on startup. Settings → Performance

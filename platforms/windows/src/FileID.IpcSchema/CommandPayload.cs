@@ -89,11 +89,24 @@ public sealed record RenamePersonCommand(
     string? LastName = null,
     string? Suffix = null) : CommandPayload;
 
+/// <summary>FEAT-CRIT-1: bulk mark-as-unknown for People multi-select.</summary>
+public sealed record MarkPersonsAsUnknownCommand(
+    System.Collections.Generic.IReadOnlyList<long> PersonIds) : CommandPayload;
+
 public sealed record FindMergeSuggestionsCommand : CommandPayload;
 
 public sealed record EmbedImageQueryCommand(
     long FileId,
     string QueryId) : CommandPayload;
+
+public sealed record RestoreFromTrashCommand(string BatchId) : CommandPayload;
+
+public sealed record RevertMergeCommand(
+    long SourcePersonId,
+    long DestinationPersonId,
+    System.Collections.Generic.IReadOnlyList<long> FaceIdsToRevert) : CommandPayload;
+
+public sealed record RecentScansCommand(uint Limit = 20) : CommandPayload;
 
 /// <summary>
 /// Reads/writes the externally-tagged shape Swift's Codable produces.
@@ -136,8 +149,12 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             "mergeClusters"      => JsonSerializer.Deserialize<MergeClustersCommand>(ref reader, options) ?? throw new JsonException("mergeClusters: null body"),
             "embedTextQuery"     => JsonSerializer.Deserialize<EmbedTextQueryCommand>(ref reader, options) ?? throw new JsonException("embedTextQuery: null body"),
             "renamePerson"       => JsonSerializer.Deserialize<RenamePersonCommand>(ref reader, options) ?? throw new JsonException("renamePerson: null body"),
+            "markPersonsAsUnknown" => JsonSerializer.Deserialize<MarkPersonsAsUnknownCommand>(ref reader, options) ?? throw new JsonException("markPersonsAsUnknown: null body"),
             "findMergeSuggestions" => Empty<FindMergeSuggestionsCommand>(ref reader),
             "embedImageQuery"    => JsonSerializer.Deserialize<EmbedImageQueryCommand>(ref reader, options) ?? throw new JsonException("embedImageQuery: null body"),
+            "restoreFromTrash"   => JsonSerializer.Deserialize<RestoreFromTrashCommand>(ref reader, options) ?? throw new JsonException("restoreFromTrash: null body"),
+            "revertMerge"        => JsonSerializer.Deserialize<RevertMergeCommand>(ref reader, options) ?? throw new JsonException("revertMerge: null body"),
+            "recentScans"        => JsonSerializer.Deserialize<RecentScansCommand>(ref reader, options) ?? throw new JsonException("recentScans: null body"),
 
             "pauseScan"          => Empty<PauseScanCommand>(ref reader),
             "resumeScan"         => Empty<ResumeScanCommand>(ref reader),
@@ -187,8 +204,12 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             case MergeClustersCommand c:       WriteVariant(writer, "mergeClusters", c, options); break;
             case EmbedTextQueryCommand c:      WriteVariant(writer, "embedTextQuery", c, options); break;
             case RenamePersonCommand c:        WriteVariant(writer, "renamePerson", c, options); break;
+            case MarkPersonsAsUnknownCommand c:WriteVariant(writer, "markPersonsAsUnknown", c, options); break;
             case FindMergeSuggestionsCommand:  WriteEmpty(writer, "findMergeSuggestions"); break;
             case EmbedImageQueryCommand c:     WriteVariant(writer, "embedImageQuery", c, options); break;
+            case RestoreFromTrashCommand c:    WriteVariant(writer, "restoreFromTrash", c, options); break;
+            case RevertMergeCommand c:         WriteVariant(writer, "revertMerge", c, options); break;
+            case RecentScansCommand c:         WriteVariant(writer, "recentScans", c, options); break;
             default:
                 throw new JsonException($"CommandPayload: unknown C# type {value.GetType().FullName}");
         }

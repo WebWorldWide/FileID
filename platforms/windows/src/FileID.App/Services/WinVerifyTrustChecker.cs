@@ -50,8 +50,12 @@ internal static class WinVerifyTrustChecker
             return IntegrityVerdict.NotFound;
         }
 
-        // WinVerifyTrust cares only about the signature chain. We pass
-        // WTD_REVOCATION_CHECK_CHAIN to also flag revoked intermediaries.
+        // SEC-4: WTD_REVOCATION_CHECK_CHAIN in dwProvFlags is a no-op
+        // unless fdwRevocationChecks asks for it. The previous version
+        // had REVOKE_NONE so revocation never actually ran. Set
+        // WHOLECHAIN to validate every cert in the chain (including the
+        // root CA) against published CRL/OCSP. This is what blocks a
+        // signed-but-revoked binary from spawning.
         var fileInfo = new WinTrustFileInfo
         {
             cbStruct = (uint)Marshal.SizeOf<WinTrustFileInfo>(),
@@ -72,7 +76,7 @@ internal static class WinVerifyTrustChecker
                 pPolicyCallbackData = IntPtr.Zero,
                 pSIPClientData = IntPtr.Zero,
                 dwUIChoice = WTD_UI_NONE,
-                fdwRevocationChecks = WTD_REVOKE_NONE,
+                fdwRevocationChecks = WTD_REVOKE_WHOLECHAIN,
                 dwUnionChoice = WTD_CHOICE_FILE,
                 pInfoStruct = fileInfoPtr,
                 dwStateAction = WTD_STATEACTION_VERIFY,
@@ -154,6 +158,7 @@ internal static class WinVerifyTrustChecker
 
     private const uint WTD_UI_NONE                = 2;
     private const uint WTD_REVOKE_NONE            = 0;
+    private const uint WTD_REVOKE_WHOLECHAIN      = 1; // SEC-4: actually checks revocation
     private const uint WTD_CHOICE_FILE            = 1;
     private const uint WTD_STATEACTION_VERIFY     = 1;
     private const uint WTD_STATEACTION_CLOSE      = 2;

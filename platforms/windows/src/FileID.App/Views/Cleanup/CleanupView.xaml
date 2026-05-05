@@ -12,7 +12,7 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <Grid Padding="32,28,32,20" RowSpacing="20">
+    <Grid Padding="32,32,32,24" RowSpacing="20">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
@@ -61,9 +61,60 @@
                               Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                               BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                               BorderThickness="1"
-                              Padding="16">
+                              Padding="16"
+                              Tag="{x:Bind PerceptualHash}">
+                            <!-- FEAT-CRIT-2: per-group right-click action menu.
+                                 Mirror of macOS Cleanup group menu. -->
+                            <Grid.ContextFlyout>
+                                <MenuFlyout>
+                                    <MenuFlyoutItem Text="Keep first"
+                                                    Click="OnGroupKeepFirst"
+                                                    ToolTipService.ToolTip="Mark only the first member as keeper.">
+                                        <MenuFlyoutItem.Icon>
+                                            <FontIcon Glyph="&#xE73E;" />
+                                        </MenuFlyoutItem.Icon>
+                                    </MenuFlyoutItem>
+                                    <MenuFlyoutItem Text="Keep largest"
+                                                    Click="OnGroupKeepLargest"
+                                                    ToolTipService.ToolTip="Mark the largest file as keeper.">
+                                        <MenuFlyoutItem.Icon>
+                                            <FontIcon Glyph="&#xE8AB;" />
+                                        </MenuFlyoutItem.Icon>
+                                    </MenuFlyoutItem>
+                                    <MenuFlyoutItem Text="Invert keeper"
+                                                    Click="OnGroupInvert"
+                                                    ToolTipService.ToolTip="Pick the next member as keeper.">
+                                        <MenuFlyoutItem.Icon>
+                                            <FontIcon Glyph="&#xE72C;" />
+                                        </MenuFlyoutItem.Icon>
+                                    </MenuFlyoutItem>
+                                    <MenuFlyoutSeparator />
+                                    <MenuFlyoutItem Text="Skip group"
+                                                    Click="OnGroupSkip"
+                                                    ToolTipService.ToolTip="Exclude this group from 'Trash non-keepers'.">
+                                        <MenuFlyoutItem.Icon>
+                                            <FontIcon Glyph="&#xE894;" />
+                                        </MenuFlyoutItem.Icon>
+                                    </MenuFlyoutItem>
+                                    <MenuFlyoutItem Text="Unskip group"
+                                                    Click="OnGroupUnskip"
+                                                    ToolTipService.ToolTip="Re-include this group in 'Trash non-keepers'.">
+                                        <MenuFlyoutItem.Icon>
+                                            <FontIcon Glyph="&#xE73E;" />
+                                        </MenuFlyoutItem.Icon>
+                                    </MenuFlyoutItem>
+                                    <MenuFlyoutSeparator />
+                                    <MenuFlyoutItem Text="Trash this group only"
+                                                    Click="OnGroupTrashNow"
+                                                    ToolTipService.ToolTip="Move every non-keeper member to the Recycle Bin.">
+                                        <MenuFlyoutItem.Icon>
+                                            <FontIcon Glyph="&#xE74D;" />
+                                        </MenuFlyoutItem.Icon>
+                                    </MenuFlyoutItem>
+                                </MenuFlyout>
+                            </Grid.ContextFlyout>
                             <StackPanel Spacing="6">
-                                <TextBlock Text="{x:Bind Caption}"
+                                <TextBlock Text="{x:Bind Caption, Mode=OneWay}"
                                            Style="{StaticResource BodyStrongTextBlockStyle}"/>
                                 <ItemsRepeater ItemsSource="{x:Bind Members}">
                                     <ItemsRepeater.Layout>

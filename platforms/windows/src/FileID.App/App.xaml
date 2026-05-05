@@ -18,6 +18,7 @@
             </ResourceDictionary.MergedDictionaries>
 
             <conv:BoolToVisibilityConverter x:Key="BoolToVisibility" />
+            <conv:NullToVisibilityConverter x:Key="NullToVisibility" />
         </ResourceDictionary>
     </Application.Resources>
 </Application>

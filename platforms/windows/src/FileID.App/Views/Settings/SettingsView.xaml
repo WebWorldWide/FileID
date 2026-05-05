@@ -21,7 +21,7 @@
 
     <ScrollViewer VerticalScrollBarVisibility="Auto"
                   HorizontalScrollBarVisibility="Disabled">
-        <StackPanel Padding="32,28,32,32" Spacing="20" MaxWidth="820" HorizontalAlignment="Stretch">
+        <StackPanel Padding="32,32,32,32" Spacing="20" MaxWidth="820" HorizontalAlignment="Stretch">
 
             <StackPanel Spacing="4">
                 <TextBlock Text="Settings" Style="{StaticResource TitleTextBlockStyle}"/>
@@ -57,6 +57,99 @@
                 </StackPanel>
             </Border>
 
+            <!-- FEAT-CRIT-4: Models card. Shows install/progress per model
+                 kind, mirrors macOS Settings.swift "Local AI" section. -->
+            <Border CornerRadius="12"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    Padding="20">
+                <StackPanel Spacing="14">
+                    <TextBlock Text="Local AI" Style="{StaticResource SubtitleTextBlockStyle}"/>
+                    <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               TextWrapping="Wrap"
+                               Text="On-device models. Install once; everything runs locally."/>
+
+                    <!-- ArcFace -->
+                    <Grid ColumnSpacing="12" Padding="14,12" CornerRadius="10"
+                          Background="{ThemeResource SubtleFillColorTertiaryBrush}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Spacing="2">
+                            <TextBlock Text="ArcFace + SCRFD"
+                                       Style="{StaticResource BodyStrongTextBlockStyle}"/>
+                            <TextBlock x:Name="ArcFaceStatusText"
+                                       Text="Face detection + identity embedding (~120 MB)"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                            <ProgressBar x:Name="ArcFaceProgress"
+                                         Visibility="Collapsed"
+                                         Margin="0,4,0,0"
+                                         Height="4"
+                                         Maximum="1"/>
+                        </StackPanel>
+                        <TextBlock Grid.Column="1"
+                                   x:Name="ArcFaceSizeText"
+                                   Text="120 MB"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   VerticalAlignment="Center"
+                                   Margin="0,0,8,0"/>
+                        <Button Grid.Column="2"
+                                x:Name="ArcFaceInstallButton"
+                                Content="Install"
+                                Tag="arcface_buffalo"
+                                Click="OnInstallModelClicked"
+                                AutomationProperties.Name="Install ArcFace + SCRFD"/>
+                    </Grid>
+
+                    <!-- MobileCLIP-S2 -->
+                    <Grid ColumnSpacing="12" Padding="14,12" CornerRadius="10"
+                          Background="{ThemeResource SubtleFillColorTertiaryBrush}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Spacing="2">
+                            <TextBlock Text="MobileCLIP-S2"
+                                       Style="{StaticResource BodyStrongTextBlockStyle}"/>
+                            <TextBlock x:Name="ClipStatusText"
+                                       Text="Semantic image search (~210 MB) — 'a dog at the beach'"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                            <ProgressBar x:Name="ClipProgress"
+                                         Visibility="Collapsed"
+                                         Margin="0,4,0,0"
+                                         Height="4"
+                                         Maximum="1"/>
+                        </StackPanel>
+                        <TextBlock Grid.Column="1"
+                                   x:Name="ClipSizeText"
+                                   Text="210 MB"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   VerticalAlignment="Center"
+                                   Margin="0,0,8,0"/>
+                        <Button Grid.Column="2"
+                                x:Name="ClipInstallButton"
+                                Content="Install"
+                                Tag="mobileclip_s2"
+                                Click="OnInstallModelClicked"
+                                AutomationProperties.Name="Install MobileCLIP-S2"/>
+                    </Grid>
+
+                    <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                               TextWrapping="Wrap"
+                               Text="VLM downloads (Qwen 2.5-VL · Gemma 3 · SmolVLM) live on the Deep Analyze tab."/>
+                </StackPanel>
+            </Border>
+
             <!-- Engine info. -->
             <Border CornerRadius="12"
                     Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
@@ -69,9 +162,12 @@
                                Style="{StaticResource BodyTextBlockStyle}"/>
                     <TextBlock Text="{x:Bind WorkerCapText, Mode=OneWay}"
                                Style="{StaticResource BodyTextBlockStyle}"/>
-                    <Button Content="Open log folder"
-                            Click="OnOpenLogsClicked"
-                            Margin="0,8,0,0"/>
+                    <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,8,0,0">
+                        <Button Content="Open log folder" Click="OnOpenLogsClicked" />
+                        <Button Content="Recent scans" Click="OnRecentScansClicked" />
+                        <Button Content="Verify zero telemetry" Click="OnVerifyPrivacyClicked"
+                                ToolTipService.ToolTip="Scan the engine binary for known telemetry strings (Sentry, AppInsights, Firebase, Segment, Mixpanel, Google Analytics)." />
+                    </StackPanel>
                 </StackPanel>
             </Border>
 
@@ -146,8 +242,10 @@
                             <TextBlock Grid.Column="0" VerticalAlignment="Center"
                                        Style="{StaticResource BodyTextBlockStyle}"
                                        Text="NVIDIA CUDA Pack — ~600 MB. Unlocks ~30% faster ML inference on RTX-class GPUs."/>
-                            <Button Grid.Column="1" Content="Install" IsEnabled="False"
-                                    ToolTipService.ToolTip="Pack hosting lands in V14.7 once the manifest URLs are pinned in MODELS.md."/>
+                            <Button Grid.Column="1" Content="Install"
+                                    Click="OnInstallPackClicked"
+                                    Tag="cuda_pack_x64"
+                                    ToolTipService.ToolTip="Downloads the CUDA EP DLLs from the FileID HuggingFace dataset repo." />
                         </Grid>
                         <Grid ColumnSpacing="8">
                             <Grid.ColumnDefinitions>
@@ -157,8 +255,10 @@
                             <TextBlock Grid.Column="0" VerticalAlignment="Center"
                                        Style="{StaticResource BodyTextBlockStyle}"
                                        Text="Intel OpenVINO Pack — ~300 MB. Vendor-tuned EP for Intel iGPU + Arc."/>
-                            <Button Grid.Column="1" Content="Install" IsEnabled="False"
-                                    ToolTipService.ToolTip="Pack hosting lands in V14.7 once the manifest URLs are pinned in MODELS.md."/>
+                            <Button Grid.Column="1" Content="Install"
+                                    Click="OnInstallPackClicked"
+                                    Tag="openvino_pack_x64"
+                                    ToolTipService.ToolTip="Downloads the OpenVINO EP DLLs from the FileID HuggingFace dataset repo." />
                         </Grid>
                         <Grid ColumnSpacing="8">
                             <Grid.ColumnDefinitions>
@@ -168,9 +268,15 @@
                             <TextBlock Grid.Column="0" VerticalAlignment="Center"
                                        Style="{StaticResource BodyTextBlockStyle}"
                                        Text="Snapdragon QNN Pack — ~150 MB. Hexagon NPU acceleration for WoA."/>
-                            <Button Grid.Column="1" Content="Install" IsEnabled="False"
-                                    ToolTipService.ToolTip="Pack hosting lands in V14.7 once the manifest URLs are pinned in MODELS.md."/>
+                            <Button Grid.Column="1" Content="Install"
+                                    Click="OnInstallPackClicked"
+                                    Tag="qnn_pack_arm64"
+                                    ToolTipService.ToolTip="Downloads the QNN EP DLLs from the FileID HuggingFace dataset repo." />
                         </Grid>
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   TextWrapping="Wrap"
+                                   Text="Pack ZIPs are SHA256-pinned; engine restarts after install to pick up the new EP. Manual install (download + extract) is also supported — just drop the DLLs next to FileIDEngine.exe." />
                     </StackPanel>
 
                     <!-- Manual override. Auto-detect is the default; Settings.json

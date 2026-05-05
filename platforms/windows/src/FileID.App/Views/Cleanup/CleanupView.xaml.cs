@@ -61,6 +61,9 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         long bytes = 0;
         foreach (var grp in ViewModel.Groups)
         {
+            // FEAT-CRIT-2: skipped groups are excluded from the global
+            // "Trash non-keepers" run.
+            if (grp.IsSkipped) continue;
             foreach (var m in grp.Members)
             {
                 if (!m.IsKeeper)
@@ -89,6 +92,19 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
 
         try
         {
+            Services.UndoStack.CaptureNextBulkResult(
+                "trashFiles:",
+                $"trash {ids.Count} duplicate{(ids.Count == 1 ? "" : "s")}",
+                async batchId =>
+                {
+                    if (string.IsNullOrEmpty(batchId)) return false;
+                    try
+                    {
+                        await ViewModels.EngineClient.Instance.RestoreFromTrashAsync(batchId);
+                        return true;
+                    }
+                    catch { return false; }
+                });
             await ViewModels.EngineClient.Instance.TrashFilesAsync(ids);
         }
         catch
@@ -105,6 +121,114 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         if (bytes < 1024 * 1024) return $"{bytes / 1024.0:0.#} KB";
         if (bytes < 1024L * 1024 * 1024) return $"{bytes / (1024.0 * 1024):0.#} MB";
         return $"{bytes / (1024.0 * 1024 * 1024):0.##} GB";
+    }
+
+    // ─── FEAT-CRIT-2: Per-group action menu handlers ─────────────────
+
+    /// <summary>Walk up the visual tree from the FlyoutItem's target to find
+    /// the DuplicateGroup whose ContextFlyout fired.</summary>
+    private static DuplicateGroup? GroupFromFlyoutItem(object sender)
+    {
+        if (sender is not MenuFlyoutItem item) return null;
+        // The item lives in a MenuFlyout owned by a Grid whose DataContext
+        // is the DuplicateGroup. WinUI 3 flyouts don't expose Owner directly,
+        // but the DataContext on the menu is inherited from the Grid.
+        var p = item.DataContext as DuplicateGroup;
+        return p;
+    }
+
+    private void OnGroupKeepFirst(object sender, RoutedEventArgs e)
+    {
+        var grp = GroupFromFlyoutItem(sender);
+        if (grp == null || grp.Members.Count == 0) return;
+        for (int i = 0; i < grp.Members.Count; i++)
+        {
+            grp.Members[i].IsKeeper = (i == 0);
+        }
+    }
+
+    private void OnGroupKeepLargest(object sender, RoutedEventArgs e)
+    {
+        var grp = GroupFromFlyoutItem(sender);
+        if (grp == null || grp.Members.Count == 0) return;
+        var largestIdx = 0;
+        for (int i = 1; i < grp.Members.Count; i++)
+        {
+            if (grp.Members[i].SizeBytes > grp.Members[largestIdx].SizeBytes)
+            {
+                largestIdx = i;
+            }
+        }
+        for (int i = 0; i < grp.Members.Count; i++)
+        {
+            grp.Members[i].IsKeeper = (i == largestIdx);
+        }
+    }
+
+    private void OnGroupInvert(object sender, RoutedEventArgs e)
+    {
+        var grp = GroupFromFlyoutItem(sender);
+        if (grp == null || grp.Members.Count == 0) return;
+        var currentIdx = -1;
+        for (int i = 0; i < grp.Members.Count; i++)
+        {
+            if (grp.Members[i].IsKeeper) { currentIdx = i; break; }
+        }
+        var nextIdx = (currentIdx + 1) % grp.Members.Count;
+        for (int i = 0; i < grp.Members.Count; i++)
+        {
+            grp.Members[i].IsKeeper = (i == nextIdx);
+        }
+    }
+
+    private void OnGroupSkip(object sender, RoutedEventArgs e)
+    {
+        var grp = GroupFromFlyoutItem(sender);
+        if (grp != null) grp.IsSkipped = true;
+    }
+
+    private void OnGroupUnskip(object sender, RoutedEventArgs e)
+    {
+        var grp = GroupFromFlyoutItem(sender);
+        if (grp != null) grp.IsSkipped = false;
+    }
+
+    private async void OnGroupTrashNow(object sender, RoutedEventArgs e)
+    {
+        var grp = GroupFromFlyoutItem(sender);
+        if (grp == null) return;
+        var ids = new List<long>();
+        long bytes = 0;
+        foreach (var m in grp.Members)
+        {
+            if (!m.IsKeeper) { ids.Add(m.Id); bytes += m.SizeBytes; }
+        }
+        if (ids.Count == 0) return;
+        var confirm = new ContentDialog
+        {
+            XamlRoot = this.XamlRoot,
+            Title = "Trash this group?",
+            Content = $"{ids.Count} non-keeper file{(ids.Count == 1 ? "" : "s")} ({FormatSize(bytes)}) will move to the Recycle Bin.",
+            PrimaryButtonText = "Move to Recycle Bin",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close,
+        };
+        if (await confirm.ShowAsync() != ContentDialogResult.Primary) return;
+        try
+        {
+            Services.UndoStack.CaptureNextBulkResult(
+                "trashFiles:",
+                $"trash {ids.Count} duplicate{(ids.Count == 1 ? "" : "s")}",
+                async batchId =>
+                {
+                    if (string.IsNullOrEmpty(batchId)) return false;
+                    try { await ViewModels.EngineClient.Instance.RestoreFromTrashAsync(batchId); return true; }
+                    catch { return false; }
+                });
+            await ViewModels.EngineClient.Instance.TrashFilesAsync(ids);
+        }
+        catch { }
+        await ViewModel.RefreshAsync(CancellationToken.None);
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;

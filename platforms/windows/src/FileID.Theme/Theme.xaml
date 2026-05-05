@@ -60,6 +60,20 @@
     <SolidColorBrush x:Key="WhiteSubtleFillBrush"        Color="#FFFFFF" Opacity="0.08" />
     <SolidColorBrush x:Key="WhiteSubtleStrokeBrush"      Color="#FFFFFF" Opacity="0.10" />
 
+    <!-- Destructive (clear-folder, trash, wipe). Muted red on dark. -->
+    <Color x:Key="DestructiveColor">#FFE5A5A5</Color>
+    <SolidColorBrush x:Key="DestructiveTextBrush"        Color="{StaticResource DestructiveColor}" />
+    <SolidColorBrush x:Key="DestructiveBackgroundBrush"  Color="#FF2B0000" Opacity="0.13" />
+    <SolidColorBrush x:Key="DestructiveBorderBrush"      Color="#FF2B0000" Opacity="0.33" />
+
+    <!-- Scrim — for badge pills atop tile thumbnails. ~60% black. -->
+    <SolidColorBrush x:Key="TileScrimBrush"              Color="#000000" Opacity="0.60" />
+
+    <!-- Apply-bar gradient (Restructure floating bar). Gold → orange,
+         pre-multiplied alpha so a GradientStop can use it directly. -->
+    <Color x:Key="ApplyBarGoldStopColor">#33FFCC00</Color>
+    <Color x:Key="ApplyBarOrangeStopColor">#11FF6600</Color>
+
     <!-- ─── Spacing scale (Theme.Space.*) ────────────────────────────── -->
     <x:Double x:Key="SpaceXs">4</x:Double>
     <x:Double x:Key="SpaceS">8</x:Double>

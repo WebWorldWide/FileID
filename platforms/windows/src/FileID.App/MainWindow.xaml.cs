@@ -237,6 +237,14 @@ public sealed partial class MainWindow : Window
             }
         });
 
+        // BUG-13: Ctrl+, opens Settings (mirror of macOS Cmd+,).
+        // VirtualKey.Decimal is the NUMPAD period — wrong key. The
+        // ASCII comma reports as VK_OEM_COMMA = 0xBC = 188. Register
+        // ONLY the OEM comma. (Previous version also registered Decimal,
+        // which made numpad-period jump to Settings — surprise.)
+        AddAccelerator((VirtualKey)0xBC, VirtualKeyModifiers.Control,
+            (_, _) => AppViewModel.Instance.ActiveTab = SidebarTab.Settings);
+
         // Ctrl+F — focus search. Phase 1 has no search field in the
         // Detail; the accelerator is reserved here so Phase 2 wiring is
         // a one-liner (raise an event the LibraryView subscribes to).

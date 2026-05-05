@@ -22,7 +22,7 @@
     mc:Ignorable="d">
 
     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-        <StackPanel Padding="32,28,32,32" Spacing="20" MaxWidth="980" HorizontalAlignment="Stretch">
+        <StackPanel Padding="32,32,32,32" Spacing="20" MaxWidth="980" HorizontalAlignment="Stretch">
 
             <StackPanel Spacing="4">
                 <TextBlock Text="Deep Analyze" Style="{StaticResource TitleTextBlockStyle}" />

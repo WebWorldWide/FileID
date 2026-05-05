@@ -39,6 +39,18 @@ pub fn open_writer(db_path: &Path) -> Result<Connection> {
             .with_context(|| format!("applying {pragma}"))?;
     }
     migrations::apply(&conn).context("applying migrations")?;
+
+    // Sweep orphaned "running" scan_sessions left over from a previous
+    // crash. The engine writes status='running' at scan start; if it
+    // exits abnormally the row stays stale forever, polluting Settings →
+    // Recent scans. Mark them all as 'failed' on startup; new scans
+    // overwrite this when they finish cleanly.
+    let _ = conn.execute(
+        "UPDATE scan_sessions SET status = 'failed', completed_at = COALESCE(completed_at, started_at) \
+         WHERE status = 'running'",
+        [],
+    );
+
     Ok(conn)
 }
 

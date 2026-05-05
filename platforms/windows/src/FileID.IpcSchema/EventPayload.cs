@@ -42,6 +42,7 @@ public sealed record RestructureApplyResultEvent(RestructureApplyResult Result) 
 public sealed record BulkActionResultEvent(BulkActionResult Result) : EventPayload;
 public sealed record ClipTextEmbeddingEvent(ClipTextEmbedding Embedding) : EventPayload;
 public sealed record MergeSuggestionsEvent(MergeSuggestions Suggestions) : EventPayload;
+public sealed record RecentScansEvent(RecentScans Scans) : EventPayload;
 
 public sealed class EventPayloadJsonConverter : JsonConverter<EventPayload>
 {
@@ -84,6 +85,7 @@ public sealed class EventPayloadJsonConverter : JsonConverter<EventPayload>
             "bulkActionResult"       => new BulkActionResultEvent(ReadWrapped<BulkActionResult>(ref reader, options)),
             "clipTextEmbedding"      => new ClipTextEmbeddingEvent(ReadWrapped<ClipTextEmbedding>(ref reader, options)),
             "mergeSuggestions"       => new MergeSuggestionsEvent(ReadWrapped<MergeSuggestions>(ref reader, options)),
+            "recentScans"            => new RecentScansEvent(ReadWrapped<RecentScans>(ref reader, options)),
             _ => throw new JsonException($"EventPayload: unknown variant '{variant}'"),
         };
 
@@ -120,6 +122,7 @@ public sealed class EventPayloadJsonConverter : JsonConverter<EventPayload>
             case BulkActionResultEvent v:       WriteWrapped(writer, "bulkActionResult", v.Result, options); break;
             case ClipTextEmbeddingEvent v:      WriteWrapped(writer, "clipTextEmbedding", v.Embedding, options); break;
             case MergeSuggestionsEvent v:       WriteWrapped(writer, "mergeSuggestions", v.Suggestions, options); break;
+            case RecentScansEvent v:            WriteWrapped(writer, "recentScans", v.Scans, options); break;
             default:
                 throw new JsonException($"EventPayload: unknown C# type {value.GetType().FullName}");
         }

@@ -28,11 +28,18 @@ public sealed partial class DeepAnalyzeView : UserControl
     {
         InitializeComponent();
         Loaded += OnLoadedHandler;
-        Unloaded += (_, _) =>
-        {
-            ModelInstallerService.Instance.PropertyChanged -= OnInstallerChanged;
-            EngineClient.Instance.PropertyChanged -= OnEngineChanged;
-        };
+        Unloaded += OnUnloadedHandler;
+    }
+
+    private void OnUnloadedHandler(object sender, RoutedEventArgs e)
+    {
+        // Use named handlers (not lambdas) so -= actually unregisters.
+        // Lambdas create a fresh delegate object each time, so -= silently
+        // misses the original subscription → leaked event listeners.
+        ModelInstallerService.Instance.PropertyChanged -= OnInstallerChanged;
+        EngineClient.Instance.PropertyChanged -= OnEngineChanged;
+        Loaded -= OnLoadedHandler;
+        Unloaded -= OnUnloadedHandler;
     }
 
     private void OnLoadedHandler(object sender, RoutedEventArgs e)
@@ -210,37 +217,46 @@ public sealed partial class DeepAnalyzeView : UserControl
         }
     }
 
+    // Every `async void` handler below has the entire body inside a
+    // try/catch. An async-void handler that throws kills the dispatcher
+    // and crashes the window; the catch makes failures surface as log
+    // entries instead.
     private async void OnInstallModelClicked(object sender, RoutedEventArgs e)
     {
-        if (sender is not Button b || b.Tag is not string modelId) return;
         try
         {
+            if (sender is not Button b || b.Tag is not string modelId) return;
             await ModelInstallerService.Instance.InstallRecommendedVlmAsync();
         }
         catch (Exception ex)
         {
-            DebugLog.Warn($"VLM install '{modelId}' failed: {ex}");
+            DebugLog.Warn("VLM install failed: " + ex);
         }
     }
 
     private async void OnInstallRuntimeClicked(object sender, RoutedEventArgs e)
     {
-        InstallRuntimeButton.IsEnabled = false;
         try
         {
-            await EngineClient.Instance.PrewarmModelAsync("llama_runtime_x64");
-            // Engine emits modelDownloadProgress events; we re-check the
-            // banner each time the installer service refreshes.
-            ModelInstallerService.Instance.Refresh();
-            SyncRuntimeBanner();
+            InstallRuntimeButton.IsEnabled = false;
+            try
+            {
+                await EngineClient.Instance.PrewarmModelAsync("llama_runtime_x64");
+                ModelInstallerService.Instance.Refresh();
+                SyncRuntimeBanner();
+            }
+            catch (Exception ex)
+            {
+                RuntimeBannerText.Text = $"Couldn't fetch runtime: {ex.Message}";
+            }
+            finally
+            {
+                InstallRuntimeButton.IsEnabled = true;
+            }
         }
-        catch (Exception ex)
+        catch (Exception outer)
         {
-            RuntimeBannerText.Text = $"Couldn't fetch runtime: {ex.Message}";
-        }
-        finally
-        {
-            InstallRuntimeButton.IsEnabled = true;
+            DebugLog.Warn("Runtime install handler threw: " + outer);
         }
     }
 
@@ -260,6 +276,7 @@ public sealed partial class DeepAnalyzeView : UserControl
 
     private async void OnCancelClicked(object sender, RoutedEventArgs e)
     {
-        try { await EngineClient.Instance.DeepAnalyzeCancelAsync(); } catch { /* swallow */ }
+        try { await EngineClient.Instance.DeepAnalyzeCancelAsync(); }
+        catch (Exception ex) { DebugLog.Warn("Cancel failed: " + ex); }
     }
 }

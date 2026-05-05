@@ -81,14 +81,28 @@ public sealed class LavaLampBackground : Control
         }
     }
 
+    private DispatcherTimer? _resizeDebounce;
+
     private void OnSizeChanged(object sender, SizeChangedEventArgs e)
     {
         if (_root is null) return;
         _root.Size = new Vector2((float)ActualWidth, (float)ActualHeight);
-        // Re-start animations so the sin/cos amplitudes pick up the new
-        // size; cheap (the animations are GPU resident).
-        StopAnimations();
-        StartAnimations();
+        // Debounce 100 ms so a fast resize drag doesn't thrash 3
+        // ExpressionAnimations 30+ times per second. The Vector2 size on
+        // _root above takes effect immediately (visuals don't blur);
+        // only the sin/cos amplitudes need the restart.
+        if (_resizeDebounce is null)
+        {
+            _resizeDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
+            _resizeDebounce.Tick += (_, _) =>
+            {
+                _resizeDebounce!.Stop();
+                StopAnimations();
+                StartAnimations();
+            };
+        }
+        _resizeDebounce.Stop();
+        _resizeDebounce.Start();
     }
 
     private void OnXamlRootChanged(XamlRoot sender, XamlRootChangedEventArgs args)

@@ -27,6 +27,7 @@ pub fn physical_memory_gb() -> f64 {
 /// Get the parent-process PID via OS-specific API. None if unknown.
 #[cfg(windows)]
 pub fn get_parent_pid() -> Option<u32> {
+    use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
@@ -35,21 +36,27 @@ pub fn get_parent_pid() -> Option<u32> {
     let our_pid = std::process::id();
     unsafe {
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
-        let mut entry = PROCESSENTRY32W {
-            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
-            ..Default::default()
-        };
-        if Process32FirstW(snap, &mut entry).is_err() {
-            return None;
-        }
-        loop {
-            if entry.th32ProcessID == our_pid {
-                return Some(entry.th32ParentProcessID);
-            }
-            if Process32NextW(snap, &mut entry).is_err() {
+        // BUG-18: snapshot HANDLE leaked on every exit path. Wrap in a
+        // closure + always close.
+        let result = (|| -> Option<u32> {
+            let mut entry = PROCESSENTRY32W {
+                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                ..Default::default()
+            };
+            if Process32FirstW(snap, &mut entry).is_err() {
                 return None;
             }
-        }
+            loop {
+                if entry.th32ProcessID == our_pid {
+                    return Some(entry.th32ParentProcessID);
+                }
+                if Process32NextW(snap, &mut entry).is_err() {
+                    return None;
+                }
+            }
+        })();
+        let _ = CloseHandle(snap);
+        result
     }
 }
 

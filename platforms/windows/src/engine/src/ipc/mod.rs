@@ -122,6 +122,11 @@ pub enum CommandPayload {
     #[serde(rename = "renamePerson")]
     RenamePerson(RenamePersonPayload),
 
+    /// FEAT-CRIT-1: bulk mark-as-unknown for multi-select People mode.
+    /// Sets `persons.is_unknown = 1` and clears name fields for every id.
+    #[serde(rename = "markPersonsAsUnknown")]
+    MarkPersonsAsUnknown(MarkPersonsAsUnknownPayload),
+
     /// Find merge-candidate cluster pairs by ArcFace cosine similarity in
     /// the uncertain band 0.45–0.70. Engine emits `mergeSuggestions`.
     #[serde(rename = "findMergeSuggestions")]
@@ -353,6 +358,13 @@ pub struct RenamePersonPayload {
     pub suffix: Option<String>,
 }
 
+/// FEAT-CRIT-1 payload for bulk mark-as-unknown.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkPersonsAsUnknownPayload {
+    pub person_ids: Vec<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MergeSuggestion {
@@ -442,6 +454,9 @@ pub enum EventPayload {
 
     #[serde(rename = "mergeSuggestions")]
     MergeSuggestions(Wrap<MergeSuggestions>),
+
+    #[serde(rename = "recentScans")]
+    RecentScansEvent(Wrap<RecentScans>),
 }
 
 /// Wraps a single positional value in `{"_0": ...}` to match Swift Codable
@@ -707,6 +722,20 @@ pub struct RestructurePlan {
     pub library_root: String,
     pub moves: Vec<RestructureMove>,
     pub category_counts: Vec<RestructureCategoryCount>,
+    /// V14.7.2: engine-authoritative folder classification.
+    /// Anchor / Mixed / Junk counts per RestructurePlan — replaces the
+    /// C#-side approximation that lived in V14.7. None when the engine
+    /// hasn't computed yet (older plans), keeps cross-version compat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_classifications: Option<FolderClassificationCounts>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderClassificationCounts {
+    pub anchor_folders: u32,
+    pub mixed_folders: u32,
+    pub junk_folders: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

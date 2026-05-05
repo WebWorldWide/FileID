@@ -26,6 +26,90 @@ pub struct ProposedMove {
     pub category: String,
 }
 
+/// V14.7.2: three-tier folder classification.
+/// Mirrors macOS engine `Restructure.swift` `FolderClassification` enum.
+///
+/// - **Anchor** = source folder where ≥80% of moves go to ONE destination
+///   category (homogeneous; folder gets renamed in place).
+/// - **Mixed**  = source folder where moves span multiple destination
+///   categories (some files extracted as outliers).
+/// - **Junk**   = source folder with ≤2 files OR a folder name that
+///   matches the generic-name pattern (folder dissolves).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FolderClassification {
+    Anchor,
+    Mixed,
+    Junk,
+}
+
+/// Per-source-folder classification + the dominant destination category.
+#[derive(Debug, Clone)]
+pub struct ClassifiedFolder {
+    pub source_folder: PathBuf,
+    pub classification: FolderClassification,
+    pub move_count: u32,
+    pub dominant_category: String,
+}
+
+/// Classify every source folder appearing in `moves`. Returns one
+/// `ClassifiedFolder` per distinct source folder. Folders that have NO
+/// moves (their files all stay put) are NOT included — they're the
+/// implicit "anchor folders intact" tier.
+pub fn classify_folders(moves: &[ProposedMove]) -> Vec<ClassifiedFolder> {
+    use std::collections::BTreeMap;
+
+    // Group moves by source folder (parent dir of `source`).
+    let mut by_folder: BTreeMap<PathBuf, Vec<&ProposedMove>> = BTreeMap::new();
+    for m in moves {
+        let parent = m.source.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        by_folder.entry(parent).or_default().push(m);
+    }
+
+    let mut out = Vec::with_capacity(by_folder.len());
+    for (folder, items) in by_folder {
+        // Per-folder category histogram.
+        let mut hist: HashMap<String, u32> = HashMap::new();
+        for m in &items {
+            *hist.entry(m.category.clone()).or_insert(0) += 1;
+        }
+        let total = items.len() as u32;
+        let (dominant, top) = hist
+            .iter()
+            .max_by_key(|(_, c)| **c)
+            .map(|(k, v)| (k.clone(), *v))
+            .unwrap_or_default();
+        let homogeneity = if total > 0 { top as f32 / total as f32 } else { 0.0 };
+
+        // Folder name heuristic — generic names like "Downloads",
+        // "Untitled", "New Folder" lean Junk regardless of size.
+        let name = folder.file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
+        let generic = matches!(
+            name.as_str(),
+            "downloads" | "downloaded" | "new folder" | "untitled" | "temp" | "tmp"
+                | "misc" | "other" | "stuff" | "things" | "files"
+        );
+
+        let classification = if generic || total <= 2 {
+            FolderClassification::Junk
+        } else if homogeneity >= 0.80 {
+            FolderClassification::Anchor
+        } else {
+            FolderClassification::Mixed
+        };
+
+        out.push(ClassifiedFolder {
+            source_folder: folder,
+            classification,
+            move_count: total,
+            dominant_category: dominant,
+        });
+    }
+    out
+}
+
 /// Heuristic root-level layout. Mirrors macOS:
 ///   - Photos/{Year}/{Month}/         for image kind
 ///   - Videos/{Year}/                 for video kind

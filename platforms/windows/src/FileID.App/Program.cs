@@ -58,23 +58,68 @@ internal static class Program
             return hr;
         }
 
+        // Startup-trace: every step of the launch path writes to a small
+        // file so when the app "opens then closes" we can diagnose without
+        // a debugger attached. Cleared at the start of each launch.
+        var traceLogPath = System.IO.Path.Combine(
+            System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
+            "FileID", "logs", "startup-trace.txt");
         try
         {
+            System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(traceLogPath)!);
+            System.IO.File.WriteAllText(traceLogPath, $"{System.DateTime.UtcNow:O} startup begin\n");
+        }
+        catch { /* trace is best-effort */ }
+
+        void Trace(string msg)
+        {
+            try { System.IO.File.AppendAllText(traceLogPath, $"{System.DateTime.UtcNow:O} {msg}\n"); }
+            catch { /* swallow */ }
+        }
+
+        try
+        {
+            Trace("ComWrappersSupport.InitializeComWrappers");
             ComWrappersSupport.InitializeComWrappers();
+            Trace("Application.Start");
             Application.Start(parameters =>
             {
-                // Bridge the WinUI dispatcher into the modern .NET
-                // SynchronizationContext so `await` resumes on the UI thread
-                // by default. Required for clean XAML data binding from
-                // background tasks (engine event stream, model installer, etc).
-                var ctx = new DispatcherQueueSynchronizationContext(DispatcherQueue.GetForCurrentThread());
-                SynchronizationContext.SetSynchronizationContext(ctx);
-                _ = new App();
+                try
+                {
+                    // Bridge the WinUI dispatcher into the modern .NET
+                    // SynchronizationContext so `await` resumes on the UI thread
+                    // by default. Required for clean XAML data binding from
+                    // background tasks (engine event stream, model installer, etc).
+                    Trace("SynchronizationContext bridge");
+                    var ctx = new DispatcherQueueSynchronizationContext(DispatcherQueue.GetForCurrentThread());
+                    SynchronizationContext.SetSynchronizationContext(ctx);
+                    Trace("new App()");
+                    _ = new App();
+                    Trace("Application.Start callback returned");
+                }
+                catch (System.Exception inner)
+                {
+                    Trace($"FATAL inside Application.Start: {inner}");
+                    throw;
+                }
             });
+            Trace("Application.Start returned (clean exit)");
+        }
+        catch (System.Exception ex)
+        {
+            Trace($"FATAL outside Application.Start: {ex}");
+            ShowFatalDialog("FileID failed to start",
+                $"FileID hit an unhandled exception during startup. The full trace is at:\n\n" +
+                $"{traceLogPath}\n\n" +
+                $"Error:\n{ex.GetType().Name}: {ex.Message}\n\n" +
+                $"{ex.StackTrace}");
+            return 1;
         }
         finally
         {
+            Trace("Bootstrap.Shutdown");
             Bootstrap.Shutdown();
+            Trace("end");
         }
 
         return 0;

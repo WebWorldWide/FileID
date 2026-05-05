@@ -30,7 +30,8 @@
                 Background="Transparent"
                 BorderThickness="0"
                 Click="OnSkipClicked"
-                ToolTipService.ToolTip="Close (Esc) — install models later from Settings.">
+                ToolTipService.ToolTip="Close (Esc) — install models later from Settings."
+                AutomationProperties.Name="Close welcome sheet">
             <FontIcon Glyph="&#xE711;" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
         </Button>
 

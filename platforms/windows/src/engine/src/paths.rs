@@ -30,6 +30,9 @@ pub fn hf_cache_dir() -> Result<PathBuf> { Ok(root()?.join("Models").join("Huggi
 pub fn thumbs_dir()   -> Result<PathBuf> { Ok(root()?.join("thumbs.cache")) }
 pub fn faces_dir()    -> Result<PathBuf> { Ok(root()?.join("face_crops")) }
 pub fn settings_path() -> Result<PathBuf> { Ok(root()?.join("settings.json")) }
+/// The C# app's settings file (separate from the engine's probe-cache
+/// `settings.json`). Read-only from the engine; the app owns writes.
+pub fn app_settings_path() -> Result<PathBuf> { Ok(root()?.join("app-settings.json")) }
 pub fn trash_log_path() -> Result<PathBuf> { Ok(root()?.join("trash_log.json")) }
 pub fn merge_log_path() -> Result<PathBuf> { Ok(root()?.join("merge_log.json")) }
 

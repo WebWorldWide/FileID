@@ -91,10 +91,20 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             return Array.Empty<FileRow>();
         }
         var match = BuildMatchExpression(query);
+        // BUG-9: early-return BEFORE acquiring the gate so the
+        // reentrant call to RecentAsync can take it cleanly.
         if (string.IsNullOrEmpty(match))
         {
             return await RecentAsync(limit, ct).ConfigureAwait(false);
         }
+        // BUG-9: gate the connection across the entire query lifetime —
+        // Microsoft.Data.Sqlite connections are NOT thread-safe across
+        // simultaneous commands, so two parallel callers would race on
+        // the same SqliteConnection's transaction state.
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+        if (_connection == null) return Array.Empty<FileRow>();
         // Two sources, deduped by file id: ocr_fts (FTS5 over OCR text;
         // ranked by bm25) UNION filename LIKE matches over files.path_text.
         // Mirror of macOS Database.swift::searchFiles which combines OCR
@@ -168,6 +178,8 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             }
         }
         return rows;
+        }
+        finally { _gate.Release(); }
     }
 
     /// <summary>
@@ -176,24 +188,27 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
     /// </summary>
     public async Task<IReadOnlyList<FileRow>> RecentAsync(int limit, CancellationToken ct)
     {
-        if (_connection == null)
+        if (_connection == null) return Array.Empty<FileRow>();
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
         {
-            return Array.Empty<FileRow>();
+            if (_connection == null) return Array.Empty<FileRow>();
+            var rows = new List<FileRow>(limit);
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = """
+                SELECT id, path_text, kind, size_bytes, modified_at, has_faces, has_text
+                FROM files
+                ORDER BY modified_at DESC NULLS LAST LIMIT $limit
+                """;
+            cmd.Parameters.AddWithValue("$limit", limit);
+            using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            {
+                rows.Add(ReadRow(reader));
+            }
+            return rows;
         }
-        var rows = new List<FileRow>(limit);
-        using var cmd = _connection.CreateCommand();
-        cmd.CommandText = """
-            SELECT id, path_text, kind, size_bytes, modified_at, has_faces, has_text
-            FROM files
-            ORDER BY modified_at DESC NULLS LAST LIMIT $limit
-            """;
-        cmd.Parameters.AddWithValue("$limit", limit);
-        using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
-        while (await reader.ReadAsync(ct).ConfigureAwait(false))
-        {
-            rows.Add(ReadRow(reader));
-        }
-        return rows;
+        finally { _gate.Release(); }
     }
 
     /// <summary>
@@ -210,6 +225,10 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
         {
             return Array.Empty<FileRowWithScore>();
         }
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+        if (_connection == null) return Array.Empty<FileRowWithScore>();
         var heap = new PriorityQueue<FileRowWithScore, float>(limit);
         using var cmd = _connection.CreateCommand();
         cmd.CommandText = """
@@ -242,6 +261,8 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
         }
         sorted.Reverse();
         return sorted;
+        }
+        finally { _gate.Release(); }
     }
 
     /// <summary>
@@ -250,19 +271,22 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
     /// </summary>
     public async Task<IReadOnlyDictionary<string, int>> KindCountsAsync(CancellationToken ct)
     {
-        if (_connection == null)
+        if (_connection == null) return new Dictionary<string, int>();
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
         {
-            return new Dictionary<string, int>();
+            if (_connection == null) return new Dictionary<string, int>();
+            var dict = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT kind, COUNT(*) FROM files GROUP BY kind";
+            using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            {
+                dict[reader.GetString(0)] = reader.GetInt32(1);
+            }
+            return dict;
         }
-        var dict = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        using var cmd = _connection.CreateCommand();
-        cmd.CommandText = "SELECT kind, COUNT(*) FROM files GROUP BY kind";
-        using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
-        while (await reader.ReadAsync(ct).ConfigureAwait(false))
-        {
-            dict[reader.GetString(0)] = reader.GetInt32(1);
-        }
-        return dict;
+        finally { _gate.Release(); }
     }
 
     private static FileRow ReadRow(SqliteDataReader reader) => new(

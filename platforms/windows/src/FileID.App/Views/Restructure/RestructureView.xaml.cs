@@ -22,6 +22,24 @@ public sealed partial class RestructureView : UserControl
         InitializeComponent();
         CategoryRepeater.ItemsSource = _categoryRows;
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
+        Sankey.RibbonInvoked += OnSankeyRibbonInvoked;
+    }
+
+    private async void OnSankeyRibbonInvoked(object? sender, (string Source, string Category) ribbon)
+    {
+        var plan = EngineClient.Instance.LastRestructurePlan;
+        if (plan is null) return;
+        var sheet = new DrillDownSheet();
+        sheet.SetSankeyFilter(plan, ribbon.Source, ribbon.Category);
+        var dialog = new ContentDialog
+        {
+            XamlRoot = this.XamlRoot,
+            Title = "Files in this flow",
+            Content = sheet,
+            CloseButtonText = "Done",
+            DefaultButton = ContentDialogButton.Close,
+        };
+        try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
     }
 
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
@@ -57,12 +75,81 @@ public sealed partial class RestructureView : UserControl
         Sankey.SetPlan(plan);
         TreeDiff.SetPlan(plan);
 
+        // FEAT-CRIT-3: compute Anchor / Mixed / Junk classification from
+        // per-source-folder move ratios. Engine doesn't classify
+        // authoritatively yet (deferred to V14.8); the UI derives the
+        // tiers from move counts vs total-file counts.
+        ComputeAndShowClassifier(plan);
+
         var hasWork = moveCount > 0;
         ApplySymlinkButton.IsEnabled = hasWork;
         ApplyMovesButton.IsEnabled = hasWork;
         ApplyStatusText.Text = hasWork
             ? $"Ready to apply {moveCount:N0} moves into '{plan.LibraryRoot}'."
             : "Nothing to apply.";
+    }
+
+    /// <summary>
+    /// V14.7.2: engine-authoritative Anchor/Mixed/Junk counts when the
+    /// plan ships them (`FolderClassifications`). Falls back to the
+    /// V14.7 C#-side approximation for older plans (or if the engine
+    /// hasn't migrated). The fallback uses move-ratio homogeneity.
+    /// </summary>
+    private void ComputeAndShowClassifier(RestructurePlan plan)
+    {
+        if (plan.Moves.Count == 0)
+        {
+            ClassifierStrip.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        uint anchor, mixed, junk;
+        if (plan.FolderClassifications is { } engineCounts)
+        {
+            // Engine computed it — trust those numbers.
+            anchor = engineCounts.AnchorFolders;
+            mixed  = engineCounts.MixedFolders;
+            junk   = engineCounts.JunkFolders;
+        }
+        else
+        {
+            // Fallback for older engine builds.
+            var bySource = new System.Collections.Generic.Dictionary<string, int>(System.StringComparer.OrdinalIgnoreCase);
+            foreach (var m in plan.Moves)
+            {
+                var srcFolder = System.IO.Path.GetDirectoryName(m.Source) ?? string.Empty;
+                if (!bySource.ContainsKey(srcFolder)) bySource[srcFolder] = 0;
+                bySource[srcFolder]++;
+            }
+            int a = 0, mx = 0, j = 0;
+            foreach (var kv in bySource)
+            {
+                var catCounts = new System.Collections.Generic.Dictionary<string, int>();
+                foreach (var m in plan.Moves)
+                {
+                    var srcFolder = System.IO.Path.GetDirectoryName(m.Source) ?? string.Empty;
+                    if (!string.Equals(srcFolder, kv.Key, System.StringComparison.OrdinalIgnoreCase)) continue;
+                    var destRoot = m.Destination
+                        .Substring(plan.LibraryRoot.Length)
+                        .TrimStart('\\', '/')
+                        .Split('\\', '/')[0];
+                    if (!catCounts.ContainsKey(destRoot)) catCounts[destRoot] = 0;
+                    catCounts[destRoot]++;
+                }
+                int total = kv.Value;
+                int topCat = 0;
+                foreach (var c in catCounts.Values) if (c > topCat) topCat = c;
+                double homogeneity = total > 0 ? (double)topCat / total : 0;
+                if (total <= 2) j++;
+                else if (homogeneity >= 0.80) a++;
+                else mx++;
+            }
+            anchor = (uint)a; mixed = (uint)mx; junk = (uint)j;
+        }
+        AnchorCountText.Text = anchor.ToString("N0");
+        MixedCountText.Text  = mixed.ToString("N0");
+        JunkCountText.Text   = junk.ToString("N0");
+        ClassifierStrip.Visibility = Visibility.Visible;
     }
 
     private void SyncApplyResult()

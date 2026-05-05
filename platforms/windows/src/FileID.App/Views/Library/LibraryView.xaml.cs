@@ -23,7 +23,11 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     internal LibraryViewModel ViewModel { get; }
     private FileTile? _lastClickedTile;
     private readonly ThumbnailService _thumbnails = new();
-    private readonly Dictionary<FileTile, CancellationTokenSource> _inflight = new();
+    // BUG-12: ElementPrepared/ElementClearing fire on the UI thread, but
+    // LoadThumbAsync's finally-block .Remove can resume on a worker thread
+    // after ConfigureAwait(true) without a SyncContext. ConcurrentDictionary
+    // makes the Add/Remove pair safe regardless.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<FileTile, CancellationTokenSource> _inflight = new();
     private readonly ClipSearchService _clip;
 
     public LibraryView()
@@ -140,7 +144,13 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         if (tile.Thumbnail != null) return; // cached on previous prepare
 
         var cts = new CancellationTokenSource();
-        _inflight[tile] = cts;
+        // BUG-12: TryAdd in case of a re-entrant prepare (rare but cheap to defend).
+        if (!_inflight.TryAdd(tile, cts))
+        {
+            // Already loading — let the existing one finish.
+            cts.Dispose();
+            return;
+        }
         _ = LoadThumbAsync(tile, cts.Token);
     }
 
@@ -148,7 +158,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                                            Microsoft.UI.Xaml.Controls.ItemsRepeaterElementClearingEventArgs args)
     {
         if (args.Element is not FrameworkElement el || el.DataContext is not FileTile tile) return;
-        if (_inflight.Remove(tile, out var cts))
+        if (_inflight.TryRemove(tile, out var cts))
         {
             try { cts.Cancel(); } catch { /* swallow */ }
             cts.Dispose();
@@ -165,10 +175,10 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                 tile.Thumbnail = bmp;
             }
         }
-        catch { /* swallow — placeholder stays */ }
+        catch { /* swallow -- placeholder stays */ }
         finally
         {
-            _inflight.Remove(tile);
+            _inflight.TryRemove(tile, out _);
         }
     }
 
@@ -313,6 +323,21 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 
         try
         {
+            // Listen for the engine's BulkActionResult — it tags the
+            // action with "trashFiles:<batch_id>" so we can plumb undo.
+            Services.UndoStack.CaptureNextBulkResult(
+                "trashFiles:",
+                $"trash {ids.Length} file{(ids.Length == 1 ? "" : "s")}",
+                async batchId =>
+                {
+                    if (string.IsNullOrEmpty(batchId)) return false;
+                    try
+                    {
+                        await EngineClient.Instance.RestoreFromTrashAsync(batchId);
+                        return true;
+                    }
+                    catch { return false; }
+                });
             await EngineClient.Instance.TrashFilesAsync(ids);
         }
         catch
@@ -408,38 +433,22 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 
     private void OnContextOpen(object sender, RoutedEventArgs e)
     {
-        if (sender is MenuFlyoutItem item && item.Tag is string path && System.IO.File.Exists(path))
+        // SEC-9: Open is gated by SafeOpen's extension allowlist — falls
+        // back to Reveal for anything that could be executable.
+        if (sender is MenuFlyoutItem item && item.Tag is string path)
         {
-            try
+            if (!Services.SafeOpen.TryOpenFile(path))
             {
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = path,
-                    UseShellExecute = true,
-                });
+                Services.SafeOpen.Reveal(path);
             }
-            catch { /* user-facing toast lands when we wire a global error surface */ }
         }
     }
 
     private void OnContextReveal(object sender, RoutedEventArgs e)
     {
-        if (sender is MenuFlyoutItem item && item.Tag is string path && System.IO.File.Exists(path))
+        if (sender is MenuFlyoutItem item && item.Tag is string path)
         {
-            try
-            {
-                // Escape embedded quotes so a filename containing `"` can't
-                // break the explorer argument (defensive; users rarely have
-                // quote-named files but the cost is one Replace).
-                var quoted = path.Replace("\"", "\\\"");
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = "explorer.exe",
-                    Arguments = $"/select,\"{quoted}\"",
-                    UseShellExecute = true,
-                });
-            }
-            catch { /* swallow — non-critical */ }
+            Services.SafeOpen.Reveal(path);
         }
     }
 
