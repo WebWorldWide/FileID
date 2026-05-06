@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
     SuggestedMergesSheet — modal listing pairs of clusters whose anchor
     faces fall in the uncertain similarity band (0.45..0.70). Engine-side

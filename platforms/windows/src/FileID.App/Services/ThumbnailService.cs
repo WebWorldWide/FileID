@@ -1,4 +1,4 @@
-// ThumbnailService — IShellItemImageFactory-driven shell thumbnails with
+﻿// ThumbnailService — IShellItemImageFactory-driven shell thumbnails with
 // an in-process LRU cache and a disk-backed cache under thumbs.cache/.
 //
 // Mirror of the macOS app's QLThumbnailGenerator-backed `ThumbnailService.swift`.

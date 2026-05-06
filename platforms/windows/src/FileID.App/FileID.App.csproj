@@ -17,9 +17,11 @@
     <RootNamespace>FileID</RootNamespace>
     <AssemblyName>FileID</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <!-- Application icon lands in Phase 4 (installer). For dev builds the
-         default WinUI 3 icon is fine. -->
-    <!-- <ApplicationIcon>Assets/FileID.ico</ApplicationIcon> -->
+    <!-- V14.7.3: multi-resolution .ico (16/32/48/64/128/256) embedded
+         in FileID.exe. Drives Explorer, taskbar, Alt-Tab, Add/Remove
+         Programs, and the WiX MSI Icon element. Generated via
+         build/make-icon.ps1 from shared/docs/assets/FileID-AppIcon.png. -->
+    <ApplicationIcon>Assets\FileID.ico</ApplicationIcon>
 
     <UseWinUI>true</UseWinUI>
     <EnableMsixTooling>false</EnableMsixTooling>
@@ -69,6 +71,21 @@
   <ItemGroup>
     <ProjectReference Include="..\FileID.Theme\FileID.Theme.csproj" />
     <ProjectReference Include="..\FileID.IpcSchema\FileID.IpcSchema.csproj" />
+  </ItemGroup>
+
+  <!-- V14.7.3: app icon + ms-appx:/// Logo PNGs.
+       FileID.ico is referenced by <ApplicationIcon> above (embeds in .exe)
+       AND copied to the output dir so AppWindow.SetIcon can find it at
+       runtime via AppContext.BaseDirectory.
+       Assets\Logo\*.png ship alongside the .exe so XAML <Image> with
+       Source="ms-appx:///Assets/Logo/FileID-96.png" resolves at runtime. -->
+  <ItemGroup>
+    <Content Include="Assets\FileID.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Assets\Logo\*.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
   <!-- WinUI 3 SDK auto-includes XAML via Microsoft.WinUI.targets globs.

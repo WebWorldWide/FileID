@@ -1,4 +1,4 @@
-// DeepAnalyzeView code-behind. Subscribes to EngineClient observables
+﻿// DeepAnalyzeView code-behind. Subscribes to EngineClient observables
 // + ModelInstallerService for the per-model install state. Drives the
 // llama.cpp runtime install, model install, full-library/per-file
 // analyze, cancel, and renders the live caption stream as tokens
@@ -36,7 +36,7 @@ public sealed partial class DeepAnalyzeView : UserControl
         // Use named handlers (not lambdas) so -= actually unregisters.
         // Lambdas create a fresh delegate object each time, so -= silently
         // misses the original subscription → leaked event listeners.
-        ModelInstallerService.Instance.PropertyChanged -= OnInstallerChanged;
+        ModelInstallerService.Instance.Vlm.PropertyChanged -= OnInstallerChanged;
         EngineClient.Instance.PropertyChanged -= OnEngineChanged;
         Loaded -= OnLoadedHandler;
         Unloaded -= OnUnloadedHandler;
@@ -44,7 +44,7 @@ public sealed partial class DeepAnalyzeView : UserControl
 
     private void OnLoadedHandler(object sender, RoutedEventArgs e)
     {
-        ModelInstallerService.Instance.PropertyChanged += OnInstallerChanged;
+        ModelInstallerService.Instance.Vlm.PropertyChanged += OnInstallerChanged;
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         SyncCards();
         SyncRuntimeBanner();
@@ -69,10 +69,10 @@ public sealed partial class DeepAnalyzeView : UserControl
 
     private void SyncCards()
     {
-        var svc = ModelInstallerService.Instance;
-        ApplyCard(QwenSmallStatus, QwenSmallProgress, QwenSmallInstallButton, svc.VlmStatus, svc.VlmProgress);
-        ApplyCard(QwenLargeStatus, QwenLargeProgress, QwenLargeInstallButton, svc.VlmStatus, svc.VlmProgress);
-        ApplyCard(SmolVlmStatus, SmolVlmProgress, SmolVlmInstallButton, svc.VlmStatus, svc.VlmProgress);
+        var slot = ModelInstallerService.Instance.Vlm;
+        ApplyCard(QwenSmallStatus, QwenSmallProgress, QwenSmallInstallButton, slot.Status, slot.Fraction);
+        ApplyCard(QwenLargeStatus, QwenLargeProgress, QwenLargeInstallButton, slot.Status, slot.Fraction);
+        ApplyCard(SmolVlmStatus, SmolVlmProgress, SmolVlmInstallButton, slot.Status, slot.Fraction);
         HighlightActiveCard();
     }
 
@@ -225,8 +225,11 @@ public sealed partial class DeepAnalyzeView : UserControl
     {
         try
         {
-            if (sender is not Button b || b.Tag is not string modelId) return;
-            await ModelInstallerService.Instance.InstallRecommendedVlmAsync();
+            // V14.7.6: previous version ignored the Tag and ALWAYS installed
+            // qwen2_5_vl_3b. Now uses the per-card model id from Tag so each
+            // model card actually installs its own model.
+            if (sender is not Button b || b.Tag is not string modelId || string.IsNullOrWhiteSpace(modelId)) return;
+            await EngineClient.Instance.PrewarmModelAsync(modelId);
         }
         catch (Exception ex)
         {

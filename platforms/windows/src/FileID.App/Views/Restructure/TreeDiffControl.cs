@@ -1,4 +1,4 @@
-// TreeDiffControl — side-by-side current vs proposed folder tree.
+﻿// TreeDiffControl — side-by-side current vs proposed folder tree.
 //
 // Mirror of macOS TreeDiffView. Renders two TreeView columns: the
 // current folder structure as discovered, and the proposed structure

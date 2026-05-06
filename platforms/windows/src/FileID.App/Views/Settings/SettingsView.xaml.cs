@@ -1,4 +1,4 @@
-// SettingsView code-behind.
+﻿// SettingsView code-behind.
 
 using System;
 using System.ComponentModel;
@@ -21,20 +21,23 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     public SettingsView()
     {
         InitializeComponent();
-        EngineClient.Instance.PropertyChanged += (_, e) =>
-        {
-            if (e.PropertyName is nameof(EngineClient.Info)
-                or nameof(EngineClient.State))
-            {
-                OnPropertyChanged(nameof(EngineVersionText));
-                OnPropertyChanged(nameof(WorkerCapText));
-                OnPropertyChanged(nameof(GpuSummaryText));
-                OnPropertyChanged(nameof(ExecutionProviderText));
-                OnPropertyChanged(nameof(RecommendationText));
-                OnPropertyChanged(nameof(RecommendationVisibility));
-            }
-        };
+        EngineClient.Instance.PropertyChanged += OnEngineChanged;
+        Unloaded += (_, _) => EngineClient.Instance.PropertyChanged -= OnEngineChanged;
         Loaded += (_, _) => HydrateToggles();
+    }
+
+    private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is nameof(EngineClient.Info)
+            or nameof(EngineClient.State))
+        {
+            OnPropertyChanged(nameof(EngineVersionText));
+            OnPropertyChanged(nameof(WorkerCapText));
+            OnPropertyChanged(nameof(GpuSummaryText));
+            OnPropertyChanged(nameof(ExecutionProviderText));
+            OnPropertyChanged(nameof(RecommendationText));
+            OnPropertyChanged(nameof(RecommendationVisibility));
+        }
     }
 
     private void HydrateToggles()
@@ -104,10 +107,20 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     {
         get
         {
-            var info = EngineClient.Instance.Info;
-            return info is null
-                ? "Engine starting…"
-                : $"Engine v{info.Version} · PID {info.Pid}";
+            // V14.7.6: Info can be null even when State==Ready in the brief
+            // window between spawn + first ready event. Surface State so
+            // the Settings card stops claiming "Engine starting..." for
+            // a Ready engine.
+            var ec = EngineClient.Instance;
+            var info = ec.Info;
+            if (info is not null) return $"Engine v{info.Version} - PID {info.Pid}";
+            return ec.State switch
+            {
+                EngineClient.LifecycleState.Ready    => "Engine ready",
+                EngineClient.LifecycleState.Starting => "Engine starting...",
+                EngineClient.LifecycleState.Crashed  => "Engine stopped (manual restart required)",
+                _                                     => "Engine state unknown",
+            };
         }
     }
 
@@ -116,10 +129,10 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         get
         {
             var info = EngineClient.Instance.Info;
-            if (info is null) return "Worker pool — pending";
+            if (info is null) return "Worker pool: pending";
             var cores = info.Hardware?.PhysicalCpuCores;
-            var coreText = cores.HasValue ? $" · {cores.Value} physical cores" : string.Empty;
-            return $"Worker cap: {info.WorkerCap}{coreText} · {info.PhysicalMemoryGB:0.#} GB RAM";
+            var coreText = cores.HasValue ? $" - {cores.Value} physical cores" : string.Empty;
+            return $"Worker cap: {info.WorkerCap}{coreText} - {info.PhysicalMemoryGB:0.#} GB RAM";
         }
     }
 
@@ -196,27 +209,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
-    private async void OnRecentScansClicked(object sender, RoutedEventArgs e)
-    {
-        try
-        {
-            var sheet = new RecentScansSheet();
-            var dialog = new ContentDialog
-            {
-                XamlRoot = this.XamlRoot,
-                Title = "Recent scans",
-                Content = sheet,
-                CloseButtonText = "Done",
-                DefaultButton = ContentDialogButton.Close,
-            };
-            await dialog.ShowAsync();
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Warn("RecentScansSheet open failed: " + ex);
-        }
-    }
-
     private async void OnVerifyPrivacyClicked(object sender, RoutedEventArgs e)
     {
         try
@@ -248,28 +240,24 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     {
         if (sender is not Button button || button.Tag is not string modelKind || string.IsNullOrWhiteSpace(modelKind))
             return;
-        var (statusText, progressBar, progressProp) = modelKind switch
+        var svc = Services.ModelInstallerService.Instance;
+        var (statusText, progressBar, slot) = modelKind switch
         {
-            "arcface_buffalo" => (ArcFaceStatusText, ArcFaceProgress, nameof(Services.ModelInstallerService.ArcfaceProgress)),
-            "mobileclip_s2"   => (ClipStatusText,    ClipProgress,    nameof(Services.ModelInstallerService.ClipProgress)),
-            _ => (null!, null!, string.Empty),
+            "arcface_buffalo" => (ArcFaceStatusText, ArcFaceProgress, svc.Arcface),
+            "mobileclip_s2"   => (ClipStatusText,    ClipProgress,    svc.Clip),
+            _ => (null!, null!, null!),
         };
-        if (statusText is null) return;
+        if (statusText is null || slot is null) return;
         var originalContent = button.Content;
         button.IsEnabled = false;
         button.Content = "Installing…";
         progressBar.Visibility = Visibility.Visible;
 
-        // Subscribe to ModelInstallerService.<*Progress> for live updates.
+        // Subscribe to slot.Fraction for live updates.
         void OnProgress(object? _, System.ComponentModel.PropertyChangedEventArgs ev)
         {
-            if (ev.PropertyName != progressProp) return;
-            var pct = modelKind switch
-            {
-                "arcface_buffalo" => Services.ModelInstallerService.Instance.ArcfaceProgress,
-                "mobileclip_s2"   => Services.ModelInstallerService.Instance.ClipProgress,
-                _ => 0.0,
-            };
+            if (ev.PropertyName != nameof(Services.ModelSlot.Fraction)) return;
+            var pct = slot.Fraction;
             DispatcherQueue.TryEnqueue(() =>
             {
                 progressBar.Value = pct;
@@ -278,7 +266,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
                     : (pct >= 1 ? "Installed" : statusText.Text);
             });
         }
-        Services.ModelInstallerService.Instance.PropertyChanged += OnProgress;
+        slot.PropertyChanged += OnProgress;
         try
         {
             await EngineClient.Instance.PrewarmModelAsync(modelKind);
@@ -293,7 +281,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
         finally
         {
-            Services.ModelInstallerService.Instance.PropertyChanged -= OnProgress;
+            slot.PropertyChanged -= OnProgress;
             progressBar.Visibility = Visibility.Collapsed;
         }
     }

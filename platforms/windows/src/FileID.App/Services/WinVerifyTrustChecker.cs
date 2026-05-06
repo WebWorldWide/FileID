@@ -1,4 +1,4 @@
-// WinVerifyTrustChecker — Authenticode integrity check on the engine binary.
+﻿// WinVerifyTrustChecker — Authenticode integrity check on the engine binary.
 //
 // Mirror of macOS EngineClient.swift's SecCode/SecStaticCode validation. On
 // every spawn, the app verifies that FileIDEngine.exe's Authenticode chain
@@ -45,7 +45,13 @@ internal static class WinVerifyTrustChecker
     /// </summary>
     public static IntegrityVerdict Verify(string path, string? expectedThumbprintHex = null)
     {
-        if (!System.IO.File.Exists(path))
+        // V14.7.11: File.Exists wrapped — paths with invalid chars or
+        // denied access on the parent dir would throw.
+        bool exists;
+        try { exists = System.IO.File.Exists(path); }
+        catch (System.IO.IOException) { exists = false; }
+        catch (System.UnauthorizedAccessException) { exists = false; }
+        if (!exists)
         {
             return IntegrityVerdict.NotFound;
         }

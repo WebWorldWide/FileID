@@ -1,4 +1,4 @@
-// SidebarEngineStatus code-behind. Subscribes to EngineClient lifecycle
+﻿// SidebarEngineStatus code-behind. Subscribes to EngineClient lifecycle
 // and re-paints the pill — including the soft glow ring around the dot
 // for that "live status" feel.
 
@@ -17,6 +17,7 @@ public sealed partial class SidebarEngineStatus : UserControl
         InitializeComponent();
         Loaded += (_, _) => Sync();
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
+        Unloaded += (_, _) => EngineClient.Instance.PropertyChanged -= OnEngineChanged;
     }
 
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)

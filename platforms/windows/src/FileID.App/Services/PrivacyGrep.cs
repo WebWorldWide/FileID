@@ -1,4 +1,4 @@
-// PrivacyGrep — strings audit over the engine binary.
+﻿// PrivacyGrep — strings audit over the engine binary.
 //
 // The "What we don't do" panel in Settings advertises zero telemetry.
 // This service makes that claim verifiable: scan the running engine

@@ -4,7 +4,17 @@
 
 ---
 
-## V14.8 — Polish + engine-authoritative classification (2026-05-05)
+## (none — V14.8 closed in V14.7.2 on 2026-05-05)
+
+Nothing queued. Every CRITICAL/HIGH parity gap, every security finding, every bug surfaced in the V14.5/V14.6/V14.7 audits is closed. New work begins after the user runs `./build.sh -windows` on real hardware and the `iterate.ps1` regression harness either GREENs or surfaces a real defect.
+
+The three external manual steps documented in `shared/docs/STATE.md` V14.7.2 ship-readiness section (EV cert purchase, Performance Pack ZIP upload to HuggingFace, real-hardware verification) remain — but they're not code work, they're user actions.
+
+---
+
+## (Historical entries below — closed in V14.7.2)
+
+## V14.8 — Polish + engine-authoritative classification (2026-05-05) — CLOSED IN V14.7.2
 
 V14.7.1 closed every CRITICAL parity gap, every HIGH security finding, and every HIGH bug from the V14.7 audits. The remaining work is polish + the next layer of correctness:
 

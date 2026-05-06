@@ -1,11 +1,12 @@
-// SidebarPipelineProgress code-behind. Builds five dots + four connectors
-// and tints them based on the engine's reported phase + completion of
-// face-clustering / deep-analyze stages.
+// SidebarPipelineProgress code-behind. Builds five stage cells, each
+// containing a dot + label + left/right connector halves. 1:1 port of
+// macOS SidebarPipelineProgress.swift: dots and labels share the same
+// 5-equal-column layout so they always align vertically; connectors
+// live in the same column as the dot they belong to.
 
 using System.ComponentModel;
 using FileID.IpcSchema;
 using FileID.ViewModels;
-using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -16,59 +17,120 @@ namespace FileID.Views.Sidebar;
 
 public sealed partial class SidebarPipelineProgress : UserControl
 {
-    private const int StageCount = 5; // Scan, Tag, People, Captions, Done
-    private readonly Ellipse[] _dots = new Ellipse[StageCount];
-    private readonly Rectangle[] _connectors = new Rectangle[StageCount - 1];
+    private static readonly (string Label, int Index)[] Stages =
+    {
+        ("Scan",     0),
+        ("Tag",      1),
+        ("People",   2),
+        ("Captions", 3),
+        ("Done",     4),
+    };
+
+    private readonly Ellipse[] _dots = new Ellipse[Stages.Length];
+    private readonly Rectangle?[] _leftConnectors  = new Rectangle?[Stages.Length];
+    private readonly Rectangle?[] _rightConnectors = new Rectangle?[Stages.Length];
+    private readonly TextBlock[] _labels = new TextBlock[Stages.Length];
 
     public SidebarPipelineProgress()
     {
         InitializeComponent();
-        BuildDots();
+        BuildStages();
         Loaded += (_, _) => SyncStage();
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
+        Unloaded += (_, _) => EngineClient.Instance.PropertyChanged -= OnEngineChanged;
     }
 
-    private void BuildDots()
+    private void BuildStages()
     {
-        // Layout: dot, connector, dot, connector, ... dot.
-        // Use a Grid with 9 alternating star columns (dot=auto, connector=*).
-        for (int i = 0; i < StageCount; i++)
+        // 5 equal columns — each owns one stage. Dot + label stacked.
+        for (int i = 0; i < Stages.Length; i++)
         {
-            DotsRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            if (i < StageCount - 1)
-            {
-                DotsRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            }
+            StagesRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         }
 
-        for (int i = 0; i < StageCount; i++)
+        for (int i = 0; i < Stages.Length; i++)
         {
-            var dot = new Ellipse
-            {
-                Width = 12,
-                Height = 12,
-                VerticalAlignment = VerticalAlignment.Center,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                Fill = new SolidColorBrush(Color.FromArgb(0x55, 0xFF, 0xFF, 0xFF)),
-            };
-            Grid.SetColumn(dot, i * 2);
-            DotsRow.Children.Add(dot);
-            _dots[i] = dot;
+            var (label, _) = Stages[i];
 
-            if (i < StageCount - 1)
+            // Stack inside this column: dot row (with connector halves) + label.
+            var cellStack = new StackPanel
             {
-                var line = new Rectangle
+                Spacing = 4,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+            };
+
+            // Dot row — Grid with 3 columns (left half | dot | right half).
+            // The connector lines fill their halves; the dot is centered.
+            var dotRow = new Grid { Height = 14 };
+            dotRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            dotRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            dotRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+            // WinUI 3 has no Visibility.Hidden — for the first stage we
+            // simply don't add the left connector (the column slot stays
+            // so the dot still centers correctly).
+            Rectangle? leftConn = null;
+            if (i > 0)
+            {
+                leftConn = new Rectangle
                 {
-                    Height = 2,
-                    Fill = new SolidColorBrush(Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF)),
+                    Height = 1,
                     VerticalAlignment = VerticalAlignment.Center,
                     HorizontalAlignment = HorizontalAlignment.Stretch,
-                    Margin = new Thickness(2, 0, 2, 0),
+                    Fill = InactiveConnectorBrush(),
                 };
-                Grid.SetColumn(line, i * 2 + 1);
-                DotsRow.Children.Add(line);
-                _connectors[i] = line;
+                Grid.SetColumn(leftConn, 0);
+                dotRow.Children.Add(leftConn);
             }
+            _leftConnectors[i] = leftConn;
+
+            var dot = new Ellipse
+            {
+                Width = 10,
+                Height = 10,
+                VerticalAlignment = VerticalAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Fill = InactiveDotBrush(),
+                Stroke = InactiveDotStrokeBrush(),
+                StrokeThickness = 1,
+            };
+            Grid.SetColumn(dot, 1);
+            dotRow.Children.Add(dot);
+            _dots[i] = dot;
+
+            Rectangle? rightConn = null;
+            if (i < Stages.Length - 1)
+            {
+                rightConn = new Rectangle
+                {
+                    Height = 1,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    HorizontalAlignment = HorizontalAlignment.Stretch,
+                    Fill = InactiveConnectorBrush(),
+                };
+                Grid.SetColumn(rightConn, 2);
+                dotRow.Children.Add(rightConn);
+            }
+            _rightConnectors[i] = rightConn;
+
+            cellStack.Children.Add(dotRow);
+
+            // Label — single-line, centered, small font (matches macOS 8 pt).
+            var labelText = new TextBlock
+            {
+                Text = label,
+                FontSize = 10,
+                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                TextWrapping = TextWrapping.NoWrap,
+                TextTrimming = TextTrimming.None,
+                Foreground = (Brush)Application.Current.Resources["TextFillColorTertiaryBrush"],
+            };
+            cellStack.Children.Add(labelText);
+            _labels[i] = labelText;
+
+            Grid.SetColumn(cellStack, i);
+            StagesRow.Children.Add(cellStack);
         }
     }
 
@@ -77,6 +139,8 @@ public sealed partial class SidebarPipelineProgress : UserControl
         if (e.PropertyName is nameof(EngineClient.Phase)
                           or nameof(EngineClient.LastFaceClustering)
                           or nameof(EngineClient.DeepAnalyzeComplete)
+                          or nameof(EngineClient.DeepAnalyzeProgress)
+                          or nameof(EngineClient.DeepAnalyzeStarting)
                           or nameof(EngineClient.LastProgress))
         {
             DispatcherQueue.TryEnqueue(SyncStage);
@@ -87,7 +151,7 @@ public sealed partial class SidebarPipelineProgress : UserControl
     {
         // Stage 0 = Scan (Discovering)
         // Stage 1 = Tag (Tagging)
-        // Stage 2 = People (face clustering, indicated by LastFaceClustering present)
+        // Stage 2 = People (PostScan or face clustering)
         // Stage 3 = Captions (Deep Analyze in flight or complete)
         // Stage 4 = Done
 
@@ -95,10 +159,11 @@ public sealed partial class SidebarPipelineProgress : UserControl
         bool peopleDone = EngineClient.Instance.LastFaceClustering is not null;
         bool captionsRunning = EngineClient.Instance.DeepAnalyzeProgress is not null
                             || EngineClient.Instance.DeepAnalyzeStarting is not null;
-        bool captionsDone = EngineClient.Instance.DeepAnalyzeComplete is { Cancelled: false };
+        // V14.7.15: any DeepAnalyzeComplete event (cancelled or finished) is
+        // a terminal state — flip the strip to "Done" rather than freezing
+        // at Captions when the user cancels.
+        bool captionsDone = EngineClient.Instance.DeepAnalyzeComplete is not null;
 
-        // Activity stage: where we are RIGHT NOW. "Filled" stages are those
-        // before activity. "Inactive" are after.
         int activeIndex = phase switch
         {
             ScanPhase.Discovering => 0,
@@ -108,36 +173,69 @@ public sealed partial class SidebarPipelineProgress : UserControl
         };
         if (activeIndex < 0)
         {
-            // Not scanning; pick the latest completed stage.
             if (captionsDone) activeIndex = 4;
             else if (captionsRunning) activeIndex = 3;
             else if (peopleDone) activeIndex = 2;
-            else activeIndex = -1;
         }
 
         var goldBrush = (SolidColorBrush)Application.Current.Resources["GoldBrush"];
-        var fadedGold = new SolidColorBrush(Color.FromArgb(0x66, 0xFF, 0xCC, 0x00));
-        var inactive = new SolidColorBrush(Color.FromArgb(0x55, 0xFF, 0xFF, 0xFF));
+        var fadedGold = new SolidColorBrush(Color.FromArgb(0x99, 0xFF, 0xCC, 0x00));
+        var goldStroke = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00));
+        var primaryText = (Brush)Application.Current.Resources["TextFillColorPrimaryBrush"];
+        var secondaryText = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"];
+        var tertiaryText = (Brush)Application.Current.Resources["TextFillColorTertiaryBrush"];
 
-        for (int i = 0; i < StageCount; i++)
+        for (int i = 0; i < Stages.Length; i++)
         {
-            if (i < activeIndex)
-            {
-                _dots[i].Fill = fadedGold;
-            }
-            else if (i == activeIndex)
+            bool filled = i < activeIndex || activeIndex == 4;
+            bool active = i == activeIndex;
+
+            // Dot fill + stroke.
+            if (filled)
             {
                 _dots[i].Fill = goldBrush;
-                // Subtle drop shadow for the active dot.
+                _dots[i].Stroke = goldStroke;
+                _dots[i].Width = 10; _dots[i].Height = 10;
+            }
+            else if (active)
+            {
+                _dots[i].Fill = fadedGold;
+                _dots[i].Stroke = goldStroke;
+                _dots[i].StrokeThickness = 1.5;
+                _dots[i].Width = 12; _dots[i].Height = 12;
             }
             else
             {
-                _dots[i].Fill = inactive;
+                _dots[i].Fill = InactiveDotBrush();
+                _dots[i].Stroke = InactiveDotStrokeBrush();
+                _dots[i].StrokeThickness = 1;
+                _dots[i].Width = 10; _dots[i].Height = 10;
             }
-        }
-        for (int i = 0; i < _connectors.Length; i++)
-        {
-            _connectors[i].Fill = i < activeIndex ? fadedGold : new SolidColorBrush(Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF));
+
+            // Label color: active → gold, filled → primary, else → tertiary.
+            _labels[i].Foreground = active ? goldBrush : (filled ? primaryText : tertiaryText);
+
+            // Connectors: a half is "filled" iff the dot it connects to AND
+            // the dot it leads from are filled (or the half belongs to the
+            // active dot extending toward a filled side).
+            // Left half of stage i ← (stage i-1 filled).
+            bool leftFilled  = i > 0 && (i - 1 < activeIndex || activeIndex == 4);
+            // Right half of stage i → (stage i filled relative to next).
+            bool rightFilled = i < Stages.Length - 1 && filled;
+
+            if (_leftConnectors[i] is { } lc)
+                lc.Fill = leftFilled ? goldBrush : InactiveConnectorBrush();
+            if (_rightConnectors[i] is { } rc)
+                rc.Fill = rightFilled ? goldBrush : InactiveConnectorBrush();
         }
     }
+
+    private static SolidColorBrush InactiveDotBrush() =>
+        new(Color.FromArgb(0x1F, 0xFF, 0xFF, 0xFF));
+
+    private static SolidColorBrush InactiveDotStrokeBrush() =>
+        new(Color.FromArgb(0x2E, 0xFF, 0xFF, 0xFF));
+
+    private static SolidColorBrush InactiveConnectorBrush() =>
+        new(Color.FromArgb(0x1A, 0xFF, 0xFF, 0xFF));
 }

@@ -1,4 +1,4 @@
-// LibraryViewModel — backs the Library tab grid + search bar.
+﻿// LibraryViewModel — backs the Library tab grid + search bar.
 //
 // Mirror of macOS app/Sources/FileID/Library/LibraryViewModel.swift. The
 // shape is the same: a debounced query string, a kind filter, a page of

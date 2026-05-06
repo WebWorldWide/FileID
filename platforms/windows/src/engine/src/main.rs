@@ -136,6 +136,25 @@ async fn main() -> Result<()> {
         Arc::new(std::sync::atomic::AtomicBool::new(false));
     let dispatch_deep_cancel = deep_analyze_cancel.clone();
 
+    // V14.7.4: shared HTTP client (HTTP/2 + connection pool) for the
+    // 12-way parallel downloader. Built once at engine startup; cloned
+    // cheaply via Arc into every prewarm task.
+    let http_client = match crate::downloader::build_shared_client() {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::error!(?err, "failed to build shared HTTP client; downloads will fail");
+            // Stub a minimal client so the engine can still start.
+            Arc::new(reqwest::Client::new())
+        }
+    };
+    let dispatch_http_client = http_client.clone();
+
+    // V14.7.4: prewarm cancel flag. CancelPrewarm flips it; the
+    // download_parallel inner loop polls it after every chunk.
+    let prewarm_cancel: Arc<std::sync::atomic::AtomicBool> =
+        Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dispatch_prewarm_cancel = prewarm_cancel.clone();
+
     let stdio_loop = tokio::spawn(async move {
         const MAX_FRAME_BYTES: usize = 1024 * 1024;
         let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
@@ -156,6 +175,8 @@ async fn main() -> Result<()> {
                                 dispatch_db.as_ref(),
                                 &dispatch_scan_state,
                                 &dispatch_deep_cancel,
+                                &dispatch_http_client,
+                                &dispatch_prewarm_cancel,
                                 &text,
                             ).await;
                         }
@@ -215,6 +236,8 @@ async fn handle_line(
     db: Option<&std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>>,
     scan_state: &Arc<parking_lot::Mutex<Option<coordinator::ScanCoordinator>>>,
     deep_analyze_cancel: &Arc<std::sync::atomic::AtomicBool>,
+    http_client: &Arc<reqwest::Client>,
+    prewarm_cancel: &Arc<std::sync::atomic::AtomicBool>,
     line: &str,
 ) {
     let cmd: IpcCommand = match serde_json::from_str(line) {
@@ -241,15 +264,24 @@ async fn handle_line(
             shutdown.notify_waiters();
         }
         CommandPayload::PrewarmModel(payload) => {
-            // Spawn so the IPC loop keeps reading other commands while
-            // the (potentially slow) download runs. Each download is its
-            // own task; downloads from different prewarm calls run in
-            // parallel.
+            // V14.7.4: clear the cancel flag at the start of every NEW
+            // prewarm call (an in-flight cancel from a prior call shouldn't
+            // immediately abort this one). Downloads from different prewarm
+            // calls run concurrently against the shared http_client pool.
+            prewarm_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
             let sink = sink.clone();
             let model_kind = payload.model_kind.clone();
+            let http_client = http_client.clone();
+            let cancel = prewarm_cancel.clone();
             tokio::spawn(async move {
-                handle_prewarm_model(sink, model_kind).await;
+                handle_prewarm_model(sink, model_kind, http_client, cancel).await;
             });
+        }
+        CommandPayload::CancelPrewarm(_) => {
+            // V14.7.4: previously parsed but silently dropped. Now actually
+            // cancels the in-flight prewarm by flipping the AtomicBool.
+            prewarm_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            tracing::info!("CancelPrewarm received; in-flight downloads will abort");
         }
         CommandPayload::PlanRestructure(payload) => {
             let Some(db) = db else {
@@ -462,17 +494,6 @@ async fn handle_line(
                 handle_revert_merge(sink_c, db_c, payload).await;
             });
         }
-        CommandPayload::RecentScans(payload) => {
-            let Some(db) = db else {
-                emit_db_unavailable(sink, "recentScans").await;
-                return;
-            };
-            let sink_c = sink.clone();
-            let db_c = db.clone();
-            tokio::spawn(async move {
-                handle_recent_scans(sink_c, db_c, payload).await;
-            });
-        }
         CommandPayload::RunFaceClustering(_) => {
             let Some(db) = db else {
                 emit_db_unavailable(sink, "runFaceClustering").await;
@@ -482,18 +503,6 @@ async fn handle_line(
             let db_c = db.clone();
             tokio::spawn(async move {
                 handle_run_face_clustering(sink_c, db_c).await;
-            });
-        }
-        CommandPayload::AutoPilot(payload) => {
-            let Some(db) = db else {
-                emit_db_unavailable(sink, "autoPilot").await;
-                return;
-            };
-            let sink_c = sink.clone();
-            let db_c = db.clone();
-            let scan_state_c = scan_state.clone();
-            tokio::spawn(async move {
-                handle_autopilot(sink_c, db_c, scan_state_c, payload).await;
             });
         }
         // Phase 0 stub: every other variant gets a structured "not implemented"
@@ -723,14 +732,71 @@ async fn handle_apply_restructure(
     }
 }
 
+/// V14.7.5 helper: RAII guard that removes a model_kind from the
+/// in-flight set when the prewarm function returns / unwinds.
+struct ReleaseOnDrop {
+    kind: String,
+    set: &'static parking_lot::Mutex<std::collections::HashSet<String>>,
+}
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        self.set.lock().remove(&self.kind);
+    }
+}
+
 /// Download every file in the requested model bundle, emit progress
 /// events as bytes flow, drop a `.fileid-installed` sentinel when every
 /// file lands successfully. The app's ModelInstallerService polls for
 /// the sentinel to flip its per-model status to `Installed`.
-async fn handle_prewarm_model(sink: Sink, model_kind: String) {
-    use crate::downloader::{download_simple, DownloadRequest};
+async fn handle_prewarm_model(
+    sink: Sink,
+    model_kind: String,
+    http_client: Arc<reqwest::Client>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+) {
+    use crate::downloader::{download_parallel, DownloadRequest};
     use crate::ipc::ModelDownloadProgress;
     use models::registry::LookupResult;
+
+    // V14.7.5: per-model-kind in-flight dedupe. Without this, repeated
+    // clicks of "Install all" race on the .part file: first call's
+    // rename(.part -> final) runs while a second call still streams
+    // bytes into the same .part, then the second call's rename trips
+    // "os error 2: file not found." Fix: a global Mutex<HashSet<String>>
+    // — if model_kind is already mid-download, send a friendly progress
+    // event saying "still downloading" and bail.
+    static IN_FLIGHT: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    let in_flight = IN_FLIGHT.get_or_init(|| parking_lot::Mutex::new(std::collections::HashSet::new()));
+    // Check + insert under a short-lived guard. parking_lot's MutexGuard
+    // is !Send, so we MUST drop it before the first .await below.
+    let already_in_flight = {
+        let mut guard = in_flight.lock();
+        if guard.contains(&model_kind) {
+            true
+        } else {
+            guard.insert(model_kind.clone());
+            false
+        }
+    };
+    if already_in_flight {
+        tracing::info!(model = %model_kind, "prewarm already in flight; ignoring duplicate request");
+        sink.send(IpcEvent::now(EventPayload::ModelDownloadProgress(Wrap::new(
+            ModelDownloadProgress {
+                model_kind: model_kind.clone(),
+                fraction: 0.0,
+                message: "Already downloading...".to_string(),
+                bytes_done: None,
+                total_bytes: None,
+            },
+        )))).await;
+        return;
+    }
+    // RAII guard removes us from the set on every exit path.
+    let _release = ReleaseOnDrop {
+        kind: model_kind.clone(),
+        set: in_flight,
+    };
 
     let model = match models::registry::lookup_full(&model_kind) {
         LookupResult::Found(m) => m,
@@ -836,7 +902,7 @@ async fn handle_prewarm_model(sink: Sink, model_kind: String) {
             expected_sha256: file.sha256.clone(),
         };
 
-        if let Err(err) = download_simple(req, progress_cb).await {
+        if let Err(err) = download_parallel(http_client.clone(), req, cancel.clone(), progress_cb).await {
             tracing::warn!(?err, file = %label, "model download failed");
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                 kind: "model_download_failed".into(),
@@ -2026,51 +2092,6 @@ async fn handle_revert_merge(
     emit_bulk_result(&sink, "revertMerge", result).await;
 }
 
-async fn handle_recent_scans(
-    sink: Sink,
-    db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
-    payload: ipc::RecentScansPayload,
-) {
-    use crate::ipc::{RecentScanItem, RecentScans};
-    let limit = if payload.limit == 0 { 20 } else { payload.limit.min(100) };
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<RecentScans> {
-        let conn = db.lock();
-        let mut stmt = conn.prepare(
-            "SELECT id, root_path, started_at, completed_at, total_files, status \
-             FROM scan_sessions ORDER BY started_at DESC LIMIT ?1",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![limit], |r| {
-            Ok(RecentScanItem {
-                session_id: r.get::<_, String>(0)?,
-                root_path: r.get::<_, String>(1)?,
-                started_at: r.get::<_, f64>(2)?,
-                completed_at: r.get::<_, Option<f64>>(3)?,
-                total_files: r.get::<_, Option<i64>>(4)?,
-                status: r.get::<_, String>(5)?,
-            })
-        })?;
-        let mut items = Vec::new();
-        for row in rows {
-            items.push(row?);
-        }
-        Ok(RecentScans { items })
-    })
-    .await;
-
-    match result {
-        Ok(Ok(r)) => {
-            sink.send(IpcEvent::now(EventPayload::RecentScansEvent(Wrap::new(r))))
-                .await;
-        }
-        Ok(Err(err)) => {
-            tracing::warn!(?err, "recent_scans failed");
-        }
-        Err(err) => {
-            tracing::warn!(?err, "recent_scans spawn failed");
-        }
-    }
-}
-
 // ─── Deep Analyze handlers ──────────────────────────────────────────
 
 async fn handle_deep_analyze_file(
@@ -2420,77 +2441,6 @@ async fn handle_embed_image_query(
     }
 }
 
-/// Embed a free-text query through the CLIP text encoder. Loads the
-/// model + tokenizer per-call (cheap after the first call — Session is
-/// kept alive in a thread-local), runs encode → session.run → L2-norm,
-/// emits a `clipTextEmbedding` IPC event with the 512-d float32 vector
-/// for the app to dot-product against `clip_embeddings`.
-/// AutoPilot — chain scan → face clustering → restructure-plan, in that
-/// order, on the same library root. Each stage emits its own IPC event
-/// so the app's existing observers (sidebar pipeline, People tab,
-/// Restructure tab) all light up automatically. The VLM caption step is
-/// gated behind an installed model; if not present we skip it cleanly.
-async fn handle_autopilot(
-    sink: Sink,
-    db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
-    scan_state: Arc<parking_lot::Mutex<Option<coordinator::ScanCoordinator>>>,
-    payload: ipc::AutoPilotPayload,
-) {
-    use crate::pipeline::tagging::ModelStack;
-    use crate::scan_session::ScanSession;
-    use std::path::PathBuf;
-
-    let already_running = scan_state.lock().is_some();
-    if already_running {
-        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-            kind: "autopilot_busy".into(),
-            message: "A scan is already running. Cancel it before starting AutoPilot.".into(),
-            path: None,
-        }))))
-        .await;
-        return;
-    }
-
-    // Phase 1: scan
-    let coord = coordinator::ScanCoordinator::new();
-    *scan_state.lock() = Some(coord.clone());
-    let models = match tokio::task::spawn_blocking(ModelStack::load_default).await {
-        Ok(m) => Arc::new(m),
-        Err(err) => {
-            tracing::error!(?err, "AutoPilot: model stack load panicked");
-            *scan_state.lock() = None;
-            return;
-        }
-    };
-    let worker_count = platform::default_worker_cap() as usize;
-    let session = ScanSession::new(coord, db.clone(), worker_count, sink.clone(), models);
-    let root = PathBuf::from(payload.library_root.clone());
-    let scan_outcome = session.run(&root, |_| {}).await;
-    *scan_state.lock() = None;
-    if let Err(err) = scan_outcome {
-        tracing::warn!(?err, "AutoPilot: scan failed");
-        return;
-    }
-
-    // Phase 2: face clustering
-    handle_run_face_clustering(sink.clone(), db.clone()).await;
-
-    // Phase 3: restructure plan (apply not invoked — user reviews + commits).
-    handle_plan_restructure(
-        sink.clone(),
-        db,
-        ipc::PlanRestructurePayload {
-            library_root: payload.library_root,
-        },
-    )
-    .await;
-
-    // Note: VLM caption phase intentionally skipped here. Deep Analyze
-    // runs on demand from the user, not as part of AutoPilot, because
-    // captioning every file is a 10+ minute commitment that should be
-    // explicit.
-}
-
 /// Re-cluster every face in the DB. Loads all face_prints with an
 /// arcface_embedding, runs the connected-components algorithm in
 /// `face_clustering`, persists per-face person_id assignments, emits a
@@ -2786,7 +2736,6 @@ fn command_kind(p: &CommandPayload) -> &'static str {
         CommandPayload::CancelPrewarm(_)     => "cancelPrewarm",
         CommandPayload::PlanRestructure(_)   => "planRestructure",
         CommandPayload::ApplyRestructure(_)  => "applyRestructure",
-        CommandPayload::AutoPilot(_)         => "autoPilot",
         CommandPayload::ApplyTags(_)         => "applyTags",
         CommandPayload::RenameFiles(_)       => "renameFiles",
         CommandPayload::TrashFiles(_)        => "trashFiles",
@@ -2798,7 +2747,6 @@ fn command_kind(p: &CommandPayload) -> &'static str {
         CommandPayload::EmbedImageQuery(_)   => "embedImageQuery",
         CommandPayload::RestoreFromTrash(_)  => "restoreFromTrash",
         CommandPayload::RevertMerge(_)       => "revertMerge",
-        CommandPayload::RecentScans(_)       => "recentScans",
     }
 }
 

@@ -1,4 +1,4 @@
-// DetailHostView code-behind. Subscribes to AppViewModel and swaps the
+﻿// DetailHostView code-behind. Subscribes to AppViewModel and swaps the
 // hosted view when the active tab or folder-picked state changes.
 //
 // V14.2: tab swap is animated with a 220 ms opacity crossfade (the same
@@ -21,6 +21,7 @@ public sealed partial class DetailHostView : UserControl
         InitializeComponent();
         Loaded += (_, _) => Sync(animate: false);
         AppViewModel.Instance.PropertyChanged += OnAppChanged;
+        Unloaded += (_, _) => AppViewModel.Instance.PropertyChanged -= OnAppChanged;
     }
 
     private void OnAppChanged(object? sender, PropertyChangedEventArgs e)

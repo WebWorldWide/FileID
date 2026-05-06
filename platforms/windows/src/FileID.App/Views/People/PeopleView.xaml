@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
     PeopleView — face cluster cards in a wrap layout.
 
@@ -32,9 +32,18 @@
                 <TextBlock Text="People" Style="{StaticResource TitleTextBlockStyle}"/>
                 <TextBlock Text="Faces clustered into named cards. Drag to merge."
                            Style="{StaticResource BodyTextBlockStyle}"
-                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                           TextWrapping="Wrap" />
             </StackPanel>
-            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+            <!-- V14.7.4: header action buttons in a horizontal-scroll
+                 wrapper so on narrow windows they scroll instead of
+                 overflowing the title's * column. -->
+            <ScrollViewer Grid.Column="1"
+                          HorizontalScrollMode="Auto"
+                          HorizontalScrollBarVisibility="Hidden"
+                          VerticalScrollMode="Disabled"
+                          VerticalScrollBarVisibility="Disabled">
+            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                 <Button x:Name="SelectButton"
                         Click="OnToggleSelectMode"
                         ToolTipService.ToolTip="Multi-select clusters for bulk merge / mark-as-unknown.">
@@ -60,6 +69,7 @@
                     </StackPanel>
                 </Button>
             </StackPanel>
+            </ScrollViewer>
         </Grid>
 
         <!-- FEAT-CRIT-1: bulk-action toolbar, only visible in select mode. -->

@@ -1,4 +1,4 @@
-// SpringEasing — a single helper that wraps WinUI 3's
+﻿// SpringEasing — a single helper that wraps WinUI 3's
 // SpringScalarNaturalMotionAnimation so call sites read like SwiftUI:
 //
 //     // SwiftUI:  .animation(.spring(response: 0.4, dampingFraction: 0.8), value: x)

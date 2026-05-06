@@ -1,4 +1,4 @@
-// CompletionRipple — a one-shot gold ring pulse used as a "nice job"
+﻿// CompletionRipple — a one-shot gold ring pulse used as a "nice job"
 // completion affordance. Mirror of macOS CompletionRipple modifier
 // (MotionPrimitives.swift:63).
 //

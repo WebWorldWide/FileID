@@ -1,4 +1,4 @@
-// IPCCommand payload — externally-tagged discriminated union.
+﻿// IPCCommand payload — externally-tagged discriminated union.
 //
 // Wire shape: {"<variantName>": <body>}, where empty-payload variants
 // encode their body as `{}` (NOT a bare string — Swift Codable's auto-
@@ -58,8 +58,6 @@ public sealed record RestructureMove(
     string Destination,
     string Category);
 
-public sealed record AutoPilotCommand(string LibraryRoot, string? VlmModelKind = null) : CommandPayload;
-
 public sealed record ApplyTagsCommand(
     System.Collections.Generic.IReadOnlyList<long> FileIds,
     System.Collections.Generic.IReadOnlyList<string> Tags,
@@ -106,8 +104,6 @@ public sealed record RevertMergeCommand(
     long DestinationPersonId,
     System.Collections.Generic.IReadOnlyList<long> FaceIdsToRevert) : CommandPayload;
 
-public sealed record RecentScansCommand(uint Limit = 20) : CommandPayload;
-
 /// <summary>
 /// Reads/writes the externally-tagged shape Swift's Codable produces.
 /// One key, value is the body object (or `{}` for empty-payload variants).
@@ -142,7 +138,6 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             "prewarmModel"       => JsonSerializer.Deserialize<PrewarmModelCommand>(ref reader, options) ?? throw new JsonException("prewarmModel: null body"),
             "planRestructure"    => JsonSerializer.Deserialize<PlanRestructureCommand>(ref reader, options) ?? throw new JsonException("planRestructure: null body"),
             "applyRestructure"   => JsonSerializer.Deserialize<ApplyRestructureCommand>(ref reader, options) ?? throw new JsonException("applyRestructure: null body"),
-            "autoPilot"          => JsonSerializer.Deserialize<AutoPilotCommand>(ref reader, options) ?? throw new JsonException("autoPilot: null body"),
             "applyTags"          => JsonSerializer.Deserialize<ApplyTagsCommand>(ref reader, options) ?? throw new JsonException("applyTags: null body"),
             "renameFiles"        => JsonSerializer.Deserialize<RenameFilesCommand>(ref reader, options) ?? throw new JsonException("renameFiles: null body"),
             "trashFiles"         => JsonSerializer.Deserialize<TrashFilesCommand>(ref reader, options) ?? throw new JsonException("trashFiles: null body"),
@@ -154,7 +149,6 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             "embedImageQuery"    => JsonSerializer.Deserialize<EmbedImageQueryCommand>(ref reader, options) ?? throw new JsonException("embedImageQuery: null body"),
             "restoreFromTrash"   => JsonSerializer.Deserialize<RestoreFromTrashCommand>(ref reader, options) ?? throw new JsonException("restoreFromTrash: null body"),
             "revertMerge"        => JsonSerializer.Deserialize<RevertMergeCommand>(ref reader, options) ?? throw new JsonException("revertMerge: null body"),
-            "recentScans"        => JsonSerializer.Deserialize<RecentScansCommand>(ref reader, options) ?? throw new JsonException("recentScans: null body"),
 
             "pauseScan"          => Empty<PauseScanCommand>(ref reader),
             "resumeScan"         => Empty<ResumeScanCommand>(ref reader),
@@ -197,7 +191,6 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             case CancelPrewarmCommand:         WriteEmpty(writer, "cancelPrewarm"); break;
             case PlanRestructureCommand c:     WriteVariant(writer, "planRestructure", c, options); break;
             case ApplyRestructureCommand c:    WriteVariant(writer, "applyRestructure", c, options); break;
-            case AutoPilotCommand c:           WriteVariant(writer, "autoPilot", c, options); break;
             case ApplyTagsCommand c:           WriteVariant(writer, "applyTags", c, options); break;
             case RenameFilesCommand c:         WriteVariant(writer, "renameFiles", c, options); break;
             case TrashFilesCommand c:          WriteVariant(writer, "trashFiles", c, options); break;
@@ -209,7 +202,6 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             case EmbedImageQueryCommand c:     WriteVariant(writer, "embedImageQuery", c, options); break;
             case RestoreFromTrashCommand c:    WriteVariant(writer, "restoreFromTrash", c, options); break;
             case RevertMergeCommand c:         WriteVariant(writer, "revertMerge", c, options); break;
-            case RecentScansCommand c:         WriteVariant(writer, "recentScans", c, options); break;
             default:
                 throw new JsonException($"CommandPayload: unknown C# type {value.GetType().FullName}");
         }

@@ -1,4 +1,4 @@
-// FileID.Theme — visual language for the Windows port.
+﻿// FileID.Theme — visual language for the Windows port.
 //
 // Phase 1.2 lands Theme.xaml + the brush + token resources.
 // Phase 1.3 lands GlassCard, GoldButton, BadgePill, SettingToggleRow,

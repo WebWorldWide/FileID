@@ -8,9 +8,9 @@
 // pipeline tasks, calls into the IPC sink for `phaseChanged`,
 // `progress`, `batchSummary`, `scanComplete` events.
 //
-// V14.x AutoPilot follow-on (face clustering → deep analyze → restructure
-// plan, in that order, on the same session ID) lives separately so
-// individual phases stay testable in isolation.
+// Follow-on phases (face clustering → deep analyze → restructure plan)
+// each live in their own handler so individual phases stay testable in
+// isolation; ScanSession is intentionally just one "scan a folder" run.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -298,9 +298,3 @@ fn maybe_emit_progress(
     let _ = sink.try_send(IpcEvent::now(EventPayload::Progress(Wrap::new(progress))));
 }
 
-/// Lift the bounded-channel cap (Tagger → DBWriter) out of the
-/// `Tagger` impl detail so AutoPilot can use the same value for its own
-/// inter-phase channels.
-pub fn tagging_channel_cap() -> usize {
-    TAGGING_CHANNEL_CAP
-}

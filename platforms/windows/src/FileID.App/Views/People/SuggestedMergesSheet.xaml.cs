@@ -1,4 +1,4 @@
-// SuggestedMergesSheet code-behind. Subscribes to EngineClient's
+﻿// SuggestedMergesSheet code-behind. Subscribes to EngineClient's
 // LastMergeSuggestions, builds one row per pair with side-by-side anchor
 // face JPEGs + similarity % + action buttons. Merge fires mergeClusters
 // IPC; Different-people writes a face_verifications row so we don't keep
@@ -30,16 +30,15 @@ public sealed partial class SuggestedMergesSheet : UserControl
     {
         InitializeComponent();
         PairRepeater.ItemsSource = _rows;
+        // V14.7.11: subscribe in ctor (not Loaded). ContentDialog hosts
+        // don't reliably fire Loaded; the WelcomeSheet hit the same wall.
+        EngineClient.Instance.PropertyChanged += OnEngineChanged;
+        Unloaded += (_, _) => EngineClient.Instance.PropertyChanged -= OnEngineChanged;
         Loaded += (_, _) =>
         {
-            EngineClient.Instance.PropertyChanged += OnEngineChanged;
             // Trigger a fresh suggestion fetch whenever the sheet opens.
             _ = EngineClient.Instance.FindMergeSuggestionsAsync();
             HeaderText.Text = "Looking for similar clusters…";
-        };
-        Unloaded += (_, _) =>
-        {
-            EngineClient.Instance.PropertyChanged -= OnEngineChanged;
         };
     }
 

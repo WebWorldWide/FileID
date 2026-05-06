@@ -1,4 +1,4 @@
-// JsonSerializerOptions configured for IPC. Centralized so app and engine
+﻿// JsonSerializerOptions configured for IPC. Centralized so app and engine
 // always agree on date format, naming policy, and number handling.
 //
 // Mirror of Swift IPCCoder (platforms/apple/shared/Sources/FileIDShared/IPCCoder.swift).

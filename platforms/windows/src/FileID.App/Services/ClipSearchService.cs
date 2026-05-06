@@ -1,4 +1,4 @@
-// ClipSearchService — orchestrates CLIP semantic search.
+﻿// ClipSearchService — orchestrates CLIP semantic search.
 //
 // On macOS this lives in `Library/CLIPSearch.swift`. The flow:
 //   1. User types a query in the Library search bar (debounced 200 ms).

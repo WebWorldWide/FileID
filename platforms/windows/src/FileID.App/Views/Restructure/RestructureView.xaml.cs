@@ -1,4 +1,4 @@
-// RestructureView code-behind. Wires Generate plan / Preview as symlinks /
+﻿// RestructureView code-behind. Wires Generate plan / Preview as symlinks /
 // Apply (move) buttons to the engine's planRestructure + applyRestructure
 // IPC. Subscribes to the EngineClient's LastRestructurePlan +
 // LastRestructureApplyResult observables to refresh the UI.
@@ -23,6 +23,11 @@ public sealed partial class RestructureView : UserControl
         CategoryRepeater.ItemsSource = _categoryRows;
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         Sankey.RibbonInvoked += OnSankeyRibbonInvoked;
+        Unloaded += (_, _) =>
+        {
+            EngineClient.Instance.PropertyChanged -= OnEngineChanged;
+            Sankey.RibbonInvoked -= OnSankeyRibbonInvoked;
+        };
     }
 
     private async void OnSankeyRibbonInvoked(object? sender, (string Source, string Category) ribbon)

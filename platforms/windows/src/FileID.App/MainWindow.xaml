@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
     MainWindow — root window. LavaLamp behind everything; sidebar | divider |
     detail in a horizontal split; drag-drop overlay laid on top of the
@@ -40,17 +40,50 @@
         <Grid x:Name="AppTitleBar"
               Grid.Row="0"
               Background="Transparent">
-            <TextBlock Text="FileID"
+            <StackPanel Orientation="Horizontal"
+                        VerticalAlignment="Center"
+                        Margin="6,0,0,0">
+                <!-- V14.7.16: sidebar toggle button — always visible so
+                     the user has a way to bring the sidebar back after
+                     hiding it (Ctrl+Shift+S also toggles). Glyph E700
+                     is "GlobalNavButton" (the standard hamburger-style
+                     menu icon Windows uses for collapsible nav). -->
+                <Button x:Name="SidebarToggleButton"
+                        Click="OnSidebarToggleClicked"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        Padding="8,4"
+                        Width="32" Height="24"
+                        VerticalAlignment="Center"
+                        AutomationProperties.Name="Toggle sidebar"
+                        ToolTipService.ToolTip="Toggle sidebar (Ctrl+Shift+S)">
+                    <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                              Glyph="&#xE700;"
+                              FontSize="14" />
+                </Button>
+                <!-- V14.7.3: 16x16 app icon at the leading edge of the
+                     title bar (Explorer / Edge / Office convention). -->
+                <Image Source="ms-appx:///Assets/Logo/FileID-16.png"
+                       Width="16" Height="16"
                        VerticalAlignment="Center"
-                       Margin="16,0,0,0"
-                       FontSize="13"
-                       FontWeight="SemiBold"
-                       Opacity="0.55" />
+                       Margin="6,0,8,0" />
+                <TextBlock Text="FileID"
+                           VerticalAlignment="Center"
+                           FontSize="13"
+                           FontWeight="SemiBold"
+                           Opacity="0.55" />
+            </StackPanel>
         </Grid>
 
         <Grid Grid.Row="1">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition x:Name="SidebarColumn" Width="260" />
+                <!-- V14.7.4: bracket the sidebar with MinWidth/MaxWidth so
+                     it can't squeeze the detail pane on narrow windows or
+                     stretch absurdly on ultra-wide monitors. -->
+                <ColumnDefinition x:Name="SidebarColumn"
+                                  Width="260"
+                                  MinWidth="240"
+                                  MaxWidth="320" />
                 <ColumnDefinition Width="1" />
                 <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>

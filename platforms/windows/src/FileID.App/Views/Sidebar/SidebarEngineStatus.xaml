@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
     SidebarEngineStatus — engine state banner anchored at the bottom of
     the sidebar. Three states:
@@ -22,9 +22,12 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <Border Padding="12,7"
-            Height="32"
-            CornerRadius="16"
+    <!-- V14.7.4: MinHeight (not fixed Height) so long error messages can
+         expand the banner vertically. CornerRadius bumped to 12 since
+         the pill may now be taller than 32 DIP. -->
+    <Border Padding="12,8"
+            MinHeight="32"
+            CornerRadius="12"
             HorizontalAlignment="Stretch"
             Background="{ThemeResource ControlFillColorSecondaryBrush}"
             BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
@@ -52,13 +55,17 @@
                          VerticalAlignment="Center" />
             </Grid>
 
+            <!-- V14.7.4: TextWrapping=Wrap so engine error messages
+                 (which can be long) are readable in the 240-DIP-narrow
+                 sidebar. Was CharacterEllipsis which silently truncated
+                 the actual reason. -->
             <TextBlock x:Name="StatusText"
                        Grid.Column="1"
-                       Text="Engine starting…"
+                       Text="Engine starting..."
                        Style="{StaticResource CaptionTextBlockStyle}"
                        Foreground="{ThemeResource TextFillColorPrimaryBrush}"
                        VerticalAlignment="Center"
-                       TextTrimming="CharacterEllipsis" />
+                       TextWrapping="Wrap" />
         </Grid>
     </Border>
 </UserControl>

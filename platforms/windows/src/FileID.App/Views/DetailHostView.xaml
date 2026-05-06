@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
     DetailHostView — the right-hand pane. Switches between the active tab's
     view and the onboarding splash when no folder is picked. Phase 1 ships

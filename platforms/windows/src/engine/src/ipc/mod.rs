@@ -81,14 +81,6 @@ pub enum CommandPayload {
     #[serde(rename = "applyRestructure")]
     ApplyRestructure(ApplyRestructurePayload),
 
-    /// AutoPilot: scan → cluster → caption → restructure plan, in that
-    /// order, on the same session. Each phase emits its existing IPC
-    /// events; AutoPilot just orchestrates the chain. Real wiring depends
-    /// on Phase 2.6 ML; the engine acks today and emits a friendly
-    /// `error` event explaining what's pending.
-    #[serde(rename = "autoPilot")]
-    AutoPilot(AutoPilotPayload),
-
     /// Bulk-tag a set of files. Tags persist via shell::tags sidecar +
     /// the DB `tags` table.
     #[serde(rename = "applyTags")]
@@ -150,11 +142,6 @@ pub enum CommandPayload {
     /// re-creates the source person row + reassigns the faces.
     #[serde(rename = "revertMerge")]
     RevertMerge(RevertMergePayload),
-
-    /// List the last N scan sessions from the scan_sessions table for
-    /// the Settings → Recent scans panel.
-    #[serde(rename = "recentScans")]
-    RecentScans(RecentScansPayload),
 }
 
 /// Empty object — `{}`. Serde encodes a unit struct as `null`, which is wrong;
@@ -232,15 +219,6 @@ pub struct RestructureMove {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AutoPilotPayload {
-    pub library_root: String,
-    /// Optional VLM model id for the captioning phase. Skipped if None.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vlm_model_kind: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ApplyTagsPayload {
     pub file_ids: Vec<i64>,
     pub tags: Vec<String>,
@@ -314,32 +292,6 @@ pub struct RevertMergePayload {
     pub source_person_id: i64,
     pub destination_person_id: i64,
     pub face_ids_to_revert: Vec<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RecentScansPayload {
-    #[serde(default)]
-    pub limit: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RecentScans {
-    pub items: Vec<RecentScanItem>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RecentScanItem {
-    pub session_id: String,
-    pub root_path: String,
-    pub started_at: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub completed_at: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub total_files: Option<i64>,
-    pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -454,9 +406,6 @@ pub enum EventPayload {
 
     #[serde(rename = "mergeSuggestions")]
     MergeSuggestions(Wrap<MergeSuggestions>),
-
-    #[serde(rename = "recentScans")]
-    RecentScansEvent(Wrap<RecentScans>),
 }
 
 /// Wraps a single positional value in `{"_0": ...}` to match Swift Codable

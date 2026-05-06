@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
     LibraryView — search bar + kind filter + thumbnail grid.
 
@@ -34,7 +34,8 @@
             <TextBlock Text="Library" Style="{StaticResource TitleTextBlockStyle}" />
             <TextBlock Text="Search across filenames, OCR text, and CLIP semantic embeddings."
                        Style="{StaticResource BodyTextBlockStyle}"
-                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       TextWrapping="Wrap" />
         </StackPanel>
 
         <!-- Toolbar: search + kind filter. -->

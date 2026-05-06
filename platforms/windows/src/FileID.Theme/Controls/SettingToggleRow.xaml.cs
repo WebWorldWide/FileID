@@ -1,4 +1,4 @@
-// SettingToggleRow code-behind — three DPs: Title, Subtitle (optional),
+﻿// SettingToggleRow code-behind — three DPs: Title, Subtitle (optional),
 // IsOn (TwoWay-bindable). Mirrors the macOS UX exactly: tapping anywhere
 // in the row OR on the toggle flips the value.
 

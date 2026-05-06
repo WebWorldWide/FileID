@@ -1,4 +1,4 @@
-// ReadStore — app-side read-only SQLite access.
+﻿// ReadStore — app-side read-only SQLite access.
 //
 // The engine owns the writer connection (rusqlite, single-threaded by
 // design — see platforms/apple/CLAUDE.md and engine/src/db/mod.rs). The
@@ -57,7 +57,13 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             // First-launch guard: the engine creates the DB on first scan.
             // Until then the file doesn't exist; trying to open ReadOnly
             // would throw. Stay closed until the engine has written rows.
-            if (!File.Exists(_dbPath))
+            // V14.7.11: File.Exists wrapped — invalid-char paths or denied
+            // ACL on the parent dir would otherwise throw.
+            bool dbExists;
+            try { dbExists = File.Exists(_dbPath); }
+            catch (IOException) { dbExists = false; }
+            catch (UnauthorizedAccessException) { dbExists = false; }
+            if (!dbExists)
             {
                 return;
             }

@@ -1,4 +1,4 @@
-// SidebarQueueList code-behind. Builds rows for each pending job.
+﻿// SidebarQueueList code-behind. Builds rows for each pending job.
 // Hidden when the queue is empty.
 
 using System.ComponentModel;
@@ -19,6 +19,7 @@ public sealed partial class SidebarQueueList : UserControl
         InitializeComponent();
         Loaded += (_, _) => Sync();
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
+        Unloaded += (_, _) => EngineClient.Instance.PropertyChanged -= OnEngineChanged;
     }
 
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)

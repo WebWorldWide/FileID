@@ -1,4 +1,4 @@
-// DrillDownSheet code-behind. Filters the engine's RestructurePlan.Moves
+﻿// DrillDownSheet code-behind. Filters the engine's RestructurePlan.Moves
 // list down to a single source-folder + category pair (Sankey ribbon),
 // or a single proposed folder (TreeDiff click), then renders one row
 // per file with a shell-thumbnail.

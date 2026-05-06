@@ -1,4 +1,4 @@
-// DebugLog — local-only structured logging for the C# app side.
+﻿// DebugLog — local-only structured logging for the C# app side.
 //
 // Writes UTF-8 lines to %LOCALAPPDATA%\FileID\logs\app.log. Survives across
 // launches (truncates only when > 10 MB to bound disk usage). NEVER

@@ -22,6 +22,7 @@ public sealed partial class SidebarTabList : UserControl
         BuildButtons();
         AppViewModel.Instance.PropertyChanged += OnAppViewModelChanged;
         Loaded += (_, _) => SyncSelection();
+        Unloaded += (_, _) => AppViewModel.Instance.PropertyChanged -= OnAppViewModelChanged;
     }
 
     private void BuildButtons()

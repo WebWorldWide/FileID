@@ -11,6 +11,14 @@ indent_size = 4
 insert_final_newline = true
 trim_trailing_whitespace = true
 
+# V14.7.11: enforce UTF-8 BOM on .cs / .xaml so future encoding round-trips
+# can't reintroduce mojibake (cp1252 misread of UTF-8 produced `â€¦` for
+# `…` / `â€"` for `—`). The BOM forces editors + source-control hooks to
+# treat the file as UTF-8 unambiguously. csproj/xml stay BOM-less because
+# MSBuild's recommended convention is no BOM there.
+[*.{cs,xaml}]
+charset = utf-8-bom
+
 [*.{json,xml,xaml,csproj,props,targets,manifest,config,toml}]
 indent_size = 2
 

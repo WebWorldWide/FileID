@@ -1,4 +1,4 @@
-// ReducedMotion — surfaces the OS "minimize animations" preference as a
+﻿// ReducedMotion — surfaces the OS "minimize animations" preference as a
 // single observable bool that every motion primitive in this library
 // subscribes to.
 //

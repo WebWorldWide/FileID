@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
     FilePreviewSheet — modal sheet showing a single file's preview +
     metadata + a toolbar with reveal/open/copy actions. Hosted via

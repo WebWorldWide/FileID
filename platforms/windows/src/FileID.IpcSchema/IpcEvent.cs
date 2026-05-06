@@ -1,4 +1,4 @@
-// IPCEvent envelope. Mirror of the Swift `IPCEvent { t, payload }` Codable
+﻿// IPCEvent envelope. Mirror of the Swift `IPCEvent { t, payload }` Codable
 // struct. The `t` field is the timestamp the engine emitted the event,
 // serialized as ISO8601 (System.Text.Json's default for DateTimeOffset).
 //

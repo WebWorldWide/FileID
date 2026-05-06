@@ -1,4 +1,4 @@
-// AppSettings — durable user preferences. The Windows analog of the macOS
+﻿// AppSettings — durable user preferences. The Windows analog of the macOS
 // `AppStorage` / `UserDefaults` keys.
 //
 // Persisted as JSON at %LOCALAPPDATA%\FileID\app-settings.json. Atomic
@@ -55,6 +55,12 @@ internal sealed class AppSettings
     /// ML inference path lands (Phase 2.6).
     /// </summary>
     public string? GpuExecutionProviderOverride { get; set; }
+
+    /// <summary>Has the user seen the first-launch Welcome sheet?
+    /// Mirrors macOS @AppStorage("welcomeSheetSeen"). True once the
+    /// user dismisses the sheet for any reason; the sheet still re-shows
+    /// on subsequent launches if any required model is missing.</summary>
+    public bool WelcomeSheetSeen { get; set; } = false;
 
     /// <summary>Schema version of this settings.json. Bumped only on incompatible field renames.</summary>
     public int SchemaVersion { get; set; } = 1;

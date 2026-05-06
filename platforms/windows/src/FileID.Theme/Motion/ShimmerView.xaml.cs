@@ -1,4 +1,4 @@
-// ShimmerView code-behind. Drives the storyboard on/off based on
+﻿// ShimmerView code-behind. Drives the storyboard on/off based on
 // IsActive + ReducedMotion. When reduced-motion is on, the highlight
 // stays hidden (BaseLayer alone reads as "loading state at rest").
 

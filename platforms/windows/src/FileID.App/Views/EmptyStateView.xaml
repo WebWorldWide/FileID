@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
     EmptyStateView — reusable empty-state template. Mirror of macOS
     Views/EmptyStateView.swift:7. Big gold icon, title, body callout,
@@ -6,11 +6,11 @@
 
     Usage:
         <views:EmptyStateView
-            Glyph=""
+            Glyph="&#xE91B;"
             Title="No images yet"
             Body="Pick a folder above to begin."
             ActionLabel="Pick a folder"
-            ActionGlyph=""
+            ActionGlyph="&#xE8B7;"
             ActionInvoked="OnPickInvoked" />
 -->
 <UserControl

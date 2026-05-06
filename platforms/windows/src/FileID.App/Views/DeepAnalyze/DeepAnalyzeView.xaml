@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
     DeepAnalyzeView — VLM picker + analyze controls + live caption
     stream. Mirror of macOS DeepAnalyze/DeepAnalyzeView.swift.
@@ -22,7 +22,10 @@
     mc:Ignorable="d">
 
     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-        <StackPanel Padding="32,32,32,32" Spacing="20" MaxWidth="980" HorizontalAlignment="Stretch">
+        <!-- V14.7.4: HorizontalAlignment=Center (was Stretch) for the
+             same reason as Settings — center the MaxWidth-capped column
+             on wide windows. -->
+        <StackPanel Padding="32,32,32,32" Spacing="20" MaxWidth="980" HorizontalAlignment="Center">
 
             <StackPanel Spacing="4">
                 <TextBlock Text="Deep Analyze" Style="{StaticResource TitleTextBlockStyle}" />

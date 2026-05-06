@@ -85,13 +85,16 @@ llama-cpp-2 = { version = "0.1", optional = true }
 # between rc.10 / rc.11 / rc.12 (rc.12 dropped a function rc.10's API
 # referenced). Exact pins prevent silent breakage on `cargo update`.
 #
-# `download-binaries` ships prebuilt ORT DLLs (DirectML + CPU work out of
-# the box). CUDA / OpenVINO / QNN are enabled as feature gates so the
-# session-creation API surface compiles; their actual runtime support
-# requires the matching Performance Pack DLLs alongside the engine
-# (Settings → Performance → Install Pack delivers those in V14.7+).
+# V14.7.6: `download-binaries` MUST be on so the ORT runtime DLLs
+# (onnxruntime.dll + DirectML.dll + onnxruntime_providers_shared.dll)
+# ship in the build output. Without it, `Session::builder()` fails
+# IMMEDIATELY for every EP including DirectML/CPU because the engine
+# can't find onnxruntime.dll. CUDA/OpenVINO/QNN feature gates remain
+# enabled so the session-creation API compiles; their EP DLLs are
+# delivered separately via Performance Packs (Settings -> Performance -> Install).
 ort = { version = "=2.0.0-rc.10", default-features = false, features = [
     "load-dynamic",
+    "download-binaries",
     "ndarray",
     "directml",
     "cuda",

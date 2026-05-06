@@ -1,4 +1,4 @@
-// SidebarTab — the six top-level destinations the sidebar exposes.
+﻿// SidebarTab -- the six top-level destinations the sidebar exposes.
 //
 // Mirror of macOS Sidebar.swift's tab enum (Library / People / Cleanup /
 // Deep Analyze / Restructure / Settings). Each carries an id (persisted

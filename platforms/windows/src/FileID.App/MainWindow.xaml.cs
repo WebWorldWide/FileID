@@ -1,4 +1,4 @@
-// MainWindow code-behind — chrome (Mica/Acrylic, dark mode, custom title
+﻿// MainWindow code-behind — chrome (Mica/Acrylic, dark mode, custom title
 // bar, min size), sidebar visibility binding, drag-drop folder, and the
 // app-level keyboard accelerators (Alt+1..6, Ctrl+O, Ctrl+R, Ctrl+F,
 // Ctrl+Shift+S).
@@ -48,53 +48,116 @@ public sealed partial class MainWindow : Window
 
     public MainWindow()
     {
+        // V14.7.2: every step in the constructor is independently
+        // wrapped so a single failure (e.g. backdrop unsupported on
+        // older Win10) doesn't kill the window before it shows. If
+        // ANY step fails the rest still run, and the failure goes to
+        // the startup-trace.
+        var traceLogPath = System.IO.Path.Combine(
+            System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
+            "FileID", "logs", "startup-trace.txt");
+        void Trace(string msg)
+        {
+            try { System.IO.File.AppendAllText(traceLogPath, $"{System.DateTime.UtcNow:O} MainWindow: {msg}\n"); }
+            catch { }
+        }
+        void Step(string name, System.Action body)
+        {
+            try { Trace(name); body(); }
+            catch (System.Exception ex) { Trace($"{name} failed (continuing): {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        // InitializeComponent MUST succeed; if it throws there's no
+        // window to show. Let it propagate up to the App handler.
+        Trace("InitializeComponent");
         InitializeComponent();
         Title = "FileID";
 
-        ApplyTitleBarChrome();
-        ApplyMinimumSize();
-        ApplySystemBackdrop();
-        ForceDarkTitleBar();
-        WireKeyboardShortcuts();
+        Step("ApplyTitleBarChrome", ApplyTitleBarChrome);
+        Step("ApplyMinimumSize", ApplyMinimumSize);
+        Step("ApplySystemBackdrop", ApplySystemBackdrop);
+        Step("ForceDarkTitleBar", ForceDarkTitleBar);
+        Step("WireKeyboardShortcuts", WireKeyboardShortcuts);
 
         Activated += OnActivated;
         Closed += OnClosed;
-        ((FrameworkElement)Content).ActualThemeChanged += OnThemeChanged;
+        Step("ThemeChanged subscribe", () => ((FrameworkElement)Content).ActualThemeChanged += OnThemeChanged);
 
-        AppViewModel.Instance.PropertyChanged += OnAppViewModelChanged;
-        ApplySidebarVisibility();
+        Step("AppViewModel subscribe", () => AppViewModel.Instance.PropertyChanged += OnAppViewModelChanged);
+        Step("ApplySidebarVisibility", ApplySidebarVisibility);
 
         // First-launch model installer. Async-launched after the window
         // has had a moment to layout so the user sees the chrome before
         // the modal pops over it.
-        ((FrameworkElement)Content).Loaded += async (_, _) => await MaybeShowWelcomeSheetAsync();
+        Step("Welcome subscribe", () =>
+            ((FrameworkElement)Content).Loaded += async (_, _) =>
+            {
+                try { await MaybeShowWelcomeSheetAsync(); }
+                catch (System.Exception ex) { Trace($"Welcome sheet failed: {ex.Message}"); }
+            });
+
+        Trace("ctor complete");
     }
 
     private async Task MaybeShowWelcomeSheetAsync()
     {
+        DebugLog.Info("[INSTALL] MaybeShowWelcomeSheetAsync called.");
         ModelInstallerService.Instance.Refresh();
-        if (ModelInstallerService.Instance.AllInstalled)
+        var svc = ModelInstallerService.Instance;
+        DebugLog.Info($"[INSTALL] sentinel state: clip={svc.Clip.Status} arcface={svc.Arcface.Status} vlm={svc.Vlm.Status}");
+
+        // Mirror macOS shouldShowWelcome() (FileIDApp.swift:64-72): show
+        // the sheet on first launch (welcomeSheetSeen == false) OR any
+        // time a required model is missing on a subsequent launch.
+        var seen = false;
+        try { seen = AppSettings.Load().WelcomeSheetSeen; }
+        catch (Exception ex) { DebugLog.Warn("MaybeShowWelcomeSheet: AppSettings.Load threw: " + ex.Message); }
+        if (seen && svc.AllInstalled)
         {
+            DebugLog.Info("[INSTALL] welcomeSheetSeen=true and all models installed; skipping.");
+            return;
+        }
+        if (svc.AllInstalled)
+        {
+            DebugLog.Info("[INSTALL] all three models already installed; skipping welcome sheet.");
             return;
         }
 
+        // V14.7.7: ContentDialog by default adds its own padding +
+        // reserves a button row at the bottom. With our custom buttons
+        // inside the sheet, the dialog chrome was eating ~80 DIP and
+        // clipping our action row. Trim padding only -- KEEP the
+        // default Background so ContentDialog's full-screen dim
+        // overlay still hides the underlying tab content (otherwise
+        // the OnboardingSplash + sidebar bleed through and look messy).
+        DebugLog.Info("[INSTALL] constructing WelcomeSheet + ContentDialog.");
         var sheet = new Views.WelcomeSheet();
         var dialog = new ContentDialog
         {
             XamlRoot = ((FrameworkElement)Content).XamlRoot,
             Content = sheet,
+            Padding = new Thickness(0),
         };
+        // ContentDialog's default ContentDialogMaxWidth (~548 DIP) clips
+        // our 600 DIP UserControl — the per-row Install buttons + the
+        // footer "Skip for now" button get cut off the right edge. Bump
+        // both Min and Max so the dialog is exactly as wide as the sheet.
+        dialog.Resources["ContentDialogMaxWidth"] = 720.0;
+        dialog.Resources["ContentDialogMinWidth"] = 660.0;
         sheet.Dismissed += (_, _) =>
         {
+            DebugLog.Info("[INSTALL] WelcomeSheet.Dismissed fired; closing dialog.");
             try { dialog.Hide(); } catch { }
         };
         try
         {
+            DebugLog.Info("[INSTALL] dialog.ShowAsync awaiting...");
             await dialog.ShowAsync();
+            DebugLog.Info("[INSTALL] dialog.ShowAsync returned.");
         }
         catch (Exception ex)
         {
-            DebugLog.Warn("Welcome sheet: " + ex.Message);
+            DebugLog.Warn("[INSTALL] Welcome sheet ShowAsync threw: " + ex);
         }
     }
 
@@ -102,6 +165,26 @@ public sealed partial class MainWindow : Window
     {
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
+
+        // V14.7.3: explicit AppWindow icon. The .exe already has the
+        // icon embedded via <ApplicationIcon>, so taskbar / Alt-Tab
+        // already work. SetIcon makes the WINDOW icon (top-left if a
+        // chrome'd window, system menu icon) match — defensive +
+        // explicit so any consumer (third-party window enumerators,
+        // WinUI's own internal title-bar code) sees the right icon.
+        try
+        {
+            var iconPath = System.IO.Path.Combine(
+                System.AppContext.BaseDirectory, "Assets", "FileID.ico");
+            if (System.IO.File.Exists(iconPath))
+            {
+                AppWindow.SetIcon(iconPath);
+            }
+        }
+        catch (System.Exception ex)
+        {
+            DebugLog.Warn("AppWindow.SetIcon failed (non-fatal): " + ex.Message);
+        }
     }
 
     private void ApplyMinimumSize()
@@ -263,28 +346,8 @@ public sealed partial class MainWindow : Window
             });
         }
 
-        // F1 — show keyboard shortcut cheat sheet. Standard Windows help key.
-        AddAccelerator(VirtualKey.F1, VirtualKeyModifiers.None, async (_, _) =>
-        {
-            await ShowShortcutsAsync();
-        });
-        // Ctrl+? (typed via Ctrl+Shift+/) — alternate "show help" gesture.
-        AddAccelerator((VirtualKey)191 /* OEM_2 = '/' on US layouts */,
-            VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift,
-            async (_, _) => await ShowShortcutsAsync());
-    }
-
-    private async Task ShowShortcutsAsync()
-    {
-        var dialog = new ContentDialog
-        {
-            XamlRoot = (Content as FrameworkElement)?.XamlRoot,
-            Title = "Keyboard shortcuts",
-            CloseButtonText = "Close",
-            DefaultButton = ContentDialogButton.Close,
-            Content = new Views.ShortcutsCheatSheet(),
-        };
-        try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
+        // V14.7.15: ShortcutsCheatSheet (F1 / Ctrl+?) removed for strict
+        // macOS parity — macOS has no centralized shortcuts panel.
     }
 
     private void AddAccelerator(VirtualKey key, VirtualKeyModifiers modifiers,
@@ -362,6 +425,16 @@ public sealed partial class MainWindow : Window
             SidebarColumn.Width = new GridLength(0);
             SidebarHost.Visibility = Visibility.Collapsed;
         }
+    }
+
+    /// <summary>
+    /// V14.7.16: title-bar sidebar toggle button. Same effect as
+    /// Ctrl+Shift+S but visible at all times so the user always has a way
+    /// to bring the sidebar back after hiding it.
+    /// </summary>
+    private void OnSidebarToggleClicked(object sender, RoutedEventArgs e)
+    {
+        AppViewModel.Instance.ToggleSidebar();
     }
 
     // ─── Drag-drop folder ──────────────────────────────────────────────

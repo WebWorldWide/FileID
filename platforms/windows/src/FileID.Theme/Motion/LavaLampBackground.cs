@@ -1,4 +1,4 @@
-// LavaLampBackground — three blurred ellipses drifting under a translucent
+﻿// LavaLampBackground — three blurred ellipses drifting under a translucent
 // overlay. The user's favorite touch; the visual signature of FileID.
 //
 // V14.6: rewritten on Microsoft.UI.Composition (no Win2D). The previous

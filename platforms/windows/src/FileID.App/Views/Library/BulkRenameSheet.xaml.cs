@@ -1,4 +1,4 @@
-// BulkRenameSheet code-behind. Each row is a small custom panel built in
+﻿// BulkRenameSheet code-behind. Each row is a small custom panel built in
 // code (avoids a DataTemplate dance for what is two controls per row).
 // Apply emits engine `renameFiles` IPC with the entries for which the
 // "include" checkbox is on.

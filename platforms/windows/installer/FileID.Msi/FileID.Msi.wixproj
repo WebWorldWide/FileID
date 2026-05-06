@@ -32,6 +32,12 @@
     <PublishRoot Condition="'$(Platform)' == 'x64'">$(MSBuildThisFileDirectory)..\..\src\FileID.App\bin\x64\Release\net8.0-windows10.0.19041.0\win-x64\publish</PublishRoot>
     <PublishRoot Condition="'$(Platform)' == 'arm64'">$(MSBuildThisFileDirectory)..\..\src\FileID.App\bin\arm64\Release\net8.0-windows10.0.19041.0\win-arm64\publish</PublishRoot>
 
+    <!-- V14.7.3: source-of-truth path for the multi-resolution .ico
+         used by ARPPRODUCTICON + Start Menu shortcut. References the
+         repo asset, not the publish output, so the WiX MSI gets the
+         multi-res version even before R2R/AOT publish runs. -->
+    <AssetsRoot>$(MSBuildThisFileDirectory)..\..\src\FileID.App\Assets</AssetsRoot>
+
     <OutputPath>$(MSBuildThisFileDirectory)..\..\dist\installer\</OutputPath>
     <IntermediateOutputPath>$(MSBuildThisFileDirectory)obj\$(Platform)\</IntermediateOutputPath>
 
@@ -56,9 +62,9 @@
          takes DefineConstants as a semicolon-separated PropertyGroup
          entry, NOT an ItemGroup like older versions. -->
     <DefineConstants Condition="'$(Platform)' == 'x64'"
-        >PublishRoot=$(PublishRoot);UpgradeCode=$(UpgradeCodeX64)</DefineConstants>
+        >PublishRoot=$(PublishRoot);UpgradeCode=$(UpgradeCodeX64);AssetsRoot=$(AssetsRoot)</DefineConstants>
     <DefineConstants Condition="'$(Platform)' == 'arm64'"
-        >PublishRoot=$(PublishRoot);UpgradeCode=$(UpgradeCodeArm64)</DefineConstants>
+        >PublishRoot=$(PublishRoot);UpgradeCode=$(UpgradeCodeArm64);AssetsRoot=$(AssetsRoot)</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>

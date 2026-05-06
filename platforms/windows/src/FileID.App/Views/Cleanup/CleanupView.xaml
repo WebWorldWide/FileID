@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
     CleanupView — duplicate-group list with keeper selection.
     Mirror of macOS Cleanup/CleanupView.swift.
@@ -28,24 +28,31 @@
                 <TextBlock Text="Cleanup" Style="{StaticResource TitleTextBlockStyle}"/>
                 <TextBlock Text="Visually-similar files grouped by perceptual hash. Trashed items stay recoverable."
                            Style="{StaticResource BodyTextBlockStyle}"
-                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                           TextWrapping="Wrap" />
             </StackPanel>
-            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                <Button Click="OnTrashNonKeepersClicked"
-                        ToolTipService.ToolTip="Move every non-keeper duplicate to the Recycle Bin.">
-                    <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                        <FontIcon FontSize="13" Glyph="&#xE74D;" />
-                        <TextBlock Text="Trash non-keepers" />
-                    </StackPanel>
-                </Button>
-                <Button Click="OnRefreshClicked"
-                        ToolTipService.ToolTip="Re-scan the database for duplicate phash groups.">
-                    <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                        <FontIcon FontSize="13" Glyph="&#xE72C;" />
-                        <TextBlock Text="Refresh" />
-                    </StackPanel>
-                </Button>
-            </StackPanel>
+            <ScrollViewer Grid.Column="1"
+                          HorizontalScrollMode="Auto"
+                          HorizontalScrollBarVisibility="Hidden"
+                          VerticalScrollMode="Disabled"
+                          VerticalScrollBarVisibility="Disabled">
+                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <Button Click="OnTrashNonKeepersClicked"
+                            ToolTipService.ToolTip="Move every non-keeper duplicate to the Recycle Bin.">
+                        <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                            <FontIcon FontSize="13" Glyph="&#xE74D;" />
+                            <TextBlock Text="Trash non-keepers" />
+                        </StackPanel>
+                    </Button>
+                    <Button Click="OnRefreshClicked"
+                            ToolTipService.ToolTip="Re-scan the database for duplicate phash groups.">
+                        <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                            <FontIcon FontSize="13" Glyph="&#xE72C;" />
+                            <TextBlock Text="Refresh" />
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+            </ScrollViewer>
         </Grid>
 
         <ScrollViewer Grid.Row="1"
@@ -62,9 +69,14 @@
                               BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                               BorderThickness="1"
                               Padding="16"
-                              Tag="{x:Bind PerceptualHash}">
+                              Tag="{x:Bind PerceptualHash}"
+                              RightTapped="OnGroupRightTapped">
                             <!-- FEAT-CRIT-2: per-group right-click action menu.
-                                 Mirror of macOS Cleanup group menu. -->
+                                 Mirror of macOS Cleanup group menu.
+                                 V14.7.6: RightTapped seeds the current-group
+                                 cache so MenuFlyoutItem clicks (which don't
+                                 inherit DataContext on WinUI 3) can resolve
+                                 to the correct DuplicateGroup. -->
                             <Grid.ContextFlyout>
                                 <MenuFlyout>
                                     <MenuFlyoutItem Text="Keep first"
@@ -128,7 +140,7 @@
                                                     <ColumnDefinition Width="*"/>
                                                     <ColumnDefinition Width="Auto"/>
                                                 </Grid.ColumnDefinitions>
-                                                <RadioButton GroupName="{x:Bind Path, Mode=OneTime}"
+                                                <RadioButton GroupName="{x:Bind GroupKey, Mode=OneTime}"
                                                              IsChecked="{x:Bind IsKeeper, Mode=TwoWay}"
                                                              Content="Keep"
                                                              VerticalAlignment="Center" />

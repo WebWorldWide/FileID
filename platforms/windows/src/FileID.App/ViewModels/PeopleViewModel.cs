@@ -1,4 +1,4 @@
-// PeopleViewModel — backs the People tab cluster grid.
+﻿// PeopleViewModel — backs the People tab cluster grid.
 //
 // Mirror of macOS app/Sources/FileID/People/PeopleViewModel.swift. Each
 // cluster has a representative face image, a member count, an optional

@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
     Sidebar — composition root. 260 DIP fixed width. Hosts:
       • SidebarFolderHeader     (folder picker + change/clear/wipe actions)
@@ -17,25 +17,35 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <!-- 16-px outer padding + 16-px row spacing matches Fluent's 8-px
-         baseline grid (multiples of 8). The bottom padding is doubled
-         (24-px) so the engine pill never touches the window edge. -->
-    <Grid Padding="16,12,16,24" RowSpacing="16">
+    <!-- V14.7.4: rows 0-4 live inside a ScrollViewer so on short windows
+         the queue list overflows scrollably instead of pushing the engine
+         pill (the most important "is the engine running" indicator) below
+         the visible area. The engine pill stays anchored at row 1 of the
+         outer Grid where Height="Auto" means it always renders.
+
+         16-px outer padding + 16-px row spacing matches Fluent's 8-px
+         baseline grid. The bottom padding is doubled (24-px) so the
+         engine pill never touches the window edge. -->
+    <Grid Padding="16,12,16,24">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" /> <!-- Folder header -->
-            <RowDefinition Height="Auto" /> <!-- Tab list -->
-            <RowDefinition Height="Auto" /> <!-- Processing control -->
-            <RowDefinition Height="Auto" /> <!-- Pipeline progress -->
-            <RowDefinition Height="Auto" /> <!-- Queue list -->
-            <RowDefinition Height="*" />    <!-- Spacer -->
-            <RowDefinition Height="Auto" /> <!-- Engine status -->
+            <RowDefinition Height="*" />    <!-- Scrollable content -->
+            <RowDefinition Height="Auto" /> <!-- Engine status (anchored) -->
         </Grid.RowDefinitions>
 
-        <local:SidebarFolderHeader     Grid.Row="0" />
-        <local:SidebarTabList          Grid.Row="1" />
-        <local:SidebarProcessingControl Grid.Row="2" />
-        <local:SidebarPipelineProgress Grid.Row="3" />
-        <local:SidebarQueueList        Grid.Row="4" />
-        <local:SidebarEngineStatus     Grid.Row="6" />
+        <ScrollViewer Grid.Row="0"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled"
+                      ZoomMode="Disabled">
+            <StackPanel Spacing="16">
+                <local:SidebarFolderHeader />
+                <local:SidebarTabList />
+                <local:SidebarProcessingControl />
+                <local:SidebarPipelineProgress />
+                <local:SidebarQueueList />
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- Engine status anchored at the bottom — always visible. -->
+        <local:SidebarEngineStatus Grid.Row="1" Margin="0,16,0,0" />
     </Grid>
 </UserControl>

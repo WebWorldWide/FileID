@@ -1,4 +1,4 @@
-// CleanupView code-behind. Trash-non-keepers walks every group, gathers
+﻿// CleanupView code-behind. Trash-non-keepers walks every group, gathers
 // the file_ids for members where IsKeeper == false, confirms with the
 // user, then sends one big trashFiles IPC.
 
@@ -125,17 +125,22 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
 
     // ─── FEAT-CRIT-2: Per-group action menu handlers ─────────────────
 
-    /// <summary>Walk up the visual tree from the FlyoutItem's target to find
-    /// the DuplicateGroup whose ContextFlyout fired.</summary>
-    private static DuplicateGroup? GroupFromFlyoutItem(object sender)
+    // V14.7.6: WinUI 3 MenuFlyoutItem inside a Grid.ContextFlyout does NOT
+    // inherit the parent Grid's DataContext, so the prior version's
+    // `item.DataContext as DuplicateGroup` always returned null and every
+    // per-group action silently no-op'd. Fix: cache the right-tapped group
+    // here at the moment the context menu is invoked.
+    private DuplicateGroup? _lastRightTappedGroup;
+
+    private void OnGroupRightTapped(object sender, Microsoft.UI.Xaml.Input.RightTappedRoutedEventArgs e)
     {
-        if (sender is not MenuFlyoutItem item) return null;
-        // The item lives in a MenuFlyout owned by a Grid whose DataContext
-        // is the DuplicateGroup. WinUI 3 flyouts don't expose Owner directly,
-        // but the DataContext on the menu is inherited from the Grid.
-        var p = item.DataContext as DuplicateGroup;
-        return p;
+        if (sender is FrameworkElement fe && fe.DataContext is DuplicateGroup g)
+        {
+            _lastRightTappedGroup = g;
+        }
     }
+
+    private DuplicateGroup? GroupFromFlyoutItem(object sender) => _lastRightTappedGroup;
 
     private void OnGroupKeepFirst(object sender, RoutedEventArgs e)
     {

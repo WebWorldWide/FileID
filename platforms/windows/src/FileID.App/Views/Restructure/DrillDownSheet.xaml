@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
     DrillDownSheet — modal listing every file flowing through a single
     Sankey ribbon or TreeDiff folder. Each row shows a thumbnail + the

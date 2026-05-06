@@ -1,4 +1,4 @@
-// Plain DTO records used inside command + event payloads. 1:1 mirror of the
+﻿// Plain DTO records used inside command + event payloads. 1:1 mirror of the
 // schema's `$defs` section. Records (immutable, init-only, value-equality)
 // match Swift's struct semantics and Rust's #[derive(Debug, Clone)] structs.
 //
@@ -65,17 +65,6 @@ public sealed record MergeSuggestion(
 
 public sealed record MergeSuggestions(
     System.Collections.Generic.IReadOnlyList<MergeSuggestion> Pairs);
-
-public sealed record RecentScans(
-    System.Collections.Generic.IReadOnlyList<RecentScanItem> Items);
-
-public sealed record RecentScanItem(
-    string SessionId,
-    string RootPath,
-    double StartedAt,
-    double? CompletedAt,
-    long? TotalFiles,
-    string Status);
 
 /// <summary>
 /// Hardware probe surfaced by the engine on startup. Settings → Performance

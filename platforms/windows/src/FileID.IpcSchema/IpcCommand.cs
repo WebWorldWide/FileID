@@ -1,4 +1,4 @@
-// IPCCommand envelope. Mirror of the Swift `IPCCommand { id, payload }`
+﻿// IPCCommand envelope. Mirror of the Swift `IPCCommand { id, payload }`
 // Codable struct. The `id` is an app-assigned UUID; the engine echoes it
 // in any reply so the app can correlate.
 //

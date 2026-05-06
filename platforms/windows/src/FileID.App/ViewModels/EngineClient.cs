@@ -1,4 +1,4 @@
-// EngineClient — owns the FileIDEngine.exe child process lifecycle.
+﻿// EngineClient — owns the FileIDEngine.exe child process lifecycle.
 //
 // Mirror of macOS EngineClient.swift. Responsibilities:
 //   1. Spawn FileIDEngine.exe with stdin/stdout/stderr redirected.
@@ -72,6 +72,11 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
 
     private DateTime _lastDeepAnalyzeFileDone = DateTime.MinValue;
     private static readonly TimeSpan DeepAnalyzeFileDoneThrottle = TimeSpan.FromMilliseconds(500); // 2 Hz
+
+    // V14.7.16: throttled diagnostic counter for inbound progress events.
+    // Lets `[IPC IN] ModelDownloadProgress #N` lines correlate with engine
+    // activity without flooding app.log.
+    private int _modelDownloadEventCount;
 
     // ─── Observable surface (mirror of macOS @Observable) ──────────────
 
@@ -192,13 +197,6 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
     {
         get => _lastMergeSuggestions;
         private set => Set(ref _lastMergeSuggestions, value);
-    }
-
-    private RecentScans? _lastRecentScans;
-    public RecentScans? LastRecentScans
-    {
-        get => _lastRecentScans;
-        private set => Set(ref _lastRecentScans, value);
     }
 
     private DeepAnalyzeStarting? _deepAnalyzeStarting;
@@ -432,6 +430,13 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
             DebugLog.Warn($"EngineClient: process exited (code={_process?.ExitCode}).");
             Cleanup();
 
+            // Notify install service immediately so any in-flight download
+            // owned by the now-dead engine flips to Failed instead of
+            // spinning forever. Runs on every exit (graceful shutdown,
+            // crash + respawn, 3-strike terminal crash). Idempotent.
+            try { Services.ModelInstallerService.Instance.Reset(); }
+            catch (Exception ex) { DebugLog.Warn("OnProcessExited: ModelInstallerService.Reset threw: " + ex.Message); }
+
             // BUG-6: user-initiated shutdown shouldn't count as a crash
             // or trigger the auto-respawn — that would drag the engine
             // back up after the user explicitly asked it to stop.
@@ -515,24 +520,108 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
 
     // ─── Commands ──────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Block until the engine reaches <see cref="LifecycleState.Ready"/>.
+    /// Throws <see cref="TimeoutException"/> if the engine never becomes
+    /// ready within <paramref name="timeout"/>; throws
+    /// <see cref="InvalidOperationException"/> with the crash reason if
+    /// the engine has already crashed. Returns immediately if Ready.
+    /// Callers (the install flow) gate on this before sending an IPC
+    /// command, so a click that happens during cold start either waits
+    /// or surfaces a clean error — never silently throws "Engine not
+    /// running."
+    /// </summary>
+    public Task WaitForReadyAsync(TimeSpan timeout, CancellationToken ct = default)
+    {
+        if (State == LifecycleState.Ready) return Task.CompletedTask;
+        if (State == LifecycleState.Crashed)
+        {
+            throw new InvalidOperationException(
+                "Engine has crashed: " + (CrashReason ?? "unknown reason"));
+        }
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        PropertyChangedEventHandler? handler = null;
+        handler = (_, e) =>
+        {
+            if (e.PropertyName != nameof(State)) return;
+            if (State == LifecycleState.Ready)
+            {
+                PropertyChanged -= handler;
+                tcs.TrySetResult(true);
+            }
+            else if (State == LifecycleState.Crashed)
+            {
+                PropertyChanged -= handler;
+                tcs.TrySetException(new InvalidOperationException(
+                    "Engine crashed while waiting for ready: " + (CrashReason ?? "unknown reason")));
+            }
+        };
+        PropertyChanged += handler;
+        // Re-check after subscribing in case the state changed between
+        // the early-return above and the handler attach.
+        if (State == LifecycleState.Ready)
+        {
+            PropertyChanged -= handler;
+            return Task.CompletedTask;
+        }
+        return Task.Run(async () =>
+        {
+            try
+            {
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                cts.CancelAfter(timeout);
+                using var reg = cts.Token.Register(() =>
+                {
+                    PropertyChanged -= handler;
+                    if (ct.IsCancellationRequested)
+                    {
+                        tcs.TrySetCanceled(ct);
+                    }
+                    else
+                    {
+                        tcs.TrySetException(new TimeoutException(
+                            $"Engine did not become Ready within {timeout.TotalSeconds:0}s (current state: {State})."));
+                    }
+                });
+                await tcs.Task.ConfigureAwait(false);
+            }
+            finally
+            {
+                PropertyChanged -= handler;
+            }
+        }, ct);
+    }
+
     public Task SendCommandAsync(CommandPayload payload, CancellationToken ct = default)
     {
         var cmd = IpcCommand.New(payload);
         var bytes = IpcCoder.EncodeLine(cmd);
+        var commandKind = payload.GetType().Name.Replace("Command", "");
+        DebugLog.Info($"[IPC OUT] {commandKind} ({bytes.Length} bytes)");
         // The engine's stdin reader handles concurrent writers because
         // our writes are atomic per-line, but we still serialize through a
         // lock to make the byte order deterministic for log correlation.
         return Task.Run(() =>
         {
             ct.ThrowIfCancellationRequested();
-            lock (_writeLock)
+            try
             {
-                if (_stdin is null)
+                lock (_writeLock)
                 {
-                    throw new InvalidOperationException("Engine not running.");
+                    if (_stdin is null)
+                    {
+                        DebugLog.Warn($"[IPC OUT] {commandKind} ABORTED — engine stdin is null (engine not running).");
+                        throw new InvalidOperationException("Engine not running.");
+                    }
+                    _stdin.BaseStream.Write(bytes, 0, bytes.Length);
+                    _stdin.BaseStream.Flush();
                 }
-                _stdin.BaseStream.Write(bytes, 0, bytes.Length);
-                _stdin.BaseStream.Flush();
+                DebugLog.Info($"[IPC OUT] {commandKind} flushed to engine stdin.");
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn($"[IPC OUT] {commandKind} threw on send: {ex.Message}");
+                throw;
             }
         }, ct);
     }
@@ -594,15 +683,20 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
     public Task DeepAnalyzeAllAsync(string modelKind, bool skipExisting) =>
         SendCommandAsync(new DeepAnalyzeAllCommand(modelKind, skipExisting));
     public Task DeepAnalyzeCancelAsync() => SendCommandAsync(new DeepAnalyzeCancelCommand());
-    public Task PrewarmModelAsync(string modelKind) =>
-        SendCommandAsync(new PrewarmModelCommand(modelKind));
-    public Task CancelPrewarmAsync() => SendCommandAsync(new CancelPrewarmCommand());
+    public Task PrewarmModelAsync(string modelKind)
+    {
+        DebugLog.Info($"[INSTALL] EngineClient.PrewarmModelAsync('{modelKind}') called. State={State}, _stdin={(_stdin is null ? "NULL" : "alive")}");
+        return SendCommandAsync(new PrewarmModelCommand(modelKind));
+    }
+    public Task CancelPrewarmAsync()
+    {
+        DebugLog.Info("[INSTALL] EngineClient.CancelPrewarmAsync() called.");
+        return SendCommandAsync(new CancelPrewarmCommand());
+    }
     public Task PlanRestructureAsync(string libraryRoot) =>
         SendCommandAsync(new PlanRestructureCommand(libraryRoot));
     public Task ApplyRestructureAsync(string libraryRoot, IReadOnlyList<RestructureMove> moves, bool useSymlinks) =>
         SendCommandAsync(new ApplyRestructureCommand(libraryRoot, moves, useSymlinks));
-    public Task AutoPilotAsync(string libraryRoot, string? vlmModelKind = null) =>
-        SendCommandAsync(new AutoPilotCommand(libraryRoot, vlmModelKind));
 
     public Task ApplyTagsAsync(IReadOnlyList<long> fileIds, IReadOnlyList<string> tags, string mode = "add") =>
         SendCommandAsync(new ApplyTagsCommand(fileIds, tags, mode));
@@ -637,9 +731,6 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
 
     public Task RevertMergeAsync(long sourcePersonId, long destPersonId, IReadOnlyList<long> faceIdsToRevert) =>
         SendCommandAsync(new RevertMergeCommand(sourcePersonId, destPersonId, faceIdsToRevert));
-
-    public Task FetchRecentScansAsync(uint limit = 20) =>
-        SendCommandAsync(new RecentScansCommand(limit));
 
     // ─── Event router ──────────────────────────────────────────────────
 
@@ -687,7 +778,7 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
                 break;
             case ErrorEvent e:
                 LastError = e.Error;
-                DebugLog.Warn($"engine error: kind={e.Error.Kind} msg={e.Error.Message} path={PathRedactor.Redact(e.Error.Path)}");
+                DebugLog.Warn($"[IPC IN] engine error: kind={e.Error.Kind} msg={e.Error.Message} path={PathRedactor.Redact(e.Error.Path)}");
                 break;
             case LogEvent:
                 // Engine LogLine events go to the transcript via Events.
@@ -717,6 +808,16 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
                 DeepAnalyzeStarting = null;
                 break;
             case ModelDownloadProgressEvent mdp:
+                // Throttled to one log line per 1% (~100 events / model) so
+                // app.log isn't flooded but the trail is dense enough to
+                // diagnose stuck installs.
+                _modelDownloadEventCount++;
+                if (_modelDownloadEventCount <= 5
+                    || _modelDownloadEventCount % 50 == 0
+                    || mdp.Progress.Fraction >= 0.999)
+                {
+                    DebugLog.Info($"[IPC IN] ModelDownloadProgress #{_modelDownloadEventCount}: {mdp.Progress.ModelKind} {mdp.Progress.Fraction:P0} - {mdp.Progress.Message}");
+                }
                 ModelDownloadProgress = mdp.Progress;
                 break;
             case QueueStateEvent qs:
@@ -736,9 +837,6 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
                 break;
             case MergeSuggestionsEvent ms:
                 LastMergeSuggestions = ms.Suggestions;
-                break;
-            case RecentScansEvent rs:
-                LastRecentScans = rs.Scans;
                 break;
         }
     }

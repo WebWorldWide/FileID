@@ -1,9 +1,9 @@
-// SidebarProcessingControl code-behind. Subscribes to EngineClient state
+﻿// SidebarProcessingControl code-behind. Subscribes to EngineClient state
 // and re-paints the panel as scan phase advances.
 //
 // Stat color thresholds (matches macOS):
-//   memory  > 1200 MB → orange
-//   failures > 0      → red
+//   memory  > 1200 MB -> orange
+//   failures > 0      -> red
 
 using System.ComponentModel;
 using FileID.IpcSchema;
@@ -25,6 +25,11 @@ public sealed partial class SidebarProcessingControl : UserControl
         Loaded += (_, _) => Sync();
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         AppViewModel.Instance.PropertyChanged += OnAppChanged;
+        Unloaded += (_, _) =>
+        {
+            EngineClient.Instance.PropertyChanged -= OnEngineChanged;
+            AppViewModel.Instance.PropertyChanged -= OnAppChanged;
+        };
     }
 
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
@@ -38,6 +43,7 @@ public sealed partial class SidebarProcessingControl : UserControl
             DispatcherQueue.TryEnqueue(Sync);
         }
     }
+
 
     private void OnAppChanged(object? sender, PropertyChangedEventArgs e)
     {
@@ -70,32 +76,6 @@ public sealed partial class SidebarProcessingControl : UserControl
         }
     }
 
-    private async void OnAutoPilotClicked(object sender, RoutedEventArgs e)
-    {
-        // FEAT-CRIT-5: AutoPilot — fire-and-forget. The engine drives the
-        // Scan -> Cluster -> Plan -> Caption pipeline; the sidebar shows
-        // phase/progress via the same ScanProgress/PhaseChanged events
-        // the manual flow uses, so the existing UI keeps working.
-        var vm = AppViewModel.Instance;
-        if (!vm.HasFolder)
-        {
-            await ShowAlertAsync("Pick a folder first",
-                "AutoPilot needs a library folder. Use the picker at the top of the sidebar.");
-            return;
-        }
-        try
-        {
-            await EngineClient.Instance.AutoPilotAsync(vm.FolderPath!);
-            DebugLog.Info($"Sent autoPilot: {PathRedactor.Redact(vm.FolderPath!)}");
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Error("AutoPilot IPC failed: " + ex.Message);
-            await ShowAlertAsync("AutoPilot didn't start",
-                "FileID couldn't tell the engine to start AutoPilot. Engine status: "
-                + EngineClient.Instance.State);
-        }
-    }
 
     private async void OnPauseResumeClicked(object sender, RoutedEventArgs e)
     {
@@ -103,7 +83,7 @@ public sealed partial class SidebarProcessingControl : UserControl
         {
             // FEAT-1: drive the toggle off EngineClient.IsPaused (set by
             // PauseScanAsync/ResumeScanAsync optimistically) instead of
-            // reading the visible Text — which desyncs if the engine
+            // reading the visible Text -- which desyncs if the engine
             // emits an unrelated phase update between click + IPC reply.
             if (EngineClient.Instance.IsPaused)
             {
@@ -146,9 +126,6 @@ public sealed partial class SidebarProcessingControl : UserControl
 
         StartScanButton.IsEnabled = AppViewModel.Instance.HasFolder
                                   && EngineClient.Instance.State == EngineClient.LifecycleState.Ready;
-        // AutoPilot follows the same eligibility — disabled when no folder
-        // picked or engine not ready, plus while a scan/run is in flight.
-        AutoPilotButton.IsEnabled = StartScanButton.IsEnabled && !isInFlight;
 
         // FEAT-1: Pause/Resume label always reflects engine truth.
         PauseResumeText.Text = EngineClient.Instance.IsPaused ? "Resume" : "Pause";
@@ -157,17 +134,23 @@ public sealed partial class SidebarProcessingControl : UserControl
         {
             PhaseText.Text = phase switch
             {
-                ScanPhase.Discovering => "Discovering files…",
-                ScanPhase.Tagging     => "Tagging files…",
-                ScanPhase.PostScan    => "Wrapping up…",
-                _                      => "Working…",
+                ScanPhase.Discovering => "Discovering files...",
+                ScanPhase.Tagging     => "Tagging files...",
+                ScanPhase.PostScan    => "Wrapping up...",
+                _                      => "Working...",
             };
+            // V14.7.6: glyphs were empty strings from a prior cp1252 round-trip
+            // that ate the PUA chars. Use Unicode escapes (encoding-bulletproof):
+            //   E721 = Search (Discovering)
+            //   E8B7 = TagGroup / labels (Tagging)
+            //   E895 = OEM (Wrapping up)
+            //   E8FB = AcceptMedium (default Working)
             PhaseIcon.Glyph = phase switch
             {
-                ScanPhase.Discovering => "",
-                ScanPhase.Tagging     => "",
-                ScanPhase.PostScan    => "",
-                _                      => "",
+                ScanPhase.Discovering => "",
+                ScanPhase.Tagging     => "",
+                ScanPhase.PostScan    => "",
+                _                      => "",
             };
 
             if (prog.Total > 0)
@@ -194,7 +177,7 @@ public sealed partial class SidebarProcessingControl : UserControl
 
             EtaText.Text = prog.EtaSeconds is { } eta && eta > 0
                 ? "ETA: " + FormatDuration(eta)
-                : "ETA: computing…";
+                : "ETA: computing...";
         }
         else if (isCompleted && prog is not null)
         {
@@ -204,8 +187,8 @@ public sealed partial class SidebarProcessingControl : UserControl
             // typo `prog.Total > 0 ? 0 : 0`.
             var elapsed = EngineClient.Instance.LastScanDuration.TotalSeconds;
             CompletedSummary.Text = elapsed > 0
-                ? $"Scan complete — {prog.Processed:N0} files in {FormatDuration(elapsed)}."
-                : $"Scan complete — {prog.Processed:N0} files.";
+                ? $"Scan complete -- {prog.Processed:N0} files in {FormatDuration(elapsed)}."
+                : $"Scan complete -- {prog.Processed:N0} files.";
         }
         else if (!AppViewModel.Instance.HasFolder)
         {

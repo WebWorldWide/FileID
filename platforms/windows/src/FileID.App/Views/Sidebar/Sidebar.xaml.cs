@@ -1,4 +1,4 @@
-// Sidebar code-behind. The composition root has no logic of its own —
+﻿// Sidebar code-behind. The composition root has no logic of its own —
 // each subcomponent owns its piece of state. We construct the UserControl
 // and let XAML wire up the children.
 

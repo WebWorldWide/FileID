@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
     BulkTagSheet — modal that takes a comma-separated tag list and
     applies it to a set of files via engine `applyTags`. Confirms when

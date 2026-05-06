@@ -62,10 +62,10 @@
     <!-- Privacy posture is a product feature; surface it in Apps & Features. -->
     <Property Id="ARPCOMMENTS" Value="On-device AI file organizer. No telemetry. No cloud." />
 
-    <!-- Icon used everywhere ARPPRODUCTICON references it. The actual
-         .ico file lands once Phase 11 ships an app icon; for now this is
-         a placeholder reference Burn doesn't choke on. -->
-    <Icon Id="FileIDIcon" SourceFile="$(var.PublishRoot)\FileID.exe" />
+    <!-- V14.7.3: Icon used everywhere ARPPRODUCTICON references it.
+         References the source .ico directly (not extracted from .exe)
+         so Add/Remove Programs gets the multi-resolution version. -->
+    <Icon Id="FileIDIcon" SourceFile="$(var.AssetsRoot)\FileID.ico" />
 
     <!-- Start Menu shortcut. -->
     <DirectoryRef Id="StartMenuDir">

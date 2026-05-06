@@ -1,7 +1,7 @@
-// FilePreviewSheet code-behind. Hosted inside a ContentDialog (so Esc /
+﻿// FilePreviewSheet code-behind. Hosted inside a ContentDialog (so Esc /
 // click-outside dismiss come for free). Real preview body uses the same
 // shell-thumbnail provider chain Explorer uses (handles HEIC, RAW, Office,
-// .pages, etc) — no special pdfium / Media Foundation roundtrips needed
+// .pages, etc) -- no special pdfium / Media Foundation roundtrips needed
 // for the visual preview at this fidelity.
 
 using System;
@@ -18,7 +18,7 @@ public sealed partial class FilePreviewSheet : UserControl
     public long FileId { get; private set; }
 
     // V14.7.2: sibling navigation. The host (Library tab) sets the
-    // siblings list + current index when opening the sheet so ←/→
+    // siblings list + current index when opening the sheet so <-/->
     // can step through tiles without closing + reopening.
     private System.Collections.Generic.IReadOnlyList<FileID.ViewModels.FileTile>? _siblings;
     private int _siblingIndex;
@@ -29,15 +29,17 @@ public sealed partial class FilePreviewSheet : UserControl
     {
         InitializeComponent();
         // Esc closes the sheet via the dialog's CloseButton; we also
-        // hook the KeyDown for ←/→ siblings nav so users don't have
+        // hook the KeyDown for <-/-> siblings nav so users don't have
         // to bring the dialog buttons into focus.
         KeyDown += OnKeyDown;
         IsTabStop = true;
     }
 
-    /// <summary>V14.7.2: set the siblings list so the user can ←/→
-    /// through neighboring tiles without closing the sheet.</summary>
-    public void SetSiblings(System.Collections.Generic.IReadOnlyList<FileID.ViewModels.FileTile> siblings, int currentIndex)
+    /// <summary>V14.7.2: set the siblings list so the user can <-/->
+    /// through neighboring tiles without closing the sheet.
+    /// Internal because FileTile is internal; LibraryView calls this
+    /// from the same assembly when opening the sheet.</summary>
+    internal void SetSiblings(System.Collections.Generic.IReadOnlyList<FileID.ViewModels.FileTile> siblings, int currentIndex)
     {
         _siblings = siblings;
         _siblingIndex = currentIndex;
@@ -87,7 +89,7 @@ public sealed partial class FilePreviewSheet : UserControl
     public async void SetFile(string path, string kind, long sizeBytes, double? modifiedAt, long fileId = 0)
     {
         FileId = fileId;
-        // Async-void → must wrap the entire body. Any unhandled exception
+        // Async-void -> must wrap the entire body. Any unhandled exception
         // here would terminate the dispatcher and crash the window.
         try
         {
@@ -107,7 +109,7 @@ public sealed partial class FilePreviewSheet : UserControl
             AnalyzeButton.IsEnabled = false;
             // Use the recommended VLM model id; the engine will surface
             // a friendly error if the model isn't installed (Welcome /
-            // Settings → Install).
+            // Settings -> Install).
             await ViewModels.EngineClient.Instance.DeepAnalyzeFileAsync(FileId, "qwen2_5_vl_3b");
         }
         catch (Exception ex)
@@ -129,7 +131,7 @@ public sealed partial class FilePreviewSheet : UserControl
         var sizeDisplay = FormatSize(sizeBytes);
         var modifiedDisplay = modifiedAt.HasValue
             ? DateTimeOffset.FromUnixTimeMilliseconds((long)(modifiedAt.Value * 1000)).LocalDateTime.ToString("g")
-            : "—";
+            : "--";
         var kindDisplay = kind switch
         {
             "image" => "Image",
@@ -139,7 +141,7 @@ public sealed partial class FilePreviewSheet : UserControl
             "audio" => "Audio",
             _       => kind,
         };
-        MetadataText.Text = $"{kindDisplay} · {sizeDisplay} · modified {modifiedDisplay}";
+        MetadataText.Text = $"{kindDisplay} * {sizeDisplay} * modified {modifiedDisplay}";
 
         // Kind-glyph fallback for non-renderable kinds.
         KindGlyphIcon.Glyph = kind switch

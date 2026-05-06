@@ -1,4 +1,4 @@
-// SEC-9: centralized "Open file in default handler" helper with an
+﻿// SEC-9: centralized "Open file in default handler" helper with an
 // extension allowlist. The library DB stores paths; if a row's underlying
 // file is swapped on disk for a `.exe` / `.lnk` / `.bat` between scan + open,
 // a naive ShellExecute would execute it. This helper restricts "Open" to
@@ -48,7 +48,7 @@ internal static class SafeOpen
     public static bool TryOpenFile(string path)
     {
         if (string.IsNullOrWhiteSpace(path)) return false;
-        if (!File.Exists(path)) return false;
+        if (!SafeFileExists(path)) return false;
         var ext = Path.GetExtension(path);
         if (string.IsNullOrEmpty(ext) || !AllowedExts.Contains(ext))
         {
@@ -115,5 +115,18 @@ internal static class SafeOpen
         {
             DebugLog.Warn($"Reveal failed for '{path}': {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// File.Exists wrapper that swallows IOException / UnauthorizedAccessException.
+    /// V14.7.11: an unguarded File.Exists can throw on paths with invalid
+    /// characters or denied access — defensive wrap returns false in
+    /// those cases so callers don't crash.
+    /// </summary>
+    private static bool SafeFileExists(string path)
+    {
+        try { return File.Exists(path); }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
     }
 }

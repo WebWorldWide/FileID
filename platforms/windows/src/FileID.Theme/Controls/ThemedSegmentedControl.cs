@@ -1,4 +1,4 @@
-// ThemedSegmentedControl — gold-pill segmented control. The Windows analog
+﻿// ThemedSegmentedControl — gold-pill segmented control. The Windows analog
 // of platforms/apple/app/Sources/FileID/Theme/Theme.swift:141.
 //
 // Why not <Pivot> or <SelectorBar>: WinUI's stock styles use accent colors

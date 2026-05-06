@@ -1,4 +1,4 @@
-// FolderPickerService — opens the standard Windows folder picker associated
+﻿// FolderPickerService — opens the standard Windows folder picker associated
 // with the current window. Uses Windows.Storage.Pickers.FolderPicker, which
 // internally bridges to IFileOpenDialog (the shell folder picker).
 //

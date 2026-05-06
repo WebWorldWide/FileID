@@ -1,4 +1,4 @@
-// AppViewModel — the shell-level state the MainWindow + sidebar bind to.
+﻿// AppViewModel — the shell-level state the MainWindow + sidebar bind to.
 //
 // One instance lives on the UI thread (created at App startup). It owns:
 //   - The active SidebarTab (persisted via AppSettings.ActiveTab)

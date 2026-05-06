@@ -1,4 +1,4 @@
-// PathRedactor — strips PII from file paths before they're logged.
+﻿// PathRedactor — strips PII from file paths before they're logged.
 //
 // Mirror of `redactPathForLog(_:)` on macOS (PathRedaction.swift) and
 // `redact_path_for_log` in the Rust engine. The semantics:

@@ -1,4 +1,4 @@
-// CleanupViewModel — backs the Cleanup tab duplicate groups list.
+﻿// CleanupViewModel — backs the Cleanup tab duplicate groups list.
 //
 // Mirror of macOS app/Sources/FileID/Cleanup/CleanupViewModel.swift.
 // Groups files by matching `phash` (perceptual hash, 64-bit) to find
@@ -139,6 +139,12 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged
             // Pick the largest file as default keeper (best resolution
             // typically). User can re-pick in the UI.
             indices.Sort((a, b) => rawMembers[b].Size.CompareTo(rawMembers[a].Size));
+            var phash = rawMembers[indices[0]].Phash;
+            // V14.7.6: shared GroupName for the keeper RadioButton so
+            // mutual exclusion within a duplicate group works. Hex
+            // representation of the perceptual hash uniquely identifies
+            // the group across the whole tab.
+            var groupKey = $"dup-{phash:X16}";
             var members = new List<DuplicateMember>(indices.Count);
             for (int k = 0; k < indices.Count; k++)
             {
@@ -149,12 +155,13 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged
                     Path = m.Path,
                     FileName = System.IO.Path.GetFileName(m.Path),
                     SizeBytes = m.Size,
+                    GroupKey = groupKey,
                     IsKeeper = k == 0,
                 });
             }
             groups.Add(new DuplicateGroup
             {
-                PerceptualHash = rawMembers[indices[0]].Phash,
+                PerceptualHash = phash,
                 Members = members,
             });
         }
@@ -217,6 +224,12 @@ internal sealed class DuplicateMember : INotifyPropertyChanged
     public required string Path { get; init; }
     public required string FileName { get; init; }
     public required long SizeBytes { get; init; }
+
+    /// <summary>V14.7.6: shared per-group key for the keeper RadioButton's
+    /// GroupName. Was previously bound to `Path` per member, which made
+    /// mutual exclusion impossible (each member had its own group). Set
+    /// to the parent group's perceptual hash hex string at construction.</summary>
+    public required string GroupKey { get; init; }
 
     public string SizeDisplay
     {

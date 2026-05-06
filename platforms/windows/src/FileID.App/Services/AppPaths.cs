@@ -1,4 +1,4 @@
-// AppPaths — C# mirror of the Rust engine's `paths.rs`.
+﻿// AppPaths — C# mirror of the Rust engine's `paths.rs`.
 //
 // All app-side filesystem locations live under %LOCALAPPDATA%\FileID\.
 // Engine + app share the same directory layout so a DB written by the

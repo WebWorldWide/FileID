@@ -1,4 +1,4 @@
-// IridescentBorder — rotating angular gradient border. 14s linear loop.
+﻿// IridescentBorder — rotating angular gradient border. 14s linear loop.
 // Frozen to gold under reduced-motion.
 //
 // Mirror of macOS IridescentBorder modifier (MotionPrimitives.swift:110).

@@ -1,4 +1,4 @@
-// BadgePill — code-behind for the BadgePill UserControl.
+﻿// BadgePill — code-behind for the BadgePill UserControl.
 //
 // Mirror of macOS BadgePill (Theme.swift:71). Two DPs:
 //   - Label: the displayed text

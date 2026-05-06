@@ -1,4 +1,4 @@
-// Fires a Windows shell toast when a scan completes. We use the raw
+﻿// Fires a Windows shell toast when a scan completes. We use the raw
 // ToastNotification API (no Microsoft.Toolkit.Uwp.Notifications dep —
 // that package adds a 600KB transitive surface that we don't need for
 // the few toasts FileID raises).
@@ -33,6 +33,16 @@ public static class ScanCompleteToast
                     Show(sc.Result);
                 }
             });
+    }
+
+    /// <summary>
+    /// Disposes the Rx subscription. Call from app shutdown (App.OnSuspending
+    /// or equivalent) so the lambda doesn't outlive the process intent.
+    /// </summary>
+    public static void Stop()
+    {
+        _sub?.Dispose();
+        _sub = null;
     }
 
     private static void Show(ScanComplete result)

@@ -1,12 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    WelcomeSheet — first-launch onboarding modal. Three model rows + a
-    privacy banner + Install all / Skip actions.
+    WelcomeSheet — first-launch onboarding modal. 1:1 port of
+    platforms/apple/app/Sources/FileID/Views/WelcomeSheet.swift.
+
+    Layout matches macOS verbatim:
+      VStack(alignment: .leading, spacing: 18) { header; Divider 0.3;
+        modelRow x3; Spacer 4; footer }.padding(28).frame(width: 600)
 
     All FontIcon glyphs use numeric XML escapes (&#xE896;) so the bytes
     survive any source-control / editor encoding pass; raw glyph chars
-    don't. Status icons are rewritten programmatically by the code-behind
-    based on per-row install state.
+    don't. Per-row state flows via x:Bind OneWay against
+    ModelInstallerService.Instance.{Clip,Arcface,Vlm} — no polling timer,
+    no manual widget mutation.
 -->
 <UserControl
     x:Class="FileID.Views.WelcomeSheet"
@@ -14,222 +19,284 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-    mc:Ignorable="d">
+    xmlns:svc="using:FileID.Services"
+    mc:Ignorable="d"
+    Width="600">
 
-    <Grid Padding="36" Background="{ThemeResource SurfaceBaseBrush}" MinWidth="540" MaxWidth="680" CornerRadius="16">
-        <!-- Top-right close (X) so the user always has an escape, even
-             mid-download. Skip for now in the footer remains the canonical
-             "I'll do this later" affordance. -->
-        <Button x:Name="CloseButton"
-                HorizontalAlignment="Right"
-                VerticalAlignment="Top"
-                Margin="0,-12,-12,0"
-                Padding="6"
-                Width="32" Height="32"
-                CornerRadius="16"
-                Background="Transparent"
-                BorderThickness="0"
-                Click="OnSkipClicked"
-                ToolTipService.ToolTip="Close (Esc) — install models later from Settings."
-                AutomationProperties.Name="Close welcome sheet">
-            <FontIcon Glyph="&#xE711;" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-        </Button>
+    <Grid Padding="28">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
 
-        <StackPanel Spacing="24">
-            <!-- Hero. -->
-            <StackPanel Spacing="8">
-                <TextBlock Text="Welcome to FileID"
-                           Style="{StaticResource TitleTextBlockStyle}" />
-                <TextBlock Text="To get started, FileID needs three on-device models. They run locally; nothing leaves your machine."
-                           Style="{StaticResource BodyTextBlockStyle}"
-                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                           TextWrapping="Wrap" />
-            </StackPanel>
+        <ScrollViewer Grid.Row="0"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled"
+                      Padding="0,0,4,0">
+            <StackPanel Spacing="18">
 
-            <!-- Model rows. -->
-            <StackPanel Spacing="10">
+                <!-- Header. macOS: VStack(spacing: 6) { title; body } -->
+                <StackPanel Spacing="6">
+                    <TextBlock Text="Welcome to FileID"
+                               Style="{StaticResource TitleLargeTextBlockStyle}" />
+                    <TextBlock Text="FileID runs entirely on your PC. Install the on-device models below to enable semantic search, face clustering, and Deep Analyze. Every model downloads from its canonical upstream repository on HuggingFace — FileID never redistributes weights."
+                               Style="{StaticResource BodyTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               TextWrapping="Wrap" />
+                </StackPanel>
 
-                <!-- CLIP — semantic search. -->
-                <Grid x:Name="ClipRow"
-                      Padding="18,14"
-                      CornerRadius="12"
-                      BorderThickness="1"
-                      BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
-                      Background="{ThemeResource ControlFillColorDefaultBrush}">
+                <!-- Divider with 0.3 opacity to match macOS Divider().opacity(0.3). -->
+                <Rectangle Height="1"
+                           HorizontalAlignment="Stretch"
+                           Fill="{ThemeResource ControlStrokeColorDefaultBrush}"
+                           Opacity="0.3" />
+
+                <!-- CLIP — Semantic search. -->
+                <Grid Padding="0,4">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="28" />
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
-                    <FontIcon x:Name="ClipStatusIcon"
-                              Grid.Column="0"
-                              FontSize="18"
-                              Margin="0,0,14,0"
-                              VerticalAlignment="Center"
-                              Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                              Glyph="&#xE896;" />
-                    <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center">
-                        <TextBlock Text="Semantic search (CLIP)"
-                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
-                        <TextBlock Text="MobileCLIP-S2 + OpenAI text encoder. Lets you search 'a dog at the beach'."
+                    <FontIcon Grid.Column="0"
+                              Glyph="{x:Bind GlyphFor(Svc.Clip.Status), Mode=OneWay}"
+                              Foreground="{x:Bind IconBrushFor(Svc.Clip.Status), Mode=OneWay}"
+                              FontSize="22"
+                              VerticalAlignment="Top" />
+                    <StackPanel Grid.Column="1" Spacing="4" Margin="12,0,0,0" VerticalAlignment="Center">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0"
+                                       Text="Semantic search (MobileCLIP-S2)"
+                                       Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <TextBlock Grid.Column="1"
+                                       Text="~210 MB"
+                                       Margin="12,0,0,0"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </Grid>
+                        <TextBlock Text="Type queries like 'sunset at the beach' — FileID ranks every photo by visual relevance."
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                    TextWrapping="Wrap" />
-                        <ProgressBar x:Name="ClipProgressBar"
-                                     Margin="0,8,0,0"
-                                     Maximum="1"
-                                     Value="0"
-                                     Visibility="Collapsed"
-                                     Foreground="{ThemeResource GoldBrush}" />
+                        <ProgressBar Maximum="1"
+                                     Value="{x:Bind Svc.Clip.Fraction, Mode=OneWay}"
+                                     Foreground="{StaticResource GoldBrush}"
+                                     Visibility="{x:Bind ShowDeterminate(Svc.Clip.Status, Svc.Clip.Fraction), Mode=OneWay}" />
+                        <ProgressRing IsActive="{x:Bind SpinnerActive(Svc.Clip.Status, Svc.Clip.Fraction), Mode=OneWay}"
+                                      Visibility="{x:Bind ShowSpinner(Svc.Clip.Status, Svc.Clip.Fraction), Mode=OneWay}"
+                                      Width="18" Height="18"
+                                      HorizontalAlignment="Left"
+                                      Foreground="{StaticResource GoldBrush}" />
+                        <TextBlock FontFamily="Consolas"
+                                   FontSize="11"
+                                   Text="{x:Bind ProgressLabel(Svc.Clip.Fraction, Svc.Clip.BytesDone, Svc.Clip.TotalBytes), Mode=OneWay}"
+                                   Visibility="{x:Bind VisibleIfDownloading(Svc.Clip.Status), Mode=OneWay}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock FontFamily="Consolas"
+                                   FontSize="11"
+                                   Text="{x:Bind RateEtaLabel(Svc.Clip.BytesPerSecond, Svc.Clip.EtaSeconds), Mode=OneWay}"
+                                   Visibility="{x:Bind ShowRateEta(Svc.Clip.Status, Svc.Clip.BytesPerSecond), Mode=OneWay}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ErrorLabel(Svc.Clip.LastError), Mode=OneWay}"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="#FFE55555"
+                                   Visibility="{x:Bind VisibleIfFailed(Svc.Clip.Status), Mode=OneWay}"
+                                   TextWrapping="Wrap" />
                     </StackPanel>
-                    <TextBlock Grid.Column="2"
-                               Text="210 MB"
-                               Margin="14,0,0,0"
-                               Style="{StaticResource CaptionTextBlockStyle}"
-                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                               VerticalAlignment="Center" />
+                    <Grid Grid.Column="2" Margin="14,0,0,0" VerticalAlignment="Top">
+                        <TextBlock Text="Installed"
+                                   Foreground="#FF6BE082"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   VerticalAlignment="Center"
+                                   Visibility="{x:Bind VisibleIfInstalled(Svc.Clip.Status), Mode=OneWay}" />
+                        <Button Click="OnClipActionClicked"
+                                Content="{x:Bind ButtonLabel(Svc.Clip.Status), Mode=OneWay}"
+                                MinWidth="86"
+                                Visibility="{x:Bind ShowActionButton(Svc.Clip.Status), Mode=OneWay}" />
+                    </Grid>
                 </Grid>
 
-                <!-- ArcFace — face recognition. -->
-                <Grid x:Name="ArcfaceRow"
-                      Padding="18,14"
-                      CornerRadius="12"
-                      BorderThickness="1"
-                      BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
-                      Background="{ThemeResource ControlFillColorDefaultBrush}">
+                <!-- ArcFace — Face recognition. -->
+                <Grid Padding="0,4">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="28" />
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
-                    <FontIcon x:Name="ArcfaceStatusIcon"
-                              Grid.Column="0"
-                              FontSize="18"
-                              Margin="0,0,14,0"
-                              VerticalAlignment="Center"
-                              Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                              Glyph="&#xE896;" />
-                    <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center">
-                        <TextBlock Text="Face recognition (ArcFace)"
-                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
-                        <TextBlock Text="InsightFace Buffalo. Clusters faces into named people."
+                    <FontIcon Grid.Column="0"
+                              Glyph="{x:Bind GlyphFor(Svc.Arcface.Status), Mode=OneWay}"
+                              Foreground="{x:Bind IconBrushFor(Svc.Arcface.Status), Mode=OneWay}"
+                              FontSize="22"
+                              VerticalAlignment="Top" />
+                    <StackPanel Grid.Column="1" Spacing="4" Margin="12,0,0,0" VerticalAlignment="Center">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0"
+                                       Text="Face recognition (ArcFace MobileFace)"
+                                       Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <TextBlock Grid.Column="1"
+                                       Text="~13 MB"
+                                       Margin="12,0,0,0"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </Grid>
+                        <TextBlock Text="InsightFace Buffalo bundle. Clusters faces into named people."
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                    TextWrapping="Wrap" />
-                        <ProgressBar x:Name="ArcfaceProgressBar"
-                                     Margin="0,8,0,0"
-                                     Maximum="1"
-                                     Value="0"
-                                     Visibility="Collapsed"
-                                     Foreground="{ThemeResource GoldBrush}" />
+                        <ProgressBar Maximum="1"
+                                     Value="{x:Bind Svc.Arcface.Fraction, Mode=OneWay}"
+                                     Foreground="{StaticResource GoldBrush}"
+                                     Visibility="{x:Bind ShowDeterminate(Svc.Arcface.Status, Svc.Arcface.Fraction), Mode=OneWay}" />
+                        <ProgressRing IsActive="{x:Bind SpinnerActive(Svc.Arcface.Status, Svc.Arcface.Fraction), Mode=OneWay}"
+                                      Visibility="{x:Bind ShowSpinner(Svc.Arcface.Status, Svc.Arcface.Fraction), Mode=OneWay}"
+                                      Width="18" Height="18"
+                                      HorizontalAlignment="Left"
+                                      Foreground="{StaticResource GoldBrush}" />
+                        <TextBlock FontFamily="Consolas"
+                                   FontSize="11"
+                                   Text="{x:Bind ProgressLabel(Svc.Arcface.Fraction, Svc.Arcface.BytesDone, Svc.Arcface.TotalBytes), Mode=OneWay}"
+                                   Visibility="{x:Bind VisibleIfDownloading(Svc.Arcface.Status), Mode=OneWay}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock FontFamily="Consolas"
+                                   FontSize="11"
+                                   Text="{x:Bind RateEtaLabel(Svc.Arcface.BytesPerSecond, Svc.Arcface.EtaSeconds), Mode=OneWay}"
+                                   Visibility="{x:Bind ShowRateEta(Svc.Arcface.Status, Svc.Arcface.BytesPerSecond), Mode=OneWay}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ErrorLabel(Svc.Arcface.LastError), Mode=OneWay}"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="#FFE55555"
+                                   Visibility="{x:Bind VisibleIfFailed(Svc.Arcface.Status), Mode=OneWay}"
+                                   TextWrapping="Wrap" />
                     </StackPanel>
-                    <TextBlock Grid.Column="2"
-                               Text="~13 MB"
-                               Margin="14,0,0,0"
-                               Style="{StaticResource CaptionTextBlockStyle}"
-                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                               VerticalAlignment="Center" />
+                    <Grid Grid.Column="2" Margin="14,0,0,0" VerticalAlignment="Top">
+                        <TextBlock Text="Installed"
+                                   Foreground="#FF6BE082"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   VerticalAlignment="Center"
+                                   Visibility="{x:Bind VisibleIfInstalled(Svc.Arcface.Status), Mode=OneWay}" />
+                        <Button Click="OnArcfaceActionClicked"
+                                Content="{x:Bind ButtonLabel(Svc.Arcface.Status), Mode=OneWay}"
+                                MinWidth="86"
+                                Visibility="{x:Bind ShowActionButton(Svc.Arcface.Status), Mode=OneWay}" />
+                    </Grid>
                 </Grid>
 
                 <!-- Qwen 2.5-VL 3B — Deep Analyze. -->
-                <Grid x:Name="VlmRow"
-                      Padding="18,14"
-                      CornerRadius="12"
-                      BorderThickness="1"
-                      BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
-                      Background="{ThemeResource ControlFillColorDefaultBrush}">
+                <Grid Padding="0,4">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="28" />
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
-                    <FontIcon x:Name="VlmStatusIcon"
-                              Grid.Column="0"
-                              FontSize="18"
-                              Margin="0,0,14,0"
-                              VerticalAlignment="Center"
-                              Foreground="{ThemeResource AiBrush}"
-                              Glyph="&#xE945;" />
-                    <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center">
-                        <TextBlock Text="Deep Analyze (Qwen 2.5-VL 3B)"
-                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
-                        <TextBlock Text="Local vision-language model. Writes captions and proposes filenames. Recommended on machines with 8 GB+ RAM."
+                    <FontIcon Grid.Column="0"
+                              Glyph="{x:Bind GlyphFor(Svc.Vlm.Status), Mode=OneWay}"
+                              Foreground="{x:Bind IconBrushFor(Svc.Vlm.Status), Mode=OneWay}"
+                              FontSize="22"
+                              VerticalAlignment="Top" />
+                    <StackPanel Grid.Column="1" Spacing="4" Margin="12,0,0,0" VerticalAlignment="Center">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0"
+                                       Text="Deep Analyze (Qwen 2.5-VL 3B)"
+                                       Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <TextBlock Grid.Column="1"
+                                       Text="~1.5 GB"
+                                       Margin="12,0,0,0"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </Grid>
+                        <TextBlock Text="On-device vision model that captions photos, PDFs, video keyframes, and writes smart filenames. Recommended pick for this PC."
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                    TextWrapping="Wrap" />
-                        <ProgressBar x:Name="VlmProgressBar"
-                                     Margin="0,8,0,0"
-                                     Maximum="1"
-                                     Value="0"
-                                     Visibility="Collapsed"
-                                     Foreground="{ThemeResource AiBrush}" />
+                        <ProgressBar Maximum="1"
+                                     Value="{x:Bind Svc.Vlm.Fraction, Mode=OneWay}"
+                                     Foreground="{StaticResource GoldBrush}"
+                                     Visibility="{x:Bind ShowDeterminate(Svc.Vlm.Status, Svc.Vlm.Fraction), Mode=OneWay}" />
+                        <ProgressRing IsActive="{x:Bind SpinnerActive(Svc.Vlm.Status, Svc.Vlm.Fraction), Mode=OneWay}"
+                                      Visibility="{x:Bind ShowSpinner(Svc.Vlm.Status, Svc.Vlm.Fraction), Mode=OneWay}"
+                                      Width="18" Height="18"
+                                      HorizontalAlignment="Left"
+                                      Foreground="{StaticResource GoldBrush}" />
+                        <TextBlock FontFamily="Consolas"
+                                   FontSize="11"
+                                   Text="{x:Bind ProgressLabel(Svc.Vlm.Fraction, Svc.Vlm.BytesDone, Svc.Vlm.TotalBytes), Mode=OneWay}"
+                                   Visibility="{x:Bind VisibleIfDownloading(Svc.Vlm.Status), Mode=OneWay}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock FontFamily="Consolas"
+                                   FontSize="11"
+                                   Text="{x:Bind RateEtaLabel(Svc.Vlm.BytesPerSecond, Svc.Vlm.EtaSeconds), Mode=OneWay}"
+                                   Visibility="{x:Bind ShowRateEta(Svc.Vlm.Status, Svc.Vlm.BytesPerSecond), Mode=OneWay}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ErrorLabel(Svc.Vlm.LastError), Mode=OneWay}"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="#FFE55555"
+                                   Visibility="{x:Bind VisibleIfFailed(Svc.Vlm.Status), Mode=OneWay}"
+                                   TextWrapping="Wrap" />
                     </StackPanel>
-                    <TextBlock Grid.Column="2"
-                               Text="~1.5 GB"
-                               Margin="14,0,0,0"
-                               Style="{StaticResource CaptionTextBlockStyle}"
-                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                               VerticalAlignment="Center" />
+                    <Grid Grid.Column="2" Margin="14,0,0,0" VerticalAlignment="Top">
+                        <TextBlock Text="Installed"
+                                   Foreground="#FF6BE082"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   VerticalAlignment="Center"
+                                   Visibility="{x:Bind VisibleIfInstalled(Svc.Vlm.Status), Mode=OneWay}" />
+                        <Button Click="OnVlmActionClicked"
+                                Content="{x:Bind ButtonLabel(Svc.Vlm.Status), Mode=OneWay}"
+                                MinWidth="86"
+                                Visibility="{x:Bind ShowActionButton(Svc.Vlm.Status), Mode=OneWay}" />
+                    </Grid>
                 </Grid>
             </StackPanel>
+        </ScrollViewer>
 
-            <!-- Privacy banner. Wraps text within the parent's MaxWidth so it
-                 never bleeds outside the modal. -->
-            <Border Padding="14,12"
-                    CornerRadius="10"
-                    Background="{ThemeResource SubtleFillColorSecondaryBrush}">
-                <Grid ColumnSpacing="12">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="*" />
-                    </Grid.ColumnDefinitions>
-                    <FontIcon Grid.Column="0"
-                              Glyph="&#xE946;"
-                              FontSize="14"
-                              Foreground="{ThemeResource AiBrush}"
-                              VerticalAlignment="Top"
-                              Margin="0,2,0,0" />
-                    <TextBlock Grid.Column="1"
-                               Text="No analytics. No telemetry. No remote logging. Models download once from HuggingFace; after that, FileID is fully offline."
-                               Style="{StaticResource CaptionTextBlockStyle}"
-                               Foreground="{ThemeResource TextFillColorPrimaryBrush}"
-                               TextWrapping="Wrap" />
-                </Grid>
-            </Border>
-
-            <TextBlock x:Name="StatusMessage"
-                       Style="{StaticResource CaptionTextBlockStyle}"
-                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                       TextWrapping="Wrap"
-                       Visibility="Collapsed" />
-
-            <!-- Actions. -->
-            <Grid ColumnSpacing="12">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="*" />
-                </Grid.ColumnDefinitions>
-                <Button Grid.Column="0"
-                        Click="OnSkipClicked"
-                        HorizontalAlignment="Stretch"
-                        Height="40"
-                        Background="Transparent"
-                        BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
-                        BorderThickness="1"
-                        CornerRadius="10">
-                    <TextBlock Text="Skip for now"
-                               Style="{StaticResource BodyTextBlockStyle}" />
-                </Button>
-                <Button x:Name="InstallAllButton"
-                        Grid.Column="1"
-                        Click="OnInstallAllClicked"
-                        Style="{StaticResource GoldButtonStyle}"
-                        HorizontalAlignment="Stretch"
-                        Height="40">
-                    <TextBlock Text="Install all"
-                               FontWeight="SemiBold" />
-                </Button>
-            </Grid>
-        </StackPanel>
+        <!-- Footer: caption text + Install all + Skip/Done. macOS:
+             HStack { Text(caption2 tertiary); Spacer; "Install all"
+             borderedProminent goldTint disabled(allInstalled||installAllRequested);
+             "Skip for now"/"Done" bordered }. -->
+        <!-- 22 DIP top gap matches macOS: outer VStack(spacing:18) + Spacer(minLength:4) -->
+        <Grid Grid.Row="1" Margin="0,22,0,0" ColumnSpacing="12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Column="0"
+                       Text="Skip and install later from Settings → AI Models."
+                       FontSize="11"
+                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                       VerticalAlignment="Center"
+                       TextWrapping="Wrap" />
+            <Button Grid.Column="1"
+                    x:Name="InstallAllButton"
+                    Click="OnInstallAllClicked"
+                    Style="{StaticResource GoldButtonStyle}"
+                    IsEnabled="{x:Bind InstallAllEnabled(Svc.AllInstalled, Svc.IsBusy), Mode=OneWay}"
+                    Height="32"
+                    MinWidth="100">
+                <TextBlock Text="Install all" FontWeight="SemiBold" />
+            </Button>
+            <Button Grid.Column="2"
+                    Click="OnSkipClicked"
+                    Content="{x:Bind SkipLabel(Svc.AllInstalled), Mode=OneWay}"
+                    Height="32"
+                    MinWidth="100" />
+        </Grid>
     </Grid>
 </UserControl>

@@ -1,4 +1,4 @@
-// UndoStack — bounded LIFO of reversible destructive actions.
+﻿// UndoStack — bounded LIFO of reversible destructive actions.
 //
 // Records the last 16 destructive ops (rename / trash / restructure /
 // merge-clusters) with a reverse-op closure. Ctrl+Z on MainWindow pops

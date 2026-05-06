@@ -4,7 +4,12 @@
     Scan → Tag → People → Captions → Done. Filled / active / inactive
     dots with connecting segments. Gold for filled+active.
 
-    Mirror of macOS Sidebar/SidebarPipelineProgress.swift.
+    1:1 port of macOS SidebarPipelineProgress.swift: 5 EQUAL columns,
+    each containing a dot centered above its label + left/right
+    connector halves. Dots and labels are in the same column structure
+    so they always align vertically. Connectors live in the SAME column
+    as the dot (left half + right half) so they meet adjacent dots
+    without offsetting them.
 -->
 <UserControl
     x:Class="FileID.Views.Sidebar.SidebarPipelineProgress"
@@ -14,40 +19,15 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <StackPanel Spacing="10">
+    <StackPanel Spacing="8">
         <TextBlock Text="PIPELINE"
                    Style="{StaticResource CaptionTextBlockStyle}"
                    FontWeight="SemiBold"
                    CharacterSpacing="40"
                    Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
 
-        <Grid x:Name="DotsRow" ColumnSpacing="0" Height="22" />
-
-        <!-- Stage labels under the dots. Caption style so they ride the
-             same baseline grid as the rest of the sidebar. -->
-        <Grid x:Name="LabelsRow" ColumnSpacing="0">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="*" />
-            </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0" Text="Scan"     HorizontalAlignment="Center"
-                       Style="{StaticResource CaptionTextBlockStyle}"
-                       Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
-            <TextBlock Grid.Column="1" Text="Tag"      HorizontalAlignment="Center"
-                       Style="{StaticResource CaptionTextBlockStyle}"
-                       Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
-            <TextBlock Grid.Column="2" Text="People"   HorizontalAlignment="Center"
-                       Style="{StaticResource CaptionTextBlockStyle}"
-                       Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
-            <TextBlock Grid.Column="3" Text="Captions" HorizontalAlignment="Center"
-                       Style="{StaticResource CaptionTextBlockStyle}"
-                       Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
-            <TextBlock Grid.Column="4" Text="Done"     HorizontalAlignment="Center"
-                       Style="{StaticResource CaptionTextBlockStyle}"
-                       Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
-        </Grid>
+        <!-- 5 equal columns. Each column owns one stage: dot + label
+             stacked vertically, connector halves in the same column. -->
+        <Grid x:Name="StagesRow" Padding="4,0" />
     </StackPanel>
 </UserControl>

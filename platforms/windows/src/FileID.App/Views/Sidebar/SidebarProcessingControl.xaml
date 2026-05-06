@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
     SidebarProcessingControl — Start Scan / Pause / Resume / Cancel + ETA
     + 4-stat grid (discovered / tagged / memory MB / failures).
@@ -56,21 +56,8 @@
                     <TextBlock Text="Start Scan" FontWeight="SemiBold" />
                 </StackPanel>
             </Button>
-            <!-- FEAT-CRIT-5: AutoPilot. Chains Scan -> Cluster -> Plan -> Caption
-                 in one go. Engine wires the state machine; this button drives it. -->
-            <Button x:Name="AutoPilotButton"
-                    HorizontalAlignment="Stretch"
-                    Click="OnAutoPilotClicked"
-                    Height="40"
-                    Margin="0,8,0,0"
-                    ToolTipService.ToolTip="Run the full pipeline: Scan, Cluster faces, Plan restructure, Caption (if VLM is installed)."
-                    AutomationProperties.Name="Run AutoPilot — full pipeline">
-                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                    <FontIcon FontSize="13" Glyph="&#xE945;"
-                              Foreground="{ThemeResource AiBrush}"/>
-                    <TextBlock Text="AutoPilot" />
-                </StackPanel>
-            </Button>
+            <!-- AutoPilot intentionally absent: macOS reference doesn't have
+                 it. Engine + IPC + DTOs were fully removed in V14.7.11. -->
         </StackPanel>
 
         <!-- In-flight: phase + progress + stats + Pause/Cancel -->

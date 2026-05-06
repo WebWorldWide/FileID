@@ -1,4 +1,4 @@
-// BulkTagSheet code-behind. Hosted inside a ContentDialog so Esc dismisses
+﻿// BulkTagSheet code-behind. Hosted inside a ContentDialog so Esc dismisses
 // for free. The Apply path emits engine `applyTags` IPC and surfaces the
 // engine's BulkActionResult via a status line.
 

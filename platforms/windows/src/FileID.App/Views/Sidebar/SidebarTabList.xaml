@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
     SidebarTabList — six tab buttons. Active tab gets gold @ 18% background
     + gold @ 55% stroke (matches macOS Sidebar.swift:143-150). Tabs are
