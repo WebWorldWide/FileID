@@ -66,54 +66,62 @@ internal static class SafeOpen
         }
         catch (Exception ex)
         {
-            DebugLog.Warn($"SafeOpen failed for '{path}': {ex.Message}");
+            DebugLog.Warn($"SafeOpen failed for '{PathRedactor.Redact(path)}': {ex.Message}");
             return false;
         }
     }
 
     /// <summary>
     /// Open a folder (Explorer). Folder paths are inherently safe — no
-    /// execution surface — so no allowlist applies.
+    /// execution surface — so no allowlist applies. Uses
+    /// UseShellExecute=false + ArgumentList so quotes/backslashes/
+    /// shell metachars in the path can't be interpreted by cmd.
     /// </summary>
     public static void OpenFolder(string path)
     {
         if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path)) return;
         try
         {
-            Process.Start(new ProcessStartInfo
+            var psi = new ProcessStartInfo
             {
                 FileName = "explorer.exe",
-                Arguments = $"\"{path.Replace("\"", "\\\"")}\"",
-                UseShellExecute = true,
-            });
+                UseShellExecute = false,
+            };
+            psi.ArgumentList.Add(path);
+            Process.Start(psi);
         }
         catch (Exception ex)
         {
-            DebugLog.Warn($"OpenFolder failed for '{path}': {ex.Message}");
+            DebugLog.Warn($"OpenFolder failed for '{PathRedactor.Redact(path)}': {ex.Message}");
         }
     }
 
     /// <summary>
     /// Reveal-in-Explorer. Selects the file in its parent folder. Universal:
-    /// works for any file extension, can't execute the target.
+    /// works for any file extension, can't execute the target. Uses
+    /// UseShellExecute=false + ArgumentList for the same reason as
+    /// OpenFolder above.
     /// </summary>
     public static void Reveal(string path)
     {
         if (string.IsNullOrWhiteSpace(path)) return;
         try
         {
-            // Quote-escape per V14.5 SEC-2 fix.
-            var escaped = path.Replace("\"", "\\\"");
-            Process.Start(new ProcessStartInfo
+            var psi = new ProcessStartInfo
             {
                 FileName = "explorer.exe",
-                Arguments = $"/select,\"{escaped}\"",
-                UseShellExecute = true,
-            });
+                UseShellExecute = false,
+            };
+            // explorer.exe expects "/select," and the path as ONE argument
+            // (no space between comma and path). ArgumentList quotes each
+            // entry independently, so we still need to glue them ourselves
+            // for the /select, syntax.
+            psi.ArgumentList.Add("/select," + path);
+            Process.Start(psi);
         }
         catch (Exception ex)
         {
-            DebugLog.Warn($"Reveal failed for '{path}': {ex.Message}");
+            DebugLog.Warn($"Reveal failed for '{PathRedactor.Redact(path)}': {ex.Message}");
         }
     }
 

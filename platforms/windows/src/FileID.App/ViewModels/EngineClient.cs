@@ -67,11 +67,24 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
     private int _isStarting; // 0 = idle, 1 = StartAsync in flight
 
     // BUG-6: distinguish user-initiated shutdown from a crash. Set by
-    // ShutdownAsync; OnProcessExited consumes it.
-    private bool _expectingExit;
+    // ShutdownAsync; OnProcessExited consumes it. Uses int + Interlocked
+    // (instead of bool) so reads/writes are atomic across threads on
+    // ARM64 — bool reads can theoretically tear on weakly-ordered
+    // architectures, and OnProcessExited fires on whichever thread
+    // detects process exit (not always the UI thread).
+    private int _expectingExit; // 0 = false, 1 = true
 
     private DateTime _lastDeepAnalyzeFileDone = DateTime.MinValue;
     private static readonly TimeSpan DeepAnalyzeFileDoneThrottle = TimeSpan.FromMilliseconds(500); // 2 Hz
+
+    // PerfAudit-#8: ScanProgress throttle. Engine emits one Progress
+    // per discovery/tagging batch; on a fast scan that's 100+ events/s.
+    // Throttle at 10 Hz so the sidebar's progress bar / counters don't
+    // re-render at scan-throughput rate. Phase transitions bypass the
+    // throttle (rare; user-visible).
+    private DateTime _lastProgressEmit = DateTime.MinValue;
+    private ScanPhase? _lastProgressPhase;
+    private static readonly TimeSpan ProgressThrottle = TimeSpan.FromMilliseconds(100); // 10 Hz
 
     // V14.7.16: throttled diagnostic counter for inbound progress events.
     // Lets `[IPC IN] ModelDownloadProgress #N` lines correlate with engine
@@ -221,9 +234,16 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
 
     private EngineClient()
     {
+        // The singleton MUST be first-touched on the UI thread (App.OnLaunched
+        // ensures this). If it's first touched from a thread-pool thread,
+        // GetForCurrentThread returns null and there's no recovery — every
+        // subsequent _ui.TryEnqueue would silently no-op. Throw early so
+        // the misuse surfaces as a clean exception instead of silent UI
+        // staleness across the lifetime of the app.
         _ui = DispatcherQueue.GetForCurrentThread()
-              ?? DispatcherQueue.GetForCurrentThread()
-              ?? throw new InvalidOperationException("EngineClient must be constructed on the UI thread");
+              ?? throw new InvalidOperationException(
+                  "EngineClient must be constructed on the UI thread. "
+                  + "First-touch the singleton from App.OnLaunched, not from a Task.Run continuation.");
     }
 
     // ─── Lifecycle ─────────────────────────────────────────────────────
@@ -259,7 +279,7 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
 
         State = LifecycleState.Starting;
         CrashReason = null;
-        _expectingExit = false;
+        Interlocked.Exchange(ref _expectingExit, 0);
         _lastSpawnAttempt = DateTime.UtcNow;
 
         var enginePath = AppPaths.EngineExePath;
@@ -304,8 +324,57 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
                 break;
         }
 
+        // SEC: TOCTOU mitigation. Hash the binary AFTER WinVerifyTrust
+        // returned its verdict, then re-hash + compare immediately
+        // before Process.Start. If a privileged adversary swaps the
+        // engine binary between Verify and spawn, the post-spawn hash
+        // diverges and we abort. Skipped in dev (no thumbprint pinned)
+        // because Visual Studio rebuilds change the hash legitimately.
+        byte[]? preSpawnHash = null;
+        if (!string.IsNullOrEmpty(expectedThumb))
+        {
+            try
+            {
+                using var sha = System.Security.Cryptography.SHA256.Create();
+                using var fs = System.IO.File.OpenRead(enginePath);
+                preSpawnHash = sha.ComputeHash(fs);
+            }
+            catch (Exception ex)
+            {
+                CrashReason = "Pre-spawn binary hash failed: " + ex.Message;
+                State = LifecycleState.Crashed;
+                DebugLog.Error("EngineClient: pre-spawn hash failed — refusing to spawn.");
+                return;
+            }
+        }
+
         try
         {
+            // Re-hash + compare immediately before Process.Start.
+            if (preSpawnHash is not null)
+            {
+                try
+                {
+                    using var sha = System.Security.Cryptography.SHA256.Create();
+                    using var fs = System.IO.File.OpenRead(enginePath);
+                    var nowHash = sha.ComputeHash(fs);
+                    if (!System.Linq.Enumerable.SequenceEqual(preSpawnHash, nowHash))
+                    {
+                        CrashReason = "Engine binary changed between Verify and spawn — refusing.";
+                        State = LifecycleState.Crashed;
+                        DebugLog.Error("EngineClient: TOCTOU detected on engine binary — refusing to spawn.");
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    CrashReason = "Post-verify hash failed: " + ex.Message;
+                    State = LifecycleState.Crashed;
+                    DebugLog.Error("EngineClient: post-verify hash failed — refusing to spawn.");
+                    return;
+                }
+            }
+
             var psi = new ProcessStartInfo
             {
                 FileName = enginePath,
@@ -416,12 +485,32 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
             catch (OperationCanceledException) { return; }
             catch { return; }
             if (line is null) return;
-            // Engine writes structured tracing JSON to stderr. We log it
-            // verbatim; the JSON shape is decoded client-side only when a
-            // crash investigation actually needs it.
-            DebugLog.Debug("[engine] " + line);
+            // Engine writes structured tracing JSON to stderr. The engine
+            // SHOULD redact paths via redact_path_for_log, but as a
+            // belt-and-suspenders defense the C# bridge also passes any
+            // detected path through PathRedactor. The detection is
+            // best-effort: lines containing a Windows-shaped absolute
+            // path (drive letter + colon + backslash) get reformatted
+            // with the canonical home-tilde substitution.
+            DebugLog.Debug("[engine] " + RedactWindowsPathsInLine(line));
         }
     }
+
+    private static string RedactWindowsPathsInLine(string line)
+    {
+        // Cheap path detection: only run the regex if there's a `\` in
+        // the line. Most engine tracing lines (event counters, model
+        // names, performance numbers) won't match.
+        if (line.IndexOf('\\') < 0) return line;
+        return s_pathInLine.Replace(line, m => PathRedactor.Redact(m.Value));
+    }
+
+    // Conservative match: drive letter, colon, backslash, then any
+    // non-whitespace / non-quote / non-bracket. Catches `C:\Users\…`
+    // anywhere in the line while leaving Unicode logging strings alone.
+    private static readonly System.Text.RegularExpressions.Regex s_pathInLine =
+        new(@"[A-Za-z]:\\[^\s""\)\}\>]+",
+            System.Text.RegularExpressions.RegexOptions.Compiled);
 
     private void OnProcessExited(object? sender, EventArgs e)
     {
@@ -440,9 +529,9 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
             // BUG-6: user-initiated shutdown shouldn't count as a crash
             // or trigger the auto-respawn — that would drag the engine
             // back up after the user explicitly asked it to stop.
-            if (_expectingExit)
+            // Interlocked.Exchange both reads + clears in one atomic op.
+            if (Interlocked.Exchange(ref _expectingExit, 0) == 1)
             {
-                _expectingExit = false;
                 State = LifecycleState.Crashed; // "stopped" UI; user can manually start
                 CrashReason = string.Empty;
                 return;
@@ -592,12 +681,40 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
         }, ct);
     }
 
+    /// <summary>Maximum size of a single IPC frame in bytes. Windows
+    /// pipe buffers default to ~64 KB; flushing more than that in a
+    /// single Write can deadlock if the engine's stdout reader hasn't
+    /// drained its half. 1 MB is generous for every legitimate command
+    /// today (each fits comfortably under 100 KB) — beyond that the
+    /// caller should chunk explicitly.</summary>
+    private const int MaxIpcFrameBytes = 1_000_000;
+
     public Task SendCommandAsync(CommandPayload payload, CancellationToken ct = default)
     {
         var cmd = IpcCommand.New(payload);
         var bytes = IpcCoder.EncodeLine(cmd);
         var commandKind = payload.GetType().Name.Replace("Command", "");
         DebugLog.Info($"[IPC OUT] {commandKind} ({bytes.Length} bytes)");
+
+        // F.3: refuse to write a frame that risks pipe-buffer deadlock.
+        if (bytes.Length > MaxIpcFrameBytes)
+        {
+            var msg = $"IPC frame too large: {commandKind} is {bytes.Length:N0} bytes (max {MaxIpcFrameBytes:N0}). Chunk the request into smaller batches.";
+            DebugLog.Warn("[IPC OUT] " + msg);
+            return Task.FromException(new InvalidOperationException(msg));
+        }
+
+        // F.2: precondition — engine must be Ready. Without this, callers
+        // get the generic "Engine not running" later and have no clue if
+        // the engine is starting (wait), crashed (give up), or already
+        // shut down (abandon). Throw early so the message is meaningful.
+        if (State != LifecycleState.Ready)
+        {
+            var msg = $"Engine not ready (state={State}). Wait for Ready or call WaitForReadyAsync first.";
+            DebugLog.Warn($"[IPC OUT] {commandKind} ABORTED — {msg}");
+            return Task.FromException(new InvalidOperationException(msg));
+        }
+
         // The engine's stdin reader handles concurrent writers because
         // our writes are atomic per-line, but we still serialize through a
         // lock to make the byte order deterministic for log correlation.
@@ -672,8 +789,57 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
     {
         // BUG-6: mark this exit as user-initiated so OnProcessExited
         // doesn't count it as a crash + auto-respawn.
-        _expectingExit = true;
+        Interlocked.Exchange(ref _expectingExit, 1);
         return SendCommandAsync(new ShutdownCommand());
+    }
+
+    /// <summary>Cleanly stop the engine and respawn it. Used after a
+    /// Performance Pack install so the new EP is picked up — the
+    /// RuntimeProbe runs once at startup, so a fresh process is the only
+    /// way to switch DLLs on the search path.
+    ///
+    /// Throws TimeoutException if the engine doesn't reach Ready within
+    /// 60 s (10 s shutdown + 30 s startup + 20 s slack). On timeout,
+    /// State is left where the FSM happened to land — caller can retry.</summary>
+    public async Task RestartAsync(CancellationToken ct = default)
+    {
+        DebugLog.Info("[ENGINE] RestartAsync requested.");
+        try
+        {
+            await ShutdownAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("[ENGINE] ShutdownAsync threw during restart: " + ex.Message);
+            // Even if the IPC send failed, OnProcessExited may still fire.
+        }
+
+        // Wait for the process to actually exit. OnProcessExited sets
+        // State to Crashed (per the _expectingExit branch), then schedules
+        // StartAsync via Task.Delay(0..16s) backoff. We don't strictly
+        // need to wait for the exit — but if the engine is wedged and
+        // doesn't exit, restarting blindly is worse.
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.Elapsed < TimeSpan.FromSeconds(10) && !ct.IsCancellationRequested)
+        {
+            if (_process is null || _process.HasExited) break;
+            await Task.Delay(100, ct).ConfigureAwait(false);
+        }
+
+        // Force a fresh spawn. StartAsync is idempotent if a process is
+        // already running, but here we explicitly want a new one. If the
+        // backoff path already kicked off StartAsync, this call is a
+        // no-op (the _isStarting gate dedupes).
+        DebugLog.Info("[ENGINE] RestartAsync: requesting fresh spawn.");
+        try { await StartAsync().ConfigureAwait(false); }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("[ENGINE] StartAsync threw during restart: " + ex.Message);
+        }
+
+        // Wait for the new process to reach Ready.
+        await WaitForReadyAsync(TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
+        DebugLog.Info("[ENGINE] RestartAsync complete; engine is Ready.");
     }
     public Task RunFaceClusteringAsync() => SendCommandAsync(new RunFaceClusteringCommand());
     public Task DeepAnalyzeFileAsync(long fileId, string modelKind) =>
@@ -746,10 +912,34 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
                 Info = r.Info;
                 State = LifecycleState.Ready;
                 CrashReason = null;
+                // A successful Ready is the canonical signal that the
+                // engine has fully recovered from any prior crash.
+                // Reset both the failure counter AND the failure-window
+                // timestamp so a subsequent crash doesn't tick toward
+                // the 3-strike limit using stale state. Without this
+                // reset, a deterministic-crash file (corrupt .gguf)
+                // could permanently lock the engine in Crashed even
+                // after the user removes the bad file.
                 _consecutiveFailures = 0;
+                _failureWindowStart = DateTime.MinValue;
                 break;
             case ProgressEvent p:
-                LastProgress = p.Progress;
+                // Throttle to 10 Hz. The engine emits a Progress per
+                // discovery/tagging batch; on a fast scan that's 100+
+                // events/s, each rebuilding the sidebar progress bar +
+                // labels via x:Bind. 10 Hz is plenty for human
+                // perception and keeps the UI thread idle. The phase
+                // transition itself (Discovering → Tagging → Completed)
+                // is captured by PhaseChangedEvent which is NOT
+                // throttled — it fires once per phase boundary.
+                var nowProg = DateTime.UtcNow;
+                if (nowProg - _lastProgressEmit >= ProgressThrottle
+                    || p.Progress.Phase != _lastProgressPhase)
+                {
+                    LastProgress = p.Progress;
+                    _lastProgressEmit = nowProg;
+                    _lastProgressPhase = p.Progress.Phase;
+                }
                 Phase = p.Progress.Phase;
                 break;
             case PhaseChangedEvent pc:

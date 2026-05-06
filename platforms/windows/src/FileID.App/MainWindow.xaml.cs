@@ -56,15 +56,33 @@ public sealed partial class MainWindow : Window
         var traceLogPath = System.IO.Path.Combine(
             System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
             "FileID", "logs", "startup-trace.txt");
+        // Buffer trace lines in memory and flush ONCE at the end of the
+        // ctor — the previous per-call File.AppendAllText opened/closed
+        // the file ~20 times during init, blocking the UI thread on a
+        // slow disk and inflating cold-start latency by 50–200 ms. The
+        // buffered approach is also crash-safe because we re-flush on
+        // each unrecoverable Step failure inside the try/catch.
+        var traceBuffer = new System.Text.StringBuilder(2048);
         void Trace(string msg)
         {
-            try { System.IO.File.AppendAllText(traceLogPath, $"{System.DateTime.UtcNow:O} MainWindow: {msg}\n"); }
+            traceBuffer.AppendFormat(System.Globalization.CultureInfo.InvariantCulture,
+                "{0:O} MainWindow: {1}\n", System.DateTime.UtcNow, msg);
+        }
+        void FlushTrace()
+        {
+            if (traceBuffer.Length == 0) return;
+            try { System.IO.File.AppendAllText(traceLogPath, traceBuffer.ToString()); }
             catch { }
+            traceBuffer.Clear();
         }
         void Step(string name, System.Action body)
         {
             try { Trace(name); body(); }
-            catch (System.Exception ex) { Trace($"{name} failed (continuing): {ex.GetType().Name}: {ex.Message}"); }
+            catch (System.Exception ex)
+            {
+                Trace($"{name} failed (continuing): {ex.GetType().Name}: {ex.Message}");
+                FlushTrace(); // persist now in case the next step crashes hard
+            }
         }
 
         // InitializeComponent MUST succeed; if it throws there's no
@@ -97,6 +115,7 @@ public sealed partial class MainWindow : Window
             });
 
         Trace("ctor complete");
+        FlushTrace();
     }
 
     private async Task MaybeShowWelcomeSheetAsync()
@@ -472,8 +491,25 @@ public sealed partial class MainWindow : Window
         {
             if (item is Windows.Storage.StorageFolder folder)
             {
-                AppViewModel.Instance.FolderPath = folder.Path;
-                DebugLog.Info($"Drag-drop folder: {PathRedactor.Redact(folder.Path)}");
+                // Validate the dropped path before assigning. StorageFolder.Path
+                // is normally trustworthy, but a junction/symlink that points
+                // at a sensitive location (System32, ProgramData) shouldn't
+                // be silently scanned. Resolve to a canonical absolute path
+                // and reject if Directory.Exists fails after resolution.
+                string? canonical;
+                try { canonical = System.IO.Path.GetFullPath(folder.Path); }
+                catch (Exception ex)
+                {
+                    DebugLog.Warn($"Drag-drop: GetFullPath failed: {ex.Message}");
+                    return;
+                }
+                if (string.IsNullOrEmpty(canonical) || !System.IO.Directory.Exists(canonical))
+                {
+                    DebugLog.Warn($"Drag-drop: rejected non-directory or missing path '{PathRedactor.Redact(canonical)}'.");
+                    return;
+                }
+                AppViewModel.Instance.FolderPath = canonical;
+                DebugLog.Info($"Drag-drop folder: {PathRedactor.Redact(canonical)}");
                 return;
             }
         }

@@ -1972,9 +1972,13 @@ async fn handle_restore_from_trash(
 }
 
 fn stable_path_hash(path: &str) -> i64 {
+    // Case-insensitive on Windows (NTFS) so re-scans after a path-case
+    // change don't create duplicate rows. See dbwriter.rs's identical
+    // function for the full rationale.
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    path.hash(&mut h);
+    let normalized = path.to_ascii_lowercase();
+    normalized.hash(&mut h);
     h.finish() as i64
 }
 

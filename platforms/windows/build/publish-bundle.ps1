@@ -52,15 +52,31 @@ $AppTfm = "net8.0-windows10.0.19041.0"
 # Telemetry strings the privacy gate refuses to ship. Anything matching
 # any of these in the final shipped binaries fails the build.
 $ForbiddenTelemetryStrings = @(
+    # MUST stay in sync with .github/workflows/windows-engine.yml's
+    # privacy gate. Add to both lists when adding a new SDK marker.
     "sentry.io",
+    "io.sentry",
+    "applicationinsights",
     "applicationinsights.azure.com",
-    "googletagmanager.com",
+    "googletagmanager",
     "google-analytics.com",
+    "segment.io",
     "segment.com",
     "mixpanel.com",
     "amplitude.com",
+    "posthog.com",
+    "datadoghq",
+    "bugsnag",
+    "rollbar.com",
+    "honeycomb.io",
+    "newrelic.com",
+    "raygun.io",
     "firebase",
-    "appcenter.ms"
+    "firebaseio.com",
+    "appcenter.ms",
+    "in.appcenter.ms",
+    "crashpad",
+    "breakpad"
 )
 
 Write-Host "FileID release publish + bundle" -ForegroundColor Cyan

@@ -238,6 +238,32 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     public ModelSlot Arcface { get; }
     public ModelSlot Vlm { get; }
 
+    /// <summary>Optional fourth slot — populated when the engine reports
+    /// HardwareInfo with a recommended Performance Pack the user hasn't
+    /// installed. Null when no pack is recommended (e.g. AMD GPU on
+    /// DirectML, or the recommended pack is already present). Welcome
+    /// sheet binds to this; Settings has its own per-pack install UI.
+    /// NOT counted toward AllInstalled — packs are optional speedups.</summary>
+    public ModelSlot? RecommendedPack
+    {
+        get => _recommendedPack;
+        private set
+        {
+            if (ReferenceEquals(_recommendedPack, value)) return;
+            _recommendedPack = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(RecommendedPack)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ShowRecommendedPack)));
+        }
+    }
+    private ModelSlot? _recommendedPack;
+
+    public bool ShowRecommendedPack => _recommendedPack is not null;
+
+    /// <summary>Fires when a pack-row install transitions to Installed.
+    /// WelcomeSheet + SettingsView both subscribe so they can prompt the
+    /// user to restart the engine (so the new EP picks up).</summary>
+    public event EventHandler<string>? RecommendedPackInstalled;
+
     private int _installAllInFlight; // 0 = idle, 1 = in flight
 
     private ModelInstallerService()
@@ -261,6 +287,72 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
 
         SeedFromSentinels();
         EngineClient.Instance.PropertyChanged += OnEngineClientChanged;
+        // If Info is already populated by the time we wire up (warm
+        // singleton on engine respawn), evaluate immediately so the
+        // pack slot exists before the Welcome sheet first renders.
+        EvaluateRecommendedPack();
+    }
+
+    /// <summary>Map the engine's HardwareInfo to a recommended pack slot.
+    /// Sets RecommendedPack to a configured ModelSlot if a pack would
+    /// help; clears it otherwise. Idempotent — safe to re-call.</summary>
+    private void EvaluateRecommendedPack()
+    {
+        var hw = EngineClient.Instance.Info?.Hardware;
+        if (hw is null)
+        {
+            // No HardwareInfo yet — leave the slot null. We'll re-evaluate
+            // when the Info PropertyChanged fires.
+            return;
+        }
+        var vendor = (hw.GpuVendor ?? string.Empty).ToLowerInvariant();
+        string? packId = null;
+        string? displayLabel = null;
+        ulong approxBytes = 0;
+        string[] sentinelDirs = Array.Empty<string>();
+        if (vendor == "nvidia" && !hw.CudaPackPresent)
+        {
+            packId = "cuda_pack_x64";
+            displayLabel = "GPU performance pack (CUDA)";
+            approxBytes = 600UL * 1024 * 1024;
+            sentinelDirs = new[] { "packs/cuda" };
+        }
+        else if (vendor == "intel" && !hw.OpenvinoPackPresent)
+        {
+            packId = "openvino_pack_x64";
+            displayLabel = "GPU performance pack (OpenVINO)";
+            approxBytes = 300UL * 1024 * 1024;
+            sentinelDirs = new[] { "packs/openvino" };
+        }
+        else if (vendor == "qualcomm" && !hw.QnnPackPresent)
+        {
+            packId = "qnn_pack_arm64";
+            displayLabel = "NPU performance pack (QNN)";
+            approxBytes = 150UL * 1024 * 1024;
+            sentinelDirs = new[] { "packs/qnn" };
+        }
+
+        if (packId is null)
+        {
+            // No pack recommended (AMD, no GPU, or already installed).
+            if (RecommendedPack is not null)
+            {
+                RecommendedPack.PropertyChanged -= OnSlotPropertyChanged;
+                RecommendedPack = null;
+            }
+            return;
+        }
+
+        // Don't recreate the slot if it already exists for the same id —
+        // would lose any in-flight progress state.
+        if (RecommendedPack is not null && RecommendedPack.CurrentModelKind == packId) return;
+
+        var captured = packId;
+        var newSlot = new ModelSlot(displayLabel!, approxBytes, () => PrewarmAsync(captured));
+        newSlot.PropertyChanged += OnSlotPropertyChanged;
+        // Seed from sentinel — if the user already installed via Settings.
+        SeedSlot(newSlot, sentinelDirs);
+        RecommendedPack = newSlot;
     }
 
     /// <summary>
@@ -311,11 +403,23 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         }
         try
         {
-            await Task.WhenAll(
+            // The pack slot is included only when it exists AND isn't
+            // already Installed — matches the row's visibility on the
+            // sheet ("install everything visible"). AMD / no-GPU configs
+            // have no pack; their fourth row stays collapsed and
+            // InstallAllAsync just installs the three AI models.
+            var tasks = new List<Task>(4)
+            {
                 TryInstallAsync(Clip),
                 TryInstallAsync(Arcface),
-                TryInstallAsync(Vlm)
-            ).ConfigureAwait(false);
+                TryInstallAsync(Vlm),
+            };
+            var pack = RecommendedPack;
+            if (pack is not null && pack.Status != ModelInstallStatus.Installed)
+            {
+                tasks.Add(TryInstallAsync(pack));
+            }
+            await Task.WhenAll(tasks).ConfigureAwait(false);
         }
         finally
         {
@@ -367,9 +471,19 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
 
     private void OnSlotPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == nameof(ModelSlot.Status))
+        if (e.PropertyName != nameof(ModelSlot.Status)) return;
+        RecomputeAggregates();
+
+        // Pack-row install completion → emit so Welcome / Settings can
+        // prompt the user to restart the engine to pick up the new EP.
+        if (sender is ModelSlot slot
+            && ReferenceEquals(slot, RecommendedPack)
+            && slot.Status == ModelInstallStatus.Installed
+            && slot.CurrentModelKind is { } kind)
         {
-            RecomputeAggregates();
+            DebugLog.Info($"[INSTALL] RecommendedPack '{kind}' installed; raising RecommendedPackInstalled");
+            try { RecommendedPackInstalled?.Invoke(this, kind); }
+            catch (Exception ex) { DebugLog.Warn("RecommendedPackInstalled handler threw: " + ex.Message); }
         }
     }
 
@@ -468,15 +582,33 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     private static void ScheduleNoProgressWatchdog(ModelSlot slot, string modelKind)
     {
         var sentAt = DateTime.UtcNow;
+        // Capture the UI dispatcher at schedule time. The watchdog runs on
+        // a thread-pool thread (Task.Run) but slot.Fail mutates state that
+        // x:Bind UI elements observe — those updates have to land on the
+        // UI thread or downstream PropertyChanged handlers may touch
+        // FrameworkElements off-thread.
+        var ui = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
         _ = Task.Run(async () =>
         {
             try
             {
                 await Task.Delay(NoProgressTimeout).ConfigureAwait(false);
+                // Read-only check off-thread is fine (status/timestamp are
+                // primitives + DateTime; no torn-read risk on x64/ARM64).
                 if (slot.Status != ModelInstallStatus.Downloading) return;
                 if (slot.LastProgressAt > sentAt) return; // got progress, all good
                 DebugLog.Warn($"[INSTALL] {modelKind} no-progress watchdog firing (no events in {NoProgressTimeout.TotalSeconds:0}s)");
-                slot.Fail("No response from engine — try again.");
+                if (ui is not null)
+                {
+                    ui.TryEnqueue(() => slot.Fail("No response from engine — try again."));
+                }
+                else
+                {
+                    // No UI dispatcher available (test/headless); fall back
+                    // to direct mutation. PropertyChanged subscribers must
+                    // tolerate this case anyway.
+                    slot.Fail("No response from engine — try again.");
+                }
             }
             catch (Exception ex)
             {
@@ -485,13 +617,31 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         });
     }
 
-    private ModelSlot? SlotFor(string? modelKind) => modelKind switch
+    private ModelSlot? SlotFor(string? modelKind)
     {
-        "mobileclip_s2" or "clip_image" or "clip_text"               => Clip,
-        "arcface_default" or "arcface_iresnet50" or "arcface_mobileface" => Arcface,
-        "qwen2_5_vl_3b" or "qwen2_5_vl_7b" or "gemma_3_4b" or "smolvlm" => Vlm,
-        _ => null,
-    };
+        switch (modelKind)
+        {
+            case "mobileclip_s2":
+            case "clip_image":
+            case "clip_text":
+                return Clip;
+            case "arcface_default":
+            case "arcface_iresnet50":
+            case "arcface_mobileface":
+                return Arcface;
+            case "qwen2_5_vl_3b":
+            case "qwen2_5_vl_7b":
+            case "gemma_3_4b":
+            case "smolvlm":
+                return Vlm;
+            case "cuda_pack_x64":
+            case "openvino_pack_x64":
+            case "qnn_pack_arm64":
+                return RecommendedPack;
+            default:
+                return null;
+        }
+    }
 
     /// <summary>Map an engine error path (e.g. ".../MobileCLIP/...") to
     /// the slot that owns it. Falls back to whichever slot currently
@@ -529,6 +679,13 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         if (e.PropertyName == nameof(EngineClient.LastError))
         {
             HandleEngineError(EngineClient.Instance.LastError);
+            return;
+        }
+        if (e.PropertyName == nameof(EngineClient.Info))
+        {
+            // Hardware info just landed (or changed after a respawn) —
+            // re-evaluate whether a Performance Pack is recommended.
+            EvaluateRecommendedPack();
             return;
         }
     }
@@ -581,6 +738,16 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         if (ReferenceEquals(slot, Instance.Clip)) return ClipSentinelDirs;
         if (ReferenceEquals(slot, Instance.Arcface)) return ArcfaceSentinelDirs;
         if (ReferenceEquals(slot, Instance.Vlm)) return VlmSentinelDirs;
+        if (ReferenceEquals(slot, Instance.RecommendedPack))
+        {
+            return slot.CurrentModelKind switch
+            {
+                "cuda_pack_x64"     => new[] { "packs/cuda" },
+                "openvino_pack_x64" => new[] { "packs/openvino" },
+                "qnn_pack_arm64"    => new[] { "packs/qnn" },
+                _                    => Array.Empty<string>(),
+            };
+        }
         return Array.Empty<string>();
     }
 
@@ -597,7 +764,26 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     {
         try
         {
-            return Directory.Exists(dir) && File.Exists(Path.Combine(dir, ".fileid-installed"));
+            if (!Directory.Exists(dir)) return false;
+            if (!File.Exists(Path.Combine(dir, ".fileid-installed"))) return false;
+            // Defensive: a stray sentinel file in an otherwise-empty
+            // directory shouldn't be trusted (could be left over from a
+            // botched install + manual cleanup, or a malicious drop).
+            // Require at least one non-sentinel file in the dir.
+            foreach (var f in Directory.EnumerateFiles(dir))
+            {
+                var name = Path.GetFileName(f);
+                if (!string.Equals(name, ".fileid-installed", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+            // Recurse one level for compound-dir layouts (packs/cuda/...)
+            foreach (var sub in Directory.EnumerateDirectories(dir))
+            {
+                if (Directory.EnumerateFiles(sub).Any()) return true;
+            }
+            return false;
         }
         catch { return false; }
     }

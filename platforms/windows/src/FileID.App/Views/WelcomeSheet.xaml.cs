@@ -15,6 +15,7 @@
 
 using FileID.IpcSchema;
 using FileID.Services;
+using FileID.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -34,9 +35,32 @@ public sealed partial class WelcomeSheet : UserControl
 
     private bool _autoDismissScheduled;
 
+    /// <summary>Cancels the auto-dismiss task + any in-flight restart
+    /// prompt if the sheet unloads before they complete. Without this
+    /// the Task.Run + Task.Delay continues firing TryEnqueue / ShowAsync
+    /// on a control that's already been removed from the visual tree.</summary>
+    private CancellationTokenSource? _lifetimeCts = new();
+
     public WelcomeSheet()
     {
         InitializeComponent();
+        // Subscribe FIRST, then seed. Reverse order would race: a
+        // sentinel that flips Status synchronously during Seed fires
+        // PropertyChanged with no handler attached, the AllInstalled
+        // signal is lost, and the auto-dismiss never fires.
+        Svc.PropertyChanged += OnServicePropertyChanged;
+        Svc.RecommendedPackInstalled += OnRecommendedPackInstalled;
+        Unloaded += (_, _) =>
+        {
+            Svc.PropertyChanged -= OnServicePropertyChanged;
+            Svc.RecommendedPackInstalled -= OnRecommendedPackInstalled;
+            // Cancel in-flight auto-dismiss + restart-prompt tasks so
+            // they don't fire TryEnqueue / ShowAsync on a detached control.
+            try { _lifetimeCts?.Cancel(); _lifetimeCts?.Dispose(); }
+            catch { /* swallow — Cts may already be disposed */ }
+            _lifetimeCts = null;
+        };
+
         try
         {
             Svc.SeedFromSentinels();
@@ -46,12 +70,10 @@ public sealed partial class WelcomeSheet : UserControl
             DebugLog.Warn("WelcomeSheet ctor SeedFromSentinels threw: " + ex.Message);
         }
 
-        Svc.PropertyChanged += OnServicePropertyChanged;
-        Unloaded += (_, _) => Svc.PropertyChanged -= OnServicePropertyChanged;
-
         // If the user opens the sheet with everything already installed
         // (e.g. they re-opened it from Settings), the auto-dismiss should
         // still fire so they're not staring at three green checkmarks.
+        // Belt-and-braces with the PropertyChanged path above.
         if (Svc.AllInstalled) ScheduleAutoDismiss();
     }
 
@@ -63,27 +85,71 @@ public sealed partial class WelcomeSheet : UserControl
         }
     }
 
+    private bool _packRestartPromptShown;
+
+    private async void OnRecommendedPackInstalled(object? sender, string packId)
+    {
+        if (_packRestartPromptShown) return; // one prompt per session
+        _packRestartPromptShown = true;
+        DebugLog.Info($"[INSTALL] Pack '{packId}' installed; prompting for restart.");
+        // Capture the XamlRoot snapshot now — if the user dismisses the
+        // sheet between the install completing and the dialog opening,
+        // XamlRoot reads as null and ShowAsync would throw.
+        var root = this.XamlRoot;
+        if (root is null) return;
+        var ct = _lifetimeCts?.Token ?? CancellationToken.None;
+        try
+        {
+            var dialog = new ContentDialog
+            {
+                XamlRoot = root,
+                Title = "Performance Pack installed",
+                Content = "Restart the FileID engine now to activate the GPU performance pack? Your scan will run with the faster execution provider.",
+                PrimaryButtonText = "Restart now",
+                SecondaryButtonText = "Later",
+                DefaultButton = ContentDialogButton.Primary,
+            };
+            if (ct.IsCancellationRequested) return;
+            var result = await dialog.ShowAsync();
+            if (ct.IsCancellationRequested) return;
+            if (result == ContentDialogResult.Primary)
+            {
+                try { await EngineClient.Instance.RestartAsync(ct); }
+                catch (Exception rex)
+                {
+                    DebugLog.Warn($"Engine restart from Welcome sheet failed: {rex.Message}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("RecommendedPackInstalled prompt threw: " + ex.Message);
+        }
+    }
+
     private void ScheduleAutoDismiss()
     {
         if (_autoDismissScheduled) return;
         _autoDismissScheduled = true;
+        var ct = _lifetimeCts?.Token ?? CancellationToken.None;
+        var dq = DispatcherQueue; // capture now while still attached
         // Match macOS WelcomeSheet.swift:103-109: 800 ms before dismissing
         // so the user sees the green checkmark transition land.
         _ = Task.Run(async () =>
         {
             try
             {
-                await Task.Delay(800).ConfigureAwait(false);
-                if (DispatcherQueue is not null)
+                await Task.Delay(800, ct).ConfigureAwait(false);
+                if (ct.IsCancellationRequested) return;
+                dq?.TryEnqueue(() =>
                 {
-                    DispatcherQueue.TryEnqueue(() =>
-                    {
-                        if (Svc.AllInstalled) RaiseDismissed();
-                    });
-                }
+                    if (ct.IsCancellationRequested) return;
+                    if (Svc.AllInstalled) RaiseDismissed();
+                });
             }
+            catch (OperationCanceledException) { /* sheet dismissed before 800 ms — fine */ }
             catch (Exception ex) { DebugLog.Warn("WelcomeSheet auto-dismiss threw: " + ex.Message); }
-        });
+        }, ct);
     }
 
     // ─── x:Bind helper functions ────────────────────────────────────────
@@ -205,6 +271,77 @@ public sealed partial class WelcomeSheet : UserControl
     internal string ErrorLabel(string? lastError) =>
         "Failed: " + (lastError ?? "unknown error");
 
+    // ─── Pack-row x:Bind helpers ────────────────────────────────────────
+    //
+    // The pack row binds to Svc.RecommendedPack, which is nullable. Each
+    // helper short-circuits to a safe default when the slot isn't
+    // populated yet (engine still starting, no pack recommended, etc.)
+    // so the XAML never throws on a null path.
+
+    internal Visibility PackRowVisibility(bool show) =>
+        show ? Visibility.Visible : Visibility.Collapsed;
+
+    internal string PackGlyph(ModelSlot? slot) =>
+        slot is null ? GlyphCloud : GlyphFor(slot.Status);
+
+    internal Brush PackIconBrush(ModelSlot? slot) =>
+        slot is null ? GoldBrushResolved : IconBrushFor(slot.Status);
+
+    internal string PackTitle(ModelSlot? slot) => slot?.DisplayLabel ?? string.Empty;
+
+    internal string PackSize(ModelSlot? slot)
+    {
+        if (slot is null || slot.ApproxBytes == 0) return string.Empty;
+        const double MB = 1024.0 * 1024.0;
+        const double GB = MB * 1024.0;
+        return slot.ApproxBytes >= (ulong)GB
+            ? $"~{slot.ApproxBytes / GB:0.0} GB"
+            : $"~{slot.ApproxBytes / MB:0} MB";
+    }
+
+    internal double PackFraction(ModelSlot? slot) => slot?.Fraction ?? 0;
+
+    internal Visibility PackShowDeterminate(ModelSlot? slot) =>
+        slot is not null && slot.Status == ModelInstallStatus.Downloading && slot.Fraction > 0
+            ? Visibility.Visible : Visibility.Collapsed;
+
+    internal Visibility PackShowSpinner(ModelSlot? slot) =>
+        slot is not null && slot.Status == ModelInstallStatus.Downloading && slot.Fraction <= 0
+            ? Visibility.Visible : Visibility.Collapsed;
+
+    internal bool PackSpinnerActive(ModelSlot? slot) =>
+        slot is not null && slot.Status == ModelInstallStatus.Downloading && slot.Fraction <= 0;
+
+    internal Visibility PackVisibleIfDownloading(ModelSlot? slot) =>
+        slot?.Status == ModelInstallStatus.Downloading ? Visibility.Visible : Visibility.Collapsed;
+
+    internal Visibility PackVisibleIfFailed(ModelSlot? slot) =>
+        slot?.Status == ModelInstallStatus.Failed ? Visibility.Visible : Visibility.Collapsed;
+
+    internal Visibility PackVisibleIfInstalled(ModelSlot? slot) =>
+        slot?.Status == ModelInstallStatus.Installed ? Visibility.Visible : Visibility.Collapsed;
+
+    internal Visibility PackShowActionButton(ModelSlot? slot) =>
+        slot is not null && slot.Status != ModelInstallStatus.Installed
+            ? Visibility.Visible : Visibility.Collapsed;
+
+    internal string PackButtonLabel(ModelSlot? slot) =>
+        slot is null ? "Install" : ButtonLabel(slot.Status);
+
+    internal string PackProgressLabel(ModelSlot? slot) =>
+        slot is null ? string.Empty
+        : ProgressLabel(slot.Fraction, slot.BytesDone, slot.TotalBytes);
+
+    internal Visibility PackShowRateEta(ModelSlot? slot) =>
+        slot is not null && slot.Status == ModelInstallStatus.Downloading && slot.BytesPerSecond > 0
+            ? Visibility.Visible : Visibility.Collapsed;
+
+    internal string PackRateEtaLabel(ModelSlot? slot) =>
+        slot is null ? string.Empty : RateEtaLabel(slot.BytesPerSecond, slot.EtaSeconds);
+
+    internal string PackErrorLabel(ModelSlot? slot) =>
+        slot is null ? string.Empty : ErrorLabel(slot.LastError);
+
     private static string FormatBytes(ulong b)
     {
         const double KB = 1024.0;
@@ -241,6 +378,14 @@ public sealed partial class WelcomeSheet : UserControl
     {
         DebugLog.Info("[INSTALL] VLM per-row button clicked.");
         HandleAction(Svc.Vlm);
+    }
+
+    private void OnPackActionClicked(object sender, RoutedEventArgs e)
+    {
+        var slot = Svc.RecommendedPack;
+        if (slot is null) return;
+        DebugLog.Info($"[INSTALL] Performance pack per-row button clicked ({slot.DisplayLabel}).");
+        HandleAction(slot);
     }
 
     private void HandleAction(ModelSlot slot)

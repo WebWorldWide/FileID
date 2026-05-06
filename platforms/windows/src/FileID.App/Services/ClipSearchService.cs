@@ -28,11 +28,28 @@ using FileID.ViewModels;
 
 namespace FileID.Services;
 
-internal sealed class ClipSearchService : IDisposable
+internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
 {
     private readonly ReadStore _store;
     private readonly ConcurrentDictionary<string, TaskCompletionSource<float[]?>> _inflight = new();
     private bool _disposed;
+
+    /// <summary>Last non-cancellation error from a search round-trip. Null
+    /// when the most recent search succeeded. Bind in the search box UI to
+    /// surface "Search unavailable" instead of silently empty results.</summary>
+    private string? _lastSearchError;
+    public string? LastSearchError
+    {
+        get => _lastSearchError;
+        private set
+        {
+            if (_lastSearchError == value) return;
+            _lastSearchError = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(LastSearchError)));
+        }
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
 
     public ClipSearchService(ReadStore store)
     {
@@ -83,9 +100,18 @@ internal sealed class ClipSearchService : IDisposable
         {
             await EngineClient.Instance.EmbedTextQueryAsync(query, queryId).ConfigureAwait(false);
         }
-        catch (Exception)
+        catch (OperationCanceledException)
         {
             _inflight.TryRemove(queryId, out _);
+            throw; // user-initiated; let it propagate
+        }
+        catch (Exception ex)
+        {
+            // Engine I/O / serialization failure. Surface to UI via
+            // LastSearchError instead of silently returning empty results.
+            _inflight.TryRemove(queryId, out _);
+            DebugLog.Warn($"[CLIP] EmbedTextQueryAsync threw: {ex.Message}");
+            LastSearchError = "Search unavailable: " + ex.Message;
             return null;
         }
 
@@ -102,10 +128,19 @@ internal sealed class ClipSearchService : IDisposable
         });
         try
         {
-            return await tcs.Task.ConfigureAwait(false);
+            var result = await tcs.Task.ConfigureAwait(false);
+            // Successful round-trip — clear any stale error banner.
+            if (result is not null) LastSearchError = null;
+            return result;
         }
-        catch
+        catch (OperationCanceledException)
         {
+            throw; // user-initiated cancellation
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"[CLIP] embed-await threw: {ex.Message}");
+            LastSearchError = "Search timed out: " + ex.Message;
             return null;
         }
     }

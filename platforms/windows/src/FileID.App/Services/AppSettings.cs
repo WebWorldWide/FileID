@@ -21,8 +21,22 @@ internal sealed class AppSettings
     {
         WriteIndented = true,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = false, // strict casing — case-flips can't smuggle past Sanitize
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        // Unknown fields are intentionally ignored (forward-compatibility
+        // for the next schema version); Sanitize() validates every
+        // declared field individually so an unknown field can't pollute
+        // the in-memory state.
     };
+
+    /// <summary>Single-writer gate for Save(). Multiple property setters
+    /// on AppViewModel (ActiveTab, SidebarVisible, FolderPath, ...) all
+    /// call Save() synchronously on the UI thread. Without this lock,
+    /// rapid changes (user spam-clicking tabs) race File.WriteAllBytes +
+    /// File.Move on settings.json — second Save can clobber first
+    /// Save's bytes. The atomic-write protects against crashes, not
+    /// concurrent writers.</summary>
+    private static readonly object s_saveLock = new();
 
     /// <summary>Last-picked folder root. Absolute path or null if never picked.</summary>
     public string? LastFolderPath { get; set; }
@@ -65,6 +79,14 @@ internal sealed class AppSettings
     /// <summary>Schema version of this settings.json. Bumped only on incompatible field renames.</summary>
     public int SchemaVersion { get; set; } = 1;
 
+    /// <summary>Whitelist of execution-provider tags the engine accepts.
+    /// Matches the Rust ExecutionProvider enum in `runtime.rs`. Anything
+    /// outside this set is silently coerced to null (auto-detect) so a
+    /// tampered settings.json can't influence DLL search via this field.</summary>
+    private static readonly HashSet<string> AllowedEpOverrides =
+        new(StringComparer.OrdinalIgnoreCase)
+        { "auto", "cuda", "tensorrt", "directml", "openvino", "qnn", "cpu" };
+
     public static AppSettings Load()
     {
         try
@@ -75,6 +97,7 @@ internal sealed class AppSettings
                 var loaded = JsonSerializer.Deserialize<AppSettings>(bytes, s_jsonOptions);
                 if (loaded is not null)
                 {
+                    Sanitize(loaded);
                     return loaded;
                 }
             }
@@ -87,20 +110,40 @@ internal sealed class AppSettings
         return new AppSettings();
     }
 
+    /// <summary>Defensive cleanup of fields a malicious settings.json
+    /// could otherwise smuggle through. Currently scrubs the EP override
+    /// (rejects anything outside the canonical enum so DLL paths can't
+    /// be injected). Add new validations here as fields are added.</summary>
+    private static void Sanitize(AppSettings s)
+    {
+        if (s.GpuExecutionProviderOverride is { } v
+            && !AllowedEpOverrides.Contains(v))
+        {
+            DebugLog.Warn($"AppSettings: GpuExecutionProviderOverride '{v}' is not a recognized value; coercing to null (auto-detect).");
+            s.GpuExecutionProviderOverride = null;
+        }
+    }
+
     public void Save()
     {
-        try
+        // Serialize the entire write through s_saveLock so concurrent
+        // setters can't race File.Move. Brief lock — typical save is
+        // < 5 ms (small JSON, single SSD write).
+        lock (s_saveLock)
         {
-            AppPaths.EnsureDirectories();
-            var bytes = JsonSerializer.SerializeToUtf8Bytes(this, s_jsonOptions);
-            // Atomic write: temp file + File.Move. Avoids partial files on crash.
-            var tmp = AppPaths.SettingsPath + ".tmp";
-            File.WriteAllBytes(tmp, bytes);
-            File.Move(tmp, AppPaths.SettingsPath, overwrite: true);
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Warn("AppSettings.Save failed: " + ex.Message);
+            try
+            {
+                AppPaths.EnsureDirectories();
+                var bytes = JsonSerializer.SerializeToUtf8Bytes(this, s_jsonOptions);
+                // Atomic write: temp file + File.Move. Avoids partial files on crash.
+                var tmp = AppPaths.SettingsPath + ".tmp";
+                File.WriteAllBytes(tmp, bytes);
+                File.Move(tmp, AppPaths.SettingsPath, overwrite: true);
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn("AppSettings.Save failed: " + ex.Message);
+            }
         }
     }
 }

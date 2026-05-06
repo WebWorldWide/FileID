@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.90"
 description = "FileID engine — owns DB, scan pipeline, ML inference. Spawned as a child of the FileID app and talks newline-delimited JSON over stdio."
+# License choice is pending the public-release decision; the engine is
+# `publish = false` so cargo doesn't enforce a SPDX expression. Update
+# this to "MIT" / "Apache-2.0" / proprietary text before any external
+# distribution. Tracked in shared/docs/SHIP.md.
 license = "TBD"
 publish = false
 
@@ -23,7 +27,8 @@ serde      = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 base64     = "0.22"
 uuid       = { version = "1", features = ["v4", "serde"] }
-chrono     = { version = "0.4", features = ["serde"] }
+# 0.4.20+ for RUSTSEC-2020-0071 / RUSTSEC-2020-0159 (panic-on-invalid-timestamp + localtime_r soundness).
+chrono     = { version = "0.4.20", features = ["serde"] }
 
 # SQLite — drop-in for GRDB. Bundled libsqlite3 + FTS5 for byte-faithful schema with macOS.
 rusqlite = { version = "0.31", features = ["bundled", "blob", "chrono", "limits", "modern_sqlite"] }

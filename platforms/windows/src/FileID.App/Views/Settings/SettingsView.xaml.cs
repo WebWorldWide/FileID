@@ -98,9 +98,10 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         var s = AppViewModel.Instance.Settings;
         s.GpuExecutionProviderOverride = (tag == "auto") ? null : tag;
         s.Save();
-        // V14.x note: send a setExecutionProvider IPC here once the
-        // engine has a real consumer. For now the override sits in
-        // settings.json and the engine ignores it.
+        // The engine reads this value at startup via runtime.rs's
+        // read_user_ep_override(); to apply a change live, the user
+        // must restart the engine (the Restart button in this view, or
+        // the prompt shown after installing a Performance Pack).
     }
 
     public string EngineVersionText
@@ -303,11 +304,31 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
                 {
                     XamlRoot = this.XamlRoot,
                     Title = "Performance Pack installed",
-                    Content = "Restart the engine to start using the new execution provider. Sidebar → Engine → Restart, or just relaunch FileID.",
-                    CloseButtonText = "OK",
-                    DefaultButton = ContentDialogButton.Close,
+                    Content = "FileID needs to restart its engine to activate the new execution provider. Restart now?",
+                    PrimaryButtonText = "Restart now",
+                    SecondaryButtonText = "Later",
+                    DefaultButton = ContentDialogButton.Primary,
                 };
-                await dialog.ShowAsync();
+                var choice = await dialog.ShowAsync();
+                if (choice == ContentDialogResult.Primary)
+                {
+                    button.IsEnabled = false;
+                    button.Content = "Restarting…";
+                    try
+                    {
+                        await EngineClient.Instance.RestartAsync();
+                        button.Content = "Active";
+                    }
+                    catch (Exception rex)
+                    {
+                        DebugLog.Warn($"Engine restart after pack install failed: {rex.Message}");
+                        button.Content = "Installed (restart manually)";
+                    }
+                    finally
+                    {
+                        button.IsEnabled = true;
+                    }
+                }
             }
             catch { /* dialog show is best-effort */ }
         }

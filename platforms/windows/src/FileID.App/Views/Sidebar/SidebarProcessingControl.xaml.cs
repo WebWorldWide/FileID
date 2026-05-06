@@ -53,6 +53,18 @@ public sealed partial class SidebarProcessingControl : UserControl
         }
     }
 
+    /// <summary>Cached per-launch (NOT persisted) so the pre-scan
+    /// performance warning isn't shown twice in a single session. Reset
+    /// every app relaunch — gives the user a fresh chance to install
+    /// the recommended Performance Pack.</summary>
+    private bool _userAcceptedSuboptimalScan;
+
+    /// <summary>Re-entrancy guard for the pre-scan ContentDialog.
+    /// WinUI 3's ContentDialog throws if a second is shown while the
+    /// first is open — spam-clicking Start scan would crash. Set on
+    /// dialog open, cleared in finally.</summary>
+    private bool _prescanDialogShowing;
+
     private async void OnStartScanClicked(object sender, RoutedEventArgs e)
     {
         var vm = AppViewModel.Instance;
@@ -62,6 +74,34 @@ public sealed partial class SidebarProcessingControl : UserControl
                 "FileID needs a folder to scan. Use the picker at the top of the sidebar.");
             return;
         }
+
+        // Pre-scan EP gate: warn if the engine would run on CPU or on
+        // DirectML when a vendor-specific Performance Pack would help.
+        // Skip if the user already accepted in this session.
+        if (!_userAcceptedSuboptimalScan)
+        {
+            var hw = EngineClient.Instance.Info?.Hardware;
+            if (hw is not null)
+            {
+                var prompt = BuildPerformancePrompt(hw);
+                if (prompt is not null)
+                {
+                    var result = await ShowPerformancePromptAsync(prompt);
+                    switch (result)
+                    {
+                        case PerformancePromptResult.OpenSettings:
+                            AppViewModel.Instance.ActiveTab = SidebarTab.Settings;
+                            return;
+                        case PerformancePromptResult.Cancel:
+                            return;
+                        case PerformancePromptResult.Continue:
+                            _userAcceptedSuboptimalScan = true;
+                            break;
+                    }
+                }
+            }
+        }
+
         try
         {
             await EngineClient.Instance.StartScanAsync(vm.FolderPath!, vm.FolderDisplay);
@@ -74,6 +114,96 @@ public sealed partial class SidebarProcessingControl : UserControl
                 "FileID couldn't tell the engine to start. Engine status: "
                 + EngineClient.Instance.State);
         }
+    }
+
+    private enum PerformancePromptResult { Continue, OpenSettings, Cancel }
+
+    private sealed record PerformancePrompt(string Title, string Body, bool ShowOpenSettings);
+
+    /// <summary>Decide whether to warn the user before scanning. Returns
+    /// null when the active EP is already optimal for this hardware.</summary>
+    private static PerformancePrompt? BuildPerformancePrompt(HardwareInfo hw)
+    {
+        var ep = (hw.ExecutionProvider ?? string.Empty).ToLowerInvariant();
+        var vendor = (hw.GpuVendor ?? string.Empty).ToLowerInvariant();
+
+        // Optimal — best EP already active, scan freely.
+        if (ep is "cuda" or "qnn" or "openvino") return null;
+
+        // CPU branch.
+        if (ep == "cpu")
+        {
+            if (vendor is "" or "none")
+            {
+                return new PerformancePrompt(
+                    "Scan will run on CPU",
+                    "No GPU was detected on this PC. Scanning on CPU is roughly 10× slower than on GPU.\n\nContinue anyway?",
+                    ShowOpenSettings: false);
+            }
+            return new PerformancePrompt(
+                "GPU detected but inactive",
+                $"FileID detected a {hw.AdapterName ?? hw.GpuVendor} GPU but is currently running on CPU. Open Settings → Performance to install the right Performance Pack.\n\nScanning now will use CPU (roughly 10× slower).",
+                ShowOpenSettings: true);
+        }
+
+        // DirectML branch — already a real GPU EP. Only warn if a
+        // vendor-specific pack would be a meaningful upgrade.
+        if (ep == "directml")
+        {
+            var packMissing =
+                (vendor == "nvidia"   && !hw.CudaPackPresent) ||
+                (vendor == "intel"    && !hw.OpenvinoPackPresent) ||
+                (vendor == "qualcomm" && !hw.QnnPackPresent);
+            if (!packMissing) return null; // AMD or already-installed pack — silent
+            return new PerformancePrompt(
+                "Performance Pack available",
+                string.IsNullOrEmpty(hw.Recommendation)
+                    ? "A vendor-specific GPU Performance Pack is available for your hardware and would speed up the scan. Open Settings → Performance to install it."
+                    : hw.Recommendation,
+                ShowOpenSettings: true);
+        }
+
+        return null;
+    }
+
+    private async Task<PerformancePromptResult> ShowPerformancePromptAsync(PerformancePrompt p)
+    {
+        if (_prescanDialogShowing) return PerformancePromptResult.Cancel;
+        _prescanDialogShowing = true;
+        ContentDialogResult result;
+        try
+        {
+            var dialog = new ContentDialog
+            {
+                XamlRoot = this.XamlRoot,
+                Title = p.Title,
+                Content = p.Body,
+                PrimaryButtonText = p.ShowOpenSettings ? "Open Settings" : "Continue scan",
+                SecondaryButtonText = p.ShowOpenSettings ? "Continue scan" : "Cancel",
+                CloseButtonText = p.ShowOpenSettings ? "Cancel" : null,
+                DefaultButton = ContentDialogButton.Primary,
+            };
+            result = await dialog.ShowAsync();
+        }
+        finally
+        {
+            _prescanDialogShowing = false;
+        }
+        if (p.ShowOpenSettings)
+        {
+            return result switch
+            {
+                ContentDialogResult.Primary   => PerformancePromptResult.OpenSettings,
+                ContentDialogResult.Secondary => PerformancePromptResult.Continue,
+                _                              => PerformancePromptResult.Cancel,
+            };
+        }
+        // No "Open Settings" affordance: Primary == Continue, Secondary == Cancel.
+        return result switch
+        {
+            ContentDialogResult.Primary   => PerformancePromptResult.Continue,
+            _                              => PerformancePromptResult.Cancel,
+        };
     }
 
 

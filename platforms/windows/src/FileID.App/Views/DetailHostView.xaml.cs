@@ -16,12 +16,25 @@ namespace FileID.Views;
 
 public sealed partial class DetailHostView : UserControl
 {
+    /// <summary>The currently-running tab-swap Storyboard, if any. Tracked
+    /// so it can be Stopped on Unloaded — otherwise the animation keeps
+    /// running past view detach, holding a reference to the (now orphaned)
+    /// Host element and preventing GC.</summary>
+    private Storyboard? _activeStoryboard;
+
     public DetailHostView()
     {
         InitializeComponent();
         Loaded += (_, _) => Sync(animate: false);
         AppViewModel.Instance.PropertyChanged += OnAppChanged;
-        Unloaded += (_, _) => AppViewModel.Instance.PropertyChanged -= OnAppChanged;
+        Unloaded += OnUnloaded;
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        AppViewModel.Instance.PropertyChanged -= OnAppChanged;
+        try { _activeStoryboard?.Stop(); } catch { /* best-effort */ }
+        _activeStoryboard = null;
     }
 
     private void OnAppChanged(object? sender, PropertyChangedEventArgs e)
@@ -36,7 +49,16 @@ public sealed partial class DetailHostView : UserControl
     {
         var vm = AppViewModel.Instance;
         UIElement child;
-        if (!vm.HasFolder)
+        // Settings is reachable WITHOUT a folder (matches the special-case
+        // in SidebarTabList that keeps the Settings entry enabled at the
+        // pre-folder onboarding stage). Without this short-circuit the
+        // Sync below falls through to OnboardingSplash and the user never
+        // sees the Settings view they just clicked.
+        if (vm.ActiveTab.Id == "settings")
+        {
+            child = new Settings.SettingsView();
+        }
+        else if (!vm.HasFolder)
         {
             child = new OnboardingSplash();
         }
@@ -47,7 +69,6 @@ public sealed partial class DetailHostView : UserControl
                 "library"     => (UIElement)new Library.LibraryView(),
                 "people"      => (UIElement)new People.PeopleView(),
                 "cleanup"     => (UIElement)new Cleanup.CleanupView(),
-                "settings"    => (UIElement)new Settings.SettingsView(),
                 "deepanalyze" => (UIElement)new DeepAnalyze.DeepAnalyzeView(),
                 "restructure" => (UIElement)new Restructure.RestructureView(),
                 _              => BuildPlaceholder("",  vm.ActiveTab.Label, "Coming soon."),
@@ -74,6 +95,10 @@ public sealed partial class DetailHostView : UserControl
         Storyboard.SetTargetProperty(fadeOut, "Opacity");
         var sbOut = new Storyboard();
         sbOut.Children.Add(fadeOut);
+        // Stop any prior in-flight animation before starting a new one;
+        // racing storyboards on the same target leak references.
+        try { _activeStoryboard?.Stop(); } catch { }
+        _activeStoryboard = sbOut;
         sbOut.Completed += (_, _) =>
         {
             Host.Children.Clear();
@@ -89,6 +114,11 @@ public sealed partial class DetailHostView : UserControl
             Storyboard.SetTargetProperty(fadeIn, "Opacity");
             var sbIn = new Storyboard();
             sbIn.Children.Add(fadeIn);
+            sbIn.Completed += (_, _) =>
+            {
+                if (ReferenceEquals(_activeStoryboard, sbIn)) _activeStoryboard = null;
+            };
+            _activeStoryboard = sbIn;
             sbIn.Begin();
         };
         sbOut.Begin();

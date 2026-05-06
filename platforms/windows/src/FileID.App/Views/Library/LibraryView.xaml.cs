@@ -39,20 +39,11 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 
         InitializeComponent();
         Unloaded += OnUnloaded;
-        ViewModel.PropertyChanged += (_, e) =>
-        {
-            if (e.PropertyName is nameof(LibraryViewModel.IsLoading)
-                or nameof(LibraryViewModel.ErrorMessage))
-            {
-                OnPropertyChanged(nameof(StatusText));
-                OnPropertyChanged(nameof(FooterVisibility));
-            }
-        };
-        ViewModel.Items.CollectionChanged += (_, _) =>
-        {
-            OnPropertyChanged(nameof(StatusText));
-            OnPropertyChanged(nameof(FooterVisibility));
-        };
+        // Named handlers (not inline lambdas) so OnUnloaded can detach
+        // them. Inline lambdas leak the view + VM graph (~500 KB) every
+        // time the tab is navigated away from and back to.
+        ViewModel.PropertyChanged += OnViewModelPropertyChanged;
+        ViewModel.Items.CollectionChanged += OnItemsCollectionChanged;
 
         Loaded += async (_, _) =>
         {
@@ -72,6 +63,9 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
         Unloaded -= OnUnloaded;
+        // Detach VM subscriptions so the VM/View graph can be GC'd.
+        try { ViewModel.PropertyChanged -= OnViewModelPropertyChanged; } catch { /* swallow */ }
+        try { ViewModel.Items.CollectionChanged -= OnItemsCollectionChanged; } catch { /* swallow */ }
         // Cancel + dispose every in-flight thumb load so closing the tab
         // doesn't leave background tasks holding BitmapImage refs.
         foreach (var (_, cts) in _inflight)
@@ -83,6 +77,22 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         try { _thumbnails.Dispose(); } catch { /* swallow */ }
         try { _clip.Dispose(); } catch { /* swallow */ }
         try { ViewModel.Dispose(); } catch { /* swallow */ }
+    }
+
+    private void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is nameof(LibraryViewModel.IsLoading)
+            or nameof(LibraryViewModel.ErrorMessage))
+        {
+            OnPropertyChanged(nameof(StatusText));
+            OnPropertyChanged(nameof(FooterVisibility));
+        }
+    }
+
+    private void OnItemsCollectionChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
+    {
+        OnPropertyChanged(nameof(StatusText));
+        OnPropertyChanged(nameof(FooterVisibility));
     }
 
     public string StatusText

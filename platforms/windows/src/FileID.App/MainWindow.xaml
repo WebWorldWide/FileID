@@ -37,43 +37,56 @@
              interaction that bit us in V12.2 doesn't apply here). -->
         <motion:LavaLampBackground Grid.RowSpan="2" />
 
+        <!-- AppTitleBar: a transparent drag-region backdrop. Passed to
+             SetTitleBar() so its full bounds are draggable / double-click-
+             to-maximize. Must remain EMPTY of interactive children — any
+             Button inside this Grid would consume pointer events and break
+             window dragging. Visible chrome (icon, app name) lives in the
+             sibling Grid below with IsHitTestVisible=False so pointer
+             events pass through to the drag region. The sidebar toggle
+             button sits in its own sibling so it stays clickable without
+             eating drag events from the rest of the title bar. -->
         <Grid x:Name="AppTitleBar"
               Grid.Row="0"
-              Background="Transparent">
-            <StackPanel Orientation="Horizontal"
-                        VerticalAlignment="Center"
-                        Margin="6,0,0,0">
-                <!-- V14.7.16: sidebar toggle button — always visible so
-                     the user has a way to bring the sidebar back after
-                     hiding it (Ctrl+Shift+S also toggles). Glyph E700
-                     is "GlobalNavButton" (the standard hamburger-style
-                     menu icon Windows uses for collapsible nav). -->
-                <Button x:Name="SidebarToggleButton"
-                        Click="OnSidebarToggleClicked"
-                        Background="Transparent"
-                        BorderThickness="0"
-                        Padding="8,4"
-                        Width="32" Height="24"
-                        VerticalAlignment="Center"
-                        AutomationProperties.Name="Toggle sidebar"
-                        ToolTipService.ToolTip="Toggle sidebar (Ctrl+Shift+S)">
-                    <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                              Glyph="&#xE700;"
-                              FontSize="14" />
-                </Button>
-                <!-- V14.7.3: 16x16 app icon at the leading edge of the
-                     title bar (Explorer / Edge / Office convention). -->
-                <Image Source="ms-appx:///Assets/Logo/FileID-16.png"
-                       Width="16" Height="16"
+              Background="Transparent" />
+
+        <!-- Sidebar toggle button: hit-testable sibling overlay. Only the
+             button's own 32×24 bounds capture pointer events; everything
+             outside it falls through to AppTitleBar and drags the window. -->
+        <Button x:Name="SidebarToggleButton"
+                Grid.Row="0"
+                Click="OnSidebarToggleClicked"
+                Background="Transparent"
+                BorderThickness="0"
+                Padding="8,4"
+                Width="32" Height="24"
+                Margin="6,0,0,0"
+                HorizontalAlignment="Left"
+                VerticalAlignment="Center"
+                AutomationProperties.Name="Toggle sidebar"
+                ToolTipService.ToolTip="Toggle sidebar (Ctrl+Shift+S)">
+            <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                      Glyph="&#xE700;"
+                      FontSize="14" />
+        </Button>
+
+        <!-- App icon + name: visible but hit-test-invisible so window-drag
+             events on this area fall through to AppTitleBar below. -->
+        <StackPanel Grid.Row="0"
+                    Orientation="Horizontal"
+                    VerticalAlignment="Center"
+                    Margin="44,0,0,0"
+                    IsHitTestVisible="False">
+            <Image Source="ms-appx:///Assets/Logo/FileID-16.png"
+                   Width="16" Height="16"
+                   VerticalAlignment="Center"
+                   Margin="0,0,8,0" />
+            <TextBlock Text="FileID"
                        VerticalAlignment="Center"
-                       Margin="6,0,8,0" />
-                <TextBlock Text="FileID"
-                           VerticalAlignment="Center"
-                           FontSize="13"
-                           FontWeight="SemiBold"
-                           Opacity="0.55" />
-            </StackPanel>
-        </Grid>
+                       FontSize="13"
+                       FontWeight="SemiBold"
+                       Opacity="0.55" />
+        </StackPanel>
 
         <Grid Grid.Row="1">
             <Grid.ColumnDefinitions>

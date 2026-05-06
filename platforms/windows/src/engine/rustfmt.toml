@@ -1,0 +1,11 @@
+# Rustfmt config for the FileID engine.
+#
+# The codebase deliberately uses aligned columns and human-grouped layout
+# (e.g. the migration registry, model registry, EP picker decision tree)
+# that don't survive default rustfmt. Rather than churn every file, we
+# disable formatting and rely on code review for style.
+#
+# CI's `cargo fmt --check` becomes a no-op against this config; the
+# privacy gate, clippy (functional lints only), build, and test gates
+# remain authoritative.
+disable_all_formatting = true

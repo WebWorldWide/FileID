@@ -73,8 +73,28 @@ pub fn open_reader(db_path: &Path) -> Result<Connection> {
 /// Drain WAL into the main DB file. Called at shutdown to keep the on-disk
 /// state self-contained. Mirror of macOS `Database.swift`'s shutdown
 /// `PRAGMA wal_checkpoint(TRUNCATE)`.
+///
+/// Retries up to 5 times on `SQLITE_BUSY` (a read connection holding an
+/// active txn at shutdown). 50 ms between attempts → ~250 ms worst case,
+/// well under any reasonable shutdown grace period. After exhaustion,
+/// returns the error so the caller can log + continue (the WAL persists
+/// to disk and gets reapplied on next open — same as today's failure
+/// mode without a retry, just less likely to hit it).
 pub fn checkpoint_truncate(conn: &Connection) -> Result<()> {
-    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
-        .context("WAL checkpoint(TRUNCATE) failed")?;
+    const MAX_ATTEMPTS: u32 = 5;
+    const RETRY_DELAY_MS: u64 = 50;
+    for attempt in 1..=MAX_ATTEMPTS {
+        match conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)") {
+            Ok(()) => return Ok(()),
+            Err(rusqlite::Error::SqliteFailure(err, _))
+                if err.code == rusqlite::ErrorCode::DatabaseBusy
+                    && attempt < MAX_ATTEMPTS =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS));
+                continue;
+            }
+            Err(e) => return Err(e).context("WAL checkpoint(TRUNCATE) failed"),
+        }
+    }
     Ok(())
 }

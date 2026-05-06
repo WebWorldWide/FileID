@@ -1,0 +1,90 @@
+name: Windows app (.NET)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'platforms/windows/src/FileID.App/**'
+      - 'platforms/windows/src/FileID.Theme/**'
+      - 'platforms/windows/src/FileID.IpcSchema/**'
+      - 'platforms/windows/Directory.Packages.props'
+      - 'platforms/windows/Directory.Build.props'
+      - 'platforms/windows/FileID.sln'
+      - '.github/workflows/windows-app.yml'
+  pull_request:
+    paths:
+      - 'platforms/windows/src/FileID.App/**'
+      - 'platforms/windows/src/FileID.Theme/**'
+      - 'platforms/windows/src/FileID.IpcSchema/**'
+      - 'platforms/windows/Directory.Packages.props'
+      - 'platforms/windows/Directory.Build.props'
+      - 'platforms/windows/FileID.sln'
+      - '.github/workflows/windows-app.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build .NET app — ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: x64
+            runner: windows-latest
+            arch: x64
+          - label: arm64
+            runner: windows-latest
+            arch: arm64
+
+    runs-on: ${{ matrix.runner }}
+
+    defaults:
+      run:
+        working-directory: platforms/windows
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Cache NuGet
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ matrix.arch }}-${{ hashFiles('platforms/windows/Directory.Packages.props') }}
+          restore-keys: |
+            nuget-${{ matrix.arch }}-
+
+      - name: Restore
+        run: dotnet restore src/FileID.App/FileID.App.csproj /p:Platform=${{ matrix.arch }}
+
+      - name: Build (Debug)
+        run: dotnet build src/FileID.App/FileID.App.csproj -c Debug --no-restore /p:Platform=${{ matrix.arch }}
+
+      - name: Build (Release)
+        run: dotnet build src/FileID.App/FileID.App.csproj -c Release --no-restore /p:Platform=${{ matrix.arch }}
+
+      - name: Build IpcSchema tests project (if present)
+        # Tests run on x64 only — ARM64 cross-building tests is rarely useful here.
+        if: matrix.arch == 'x64'
+        continue-on-error: true
+        run: |
+          if (Test-Path Tests) {
+            dotnet test Tests/ -c Debug --no-restore --verbosity minimal
+          } else {
+            Write-Host "No Tests/ directory; skipping."
+          }
+        shell: pwsh
+
+      - name: Verify output assembly
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem -Path "src/FileID.App/bin/Release/net8.0-windows10.0.19041.0/win-${{ matrix.arch }}" -Filter "FileID.dll" -Recurse | Select-Object -First 1
+          if (-not $dll) { throw "FileID.dll not found in Release output" }
+          Write-Host ("FileID.dll size: {0:F1} MB" -f ($dll.Length / 1MB))

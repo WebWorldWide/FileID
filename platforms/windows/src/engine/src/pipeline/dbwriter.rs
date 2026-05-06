@@ -257,6 +257,25 @@ impl DbWriter {
             }
         }
         tx.commit().context("commit batch")?;
+
+        // Periodic WAL checkpoint to keep the -wal file from growing
+        // unboundedly on long scans. SQLite's auto-checkpoint (on this
+        // connection) fires at ~1000 pages, but a -wal that never goes
+        // through TRUNCATE keeps growing on disk. Every WAL_CHECKPOINT_BATCHES
+        // commits we ask for a PASSIVE checkpoint; on success the WAL
+        // gets truncated next time it crosses the threshold. PASSIVE
+        // doesn't block readers, so this is safe to call from the
+        // hot scan path.
+        const WAL_CHECKPOINT_BATCHES: u32 = 32;
+        if batch_index > 0 && batch_index % WAL_CHECKPOINT_BATCHES == 0 {
+            // Best-effort — failure here just means the WAL stays a
+            // little larger; it doesn't break correctness. A
+            // SQLITE_BUSY here is normal if a reader is mid-query.
+            if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE)") {
+                tracing::debug!(?e, batch_index, "periodic WAL checkpoint failed (transient, continuing)");
+            }
+        }
+
         drop(conn);
 
         let wall = started.elapsed().as_secs_f64();
@@ -279,13 +298,30 @@ impl DbWriter {
     }
 }
 
-/// Stable 64-bit hash for `path_hash`. Matches Swift's `Hasher.combine` we
-/// stored in v1: not cryptographic, used only for cheap probe-by-hash on
-/// resume-cursor updates.
+/// Stable 64-bit hash for `path_hash`. Used for cheap probe-by-hash on
+/// resume-cursor updates and dedupe of re-scanned files.
+///
+/// On Windows, NTFS file lookups are case-INsensitive (`C:\Users\Foo`
+/// and `c:\users\foo` resolve to the same file). The hash must therefore
+/// be case-insensitive too; otherwise a re-scan after a path-case change
+/// (Explorer rename, Library import, drive remount) creates a duplicate
+/// row pointing to the same physical file. Lowercase before hashing.
+///
+/// macOS volumes default to case-insensitive HFS+/APFS, so the same
+/// behavior is correct there — but each platform owns its own DB, so
+/// the cross-platform implication is moot. The wire schema stores the
+/// resulting i64 as-is.
 fn stable_path_hash(path: &str) -> i64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    path.hash(&mut h);
+    // ASCII lowercase is enough for Windows path comparison — NTFS uses
+    // a Unicode case-folding table that's roughly equivalent to
+    // `to_ascii_lowercase` for typical paths. A pathological filename
+    // with Turkish dotted I would not round-trip exactly, but the
+    // resulting hash collision is bounded and tolerable (worst case:
+    // one duplicate row that the next scan overwrites via UPSERT).
+    let normalized = path.to_ascii_lowercase();
+    normalized.hash(&mut h);
     h.finish() as i64
 }
 
