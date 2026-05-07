@@ -42,27 +42,47 @@ DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c release --product FileIDEngine
 #     plus `TOOLCHAINS=Metal` env var to expose `metal` to xcrun.
 METALLIB_CACHE="$PROJECT_DIR/.build/cache/mlx.metallib"
 if [ ! -f "$METALLIB_CACHE" ]; then
-    echo "⚙️  Building mlx.metallib (one-time, ~30 s)..."
     if ! command -v cmake >/dev/null 2>&1; then
         echo "❌ cmake not found — required to build Deep Analyze GPU kernels."
         echo "   Install: brew install cmake"
         echo "   Then re-run ./run.sh."
         exit 1
     fi
-    if ! TOOLCHAINS=Metal DEVELOPER_DIR="$XCODE_DEV_DIR" xcrun --find metal >/dev/null 2>&1; then
-        echo "❌ Metal Toolchain not found — required to build Deep Analyze GPU kernels."
+    # `xcrun --find metal` only locates the shim binary — on Xcode 26 /
+    # macOS Tahoe the actual Metal Toolchain is a separate downloadable
+    # component, and the shim errors with "cannot execute tool 'metal'
+    # due to missing Metal Toolchain" if it isn't installed. Actually
+    # invoke `metal --version` so this fails fast with a clear message
+    # instead of bombing out 6s into the cmake configure.
+    if ! TOOLCHAINS=Metal DEVELOPER_DIR="$XCODE_DEV_DIR" xcrun metal --version >/dev/null 2>&1; then
+        echo "❌ Metal Toolchain not installed — required to build Deep Analyze GPU kernels."
+        echo "   The 'metal' shim exists, but the toolchain component is missing."
         echo "   Install: xcodebuild -downloadComponent MetalToolchain"
+        echo "   (Several-hundred-MB download; may prompt for auth.)"
         echo "   Then re-run ./run.sh."
         exit 1
     fi
+    LOG="$PROJECT_DIR/.build/cache/metallib-build.log"
+    mkdir -p "$(dirname "$LOG")"
+    echo "⚙️  Building mlx.metallib (one-time, 1–3 min on first run)…"
+    echo "    Streaming output to $LOG"
+    # tee through a pipeline; pipefail surfaces cmake's exit code instead of tee's.
+    set -o pipefail
     BUILDDIR=$(mktemp -d)
-    TOOLCHAINS=Metal DEVELOPER_DIR="$XCODE_DEV_DIR" cmake \
+    if ! TOOLCHAINS=Metal DEVELOPER_DIR="$XCODE_DEV_DIR" cmake \
         "$PROJECT_DIR/.build/checkouts/mlx-swift/Source/Cmlx/mlx" \
         -B "$BUILDDIR" \
         -DMLX_BUILD_METAL=ON -DMLX_BUILD_TESTS=OFF -DMLX_BUILD_EXAMPLES=OFF \
         -DMLX_BUILD_BENCHMARKS=OFF -DMLX_BUILD_PYTHON_BINDINGS=OFF \
-        -DCMAKE_BUILD_TYPE=Release > /dev/null 2>&1
-    TOOLCHAINS=Metal DEVELOPER_DIR="$XCODE_DEV_DIR" cmake --build "$BUILDDIR" --target mlx-metallib > /dev/null 2>&1
+        -DCMAKE_BUILD_TYPE=Release 2>&1 | tee "$LOG"; then
+        echo "❌ cmake configure failed — full log at $LOG"
+        exit 1
+    fi
+    if ! TOOLCHAINS=Metal DEVELOPER_DIR="$XCODE_DEV_DIR" cmake \
+        --build "$BUILDDIR" --target mlx-metallib 2>&1 | tee -a "$LOG"; then
+        echo "❌ cmake build failed — full log at $LOG"
+        exit 1
+    fi
     BUILT="$BUILDDIR/mlx/backend/metal/kernels/mlx.metallib"
     if [ -f "$BUILT" ]; then
         mkdir -p "$(dirname "$METALLIB_CACHE")"

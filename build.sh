@@ -154,7 +154,24 @@ case "$TARGET" in
         if $RUN_TESTS; then
             ( cd "$REPO_ROOT/platforms/apple" && swift test )
         fi
-        exec "$SCRIPT"
+        "$SCRIPT"
+
+        # Mirror FileID.app to ~/Desktop for one-click access — matches
+        # the Windows --desktop default. Wipe any prior copy + Finder's
+        # numbered duplicates (FileID 2.app, …) so the new bundle keeps
+        # its real name.
+        if $DESKTOP; then
+            APP_BUNDLE="$REPO_ROOT/platforms/apple/FileID.app"
+            DESKTOP_APP="$HOME/Desktop/FileID.app"
+            if [ -d "$APP_BUNDLE" ]; then
+                find "$HOME/Desktop" -maxdepth 1 -name "FileID *.app" -exec rm -rf {} + 2>/dev/null || true
+                rm -rf "$DESKTOP_APP"
+                cp -R "$APP_BUNDLE" "$DESKTOP_APP"
+                echo "✅ Mirrored to $DESKTOP_APP"
+            else
+                echo "⚠️  $APP_BUNDLE not found — skipping Desktop mirror." >&2
+            fi
+        fi
         ;;
 
     linux)
