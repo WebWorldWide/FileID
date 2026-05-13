@@ -329,19 +329,22 @@ async fn main() -> Result<()> {
 
     // Checkpoint before exit so the next opener doesn't need the .wal/.shm
     // sidecars. On failure, surface to the sink before teardown so the
-    // app's next launch can warn about stale-read.
-    if let Some(conn_arc) = &db_conn {
+    // app's next launch can warn about stale-read. The checkpoint result
+    // is captured into a local so we can drop the mutex guard before
+    // any `await` on the sink.
+    let checkpoint_outcome = db_conn.as_ref().map(|conn_arc| {
         let guard = conn_arc.lock();
-        if let Err(err) = db::checkpoint_truncate(&guard) {
-            tracing::warn!(?err, "WAL checkpoint at shutdown failed");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "checkpoint_failed_at_shutdown".into(),
-                message: "WAL not truncated at shutdown — your data is safe, but a previous read may show stale state on next launch.".into(),
-                path: None,
-                model_kind: None,
-            }))))
-            .await;
-        }
+        db::checkpoint_truncate(&guard)
+    });
+    if let Some(Err(err)) = checkpoint_outcome {
+        tracing::warn!(?err, "WAL checkpoint at shutdown failed");
+        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+            kind: "checkpoint_failed_at_shutdown".into(),
+            message: "WAL not truncated at shutdown — your data is safe, but a previous read may show stale state on next launch.".into(),
+            path: None,
+            model_kind: None,
+        }))))
+        .await;
     }
     tokio::time::sleep(Duration::from_millis(50)).await;
     drop(db_conn);
