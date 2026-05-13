@@ -154,20 +154,26 @@ jobs:
             -RedirectStandardError  "engine.stderr" `
             -NoNewWindow
           $exited = $proc.WaitForExit(10000)
+          $stdout = Get-Content "engine.stdout" -Raw -ErrorAction SilentlyContinue
+          $stderr = Get-Content "engine.stderr" -Raw -ErrorAction SilentlyContinue
+          Write-Host "=== engine.stdout ==="
+          Write-Host ($stdout ?? "<empty>")
+          Write-Host "=== engine.stderr ==="
+          Write-Host ($stderr ?? "<empty>")
+          Write-Host "=== end ==="
           if (-not $exited) {
             try { $proc.Kill() } catch { }
             throw "Engine did not exit within 10 s of stdin EOF."
           }
-          $stdout = Get-Content "engine.stdout" -Raw -ErrorAction SilentlyContinue
           if ([string]::IsNullOrWhiteSpace($stdout)) { throw "No stdout from engine — startup failed." }
           # Event JSON is { "t": "...", "payload": { "ready": { "_0": { ... } } } }
           # so the variant tag appears as a JSON key inside payload — match that.
           if (-not ($stdout -match '"ready"\s*:')) {
-            Write-Error "engine.stdout did not contain a ready event:`n$stdout"
+            Write-Error "engine.stdout did not contain a ready event"
             exit 1
           }
           if (-not ($stdout -match '"executionProvider"\s*:')) {
-            Write-Error "ready event missing HardwareInfo.executionProvider:`n$stdout"
+            Write-Error "ready event missing HardwareInfo.executionProvider"
             exit 1
           }
           Write-Host "Engine startup + EP probe smoke passed. ✅"
