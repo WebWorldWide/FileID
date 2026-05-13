@@ -22,21 +22,74 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     internal PeopleViewModel ViewModel { get; }
     private const string MergeFormatId = "fileid/person-cluster-id";
 
+    private bool _unloaded;
     public PeopleView()
     {
         ViewModel = new PeopleViewModel(AppPaths.DbPath, Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
         InitializeComponent();
-        ViewModel.PropertyChanged += (_, _) =>
+        // Named handlers (not inline lambdas) so OnUnloaded can detach
+        // them. Inline lambdas leak the view + VM graph (~hundreds of KB)
+        // every time the tab is swapped + can fire after the view is
+        // detached, touching disposed XAML — a known cause of the
+        // "click sidebar mid-scan → app crash" symptom.
+        ViewModel.PropertyChanged += OnViewModelPropertyChanged;
+        ViewModel.Clusters.CollectionChanged += OnClustersCollectionChanged;
+        // V14.9-K3: auto-refresh on FaceClusteringComplete. Without this,
+        // a user who runs `runFaceClustering` (or AutoPilot's clustering
+        // stage) while sitting on the People tab sees zero update until
+        // they leave + re-enter the tab. Subscribe to the engine event
+        // and call RefreshAsync inline; the _unloaded guard prevents a
+        // late-firing dispatcher continuation from touching disposed state.
+        FileID.ViewModels.EngineClient.Instance.PropertyChanged += OnEngineClientChanged;
+        Loaded += OnLoadedAsync;
+        Unloaded += OnUnloaded;
+    }
+
+    private void OnEngineClientChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (_unloaded) return;
+        if (e.PropertyName != nameof(FileID.ViewModels.EngineClient.LastFaceClustering)) return;
+        DispatcherQueue.TryEnqueue(async () =>
         {
-            OnPropertyChanged(nameof(StatusText));
-            OnPropertyChanged(nameof(FooterVisibility));
-        };
-        ViewModel.Clusters.CollectionChanged += (_, _) =>
-        {
-            OnPropertyChanged(nameof(StatusText));
-            OnPropertyChanged(nameof(FooterVisibility));
-        };
-        Loaded += async (_, _) => await ViewModel.RefreshAsync(CancellationToken.None);
+            if (_unloaded) return;
+            try { await ViewModel.RefreshAsync(CancellationToken.None); }
+            catch (Exception ex) { DebugLog.Warn("PeopleView post-clustering refresh threw: " + ex.Message); }
+        });
+    }
+
+    private async void OnLoadedAsync(object sender, RoutedEventArgs e)
+    {
+        if (_unloaded) return;
+        try { await ViewModel.RefreshAsync(CancellationToken.None); }
+        catch (Exception ex) { DebugLog.Warn("PeopleView.OnLoaded refresh threw: " + ex.Message); }
+    }
+
+    private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (_unloaded) return;
+        OnPropertyChanged(nameof(StatusText));
+        OnPropertyChanged(nameof(FooterVisibility));
+    }
+
+    private void OnClustersCollectionChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
+    {
+        if (_unloaded) return;
+        OnPropertyChanged(nameof(StatusText));
+        OnPropertyChanged(nameof(FooterVisibility));
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        _unloaded = true;
+        Unloaded -= OnUnloaded;
+        Loaded -= OnLoadedAsync;
+        try { ViewModel.PropertyChanged -= OnViewModelPropertyChanged; } catch { /* swallow */ }
+        try { ViewModel.Clusters.CollectionChanged -= OnClustersCollectionChanged; } catch { /* swallow */ }
+        try { FileID.ViewModels.EngineClient.Instance.PropertyChanged -= OnEngineClientChanged; } catch { /* swallow */ }
+        // Dispose the ViewModel — cancels its _disposalCts so any in-flight
+        // RefreshAsync task running on a thread-pool thread unwinds with
+        // OperationCanceledException instead of accessing detached state.
+        try { ViewModel.Dispose(); } catch { /* swallow */ }
     }
 
     public string StatusText

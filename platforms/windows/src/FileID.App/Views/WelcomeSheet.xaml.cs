@@ -214,7 +214,12 @@ public sealed partial class WelcomeSheet : UserControl
         var bytes = string.Empty;
         if (bytesDone is { } done && totalBytes is { } total && total > 0)
         {
-            bytes = $" · {FormatBytes(done)} of {FormatBytes(total)}";
+            // V14.9-N1: defensive `Max` so the user never sees "578 MB of 201 MB"
+            // when the engine's per-file total falls behind the bundle-cumulative
+            // BytesDone. ModelSlot.Apply already guards against TotalBytes
+            // downgrading; this is belt-and-suspenders for any race window.
+            var shownTotal = Math.Max(done, total);
+            bytes = $" · {FormatBytes(done)} of {FormatBytes(shownTotal)}";
         }
         else if (totalBytes is { } total2)
         {
@@ -261,9 +266,20 @@ public sealed partial class WelcomeSheet : UserControl
 
     private static string FormatEta(double seconds)
     {
+        // V14.9-N1: clamp pathological values (NaN, infinity, EMA-asymptote
+        // overflow) before any arithmetic so the user never sees
+        // "7726735523606260000000000h" again. The slot-side fix in
+        // UpdateRate already caps at 99h via MaxEtaSeconds, but a stale
+        // value plumbed through other code paths still reaches here.
+        if (double.IsNaN(seconds) || double.IsInfinity(seconds) || seconds < 0)
+        {
+            return "—";
+        }
         if (seconds < 60) return $"{seconds:0}s";
         if (seconds < 3600) return $"{seconds / 60:0}m {seconds % 60:00}s";
-        return $"{seconds / 3600:0}h {(seconds % 3600) / 60:00}m";
+        var hours = seconds / 3600;
+        if (hours > 99) return "99+ h";
+        return $"{hours:0}h {(seconds % 3600) / 60:00}m";
     }
 
     // ─── Per-row action handlers ────────────────────────────────────────

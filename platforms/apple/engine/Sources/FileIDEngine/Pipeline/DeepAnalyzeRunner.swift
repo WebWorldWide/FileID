@@ -200,10 +200,27 @@ public enum DeepAnalyzeRunner {
                 currentPath: target.path, modelKind: modelKey
             )))
 
+            // V14.9-L1: per-token live caption accumulator. MLX yields chunks
+            // as the model generates; throttle wire emission to 4 Hz so a
+            // fast token stream doesn't flood the IPC sink. Mirror of the
+            // Windows engine accumulator in main.rs::append_caption_chunk.
+            let captionState = CaptionStreamState()
+            let sinkRef = sink
+            let modelKeyRef = modelKey
+            let onToken: @Sendable (String) async -> Void = { chunk in
+                let snapshot = await captionState.append(chunk)
+                guard await captionState.shouldEmit() else { return }
+                await sinkRef.emit(.deepAnalyzeProgress(DeepAnalyzeProgress(
+                    processed: i, total: total, etaSeconds: nil,
+                    currentPath: target.path, modelKind: modelKeyRef,
+                    currentCaption: snapshot
+                )))
+            }
+
             // Pull face cluster names (if any) to inject into the prompt.
             let faceNames = (try? await fetchFaceNames(database: database, fileID: target.id)) ?? []
             let url = URL(fileURLWithPath: target.path)
-            let result = await DeepAnalyze.shared.analyze(imageURL: url, faceNames: faceNames)
+            let result = await DeepAnalyze.shared.analyze(imageURL: url, faceNames: faceNames, onToken: onToken)
             let isFailure = result.description.hasPrefix("Inference failed")
                 || result.description.hasPrefix("Could not decode")
                 || result.description == "Model not loaded."
@@ -297,5 +314,38 @@ public enum DeepAnalyzeRunner {
         if !f.isEmpty { return f }
         if !t.isEmpty { return t }
         return (legacy ?? "").trimmingCharacters(in: .whitespaces)
+    }
+}
+
+/// V14.9-L1: actor-isolated state for the per-token caption accumulator
+/// used by `DeepAnalyzeRunner`. Mirrors the Windows engine's
+/// `append_caption_chunk` semantics: trim each chunk, join with exactly
+/// one space, and throttle wire emission to 4 Hz so a fast MLX stream
+/// doesn't flood the IPC sink. Actor-isolated so the @Sendable callback
+/// passed into `DeepAnalyze.shared.analyze` is concurrency-safe.
+actor CaptionStreamState {
+    private var buffer: String = ""
+    private var lastEmit: Date = .distantPast
+
+    /// Append a chunk to the buffer with single-space normalization,
+    /// return the post-append snapshot for any caller that wants to emit.
+    func append(_ chunk: String) -> String {
+        let trimmed = chunk.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return buffer }
+        if !buffer.isEmpty && !buffer.hasSuffix(" ") {
+            buffer.append(" ")
+        }
+        buffer.append(trimmed)
+        return buffer
+    }
+
+    /// Throttle gate — returns true at most every 250 ms.
+    func shouldEmit() -> Bool {
+        let now = Date()
+        if now.timeIntervalSince(lastEmit) >= 0.25 {
+            lastEmit = now
+            return true
+        }
+        return false
     }
 }

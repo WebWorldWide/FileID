@@ -142,9 +142,16 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             cts.Dispose();
         }
         _inflight.Clear();
-        try { _thumbnails.Dispose(); } catch { /* swallow */ }
-        try { _clip.Dispose(); } catch { /* swallow */ }
+        // V14.9-F-A2: dispose ViewModel FIRST. Its Dispose cancels the
+        // VM-level _disposalCts, which propagates through every linked
+        // token into in-flight RefreshAsync / SemanticSearch awaits.
+        // ONLY after that's done is it safe to tear down _clip and
+        // _thumbnails — otherwise a resumed task would touch a disposed
+        // service and crash the process (the user's reported "click a
+        // sidebar tab during a scan and the app dies" symptom).
         try { ViewModel.Dispose(); } catch { /* swallow */ }
+        try { _clip.Dispose(); } catch { /* swallow */ }
+        try { _thumbnails.Dispose(); } catch { /* swallow */ }
     }
 
     private void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)

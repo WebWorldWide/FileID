@@ -137,6 +137,15 @@ pub enum CommandPayload {
     #[serde(rename = "restoreFromTrash")]
     RestoreFromTrash(RestoreFromTrashPayload),
 
+    /// V14.9-G: re-probe CUDA Toolkit + cuDNN availability without
+    /// restarting the engine. After the user manually installs cuDNN
+    /// from NVIDIA's site, the Settings → Performance "Verify install"
+    /// button sends this; the engine replies with a `hardwareReprobed`
+    /// event carrying fresh `HardwareInfo` + an optional `diagnostics`
+    /// string explaining why a negative probe came back negative.
+    #[serde(rename = "verifyCudaPack")]
+    VerifyCudaPack(Empty),
+
     /// Undo a mergeClusters call. App passes the original (face_id,
     /// previous_person_id) pairs it captured at merge time; engine
     /// re-creates the source person row + reassigns the faces.
@@ -412,6 +421,15 @@ pub enum EventPayload {
 
     #[serde(rename = "mergeSuggestions")]
     MergeSuggestions(Wrap<MergeSuggestions>),
+
+    /// V14.9-G: reply to a `verifyCudaPack` command. Carries fresh
+    /// `HardwareInfo` (so the Settings card can flip to ✓ if the user
+    /// just installed cuDNN) + an optional `diagnostics` string with
+    /// human-readable details about why a negative probe came back
+    /// negative (e.g. "Found `cudnn64_8.dll` at C:\… but missing
+    /// `cudart64_12.dll` in the same dir").
+    #[serde(rename = "hardwareReprobed")]
+    HardwareReprobed(Wrap<HardwareReprobed>),
 }
 
 /// Wraps a single positional value in `{"_0": ...}` to match Swift Codable
@@ -442,6 +460,20 @@ pub struct EngineInfo {
     /// Optional so older clients of this schema don't break.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hardware: Option<HardwareInfo>,
+}
+
+/// V14.9-G: reply payload for the `verifyCudaPack` command. Mirrors
+/// the EngineInfo's `hardware` field shape so the C# side can reuse
+/// the same `HardwareInfo` DTO. `diagnostics` is a non-PII human-
+/// readable explanation when `hardware.cuda_pack_present == false`
+/// (e.g. "Probed C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\
+/// v12.4\bin; cudnn64_*.dll missing.").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HardwareReprobed {
+    pub hardware: HardwareInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -622,6 +654,12 @@ pub struct DeepAnalyzeProgress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_path: Option<String>,
     pub model_kind: String,
+    /// V14.9-I: partial caption text accumulated from per-token streaming.
+    /// The engine throttles emissions to every 250 ms so a 50-token-per-
+    /// second VLM doesn't spam the wire. Empty for non-token progress
+    /// events (e.g. "starting file N of M" emitted before inference).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_caption: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

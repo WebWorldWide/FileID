@@ -20,7 +20,7 @@ using Microsoft.UI.Dispatching;
 
 namespace FileID.ViewModels;
 
-internal sealed class PeopleViewModel : INotifyPropertyChanged
+internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
 {
     private readonly string _dbPath;
     private readonly DispatcherQueue _ui;
@@ -28,11 +28,24 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged
     private string? _errorMessage;
     // FEAT-CRIT-1: multi-select mode for bulk merge / mark-as-unknown.
     private bool _isSelectMode;
+    private bool _disposed;
+    /// <summary>Cancelled in <see cref="Dispose"/> so any RefreshAsync running
+    /// on a thread-pool thread unwinds before the view's connection state
+    /// is torn down.</summary>
+    private readonly CancellationTokenSource _disposalCts = new();
 
     public PeopleViewModel(string dbPath, DispatcherQueue ui)
     {
         _dbPath = dbPath;
         _ui = ui;
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        try { _disposalCts.Cancel(); } catch { /* swallow */ }
+        try { _disposalCts.Dispose(); } catch { /* swallow */ }
     }
 
     public ObservableCollection<PersonCluster> Clusters { get; } = new();
@@ -104,21 +117,26 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged
 
     public async Task RefreshAsync(CancellationToken ct)
     {
+        if (_disposed) return;
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
+        var token = linked.Token;
         IsLoading = true;
         ErrorMessage = null;
         try
         {
-            var clusters = await Task.Run(() => LoadClusters(ct), ct).ConfigureAwait(false);
+            var clusters = await Task.Run(() => LoadClusters(token), token).ConfigureAwait(false);
+            if (_disposed || token.IsCancellationRequested) return;
             ApplyOnUi(clusters);
         }
         catch (OperationCanceledException) { /* expected */ }
+        catch (ObjectDisposedException) { /* expected during teardown */ }
         catch (Exception ex)
         {
-            ErrorMessage = ex.Message;
+            if (!_disposed) ErrorMessage = ex.Message;
         }
         finally
         {
-            IsLoading = false;
+            if (!_disposed) IsLoading = false;
         }
     }
 

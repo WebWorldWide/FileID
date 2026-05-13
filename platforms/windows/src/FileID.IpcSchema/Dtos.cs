@@ -81,6 +81,16 @@ public sealed record HardwareInfo(
     bool QnnPackPresent,
     string Recommendation);
 
+/// <summary>V14.9-G: payload of the `hardwareReprobed` event. Engine
+/// re-runs the probe in response to a `verifyCudaPack` command from
+/// Settings → Performance "Verify install" and emits this with the
+/// fresh hardware snapshot + a human-readable diagnostics string when
+/// CUDA pack is absent (explains *why* it's absent, e.g. "missing
+/// cudart64_12.dll in the same directory as cudnn64_8.dll").</summary>
+public sealed record HardwareReprobed(
+    HardwareInfo Hardware,
+    string? Diagnostics);
+
 public sealed record ScanProgress(
     [property: JsonPropertyName("sessionID")] string SessionId,
     ScanPhase Phase,
@@ -149,7 +159,11 @@ public sealed record DeepAnalyzeProgress(
     ulong Total,
     double? EtaSeconds,
     string? CurrentPath,
-    string ModelKind);
+    string ModelKind,
+    /// <summary>V14.9-I: partial caption text accumulated as the VLM emits
+    /// tokens. Engine throttles to 4 Hz. Null on non-token progress
+    /// events (e.g. "starting file N").</summary>
+    string? CurrentCaption = null);
 
 public sealed record DeepAnalyzeFileDone(
     [property: JsonPropertyName("fileID")] long FileId,

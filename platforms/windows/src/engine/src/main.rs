@@ -369,6 +369,9 @@ async fn handle_line(
             // Re-emit ready so the app can rebuild its EngineInfo snapshot.
             emit_ready(sink).await;
         }
+        CommandPayload::VerifyCudaPack(_) => {
+            handle_verify_cuda_pack(sink).await;
+        }
         CommandPayload::Shutdown(_) => {
             tracing::info!("shutdown command received");
             shutdown.notify_waiters();
@@ -2406,6 +2409,13 @@ async fn handle_deep_analyze_file(
     let model_kind_for_progress = model_kind.clone();
     let file_id = payload.file_id;
     let started_at = std::time::Instant::now();
+    // V14.9-I: accumulate per-token text so the UI can render the live
+    // caption stream word-by-word. Throttle wire emission to 4 Hz so a
+    // 50-tok/sec VLM doesn't flood the sink.
+    let caption_buf = std::sync::Arc::new(parking_lot::Mutex::new(String::new()));
+    let last_emit = std::sync::Arc::new(parking_lot::Mutex::new(std::time::Instant::now() - std::time::Duration::from_millis(500)));
+    let caption_buf_cb = caption_buf.clone();
+    let last_emit_cb = last_emit.clone();
     let outcome = analyze_file(
         db,
         &runner,
@@ -2413,12 +2423,32 @@ async fn handle_deep_analyze_file(
         &model_kind,
         AnalyzeMode::Both,
         cancel.clone(),
-        move |_chunk| {
+        move |chunk| {
             // Intentional try_send + drop-on-overflow. Per-token streaming
             // can fire 50+/sec and the original tokio::spawn(async {
             // send.await }) pattern would pile up unbounded tasks if
             // the sink filled. Drops are fine — UI gets the next chunk
             // a few ms later.
+            //
+            // V14.9-K2: trim chunk + single-space-join. Each chunk from
+            // llama-mtmd-cli is one stdout line that may carry trailing
+            // whitespace (alignment padding) or no whitespace at all.
+            // append_caption_chunk normalizes both into single-space
+            // separators so the UI never renders double-spaces or
+            // glued-together words.
+            append_caption_chunk(&caption_buf_cb, chunk);
+            let now = std::time::Instant::now();
+            let should_emit = {
+                let mut last = last_emit_cb.lock();
+                if now.duration_since(*last) >= std::time::Duration::from_millis(250) {
+                    *last = now;
+                    true
+                } else {
+                    false
+                }
+            };
+            if !should_emit { return; }
+            let snapshot = caption_buf_cb.lock().clone();
             let kind = model_kind_for_progress.clone();
             let _ = sink_c.try_send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(Wrap::new(
                 DeepAnalyzeProgress {
@@ -2427,6 +2457,7 @@ async fn handle_deep_analyze_file(
                     eta_seconds: None,
                     current_path: None,
                     model_kind: kind,
+                    current_caption: Some(snapshot),
                 },
             ))));
         },
@@ -2597,12 +2628,18 @@ async fn run_deep_analyze_batch(
                 eta_seconds: None,
                 current_path,
                 model_kind: model_kind.to_string(),
+                current_caption: None, // pre-inference progress; caption not started.
             },
         ))))
         .await;
 
         let sink_c = sink.clone();
         let model_kind_c = model_kind.to_string();
+        // V14.9-I: per-file caption accumulator + 4 Hz throttle.
+        let caption_buf = std::sync::Arc::new(parking_lot::Mutex::new(String::new()));
+        let last_emit = std::sync::Arc::new(parking_lot::Mutex::new(std::time::Instant::now() - std::time::Duration::from_millis(500)));
+        let caption_buf_cb = caption_buf.clone();
+        let last_emit_cb = last_emit.clone();
         let outcome = analyze_file(
             db.clone(),
             &runner,
@@ -2610,9 +2647,23 @@ async fn run_deep_analyze_batch(
             model_kind,
             AnalyzeMode::Both,
             cancel.clone(),
-            move |_chunk| {
+            move |chunk| {
                 // Intentional try_send + drop-on-overflow (see the
                 // single-file analyze callback above for rationale).
+                // V14.9-K2: append_caption_chunk normalizes spacing.
+                append_caption_chunk(&caption_buf_cb, chunk);
+                let now = std::time::Instant::now();
+                let should_emit = {
+                    let mut last = last_emit_cb.lock();
+                    if now.duration_since(*last) >= std::time::Duration::from_millis(250) {
+                        *last = now;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if !should_emit { return; }
+                let snapshot = caption_buf_cb.lock().clone();
                 let kind = model_kind_c.clone();
                 let _ = sink_c.try_send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(Wrap::new(
                     DeepAnalyzeProgress {
@@ -2621,6 +2672,7 @@ async fn run_deep_analyze_batch(
                         eta_seconds: None,
                         current_path: None,
                         model_kind: kind,
+                        current_caption: Some(snapshot),
                     },
                 ))));
             },
@@ -2969,6 +3021,30 @@ async fn handle_start_scan(
     ))))
     .await;
 
+    // V14.9-N2.1: baseline Progress so the sidebar stats flip from "—"
+    // to "0" immediately. Previously, if no file ever reached the
+    // DBWriter (empty folder, all-filtered, or a stall anywhere
+    // downstream), LastProgress stayed null and every stat row in the
+    // sidebar rendered "—" forever — looked identical to "scan did
+    // nothing". This baseline event guarantees the user always sees
+    // a confirmation that the scan started.
+    let session_id_baseline = uuid::Uuid::new_v4().to_string();
+    sink.send(IpcEvent::now(EventPayload::Progress(Wrap::new(
+        ipc::ScanProgress {
+            session_id: session_id_baseline.clone(),
+            phase: ScanPhase::Discovering,
+            total: 0,
+            discovered: 0,
+            processed: 0,
+            failed: 0,
+            files_per_second: 0.0,
+            eta_seconds: None,
+            resident_mb: 0,
+            available_mb: 0,
+        },
+    ))))
+    .await;
+
     let coord = coordinator::ScanCoordinator::new();
     *scan_state.lock() = Some(coord.clone());
 
@@ -3056,13 +3132,32 @@ async fn handle_start_scan(
     tracing::info!("[SCAN] handle_start_scan exiting normally");
 }
 
-async fn emit_ready(sink: &Sink) {
+/// V14.9-G: build a fresh `HardwareInfo` snapshot by re-running the
+/// detection probe. Shared by `emit_ready` (engine startup) and the
+/// `verifyCudaPack` handler (Settings → Performance "Verify install"
+/// button) so both surfaces see the same authoritative shape.
+/// V14.9-K2: append a per-token caption chunk from `llama-mtmd-cli` into
+/// the shared accumulator with normalized single-space separators.
+/// `llama-mtmd-cli` emits one stdout line per `on_token` call; lines may
+/// carry leading/trailing whitespace (alignment padding) or none at all.
+/// Trimming each chunk and joining with exactly one space produces clean
+/// English-prose output regardless of the model's actual whitespace habit.
+fn append_caption_chunk(buf: &std::sync::Arc<parking_lot::Mutex<String>>, chunk: &str) {
+    let trimmed = chunk.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let mut b = buf.lock();
+    if !b.is_empty() && !b.ends_with(' ') {
+        b.push(' ');
+    }
+    b.push_str(trimmed);
+}
+
+fn build_hardware_info() -> ipc::HardwareInfo {
     use ipc::HardwareInfo;
     use models::runtime::{ExecutionProvider, GpuVendor, RuntimeProbe};
 
-    // Probe once at ready. Cheap (a single DXGI walk + a few file-exists
-    // checks). Persist would happen here in Phase 5; for now we re-probe
-    // every spawn so device-driver changes get picked up.
     let probe = RuntimeProbe::detect();
     let vendor_str = match probe.vendor {
         GpuVendor::Nvidia    => "nvidia",
@@ -3086,7 +3181,7 @@ async fn emit_ready(sink: &Sink) {
         _ => String::new(),
     };
 
-    let hardware = HardwareInfo {
+    HardwareInfo {
         gpu_vendor: vendor_str.into(),
         adapter_name: probe.adapter_name.clone(),
         execution_provider: probe.provider.as_str().into(),
@@ -3095,8 +3190,11 @@ async fn emit_ready(sink: &Sink) {
         openvino_pack_present: probe.openvino_pack_present,
         qnn_pack_present: probe.qnn_pack_present,
         recommendation,
-    };
+    }
+}
 
+async fn emit_ready(sink: &Sink) {
+    let hardware = build_hardware_info();
     let info = EngineInfo {
         version: ENGINE_VERSION.into(),
         pid: std::process::id() as i32,
@@ -3106,6 +3204,25 @@ async fn emit_ready(sink: &Sink) {
     };
     sink.send(IpcEvent::now(EventPayload::Ready(Wrap::new(info))))
         .await;
+}
+
+/// V14.9-G: handle `verifyCudaPack`. Re-runs the CUDA + cuDNN probe
+/// and emits a `HardwareReprobed` event with the fresh `HardwareInfo`
+/// plus a `diagnostics` string when the pack is absent. Lets the
+/// Settings → Performance card flip to ✓ the moment the user installs
+/// cuDNN, without an engine restart.
+async fn handle_verify_cuda_pack(sink: &Sink) {
+    let hardware = build_hardware_info();
+    let diagnostics = models::runtime::probe_cuda_pack().diagnostics;
+    tracing::info!(
+        cuda_pack_present = hardware.cuda_pack_present,
+        execution_provider = %hardware.execution_provider,
+        "[VERIFY] hardware reprobed"
+    );
+    sink.send(IpcEvent::now(EventPayload::HardwareReprobed(Wrap::new(
+        ipc::HardwareReprobed { hardware, diagnostics },
+    ))))
+    .await;
 }
 
 fn init_tracing() -> Result<()> {
@@ -3147,7 +3264,48 @@ fn init_tracing() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_safe_filename;
+    use super::{append_caption_chunk, is_safe_filename};
+    use std::sync::Arc;
+    use parking_lot::Mutex;
+
+    fn run_caption_chunks(chunks: &[&str]) -> String {
+        let buf = Arc::new(Mutex::new(String::new()));
+        for c in chunks {
+            append_caption_chunk(&buf, c);
+        }
+        let result = buf.lock().clone();
+        result
+    }
+
+    #[test]
+    fn caption_chunks_join_with_single_space() {
+        // Word-per-chunk: standard prose.
+        let out = run_caption_chunks(&["A", "dog", "sits", "on", "a", "couch"]);
+        assert_eq!(out, "A dog sits on a couch");
+    }
+
+    #[test]
+    fn caption_chunks_trim_trailing_whitespace() {
+        // CLI emits trailing space / padding on some lines — must not
+        // produce double-spaces.
+        let out = run_caption_chunks(&["A", "dog ", " sits  ", "on", "  a couch"]);
+        assert_eq!(out, "A dog sits on a couch");
+    }
+
+    #[test]
+    fn caption_chunks_drop_blank_lines() {
+        // CLI emits blank lines between tokens occasionally — must be ignored.
+        let out = run_caption_chunks(&["A", "", "dog", "   ", "sits"]);
+        assert_eq!(out, "A dog sits");
+    }
+
+    #[test]
+    fn caption_chunks_handle_multi_word_lines() {
+        // Some prompts produce whole sentences per line — keep internal
+        // spacing intact, single-space at line boundary.
+        let out = run_caption_chunks(&["A dog sits", "on a couch"]);
+        assert_eq!(out, "A dog sits on a couch");
+    }
 
     #[test]
     fn safe_filenames_accepted() {

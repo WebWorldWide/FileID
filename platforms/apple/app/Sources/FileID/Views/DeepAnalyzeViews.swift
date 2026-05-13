@@ -555,6 +555,19 @@ struct DeepAnalyzeView: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(1).truncationMode(.middle)
                     }
+                    // V14.9-L1: live caption stream — engine emits the
+                    // partial caption text at 4 Hz as the VLM generates.
+                    // Empty/nil while pre-inference; fills word-by-word
+                    // once tokens start flowing.
+                    if let cap = p.currentCaption, !cap.isEmpty {
+                        Text(cap)
+                            .font(.callout)
+                            .foregroundStyle(.primary)
+                            .lineLimit(3)
+                            .multilineTextAlignment(.leading)
+                            .padding(.top, 4)
+                            .animation(.easeInOut(duration: 0.15), value: cap)
+                    }
                 }
             }
         }

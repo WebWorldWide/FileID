@@ -2,6 +2,174 @@
 
 > Snapshot of what's working and where we left off. Update at the end of every working session.
 
+## V14.9-N (2026-05-13) — two user-reported bugs: Welcome ETA garbage + scan stuck on Discovering
+
+User screenshot 1: MobileCLIP-S2 install row shows `0 B/s · 7726735523606260000000000h 14m remaining` and `578.3 MB of 201.7 MB`. User screenshot 2: clicked Start Scan, sidebar shows "Discovering…" with every stat reading "—" and no Progress event has ever landed.
+
+**Bug 1 — Welcome ETA garbage + bytes-done overshoot.**
+Root cause in `ModelInstallerService.UpdateRate()`: the rate EMA (`BytesPerSecond = 0.7 * prev + 0.3 * instant`) decays asymptotically toward zero when the download stalls (`instant == 0`) but never reaches zero. After many stall samples `BytesPerSecond ≈ 1e-60`; `bytesLeft / 1e-60` = 5e23 seconds = 7e18 hours. Compounding bug: `ModelSlot.Apply` accepts the engine's per-file `total_bytes` from `ModelDownloadProgress` but the slot's `BytesDone` is bundle-cumulative across MobileCLIP-S2's 4 files — once you cross a file boundary, `BytesDone > TotalBytes` and the row reads "578 of 201".
+
+Fixes in `ModelInstallerService.cs` + `WelcomeSheet.xaml.cs`:
+- **Clean stall detection**: when the per-sample `instant` rate is below 100 B/s, zero `BytesPerSecond` + `EtaSeconds` outright instead of EMA-decaying. After 5 consecutive stall samples (~2.5 s) the slot's `Message` flips to "Stalled — check your internet connection." — user feedback well before the existing 30 s no-progress watchdog declares failure.
+- **ETA cap**: `EtaSeconds = Math.Min(bytesLeft / BytesPerSecond, 99 * 3600)` at the slot level. `FormatEta` defensively returns "99+ h" for >99 h and "—" for NaN/Infinity/negative.
+- **TotalBytes guard**: in `Apply`, if the engine's new `p.TotalBytes` is less than both the current `TotalBytes` AND the current `BytesDone`, keep the existing total (it's the bundle total; the engine just sent a per-file one).
+- **ProgressLabel clamp**: `Math.Max(done, total)` for display so the user-visible label can never read "X of Y" with X > Y even if there's a race window. Worst case it reads "578 of 578" until the slot's total catches up.
+
+**Bug 2 — scan stuck on "Discovering…" with no Progress events.**
+Root cause: nothing emitted a `Progress` event with `phase=Discovering` until DBWriter flushed its first batch. If the folder was empty, all-filtered, or simply slow to start, the sidebar saw a `PhaseChanged(Discovering)` but `LastProgress` stayed null forever — every stat row rendered "—". No "scan complete" or error event ever fired in the empty-folder case, so the UI hung indefinitely.
+
+Fixes spanning the engine + the C# bindings stay untouched:
+- **N2.1 — Baseline Progress emit (`main.rs::handle_start_scan`)**: immediately after `PhaseChanged(Discovering)`, emit a `Progress { phase=Discovering, discovered=0, ... }`. The sidebar's `prog?.Discovered.ToString("N0")` now renders "0" instead of "—" within microseconds of click.
+- **N2.2 — Live discovery counter (`pipeline/discovery.rs` + `scan_session.rs`)**: `Discovery::spawn` now returns a `DiscoveryHandle { rx, count: Arc<AtomicU64>, done: Arc<AtomicBool> }`. The walker increments `count` per accepted file and sets `done` when the loop exits. `ScanSession::run` spawns a 250 ms tick task that reads `count` and emits a fresh `Progress` event with the live `discovered` count. User sees the number climb 0 → N during the walk, even if tagging is slow to spin up.
+- **N2.3 — Empty-folder graceful path**: when the tick task observes `done == true` AND `count == 0`, it emits an `EngineError { kind: "empty_folder", message: "No supported files found in <path>. Pick a folder with images, videos, PDFs, or documents." }` so the user knows *why* nothing happened. The existing app-side `HandleEngineError` routes this to `LastError`; the sidebar's `Failed`-phase branch renders the message in red.
+- **N2.4 — Skipped**. `DbWriter` already flushes every 200 ms via `tokio::time::timeout(FLUSH_INTERVAL, input.recv())`. The plan's claim that it was first-batch-gated was wrong.
+
+The tick task aborts cleanly via `tick.abort()` after DBWriter returns (belt-and-suspenders for the cancellation edge case).
+
+### Files touched
+
+- `platforms/windows/src/FileID.App/Services/ModelInstallerService.cs` — stall detection, ETA cap, TotalBytes guard
+- `platforms/windows/src/FileID.App/Views/WelcomeSheet.xaml.cs` — FormatEta floor + display clamp
+- `platforms/windows/src/engine/src/main.rs` — baseline Progress emit in `handle_start_scan`
+- `platforms/windows/src/engine/src/pipeline/discovery.rs` — new `DiscoveryHandle` (rx + count + done atomics), test-helper `enumerate` updated
+- `platforms/windows/src/engine/src/scan_session.rs` — consume the handle, spawn the 250 ms tick task, abort on completion
+
+### Verification
+
+`dotnet build src/FileID.App` clean. `cargo check` clean. `cargo test --bin FileIDEngine` — 70 unit tests pass (no regressions). `dotnet test Tests/FileID.IpcSchema.Tests/` — 30 round-trip tests pass.
+
+User runs `pwsh platforms/windows/build/build.ps1` and exercises:
+1. **Welcome sheet, stalled MobileCLIP install**: pill should never show > 99h ETA. After ~2.5 s of stall the row reads "Stalled — check your internet connection." Bytes-done can never exceed total in display.
+2. **Scan on a folder with photos**: sidebar Discovered count climbs 0 → N within 1 second.
+3. **Scan on an empty / all-non-supported folder**: sidebar transitions Discovering → Failed within 1 second, with red "No supported files found" message.
+
+### What's still NOT done
+
+Same list as the previous V14.9-K-M entry. None of those distribution/polish gates moved this pass. The two ASAP bugs are fixed; the broader v1.0 ship readiness checklist (LavaLamp blur fidelity, SF Symbol audit, WiX MSI, ARM64 verification, iterate.ps1 harness, privacy CI gate, hardware verification matrix) is unchanged.
+
+## V14.9-K-M (2026-05-13) — risk-tightening + macOS live caption parity + Restructure ApplyBar port
+
+Picked up the four risks the user pressed me on (no overconfidence claims this time), the three "actually-not-implemented Windows chunks" from the plan (turned out two of them were already implemented — face clustering + AutoPilot ship today), and the macOS-side parity gap for live caption streaming.
+
+**Phase K — risk-tightening.**
+- **K1: IPC round-trip tests.** `Tests/FileID.IpcSchema.Tests/` grew 4 new xUnit tests covering the V14.9-G/I types: `VerifyCudaPackCommand` empty-payload encoding (added to the existing `[Theory]`), `HardwareReprobed_RoundTripsAllFields` (full HardwareInfo + diagnostics survive), `HardwareReprobed_DecodesEngineEmittedShapeWithoutDiagnostics` (Rust's `skip_serializing_if` produces a key-omitted wire shape the C# decoder must accept), `DeepAnalyzeProgress_RoundTripsCurrentCaption` (new live-caption field), `DeepAnalyzeProgress_DecodesEngineEmittedShapeWithoutCurrentCaption` (pre-inference progress with no caption text). All 30 tests green.
+- **K2: token-spacing accumulator fix.** Replaced the Phase-I "join with space unless either side already has one" heuristic with a `trim() + ensure-single-space-suffix` rule. `llama-mtmd-cli` emits one stdout line per `on_token` call; lines may carry trailing padding or none at all. New helper `append_caption_chunk()` in `main.rs` (around the `build_hardware_info` block) does the right thing in all cases. Four unit tests cover: word-per-chunk prose, trailing-whitespace tolerance, blank-line dropping, and multi-word lines. `cargo test --bin FileIDEngine` shows 70 tests pass (up from 66).
+- **K3: People auto-refresh on FaceClusteringComplete.** `PeopleView.xaml.cs` now subscribes to `EngineClient.LastFaceClustering` PropertyChanged and re-runs `RefreshAsync` on the dispatcher, guarded by the existing `_unloaded` flag from Phase A2. Previously a user sitting on the People tab while clustering ran would see zero update until they navigated away + back.
+- **K4: AutoPilotTracker DEBUG visibility instrumentation.** Added a DEBUG-only one-shot log line in `AutoPilotTracker.Sync()` that emits `[AUTOPILOT-TRACKER] mounted (stage=…, parent=…)` the first time the tracker becomes visible per run. A future regression that detaches the tracker from the visual tree shows up in `engine.jsonl` immediately instead of being silently invisible.
+
+**Phase L — macOS parity.** Exploration revealed three of the four "Windows-only" features the agent flagged were already implemented on macOS:
+- **L1 (added):** live caption streaming. `DeepAnalyzeProgress` in `shared/IPCProtocol.swift` gained `currentCaption: String?`. `DeepAnalyze.swift::analyze()` accepts an optional `onToken` callback; the existing `for await item in stream { collector.append(chunk) }` loop now also calls `await onToken(chunk)`. `DeepAnalyzeRunner.swift`'s per-file loop wraps the callback through a new `CaptionStreamState` actor that trims chunks, joins with single spaces, and throttles wire emission to 4 Hz — mirror of Windows' `append_caption_chunk`. `DeepAnalyzeViews.swift::progressCard` renders the live `currentCaption` below the filename with a 0.15s ease-in-out animation, so SwiftUI updates the partial text smoothly as tokens arrive.
+- **L2 (already exists):** Smart-names ready pill in `DeepAnalyzeViews.swift:223-289` already opens `BulkRenameSheet` from `filesWithProposedNames(limit:)` — present since V14.7.x.
+- **L3 (already exists):** Open scan log / app log / Finder buttons in `SettingsView.swift:117-129` Advanced section.
+- **L4 (already exists):** `unavailableCard` at `DeepAnalyzeViews.swift:293-311` renders when `engine.deepAnalyzeAvailable == false` with a clear "mlx.metallib was not compiled. Run ./run.sh" message.
+
+So macOS now has live caption streaming matching Windows; the other three checkpoints were already covered.
+
+**Phase M — Windows Restructure floating ApplyBar.** Replaced the static gold-gradient apply Grid at `RestructureView.xaml:248-285` with a floating frosted Acrylic bar matching the macOS `RestructureApplyBar.swift` visual structure:
+- **Selection summary** (left): "N of N selected" with gold count + hint caption.
+- **Two-step chips** (center): filled-gold "1 Apply as shortcuts / Safe preview" → arrow → outline-gold "2 Convert to real moves / When ready". Chip 1 fills only when a plan has work; chip 2 fills once an apply has succeeded.
+- **Primary button** (right): gold-gradient "Apply as shortcuts (N)" with link icon. Wires to existing `OnApplySymlinksClicked`.
+- **Secondary button** (right): outline-gold "Convert to real moves" with arrow-swap icon. Wires to existing `OnApplyMovesClicked`.
+- **Acrylic backdrop** (`AcrylicBrush TintColor=Black TintOpacity=0.55`) + `ThemeShadow` for depth.
+- `SyncPlan()` and `SyncApplyResult()` updated to populate `ApplyBarSelectedCount`, `ApplyBarTotalCount`, `ApplyBarHint`, `ApplySymlinkButtonText`, `StepChip1Bg`, `StepChip2Bg`.
+
+Files touched (summary):
+- `platforms/windows/Tests/FileID.IpcSchema.Tests/{IpcCommandTests,IpcEventTests}.cs` — 4 new tests
+- `platforms/windows/src/engine/src/main.rs` — `append_caption_chunk` helper + 4 unit tests + both Phase-I callback sites refactored to use it
+- `platforms/windows/src/FileID.App/Views/People/PeopleView.xaml.cs` — `OnEngineClientChanged` subscription for auto-refresh on clustering complete
+- `platforms/windows/src/FileID.App/Views/AutoPilot/AutoPilotTracker.xaml.cs` — DEBUG-only mount log line
+- `platforms/windows/src/FileID.App/Views/Restructure/RestructureView.xaml(.cs)` — floating ApplyBar replacement
+- `platforms/apple/shared/Sources/FileIDShared/IPCProtocol.swift` — `currentCaption` field on `DeepAnalyzeProgress`
+- `platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift` — optional `onToken` callback on `analyze()`
+- `platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyzeRunner.swift` — accumulator + throttling via new `CaptionStreamState` actor
+- `platforms/apple/app/Sources/FileID/Views/DeepAnalyzeViews.swift` — live caption Text in `progressCard`
+
+`dotnet build src/FileID.App` clean. `cargo check` + `cargo test --bin FileIDEngine` clean (70 unit tests pass). `dotnet test Tests/FileID.IpcSchema.Tests` green (30 tests). Swift edits not built in this environment — user runs `./run.sh` on Mac.
+
+### What's still NOT done after this pass
+
+The user asked for "full parity" and "no bugs"; that's not what this commit delivers. The remaining gaps from the NEXT.md / SHIP.md backlog:
+- LavaLamp Gaussian blur fidelity check (NEXT.md A8 — needs eyeball comparison on real hardware)
+- SF Symbol → Segoe Fluent icon audit (A9)
+- Spring animation tuning vs SwiftUI (A10)
+- Empty / error-state parity sweep (A11)
+- WiX MSI + Authenticode signing (Phase F7 — distribution)
+- ARM64 verification on real ARM hardware (F8)
+- iterate.ps1 regression harness (F9)
+- Privacy binary scan CI gate (F10)
+- Hardware verification matrix (SHIP.md Appendix W)
+
+These are the genuine "before v1.0 ship" items. The features themselves are present on both platforms now; what's left is distribution + polish.
+
+## V14.9-G-J (2026-05-13) — Windows: CuDNN verify UX + Deep Analyze live caption + Restructure tier cleanup + scan log access
+
+Continuing the Phase A→G ship plan. Four chunks landed in one pass; engine + app both compile clean.
+
+**Phase G — CuDNN install verification.** Closes the open question: "did my cuDNN install take?" Today the user clicks **Get cuDNN** in Settings → Performance, installs from NVIDIA's site, comes back to FileID, and gets zero feedback that anything changed — the engine doesn't re-probe until next spawn, the yellow banner stays yellow, and the only way to confirm CUDA EP is actually active is restarting the app and reading the wall-of-text status caption. Fix:
+- New `verifyCudaPack` IPC command + `hardwareReprobed` event. Engine handler in `main.rs::handle_verify_cuda_pack` re-runs the existing DXGI/DLL probe via the new `runtime::probe_cuda_pack()` helper, which now returns both `present: bool` and a human-readable `diagnostics: Option<String>` ("Found cudnn64_8.dll but missing cudart64_12.dll in same directory" / "No CUDA Toolkit detected, looked in %CUDA_PATH% and %ProgramFiles%\\…"). Schema + Swift Codable + Rust serde + C# DTO all updated in lockstep.
+- Settings → Performance card grows a **Verify install** button and a gold ✓ success pill. On success the pill reads "cuDNN detected — restart engine to switch to CUDA" with an inline **Restart engine** button (calls existing `EngineClient.RestartAsync`). When CUDA is already the active EP for the current session, the pill reads "✓ cuDNN active — scanning uses CUDA EP" and hides the restart button. On failure the diagnostics string lands in the existing caption row, telling the user *exactly* what's wrong.
+- `EngineClient.LastHardwareReprobe` observable + `Info` re-emission so all bindings to `Info.Hardware` update too.
+
+**Phase J — Restructure tier cleanup + visual badges.** Engine has been emitting `RestructureMove.tier` since V14.9 A7; C# still carried a dead-code fallback that recomputed the heuristic locally for older engine builds. The fallback at `RestructureView.xaml.cs:119-153` (≥80% homogeneity, dissolve ≤2-file folders) is gone — the engine is now the single source of truth for Anchor / Mixed / Junk. Drill-down rows get a colored tier pill on the right edge (Anchor gold #FFCC00, Mixed cyan #A0E2EA, Junk pink #F2A6C0) so the user can see at a glance which side of the classifier each move came from. The floating-ApplyBar port from macOS was scoped out for now — the existing gold-gradient apply bar at the bottom of RestructureView is visually serviceable; porting the Acrylic-vibrancy version with step chips needs a side-by-side review on real hardware that can't be done blind.
+
+**Phase I — Deep Analyze polish (make it feel like a feature, not a black box).**
+- **Live caption streaming.** Added `current_caption: Option<String>` to `DeepAnalyzeProgress`. Engine's `on_token` callbacks in `main.rs` (both the single-file and the batch paths) now accumulate per-token text into an `Arc<Mutex<String>>` and emit at 4 Hz via `parking_lot::Mutex` throttling, so a 50-tok/sec VLM doesn't flood the sink. `DeepAnalyzeView.xaml.cs::SyncStream` binds `prog.CurrentCaption` directly into `StreamCaptionText.Text` — the user watches the caption appear word-by-word as the model generates it.
+- **Pending-renames pill → bulk-apply.** The existing `ProposedNamesPill` used to just route to the Library tab. Now it opens `BulkRenameSheet` pre-seeded with every row from `files` where `vlm_proposed_name IS NOT NULL` (via two new `ReadStore` methods: `PendingProposedRenamesAsync` + `PendingProposedRenameCountAsync`). One click → review the model's smart filenames → apply all in a single `RenameFilesCommand`.
+- **Video keyframe fallback.** `pipeline/deep_analyze.rs::rasterize_video_keyframe` now catches a first-call failure and retries `keyframe_25pct` once. The underlying helper already falls back to offset 0 when duration is 0; the extra retry rescues transient I/O errors on USB drives / network shares before failing the whole Deep Analyze file.
+
+**Phase H (partial) — scan diagnostics.** Added a discreet "Open engine log" hyperlink at the bottom of the SidebarProcessingControl. Picks the newest `engine.jsonl*` file in `%LOCALAPPDATA%\FileID\logs\` and opens it via `ProcessStartInfo { UseShellExecute = true }`. Default association is Notepad on a fresh box. The scan-error ribbon at the top of MainWindow was deferred — the existing Phase-Failed pill + Open-engine-log path covers the same diagnostic need.
+
+Files touched this pass (summary):
+- `shared/ipc-schema/ipc.schema.json` (verifyCudaPack command + hardwareReprobed event)
+- `platforms/windows/src/engine/src/ipc/mod.rs` (`VerifyCudaPack` + `HardwareReprobed` types, `current_caption` on `DeepAnalyzeProgress`)
+- `platforms/windows/src/engine/src/main.rs` (handler dispatch, `build_hardware_info` refactor, per-token accumulator at two call sites)
+- `platforms/windows/src/engine/src/models/runtime.rs` (`probe_cuda_pack()` + diagnostics helper)
+- `platforms/windows/src/engine/src/pipeline/deep_analyze.rs` (keyframe retry)
+- `platforms/windows/src/FileID.IpcSchema/{CommandPayload,EventPayload,Dtos}.cs`
+- `platforms/windows/src/FileID.App/ViewModels/EngineClient.cs` (`VerifyCudaPackAsync`, `LastHardwareReprobe`)
+- `platforms/windows/src/FileID.App/Views/Settings/SettingsView.xaml(.cs)` (Verify button + success pill + diagnostics line + Restart button)
+- `platforms/windows/src/FileID.App/Views/Restructure/RestructureView.xaml.cs` (dropped fallback)
+- `platforms/windows/src/FileID.App/Views/Restructure/DrillDownSheet.xaml.cs` (tier badge per move row)
+- `platforms/windows/src/FileID.App/Views/DeepAnalyze/DeepAnalyzeView.xaml.cs` (live caption, bulk-rename pill)
+- `platforms/windows/src/FileID.App/Services/ReadStore.cs` (pending-renames queries)
+- `platforms/windows/src/FileID.App/Views/Sidebar/SidebarProcessingControl.xaml(.cs)` (Open log link)
+
+Verification (user runs on real hardware):
+- **CuDNN verify:** open Settings → Performance on a box without cuDNN. Click Verify install — the diagnostics caption appears explaining what's missing. Install cuDNN from NVIDIA. Click Verify install again — the gold ✓ pill appears with the detected DLL path; click Restart engine; on the next spawn the EP picker logs `pick_provider=cuda` and the Settings card shows ✓ cuDNN active.
+- **Restructure tiers:** open Restructure after a scan → Generate plan → click into a Sankey ribbon. Each move row shows a gold/cyan/pink Anchor/Mixed/Junk badge.
+- **Deep Analyze:** open Deep Analyze, click Analyze All. Watch the StreamCaptionText fill in word-by-word as the VLM generates each caption. When the run completes, click the "Pending renames (N)" pill — BulkRenameSheet pops with every proposal pre-seeded.
+- **Scan log:** click "Open engine log" anytime; the daily-rolled engine.jsonl opens in Notepad.
+
+## V14.9-F-A (2026-05-13) — Windows: Start Scan no-op + sidebar-mid-scan crash (Phase A of ship plan)
+
+Two critical bugs blocking every other Windows test:
+
+**Bug 1 — Click Start Scan, nothing happens.** Root cause: `SidebarProcessingControl.xaml.cs::Sync()` previously disabled the button whenever `EngineClient.State != LifecycleState.Ready`. If the engine took longer than expected to spawn (cold start, EP probe, missing model file blocking init), the user saw a permanently grey button with the generic "Ready when you are." caption and assumed the app was broken. Fix: enable Start Scan on `HasFolder` alone (only blocking `Crashed` state), and have the click handler `await EngineClient.WaitForReadyAsync(15s)` with inline "Waiting for engine ({state})…" feedback. The idle pill now shows the current `LifecycleState` ("Engine starting…" / "Engine crashed: …") instead of a static "Ready" stub. State updates already drive `Sync()` via the existing PropertyChanged subscription, so the pill stays live.
+
+**Bug 2 — Click a sidebar tab during a scan, the entire app crashes.** Root cause: `DetailHostView.Sync()` constructs a fresh `LibraryView` / `PeopleView` / `CleanupView` per tab click; the old view's `Unloaded` handler synchronously disposed `_clip` (`ClipSearchService`) and `_thumbnails` (`ThumbnailService`) BEFORE disposing the `LibraryViewModel`. If `LibraryViewModel.RefreshAsync` was mid-await on `_clip.SearchAsync(...)` (which the engine writing batches at ~100/s during tagging makes very likely), the await would resume on a thread-pool thread after `_clip.Dispose()` ran — touching disposed internal state, throwing `ObjectDisposedException` from a `ConfigureAwait(false)` continuation. Background-thread exceptions don't hit WinUI's `UnhandledException`; they bubble up to `AppDomain.UnhandledException` (terminating). PeopleView and CleanupView had a separate but parallel hazard — inline-lambda subscriptions that never unsubscribed + no `Unloaded` handler at all → view + VM graph leaked on every tab swap + late `PropertyChanged` callbacks could fire on detached XAML.
+
+Fix (multi-layer, all in this commit):
+- `App.xaml.cs` — register `AppDomain.UnhandledException` + `TaskScheduler.UnobservedTaskException` handlers that log to disk. WinUI's `UnhandledException` only catches dispatcher exceptions; thread-pool failures previously crashed silently without a forensic trail.
+- `LibraryViewModel` — added a `_disposalCts` separate from the per-search `_searchCts`. Every `RefreshAsync` / `SemanticSearchWithSeedAsync` creates a `CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token)`; `Dispose()` cancels `_disposalCts` first so any in-flight task unwinds with `OperationCanceledException` BEFORE its services are torn down. Catches now include `ObjectDisposedException` and `_disposed` checks before touching `ErrorMessage` / `IsLoading`.
+- `LibraryView.OnUnloaded` — disposes `ViewModel` FIRST (which cancels `_disposalCts`), then `_clip`, then `_thumbnails`. The reverse of the prior order; previously services died first while the VM's tasks were still running against them.
+- `PeopleViewModel` + `CleanupViewModel` — both now implement `IDisposable` with the same `_disposalCts` pattern; `RefreshAsync` links it into `Task.Run(() => Load(token), token)`.
+- `PeopleView` + `CleanupView` — replaced inline-lambda subscriptions with named `OnViewModelPropertyChanged` / `OnGroupsCollectionChanged` etc.; added `OnLoadedAsync` + `OnUnloaded`; unsubscribe + dispose VM on `Unloaded`. Adds an `_unloaded` flag every callback checks to defend against any late-firing dispatcher continuation.
+- `DetailHostView` — new `DisposePriorChild()` helper walks `Host.Children` for `IDisposable` and disposes before `Children.Clear()`. Today UserControls don't implement IDisposable directly (the cleanup runs via the implicit Unloaded → handler path), but the explicit dispose is defense-in-depth + an opt-in point for future Views that own native resources.
+
+`dotnet build src/FileID.App/FileID.App.csproj` clean (1 pre-existing Win2D AnyCPU copy warning). `cargo check` on the engine also clean (no engine changes in this commit beyond V14.8.5).
+
+### Phase A in the ship plan
+
+This is Phase A of the multi-phase plan in `~/.claude/plans/glowing-strolling-eich.md`. Subsequent phases (still ahead):
+- **B** Verify the existing pipeline (`pipeline/{discovery,tagging,dbwriter,face_clustering}.rs` + `models/*` are already implemented) end-to-end on real hardware.
+- **C** Face clustering — wire the (complete) algorithm to a `runFaceClustering` IPC handler + persist `face_clusters` table.
+- **D1** Restructure A7 — serialize per-move `tier` from `pipeline/restructure.rs::classify_folders()` through IPC; drop the C# heuristic.
+- **D2** AutoPilot A6 — `AutoPilotStage` event + sidebar tracker UI.
+- **E** Deep Analyze Phase 6 — wire `models/vlm.rs::VlmRunner` to `deepAnalyzeFile/Folder/All` handlers.
+- **F1–F10** Polish + WiX MSI + Authenticode + ARM64 verification + `iterate.ps1` harness.
+
+User needs to run the build (`pwsh platforms/windows/build/build.ps1` then launch from `platforms/windows/dist/x64/FileID/`) and exercise Bug 1 + Bug 2 paths: pick a folder → click Scan, confirm it progresses; mid-scan rapidly cycle Library → People → Library → Cleanup → Settings, confirm no crash. If a crash still happens, `%LOCALAPPDATA%\FileID\logs\app.log` will now have the AppDomain/UnobservedTask exception detail (previously the process tore down silently).
+
 ## V14.8.5 (2026-05-12) — Windows: downloader timeout + resume rewrite (Qwen 2.5-VL 3B "reading chunk" fix)
 
 User report: clicking **Install all** on the Welcome sheet, the Qwen 2.5-VL 3B row failed with `Failed: Couldn't download Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf: reading chunk` — screenshot attached to the session.

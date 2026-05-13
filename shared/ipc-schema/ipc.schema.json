@@ -51,6 +51,7 @@
         { "type": "object", "required": ["requestStatus"],      "additionalProperties": false, "properties": { "requestStatus":      { "type": "object", "additionalProperties": false } } },
         { "type": "object", "required": ["shutdown"],           "additionalProperties": false, "properties": { "shutdown":           { "type": "object", "additionalProperties": false } } },
         { "type": "object", "required": ["runFaceClustering"],  "additionalProperties": false, "properties": { "runFaceClustering":  { "type": "object", "additionalProperties": false } } },
+        { "type": "object", "required": ["verifyCudaPack"],     "additionalProperties": false, "properties": { "verifyCudaPack":     { "type": "object", "additionalProperties": false, "description": "Re-probe CUDA Toolkit + cuDNN availability without restarting the engine. Engine replies with a `hardwareReprobed` event." } } },
         {
           "type": "object",
           "required": ["deepAnalyzeFile"],
@@ -149,7 +150,30 @@
         { "type": "object", "required": ["deepAnalyzeFileDone"],     "additionalProperties": false, "properties": { "deepAnalyzeFileDone":     { "$ref": "#/$defs/SinglePositional/DeepAnalyzeFileDone" } } },
         { "type": "object", "required": ["deepAnalyzeComplete"],     "additionalProperties": false, "properties": { "deepAnalyzeComplete":     { "$ref": "#/$defs/SinglePositional/DeepAnalyzeComplete" } } },
         { "type": "object", "required": ["modelDownloadProgress"],   "additionalProperties": false, "properties": { "modelDownloadProgress":   { "$ref": "#/$defs/SinglePositional/ModelDownloadProgress" } } },
-        { "type": "object", "required": ["queueState"],              "additionalProperties": false, "properties": { "queueState":              { "$ref": "#/$defs/SinglePositional/QueueState" } } }
+        { "type": "object", "required": ["queueState"],              "additionalProperties": false, "properties": { "queueState":              { "$ref": "#/$defs/SinglePositional/QueueState" } } },
+        {
+          "type": "object",
+          "required": ["hardwareReprobed"],
+          "additionalProperties": false,
+          "properties": {
+            "hardwareReprobed": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["_0"],
+              "properties": {
+                "_0": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["hardware"],
+                  "properties": {
+                    "hardware":    { "type": "object", "description": "Fresh HardwareInfo snapshot; same shape as EngineInfo.hardware." },
+                    "diagnostics": { "type": ["string", "null"], "description": "Human-readable explanation when hardware.cudaPackPresent is false." }
+                  }
+                }
+              }
+            }
+          }
+        }
       ]
     },
 

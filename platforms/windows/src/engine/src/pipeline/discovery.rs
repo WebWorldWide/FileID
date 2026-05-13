@@ -15,6 +15,8 @@
 // workers fall behind.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::Result;
 use tokio::sync::mpsc;
 use walkdir::WalkDir;
@@ -83,6 +85,19 @@ pub struct Discovery {
     coordinator: ScanCoordinator,
 }
 
+/// V14.9-N2: handle returned from `Discovery::spawn`. `rx` is the file
+/// channel; `count` is a live counter the orchestrator polls to emit
+/// Progress events with `discovered=count` (so the user sees the number
+/// climb during a long discovery walk); `done` flips true the instant
+/// the walker exits its loop (used to detect the empty-folder case
+/// where `count` stays at 0 and the orchestrator should surface a
+/// friendly "no supported files found" event instead of hanging).
+pub struct DiscoveryHandle {
+    pub rx: mpsc::Receiver<DiscoveredFile>,
+    pub count: Arc<AtomicU64>,
+    pub done: Arc<std::sync::atomic::AtomicBool>,
+}
+
 impl Discovery {
     pub fn new(root: impl Into<PathBuf>, coordinator: ScanCoordinator) -> Self {
         Self {
@@ -94,10 +109,21 @@ impl Discovery {
     /// Walk the root, sending each readable file onto the returned receiver.
     /// Spawns a tokio blocking task because walkdir is sync. Closes the
     /// channel when traversal completes OR cancellation is requested.
-    pub fn spawn(self) -> mpsc::Receiver<DiscoveredFile> {
+    ///
+    /// V14.9-N2: returns a tuple `(rx, count, done)` so the orchestrator can
+    /// emit periodic Progress events with the live `discovered` count and
+    /// detect when discovery has completed (so the empty-folder case
+    /// surfaces a clear "no files found" event instead of hanging on
+    /// "Discovering…"). Both `count` and `done` are shared atomics — no
+    /// need for channels.
+    pub fn spawn(self) -> DiscoveryHandle {
         let (tx, rx) = mpsc::channel(DISCOVERY_CHANNEL_CAP);
         let root = self.root.clone();
         let coordinator = self.coordinator.clone();
+        let count = Arc::new(AtomicU64::new(0));
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let count_inner = count.clone();
+        let done_inner = done.clone();
 
         tokio::task::spawn_blocking(move || {
             // walkdir: sorted-by-path traversal for I/O locality (sequential
@@ -157,11 +183,13 @@ impl Discovery {
                 if tx.blocking_send(discovered).is_err() {
                     break;
                 }
+                count_inner.fetch_add(1, Ordering::Relaxed);
             }
+            done_inner.store(true, Ordering::Release);
             // Channel auto-closes when tx drops here.
         });
 
-        rx
+        DiscoveryHandle { rx, count, done }
     }
 
     fn should_skip(path: &Path) -> bool {
@@ -200,9 +228,9 @@ impl Discovery {
 pub async fn enumerate(root: impl AsRef<Path>) -> Result<Vec<DiscoveredFile>> {
     let coordinator = ScanCoordinator::new();
     let discovery = Discovery::new(root.as_ref(), coordinator);
-    let mut rx = discovery.spawn();
+    let mut handle = discovery.spawn();
     let mut out = Vec::new();
-    while let Some(f) = rx.recv().await {
+    while let Some(f) = handle.rx.recv().await {
         out.push(f);
     }
     Ok(out)

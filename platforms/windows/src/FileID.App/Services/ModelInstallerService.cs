@@ -119,7 +119,21 @@ internal sealed class ModelSlot : INotifyPropertyChanged
     {
         Fraction = p.Fraction;
         BytesDone = p.BytesDone;
-        TotalBytes = p.TotalBytes ?? (ApproxBytes > 0 ? ApproxBytes : null);
+        // V14.9-N1: don't let a per-file `total_bytes` from the engine
+        // downgrade the slot's bundle-cumulative total. MobileCLIP-S2
+        // ships 4 files; engine emits per-file `total_bytes` while the
+        // app's `BytesDone` is the bundle-cumulative byte count. Without
+        // this guard the Welcome row would render "578 MB of 201 MB"
+        // mid-bundle (the user's reported regression).
+        var newTotal = p.TotalBytes ?? (ApproxBytes > 0 ? ApproxBytes : null);
+        if (newTotal is { } nt && TotalBytes is { } existing && nt < existing && nt < (BytesDone ?? 0))
+        {
+            // Per-file total < bundle progress → keep the existing total.
+        }
+        else
+        {
+            TotalBytes = newTotal;
+        }
         Message = p.Message;
         LastProgressAt = DateTime.UtcNow;
         if (p.Fraction >= 1.0)
@@ -172,6 +186,14 @@ internal sealed class ModelSlot : INotifyPropertyChanged
         _lastFraction = 0;
     }
 
+    /// <summary>V14.9-N1: number of consecutive stalled (sub-100 B/s) samples
+    /// observed. After 5 in a row (≈2.5 s of stall) the Message field flips
+    /// to "Stalled — check connection" so the user sees feedback well before
+    /// the 30 s no-progress watchdog declares failure.</summary>
+    private int _stallSampleCount;
+    private const double StallThresholdBytesPerSecond = 100.0;
+    private const double MaxEtaSeconds = 99.0 * 3600.0;
+
     private void UpdateRate(ModelDownloadProgress p)
     {
         var now = DateTime.UtcNow;
@@ -187,6 +209,7 @@ internal sealed class ModelSlot : INotifyPropertyChanged
             _rateSampleFrac = p.Fraction;
             BytesPerSecond = 0;
             EtaSeconds = 0;
+            _stallSampleCount = 0;
             _lastFraction = p.Fraction;
             return;
         }
@@ -198,18 +221,43 @@ internal sealed class ModelSlot : INotifyPropertyChanged
         }
         var bytesPrev = total * _rateSampleFrac;
         var instant = (bytesNow - bytesPrev) / dt;
-        if (BytesPerSecond <= 0)
+
+        // V14.9-N1: clean stall detection. The previous EMA decayed
+        // asymptotically toward zero when `instant == 0` (BytesPerSecond
+        // *= 0.7 each sample) but never actually hit zero. After enough
+        // stall samples BytesPerSecond became a tiny positive ε; the
+        // bytesLeft/ε ETA exploded into values like 7e18 hours.
+        // Treat any sub-100 B/s sample as "stalled": zero the rate +
+        // ETA cleanly, and after 5 consecutive stall samples surface a
+        // user-readable Message.
+        if (instant < StallThresholdBytesPerSecond)
         {
-            BytesPerSecond = instant;
+            BytesPerSecond = 0;
+            EtaSeconds = 0;
+            _stallSampleCount++;
+            if (_stallSampleCount >= 5 && Status == ModelInstallStatus.Downloading)
+            {
+                Message = "Stalled — check your internet connection.";
+            }
         }
         else
         {
-            BytesPerSecond = 0.7 * BytesPerSecond + 0.3 * instant;
-        }
-        if (BytesPerSecond > 0)
-        {
-            var bytesLeft = total - bytesNow;
-            EtaSeconds = bytesLeft > 0 ? bytesLeft / BytesPerSecond : 0;
+            _stallSampleCount = 0;
+            if (BytesPerSecond <= 0)
+            {
+                BytesPerSecond = instant;
+            }
+            else
+            {
+                BytesPerSecond = 0.7 * BytesPerSecond + 0.3 * instant;
+            }
+            if (BytesPerSecond > 0)
+            {
+                var bytesLeft = total - bytesNow;
+                EtaSeconds = bytesLeft > 0
+                    ? Math.Min(bytesLeft / BytesPerSecond, MaxEtaSeconds)
+                    : 0;
+            }
         }
         _rateSampleAt = now;
         _rateSampleFrac = p.Fraction;

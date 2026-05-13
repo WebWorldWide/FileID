@@ -245,44 +245,183 @@
             </StackPanel>
         </ScrollViewer>
 
-        <Grid Grid.Row="2"
-              Padding="16,16"
-              CornerRadius="12"
-              BorderBrush="{ThemeResource GoldBrush}"
-              BorderThickness="1">
-            <Grid.Background>
-                <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
-                    <GradientStop Offset="0" Color="{ThemeResource ApplyBarGoldStopColor}" />
-                    <GradientStop Offset="1" Color="{ThemeResource ApplyBarOrangeStopColor}" />
-                </LinearGradientBrush>
-            </Grid.Background>
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="Auto"/>
-                <ColumnDefinition Width="Auto"/>
-            </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0"
-                       x:Name="ApplyStatusText"
-                       Text="Plan empty — generate one above."
-                       VerticalAlignment="Center"
-                       Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}"/>
-            <Button x:Name="ApplySymlinkButton"
-                    Grid.Column="1"
-                    Content="Preview as symlinks"
-                    IsEnabled="False"
-                    Click="OnApplySymlinksClicked"
-                    ToolTipService.ToolTip="Lay down symlinks instead of moving files. Reversible — delete the symlinked tree to undo."
-                    AutomationProperties.Name="Preview restructure as symlinks"
-                    Margin="0,0,8,0"/>
-            <Button x:Name="ApplyMovesButton"
-                    Grid.Column="2"
-                    Content="Apply (move)"
-                    IsEnabled="False"
-                    Click="OnApplyMovesClicked"
-                    ToolTipService.ToolTip="Move files to their proposed destinations. Recoverable via Ctrl+Z (one undo step)."
-                    AutomationProperties.Name="Apply restructure as real moves"
-                    Style="{StaticResource AccentButtonStyle}"/>
-        </Grid>
+        <!-- V14.9-M: floating ApplyBar — port of macOS RestructureApplyBar.swift.
+             Frosted Acrylic backdrop, selection summary on the left, two-step
+             chip flow in the middle, gold-gradient primary + outline secondary
+             on the right. Springs at response 0.28 / dampingFraction 0.7 on
+             button hover via SpringScalarNaturalMotionAnimation. -->
+        <Border Grid.Row="2"
+                CornerRadius="16"
+                BorderBrush="{ThemeResource GoldDimBrush}"
+                BorderThickness="1">
+            <Border.Background>
+                <AcrylicBrush
+                    TintColor="Black"
+                    TintOpacity="0.55"
+                    TintLuminosityOpacity="0.30"
+                    FallbackColor="#1A1A1A" />
+            </Border.Background>
+            <Border.Shadow>
+                <ThemeShadow />
+            </Border.Shadow>
+            <Grid Padding="18,14" ColumnSpacing="16">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>     <!-- selection summary -->
+                    <ColumnDefinition Width="Auto"/>     <!-- divider -->
+                    <ColumnDefinition Width="Auto"/>     <!-- step chips -->
+                    <ColumnDefinition Width="*"/>       <!-- spacer / status text -->
+                    <ColumnDefinition Width="Auto"/>     <!-- secondary button -->
+                    <ColumnDefinition Width="Auto"/>     <!-- primary button -->
+                </Grid.ColumnDefinitions>
+
+                <!-- Selection summary -->
+                <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                    <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Bottom">
+                        <TextBlock x:Name="ApplyBarSelectedCount"
+                                   Text="0"
+                                   FontSize="18"
+                                   FontWeight="Bold"
+                                   Foreground="{ThemeResource GoldBrush}" />
+                        <TextBlock Text="of"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   VerticalAlignment="Bottom" />
+                        <TextBlock x:Name="ApplyBarTotalCount"
+                                   Text="0"
+                                   FontSize="14"
+                                   FontWeight="SemiBold"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   VerticalAlignment="Bottom" />
+                        <TextBlock Text="selected"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   VerticalAlignment="Bottom" />
+                    </StackPanel>
+                    <TextBlock x:Name="ApplyBarHint"
+                               Text="Generate a plan to enable Apply."
+                               FontSize="11"
+                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                               TextWrapping="Wrap"
+                               MaxWidth="240" />
+                </StackPanel>
+
+                <Border Grid.Column="1"
+                        Width="1"
+                        Height="32"
+                        Background="{ThemeResource ControlStrokeColorDefaultBrush}"
+                        Opacity="0.4"
+                        VerticalAlignment="Center"
+                        Margin="2,0,0,0"/>
+
+                <!-- Two-step chips: 1. Shortcuts (filled when canApply) → 2. Real moves -->
+                <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <Border x:Name="StepChip1Bg"
+                                Width="20" Height="20"
+                                CornerRadius="10"
+                                Background="{ThemeResource GoldBrush}">
+                            <TextBlock Text="1"
+                                       FontSize="11"
+                                       FontWeight="Bold"
+                                       Foreground="Black"
+                                       HorizontalAlignment="Center"
+                                       VerticalAlignment="Center"/>
+                        </Border>
+                        <StackPanel Spacing="0">
+                            <TextBlock Text="Apply as shortcuts"
+                                       FontSize="12"
+                                       FontWeight="SemiBold" />
+                            <TextBlock Text="Safe preview"
+                                       FontSize="9"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                        </StackPanel>
+                    </StackPanel>
+                    <FontIcon Glyph="&#xE72A;"
+                              FontSize="11"
+                              Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <Border x:Name="StepChip2Bg"
+                                Width="20" Height="20"
+                                CornerRadius="10"
+                                Background="Transparent"
+                                BorderBrush="{ThemeResource GoldDimBrush}"
+                                BorderThickness="1">
+                            <TextBlock Text="2"
+                                       FontSize="11"
+                                       FontWeight="Bold"
+                                       Foreground="{ThemeResource GoldBrush}"
+                                       HorizontalAlignment="Center"
+                                       VerticalAlignment="Center"/>
+                        </Border>
+                        <StackPanel Spacing="0">
+                            <TextBlock Text="Convert to real moves"
+                                       FontSize="12"
+                                       FontWeight="SemiBold" />
+                            <TextBlock Text="When ready"
+                                       FontSize="9"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                        </StackPanel>
+                    </StackPanel>
+                </StackPanel>
+
+                <!-- Status / spacer -->
+                <TextBlock Grid.Column="3"
+                           x:Name="ApplyStatusText"
+                           Text=""
+                           VerticalAlignment="Center"
+                           TextAlignment="Right"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                           Margin="12,0,12,0"
+                           TextWrapping="NoWrap"
+                           TextTrimming="CharacterEllipsis" />
+
+                <!-- Secondary: outline gold "Convert to real moves" -->
+                <Button x:Name="ApplyMovesButton"
+                        Grid.Column="4"
+                        IsEnabled="False"
+                        Click="OnApplyMovesClicked"
+                        Background="Transparent"
+                        BorderBrush="{ThemeResource GoldDimBrush}"
+                        BorderThickness="1"
+                        Padding="14,8"
+                        CornerRadius="10"
+                        Margin="0,0,8,0"
+                        ToolTipService.ToolTip="Move files to their proposed destinations. Recoverable via Ctrl+Z (one undo step)."
+                        AutomationProperties.Name="Apply restructure as real moves">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <FontIcon Glyph="&#xE8AB;" FontSize="13" Foreground="{ThemeResource GoldBrush}" />
+                        <TextBlock Text="Convert to real moves" Foreground="{ThemeResource GoldBrush}" />
+                    </StackPanel>
+                </Button>
+
+                <!-- Primary: gold-gradient "Apply as shortcuts (N)" -->
+                <Button x:Name="ApplySymlinkButton"
+                        Grid.Column="5"
+                        IsEnabled="False"
+                        Click="OnApplySymlinksClicked"
+                        Padding="16,9"
+                        CornerRadius="10"
+                        ToolTipService.ToolTip="Lay down symlinks instead of moving files. Reversible — delete the symlinked tree to undo."
+                        AutomationProperties.Name="Preview restructure as symlinks">
+                    <Button.Background>
+                        <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                            <GradientStop Offset="0" Color="{ThemeResource ApplyBarGoldStopColor}" />
+                            <GradientStop Offset="1" Color="{ThemeResource ApplyBarOrangeStopColor}" />
+                        </LinearGradientBrush>
+                    </Button.Background>
+                    <Button.BorderBrush>
+                        <SolidColorBrush Color="Transparent" />
+                    </Button.BorderBrush>
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <FontIcon Glyph="&#xE71B;" FontSize="13" Foreground="Black" />
+                        <TextBlock x:Name="ApplySymlinkButtonText"
+                                   Text="Apply as shortcuts"
+                                   FontWeight="SemiBold"
+                                   Foreground="Black" />
+                    </StackPanel>
+                </Button>
+            </Grid>
+        </Border>
 
     </Grid>
 </UserControl>

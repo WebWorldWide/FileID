@@ -6,6 +6,7 @@
 // instant for users who prefer it.
 
 using System.ComponentModel;
+using FileID.Services;
 using FileID.Theme.Motion;
 using FileID.ViewModels;
 using Microsoft.UI.Xaml;
@@ -77,6 +78,7 @@ public sealed partial class DetailHostView : UserControl
 
         if (!animate || ReducedMotion.Instance.IsReduced)
         {
+            DisposePriorChild();
             Host.Children.Clear();
             Host.Children.Add(child);
             return;
@@ -101,6 +103,7 @@ public sealed partial class DetailHostView : UserControl
         _activeStoryboard = sbOut;
         sbOut.Completed += (_, _) =>
         {
+            DisposePriorChild();
             Host.Children.Clear();
             Host.Children.Add(child);
             var fadeIn = new DoubleAnimation
@@ -122,6 +125,24 @@ public sealed partial class DetailHostView : UserControl
             sbIn.Begin();
         };
         sbOut.Begin();
+    }
+
+    /// <summary>V14.9-F-A2: explicitly dispose the outgoing tab's UserControl
+    /// if it implements IDisposable, then clear the host. Without this the
+    /// old view became unreachable and waited on GC to finalize, leaving its
+    /// ReadStore / ClipSearchService / thumbnail cache alive for an
+    /// unbounded window — during which engine event callbacks could still
+    /// fire into a detached XAML element and crash the dispatcher.</summary>
+    private void DisposePriorChild()
+    {
+        if (Host.Children.Count == 0) return;
+        foreach (var c in Host.Children)
+        {
+            if (c is System.IDisposable d)
+            {
+                try { d.Dispose(); } catch (System.Exception ex) { DebugLog.Warn("DetailHostView prior-child Dispose threw: " + ex.Message); }
+            }
+        }
     }
 
     private static EmptyStateView BuildPlaceholder(string glyph, string title, string body) =>

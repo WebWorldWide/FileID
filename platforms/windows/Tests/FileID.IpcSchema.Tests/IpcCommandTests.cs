@@ -57,6 +57,7 @@ public class IpcCommandTests
     [InlineData(typeof(RunFaceClusteringCommand), "runFaceClustering")]
     [InlineData(typeof(DeepAnalyzeCancelCommand), "deepAnalyzeCancel")]
     [InlineData(typeof(CancelPrewarmCommand),     "cancelPrewarm")]
+    [InlineData(typeof(VerifyCudaPackCommand),    "verifyCudaPack")]
     public void EmptyPayloadVariants_EncodeAsObjectNotString(Type t, string expectedKey)
     {
         var payload = (CommandPayload)Activator.CreateInstance(t)!;

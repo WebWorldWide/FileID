@@ -30,6 +30,15 @@ public partial class App : Application
     {
         InitializeComponent();
         UnhandledException += OnUnhandledException;
+        // Background-thread exceptions (Task.Run continuations, ConfigureAwait(false)
+        // resumes that throw on a thread-pool thread) bypass WinUI's
+        // UnhandledException — they bubble through AppDomain. Log to disk
+        // so a tab-swap-mid-scan crash leaves a forensic trail next session.
+        System.AppDomain.CurrentDomain.UnhandledException += OnAppDomainUnhandled;
+        // Tasks whose result/exception is never observed surface here only
+        // when the finalizer runs. Still worth logging — it identifies
+        // missing awaits / fire-and-forget bugs.
+        System.Threading.Tasks.TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
     }
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
@@ -176,5 +185,23 @@ public partial class App : Application
         // crash dumps for diagnosis trade off against the user's open
         // session — for an on-device app the user's session wins.
         e.Handled = true;
+    }
+
+    private static void OnAppDomainUnhandled(object sender, System.UnhandledExceptionEventArgs e)
+    {
+        // Cannot recover here (terminating == true means CLR is unwinding).
+        // Log to disk so the next session has forensic info; the user reported
+        // "clicking sidebar during a scan crashes the entire app" and these
+        // background-thread crashes are the most likely culprit.
+        try { DebugLog.Error("AppDomain.Unhandled (terminating=" + e.IsTerminating + "): " + e.ExceptionObject); }
+        catch { }
+    }
+
+    private static void OnUnobservedTaskException(object? sender, System.Threading.Tasks.UnobservedTaskExceptionEventArgs e)
+    {
+        // Mark observed so the process doesn't get torn down. Same logging
+        // story as AppDomain.Unhandled.
+        try { DebugLog.Error("UnobservedTaskException: " + e.Exception); } catch { }
+        e.SetObserved();
     }
 }

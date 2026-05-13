@@ -278,6 +278,62 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
         finally { _gate.Release(); }
     }
 
+    /// <summary>V14.9-I: enumerate files that have a VLM-proposed name
+    /// pending. Powers the Deep Analyze "Pending renames (N)" pill so
+    /// the user can bulk-apply the VLM's suggestions without manually
+    /// walking the library. Mirrors the Files schema's
+    /// <c>vlm_proposed_name</c> column.</summary>
+    public async Task<IReadOnlyList<ProposedRenameRow>> PendingProposedRenamesAsync(
+        int limit, CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<ProposedRenameRow>();
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_connection == null) return Array.Empty<ProposedRenameRow>();
+            var rows = new List<ProposedRenameRow>(limit);
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = """
+                SELECT id, path_text, vlm_proposed_name
+                FROM files
+                WHERE vlm_proposed_name IS NOT NULL
+                  AND vlm_proposed_name != ''
+                ORDER BY vlm_analyzed_at DESC
+                LIMIT $limit
+                """;
+            cmd.Parameters.AddWithValue("$limit", limit);
+            using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            {
+                rows.Add(new ProposedRenameRow(
+                    Id: reader.GetInt64(0),
+                    Path: reader.GetString(1),
+                    ProposedName: reader.GetString(2)));
+            }
+            return rows;
+        }
+        finally { _gate.Release(); }
+    }
+
+    /// <summary>V14.9-I: count of files with a VLM-proposed name pending.
+    /// Cheap (COUNT(*) on indexed/sparse column); polled by the Deep
+    /// Analyze pill to know whether to show it.</summary>
+    public async Task<int> PendingProposedRenameCountAsync(CancellationToken ct)
+    {
+        if (_connection == null) return 0;
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_connection == null) return 0;
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText =
+                "SELECT COUNT(*) FROM files WHERE vlm_proposed_name IS NOT NULL AND vlm_proposed_name != ''";
+            var result = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
+            return result is null ? 0 : Convert.ToInt32(result);
+        }
+        finally { _gate.Release(); }
+    }
+
     /// <summary>
     /// Distinct file kinds present in the library — drives the kind filter
     /// segmented control in the Library tab.
@@ -395,3 +451,10 @@ internal sealed record FileRow(
     bool HasText);
 
 internal sealed record FileRowWithScore(FileRow Row, float Score);
+
+/// <summary>V14.9-I: one row of pending VLM-proposed rename, used to seed
+/// the Deep Analyze "Pending renames" bulk-apply sheet.</summary>
+internal sealed record ProposedRenameRow(
+    long Id,
+    string Path,
+    string ProposedName);

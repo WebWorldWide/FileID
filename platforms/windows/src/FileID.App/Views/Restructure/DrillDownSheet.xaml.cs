@@ -79,6 +79,7 @@ public sealed partial class DrillDownSheet : UserControl
         };
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
         var thumbHost = new Border
         {
@@ -107,7 +108,49 @@ public sealed partial class DrillDownSheet : UserControl
         });
         Grid.SetColumn(labelStack, 1);
         grid.Children.Add(labelStack);
+
+        // V14.9-J: engine-stamped tier badge (Anchor / Mixed / Junk).
+        // Anchor = gold (#FFCC00), Mixed = cyan (#A0E2EA), Junk = pink (#F2A6C0).
+        if (BuildTierBadge(m.Tier) is FrameworkElement badge)
+        {
+            Grid.SetColumn(badge, 2);
+            grid.Children.Add(badge);
+        }
         return grid;
+    }
+
+    /// <summary>V14.9-J: render an Anchor/Mixed/Junk badge for a move,
+    /// using the FileID palette colors. Returns null when the move
+    /// has no tier (engine version mismatch or skipped move).</summary>
+    private static FrameworkElement? BuildTierBadge(string? tier)
+    {
+        if (string.IsNullOrEmpty(tier)) return null;
+        Windows.UI.Color colorAccent;
+        switch (tier)
+        {
+            case "Anchor": colorAccent = Windows.UI.Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00); break;
+            case "Mixed":  colorAccent = Windows.UI.Color.FromArgb(0xFF, 0xA0, 0xE2, 0xEA); break;
+            case "Junk":   colorAccent = Windows.UI.Color.FromArgb(0xFF, 0xF2, 0xA6, 0xC0); break;
+            default:       return null;
+        }
+        var fill = colorAccent; fill.A = 0x33;
+        var border = new Border
+        {
+            Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(fill),
+            BorderBrush = new Microsoft.UI.Xaml.Media.SolidColorBrush(colorAccent),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(8, 2, 8, 2),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        border.Child = new TextBlock
+        {
+            Text = tier,
+            FontSize = 11,
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            Foreground = new Microsoft.UI.Xaml.Media.SolidColorBrush(colorAccent),
+        };
+        return border;
     }
 
     private static async System.Threading.Tasks.Task LoadThumbAsync(Image img, string path)

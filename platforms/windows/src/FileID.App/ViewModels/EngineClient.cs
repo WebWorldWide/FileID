@@ -220,6 +220,16 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
         private set => Set(ref _lastMergeSuggestions, value);
     }
 
+    /// <summary>V14.9-G: latest CUDA/cuDNN re-probe result from the engine.
+    /// Settings → Performance "Verify install" binds to this to flip the
+    /// card to ✓ or surface a diagnostics string on failure.</summary>
+    private HardwareReprobed? _lastHardwareReprobe;
+    public HardwareReprobed? LastHardwareReprobe
+    {
+        get => _lastHardwareReprobe;
+        private set => Set(ref _lastHardwareReprobe, value);
+    }
+
     private DeepAnalyzeStarting? _deepAnalyzeStarting;
     public DeepAnalyzeStarting? DeepAnalyzeStarting
     {
@@ -926,6 +936,14 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
         DebugLog.Info("[ENGINE] RestartAsync complete; engine is Ready.");
     }
     public Task RunFaceClusteringAsync() => SendCommandAsync(new RunFaceClusteringCommand());
+
+    /// <summary>V14.9-G: tell the engine to re-probe CUDA/cuDNN
+    /// availability. Engine replies with a <c>hardwareReprobed</c> event
+    /// which lands on <see cref="LastHardwareReprobe"/>. Used by
+    /// Settings → Performance "Verify install" so the user gets
+    /// immediate feedback after installing cuDNN, without an engine
+    /// restart.</summary>
+    public Task VerifyCudaPackAsync() => SendCommandAsync(new VerifyCudaPackCommand());
     public Task DeepAnalyzeFileAsync(long fileId, string modelKind) =>
         SendCommandAsync(new DeepAnalyzeFileCommand(fileId, modelKind));
     public Task DeepAnalyzeFolderAsync(string pathPrefix, string modelKind) =>
@@ -1266,6 +1284,20 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
                 break;
             case MergeSuggestionsEvent ms:
                 LastMergeSuggestions = ms.Suggestions;
+                break;
+            case HardwareReprobedEvent hr:
+                LastHardwareReprobe = hr.Result;
+                // Also refresh the cached HardwareInfo in Info so Settings
+                // bindings to existing Info.Hardware fields update too.
+                if (Info is { } prevInfo)
+                {
+                    Info = new EngineInfo(
+                        prevInfo.Version,
+                        prevInfo.Pid,
+                        prevInfo.WorkerCap,
+                        prevInfo.PhysicalMemoryGB,
+                        hr.Result.Hardware);
+                }
                 break;
         }
         }

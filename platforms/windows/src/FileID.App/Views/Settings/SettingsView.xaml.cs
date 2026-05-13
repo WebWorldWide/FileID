@@ -88,7 +88,12 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             OnPropertyChanged(nameof(ExecutionProviderText));
             OnPropertyChanged(nameof(RecommendationText));
             OnPropertyChanged(nameof(RecommendationVisibility));
-            SyncNvidiaSection();
+            DispatcherQueue.TryEnqueue(SyncNvidiaSection);
+        }
+        else if (e.PropertyName == nameof(EngineClient.LastHardwareReprobe))
+        {
+            // V14.9-G: post-Verify-install update.
+            DispatcherQueue.TryEnqueue(SyncReprobeUi);
         }
     }
 
@@ -465,6 +470,105 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         catch (Exception ex)
         {
             DebugLog.Warn("Open cuDNN downloads failed: " + ex.Message);
+        }
+    }
+
+    /// <summary>V14.9-G: ask the engine to re-probe cuDNN availability after
+    /// the user manually installs it. The engine replies with a
+    /// HardwareReprobed event that lands on
+    /// <see cref="EngineClient.LastHardwareReprobe"/>; <see cref="SyncReprobeUi"/>
+    /// then renders the success pill or the diagnostics caption.</summary>
+    private async void OnVerifyCudnnClicked(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            VerifyCudnnButton.IsEnabled = false;
+            VerifyCudnnButton.Content = "Verifying…";
+            await EngineClient.Instance.VerifyCudaPackAsync();
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("Verify cuDNN failed: " + ex.Message);
+            CudnnDiagnosticsText.Text = "Couldn't re-probe (engine not ready): " + ex.Message;
+            CudnnDiagnosticsText.Visibility = Visibility.Visible;
+        }
+        finally
+        {
+            // Restore label even before the event arrives; the SyncReprobeUi
+            // hook will update the rest of the row when the engine replies.
+            VerifyCudnnButton.IsEnabled = true;
+            VerifyCudnnButton.Content = "Verify install";
+        }
+    }
+
+    /// <summary>V14.9-G: render the success pill / diagnostics caption after
+    /// the engine emits a HardwareReprobed event. Called from the engine
+    /// PropertyChanged hook on LastHardwareReprobe.</summary>
+    private void SyncReprobeUi()
+    {
+        var reprobe = EngineClient.Instance.LastHardwareReprobe;
+        if (reprobe is null) return;
+        var present = reprobe.Hardware.CudaPackPresent;
+        var activeEp = (reprobe.Hardware.ExecutionProvider ?? "").ToLowerInvariant();
+
+        if (present)
+        {
+            CudnnDiagnosticsText.Visibility = Visibility.Collapsed;
+            CudnnSuccessPill.Visibility = Visibility.Visible;
+            if (activeEp == "cuda")
+            {
+                // Already on CUDA in this engine session — no restart needed.
+                CudnnSuccessTitle.Text = "✓ cuDNN active — scanning uses CUDA EP.";
+                CudnnSuccessDetail.Text = $"Adapter: {reprobe.Hardware.AdapterName ?? "unknown"}. Execution provider: CUDA.";
+                RestartEngineButton.Visibility = Visibility.Collapsed;
+            }
+            else
+            {
+                // cuDNN reachable but this session loaded DirectML at startup —
+                // need a restart to pick CUDA next spawn.
+                CudnnSuccessTitle.Text = "✓ cuDNN detected — restart engine to switch to CUDA";
+                CudnnSuccessDetail.Text = $"Current session: {activeEp}. Restart so the engine re-picks the execution provider.";
+                RestartEngineButton.Visibility = Visibility.Visible;
+            }
+        }
+        else
+        {
+            CudnnSuccessPill.Visibility = Visibility.Collapsed;
+            var diag = reprobe.Diagnostics;
+            if (!string.IsNullOrWhiteSpace(diag))
+            {
+                CudnnDiagnosticsText.Text = diag!;
+                CudnnDiagnosticsText.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                CudnnDiagnosticsText.Visibility = Visibility.Collapsed;
+            }
+        }
+    }
+
+    /// <summary>V14.9-G: shutdown + auto-respawn cycle so the engine re-runs
+    /// the EP picker. EngineClient's existing crash-respawn path picks the
+    /// new EP on the next spawn.</summary>
+    private async void OnRestartEngineClicked(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            RestartEngineButton.IsEnabled = false;
+            RestartEngineButton.Content = "Restarting…";
+            await EngineClient.Instance.RestartAsync();
+            // After RestartAsync returns, Ready has been emitted; SyncReprobeUi
+            // will refresh on the next PropertyChanged via Info update.
+            DebugLog.Info("Engine restart requested by user after cuDNN install.");
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("Engine restart failed: " + ex.Message);
+        }
+        finally
+        {
+            RestartEngineButton.IsEnabled = true;
+            RestartEngineButton.Content = "Restart engine";
         }
     }
 

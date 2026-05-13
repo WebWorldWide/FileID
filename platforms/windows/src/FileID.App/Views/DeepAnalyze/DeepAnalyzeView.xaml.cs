@@ -321,6 +321,14 @@ public sealed partial class DeepAnalyzeView : UserControl
                 _captionAccumulator = string.Empty;
                 StreamCaptionText.Text = string.Empty;
             }
+            // V14.9-I: live caption stream. Engine emits the partial
+            // accumulated text at 4 Hz; show it directly in the caption
+            // line so the user sees the model generating word-by-word.
+            if (!string.IsNullOrEmpty(prog.CurrentCaption))
+            {
+                _captionAccumulator = prog.CurrentCaption!;
+                StreamCaptionText.Text = prog.CurrentCaption!;
+            }
         }
 
         if (last is not null)
@@ -370,11 +378,63 @@ public sealed partial class DeepAnalyzeView : UserControl
         }
     }
 
-    private void OnProposedNamesPillClicked(object sender, RoutedEventArgs e)
+    /// <summary>V14.9-I: open BulkRenameSheet pre-seeded with every
+    /// VLM-proposed rename pending in the DB. One-click bulk-apply
+    /// of the model's smart filename suggestions, no need to
+    /// navigate to Library + multi-select first.</summary>
+    private async void OnProposedNamesPillClicked(object sender, RoutedEventArgs e)
     {
-        // BulkRenameSheet is hosted from the Library tab; navigate there
-        // so the user can review + apply the proposed renames.
-        AppViewModel.Instance.ActiveTab = SidebarTab.Library;
+        try
+        {
+            var store = new Services.ReadStore(Services.AppPaths.DbPath);
+            await store.OpenAsync();
+            var pending = await store.PendingProposedRenamesAsync(500, System.Threading.CancellationToken.None);
+            if (pending.Count == 0)
+            {
+                _proposedNameCount = 0;
+                SyncProposedNamesPill();
+                return;
+            }
+            var plan = new System.Collections.Generic.List<Views.Library.BulkRenameSheet.RenamePlan>(pending.Count);
+            foreach (var p in pending)
+            {
+                plan.Add(new Views.Library.BulkRenameSheet.RenamePlan
+                {
+                    FileId = p.Id,
+                    CurrentPath = p.Path,
+                    ProposedName = p.ProposedName,
+                    Include = true,
+                });
+            }
+            var sheet = new Views.Library.BulkRenameSheet();
+            sheet.SetPlan(plan);
+            var dialog = new ContentDialog
+            {
+                XamlRoot = this.XamlRoot,
+                Title = $"Apply {pending.Count} smart rename{(pending.Count == 1 ? "" : "s")}",
+                Content = sheet,
+                PrimaryButtonText = "Rename",
+                CloseButtonText = "Close",
+                DefaultButton = ContentDialogButton.Primary,
+            };
+            dialog.PrimaryButtonClick += async (_, args) =>
+            {
+                var deferral = args.GetDeferral();
+                var ok = await sheet.CommitAsync();
+                if (!ok) args.Cancel = true;
+                deferral.Complete();
+            };
+            try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
+            // Refresh count after possible apply.
+            var remaining = await store.PendingProposedRenameCountAsync(System.Threading.CancellationToken.None);
+            _proposedNameCount = remaining;
+            SyncProposedNamesPill();
+            store.Dispose();
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("OnProposedNamesPillClicked threw: " + ex.Message);
+        }
     }
 
     private static string FormatEta(double seconds)

@@ -227,8 +227,27 @@ pub async fn analyze_file(
 /// reboot — fine for one-off analysis).
 async fn rasterize_video_keyframe(path: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
     let p = path.to_path_buf();
-    let frame = tokio::task::spawn_blocking(move || crate::shell::video::keyframe_25pct(&p))
-        .await??;
+    // V14.9-I: first attempt the 25%-of-duration keyframe. If Media
+    // Foundation can read the container but seeking fails (some
+    // VFR/fragmented MP4s have unreliable duration metadata), the
+    // function internally falls back to offset 0. We catch the rare
+    // case where the helper itself errors out: weird codecs, gap
+    // notifications only, etc. — and retry one more time before
+    // surfacing the failure. A single retry is cheap and rescues
+    // most one-shot transient I/O issues on USB drives / network shares.
+    let frame = match tokio::task::spawn_blocking({
+        let p = p.clone();
+        move || crate::shell::video::keyframe_25pct(&p)
+    })
+    .await?
+    {
+        Ok(f) => f,
+        Err(first) => {
+            tracing::warn!(?first, file = %path.display(), "keyframe_25pct failed; retrying once");
+            tokio::task::spawn_blocking(move || crate::shell::video::keyframe_25pct(&p))
+                .await??
+        }
+    };
     let dest = std::env::temp_dir().join(format!(
         "fileid-vlm-{}.jpg",
         uuid::Uuid::new_v4()

@@ -379,12 +379,64 @@
                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                            TextWrapping="Wrap"
                                            Text="Install NVIDIA cuDNN to unlock the CUDA execution provider for scanning (10-15% faster than DirectML on RTX-class GPUs). FileID can't redistribute cuDNN — get it from NVIDIA's developer site." />
+                                <!-- V14.9-G: diagnostics line populated after a Verify install
+                                     click when the engine reports cuDNN absent. Explains
+                                     *why* (missing cudart64, wrong directory, etc.). -->
+                                <TextBlock x:Name="CudnnDiagnosticsText"
+                                           Style="{StaticResource CaptionTextBlockStyle}"
+                                           Foreground="{ThemeResource SystemFillColorCautionBrush}"
+                                           TextWrapping="Wrap"
+                                           Visibility="Collapsed"
+                                           Margin="0,4,0,0" />
                             </StackPanel>
-                            <Button Grid.Column="1"
-                                    Content="Get cuDNN"
-                                    Click="OnOpenCudnnDownloadsClicked"
-                                    ToolTipService.ToolTip="Opens developer.nvidia.com/cudnn-downloads in your default browser." />
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
+                                <!-- V14.9-G: re-probe after manual install. Engine doesn't
+                                     restart; just re-runs the DLL probe and emits a
+                                     hardwareReprobed event so the card flips to ✓ when
+                                     the user finishes installing cuDNN. -->
+                                <Button x:Name="VerifyCudnnButton"
+                                        Content="Verify install"
+                                        Click="OnVerifyCudnnClicked"
+                                        ToolTipService.ToolTip="Re-probe cuDNN after manually installing it from NVIDIA's site." />
+                                <Button Content="Get cuDNN"
+                                        Click="OnOpenCudnnDownloadsClicked"
+                                        ToolTipService.ToolTip="Opens developer.nvidia.com/cudnn-downloads in your default browser." />
+                            </StackPanel>
                         </Grid>
+
+                        <!-- V14.9-G: post-verify success pill. Visible only when the
+                             re-probe confirmed cuDNN is reachable. Offers a one-click
+                             engine restart to switch from DirectML to CUDA EP. -->
+                        <Border x:Name="CudnnSuccessPill"
+                                Background="#22FFCC00"
+                                BorderBrush="#FFCC00"
+                                BorderThickness="1"
+                                CornerRadius="8"
+                                Padding="12,8"
+                                Visibility="Collapsed">
+                            <Grid ColumnSpacing="12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                                    <TextBlock x:Name="CudnnSuccessTitle"
+                                               Style="{StaticResource BodyStrongTextBlockStyle}"
+                                               Foreground="#FFCC00"
+                                               Text="cuDNN detected — restart engine to switch to CUDA" />
+                                    <TextBlock x:Name="CudnnSuccessDetail"
+                                               Style="{StaticResource CaptionTextBlockStyle}"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                               TextWrapping="Wrap"
+                                               Text="The current engine session loaded DirectML at startup; a restart picks CUDA on this next spawn." />
+                                </StackPanel>
+                                <Button Grid.Column="1"
+                                        x:Name="RestartEngineButton"
+                                        Content="Restart engine"
+                                        Click="OnRestartEngineClicked"
+                                        VerticalAlignment="Center" />
+                            </Grid>
+                        </Border>
                     </StackPanel>
                 </StackPanel>
             </Border>

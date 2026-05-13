@@ -20,17 +20,29 @@ using Microsoft.UI.Dispatching;
 
 namespace FileID.ViewModels;
 
-internal sealed class CleanupViewModel : INotifyPropertyChanged
+internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
 {
     private readonly string _dbPath;
     private readonly DispatcherQueue _ui;
     private bool _isLoading;
     private string? _errorMessage;
+    private bool _disposed;
+    /// <summary>Cancelled in <see cref="Dispose"/> so a Refresh running on a
+    /// thread-pool thread unwinds before the view is gone.</summary>
+    private readonly CancellationTokenSource _disposalCts = new();
 
     public CleanupViewModel(string dbPath, DispatcherQueue ui)
     {
         _dbPath = dbPath;
         _ui = ui;
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        try { _disposalCts.Cancel(); } catch { /* swallow */ }
+        try { _disposalCts.Dispose(); } catch { /* swallow */ }
     }
 
     public ObservableCollection<DuplicateGroup> Groups { get; } = new();
@@ -49,16 +61,21 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged
 
     public async Task RefreshAsync(CancellationToken ct)
     {
+        if (_disposed) return;
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
+        var token = linked.Token;
         IsLoading = true;
         ErrorMessage = null;
         try
         {
-            var groups = await Task.Run(() => Load(ct), ct).ConfigureAwait(false);
+            var groups = await Task.Run(() => Load(token), token).ConfigureAwait(false);
+            if (_disposed || token.IsCancellationRequested) return;
             ApplyOnUi(groups);
         }
         catch (OperationCanceledException) { /* expected */ }
-        catch (Exception ex) { ErrorMessage = ex.Message; }
-        finally { IsLoading = false; }
+        catch (ObjectDisposedException) { /* expected during teardown */ }
+        catch (Exception ex) { if (!_disposed) ErrorMessage = ex.Message; }
+        finally { if (!_disposed) IsLoading = false; }
     }
 
     private List<DuplicateGroup> Load(CancellationToken ct)

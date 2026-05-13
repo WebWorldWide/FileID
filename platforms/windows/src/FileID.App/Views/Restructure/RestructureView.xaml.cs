@@ -92,68 +92,44 @@ public sealed partial class RestructureView : UserControl
         ApplyStatusText.Text = hasWork
             ? $"Ready to apply {moveCount:N0} moves into '{plan.LibraryRoot}'."
             : "Nothing to apply.";
+
+        // V14.9-M: update ApplyBar selection summary + step chips + primary
+        // button label to reflect the plan count. macOS reference at
+        // platforms/apple/.../RestructureApplyBar.swift.
+        ApplyBarSelectedCount.Text = moveCount.ToString("N0");
+        ApplyBarTotalCount.Text = moveCount.ToString("N0");
+        ApplyBarHint.Text = hasWork
+            ? "Originals stay put — applying creates shortcuts you can review."
+            : "Generate a plan to enable Apply.";
+        ApplySymlinkButtonText.Text = hasWork
+            ? $"Apply as shortcuts ({moveCount:N0})"
+            : "Apply as shortcuts";
+        // Step chip 1 fills only when we actually have something to apply.
+        StepChip1Bg.Background = hasWork
+            ? (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["GoldBrush"]
+            : new Microsoft.UI.Xaml.Media.SolidColorBrush(
+                Windows.UI.Color.FromArgb(0x44, 0xFF, 0xCC, 0x00));
     }
 
     /// <summary>
     /// V14.7.2: engine-authoritative Anchor/Mixed/Junk counts when the
     /// plan ships them (`FolderClassifications`). Falls back to the
-    /// V14.7 C#-side approximation for older plans (or if the engine
-    /// hasn't migrated). The fallback uses move-ratio homogeneity.
+    /// V14.9-J: engine-authoritative classifier. The engine (since V14.9 A7)
+    /// always emits `FolderClassifications` in the plan event. The previous
+    /// C# fallback (≥80% homogeneity heuristic in lines 119-153 of the prior
+    /// build) was dead code with the current engine and has been removed —
+    /// the engine is the single source of truth for Anchor/Mixed/Junk.
     /// </summary>
     private void ComputeAndShowClassifier(RestructurePlan plan)
     {
-        if (plan.Moves.Count == 0)
+        if (plan.Moves.Count == 0 || plan.FolderClassifications is not { } engineCounts)
         {
             ClassifierStrip.Visibility = Visibility.Collapsed;
             return;
         }
-
-        uint anchor, mixed, junk;
-        if (plan.FolderClassifications is { } engineCounts)
-        {
-            // Engine computed it — trust those numbers.
-            anchor = engineCounts.AnchorFolders;
-            mixed  = engineCounts.MixedFolders;
-            junk   = engineCounts.JunkFolders;
-        }
-        else
-        {
-            // Fallback for older engine builds.
-            var bySource = new System.Collections.Generic.Dictionary<string, int>(System.StringComparer.OrdinalIgnoreCase);
-            foreach (var m in plan.Moves)
-            {
-                var srcFolder = System.IO.Path.GetDirectoryName(m.Source) ?? string.Empty;
-                if (!bySource.ContainsKey(srcFolder)) bySource[srcFolder] = 0;
-                bySource[srcFolder]++;
-            }
-            int a = 0, mx = 0, j = 0;
-            foreach (var kv in bySource)
-            {
-                var catCounts = new System.Collections.Generic.Dictionary<string, int>();
-                foreach (var m in plan.Moves)
-                {
-                    var srcFolder = System.IO.Path.GetDirectoryName(m.Source) ?? string.Empty;
-                    if (!string.Equals(srcFolder, kv.Key, System.StringComparison.OrdinalIgnoreCase)) continue;
-                    var destRoot = m.Destination
-                        .Substring(plan.LibraryRoot.Length)
-                        .TrimStart('\\', '/')
-                        .Split('\\', '/')[0];
-                    if (!catCounts.ContainsKey(destRoot)) catCounts[destRoot] = 0;
-                    catCounts[destRoot]++;
-                }
-                int total = kv.Value;
-                int topCat = 0;
-                foreach (var c in catCounts.Values) if (c > topCat) topCat = c;
-                double homogeneity = total > 0 ? (double)topCat / total : 0;
-                if (total <= 2) j++;
-                else if (homogeneity >= 0.80) a++;
-                else mx++;
-            }
-            anchor = (uint)a; mixed = (uint)mx; junk = (uint)j;
-        }
-        AnchorCountText.Text = anchor.ToString("N0");
-        MixedCountText.Text  = mixed.ToString("N0");
-        JunkCountText.Text   = junk.ToString("N0");
+        AnchorCountText.Text = engineCounts.AnchorFolders.ToString("N0");
+        MixedCountText.Text  = engineCounts.MixedFolders.ToString("N0");
+        JunkCountText.Text   = engineCounts.JunkFolders.ToString("N0");
         ClassifierStrip.Visibility = Visibility.Visible;
     }
 
@@ -169,6 +145,14 @@ public sealed partial class RestructureView : UserControl
         ApplyStatusText.Text = r.Failed == 0
             ? $"Applied {r.Applied:N0} moves successfully."
             : $"Applied {r.Applied:N0}, failed {r.Failed:N0}. Check %LOCALAPPDATA%\\FileID\\logs\\.";
+        // V14.9-M: step chip 2 fills once an Apply has succeeded. Visual
+        // affordance that the two-step flow has advanced past "shortcuts".
+        if (r.Failed == 0 && r.Applied > 0)
+        {
+            StepChip2Bg.Background =
+                (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["GoldBrush"];
+            StepChip2Bg.BorderThickness = new Thickness(0);
+        }
     }
 
     private void OnVisualizationModeChanged(object sender, SelectionChangedEventArgs e)

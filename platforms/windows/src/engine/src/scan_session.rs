@@ -142,7 +142,69 @@ impl ScanSession {
 
         // Wire the three pipeline stages with bounded mpsc channels.
         let discovery = Discovery::new(root, self.coordinator.clone());
-        let discovered_rx = discovery.spawn();
+        let handle = discovery.spawn();
+        let discovered_count = handle.count.clone();
+        let discovered_done = handle.done.clone();
+        let discovered_rx = handle.rx;
+
+        // V14.9-N2.2: emit a live Progress event every 250 ms while
+        // discovery is walking the tree. Without this, the user saw the
+        // sidebar stuck on "Discovering…" with every stat row reading
+        // "—" until the first DBWriter batch flushed (often >1 s on
+        // cold cache; never, if every file was filtered out). The tick
+        // task also detects "discovery finished with 0 files" and
+        // surfaces a clean empty-folder event so the UI exits Discovering
+        // instead of hanging forever.
+        let sink_for_tick = sink.clone();
+        let session_id_for_tick = session_id.clone();
+        let coord_for_tick = self.coordinator.clone();
+        let root_for_tick = root.to_string_lossy().into_owned();
+        let tick = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                if coord_for_tick.is_cancelled() {
+                    return;
+                }
+                let count = discovered_count.load(std::sync::atomic::Ordering::Relaxed);
+                let finished = discovered_done.load(std::sync::atomic::Ordering::Acquire);
+                let _ = sink_for_tick.try_send(IpcEvent::now(EventPayload::Progress(Wrap::new(
+                    ScanProgress {
+                        session_id: session_id_for_tick.clone(),
+                        phase: ScanPhase::Discovering,
+                        total: 0,
+                        discovered: count,
+                        processed: 0,
+                        failed: 0,
+                        files_per_second: 0.0,
+                        eta_seconds: None,
+                        resident_mb: 0,
+                        available_mb: 0,
+                    },
+                ))));
+                if finished {
+                    // V14.9-N2.3: graceful empty-folder path. Tagging will
+                    // wait on its input channel forever if discovery
+                    // produced zero files — close out the scan cleanly
+                    // with a "no supported files found" error so the
+                    // user knows what happened.
+                    if count == 0 {
+                        let _ = sink_for_tick.try_send(IpcEvent::now(EventPayload::Error(
+                            Wrap::new(crate::ipc::EngineError {
+                                kind: "empty_folder".into(),
+                                message: format!(
+                                    "No supported files found in {}.\n\
+                                     Pick a folder with images, videos, PDFs, or documents.",
+                                    root_for_tick
+                                ),
+                                path: Some(root_for_tick.clone()),
+                                model_kind: None,
+                            }),
+                        )));
+                    }
+                    return;
+                }
+            }
+        });
 
         on_phase(SessionPhase::Tagging);
         emit_phase(SessionPhase::Tagging);
@@ -170,6 +232,12 @@ impl ScanSession {
                 );
             })
             .await?;
+
+        // V14.9-N2: tick task exits on its own once discovery's `done`
+        // flips true, so this abort is belt-and-suspenders for the rare
+        // case where DBWriter returns before tick observes the done flag
+        // (e.g. cancellation mid-walk).
+        tick.abort();
 
         let elapsed = started.elapsed().as_secs_f64();
 

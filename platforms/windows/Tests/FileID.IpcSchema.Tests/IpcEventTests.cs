@@ -193,4 +193,126 @@ public class IpcEventTests
         const string bad = """{"t":"2026-01-01T00:00:00+00:00","payload":{"alienVariant":{"_0":{}}}}""";
         Assert.Throws<JsonException>(() => IpcCoder.Decode<IpcEvent>(bad));
     }
+
+    // V14.9-K1: Phase G IPC round-trip tests. Newly-added VerifyCudaPack
+    // command + HardwareReprobed event need coverage so a future schema
+    // edit doesn't silently break the Settings → Performance Verify flow.
+
+    [Fact]
+    public void HardwareReprobed_RoundTripsAllFields()
+    {
+        var hw = new HardwareInfo(
+            GpuVendor: "nvidia",
+            AdapterName: "NVIDIA GeForce RTX 4070",
+            ExecutionProvider: "cuda",
+            PhysicalCpuCores: 16,
+            CudaPackPresent: true,
+            OpenvinoPackPresent: false,
+            QnnPackPresent: false,
+            Recommendation: "");
+        // Use a plain-ASCII diagnostics string so the test assertion isn't
+        // sensitive to JavaScriptEncoder's choice between literal-UTF8 and
+        // \uXXXX escape forms for non-ASCII characters.
+        var reprobe = new HardwareReprobed(hw, Diagnostics: "Verified at NVIDIA toolkit bin dir");
+        var ev = IpcEvent.Now(new HardwareReprobedEvent(reprobe));
+        var json = IpcCoder.Encode(ev);
+
+        // Wire shape: {"t":"…","payload":{"hardwareReprobed":{"_0":{"hardware":{…},"diagnostics":"…"}}}}
+        Assert.Contains("\"hardwareReprobed\":{\"_0\":", json);
+        Assert.Contains("\"gpuVendor\":\"nvidia\"", json);
+        Assert.Contains("\"executionProvider\":\"cuda\"", json);
+        Assert.Contains("\"cudaPackPresent\":true", json);
+        Assert.Contains("\"diagnostics\":\"Verified at NVIDIA toolkit bin dir\"", json);
+
+        var rt = IpcCoder.Decode<IpcEvent>(json);
+        var got = Assert.IsType<HardwareReprobedEvent>(rt.Payload).Result;
+        Assert.Equal("nvidia", got.Hardware.GpuVendor);
+        Assert.Equal("NVIDIA GeForce RTX 4070", got.Hardware.AdapterName);
+        Assert.Equal("cuda", got.Hardware.ExecutionProvider);
+        Assert.Equal(16u, got.Hardware.PhysicalCpuCores);
+        Assert.True(got.Hardware.CudaPackPresent);
+        Assert.False(got.Hardware.OpenvinoPackPresent);
+        Assert.False(got.Hardware.QnnPackPresent);
+        Assert.Equal("Verified at NVIDIA toolkit bin dir", got.Diagnostics);
+    }
+
+    [Fact]
+    public void HardwareReprobed_OmitsNullDiagnostics()
+    {
+        // Engine side serializes `Option<String>` with
+        // #[serde(skip_serializing_if = "Option::is_none")] — wire JSON
+        // should omit the key when the field is None. C# side accepts
+        // the absence + leaves the optional field null.
+        var hw = new HardwareInfo("nvidia", "RTX 4070", "cuda", 16, true, false, false, "");
+        var reprobe = new HardwareReprobed(hw, Diagnostics: null);
+        var ev = IpcEvent.Now(new HardwareReprobedEvent(reprobe));
+        var json = IpcCoder.Encode(ev);
+
+        Assert.Contains("\"hardwareReprobed\":{\"_0\":", json);
+        // Round-trip: even if the C# encoder writes "diagnostics":null,
+        // the decoder must still produce a null Diagnostics field.
+        var rt = IpcCoder.Decode<IpcEvent>(json);
+        var got = Assert.IsType<HardwareReprobedEvent>(rt.Payload).Result;
+        Assert.Null(got.Diagnostics);
+    }
+
+    [Fact]
+    public void HardwareReprobed_DecodesEngineEmittedShapeWithoutDiagnostics()
+    {
+        // Simulate the exact wire bytes the Rust engine emits when cuDNN
+        // is present (`Option<String>` = None → key omitted entirely).
+        // The C# decoder must accept the absence of `diagnostics` without
+        // throwing.
+        const string engineWire = """
+            {"t":"2026-05-13T12:00:00+00:00","payload":{"hardwareReprobed":{"_0":{"hardware":{"gpuVendor":"nvidia","adapterName":"RTX 4070","executionProvider":"cuda","physicalCpuCores":16,"cudaPackPresent":true,"openvinoPackPresent":false,"qnnPackPresent":false,"recommendation":""}}}}}
+            """;
+        var rt = IpcCoder.Decode<IpcEvent>(engineWire.Trim());
+        var got = Assert.IsType<HardwareReprobedEvent>(rt.Payload).Result;
+        Assert.True(got.Hardware.CudaPackPresent);
+        Assert.Null(got.Diagnostics);
+    }
+
+    // V14.9-K1: Phase I added `currentCaption: Option<String>` to
+    // DeepAnalyzeProgress so the UI renders the live token stream.
+    // Lock in the round-trip + absent-field decode so a wire-format
+    // regression shows up in CI.
+
+    [Fact]
+    public void DeepAnalyzeProgress_RoundTripsCurrentCaption()
+    {
+        var prog = new DeepAnalyzeProgress(
+            Processed: 3,
+            Total: 10,
+            EtaSeconds: 42.5,
+            CurrentPath: @"C:\photos\dog.jpg",
+            ModelKind: "qwen2_5_vl_3b",
+            CurrentCaption: "A dog sits on");
+        var ev = IpcEvent.Now(new DeepAnalyzeProgressEvent(prog));
+        var json = IpcCoder.Encode(ev);
+
+        Assert.Contains("\"deepAnalyzeProgress\":{\"_0\":", json);
+        Assert.Contains("\"currentCaption\":\"A dog sits on\"", json);
+
+        var rt = IpcCoder.Decode<IpcEvent>(json);
+        var got = Assert.IsType<DeepAnalyzeProgressEvent>(rt.Payload).Progress;
+        Assert.Equal(3ul, got.Processed);
+        Assert.Equal("A dog sits on", got.CurrentCaption);
+    }
+
+    [Fact]
+    public void DeepAnalyzeProgress_DecodesEngineEmittedShapeWithoutCurrentCaption()
+    {
+        // Pre-inference progress events (`processed=idx, current_path=path`)
+        // don't have caption text yet — Rust emits None → key omitted.
+        const string engineWire = """
+            {"t":"2026-05-13T12:00:00+00:00","payload":{"deepAnalyzeProgress":{"_0":{"processed":1,"total":10,"modelKind":"qwen2_5_vl_3b"}}}}
+            """;
+        var rt = IpcCoder.Decode<IpcEvent>(engineWire.Trim());
+        var got = Assert.IsType<DeepAnalyzeProgressEvent>(rt.Payload).Progress;
+        Assert.Equal(1ul, got.Processed);
+        Assert.Equal(10ul, got.Total);
+        Assert.Null(got.CurrentCaption);
+        Assert.Null(got.CurrentPath);
+        Assert.Null(got.EtaSeconds);
+    }
 }

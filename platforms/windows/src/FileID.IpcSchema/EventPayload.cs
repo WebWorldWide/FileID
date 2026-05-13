@@ -43,6 +43,11 @@ public sealed record BulkActionResultEvent(BulkActionResult Result) : EventPaylo
 public sealed record ClipTextEmbeddingEvent(ClipTextEmbedding Embedding) : EventPayload;
 public sealed record MergeSuggestionsEvent(MergeSuggestions Suggestions) : EventPayload;
 
+/// <summary>V14.9-G: engine reply to a <c>verifyCudaPack</c> command.
+/// Carries fresh hardware probe + optional diagnostics text for the
+/// Settings → Performance "Verify install" affordance.</summary>
+public sealed record HardwareReprobedEvent(HardwareReprobed Result) : EventPayload;
+
 public sealed class EventPayloadJsonConverter : JsonConverter<EventPayload>
 {
     public override EventPayload Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
@@ -84,6 +89,7 @@ public sealed class EventPayloadJsonConverter : JsonConverter<EventPayload>
             "bulkActionResult"       => new BulkActionResultEvent(ReadWrapped<BulkActionResult>(ref reader, options)),
             "clipTextEmbedding"      => new ClipTextEmbeddingEvent(ReadWrapped<ClipTextEmbedding>(ref reader, options)),
             "mergeSuggestions"       => new MergeSuggestionsEvent(ReadWrapped<MergeSuggestions>(ref reader, options)),
+            "hardwareReprobed"       => new HardwareReprobedEvent(ReadWrapped<HardwareReprobed>(ref reader, options)),
             _ => throw new JsonException($"EventPayload: unknown variant '{variant}'"),
         };
 
@@ -120,6 +126,7 @@ public sealed class EventPayloadJsonConverter : JsonConverter<EventPayload>
             case BulkActionResultEvent v:       WriteWrapped(writer, "bulkActionResult", v.Result, options); break;
             case ClipTextEmbeddingEvent v:      WriteWrapped(writer, "clipTextEmbedding", v.Embedding, options); break;
             case MergeSuggestionsEvent v:       WriteWrapped(writer, "mergeSuggestions", v.Suggestions, options); break;
+            case HardwareReprobedEvent v:       WriteWrapped(writer, "hardwareReprobed", v.Result, options); break;
             default:
                 throw new JsonException($"EventPayload: unknown C# type {value.GetType().FullName}");
         }

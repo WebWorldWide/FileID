@@ -18,21 +18,51 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
 {
     internal CleanupViewModel ViewModel { get; }
 
+    private bool _unloaded;
     public CleanupView()
     {
         ViewModel = new CleanupViewModel(AppPaths.DbPath, Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
         InitializeComponent();
-        ViewModel.PropertyChanged += (_, _) =>
-        {
-            OnPropertyChanged(nameof(StatusText));
-            OnPropertyChanged(nameof(FooterVisibility));
-        };
-        ViewModel.Groups.CollectionChanged += (_, _) =>
-        {
-            OnPropertyChanged(nameof(StatusText));
-            OnPropertyChanged(nameof(FooterVisibility));
-        };
-        Loaded += async (_, _) => await ViewModel.RefreshAsync(CancellationToken.None);
+        // Named handlers (not inline lambdas) so OnUnloaded can detach
+        // them. Inline lambdas leak the view + VM graph every tab swap
+        // and can fire after the view is detached, touching disposed
+        // XAML — a known cause of the "click sidebar mid-scan → app crash"
+        // symptom.
+        ViewModel.PropertyChanged += OnViewModelPropertyChanged;
+        ViewModel.Groups.CollectionChanged += OnGroupsCollectionChanged;
+        Loaded += OnLoadedAsync;
+        Unloaded += OnUnloaded;
+    }
+
+    private async void OnLoadedAsync(object sender, RoutedEventArgs e)
+    {
+        if (_unloaded) return;
+        try { await ViewModel.RefreshAsync(CancellationToken.None); }
+        catch (Exception ex) { DebugLog.Warn("CleanupView.OnLoaded refresh threw: " + ex.Message); }
+    }
+
+    private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (_unloaded) return;
+        OnPropertyChanged(nameof(StatusText));
+        OnPropertyChanged(nameof(FooterVisibility));
+    }
+
+    private void OnGroupsCollectionChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
+    {
+        if (_unloaded) return;
+        OnPropertyChanged(nameof(StatusText));
+        OnPropertyChanged(nameof(FooterVisibility));
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        _unloaded = true;
+        Unloaded -= OnUnloaded;
+        Loaded -= OnLoadedAsync;
+        try { ViewModel.PropertyChanged -= OnViewModelPropertyChanged; } catch { /* swallow */ }
+        try { ViewModel.Groups.CollectionChanged -= OnGroupsCollectionChanged; } catch { /* swallow */ }
+        try { ViewModel.Dispose(); } catch { /* swallow */ }
     }
 
     public string StatusText

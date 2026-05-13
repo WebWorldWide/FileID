@@ -29,6 +29,13 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     private readonly DispatcherQueue _ui;
 
     private CancellationTokenSource? _searchCts;
+    /// <summary>Linked into every async IO call; cancelled by <see cref="Dispose"/>
+    /// so a tab-swap-mid-scan unwinds all in-flight work BEFORE the view
+    /// disposes the services those calls depend on. Without this the
+    /// classic crash was "click Library → click People mid-scan → an
+    /// in-flight ClipSearchService.SearchAsync resumes against a disposed
+    /// service → ObjectDisposedException escapes to AppDomain.Unhandled".</summary>
+    private readonly CancellationTokenSource _disposalCts = new();
     private string _query = string.Empty;
     private string _kindFilter = "all";
     private bool _isLoading;
@@ -55,6 +62,11 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        // Cancel disposal CTS FIRST so any in-flight RefreshAsync /
+        // SemanticSearchWithSeedAsync running on a thread-pool thread
+        // unwinds with OperationCanceledException before the view
+        // disposes _clip / _thumbnails out from under it.
+        try { _disposalCts.Cancel(); } catch { /* swallow */ }
         try { _searchCts?.Cancel(); } catch { /* swallow */ }
         _searchCts?.Dispose();
         _searchCts = null;
@@ -63,6 +75,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         Items.CollectionChanged -= OnItemsCollectionChanged;
         foreach (var t in Items) t.PropertyChanged -= OnTilePropertyChanged;
         _selected.Clear();
+        try { _disposalCts.Dispose(); } catch { /* swallow */ }
         // ClipSearchService is owned by the view, disposed there.
     }
 
@@ -188,6 +201,9 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
 
     public async Task RefreshAsync(CancellationToken ct)
     {
+        if (_disposed) return;
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
+        var token = linked.Token;
         try
         {
             IsLoading = true;
@@ -196,13 +212,14 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             IReadOnlyList<FileRow> rows;
             if (string.IsNullOrWhiteSpace(_query))
             {
-                rows = await _store.RecentAsync(PageSize, ct).ConfigureAwait(false);
+                rows = await _store.RecentAsync(PageSize, token).ConfigureAwait(false);
             }
             else
             {
-                rows = await _clip.SearchAsync(_query, PageSize, ct).ConfigureAwait(false);
+                rows = await _clip.SearchAsync(_query, PageSize, token).ConfigureAwait(false);
             }
 
+            if (_disposed || token.IsCancellationRequested) return;
             var filtered = new List<FileTile>(rows.Count);
             foreach (var r in rows)
             {
@@ -217,15 +234,19 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         }
         catch (OperationCanceledException)
         {
-            // Outer call superseded — ignore.
+            // Outer call superseded OR view unloaded mid-flight — ignore.
+        }
+        catch (ObjectDisposedException)
+        {
+            // Services torn down during shutdown — ignore.
         }
         catch (Exception ex)
         {
-            ErrorMessage = ex.Message;
+            if (!_disposed) ErrorMessage = ex.Message;
         }
         finally
         {
-            IsLoading = false;
+            if (!_disposed) IsLoading = false;
         }
     }
 
@@ -236,11 +257,15 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     /// </summary>
     public async Task SemanticSearchWithSeedAsync(float[] seed, CancellationToken ct)
     {
+        if (_disposed) return;
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
+        var token = linked.Token;
         try
         {
             IsLoading = true;
             ErrorMessage = null;
-            var ranked = await _store.SemanticSearchAsync(seed, PageSize, ct).ConfigureAwait(false);
+            var ranked = await _store.SemanticSearchAsync(seed, PageSize, token).ConfigureAwait(false);
+            if (_disposed || token.IsCancellationRequested) return;
             var filtered = new List<FileTile>(ranked.Count);
             foreach (var hit in ranked)
             {
@@ -253,8 +278,9 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             ApplyOnUi(filtered);
         }
         catch (OperationCanceledException) { /* expected */ }
-        catch (Exception ex) { ErrorMessage = ex.Message; }
-        finally { IsLoading = false; }
+        catch (ObjectDisposedException) { /* expected during teardown */ }
+        catch (Exception ex) { if (!_disposed) ErrorMessage = ex.Message; }
+        finally { if (!_disposed) IsLoading = false; }
     }
 
     private void ApplyOnUi(IReadOnlyList<FileTile> next)

@@ -80,6 +80,20 @@
                  AutoPilot is intentionally NOT a button here — matches macOS
                  reference (sidebar doesn't host the trigger). RunAutoPilotAsync
                  is callable from command palette / future entry points. -->
+
+            <!-- V14.9-H: tiny "Open engine log" affordance. Useful diagnostic
+                 link when a scan didn't behave as expected. Opens
+                 %LOCALAPPDATA%\FileID\logs\engine.jsonl in the user's default
+                 .jsonl handler (Notepad on a fresh box). Single-click; no
+                 prominence — sits as a discreet caption-styled hyperlink. -->
+            <HyperlinkButton x:Name="OpenLogButton"
+                             Click="OnOpenLogClicked"
+                             Padding="0"
+                             HorizontalAlignment="Left">
+                <TextBlock Text="Open engine log"
+                           Style="{StaticResource CaptionTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+            </HyperlinkButton>
         </StackPanel>
 
         <!-- In-flight: phase + progress + stats + Pause/Cancel -->

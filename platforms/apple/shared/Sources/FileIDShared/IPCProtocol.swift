@@ -271,13 +271,18 @@ public struct DeepAnalyzeProgress: Codable, Sendable {
     public let etaSeconds: Double?
     public let currentPath: String?
     public let modelKind: String
+    /// V14.9-L1: partial caption text accumulated from per-token streaming.
+    /// Engine throttles emission to 4 Hz so a fast VLM doesn't flood the
+    /// sink. nil on pre-inference progress events ("starting file N").
+    public let currentCaption: String?
 
-    public init(processed: Int, total: Int, etaSeconds: Double?, currentPath: String?, modelKind: String) {
+    public init(processed: Int, total: Int, etaSeconds: Double?, currentPath: String?, modelKind: String, currentCaption: String? = nil) {
         self.processed = processed
         self.total = total
         self.etaSeconds = etaSeconds
         self.currentPath = currentPath
         self.modelKind = modelKind
+        self.currentCaption = currentCaption
     }
 }
 

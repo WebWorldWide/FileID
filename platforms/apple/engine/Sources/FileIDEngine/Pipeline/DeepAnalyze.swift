@@ -336,7 +336,13 @@ public actor DeepAnalyze {
     /// Run the VLM on a single image URL. Returns description + a
     /// suggested human-readable filename. Caller must `ensureLoaded`
     /// first (cheap if already loaded).
-    public func analyze(imageURL: URL, faceNames: [String] = []) async -> AnalysisResult {
+    ///
+    /// V14.9-L1: optional `onToken` callback fires once per MLX-emitted
+    /// chunk so a streaming UI can render the partial caption as the
+    /// model generates it. Callbacks are awaited inline; throttle on
+    /// the caller side if the consumer is slow (caller throttles to 4 Hz
+    /// in DeepAnalyzeRunner so the IPC sink isn't flooded).
+    public func analyze(imageURL: URL, faceNames: [String] = [], onToken: ((String) async -> Void)? = nil) async -> AnalysisResult {
         guard let container else {
             return AnalysisResult(description: "Model not loaded.", proposedName: nil)
         }
@@ -386,7 +392,11 @@ public actor DeepAnalyze {
                     input: lmInput, parameters: params, context: context
                 )
                 for await item in stream {
-                    if let chunk = item.chunk { collector.append(chunk) }
+                    if let chunk = item.chunk {
+                        collector.append(chunk)
+                        // V14.9-L1: per-token callback for live caption streaming.
+                        if let onToken { await onToken(chunk) }
+                    }
                 }
             }
         } catch {

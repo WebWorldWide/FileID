@@ -27,6 +27,12 @@ public sealed record RequestStatusCommand : CommandPayload;
 public sealed record ShutdownCommand : CommandPayload;
 public sealed record RunFaceClusteringCommand : CommandPayload;
 
+/// <summary>V14.9-G: tell the engine to re-probe CUDA Toolkit + cuDNN
+/// availability without an engine restart. The engine replies with a
+/// `hardwareReprobed` event carrying fresh `HardwareInfo` and a
+/// diagnostics string when the pack is still missing.</summary>
+public sealed record VerifyCudaPackCommand : CommandPayload;
+
 public sealed record DeepAnalyzeFileCommand(
     [property: JsonPropertyName("fileID")] long FileId,
     string ModelKind) : CommandPayload;
@@ -160,6 +166,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             "requestStatus"      => Empty<RequestStatusCommand>(ref reader),
             "shutdown"           => Empty<ShutdownCommand>(ref reader),
             "runFaceClustering"  => Empty<RunFaceClusteringCommand>(ref reader),
+            "verifyCudaPack"     => Empty<VerifyCudaPackCommand>(ref reader),
             "deepAnalyzeCancel"  => Empty<DeepAnalyzeCancelCommand>(ref reader),
             "cancelPrewarm"      => Empty<CancelPrewarmCommand>(ref reader),
 
@@ -187,6 +194,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             case RequestStatusCommand:         WriteEmpty(writer, "requestStatus"); break;
             case ShutdownCommand:              WriteEmpty(writer, "shutdown"); break;
             case RunFaceClusteringCommand:     WriteEmpty(writer, "runFaceClustering"); break;
+            case VerifyCudaPackCommand:        WriteEmpty(writer, "verifyCudaPack"); break;
             case DeepAnalyzeFileCommand c:     WriteVariant(writer, "deepAnalyzeFile", c, options); break;
             case DeepAnalyzeFolderCommand c:   WriteVariant(writer, "deepAnalyzeFolder", c, options); break;
             case DeepAnalyzeAllCommand c:      WriteVariant(writer, "deepAnalyzeAll", c, options); break;

@@ -98,6 +98,35 @@ public sealed partial class SidebarProcessingControl : UserControl
                 return;
             }
 
+            // V14.9-F-A1: when the engine isn't Ready yet, instead of
+            // silently no-op'ing (the prior "Start Scan does nothing"
+            // symptom) WAIT for Ready up to 15 s with visible inline
+            // feedback. A user-driven retry queue is friendlier than
+            // a disabled button that gives no hint about why.
+            if (EngineClient.Instance.State != EngineClient.LifecycleState.Ready)
+            {
+                IdleStatusText.Text = $"Waiting for engine ({EngineClient.Instance.State})…";
+                StartScanButton.IsEnabled = false;
+                try
+                {
+                    await EngineClient.Instance.WaitForReadyAsync(System.TimeSpan.FromSeconds(15));
+                }
+                catch (System.Exception ex)
+                {
+                    DebugLog.Warn("StartScan: WaitForReadyAsync threw: " + ex.Message);
+                    await ShowAlertAsync("Engine isn't ready",
+                        $"FileID's engine hasn't reported ready (status: {EngineClient.Instance.State}).\n\n" +
+                        "Try restarting the app. If this keeps happening, check the engine log at " +
+                        "%LOCALAPPDATA%\\FileID\\logs\\engine.jsonl.");
+                    DispatcherQueue.TryEnqueue(Sync);
+                    return;
+                }
+                finally
+                {
+                    DispatcherQueue.TryEnqueue(Sync);
+                }
+            }
+
             // Pre-scan EP gate: warn only when the engine will fall back to
             // CPU. Performance Packs were removed in V14.8.2 — DirectML on
             // every D3D12-capable GPU is now the canonical path, so we no
@@ -288,8 +317,11 @@ public sealed partial class SidebarProcessingControl : UserControl
             var err = EngineClient.Instance.LastError;
             IdleStatusText.Text = err?.Message ?? "Scan failed.";
             IdleStatusText.Foreground = FailedTextBrush;
+            // V14.9-F-A1: Start Scan is enabled on HasFolder alone; the
+            // click handler waits for Ready with visible feedback.
+            // Exception: a Crashed engine — there's nothing to wait for.
             StartScanButton.IsEnabled = AppViewModel.Instance.HasFolder
-                                      && EngineClient.Instance.State == EngineClient.LifecycleState.Ready;
+                                      && EngineClient.Instance.State != EngineClient.LifecycleState.Crashed;
             return;
         }
 
@@ -301,8 +333,15 @@ public sealed partial class SidebarProcessingControl : UserControl
         // red text from the previous failed attempt.
         IdleStatusText.Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"];
 
+        // V14.9-F-A1: enable on HasFolder alone. The previous version also
+        // required `EngineClient.State == Ready`, which made the button
+        // silently grey for users whose engine took longer than usual to
+        // spawn — they reported "I click Start scan, nothing happens."
+        // OnStartScanClicked now awaits Ready up to 15 s with inline
+        // feedback. Crashed is the one state the click can't recover from,
+        // so we still disable for that.
         StartScanButton.IsEnabled = AppViewModel.Instance.HasFolder
-                                  && EngineClient.Instance.State == EngineClient.LifecycleState.Ready;
+                                  && EngineClient.Instance.State != EngineClient.LifecycleState.Crashed;
 
         // FEAT-1: Pause/Resume label always reflects engine truth.
         PauseResumeText.Text = EngineClient.Instance.IsPaused ? "Resume" : "Pause";
@@ -373,7 +412,22 @@ public sealed partial class SidebarProcessingControl : UserControl
         }
         else
         {
-            IdleStatusText.Text = "Ready when you are.";
+            // V14.9-F-A1: surface engine state so the user knows why
+            // Start Scan is/isn't immediately responsive.
+            var state = EngineClient.Instance.State;
+            IdleStatusText.Text = state switch
+            {
+                EngineClient.LifecycleState.Ready    => "Ready when you are.",
+                EngineClient.LifecycleState.Starting => "Engine starting…",
+                EngineClient.LifecycleState.Crashed  => EngineClient.Instance.CrashReason is string r && r.Length > 0
+                    ? $"Engine crashed: {r}"
+                    : "Engine crashed — try restarting the app.",
+                _                                     => $"Engine state: {state}",
+            };
+            if (state == EngineClient.LifecycleState.Crashed)
+            {
+                IdleStatusText.Foreground = FailedTextBrush;
+            }
         }
     }
 
@@ -393,6 +447,47 @@ public sealed partial class SidebarProcessingControl : UserControl
     // scan → cluster → caption → plan, all on-device. RunAutoPilotAsync
     // advances EngineClient.CurrentAutoPilotStage, which drives the
     // tracker dots above this control.
+    /// <summary>V14.9-H: open the engine's daily-rolled JSON log in the
+    /// user's default .jsonl handler. Lets the user diagnose a stuck scan
+    /// or surface a tagging failure without having to navigate AppData
+    /// by hand.</summary>
+    private void OnOpenLogClicked(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            // engine.jsonl uses tracing_appender's daily rolling pattern —
+            // the actual file is named "engine.jsonl.YYYY-MM-DD". Pick the
+            // newest one in the logs dir as a heuristic; fall back to the
+            // logs folder itself when no logs exist.
+            var logsDir = System.IO.Path.Combine(
+                System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
+                "FileID", "logs");
+            string target = logsDir;
+            try
+            {
+                if (System.IO.Directory.Exists(logsDir))
+                {
+                    var newest = new System.IO.DirectoryInfo(logsDir)
+                        .EnumerateFiles("engine.jsonl*")
+                        .OrderByDescending(f => f.LastWriteTimeUtc)
+                        .FirstOrDefault();
+                    if (newest is not null) target = newest.FullName;
+                }
+            }
+            catch { /* swallow — fall through to opening the directory */ }
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = target,
+                UseShellExecute = true,
+            };
+            System.Diagnostics.Process.Start(psi);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("OnOpenLogClicked threw: " + ex.Message);
+        }
+    }
+
     private async void OnAutoPilotClicked(object sender, RoutedEventArgs e)
     {
         try
