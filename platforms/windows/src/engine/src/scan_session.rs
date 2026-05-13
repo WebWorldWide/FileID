@@ -28,7 +28,7 @@ use crate::ipc::{
 };
 use crate::pipeline::dbwriter::{BatchStats, DbWriter};
 use crate::pipeline::discovery::Discovery;
-use crate::pipeline::tagging::{ModelStack, Tagger, TaggedFile, TAGGING_CHANNEL_CAP};
+use crate::pipeline::tagging::{ModelStack, Tagger, TaggedFile};
 use crate::platform::{PriorityBoost, SleepGuard};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,11 +107,11 @@ impl ScanSession {
         let sink = self.sink.clone();
 
         let emit_phase = |phase: SessionPhase| {
-            // BUG-4: try_send + drop on overflow. Phase changes are
+            // Intentional try_send + drop-on-overflow. Phase changes are
             // low-frequency (a few per scan) so the drop is unlikely
-            // in practice, but the original tokio::spawn(async { send })
-            // pattern could pile up unbounded tasks waiting on a full
-            // sink. try_send bounds the engine's worst-case memory.
+            // in practice, but a spawn(async { send.await }) pattern
+            // could pile up unbounded tasks waiting on a full sink.
+            // try_send bounds the engine's worst-case memory.
             let p = phase.as_ipc_phase();
             let _ = sink.try_send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(p))));
         };
@@ -249,10 +249,9 @@ fn emit_batch_summary(sink: &Sink, stats: &BatchStats) {
         resident_mb: 0,
         available_mb: 0,
     };
-    // BUG-4: try_send instead of tokio::spawn(async { send.await }).
-    // Per-batch BatchSummary events (one per ~100 files) are best-effort —
-    // dropping during a sink-full burst is preferable to spawning an
-    // unbounded tail of tasks awaiting capacity.
+    // Intentional try_send. Per-batch BatchSummary events (one per ~100
+    // files) are best-effort — dropping during a sink-full burst is
+    // preferable to spawning an unbounded tail of tasks awaiting capacity.
     let _ = sink.try_send(IpcEvent::now(EventPayload::BatchSummary(Wrap::new(summary))));
 }
 
@@ -292,9 +291,9 @@ fn maybe_emit_progress(
         resident_mb: 0,
         available_mb: 0,
     };
-    // BUG-4: try_send. Progress events are throttled to 10 Hz / 1k files,
-    // so dropping is rare in practice — and the next emit (≤100ms later)
-    // brings the UI back in sync.
+    // Intentional try_send. Progress events are throttled to 10 Hz / 1k
+    // files, so dropping is rare in practice — and the next emit (≤100ms
+    // later) brings the UI back in sync.
     let _ = sink.try_send(IpcEvent::now(EventPayload::Progress(Wrap::new(progress))));
 }
 

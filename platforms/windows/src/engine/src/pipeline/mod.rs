@@ -13,7 +13,3 @@ pub mod face_clustering;
 pub mod deep_analyze;
 pub mod restructure;
 pub mod restructure_apply;
-
-pub use discovery::{DiscoveredFile, Discovery, FileKind};
-pub use tagging::{TaggedFile, Tagger};
-pub use dbwriter::DbWriter;

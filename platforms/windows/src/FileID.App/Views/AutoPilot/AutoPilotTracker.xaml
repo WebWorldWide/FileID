@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    AutoPilotTracker — 4-step horizontal progress tracker. Mirrors
+    macOS's task(id:)-driven stage UI. Dots fill in order as
+    EngineClient.CurrentAutoPilotStage advances:
+
+        Scan ──── Cluster ──── Caption ──── Plan
+
+    Active dot = gold + pulse animation; completed dots = green; pending
+    dots = faint gray. The whole control is hidden when CurrentAutoPilotStage
+    is null and revealed on the first stage transition.
+-->
+<UserControl
+    x:Class="FileID.Views.AutoPilot.AutoPilotTracker"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <StackPanel Spacing="6">
+        <TextBlock Text="AUTOPILOT"
+                   Style="{StaticResource CaptionTextBlockStyle}"
+                   FontWeight="SemiBold"
+                   CharacterSpacing="40"
+                   Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+
+        <Grid x:Name="StagesGrid" ColumnSpacing="4">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <!-- 4 stage cells: each is a labeled dot. Cells fill via code-behind. -->
+            <StackPanel Grid.Column="0" Spacing="4" HorizontalAlignment="Center">
+                <Ellipse x:Name="DotScan" Width="10" Height="10"
+                         Fill="{ThemeResource ControlStrokeColorDefaultBrush}" />
+                <TextBlock x:Name="LabelScan" Text="Scan"
+                           Style="{StaticResource CaptionTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                           HorizontalAlignment="Center" />
+            </StackPanel>
+            <StackPanel Grid.Column="1" Spacing="4" HorizontalAlignment="Center">
+                <Ellipse x:Name="DotCluster" Width="10" Height="10"
+                         Fill="{ThemeResource ControlStrokeColorDefaultBrush}" />
+                <TextBlock x:Name="LabelCluster" Text="Cluster"
+                           Style="{StaticResource CaptionTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                           HorizontalAlignment="Center" />
+            </StackPanel>
+            <StackPanel Grid.Column="2" Spacing="4" HorizontalAlignment="Center">
+                <Ellipse x:Name="DotCaption" Width="10" Height="10"
+                         Fill="{ThemeResource ControlStrokeColorDefaultBrush}" />
+                <TextBlock x:Name="LabelCaption" Text="Caption"
+                           Style="{StaticResource CaptionTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                           HorizontalAlignment="Center" />
+            </StackPanel>
+            <StackPanel Grid.Column="3" Spacing="4" HorizontalAlignment="Center">
+                <Ellipse x:Name="DotPlan" Width="10" Height="10"
+                         Fill="{ThemeResource ControlStrokeColorDefaultBrush}" />
+                <TextBlock x:Name="LabelPlan" Text="Plan"
+                           Style="{StaticResource CaptionTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                           HorizontalAlignment="Center" />
+            </StackPanel>
+        </Grid>
+    </StackPanel>
+</UserControl>

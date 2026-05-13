@@ -15,8 +15,7 @@
 // workers fall behind.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tokio::sync::mpsc;
 use walkdir::WalkDir;
 

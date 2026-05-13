@@ -38,10 +38,12 @@
                        TextWrapping="Wrap" />
         </StackPanel>
 
-        <!-- Toolbar: search + kind filter. -->
+        <!-- Toolbar: search + kind filter + V14.9-D1 Select-all-visible + V14.9-D2 Undo pill. -->
         <Grid Grid.Row="1" ColumnSpacing="12">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
 
@@ -63,6 +65,34 @@
                 <ComboBoxItem Content="PDFs" Tag="pdf"/>
                 <ComboBoxItem Content="Audio" Tag="audio"/>
             </ComboBox>
+
+            <!-- V14.9-D1: explicit "Select all" affordance. macOS Library
+                 tab always exposes this so users don't have to discover
+                 Ctrl+Click. Toggling fills the selection bar; clicking
+                 again clears. -->
+            <Button x:Name="SelectAllButton"
+                    Grid.Column="2"
+                    Click="OnSelectAllClicked"
+                    ToolTipService.ToolTip="Select all visible files (Ctrl+A)">
+                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                    <FontIcon Glyph="&#xE762;" FontSize="13" />
+                    <TextBlock x:Name="SelectAllText" Text="Select" />
+                </StackPanel>
+            </Button>
+
+            <!-- V14.9-D2: Undo-last-rename header button. Hidden when the
+                 UndoStack is empty; shows a tappable pill with the last
+                 destructive op's label when entries exist. -->
+            <Button x:Name="UndoButton"
+                    Grid.Column="3"
+                    Click="OnUndoLastClicked"
+                    Visibility="Collapsed"
+                    ToolTipService.ToolTip="Undo last destructive action (Ctrl+Z)">
+                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                    <FontIcon Glyph="&#xE7A7;" FontSize="13" />
+                    <TextBlock x:Name="UndoButtonText" Text="Undo" />
+                </StackPanel>
+            </Button>
         </Grid>
 
         <!-- Selection toolbar — visible when at least one tile is selected. -->

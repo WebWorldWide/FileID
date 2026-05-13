@@ -75,7 +75,10 @@
                                TextWrapping="Wrap"
                                Text="On-device models. Install once; everything runs locally."/>
 
-                    <!-- ArcFace -->
+                    <!-- ArcFace. V14.8.4 Bug 3: every dynamic surface is now
+                         x:Bind against Svc.Arcface.* so the card reflects
+                         engine state changes regardless of where they
+                         originated (Welcome sheet, another window, etc). -->
                     <Grid ColumnSpacing="12" Padding="14,12" CornerRadius="10"
                           Background="{ThemeResource SubtleFillColorTertiaryBrush}">
                         <Grid.ColumnDefinitions>
@@ -86,32 +89,62 @@
                         <StackPanel Grid.Column="0" Spacing="2">
                             <TextBlock Text="ArcFace + SCRFD"
                                        Style="{StaticResource BodyStrongTextBlockStyle}"/>
-                            <TextBlock x:Name="ArcFaceStatusText"
-                                       Text="Face detection + identity embedding (~120 MB)"
+                            <TextBlock Text="Face detection + identity embedding (~120 MB)"
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
-                            <ProgressBar x:Name="ArcFaceProgress"
-                                         Visibility="Collapsed"
+                            <ProgressBar Maximum="1"
+                                         Value="{x:Bind Svc.Arcface.Fraction, Mode=OneWay}"
+                                         Foreground="{StaticResource GoldBrush}"
+                                         Visibility="{x:Bind ShowDeterminate(Svc.Arcface.Status, Svc.Arcface.Fraction), Mode=OneWay}"
                                          Margin="0,4,0,0"
-                                         Height="4"
-                                         Maximum="1"/>
+                                         Height="4"/>
+                            <ProgressRing IsActive="{x:Bind SpinnerActive(Svc.Arcface.Status, Svc.Arcface.Fraction), Mode=OneWay}"
+                                          Visibility="{x:Bind ShowSpinner(Svc.Arcface.Status, Svc.Arcface.Fraction), Mode=OneWay}"
+                                          Width="16" Height="16"
+                                          Margin="0,4,0,0"
+                                          HorizontalAlignment="Left"
+                                          Foreground="{StaticResource GoldBrush}"/>
+                            <TextBlock FontFamily="Consolas"
+                                       FontSize="11"
+                                       Text="{x:Bind ProgressLabel(Svc.Arcface.Message, Svc.Arcface.Fraction, Svc.Arcface.BytesDone, Svc.Arcface.TotalBytes), Mode=OneWay}"
+                                       Visibility="{x:Bind VisibleIfDownloading(Svc.Arcface.Status), Mode=OneWay}"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                       Margin="0,2,0,0"
+                                       TextWrapping="Wrap"/>
+                            <TextBlock FontFamily="Consolas"
+                                       FontSize="11"
+                                       Text="{x:Bind RateEtaLabel(Svc.Arcface.BytesPerSecond, Svc.Arcface.EtaSeconds), Mode=OneWay}"
+                                       Visibility="{x:Bind ShowRateEta(Svc.Arcface.Status, Svc.Arcface.BytesPerSecond), Mode=OneWay}"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                       TextWrapping="Wrap"/>
+                            <TextBlock Text="{x:Bind ErrorLabel(Svc.Arcface.LastError), Mode=OneWay}"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                                       Visibility="{x:Bind VisibleIfFailed(Svc.Arcface.Status), Mode=OneWay}"
+                                       TextWrapping="Wrap"/>
                         </StackPanel>
                         <TextBlock Grid.Column="1"
-                                   x:Name="ArcFaceSizeText"
                                    Text="120 MB"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                    VerticalAlignment="Center"
                                    Margin="0,0,8,0"/>
-                        <Button Grid.Column="2"
-                                x:Name="ArcFaceInstallButton"
-                                Content="Install"
-                                Tag="arcface_buffalo"
-                                Click="OnInstallModelClicked"
-                                AutomationProperties.Name="Install ArcFace + SCRFD"/>
+                        <Grid Grid.Column="2" VerticalAlignment="Center">
+                            <TextBlock Text="✓ Installed"
+                                       Foreground="{ThemeResource SystemFillColorSuccessBrush}"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       VerticalAlignment="Center"
+                                       Visibility="{x:Bind VisibleIfInstalled(Svc.Arcface.Status), Mode=OneWay}"/>
+                            <Button Content="{x:Bind ButtonLabel(Svc.Arcface.Status), Mode=OneWay}"
+                                    Tag="arcface_buffalo"
+                                    Click="OnInstallModelClicked"
+                                    MinWidth="86"
+                                    Visibility="{x:Bind ShowActionButton(Svc.Arcface.Status), Mode=OneWay}"
+                                    AutomationProperties.Name="Install ArcFace + SCRFD"/>
+                        </Grid>
                     </Grid>
 
-                    <!-- MobileCLIP-S2 -->
+                    <!-- MobileCLIP-S2. Same x:Bind pattern as ArcFace. -->
                     <Grid ColumnSpacing="12" Padding="14,12" CornerRadius="10"
                           Background="{ThemeResource SubtleFillColorTertiaryBrush}">
                         <Grid.ColumnDefinitions>
@@ -122,29 +155,59 @@
                         <StackPanel Grid.Column="0" Spacing="2">
                             <TextBlock Text="MobileCLIP-S2"
                                        Style="{StaticResource BodyStrongTextBlockStyle}"/>
-                            <TextBlock x:Name="ClipStatusText"
-                                       Text="Semantic image search (~210 MB) — 'a dog at the beach'"
+                            <TextBlock Text="Semantic image search (~210 MB) — 'a dog at the beach'"
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
-                            <ProgressBar x:Name="ClipProgress"
-                                         Visibility="Collapsed"
+                            <ProgressBar Maximum="1"
+                                         Value="{x:Bind Svc.Clip.Fraction, Mode=OneWay}"
+                                         Foreground="{StaticResource GoldBrush}"
+                                         Visibility="{x:Bind ShowDeterminate(Svc.Clip.Status, Svc.Clip.Fraction), Mode=OneWay}"
                                          Margin="0,4,0,0"
-                                         Height="4"
-                                         Maximum="1"/>
+                                         Height="4"/>
+                            <ProgressRing IsActive="{x:Bind SpinnerActive(Svc.Clip.Status, Svc.Clip.Fraction), Mode=OneWay}"
+                                          Visibility="{x:Bind ShowSpinner(Svc.Clip.Status, Svc.Clip.Fraction), Mode=OneWay}"
+                                          Width="16" Height="16"
+                                          Margin="0,4,0,0"
+                                          HorizontalAlignment="Left"
+                                          Foreground="{StaticResource GoldBrush}"/>
+                            <TextBlock FontFamily="Consolas"
+                                       FontSize="11"
+                                       Text="{x:Bind ProgressLabel(Svc.Clip.Message, Svc.Clip.Fraction, Svc.Clip.BytesDone, Svc.Clip.TotalBytes), Mode=OneWay}"
+                                       Visibility="{x:Bind VisibleIfDownloading(Svc.Clip.Status), Mode=OneWay}"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                       Margin="0,2,0,0"
+                                       TextWrapping="Wrap"/>
+                            <TextBlock FontFamily="Consolas"
+                                       FontSize="11"
+                                       Text="{x:Bind RateEtaLabel(Svc.Clip.BytesPerSecond, Svc.Clip.EtaSeconds), Mode=OneWay}"
+                                       Visibility="{x:Bind ShowRateEta(Svc.Clip.Status, Svc.Clip.BytesPerSecond), Mode=OneWay}"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                       TextWrapping="Wrap"/>
+                            <TextBlock Text="{x:Bind ErrorLabel(Svc.Clip.LastError), Mode=OneWay}"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                                       Visibility="{x:Bind VisibleIfFailed(Svc.Clip.Status), Mode=OneWay}"
+                                       TextWrapping="Wrap"/>
                         </StackPanel>
                         <TextBlock Grid.Column="1"
-                                   x:Name="ClipSizeText"
                                    Text="210 MB"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                    VerticalAlignment="Center"
                                    Margin="0,0,8,0"/>
-                        <Button Grid.Column="2"
-                                x:Name="ClipInstallButton"
-                                Content="Install"
-                                Tag="mobileclip_s2"
-                                Click="OnInstallModelClicked"
-                                AutomationProperties.Name="Install MobileCLIP-S2"/>
+                        <Grid Grid.Column="2" VerticalAlignment="Center">
+                            <TextBlock Text="✓ Installed"
+                                       Foreground="{ThemeResource SystemFillColorSuccessBrush}"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       VerticalAlignment="Center"
+                                       Visibility="{x:Bind VisibleIfInstalled(Svc.Clip.Status), Mode=OneWay}"/>
+                            <Button Content="{x:Bind ButtonLabel(Svc.Clip.Status), Mode=OneWay}"
+                                    Tag="mobileclip_s2"
+                                    Click="OnInstallModelClicked"
+                                    MinWidth="86"
+                                    Visibility="{x:Bind ShowActionButton(Svc.Clip.Status), Mode=OneWay}"
+                                    AutomationProperties.Name="Install MobileCLIP-S2"/>
+                        </Grid>
                     </Grid>
 
                     <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
@@ -168,8 +231,6 @@
                                Style="{StaticResource BodyTextBlockStyle}"/>
                     <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,8,0,0">
                         <Button Content="Open log folder" Click="OnOpenLogsClicked" />
-                        <Button Content="Verify zero telemetry" Click="OnVerifyPrivacyClicked"
-                                ToolTipService.ToolTip="Scan the engine binary for known telemetry strings (Sentry, AppInsights, Firebase, Segment, Mixpanel, Google Analytics)." />
                     </StackPanel>
                 </StackPanel>
             </Border>
@@ -227,61 +288,6 @@
                         </StackPanel>
                     </Border>
 
-                    <!-- Performance Pack rows. The "Install" buttons stay
-                         disabled until the engine ships pack manifest URLs
-                         (canonical SHA256-pinned ZIPs). UX surface is here
-                         so the affordance is visible from day one. -->
-                    <StackPanel Spacing="6">
-                        <TextBlock Text="Performance Packs"
-                                   Style="{StaticResource CaptionTextBlockStyle}"
-                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   FontWeight="SemiBold"
-                                   CharacterSpacing="40" />
-                        <Grid ColumnSpacing="8">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="Auto"/>
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="0" VerticalAlignment="Center"
-                                       Style="{StaticResource BodyTextBlockStyle}"
-                                       Text="NVIDIA CUDA Pack — ~600 MB. Unlocks ~30% faster ML inference on RTX-class GPUs."/>
-                            <Button Grid.Column="1" Content="Install"
-                                    Click="OnInstallPackClicked"
-                                    Tag="cuda_pack_x64"
-                                    ToolTipService.ToolTip="Downloads the CUDA EP DLLs from the FileID HuggingFace dataset repo." />
-                        </Grid>
-                        <Grid ColumnSpacing="8">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="Auto"/>
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="0" VerticalAlignment="Center"
-                                       Style="{StaticResource BodyTextBlockStyle}"
-                                       Text="Intel OpenVINO Pack — ~300 MB. Vendor-tuned EP for Intel iGPU + Arc."/>
-                            <Button Grid.Column="1" Content="Install"
-                                    Click="OnInstallPackClicked"
-                                    Tag="openvino_pack_x64"
-                                    ToolTipService.ToolTip="Downloads the OpenVINO EP DLLs from the FileID HuggingFace dataset repo." />
-                        </Grid>
-                        <Grid ColumnSpacing="8">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="Auto"/>
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="0" VerticalAlignment="Center"
-                                       Style="{StaticResource BodyTextBlockStyle}"
-                                       Text="Snapdragon QNN Pack — ~150 MB. Hexagon NPU acceleration for WoA."/>
-                            <Button Grid.Column="1" Content="Install"
-                                    Click="OnInstallPackClicked"
-                                    Tag="qnn_pack_arm64"
-                                    ToolTipService.ToolTip="Downloads the QNN EP DLLs from the FileID HuggingFace dataset repo." />
-                        </Grid>
-                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
-                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   TextWrapping="Wrap"
-                                   Text="Pack ZIPs are SHA256-pinned; engine restarts after install to pick up the new EP. Manual install (download + extract) is also supported — just drop the DLLs next to FileIDEngine.exe." />
-                    </StackPanel>
-
                     <!-- Manual override. Auto-detect is the default; Settings.json
                          persistence lands when the engine wires the override
                          consumer (Phase 2.6). -->
@@ -306,7 +312,79 @@
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                    TextWrapping="Wrap"
-                                   Text="Persisted across launches. The engine consumes this once Phase 2.6 (real ML inference) lands; today the override is saved but not applied." />
+                                   Text="Persisted across launches. Takes effect on the next scan (already-loaded models keep their EP)." />
+                    </StackPanel>
+
+                    <!-- F3c (V14.8.3): NVIDIA acceleration. Only visible on
+                         NVIDIA hardware. Two affordances:
+                         (1) Install the CUDA-flavored llama.cpp for Deep Analyze
+                             (works on any modern NVIDIA driver; no separate cuDNN).
+                         (2) Direct user to NVIDIA's official cuDNN download to
+                             unlock the CUDA ORT EP for scanning. Both honest
+                             paths; nothing hidden. -->
+                    <StackPanel x:Name="NvidiaAccelerationSection"
+                                Visibility="Collapsed"
+                                Spacing="10">
+                        <TextBlock Text="NVIDIA acceleration"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   FontWeight="SemiBold"
+                                   CharacterSpacing="40" />
+
+                        <!-- Row 1: CUDA llama.cpp for Deep Analyze. -->
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                                <TextBlock Text="CUDA llama.cpp for Deep Analyze"
+                                           Style="{StaticResource BodyStrongTextBlockStyle}"/>
+                                <TextBlock x:Name="CudaLlamaStatusText"
+                                           Style="{StaticResource CaptionTextBlockStyle}"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                           TextWrapping="Wrap"
+                                           Text="~200 MB download. Runs Deep Analyze 15-25% faster than the default Vulkan build. No separate cuDNN required."/>
+                            </StackPanel>
+                            <Button Grid.Column="1"
+                                    x:Name="InstallCudaLlamaButton"
+                                    Content="Install"
+                                    Click="OnInstallCudaLlamaClicked"
+                                    ToolTipService.ToolTip="Downloads llama-bXXXX-bin-win-cuda-cu12.4-x64.zip from github.com/ggml-org/llama.cpp/releases." />
+                        </Grid>
+
+                        <!-- Auto-install toggle. On by default — the CUDA
+                             llama.cpp prewarm fires silently when an NVIDIA
+                             GPU is detected on the first launch. Users who
+                             prefer the Vulkan build (smaller, identical UX)
+                             can opt out here. -->
+                        <ToggleSwitch x:Name="AutoInstallCudaToggle"
+                                      Header="Auto-install CUDA acceleration"
+                                      OffContent="Off — leave Deep Analyze on Vulkan"
+                                      OnContent="On — install CUDA llama.cpp on first launch"
+                                      IsOn="True"
+                                      Toggled="OnAutoInstallCudaToggled" />
+
+                        <!-- Row 2: cuDNN for scanning ORT EP. -->
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                                <TextBlock Text="cuDNN for scanning (CUDA EP)"
+                                           Style="{StaticResource BodyStrongTextBlockStyle}"/>
+                                <TextBlock x:Name="CudnnStatusText"
+                                           Style="{StaticResource CaptionTextBlockStyle}"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                           TextWrapping="Wrap"
+                                           Text="Install NVIDIA cuDNN to unlock the CUDA execution provider for scanning (10-15% faster than DirectML on RTX-class GPUs). FileID can't redistribute cuDNN — get it from NVIDIA's developer site." />
+                            </StackPanel>
+                            <Button Grid.Column="1"
+                                    Content="Get cuDNN"
+                                    Click="OnOpenCudnnDownloadsClicked"
+                                    ToolTipService.ToolTip="Opens developer.nvidia.com/cudnn-downloads in your default browser." />
+                        </Grid>
                     </StackPanel>
                 </StackPanel>
             </Border>

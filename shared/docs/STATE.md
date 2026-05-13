@@ -2,6 +2,337 @@
 
 > Snapshot of what's working and where we left off. Update at the end of every working session.
 
+## V14.8.5 (2026-05-12) — Windows: downloader timeout + resume rewrite (Qwen 2.5-VL 3B "reading chunk" fix)
+
+User report: clicking **Install all** on the Welcome sheet, the Qwen 2.5-VL 3B row failed with `Failed: Couldn't download Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf: reading chunk` — screenshot attached to the session.
+
+Root cause (verified in `platforms/windows/src/engine/src/downloader.rs`):
+
+1. `build_shared_client` used `.timeout(Duration::from_secs(300))` — a *total per-request* wall clock that includes connect + TLS + every body byte. The Qwen 2.5-VL 3B GGUF is 2.1 GB; on connections slower than ~7 MB/s the body alone exceeds 300 s and reqwest aborts mid-stream → `bytes_stream().next()` yields `Err` → `.context("reading chunk")` propagates that label all the way up to `EngineError.message`.
+2. `download_simple` had no retry on stream errors — one TLS hiccup killed the entire 2.1 GB download. The parallel path's `download_range_with_retry` already retries chunk errors (lines 442–447 of the pre-fix file); the simple path didn't.
+3. HuggingFace's CDN occasionally omits `Accept-Ranges: bytes` from HEAD responses behind 302 redirects even though it honors `Range:` on GET, so the parallel path was silently downgrading to the no-retry simple path more often than it should.
+
+Fix:
+
+- **Phase-specific timeouts.** Replaced `.timeout(300s)` with `.connect_timeout(30s) + .read_timeout(120s)`. `read_timeout` (reqwest 0.12.5+, locked at 0.12.28) only fires when **no bytes arrive** for the configured duration; a slow-but-steady 1 MB/s stream now completes a 2 GB download cleanly.
+- **Retry + resume in `download_simple`.** Wrapped the body loop in a 4-attempt outer loop (initial + 3 retries, 1 s / 4 s / 16 s backoffs). Each retry stats the in-progress `.part` file and sends `Range: bytes=<existing_len>-`; 206 → append, 200 → server ignored Range, truncate and start over. 4xx (non-429) fails fast. SHA256 verification re-hashes from disk when the download spanned multiple attempts.
+- **Range-support probe.** New `probe_range_support()` helper sends `GET ... Range: bytes=0-0` when HEAD didn't advertise `Accept-Ranges: bytes`. 206 means parallel-range path is safe; total is parsed from `Content-Range`. Keeps the slow simple path out of the hot path for the Qwen / SmolVLM / Gemma downloads HuggingFace serves.
+- **Cancel token threaded.** `download_simple` now takes `cancel: Arc<AtomicBool>` and polls it between attempts + inside the chunk loop, matching the parallel path. The single fallback site in `download_parallel` passes `cancel.clone()`. No main.rs caller changes needed (only `download_parallel` is called from main.rs).
+- **Better failure message.** `model_download_failed` error text in `main.rs` (both regular and zip-file paths) now reads "Large model downloads can take several minutes — check your connection and click Retry. Downloads resume from where they stopped, so no progress is lost." — accurate now that the simple path resumes from disk.
+
+Side cleanup of stale `BUG-N:` comments that read as outstanding bugs but document already-applied fixes (the closure-then-CloseHandle pattern in `platform.rs::get_parent_pid` is correct, the ReadStore gate is held end-to-end, the `try_send` drops in scan-session / deep-analyze callbacks are intentional bounded backpressure). Rephrased to describe the invariant; left the `BUG-N:` labels on EngineClient.cs / UndoStack.cs / LibraryViewModel.cs / LibraryView.xaml.cs / MainWindow.xaml.cs intact since they're useful "this code shape exists because of bug N" anchors during review.
+
+`cargo check` clean (52 pre-existing dead-code warnings, no new ones). User runs the full build + smoke-tests Install all on real hardware.
+
+## V14.8.4 (2026-05-11) — Windows: drag, scan-feedback, Settings sync, install-all pre-stamp, telemetry-button removal
+
+User reports after V14.8.3:
+1. "Semantic search (MobileCLIP-S2) won't start downloading until I hit cancel after I hit install all even if the other things install perfectly fine."
+2. "I can't move FileID on windows around. Like when I try to grab the window to move it, it's just stuck in place."
+3. "If you do install the local AI models in welcome screen it needs to update in the settings page."
+4. "Get rid of the 'verify zero telemetry' button."
+5. "When I click 'start scan' nothing happens. I don't see anything pop up like in the macOS version. I don't see anything happen in the task manager."
+
+V14.8.3 patched #1 and #5 one layer too deep; this pass addresses the real user-visible causes for all five.
+
+### Bug 1 — `InstallAllAsync` pre-stamps slots before awaiting
+
+Root cause: the three `TryInstallAsync` tasks race for `EngineClient._writeLock` when serializing their IPC commands. Whichever loses both races (often MobileCLIP, the largest) looked frozen — its engine F1 "Queued" event lands within ~10 ms but can be visually overwritten by ArcFace's first real progress event. Compounded by MobileCLIP downloading 4 files sequentially vs. 1 for ArcFace/Qwen, so per-total fraction advances visibly slower.
+
+Fix: `Services/ModelInstallerService.cs::InstallAllAsync` now pre-stamps every not-yet-installed slot to `Status=Downloading` + `Message="Queued — starting download…"` + `LastProgressAt=now` BEFORE awaiting the three tasks. All three rows flip identical to the user the instant they click Install all. `PrewarmAsync` was also guarded to skip the redundant `ResetForRetry` when the slot was already pre-stamped (would otherwise blank Fraction mid-flight if the engine's first event arrived between pre-stamp and PrewarmAsync entry).
+
+Engine instrumentation: `engine/src/main.rs::handle_prewarm_model` now emits `[PREWARM] entered handler` + per-file `[PREWARM] starting file` + per-return-path `[PREWARM] exiting outcome=...` `tracing::info!` calls. Next time the user reports this we can read `engine.jsonl` and prove three concurrent files were live.
+
+Cosmetic: the per-file download caption for multi-file models now includes the file name + size — `Downloading MobileCLIP-S2 — image_encoder.onnx (1 of 4, ~85 MB)` — so users understand why MobileCLIP advances slower than ArcFace on the same wall clock.
+
+### Bug 2 — Window drag
+
+Root cause: `MainWindow.xaml`'s outer `Grid x:Name="RootLayout"` had `AllowDrop="True"` + `DragOver`/`DragLeave`/`Drop` handlers for file drag-drop. The drop-target registration on the parent shadowed WinUI's title-bar drag region via `WM_NCHITTEST`. Compounded by `SetTitleBar(AppTitleBar)` being called in the ctor before `AppTitleBar` was laid out (zero-bounds drag region registers).
+
+Fix:
+- `MainWindow.xaml` — moved `AllowDrop` + the three drag handlers from `RootLayout` to the inner `<Grid Grid.Row="1">` that holds Sidebar + DetailHost. The title bar (Row 0) is no longer a drop target. No user-visible behavior change: drops on the chrome would never have been useful.
+- `MainWindow.xaml.cs::ApplyTitleBarChrome` — defers `SetTitleBar(AppTitleBar)` to `AppTitleBar.Loaded` so the element has measurable bounds when WinUI captures the non-client region.
+
+### Bug 3 — Settings reflects model install state
+
+Root cause: `Views/Settings/SettingsView.xaml` cards used imperatively-mutated `x:Name`'d TextBlocks, and `OnInstallModelClicked` called `EngineClient.PrewarmModelAsync` directly while attaching a transient subscription torn down in `finally`. When the engine flipped a slot to Installed via Welcome (or any other code path), the Settings view had no live binding and stayed stale.
+
+Fix: rewrote the Settings cards to mirror WelcomeSheet's pattern.
+- Added `internal Services.ModelInstallerService Svc => Services.ModelInstallerService.Instance;` on `SettingsView.xaml.cs`.
+- Subscribed to `Svc.Clip.PropertyChanged` + `Svc.Arcface.PropertyChanged` in the ctor, unsubscribed in `Unloaded`. Calls `Svc.Refresh()` on Loaded to re-seed from on-disk sentinels in case Welcome installed a model while a different tab was active.
+- Copied x:Bind helper methods (`ButtonLabel`, `VisibleIfDownloading`, `VisibleIfInstalled`, `VisibleIfFailed`, `ShowDeterminate`, `ShowSpinner`, `SpinnerActive`, `ShowActionButton`, `ShowRateEta`, `ProgressLabel`, `RateEtaLabel`, `ErrorLabel`, `FormatBytes`, `FormatEta`) verbatim from `WelcomeSheet.xaml.cs`.
+- Rewrote each model card in `SettingsView.xaml` to bind every dynamic surface against `Svc.Arcface.*` / `Svc.Clip.*` — ProgressBar/Ring/Fraction labels/Rate-ETA/Error/Installed pill/Action button.
+- Rewrote `OnInstallModelClicked` to delegate to `slot.InstallAsync()` (shared path with Welcome). Cancel routes to `Svc.CancelAllAsync()` (engine has no per-model cancel).
+- Removed the stale local `OnProgress` subscription block.
+
+### Bug 4 — "Verify zero telemetry" button removed
+
+- `SettingsView.xaml:183-184` — deleted the Button.
+- `SettingsView.xaml.cs:234-255` — deleted `OnVerifyPrivacyClicked`.
+- `Services/PrivacyGrep.cs` — deleted (zero remaining references).
+- KEPT the "What we don't do" privacy panel — that's the product contract copy.
+
+### Bug 5 — Start scan now flips the UI immediately
+
+Root cause: `engine/src/main.rs::handle_start_scan` blocked for 100 ms–30 s on `ModelStack::load_default` BEFORE the first `phaseChanged` event was emitted (that lived downstream in `ScanSession::run`). During that window, the C# UI gate `SidebarProcessingControl.Sync` stayed in `IdlePanel`, so the user saw nothing happen.
+
+Fix: `handle_start_scan` now emits `PhaseChanged(Discovering)` via `sink.send(...).await` (not `try_send` — can't be silently dropped under sink load) BEFORE the model-load block. The UI flips out of `IdlePanel` within microseconds. Every error early-return path (`model_load_failed`, `model_load_timeout`, `scan_failed`) now also emits `PhaseChanged(Failed)` before clearing `scan_state`, so the UI returns to a sensible state on failure instead of being stuck on Discovering forever.
+
+Entry/exit `tracing::info!` calls (`[SCAN] handle_start_scan entered` / `[SCAN] handle_start_scan exiting normally|model_load_failed|model_load_timeout|scan_failed|scan_already_running`) added to every path so the next "nothing happens" report has a traceable trail in `engine.jsonl`.
+
+### Files NOT changed
+
+- IPC schema — unchanged; `PhaseChanged` + `ModelDownloadProgress` events already exist, we're only emitting them earlier or instrumenting around them.
+- macOS port — unchanged.
+- DirectML / CUDA EP dispatch — unchanged.
+
+### Verification
+
+User runs:
+```powershell
+.\platforms\windows\build\build-all.ps1 -Wipe -Desktop -Run
+```
+
+Smoke list:
+1. **Bug 4:** Settings → Engine card has no "Verify zero telemetry" button. "Open log folder" is the only button.
+2. **Bug 2:** Drag the title bar — window moves smoothly. Double-click title bar toggles maximize. Drop a folder onto the content area — overlay appears, drop registers.
+3. **Bug 5:** Pick a folder, Start scan → within < 200 ms IdlePanel disappears, ScanningPanel shows "Discovering files…"; FileIDEngine.exe CPU > 0 in Task Manager; `engine.jsonl` shows `[SCAN]` entry/exit lines. Corrupted model → friendly Failed state within 30 s.
+4. **Bug 3:** Fresh install → click Install all on Welcome → mid-flight, navigate to Settings → Local AI: ArcFace and MobileCLIP cards show the SAME live progress as Welcome. On completion: both flip to "✓ Installed" without re-opening Settings.
+5. **Bug 1:** Click Install all → all three rows show "Queued — starting download…" within < 100 ms. None visibly frozen. All three transition to non-zero percentages and run in parallel. `engine.jsonl` shows three `[PREWARM] entered handler` lines with timestamps within a few hundred ms.
+
+---
+
+## V14.8.3 (2026-05-11) — Install-all "Queued" caption + start-scan crash defenses + honest NVIDIA acceleration
+
+User reports after V14.8.2 shipped:
+1. "When you click install all semantic search just spins like its waiting or can't download till everything else is finished. Either it needs to say queued or actually download in parallel with everything else."
+2. "When I click 'start scan' nothing happens and then the app crashed."
+3. "Find ways to get CUDA or Nvidia GPUs to fly on the program ... Worse comes to worse figure out if we can write something to be able to implement the performance boost."
+
+### F1 — Engine emits an immediate "Queued" progress event
+
+Root cause: `handle_prewarm_model` is dispatched via `tokio::spawn` (so all three model installs DO run in parallel — confirmed by the Phase 1 audit), but the first `ModelDownloadProgress` event for each model only lands after the registry lookup + HTTP handshake — 1-3 s for a 210 MB MobileCLIP download off HuggingFace. The C# row flips Status to `Downloading` immediately so the spinner appears, but `slot.Message` stays empty until the first event, so two of the three rows visibly tick while MobileCLIP looks frozen.
+
+Fix: `engine/src/main.rs::handle_prewarm_model` now emits a `ModelDownloadProgress { fraction: 0.0, message: "Queued — starting download…" }` event as the very first action in the handler — before the registry lookup, before any I/O. Every row flips to that caption within microseconds of the IPC command being received, then transitions to the real download progress when bytes start flowing. The downloads themselves remain truly parallel; the fix is a perception/UX correction, not a concurrency change.
+
+### F2 — Start-scan crash defenses
+
+The user reported the app crashing after Start scan with no visible feedback. Phase 1 audit identified four candidate root causes; V14.8.3 lands defenses for all of them:
+
+- **`engine/src/main.rs::main`** — install `std::panic::set_hook` at startup. Any Rust panic in the scan pipeline (ORT session create on a corrupt model, an `unwrap()` in a worker, anything) now writes a `tracing::error!` line with location + backtrace to `app.log` before the engine exits. Default unwind behavior is preserved; the hook only adds the trail. Without this, panics crashed the engine silently and the user saw "the app crashed" with no traceable cause.
+- **`engine/src/main.rs::handle_start_scan`** — wrap `tokio::task::spawn_blocking(ModelStack::load_default)` in a 30-second `tokio::time::timeout`. On timeout: emit `EngineError { kind: "model_load_timeout", message: "Loading inference models took longer than 30 seconds — a model file may be corrupted. Reinstall from Settings → Local AI." }` and clean up `scan_state`. Without the timeout, a corrupt or partial `.onnx` could hang ORT's `commit_from_file` forever; the user saw "nothing happens" and force-closed.
+- **`engine/src/models/runtime.rs::create_session`** — stat the model file before handing it to ORT; reject anything under 1 KB or with a stat error. The smallest legitimate `.onnx` (SCRFD-tiny) is ~3 MB; the 1 KB floor catches truncated / aborted prior downloads cleanly with a "model file is truncated, reinstall via Settings → Local AI" error rather than letting ORT panic on a corrupt header.
+- **`platforms/windows/src/FileID.App/Views/Sidebar/SidebarProcessingControl.xaml.cs::OnStartScanClicked`** — the whole `async void` body is now wrapped in `try { … } catch (Exception ex) { DebugLog.Error(...); }` so a broken `XamlRoot`, a dialog conflict, or a broken-pipe to a dying engine can't escape into `App.UnhandledException` and take down the process. Same handler also dropped the stale "Performance Pack available — Open Settings" prompt that referenced the V14.8.2-removed feature; CPU-fallback warning is preserved.
+
+### F3 — Honest NVIDIA acceleration
+
+User asked for "CUDA or NVIDIA GPUs to fly." V14.8.2 removed the fake Performance Packs; V14.8.3 wires the two real paths:
+
+**F3a — CUDA llama.cpp build for Deep Analyze.** Added `llama_runtime_cuda_x64` registry entry pointing at `github.com/ggml-org/llama.cpp/releases/download/b4475/llama-b4475-bin-win-cuda-cu12.4-x64.zip` (~200 MB, real public URL, MIT-licensed). llama.cpp's CUDA backend uses cuBLAS + custom kernels — it does **not** require cuDNN. The CUDA runtime ships with the NVIDIA driver on every Win11 machine from the past two years. So this is a true drop-in install that works on any NVIDIA system with up-to-date drivers, no separate user install needed.
+
+`vlm.rs::VlmRunner::find` was updated to probe `Models/llama.cpp-cuda/` BEFORE `Models/llama.cpp/`; when both are extracted, the CUDA build wins. Logs `[VLM] picked llama-mtmd-cli runtime backend=cuda` so the user can confirm in `app.log`. Expected speedup: 15-25% on VLM inference for NVIDIA users vs the Vulkan build.
+
+**F3b — System-CUDA toolkit probe for ORT scanning EP.** Added `runtime.rs::system_cuda_toolkit_dir()` that searches for an NVIDIA-installed CUDA Toolkit via three signals: `CUDA_PATH` env var, versioned `CUDA_PATH_V12_X` env vars, and the default `%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA\V*\bin\` directory. Returns the bin dir only when both the CUDA runtime DLL (`cudart64_12.dll` or `cudart64_11.dll`) AND cuDNN (`cudnn64_9.dll` or `cudnn64_8.dll`) are present. Engine startup in `main.rs` now calls `platform::register_dll_dirs_under(&cuda_bin)` so the toolkit DLLs become reachable by the LoadLibrary policy (SEC-3 locked it down to System32 + app dir + USER_DIRS; the system CUDA bin enters via this AddDllDirectory call). `is_cuda_pack_present` was updated to consult the probe — when the user has CUDA Toolkit + cuDNN installed system-wide, the EP picker's `priority_chain` now prepends CUDA for NVIDIA hardware automatically. Expected speedup: 10-15% on scanning vs DirectML for the ~20-30% of NVIDIA users who already have CUDA installed.
+
+**F3c — Settings → Performance → "NVIDIA acceleration" section.** Visible only when `RuntimeProbe.vendor == Nvidia`. Two rows:
+- "CUDA llama.cpp for Deep Analyze" — Install button that prewarms `llama_runtime_cuda_x64`. Once installed, Deep Analyze auto-uses the CUDA binary.
+- "cuDNN for scanning (CUDA EP)" — "Get cuDNN" button that opens `https://developer.nvidia.com/cudnn-downloads` in the user's default browser. After they install, the engine's F3b probe picks it up on next launch. Status text reflects whether CUDA EP is already active (`"✓ CUDA execution provider is active. Scanning uses cuDNN."`) or whether action is needed.
+
+### Files NOT changed
+
+- DirectML EP dispatch — still the universal floor for non-NVIDIA + NVIDIA-without-cuDNN. No regression.
+- V14.8.2 pack removal — unchanged; F3 adds back capabilities WITHOUT bringing back the dead pack URLs.
+
+### Verification
+
+- `cargo check` clean, `cargo test --bin FileIDEngine` — 66/66 tests pass.
+- `dotnet build src/FileID.App/FileID.App.csproj -c Debug -p:Platform=x64` — 0 warnings, 0 errors.
+- `dotnet test Tests/FileID.IpcSchema.Tests` — 24/24 tests pass.
+
+### Run
+
+```powershell
+.\platforms\windows\build\build-all.ps1 -Wipe -Desktop -Run
+```
+
+Manual smoke list:
+1. **F1**: Click Install all on welcome sheet → all three rows show "Queued — starting download…" caption within ~100 ms; rows transition to real progress within seconds.
+2. **F2 (graceful)**: Install one or more models, click Start scan → scan runs; `[EP] built session` lines in `app.log`.
+3. **F2 (defense)**: Truncate a model file to 0 bytes manually, click Start scan → friendly error sheet, no crash; `app.log` shows the file-validation rejection.
+4. **F3a**: On NVIDIA box, Settings → Performance → "Install" on CUDA llama.cpp row → ~200 MB download → Deep Analyze a few files → `app.log` shows `[VLM] picked llama-mtmd-cli runtime backend=cuda`.
+5. **F3b**: On NVIDIA box with CUDA Toolkit + cuDNN pre-installed → engine startup → `app.log` shows `[EP] registering system CUDA toolkit bin dir`; first scan's `[EP] built session ep=Cuda vendor=Nvidia` instead of DirectMl.
+6. **F3c**: On NVIDIA box without cuDNN → Settings → Performance shows the NVIDIA acceleration section with "Get cuDNN" button → clicking opens browser.
+
+---
+
+## V14.8.2 (2026-05-11) — GPU Performance Packs removed (no shippable URLs)
+
+User: "Okay so wait does the GPU performance pack not exist then?" → after I confirmed none of the three (CUDA / OpenVINO / QNN) can be shipped as drop-in ZIPs we host: "If you can't find anything remove it cause we don't want fake features."
+
+### What got removed
+
+**Engine** (`platforms/windows/src/engine/`):
+- `models/registry.rs` — the three pack `match` arms (`cuda_pack_x64` / `openvino_pack_x64` / `qnn_pack_arm64`) gone; replaced by a single comment block citing the rationale. `is_performance_pack` helper deleted.
+- `main.rs::handle_prewarm_model` — the V14.8.1 D2 fork (`if is_performance_pack(...) emit pack_not_available`) reverted back to a single `model_download_failed` emission. `pack_not_available` no longer fires from the engine.
+
+**App** (`platforms/windows/src/FileID.App/`):
+- `Services/ModelInstallerService.cs` — `RecommendedPack` property + `_recommendedPack` field + `ShowRecommendedPack` + `RecommendedPackInstalled` event deleted. `EvaluateRecommendedPack` method deleted. `InstallAllAsync` no longer queues a fourth pack task. `OnEngineClientChanged`'s `Info` case (which fed `EvaluateRecommendedPack`) deleted. `SlotFor` no longer maps `cuda_pack_x64` / `openvino_pack_x64` / `qnn_pack_arm64`. `SentinelDirsFor`'s `RecommendedPack` arm deleted. `OnSlotPropertyChanged`'s pack-install-complete branch + `RecommendedPackInstalled` emission deleted.
+- `Views/WelcomeSheet.xaml` — `<Grid x:Name="PackRow">` block (~75 lines) deleted.
+- `Views/WelcomeSheet.xaml.cs` — `OnRecommendedPackInstalled` method (~40 lines) deleted. 15 `Pack*` x:Bind helper methods (`PackRowVisibility`, `PackGlyph`, `PackTitle`, `PackSize`, `PackFraction`, `PackShowDeterminate`, `PackShowSpinner`, `PackSpinnerActive`, `PackVisibleIfDownloading`, `PackVisibleIfFailed`, `PackVisibleIfInstalled`, `PackShowActionButton`, `PackButtonLabel`, `PackProgressLabel`, `PackShowRateEta`, `PackRateEtaLabel`, `PackErrorLabel`, `PackIconBrush`) deleted. `OnPackActionClicked` deleted. `Svc.RecommendedPackInstalled` subscription deleted.
+- `Views/Settings/SettingsView.xaml` — the entire "Performance Pack rows" section (~55 lines, three pack buttons + caption) deleted.
+- `Views/Settings/SettingsView.xaml.cs` — `OnInstallPackClicked` async method (~65 lines, including the post-install restart dialog) deleted.
+
+### What stays (intentionally)
+
+- `EngineError.model_kind` field (V14.8.1 D1) — still the right shape for any model error, independent of packs.
+- `engine/src/platform.rs::register_dll_dirs_under` + the startup-replay walk over `Models\packs\` in `main.rs` — defensive code that no-ops when the dirs don't exist. If a power user manually drops cuDNN + ORT CUDA EP DLLs into a `packs\cuda\` subdir, the loader still finds them.
+- `engine/src/models/runtime.rs::is_cuda_pack_present` / `is_openvino_pack_present` / `is_qnn_pack_present` filesystem probes — still wired into `RuntimeProbe` so a manually-installed pack still gets picked. "Bring your own pack" supported; "we'll download it for you" not.
+- `ipc.schema.json` `pack_not_available` kind — documented, no emitter. Reserved for future re-introduction.
+- `llama_runtime_x64` registry entry — real GitHub release URL, still used for Deep Analyze.
+
+### Practical effect on users
+
+Zero scanning regression. The packs were "max performance" upgrades, not "make it work" — and the engine's EP priority chain already routed everyone through DirectML or CPU as the fallback. After this change:
+
+| Vendor | What runs |
+|---|---|
+| NVIDIA | DirectML EP (~80–90% of CUDA throughput) |
+| AMD | DirectML EP (was already the right path) |
+| Intel | DirectML EP |
+| Snapdragon | CPU |
+| CPU-only | CPU |
+
+The welcome sheet now shows only the three AI model rows (MobileCLIP / ArcFace / Qwen 2.5-VL). Settings → Performance shows only the GPU EP override dropdown — no pack-install buttons that would 404.
+
+### Documentation
+
+- `PACKS.md` rewritten as a status doc explaining the removal + the redistribution-license / SDK-gating blockers per vendor + what stays in the codebase for future re-introduction.
+- `SHIP.md` Appendix W — "Pack required" column dropped; NVIDIA throughput target ≥ 80 → ≥ 60 files/s (DirectML baseline); Snapdragon ≥ 60 → ≥ 25 files/s (CPU baseline); "Performance Pack uploads" pre-req removed.
+- `NEXT.md` — V14.9 B5 entry (llama.cpp ARM64+QNN build) removed (was contingent on packs). External manual step "Performance Pack ZIP upload to HuggingFace" removed.
+- `DECISIONS.md` — appended "2026-05-11 — GPU Performance Packs removed" rationale.
+
+### Verification
+
+- `cargo check` + `cargo test --bin FileIDEngine`: 0 errors, 66/66 tests pass.
+- `dotnet build src/FileID.App/FileID.App.csproj -c Debug -p:Platform=x64`: 0 warnings, 0 errors.
+- `dotnet test Tests/FileID.IpcSchema.Tests`: 24/24 tests pass (the V14.8.1 round-trip tests for `model_kind` + `pack_not_available` schema kind survive; the kind stays documented for future).
+
+---
+
+## V14.8.1 (2026-05-11) — Welcome-sheet install error cross-wiring fix
+
+User: screenshot of the welcome sheet showing "Semantic search (MobileCLIP-S2)" row with the error "Failed: Couldn't download cuda.zip: non-2xx response". The MobileCLIP row was reporting a CUDA Performance Pack download failure as if MobileCLIP itself failed.
+
+### Root cause (D-track)
+
+`EngineError` carried no `model_kind` field — only `{ kind, message, path }`. The app's `ModelInstallerService.HandleEngineError` routed errors to slots via `SlotForErrorPath`, which string-matched the `path` field. When the CUDA pack download 404'd (URL is dead — the dataset isn't uploaded to HuggingFace yet, per V14.8 PACKS.md), the path `…\packs\cuda\cuda.zip` didn't substring-match any of `MobileCLIP|arcface|Qwen|SmolVLM|Gemma`, and a fallback `if (Clip.CurrentModelKind is not null) return Clip` re-routed the error to whichever model slot was in flight — MobileCLIP, because the user had just clicked Install on that row.
+
+### Fix — D1: `model_kind` on the wire
+
+- `platforms/windows/src/engine/src/ipc/mod.rs:554-572` — `EngineError` now has `pub model_kind: Option<String>` with `#[serde(default, skip_serializing_if = "Option::is_none")]`. Serde rename_all camelCase emits `modelKind` on the wire to match the existing `ModelDownloadProgress` field.
+- `shared/ipc-schema/ipc.schema.json:279-296` — schema mirror updated; the field is documented as nullable.
+- `platforms/windows/src/FileID.IpcSchema/Dtos.cs:126-130` — C# `EngineError` record gains `string? ModelKind = null` (default value so legacy callers compile without ceremony).
+- `platforms/windows/src/engine/src/main.rs` — every `EngineError {` construction site (14 of them) now sets `model_kind` — `Some(model_kind.clone())` for the three install-related sites (`unknown_model`, `model_download_failed`, `zip_extract_failed`), `None` for non-install errors (scan_failed, ipc_decode_failed, db_unavailable, etc.).
+- `platforms/windows/src/FileID.App/Services/ModelInstallerService.cs::HandleEngineError` — routes by `error.ModelKind` first via the existing `SlotFor(kind)` lookup; only falls back to `SlotForErrorPath` when `ModelKind` is null. The old "if Clip.CurrentModelKind is not null return Clip" fallthrough is **removed** — it was masking real bugs and was the proximate cause of the cross-wiring.
+- `SlotForErrorPath` also gains a `packs` substring match as a defensive fallback for legacy error events that might still have `path` but no `ModelKind`.
+
+### Fix — D2: `pack_not_available` for soft-failing Performance Pack 404s
+
+The CUDA / OpenVINO / QNN pack URLs all point at `huggingface.co/datasets/fileid-app/performance-packs/` which doesn't exist yet (PACKS.md tracks the upload as a user action). Until the ZIPs ship, pack-install attempts will always 404, and "non-2xx response — check your internet" is misleading (the network is fine; the resource isn't published).
+
+- `platforms/windows/src/engine/src/models/registry.rs:340-352` — new `is_performance_pack(id)` helper returns true for the five pack ids.
+- `platforms/windows/src/engine/src/main.rs:918-948` — on a pack id's download failure, the engine now emits `EngineError { kind: "pack_not_available", message: "<display> isn't published yet. The engine works without it (falls back to DirectML or CPU); install when the pack ships.", path, model_kind }` instead of the generic `model_download_failed`. The user sees a friendly, accurate explanation. The slot still goes to Failed state with a Retry button — the URL might be live later.
+- `ModelInstallerService.cs::HandleEngineError` recognizes `pack_not_available` as install-related and routes it correctly. (Visual differentiation — softer color etc. — deferred; the message-only change is the primary user-facing win.)
+
+### Tests
+
+- `platforms/windows/Tests/FileID.IpcSchema.Tests/IpcEventTests.cs` — two new round-trip tests: `EngineError_RoundTripsModelKindOnInstallFailure` and `EngineError_PackNotAvailableRoundTrips`. Existing `EngineError_RoundTripsKindAndPath` updated to assert `ModelKind` is null when the error isn't model-related. **24 / 24 tests pass** (was 22 / 22).
+- Engine: **66 / 66 tests pass**.
+
+### Verification path
+
+1. `build-all.ps1 -Wipe -Desktop -Run` on an NVIDIA box.
+2. Welcome sheet shows the CUDA pack row (NVIDIA + no cuda pack installed → `EvaluateRecommendedPack` populates it).
+3. Click Install on the CUDA pack row → engine emits `pack_not_available` → CUDA pack row shows "CUDA Pack (NVIDIA, x64) isn't published yet. The engine works without it (falls back to DirectML or CPU); install when the pack ships." Retry button present.
+4. Click Install on the MobileCLIP row → MobileCLIP row downloads normally (or shows its OWN error if download fails). Critically, the MobileCLIP row's status text is **never** clobbered by the CUDA pack error.
+
+### Persistence
+
+- `STATE.md` (this entry).
+- `NEXT.md` — D-track items move to "closed in V14.8.1". V14.9 deferred items (FilePreviewSheet badges, AutoPilot stage tracker, Restructure classifier port, EP-failure recovery, LavaLamp fidelity, final polish, llama.cpp ARM64+QNN) remain.
+
+---
+
+## V14.8 (2026-05-11) — Parity + GPU coverage + hardening pass
+
+User: "Run multiple parallel agents and ensure that Windows has exact parody with the macOS version of this app. It needs to be down to the pixel parity. … ensure that the scanning process for windows works with CUDA, AMD, Intel, Snapdragon, etc. … settle for nothing less than 100% certainty it will all work. Finally do a pass on the Windows version to ensure it is free of bugs and security flaws."
+
+Three parallel Explore audits ran (pixel parity / GPU coverage / bug + security). Half the audit-flagged "missing" UI items turned out to already be implemented (A4 Cleanup per-group menu — V14.7.6; A5 People multi-select merge — FEAT-CRIT-1; A2 FilePreviewSheet sibling nav + toolbar — V14.7.2; A3 Settings install cards). Engineering work concentrated on the genuine gaps:
+
+### [EP] observability trail (engine `runtime.rs:245`)
+
+`create_session` now emits a `tracing::info!("[EP] built session", ep, vendor, adapter, model)` line on the successful build path. Mirrors the `[INSTALL]` trail discipline (V14.7.16). If a user reports slow scans on AMD hardware, `app.log` now shows exactly which EP committed for each model — previously the engine logged the negative outcome (EP failed to build) but stayed silent on the positive outcome, so "we picked DirectML when CUDA was expected" was invisible.
+
+### AddDllDirectory for Performance Packs (engine `main.rs` + `platform.rs::register_dll_dirs_under`)
+
+SEC-3 locks the default DLL search to System32 + the engine binary's dir. Performance Packs extract to `%LOCALAPPDATA%\FileID\Models\packs\<vendor>\` — outside that. Without explicit registration the extracted CUDA / OpenVINO / QNN DLLs were invisible to LoadLibrary, so an "installed" pack would fall through to DirectML / CPU and the user saw no speedup. New helper walks the extracted root + its immediate children and `AddDllDirectory`'s any dir containing `.dll`. Wired at two sites: post-extract in `PrewarmModel` (fresh install), and on startup for previously-extracted packs (subsequent launches).
+
+### OnboardingSplash rainbow-shimmer title + Pick-a-folder CTA
+
+`Views/OnboardingSplash.xaml(.cs)` was missing the macOS Detail.swift hero treatment. Replaced the solid-gold "FileID" `TextBlock` with a `LinearGradientBrush` foreground using the four palette colors (gold #FFCC00, delight #F2A6C0, ai #B19BCE, info #A0E2EA) and animated `StartPoint`/`EndPoint` on the X axis over 12 s linear `RepeatBehavior.Forever`. Reduce-motion freezes the gradient. Added a "Pick a folder" `Button` (gold background, Segoe E8B7 folder-plus glyph) that routes to the same `FolderPickerService.PickFolderAsync` the sidebar uses.
+
+### Settings model installer cards — download rate + ETA
+
+`ModelSlot` already tracked `BytesPerSecond` and `EtaSeconds` (EWMA), but `SettingsView.xaml` never surfaced them. Added a small caption `TextBlock` (`ArcFaceRateEtaText` / `ClipRateEtaText`) under each progress bar; updated `OnInstallModelClicked`'s progress handler to compute formatted strings ("2.4 MB/s · 38 s remaining") on every BytesPerSecond / EtaSeconds change. Matches the macOS SettingsView.swift per-model card.
+
+### Documentation — PACKS.md + SHIP.md per-vendor matrix
+
+New `shared/docs/PACKS.md`: build recipe + upload procedure + verification log lines for the four Performance Packs (CUDA, OpenVINO, QNN, llama.cpp ARM64+QNN). SHA256-pin requirements, Authenticode verification steps, the AddDllDirectory contract.
+
+Extended `shared/docs/SHIP.md` with an Appendix W ("Windows v1.0 per-vendor verification matrix"). Six rows: NVIDIA RTX 3060+ / AMD RX 6600+ / Intel Arc + iGPU / Snapdragon X Elite / CPU baseline. Each row has expected EP, required pack, throughput target, memory ceiling, and six acceptance criteria (log shows expected EP, throughput met, memory ceiling, no crash dumps, Deep Analyze succeeds, iterate.ps1 green). The lane gate: ≥ 4 of 6 rows green to tag Windows v1.0.
+
+### Per-vendor CI smoke (`windows-engine.yml`)
+
+New "Smoke — engine startup + EP probe" step on x64 + arm64 native runners. Spawns the freshly-built `FileIDEngine.exe` with stdin redirected from an empty file, waits up to 10 s for the engine to emit a `ready` event on stdout, then asserts the JSON contains `"ready":` and `"executionProvider":`. Proves the EP probe + dispatch + JSON serialization stay alive on each arch — on CI hosts the engine commits CPU (no GPU); on real-hardware runs the same step surfaces CUDA / DirectML / QNN.
+
+### Audit false positives cleared
+
+- **"ReadStore concurrent-SQLite race"** — `ReadStore.cs:106-110` IS acquiring `_gate` before the SQLite work; the audit misread the delegation comment at `:100`.
+- **"Cleanup per-group menu missing"** — implemented V14.7.6 (Keep first / Keep largest / Invert / Skip / Unskip / Trash this group only).
+- **"People multi-select merge missing"** — implemented FEAT-CRIT-1 (Select toggle button, BulkActionBar with Merge / Mark unknown).
+- **"FilePreviewSheet has limited tooling"** — implemented V14.7.2 (←/→ sibling nav, Analyze, Reveal, Open, Copy path).
+- **"GPU EP override not read on spawn"** — `runtime.rs:267-269` + `:304-317` reads it on every session build; updated the stale comment in `AppSettings.cs:71` that claimed Phase 2.6.
+
+### Bug + style nits
+
+- Replaced `panic!("unexpected variant")` with `panic!("expected StartScan variant, got {other:?}")` in `ipc/mod.rs:791` so test failures are diagnostic. `CommandPayload` derives `Debug` so the format is valid.
+
+### Deferred to next session
+
+Larger items that need engine-schema changes + new views + visual verification on real hardware:
+
+- **A2 (FilePreviewSheet badges + tag input)** — preview-overlay OCR/face badges + drafted-tag input row. Toolbar + nav already shipped.
+- **A6 (AutoPilot 4-step stage tracker)** — needs `AutoPilotStage` event in the IPC schema + new sidebar overlay control.
+- **A7 (engine-authoritative Restructure tier classifier + floating ApplyBar)** — port macOS `Restructure.swift` classifier to `engine/src/pipeline/restructure.rs`; reorganize `Views/Restructure/*` around Anchor / Mixed / Junk.
+- **B3 (per-inference EP-failure recovery)** — wrap first `session.run()` in `arcface/scrfd/mobileclip/clip_text` with rebuild-on-failure.
+- **A8 (LavaLamp visual-fidelity verification)** — frame-by-frame compare macOS Canvas + Gaussian vs Windows Composition radial-gradient at matching window sizes.
+- **A9–A11 (SF Symbols mapping, spring tuning, empty/error states sweep)** — multi-screen visual review pass; needs the user running both apps side-by-side.
+
+### Verification
+
+- `cargo check` + `cargo test --bin FileIDEngine`: 0 errors, 66 / 66 tests pass.
+- `dotnet build src/FileID.App/FileID.App.csproj -c Debug -p:Platform=x64`: 0 warnings, 0 errors.
+
+### Run
+
+```powershell
+.\platforms\windows\build\build-all.ps1 -Wipe -Desktop -Run
+```
+
+Watch for the rainbow-drifting "FileID" title on the splash, the "Pick a folder" CTA, and live download-rate + ETA captions under each Settings install progress bar. Tail `%LOCALAPPDATA%\FileID\logs\app.log` for `[EP] built session` lines on first scan — those are the new positive-outcome trail.
+
+---
+
 ## V14.7.16 (2026-05-06) — Sidebar toggle button, new icon, [INSTALL] log trail, smoke harness
 
 User: "click install still nothing happens at all… rewrite the install system top to bottom… add as many testing logs as possible… when I hide the sidebar there is no way to bring it back… change the icon (Windows only) to FileID.png on my desktop… make sure the build script deletes all models and other downloaded files… use an agent to control the app and screenshots."

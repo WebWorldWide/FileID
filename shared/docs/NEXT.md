@@ -4,11 +4,82 @@
 
 ---
 
-## (none — V14.8 closed in V14.7.2 on 2026-05-05)
+## V14.9 — Deferred from the V14.8 parity + GPU + hardening pass (2026-05-11)
 
-Nothing queued. Every CRITICAL/HIGH parity gap, every security finding, every bug surfaced in the V14.5/V14.6/V14.7 audits is closed. New work begins after the user runs `./build.sh -windows` on real hardware and the `iterate.ps1` regression harness either GREENs or surfaces a real defect.
+Six items were scoped out of V14.8 because they need engine-schema changes, multi-screen view rewrites, or visual review on real hardware that can't be done blind.
 
-The three external manual steps documented in `shared/docs/STATE.md` V14.7.2 ship-readiness section (EV cert purchase, Performance Pack ZIP upload to HuggingFace, real-hardware verification) remain — but they're not code work, they're user actions.
+### A2.2 — FilePreviewSheet badges + tag input
+
+**Status:** toolbar + sibling-nav + Analyze already shipped (V14.7.2). Still missing vs macOS:
+- OCR / face badge overlays *on the preview surface* (not just on Library tiles)
+- A drafted-tag input row beneath the metadata strip
+
+**Files:** `platforms/windows/src/FileID.App/Views/Library/FilePreviewSheet.xaml(.cs)`.
+
+**Acceptance:** Open a preview for a file with `HasFaces=true` AND `HasText=true`; both badges visible top-left over the preview image. Type two tags into the new row, hit save, reopen the sheet — the tags survive (round-trip through the existing tag-write IPC).
+
+### A6 — AutoPilot 4-step stage tracker
+
+The engine has the `autoPilot` IPC handler; no UI surfaces per-stage progress. Need to add an event + sidebar overlay control.
+
+**Engine:**
+- `shared/ipc-schema/ipc.schema.json` — add `AutoPilotStage` event: `{ stage: "Scanning"|"Clustering"|"Planning"|"Captioning", progress: f32 }`.
+- `platforms/windows/src/engine/src/pipeline/auto_pilot.rs` — emit a stage event at every phase transition + on progress ticks.
+
+**App:**
+- `platforms/windows/src/FileID.App/Views/AutoPilot/AutoPilotTracker.xaml(.cs)` — 4-step horizontal tracker (filled/active/empty dots; gold on active).
+- Wire `AppViewModel.AutoPilotState` bindable property; subscribe to `AutoPilotStage` events in `EngineClient`.
+
+**Acceptance:** Click AutoPilot in the sidebar; the tracker overlay slides in (spring 0.35/0.78); dots fill left-to-right as the engine progresses; on completion the overlay fades out.
+
+### A7 — Engine-authoritative Restructure classifier + floating ApplyBar
+
+Windows currently derives Anchor/Mixed/Junk in `RestructureViewModel` (C# heuristic: ≥80% homogeneity = Anchor, ≤2 files = Junk, else Mixed). macOS has a real classifier in `Restructure.swift`. Plus macOS has a floating frosted ApplyBar with step chips + apply-as-shortcuts → convert flow that Windows lacks.
+
+**Engine:** port the macOS classifier to `platforms/windows/src/engine/src/pipeline/restructure.rs`. Add `tier: "Anchor"|"Mixed"|"Junk"` to each `RestructurePlan` item; serialize through IPC. Drop the C# heuristic.
+
+**App:** `platforms/windows/src/FileID.App/Views/Restructure/RestructureView.xaml(.cs)` — three tier sections; floating ApplyBar at the bottom (`<Border Background="AcrylicBrush" CornerRadius="16">`) with step chips matching `RestructureApplyBar.swift`.
+
+**Acceptance:** Run a restructure on a mixed-content folder; tiers come from the engine (verifiable via the IPC frame in `app.log`); the floating bar appears bottom-center, animates in via spring, and chains the two-step apply (shortcuts → convert).
+
+### B3 — Per-inference EP-failure recovery
+
+Today an EP that BUILDS its session but FAILS at first `session.run()` (e.g. CUDA + wrong cuDNN at runtime) kills the worker. The fallback chain in `runtime.rs` handles build-time failures; runtime failures are unguarded.
+
+**Files:** `platforms/windows/src/engine/src/models/{arcface,scrfd,mobileclip,clip_text}.rs`.
+
+**Approach:** On the first `session.run()` per worker, wrap in a guard; on failure, rebuild via `create_session` skipping the failed EP (pass the failed EP into `create_session` so `priority_chain` excludes it). Subsequent inferences proceed on the fallback.
+
+**Acceptance:** Build an integration test that mocks an EP-runtime panic; the worker swaps to the next EP and continues without dying.
+
+### A8 — LavaLampBackground visual-fidelity verification
+
+Currently a Composition implementation (three `SpriteVisual`s + `CompositionRadialGradientBrush` + Vector3 keyframe drift + 35% darken). macOS uses Canvas + `.blur(radius: 120)` Gaussian. They may not render identically — radial-gradient falloff isn't a true Gaussian.
+
+**Approach:** Capture a 5-second 60-fps clip on both platforms at matching window sizes (1440×900). Eyeball side-by-side. If the radial-gradient version reads as visually different, swap the brush for `CompositionBackdropBrush` + `GaussianBlurEffect` (radius 120) over solid color discs.
+
+**Acceptance:** Slow-motion playback shows the same "drift + blur" feel; no banding visible on Windows that isn't visible on macOS.
+
+### A9–A11 — Final polish pass (SF Symbols mapping, spring tuning, empty/error states)
+
+Multi-screen visual review pass. Needs the user (or a test runner) to step through every view on both platforms.
+
+- **A9 SF Symbols → Segoe Fluent mapping audit:** enumerate every SF Symbol in `platforms/apple/app/Sources/FileID/**` (≈50 unique), find each Windows glyph in `platforms/windows/src/FileID.App/**/*.xaml`, replace any that read visually different from the SF original.
+- **A10 Spring animation tuning:** WinUI `SpringScalarNaturalMotionAnimation`'s `Period` + `DampingRatio` is parameterized differently from SwiftUI's `response` + `dampingFraction`. Build a side-by-side demo screen with a tap-to-grow on both platforms; tune until the decay envelope matches.
+- **A11 Empty / error-state parity sweep:** walk every view's empty + error state, fix icon/copy/centering/spacing divergences.
+
+**Acceptance:** No reviewer can tell, from screenshots, which screen is macOS and which is Windows (target = "down to the pixel" stated by the user).
+
+---
+
+## External manual steps (carry-over)
+
+- EV cert purchase + install (so signed binaries skip SmartScreen on first run).
+- Real-hardware verification pass per `SHIP.md` Appendix W matrix (six rows, target ≥ 4 green to ship Windows v1.0). Throughput targets reflect DirectML / CPU paths (no packs — see `PACKS.md`).
+
+## Closed-as-intended (no code)
+
+- **Multi-vendor auto-install (OpenVINO / QNN packs).** Performance Packs were policy-removed in V14.8.2 — DirectML is the universal D3D12 GPU path for every vendor. Only NVIDIA's CUDA llama.cpp build is auto-installable today because it's MIT-licensed redistributable from ggml-org; that flow shipped in V14.9 (`CudaAutoInstaller`). See `PACKS.md` + `DECISIONS.md` (2026-05-11).
 
 ---
 

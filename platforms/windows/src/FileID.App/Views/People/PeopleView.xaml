@@ -56,7 +56,10 @@
                         Click="OnSuggestedMergesClicked"
                         ToolTipService.ToolTip="Find pairs of clusters that might be the same person.">
                     <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                        <FontIcon FontSize="13" Glyph="&#xE8B6;" />
+                        <!-- V14.9-E1: sparkle glyph mirrors macOS sparkles SF Symbol;
+                             previously a link icon (E8B6) which read as "merge",
+                             not "AI suggestion". -->
+                        <FontIcon FontSize="13" Glyph="&#xE945;" Foreground="{ThemeResource AiBrush}" />
                         <TextBlock Text="Suggested merges" />
                     </StackPanel>
                 </Button>
@@ -160,7 +163,7 @@
                                     <MenuFlyoutItem Text="Find merge candidates"
                                                     Click="OnContextSuggestedMerges">
                                         <MenuFlyoutItem.Icon>
-                                            <FontIcon Glyph="&#xE8B6;" />
+                                            <FontIcon Glyph="&#xE945;" />
                                         </MenuFlyoutItem.Icon>
                                     </MenuFlyoutItem>
                                 </MenuFlyout>

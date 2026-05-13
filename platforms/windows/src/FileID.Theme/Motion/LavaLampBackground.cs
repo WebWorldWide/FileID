@@ -7,6 +7,25 @@
 // correct primitive anyway: GPU-accelerated, vsync-driven by DWM, no
 // extra render target, no Win2D dep.
 //
+// V14.9 A8 review (cross-checked against platforms/apple/.../LavaLampBackground.swift):
+//   - Motion periods (0.20/0.23, 0.15/0.18, 0.10/0.12) — match
+//   - Motion amplitudes (0.30, 0.40, 0.20) — match
+//   - Orb colors / diameters / center opacities — match
+//   - Base color #141414 — match
+//   - Falloff shape: radial gradient (Windows) vs Gaussian blur radius 120
+//     (macOS). NEXT.md A8 suggested swapping to GaussianBlurEffect for an
+//     exact match, but Microsoft.UI.Composition's effect graph requires a
+//     Win2D `IGraphicsEffect` source (the V14.6 rewrite removed that dep
+//     specifically to avoid the CoreMessagingXP fault). Re-introducing
+//     Win2D would be a regression. The radial gradient is a true
+//     hardware-rendered soft falloff that reads near-identical at the
+//     viewing distances we care about.
+//   - macOS's `.ultraThinMaterial` top overlay: approximated here by the
+//     dark visual at centerOpacity=0.55 (acts as a desaturate layer),
+//     plus the host MainWindow's MicaController / DesktopAcrylicController
+//     system backdrop. Combined effect reads close to the macOS overlay
+//     without an explicit blur pass.
+//
 // Design:
 //   * Three SpriteVisuals (gold, orange, dark) sized to a generous max
 //     diameter. CompositionRadialGradientBrush gives each one a soft

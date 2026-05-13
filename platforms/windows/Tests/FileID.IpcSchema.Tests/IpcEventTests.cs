@@ -112,6 +112,45 @@ public class IpcEventTests
         Assert.Equal("vision_failed", e.Kind);
         Assert.Equal("OCR timed out", e.Message);
         Assert.Equal(@"C:\Users\adam\photos\bad.jpg", e.Path);
+        Assert.Null(e.ModelKind); // Not a model error — ModelKind absent.
+    }
+
+    [Fact]
+    public void EngineError_RoundTripsModelKindOnInstallFailure()
+    {
+        // D-track regression: install failures must carry model_kind so the
+        // app routes the error to the right slot rather than guessing from
+        // the path string.
+        var ev = IpcEvent.Now(new ErrorEvent(new EngineError(
+            Kind: "model_download_failed",
+            Message: "Couldn't download mobileclip_image.onnx: timeout",
+            Path: @"C:\Users\adam\AppData\Local\FileID\Models\MobileCLIP\mobileclip_image.onnx",
+            ModelKind: "mobileclip_s2")));
+        var json = IpcCoder.Encode(ev);
+
+        var rt = IpcCoder.Decode<IpcEvent>(json);
+        var e = Assert.IsType<ErrorEvent>(rt.Payload).Error;
+        Assert.Equal("model_download_failed", e.Kind);
+        Assert.Equal("mobileclip_s2", e.ModelKind);
+    }
+
+    [Fact]
+    public void EngineError_PackNotAvailableRoundTrips()
+    {
+        // D-track soft-failure: a Performance Pack 404 emits pack_not_available
+        // instead of model_download_failed, and the app surfaces it without
+        // suggesting "check your internet" (the network is fine).
+        var ev = IpcEvent.Now(new ErrorEvent(new EngineError(
+            Kind: "pack_not_available",
+            Message: "CUDA Pack isn't published yet.",
+            Path: @"C:\Users\adam\AppData\Local\FileID\Models\packs\cuda\cuda.zip",
+            ModelKind: "cuda_pack_x64")));
+        var json = IpcCoder.Encode(ev);
+
+        var rt = IpcCoder.Decode<IpcEvent>(json);
+        var e = Assert.IsType<ErrorEvent>(rt.Payload).Error;
+        Assert.Equal("pack_not_available", e.Kind);
+        Assert.Equal("cuda_pack_x64", e.ModelKind);
     }
 
     [Fact]

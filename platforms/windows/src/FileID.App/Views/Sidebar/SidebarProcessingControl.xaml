@@ -15,11 +15,16 @@
     x:Class="FileID.Views.Sidebar.SidebarProcessingControl"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:autopilot="using:FileID.Views.AutoPilot"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
     <StackPanel Spacing="10">
+        <!-- V14.9 A6: AutoPilot stage tracker — visible only when a run is in
+             flight. EngineClient.CurrentAutoPilotStage drives the dots. -->
+        <autopilot:AutoPilotTracker x:Name="AutoPilotTrackerHost" />
+
         <!-- Section header — uppercase muted caption, Fluent Settings pattern. -->
         <TextBlock Text="PROCESSING"
                    Style="{StaticResource CaptionTextBlockStyle}"
@@ -56,8 +61,25 @@
                     <TextBlock Text="Start Scan" FontWeight="SemiBold" />
                 </StackPanel>
             </Button>
-            <!-- AutoPilot intentionally absent: macOS reference doesn't have
-                 it. Engine + IPC + DTOs were fully removed in V14.7.11. -->
+            <!-- V14.9-C6: AutoPilot trigger button. Chains scan → cluster →
+                 caption → plan in one shot. EngineClient.RunAutoPilotAsync
+                 orchestrates app-side; the tracker above shows live stage
+                 progress. -->
+            <Button x:Name="AutoPilotButton"
+                    HorizontalAlignment="Stretch"
+                    Click="OnAutoPilotClicked"
+                    Height="36"
+                    ToolTipService.ToolTip="AutoPilot: scan, cluster, caption, and plan in one go">
+                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <FontIcon FontSize="13" Glyph="&#xE945;" />
+                    <TextBlock Text="AutoPilot" />
+                </StackPanel>
+            </Button>
+            <!-- V14.9 A6: AutoPilot tracker (above PROCESSING header) renders
+                 when EngineClient.CurrentAutoPilotStage is set. Trigger for
+                 AutoPilot is intentionally NOT a button here — matches macOS
+                 reference (sidebar doesn't host the trigger). RunAutoPilotAsync
+                 is callable from command palette / future entry points. -->
         </StackPanel>
 
         <!-- In-flight: phase + progress + stats + Pause/Cancel -->
@@ -98,6 +120,7 @@
                     </StackPanel>
                 </Border>
                 <Border Grid.Row="0" Grid.Column="1" Padding="10,8"
+                        x:Name="TaggedStatBorder"
                         Background="{ThemeResource SubtleFillColorSecondaryBrush}"
                         CornerRadius="8">
                     <StackPanel Spacing="2">

@@ -32,7 +32,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncReadExt, BufReader};
 use tokio::sync::Notify;
 
 use ipc::{
@@ -46,6 +46,34 @@ const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 async fn main() -> Result<()> {
     init_tracing()?;
     let _ = paths::ensure_state_dirs()?; // create %LOCALAPPDATA%/FileID/{logs,Models,...}
+
+    // F2 (V14.8.3): capture every panic in app.log. Without this hook, a
+    // panic anywhere in the scan pipeline (ORT session create on a corrupt
+    // model, an unwrap() in a worker, anything) crashes the engine silently
+    // — the C# app sees a broken pipe and the user sees "the app crashed"
+    // with no traceable cause. The hook leaves default unwinding behavior
+    // intact (engine still exits on panic, which is correct); it just
+    // forces a tracing::error line first so the next crash report has a
+    // file:line + backtrace to point at.
+    std::panic::set_hook(Box::new(|info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "(unknown location)".to_string());
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "(no message)".to_string());
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        tracing::error!(
+            location = %location,
+            message = %message,
+            backtrace = %backtrace,
+            "engine panic"
+        );
+    }));
 
     // SEC-3: lock down DLL search path before any LoadLibrary. Default
     // search includes the engine's CWD (which may be writable user space)
@@ -73,6 +101,39 @@ async fn main() -> Result<()> {
 
     tracing::info!(version = ENGINE_VERSION, "FileIDEngine starting");
 
+    // Replay AddDllDirectory for any Performance Packs already extracted from
+    // a prior install. Packs land in %LOCALAPPDATA%\FileID\Models\packs\<vendor>\
+    // and the llama.cpp runtime lands in Models\llama.cpp\. After SEC-3 locked
+    // the default search path, those dirs are invisible until explicitly added.
+    // Without this replay step, packs only work on the install run, not on
+    // subsequent app launches.
+    if let Ok(models_dir) = paths::models_dir() {
+        let _ = platform::register_dll_dirs_under(&models_dir.join("packs").join("cuda"));
+        let _ = platform::register_dll_dirs_under(&models_dir.join("packs").join("openvino"));
+        let _ = platform::register_dll_dirs_under(&models_dir.join("packs").join("qnn"));
+        let _ = platform::register_dll_dirs_under(&models_dir.join("llama.cpp"));
+        let _ = platform::register_dll_dirs_under(&models_dir.join("llama.cpp-cuda"));
+    }
+
+    // F3b (V14.8.3): if the user has NVIDIA CUDA Toolkit + cuDNN installed
+    // system-wide (common on ML/research/dev machines), register the toolkit
+    // bin directory so ORT's CUDA EP can LoadLibrary the runtime DLLs. SEC-3
+    // locked the default search path to System32 + app dir, so without this
+    // step the toolkit on PATH would be invisible to the loader. Falls back
+    // silently if no toolkit is present.
+    //
+    // V14.9 (2.1): capture any AddDllDirectory failures so we can surface
+    // them via the IPC sink once it's built. Without this, the CUDA EP would
+    // silently fall back to DirectML and the user would have no idea why
+    // their NVIDIA card isn't being used.
+    let cuda_dll_failures: Vec<std::path::PathBuf> =
+        if let Some(cuda_bin) = models::runtime::system_cuda_toolkit_dir() {
+            tracing::info!(dir = %cuda_bin.display(), "[EP] registering system CUDA toolkit bin dir");
+            platform::register_dll_dirs_under(&cuda_bin)
+        } else {
+            Vec::new()
+        };
+
     // Open the DB up front so migrations apply (and any failure surfaces
     // before we tell the app we're ready). Checkpoint + close on shutdown.
     // Wrapped in Arc<Mutex<…>> so handlers (planRestructure, future
@@ -92,6 +153,31 @@ async fn main() -> Result<()> {
     // Emit `ready` first thing so the app sidebar can transition out of
     // .starting. The handshake is one-way; the app doesn't ack.
     emit_ready(&sink).await;
+
+    // V14.9 (2.1): surface CUDA-toolkit DLL registration failures so the
+    // user sees an actionable error rather than a silent fall-back to
+    // DirectML. We told them CUDA was detected; if AddDllDirectory failed
+    // they need to know.
+    if !cuda_dll_failures.is_empty() {
+        let dirs = cuda_dll_failures
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
+        let msg = format!(
+            "CUDA Toolkit detected but {} DLL search dir registration(s) failed: {}. Scanning will fall back to DirectML.",
+            cuda_dll_failures.len(),
+            dirs
+        );
+        tracing::error!(message = %msg, "[EP] CUDA DLL registration failed");
+        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+            kind: "cuda_dll_registration_failed".into(),
+            message: msg,
+            path: None,
+            model_kind: None,
+        }))))
+        .await;
+    }
 
     // Coordinated shutdown signal. set() once, awaited by the stdio loop +
     // the parent watchdog so they cooperate on exit.
@@ -167,7 +253,21 @@ async fn main() -> Result<()> {
                 }
                 read = bounded_read_line(&mut reader, &mut buf, MAX_FRAME_BYTES) => {
                     match read {
-                        Ok(BoundedRead::Line(text)) if text.trim().is_empty() => continue,
+                        // V14.9-Bug1: drop empty lines AND lines that are
+                        // nothing but a BOM (`\u{FEFF}`) or other zero-info
+                        // whitespace. .NET's StreamWriter for Process.
+                        // StandardInput can push a UTF-8 BOM on first
+                        // init, which otherwise lands here as a single
+                        // codepoint and trips serde_json with
+                        // "expected value at line 1 column 1".
+                        Ok(BoundedRead::Line(text))
+                            if text
+                                .trim_start_matches('\u{FEFF}')
+                                .trim()
+                                .is_empty() =>
+                        {
+                            continue;
+                        }
                         Ok(BoundedRead::Line(text)) => {
                             handle_line(
                                 &dispatch_sink,
@@ -187,6 +287,7 @@ async fn main() -> Result<()> {
                                 kind: "oversized_ipc_frame".into(),
                                 message: format!("Command frame exceeded 1 MB cap (saw {} bytes before reject).", seen),
                                 path: None,
+                                model_kind: None,
                             })))).await;
                             // Drain to next newline so we resync with the next frame.
                             let _ = drain_to_newline(&mut reader).await;
@@ -240,16 +341,25 @@ async fn handle_line(
     prewarm_cancel: &Arc<std::sync::atomic::AtomicBool>,
     line: &str,
 ) {
+    // V14.9-Bug1: strip a leading UTF-8 BOM defensively. The C# side
+    // (EngineClient.cs ProcessStartInfo) was switched to BOM-less
+    // UTF-8, but legacy installs or third-party wrappers may still
+    // push `EF BB BF` on the first byte of stdin. Trim before the
+    // deserializer sees it.
+    let line = line.trim_start_matches('\u{FEFF}').trim_start();
+    if line.is_empty() {
+        return;
+    }
     let cmd: IpcCommand = match serde_json::from_str(line) {
         Ok(c) => c,
         Err(err) => {
-            tracing::warn!(%err, "ipc decode failed");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "ipc_decode_failed".into(),
-                message: format!("could not parse command frame: {err}"),
-                path: None,
-            }))))
-            .await;
+            // V14.9-Bug1: decode failures used to bubble up as a red
+            // toast (`ipc_decode_failed` EngineError emitted to the
+            // sink). That's diagnostic noise the user can't act on —
+            // any stray byte on the pipe would alarm them. Log at
+            // warn level so the engine.jsonl still records the event
+            // for debugging, but DON'T surface it in the UI.
+            tracing::warn!(%err, "ipc decode failed (silenced)");
             return;
         }
     };
@@ -505,19 +615,6 @@ async fn handle_line(
                 handle_run_face_clustering(sink_c, db_c).await;
             });
         }
-        // Phase 0 stub: every other variant gets a structured "not implemented"
-        // error so the app surfaces it visibly during bring-up. Phase 1+ wires
-        // each variant to its real handler.
-        other => {
-            let kind = command_kind(&other);
-            tracing::info!(command = kind, "command received (phase 0 stub)");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "not_implemented".into(),
-                message: format!("command '{kind}' not implemented in Phase 0 engine yet"),
-                path: None,
-            }))))
-            .await;
-        }
     }
 }
 
@@ -577,6 +674,7 @@ async fn emit_db_unavailable(sink: &Sink, command: &str) {
              at startup. Check %LOCALAPPDATA%\\FileID\\logs\\ for the open error."
         ),
         path: None,
+        model_kind: None,
     }))))
     .await;
 }
@@ -638,6 +736,7 @@ async fn handle_plan_restructure(
                 kind: "plan_restructure_db".into(),
                 message: format!("Couldn't read files table: {err}"),
                 path: None,
+                model_kind: None,
             }))))
             .await;
             return;
@@ -657,23 +756,35 @@ async fn handle_plan_restructure(
     let mut anchor = 0u32;
     let mut mixed = 0u32;
     let mut junk = 0u32;
+    // V14.9 A7: index classification by source folder so we can stamp
+    // per-move tiers without re-classifying.
+    let mut tier_by_folder: std::collections::HashMap<PathBuf, &'static str> =
+        std::collections::HashMap::with_capacity(folder_class.len());
     for f in &folder_class {
-        match f.classification {
-            crate::pipeline::restructure::FolderClassification::Anchor => anchor += 1,
-            crate::pipeline::restructure::FolderClassification::Mixed  => mixed  += 1,
-            crate::pipeline::restructure::FolderClassification::Junk   => junk   += 1,
-        }
+        let tier_label = match f.classification {
+            crate::pipeline::restructure::FolderClassification::Anchor => { anchor += 1; "Anchor" }
+            crate::pipeline::restructure::FolderClassification::Mixed  => { mixed  += 1; "Mixed"  }
+            crate::pipeline::restructure::FolderClassification::Junk   => { junk   += 1; "Junk"   }
+        };
+        tier_by_folder.insert(f.source_folder.clone(), tier_label);
     }
 
     let plan = RestructurePlan {
         library_root,
         moves: proposed
             .into_iter()
-            .map(|m| IpcMove {
-                file_id: m.file_id,
-                source: m.source.to_string_lossy().to_string(),
-                destination: m.destination.to_string_lossy().to_string(),
-                category: m.category,
+            .map(|m| {
+                let tier = m.source
+                    .parent()
+                    .and_then(|p| tier_by_folder.get(p))
+                    .map(|s| (*s).to_string());
+                IpcMove {
+                    file_id: m.file_id,
+                    source: m.source.to_string_lossy().to_string(),
+                    destination: m.destination.to_string_lossy().to_string(),
+                    category: m.category,
+                    tier,
+                }
             })
             .collect(),
         category_counts: category_summary
@@ -723,6 +834,7 @@ async fn handle_apply_restructure(
                 kind: "apply_restructure".into(),
                 message: format!("Apply failed: {err}"),
                 path: None,
+                model_kind: None,
             }))))
             .await;
         }
@@ -758,6 +870,24 @@ async fn handle_prewarm_model(
     use crate::ipc::ModelDownloadProgress;
     use models::registry::LookupResult;
 
+    // F1 (V14.8.3): emit an immediate "Queued" progress event so the welcome
+    // sheet row flips out of the captionless-spinner state the moment the
+    // engine sees the prewarm command. Without this, the row spinner shows
+    // for ~1-3s while the registry lookup + HTTP handshake run before the
+    // first real progress event arrives — and users read "spinning with no
+    // text" as "stuck waiting for other downloads."
+    sink.send(IpcEvent::now(EventPayload::ModelDownloadProgress(Wrap::new(
+        ModelDownloadProgress {
+            model_kind: model_kind.clone(),
+            fraction: 0.0,
+            message: "Queued — starting download…".to_string(),
+            bytes_done: None,
+            total_bytes: None,
+        },
+    )))).await;
+
+    tracing::info!(model_kind = %model_kind, "[PREWARM] entered handler");
+
     // V14.7.5: per-model-kind in-flight dedupe. Without this, repeated
     // clicks of "Install all" race on the .part file: first call's
     // rename(.part -> final) runs while a second call still streams
@@ -790,6 +920,7 @@ async fn handle_prewarm_model(
                 total_bytes: None,
             },
         )))).await;
+        tracing::info!(model_kind = %model_kind, outcome = "duplicate_in_flight", "[PREWARM] exiting");
         return;
     }
     // RAII guard removes us from the set on every exit path.
@@ -816,6 +947,7 @@ async fn handle_prewarm_model(
                 },
             ))))
             .await;
+            tracing::info!(model_kind = %model_kind, outcome = "not_yet_available", "[PREWARM] exiting");
             return;
         }
         LookupResult::Unknown => {
@@ -826,8 +958,10 @@ async fn handle_prewarm_model(
                      Add it to engine/src/models/registry.rs."
                 ),
                 path: None,
+                model_kind: Some(model_kind.clone()),
             }))))
             .await;
+            tracing::warn!(model_kind = %model_kind, outcome = "unknown_model", "[PREWARM] exiting");
             return;
         }
     };
@@ -847,40 +981,64 @@ async fn handle_prewarm_model(
                 },
             ))))
             .await;
+            tracing::info!(model_kind = %model_kind, outcome = "already_installed", "[PREWARM] exiting");
             return;
         }
     }
 
     let total_bytes_estimate: u64 = model.files.iter().map(|f| f.approx_bytes).sum();
-    let mut bytes_done_aggregate: u64 = 0;
+    let total_estimate = total_bytes_estimate.max(1);
     let file_count = model.files.len();
 
+    // Per-file bytes_done counters. All file progress callbacks update
+    // their own slot so the aggregate fraction stays correct when
+    // multiple files run concurrently. Without this MobileCLIP-S2 (4
+    // files) advanced 4× slower than ArcFace/Qwen (1 file each).
+    let per_file_done: std::sync::Arc<Vec<std::sync::atomic::AtomicU64>> =
+        std::sync::Arc::new(
+            (0..file_count)
+                .map(|_| std::sync::atomic::AtomicU64::new(0))
+                .collect(),
+        );
+
+    // Partition into regular vs zip files. Zip files run sequentially
+    // because the post-download extract step mutates DLL search paths
+    // and is order-sensitive (Performance Packs).
+    let mut regular_indices: Vec<usize> = Vec::with_capacity(file_count);
+    let mut zip_indices: Vec<usize> = Vec::with_capacity(file_count);
     for (idx, file) in model.files.iter().enumerate() {
-        let label = file
-            .dest
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("file")
-            .to_string();
+        if file.dest.extension().and_then(|s| s.to_str()) == Some("zip") {
+            zip_indices.push(idx);
+        } else {
+            regular_indices.push(idx);
+        }
+    }
+
+    // Builds the per-file progress callback. All callbacks share the
+    // `per_file_done` slot vec; each one writes its own slot and reads
+    // the aggregate sum on every emit.
+    let make_progress_cb = |idx: usize, file: &models::registry::ModelFile, label: String| {
         let model_kind_local = model_kind.clone();
         let display_name = model.display_name.to_string();
         let sink_for_progress = sink.clone();
-        let bytes_so_far = bytes_done_aggregate;
-        let total_estimate = total_bytes_estimate.max(1);
-
-        // The closure runs synchronously inside `download_simple` whenever
-        // a chunk lands. We re-emit it as an IPC event from a spawned
-        // task so we don't block the download stream.
-        let progress_cb = move |p: crate::downloader::DownloadProgress| {
-            let cur_total = bytes_so_far + p.bytes_done;
+        let per_file_done = per_file_done.clone();
+        let file_bytes_mb = file.approx_bytes / (1024 * 1024);
+        let file_label_for_msg = label;
+        move |p: crate::downloader::DownloadProgress| {
+            per_file_done[idx].store(p.bytes_done, std::sync::atomic::Ordering::Relaxed);
+            let cur_total: u64 = per_file_done
+                .iter()
+                .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+                .sum();
             let fraction = (cur_total as f64) / (total_estimate as f64);
             let msg = if file_count == 1 {
                 format!("Downloading {display_name}…")
             } else {
                 format!(
-                    "Downloading {display_name} ({of} of {total})…",
+                    "Downloading {display_name} — {file_label_for_msg} ({of} of {total}, ~{mb} MB)",
                     of = idx + 1,
-                    total = file_count
+                    total = file_count,
+                    mb = file_bytes_mb,
                 )
             };
             let event = IpcEvent::now(EventPayload::ModelDownloadProgress(Wrap::new(
@@ -894,46 +1052,157 @@ async fn handle_prewarm_model(
             )));
             let s = sink_for_progress.clone();
             tokio::spawn(async move { s.send(event).await; });
-        };
+        }
+    };
 
+    // Run regular (non-zip) files in parallel. The downloader's global
+    // HTTP semaphore caps total concurrent requests so this doesn't
+    // worsen cross-model rate-limit pressure.
+    let mut regular_handles: Vec<tokio::task::JoinHandle<Result<(), (String, std::path::PathBuf, anyhow::Error)>>> =
+        Vec::with_capacity(regular_indices.len());
+    for idx in regular_indices.iter().copied() {
+        let file = model.files[idx].clone();
+        let label = file
+            .dest
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
+        let file_bytes_mb = file.approx_bytes / (1024 * 1024);
+        tracing::info!(
+            model_kind = %model_kind,
+            file_idx = idx,
+            file_total = file_count,
+            file = %label,
+            file_mb = file_bytes_mb,
+            "[PREWARM] starting file (parallel)"
+        );
+        let http_client = http_client.clone();
+        let cancel = cancel.clone();
+        let progress_cb = make_progress_cb(idx, &file, label.clone());
         let req = DownloadRequest {
             url: file.url.clone(),
             destination: file.dest.clone(),
             expected_sha256: file.sha256.clone(),
         };
+        let label_for_err = label.clone();
+        let dest_for_err = file.dest.clone();
+        regular_handles.push(tokio::spawn(async move {
+            download_parallel(http_client, req, cancel, progress_cb)
+                .await
+                .map_err(|e| (label_for_err, dest_for_err, e))
+        }));
+    }
 
+    let mut first_err: Option<(String, std::path::PathBuf, anyhow::Error)> = None;
+    for h in regular_handles {
+        match h.await {
+            Ok(Ok(())) => {}
+            Ok(Err(triple)) => {
+                if first_err.is_none() {
+                    first_err = Some(triple);
+                }
+            }
+            Err(join_err) => {
+                if first_err.is_none() {
+                    first_err = Some((
+                        "(task)".into(),
+                        std::path::PathBuf::new(),
+                        anyhow::anyhow!(join_err),
+                    ));
+                }
+            }
+        }
+    }
+    if let Some((label, dest, err)) = first_err {
+        tracing::warn!(?err, file = %label, "model download failed");
+        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+            kind: "model_download_failed".into(),
+            message: format!(
+                "Couldn't download {label}: {err}\n\n\
+                 Large model downloads can take several minutes — \
+                 check your connection and click Retry. Downloads \
+                 resume from where they stopped, so no progress is lost."
+            ),
+            path: Some(dest.display().to_string()),
+            model_kind: Some(model_kind.clone()),
+        }))))
+        .await;
+        tracing::warn!(model_kind = %model_kind, outcome = "download_failed", file = %label, "[PREWARM] exiting");
+        return;
+    }
+    // Lock in the final byte counts for regular files so zip progress
+    // computes against the correct baseline.
+    for idx in regular_indices.iter().copied() {
+        per_file_done[idx].store(
+            model.files[idx].approx_bytes,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    // Now run zip files sequentially, with post-download extract.
+    for idx in zip_indices.iter().copied() {
+        let file = &model.files[idx];
+        let label = file
+            .dest
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
+        let file_bytes_mb = file.approx_bytes / (1024 * 1024);
+        tracing::info!(
+            model_kind = %model_kind,
+            file_idx = idx,
+            file_total = file_count,
+            file = %label,
+            file_mb = file_bytes_mb,
+            "[PREWARM] starting file (zip, sequential)"
+        );
+        let progress_cb = make_progress_cb(idx, file, label.clone());
+        let req = DownloadRequest {
+            url: file.url.clone(),
+            destination: file.dest.clone(),
+            expected_sha256: file.sha256.clone(),
+        };
         if let Err(err) = download_parallel(http_client.clone(), req, cancel.clone(), progress_cb).await {
             tracing::warn!(?err, file = %label, "model download failed");
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                 kind: "model_download_failed".into(),
                 message: format!(
                     "Couldn't download {label}: {err}\n\n\
-                     Check your internet connection and try again."
+                     Large model downloads can take several minutes — \
+                     check your connection and click Retry. Downloads \
+                     resume from where they stopped, so no progress is lost."
                 ),
                 path: Some(file.dest.display().to_string()),
+                model_kind: Some(model_kind.clone()),
             }))))
             .await;
+            tracing::warn!(model_kind = %model_kind, outcome = "download_failed", file = %label, "[PREWARM] exiting");
             return;
         }
-
-        // Post-download: extract any .zip in-place.
-        if file.dest.extension().and_then(|s| s.to_str()) == Some("zip") {
-            let dest = file.dest.clone();
-            let extract = tokio::task::spawn_blocking(move || extract_zip_into_parent(&dest)).await;
-            if let Err(err) = extract.unwrap_or(Err(anyhow::anyhow!("zip extract panicked"))) {
-                tracing::warn!(?err, "zip extract failed");
-                sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                    kind: "zip_extract_failed".into(),
-                    message: format!("Couldn't extract {label}: {err}"),
-                    path: Some(file.dest.display().to_string()),
-                }))))
-                .await;
-                return;
-            }
-            // Remove the zip after successful extraction.
-            let _ = std::fs::remove_file(&file.dest);
+        let dest = file.dest.clone();
+        let extract = tokio::task::spawn_blocking(move || extract_zip_into_parent(&dest)).await;
+        if let Err(err) = extract.unwrap_or(Err(anyhow::anyhow!("zip extract panicked"))) {
+            tracing::warn!(?err, "zip extract failed");
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "zip_extract_failed".into(),
+                message: format!("Couldn't extract {label}: {err}"),
+                path: Some(file.dest.display().to_string()),
+                model_kind: Some(model_kind.clone()),
+            }))))
+            .await;
+            tracing::warn!(model_kind = %model_kind, outcome = "zip_extract_failed", file = %label, "[PREWARM] exiting");
+            return;
         }
-        bytes_done_aggregate += file.approx_bytes;
+        let _ = std::fs::remove_file(&file.dest);
+        if let Some(parent) = file.dest.parent() {
+            platform::register_dll_dirs_under(parent);
+        }
+        per_file_done[idx].store(
+            file.approx_bytes,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     // All files landed — drop the sentinel so the app sees Installed.
@@ -953,6 +1222,7 @@ async fn handle_prewarm_model(
         },
     ))))
     .await;
+    tracing::info!(model_kind = %model_kind, outcome = "installed", "[PREWARM] exiting");
 }
 
 /// Bulk-apply tags to a set of files. Updates DB `tags` table + writes
@@ -1510,6 +1780,7 @@ async fn handle_find_merge_suggestions(
                 kind: "find_merge_suggestions_failed".into(),
                 message: format!("Find merge suggestions failed: {err}"),
                 path: None,
+                model_kind: None,
             }))))
             .await;
         }
@@ -2123,6 +2394,7 @@ async fn handle_deep_analyze_file(
                 kind: "llama_cpp_missing".into(),
                 message: format!("{err}"),
                 path: None,
+                model_kind: None,
             }))))
             .await;
             return;
@@ -2142,7 +2414,7 @@ async fn handle_deep_analyze_file(
         AnalyzeMode::Both,
         cancel.clone(),
         move |_chunk| {
-            // BUG-4: try_send + drop on overflow. Per-token streaming
+            // Intentional try_send + drop-on-overflow. Per-token streaming
             // can fire 50+/sec and the original tokio::spawn(async {
             // send.await }) pattern would pile up unbounded tasks if
             // the sink filled. Drops are fine — UI gets the next chunk
@@ -2188,6 +2460,7 @@ async fn handle_deep_analyze_file(
                 kind: "deep_analyze_failed".into(),
                 message: format!("{err}"),
                 path: None,
+                model_kind: None,
             }))))
             .await;
         }
@@ -2257,6 +2530,7 @@ async fn run_deep_analyze_batch(
                 kind: "llama_cpp_missing".into(),
                 message: format!("{err}"),
                 path: None,
+                model_kind: None,
             }))))
             .await;
             return;
@@ -2337,7 +2611,8 @@ async fn run_deep_analyze_batch(
             AnalyzeMode::Both,
             cancel.clone(),
             move |_chunk| {
-                // BUG-4: try_send + drop on overflow.
+                // Intentional try_send + drop-on-overflow (see the
+                // single-file analyze callback above for rationale).
                 let kind = model_kind_c.clone();
                 let _ = sink_c.try_send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(Wrap::new(
                     DeepAnalyzeProgress {
@@ -2433,6 +2708,7 @@ async fn handle_embed_image_query(
                 kind: "embedding_missing".into(),
                 message: "This file doesn't have a CLIP embedding yet. Re-scan with CLIP installed.".into(),
                 path: None,
+                model_kind: None,
             }))))
             .await;
         }
@@ -2549,6 +2825,7 @@ async fn handle_run_face_clustering(
                 kind: "face_clustering_failed".into(),
                 message: format!("Face clustering failed: {err}"),
                 path: None,
+                model_kind: None,
             }))))
             .await;
         }
@@ -2606,6 +2883,7 @@ async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQueryPayload
                 kind: "clip_text_embed_failed".into(),
                 message: format!("CLIP text embed failed: {err}. Install CLIP via Welcome / Settings."),
                 path: None,
+                model_kind: None,
             }))))
             .await;
         }
@@ -2625,7 +2903,10 @@ async fn handle_start_scan(
 ) {
     use crate::pipeline::tagging::ModelStack;
     use crate::scan_session::ScanSession;
+    use ipc::ScanPhase;
     use std::path::PathBuf;
+
+    tracing::info!(root_path = %payload.root_path, "[SCAN] handle_start_scan entered");
 
     let already_running = scan_state.lock().is_some();
     if already_running {
@@ -2633,21 +2914,116 @@ async fn handle_start_scan(
             kind: "scan_already_running".into(),
             message: "A scan is already running. Cancel it before starting a new one.".into(),
             path: None,
+            model_kind: None,
         }))))
         .await;
+        tracing::warn!("[SCAN] handle_start_scan exiting: scan_already_running");
         return;
     }
+
+    // Pre-flight sentinel check: required models must be installed before
+    // we attempt ModelStack::load_default. Without this, a fresh install
+    // where the user clicked Scan before completing Welcome would wedge
+    // ORT for the full timeout window with no actionable feedback.
+    let missing: Vec<&str> = ["MobileCLIP", "arcfaceMobileFace"]
+        .iter()
+        .filter_map(|dir| {
+            let sentinel = match paths::models_dir() {
+                Ok(p) => p.join(dir).join(".fileid-installed"),
+                Err(_) => return Some(*dir),
+            };
+            if sentinel.exists() {
+                None
+            } else {
+                Some(*dir)
+            }
+        })
+        .collect();
+    if !missing.is_empty() {
+        tracing::warn!(missing = ?missing, "[SCAN] required models missing; aborting scan");
+        sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
+            ScanPhase::Failed,
+        ))))
+        .await;
+        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+            kind: "models_not_installed".into(),
+            message: format!(
+                "Install the AI models from the Welcome screen (or Settings → Local AI) before scanning. Missing: {}.",
+                missing.join(", ")
+            ),
+            path: None,
+            model_kind: None,
+        }))))
+        .await;
+        tracing::warn!("[SCAN] handle_start_scan exiting: models_not_installed");
+        return;
+    }
+
+    // V14.8.4 Bug 5: emit Discovering immediately so the UI flips out of
+    // IdlePanel within microseconds, regardless of how long ModelStack
+    // takes to load. Without this the user sees "nothing happens" for
+    // 100ms–30s and assumes scanning is unimplemented. Use .await (not
+    // try_send) so the event can't be silently dropped under sink load.
+    sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
+        ScanPhase::Discovering,
+    ))))
+    .await;
 
     let coord = coordinator::ScanCoordinator::new();
     *scan_state.lock() = Some(coord.clone());
 
     // Load ML model weights once per session. Heavy enough to belong on a
     // blocking thread (ORT session create can take 100-500ms per model).
-    let models = match tokio::task::spawn_blocking(ModelStack::load_default).await {
-        Ok(m) => Arc::new(m),
-        Err(err) => {
+    // 8s timeout: ORT session-create for a healthy local file completes in
+    // well under a second; budget 8s for cold-cache cases. A wedged
+    // commit_from_file (corrupt .onnx) was previously hanging the entire
+    // scan for 30s — that read to users as "Start scan did nothing".
+    let models = match tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        tokio::task::spawn_blocking(ModelStack::load_default),
+    )
+    .await
+    {
+        Ok(Ok(m)) => Arc::new(m),
+        Ok(Err(err)) => {
             tracing::error!(?err, "model stack load panicked");
+            sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
+                ScanPhase::Failed,
+            ))))
+            .await;
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "model_load_failed".into(),
+                message: format!(
+                    "The inference engine couldn't load its models: {err}.\n\
+                     Try reinstalling models from Settings → Local AI."
+                ),
+                path: None,
+                model_kind: None,
+            }))))
+            .await;
             *scan_state.lock() = None;
+            tracing::warn!("[SCAN] handle_start_scan exiting: model_load_failed");
+            return;
+        }
+        Err(_elapsed) => {
+            tracing::error!("model stack load timed out after 8s");
+            sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
+                ScanPhase::Failed,
+            ))))
+            .await;
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "model_load_timeout".into(),
+                message:
+                    "Loading inference models took longer than 8 seconds — \
+                     a model file may be corrupted. Reinstall from Settings \
+                     → Local AI."
+                        .into(),
+                path: None,
+                model_kind: None,
+            }))))
+            .await;
+            *scan_state.lock() = None;
+            tracing::warn!("[SCAN] handle_start_scan exiting: model_load_timeout");
             return;
         }
     };
@@ -2662,13 +3038,22 @@ async fn handle_start_scan(
 
     if let Err(err) = outcome {
         tracing::warn!(?err, root = %root.display(), "scan failed");
+        sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
+            ScanPhase::Failed,
+        ))))
+        .await;
         sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
             kind: "scan_failed".into(),
             message: format!("Scan failed: {err}"),
             path: Some(payload.root_path),
+            model_kind: None,
         }))))
         .await;
+        tracing::warn!("[SCAN] handle_start_scan exiting: scan_failed");
+        return;
     }
+
+    tracing::info!("[SCAN] handle_start_scan exiting normally");
 }
 
 async fn emit_ready(sink: &Sink) {
@@ -2721,37 +3106,6 @@ async fn emit_ready(sink: &Sink) {
     };
     sink.send(IpcEvent::now(EventPayload::Ready(Wrap::new(info))))
         .await;
-}
-
-fn command_kind(p: &CommandPayload) -> &'static str {
-    match p {
-        CommandPayload::StartScan(_)         => "startScan",
-        CommandPayload::PauseScan(_)         => "pauseScan",
-        CommandPayload::ResumeScan(_)        => "resumeScan",
-        CommandPayload::CancelScan(_)        => "cancelScan",
-        CommandPayload::RequestStatus(_)     => "requestStatus",
-        CommandPayload::Shutdown(_)          => "shutdown",
-        CommandPayload::RunFaceClustering(_) => "runFaceClustering",
-        CommandPayload::DeepAnalyzeFile(_)   => "deepAnalyzeFile",
-        CommandPayload::DeepAnalyzeFolder(_) => "deepAnalyzeFolder",
-        CommandPayload::DeepAnalyzeAll(_)    => "deepAnalyzeAll",
-        CommandPayload::DeepAnalyzeCancel(_) => "deepAnalyzeCancel",
-        CommandPayload::PrewarmModel(_)      => "prewarmModel",
-        CommandPayload::CancelPrewarm(_)     => "cancelPrewarm",
-        CommandPayload::PlanRestructure(_)   => "planRestructure",
-        CommandPayload::ApplyRestructure(_)  => "applyRestructure",
-        CommandPayload::ApplyTags(_)         => "applyTags",
-        CommandPayload::RenameFiles(_)       => "renameFiles",
-        CommandPayload::TrashFiles(_)        => "trashFiles",
-        CommandPayload::MergeClusters(_)     => "mergeClusters",
-        CommandPayload::EmbedTextQuery(_)    => "embedTextQuery",
-        CommandPayload::RenamePerson(_)      => "renamePerson",
-        CommandPayload::MarkPersonsAsUnknown(_) => "markPersonsAsUnknown",
-        CommandPayload::FindMergeSuggestions(_) => "findMergeSuggestions",
-        CommandPayload::EmbedImageQuery(_)   => "embedImageQuery",
-        CommandPayload::RestoreFromTrash(_)  => "restoreFromTrash",
-        CommandPayload::RevertMerge(_)       => "revertMerge",
-    }
 }
 
 fn init_tracing() -> Result<()> {

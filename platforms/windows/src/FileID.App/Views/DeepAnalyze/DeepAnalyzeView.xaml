@@ -68,6 +68,78 @@
                 </Grid>
             </Border>
 
+            <!-- NVIDIA-without-cuDNN info banner. Surfaces when an NVIDIA GPU
+                 is detected but the engine is currently routing through
+                 DirectML/CPU because cuDNN isn't on the loader path. Info-only;
+                 Deep Analyze still works, it's just ~15% slower. -->
+            <Border x:Name="CudnnInfoBanner"
+                    CornerRadius="10"
+                    Padding="14,12"
+                    Background="{ThemeResource GoldSelectedBackgroundBrush}"
+                    BorderBrush="{ThemeResource GoldSelectedStrokeBrush}"
+                    BorderThickness="1"
+                    Visibility="Collapsed">
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <FontIcon Grid.Column="0"
+                              Glyph="&#xE945;"
+                              FontSize="16"
+                              Foreground="{ThemeResource GoldBrush}"
+                              VerticalAlignment="Top"
+                              Margin="0,2,0,0" />
+                    <TextBlock Grid.Column="1"
+                               x:Name="CudnnInfoBannerText"
+                               TextWrapping="Wrap"
+                               Style="{StaticResource CaptionTextBlockStyle}" />
+                    <Button Grid.Column="2"
+                            x:Name="GetCudnnButton"
+                            Content="Get cuDNN"
+                            Click="OnGetCudnnClicked"
+                            VerticalAlignment="Center" />
+                </Grid>
+            </Border>
+
+            <!-- V14.9-C5: "Name people first" gate banner. Visible when any
+                 person cluster has both name + first_name NULL — Deep
+                 Analyze on unnamed people produces less-useful captions
+                 ("a person at a party" vs "Adam at a party"). Mirror of
+                 macOS DeepAnalyzeView's `unnamedClustersWarning` strip. -->
+            <Border x:Name="NamePeopleGateBanner"
+                    CornerRadius="10"
+                    Padding="14,12"
+                    Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                    BorderBrush="{ThemeResource AiBrush}"
+                    BorderThickness="1"
+                    Visibility="Collapsed">
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <FontIcon Grid.Column="0"
+                              Glyph="&#xE77B;"
+                              FontSize="16"
+                              Foreground="{ThemeResource AiBrush}"
+                              VerticalAlignment="Top"
+                              Margin="0,2,0,0" />
+                    <TextBlock Grid.Column="1"
+                               x:Name="NamePeopleGateText"
+                               TextWrapping="Wrap"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Text="Name your people first so smart-name proposals can use their names." />
+                    <Button Grid.Column="2"
+                            x:Name="GoToPeopleButton"
+                            Content="Open People"
+                            Click="OnGoToPeopleClicked"
+                            VerticalAlignment="Center" />
+                </Grid>
+            </Border>
+
             <!-- Model picker — 3 cards. -->
             <StackPanel Spacing="6">
                 <TextBlock Text="Choose a model"
@@ -277,6 +349,21 @@
                                Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
                 </StackPanel>
             </Border>
+
+            <!-- V14.9-D4: smart-names pending-rename pill. Visible after
+                 Deep Analyze produces one or more ProposedName values.
+                 Tap routes back to the Library so the user can apply
+                 the proposed names via BulkRenameSheet. -->
+            <Button x:Name="ProposedNamesPill"
+                    Click="OnProposedNamesPillClicked"
+                    Visibility="Collapsed"
+                    HorizontalAlignment="Left">
+                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <FontIcon Glyph="&#xE8AC;" FontSize="13" Foreground="{ThemeResource AiBrush}" />
+                    <TextBlock x:Name="ProposedNamesPillText"
+                               Style="{StaticResource CaptionTextBlockStyle}" />
+                </StackPanel>
+            </Button>
 
             <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
                        Foreground="{ThemeResource TextFillColorTertiaryBrush}"

@@ -4,6 +4,7 @@
 
 using System.ComponentModel;
 using FileID.ViewModels;
+using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Windows.UI;
@@ -24,7 +25,8 @@ public sealed partial class SidebarEngineStatus : UserControl
     {
         if (e.PropertyName is nameof(EngineClient.State)
                           or nameof(EngineClient.Info)
-                          or nameof(EngineClient.CrashReason))
+                          or nameof(EngineClient.CrashReason)
+                          or nameof(EngineClient.LastError))
         {
             DispatcherQueue.TryEnqueue(Sync);
         }
@@ -33,13 +35,23 @@ public sealed partial class SidebarEngineStatus : UserControl
     private void Sync()
     {
         var ec = EngineClient.Instance;
+        // Hide the pill entirely when everything's healthy — matches macOS
+        // Sidebar.swift:103-111. The pill is meant to surface trouble; in
+        // the steady state it's just noise.
+        var healthy = ec.State == EngineClient.LifecycleState.Ready && ec.LastError is null;
+        Visibility = healthy ? Visibility.Collapsed : Visibility.Visible;
+        if (healthy) return;
+
         switch (ec.State)
         {
             case EngineClient.LifecycleState.Starting:
                 ApplyStatus(0xFF, 0xCC, 0x00, "Engine starting…", "Engine is launching.");
                 break;
             case EngineClient.LifecycleState.Ready:
-                ApplyStatus(0x6B, 0xE0, 0x82, "Engine ready", BuildReadyTooltip(ec));
+                // Ready but with a recent error — show red so the user notices.
+                ApplyStatus(0xE5, 0x55, 0x55,
+                    ec.LastError?.Message ?? "Engine reported an error",
+                    ec.LastError?.Message ?? "See app.log for details.");
                 break;
             case EngineClient.LifecycleState.Crashed:
                 ApplyStatus(0xE5, 0x55, 0x55,

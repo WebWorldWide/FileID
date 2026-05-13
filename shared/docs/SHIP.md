@@ -291,3 +291,46 @@ We earn the right to call something "done" by passing automated tests, not by cl
 8 tracks. Each has a definition-of-done. We do them in order. When the last one ships, we cut v1.0.0.
 
 If something genuinely critical comes up that doesn't fit, it goes into a "v1.0.1 hotfix" doc — not into this plan.
+
+---
+
+## Appendix W — Windows v1.0 per-vendor verification matrix
+
+The Windows port (`platforms/windows/`) is its own ship lane, parallel to the macOS v1.0 plan. The engine's ORT execution-provider picker auto-detects the best accelerator on every supported vendor's silicon. **Performance Packs were removed in V14.8.2** (see `PACKS.md`) — DirectML is now the universal GPU path for every D3D12-capable vendor, with CPU as the floor. Throughput targets below reflect that reality.
+
+For each row below, run a 1,000-file scan on a representative library and confirm the engine log + throughput target.
+
+| Vendor | Reference hardware       | Expected EP | Throughput target | Memory ceiling | Status |
+|--------|--------------------------|-------------|-------------------|----------------|--------|
+| NVIDIA | RTX 3060 / 4060+         | DirectML    | ≥ 60 files/s      | ≤ 4 GB VRAM    | ⬜ pending |
+| AMD    | RX 6600 / 7600+          | DirectML    | ≥ 40 files/s      | ≤ 4 GB VRAM    | ⬜ pending |
+| Intel  | Arc A380 / Iris Xe       | DirectML    | ≥ 30 files/s      | ≤ 3 GB shared  | ⬜ pending |
+| Intel  | UHD 770 iGPU             | DirectML    | ≥ 18 files/s      | ≤ 3 GB shared  | ⬜ pending |
+| Qualcomm | Snapdragon X Elite     | CPU         | ≥ 25 files/s      | ≤ 2 GB         | ⬜ pending |
+| CPU    | i7-12700 / Ryzen 7 7700  | CPU         | ≥ 25 files/s      | ≤ 2 GB RSS     | ⬜ pending |
+
+NVIDIA throughput sits at ~80–90% of native CUDA via DirectML (per `DECISIONS.md` 2026-05-02). Snapdragon falls to CPU because no public QNN SDK redistributable exists — power users who install the Qualcomm SDK locally will see the engine auto-pick QNN, but the default ship target is CPU.
+
+### Per-vendor acceptance criteria
+
+Each row passes when **all six** hold:
+
+1. **Engine log shows the expected EP.** Open `%LOCALAPPDATA%\FileID\logs\app.log` after a fresh scan and grep for `[EP] built session`. The `ep=` field must match the table.
+2. **Throughput target met** over a representative 1,000-file image library. Wall-clock from "Scan started" to "Scan completed" / 1000 ≥ target.
+3. **Memory ceiling honored.** Peak RSS (per Task Manager) ≤ table value across the scan.
+4. **No crash dumps** generated in `%LOCALAPPDATA%\CrashDumps\` during the run.
+5. **Deep Analyze succeeds on 10 sample images.** llama.cpp Vulkan runtime covers NVIDIA / AMD / Intel; CPU fallback on Snapdragon. Surfaced in the engine log via `[VLM]` lines.
+6. **iterate.ps1 corpus regression green.** When the harness lands per `NEXT.md`, all 11 assertions pass on the host.
+
+### What "100% certainty" means
+
+Code-level certainty is in place: `engine/src/models/runtime.rs` unit tests cover every vendor's EP pick + fallback, and the EP picker fails safely down the chain if any EP can't build a session. **Hardware certainty** is the missing layer — only running on each vendor's silicon proves drivers, DLLs, and ORT integration all line up. The six checkboxes above ARE the proof. Per-vendor pack installs are no longer part of the loop (packs are removed; see `PACKS.md`).
+
+### Build pre-reqs for the verification pass
+
+- EV cert installed + `FILEID_EV_THUMBPRINT` set (so signed binaries don't get SmartScreen-blocked on first run).
+- `llama_runtime_x64` (Vulkan llama.cpp) downloadable from GitHub — verified live.
+
+### Lane gate
+
+Windows v1.0 ships **only** when ≥ 4 of the 6 rows are green (CPU, plus at least one each from NVIDIA / AMD / Intel; Snapdragon may launch in a follow-on if hardware availability blocks). All 6 rows is the goal; 4 is the minimum.

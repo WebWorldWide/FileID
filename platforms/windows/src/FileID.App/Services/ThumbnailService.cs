@@ -40,9 +40,20 @@ internal sealed class ThumbnailService : IDisposable
     private readonly Channel<ThumbnailRequest> _queue;
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _worker;
+    /// <summary>V14.9-A10: captured at construction time on the UI thread
+    /// so the worker (running on a thread-pool thread) always has a
+    /// reliable dispatcher to marshal BitmapImage.SetSourceAsync back to.
+    /// Late-binding to <c>GetForCurrentThread()</c> in <c>RenderAsync</c>
+    /// could return null on the worker thread, and the fallback
+    /// (<c>HostWindow?.DispatcherQueue</c>) might also be null during
+    /// startup/shutdown — causing a silent thread-affinity violation.</summary>
+    private readonly Microsoft.UI.Dispatching.DispatcherQueue? _uiDispatcher;
 
     public ThumbnailService()
     {
+        // V14.9-A10: capture the UI dispatcher at ctor time. Service is
+        // expected to be constructed on the UI thread.
+        _uiDispatcher = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
         // Bigger queue: a fast scroll on a 256-px tile grid generates
         // 50+ requests/sec. The previous 64-slot cap dropped older
         // requests within ~1 second of fast scrolling. 256 absorbs
@@ -84,7 +95,7 @@ internal sealed class ThumbnailService : IDisposable
             }
             try
             {
-                var bmp = await RenderAsync(req.Path, ct).ConfigureAwait(false);
+                var bmp = await RenderAsync(req.Path, _uiDispatcher, ct).ConfigureAwait(false);
                 if (bmp != null)
                 {
                     var key = CacheKey(req.Path, req.ModifiedAt);
@@ -111,7 +122,10 @@ internal sealed class ThumbnailService : IDisposable
     /// </summary>
     private const uint ThumbnailRequestPx = 256;
 
-    private static async Task<BitmapImage?> RenderAsync(string path, CancellationToken ct)
+    private static async Task<BitmapImage?> RenderAsync(
+        string path,
+        Microsoft.UI.Dispatching.DispatcherQueue? uiDispatcher,
+        CancellationToken ct)
     {
         if (!File.Exists(path))
         {
@@ -132,32 +146,37 @@ internal sealed class ThumbnailService : IDisposable
                 return null;
             }
             // BitmapImage.SetSourceAsync must run on the UI thread because
-            // BitmapImage is a DispatcherObject. Marshal back via the
-            // current dispatcher; the caller awaits us on the UI thread
-            // typically (FileTile binding) but the worker drains on a
-            // background thread, so we hop explicitly.
-            var bmp = new BitmapImage();
-            var dispatcher = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread()
-                ?? FileID.App.HostWindow?.DispatcherQueue;
-            if (dispatcher != null)
+            // BitmapImage is a DispatcherObject. V14.9-A10: use the ctor-
+            // captured dispatcher. Falling back to HostWindow at this
+            // point is unsafe (HostWindow may not yet exist or may have
+            // been torn down); refuse to render rather than touch
+            // BitmapImage from a thread-pool thread.
+            var dispatcher = uiDispatcher ?? FileID.App.HostWindow?.DispatcherQueue;
+            if (dispatcher is null)
             {
-                var tcs = new TaskCompletionSource<BitmapImage?>();
-                dispatcher.TryEnqueue(async () =>
-                {
-                    try
-                    {
-                        await bmp.SetSourceAsync(thumb).AsTask(ct);
-                        tcs.TrySetResult(bmp);
-                    }
-                    catch
-                    {
-                        tcs.TrySetResult(null);
-                    }
-                });
-                return await tcs.Task.ConfigureAwait(false);
+                DebugLog.Warn("ThumbnailService.RenderAsync: no UI dispatcher available; skipping.");
+                return null;
             }
-            await bmp.SetSourceAsync(thumb).AsTask(ct);
-            return bmp;
+            var bmp = new BitmapImage();
+            var tcs = new TaskCompletionSource<BitmapImage?>();
+            var enqueued = dispatcher.TryEnqueue(async () =>
+            {
+                try
+                {
+                    await bmp.SetSourceAsync(thumb).AsTask(ct);
+                    tcs.TrySetResult(bmp);
+                }
+                catch
+                {
+                    tcs.TrySetResult(null);
+                }
+            });
+            if (!enqueued)
+            {
+                DebugLog.Warn("ThumbnailService.RenderAsync: dispatcher.TryEnqueue returned false (shutdown?).");
+                return null;
+            }
+            return await tcs.Task.ConfigureAwait(false);
         }
         catch
         {
@@ -172,11 +191,16 @@ internal sealed class ThumbnailService : IDisposable
 
     public void Dispose()
     {
-        _cts.Cancel();
-        _queue.Writer.TryComplete();
-        try { _worker.Wait(TimeSpan.FromSeconds(1)); } catch { /* swallow */ }
-        _cache.Dispose();
-        _cts.Dispose();
+        // Cancel + complete; do NOT Wait on the worker. The worker is a
+        // daemon-style channel drainer — a 1 s Wait on the UI thread during
+        // app shutdown was visibly hanging window close on slow disks. The
+        // worker observes the cancellation token and exits on its own; the
+        // process exit terminates anything still in flight, which is safe
+        // because thumbnail decoding has no persistence side-effects.
+        try { _cts.Cancel(); } catch { /* swallow */ }
+        try { _queue.Writer.TryComplete(); } catch { /* swallow */ }
+        try { _cache.Dispose(); } catch { /* swallow */ }
+        try { _cts.Dispose(); } catch { /* swallow */ }
     }
 
     private sealed record ThumbnailRequest(

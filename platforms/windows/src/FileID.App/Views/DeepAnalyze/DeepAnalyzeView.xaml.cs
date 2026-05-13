@@ -48,7 +48,76 @@ public sealed partial class DeepAnalyzeView : UserControl
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         SyncCards();
         SyncRuntimeBanner();
+        SyncCudnnBanner();
         UpdateActiveModelLabel();
+        // V14.9-C5: refresh the "Name people first" gate every time the
+        // view loads; also refreshed in OnEngineChanged when face
+        // clustering finishes.
+        _ = RefreshNamePeopleGateAsync();
+    }
+
+    /// <summary>V14.9-C5: query the DB for any person row with NULL
+    /// name + first_name. Disables Analyze All + shows the gate banner
+    /// when the count is non-zero.</summary>
+    private async System.Threading.Tasks.Task RefreshNamePeopleGateAsync()
+    {
+        int unnamed = 0;
+        try
+        {
+            var dbPath = AppPaths.DbPath;
+            unnamed = await System.Threading.Tasks.Task.Run(() =>
+            {
+                try
+                {
+                    if (!System.IO.File.Exists(dbPath)) return 0;
+                    var conn = new Microsoft.Data.Sqlite.SqliteConnection(
+                        new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+                        {
+                            DataSource = dbPath,
+                            Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
+                        }.ToString());
+                    conn.Open();
+                    using var cmd = conn.CreateCommand();
+                    // A cluster is "unnamed" when both `name` (legacy) and
+                    // `first_name` (v5) are NULL — the display falls back
+                    // to "Person N" in PeopleViewModel.
+                    cmd.CommandText = "SELECT COUNT(*) FROM persons WHERE name IS NULL AND first_name IS NULL;";
+                    var result = cmd.ExecuteScalar();
+                    return result is null ? 0 : Convert.ToInt32(result);
+                }
+                catch { return 0; }
+            }).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("RefreshNamePeopleGateAsync failed: " + ex.Message);
+            unnamed = 0;
+        }
+        // Marshal UI updates back.
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (unnamed > 0)
+            {
+                NamePeopleGateBanner.Visibility = Visibility.Visible;
+                NamePeopleGateText.Text = unnamed == 1
+                    ? "1 face cluster doesn't have a name yet. Name it for sharper captions."
+                    : $"{unnamed} face clusters don't have names yet. Name them for sharper captions.";
+                AnalyzeAllButton.IsEnabled = false;
+                ToolTipService.SetToolTip(AnalyzeAllButton,
+                    "Name unnamed people first so smart-name proposals can use their names.");
+            }
+            else
+            {
+                NamePeopleGateBanner.Visibility = Visibility.Collapsed;
+                AnalyzeAllButton.IsEnabled = true;
+                ToolTipService.SetToolTip(AnalyzeAllButton, null);
+            }
+        });
+    }
+
+    private void OnGoToPeopleClicked(object sender, RoutedEventArgs e)
+    {
+        AppViewModel.Instance.ActiveTab = SidebarTab.People;
     }
 
     private void OnInstallerChanged(object? sender, PropertyChangedEventArgs e)
@@ -63,6 +132,18 @@ public sealed partial class DeepAnalyzeView : UserControl
             case nameof(EngineClient.DeepAnalyzeLast):
             case nameof(EngineClient.DeepAnalyzeComplete):
                 DispatcherQueue.TryEnqueue(SyncStream);
+                break;
+            case nameof(EngineClient.Info):
+            case nameof(EngineClient.State):
+                DispatcherQueue.TryEnqueue(SyncCudnnBanner);
+                break;
+            // V14.9-C5: re-evaluate the "Name people first" gate every
+            // time face clustering re-runs (new clusters → new unnamed)
+            // or a scan completes (new files → maybe new clusters next
+            // run).
+            case nameof(EngineClient.Phase):
+            case nameof(EngineClient.LastFaceClustering):
+                _ = RefreshNamePeopleGateAsync();
                 break;
         }
     }
@@ -133,6 +214,50 @@ public sealed partial class DeepAnalyzeView : UserControl
         }
     }
 
+    private void SyncCudnnBanner()
+    {
+        // Info-only banner: surfaces when NVIDIA is detected but the engine
+        // is currently routing Deep Analyze through a non-CUDA EP. Doesn't
+        // block — DirectML / CPU works, just slower. Mirrors macOS's
+        // "unavailableCard" pattern but as an advisory rather than a block.
+        var hw = EngineClient.Instance.Info?.Hardware;
+        if (hw is null)
+        {
+            CudnnInfoBanner.Visibility = Visibility.Collapsed;
+            return;
+        }
+        var isNvidia = string.Equals(hw.GpuVendor, "nvidia", StringComparison.OrdinalIgnoreCase);
+        var epIsCuda = string.Equals(hw.ExecutionProvider, "cuda", StringComparison.OrdinalIgnoreCase);
+        if (!isNvidia || epIsCuda)
+        {
+            CudnnInfoBanner.Visibility = Visibility.Collapsed;
+            return;
+        }
+        var currentEp = string.IsNullOrEmpty(hw.ExecutionProvider) ? "CPU" : hw.ExecutionProvider.ToUpperInvariant();
+        CudnnInfoBannerText.Text =
+            $"NVIDIA GPU detected but Deep Analyze is currently running on {currentEp}. " +
+            "Installing cuDNN 12.x adds ~15% throughput on RTX-class hardware (Compute Capability ≥ 7.5). " +
+            "FileID can't redistribute cuDNN — grab it from NVIDIA's developer site and the engine picks it up automatically on next launch.";
+        CudnnInfoBanner.Visibility = Visibility.Visible;
+    }
+
+    private void OnGetCudnnClicked(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "https://developer.nvidia.com/cudnn-downloads",
+                UseShellExecute = true,
+            };
+            System.Diagnostics.Process.Start(psi);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("Open cuDNN downloads failed: " + ex.Message);
+        }
+    }
+
     private void UpdateActiveModelLabel()
     {
         ActiveModelText.Text = _activeModel switch
@@ -143,24 +268,51 @@ public sealed partial class DeepAnalyzeView : UserControl
         };
     }
 
+    private int _proposedNameCount;
+
     private void SyncStream()
     {
         var ec = EngineClient.Instance;
+        var starting = ec.DeepAnalyzeStarting;
         var prog = ec.DeepAnalyzeProgress;
         var last = ec.DeepAnalyzeLast;
         var complete = ec.DeepAnalyzeComplete;
 
-        if (prog is null && last is null && complete is null) return;
+        if (starting is null && prog is null && last is null && complete is null) return;
+
+        // V14.9-D5: starting-card pre-progress. Engine emits
+        // DeepAnalyzeStarting with phase = Queued / Loading / Resolving
+        // BEFORE the first DeepAnalyzeProgress event. Surface the phase
+        // text so the user knows we're not stalled while the VLM warms
+        // up (~5-30 s on first run).
+        if (starting is not null && prog is null)
+        {
+            StreamCard.Visibility = Visibility.Visible;
+            CancelButton.IsEnabled = true;
+            AnalyzeAllButton.IsEnabled = false;
+            StreamFileNameText.Text = $"{starting.Phase}: {starting.ModelKind}";
+            StreamCaptionText.Text = starting.Message ?? string.Empty;
+            StreamProposedNameText.Text = string.Empty;
+            OverallProgress.Value = 0;
+            OverallProgress.IsIndeterminate = true;
+            OverallProgressText.Text = "Preparing…";
+        }
 
         if (prog is not null)
         {
             StreamCard.Visibility = Visibility.Visible;
             CancelButton.IsEnabled = true;
             AnalyzeAllButton.IsEnabled = false;
+            OverallProgress.IsIndeterminate = false;
 
             var pct = prog.Total == 0 ? 0 : (double)prog.Processed / prog.Total;
             OverallProgress.Value = pct;
-            OverallProgressText.Text = $"{prog.Processed} / {prog.Total} files";
+            // V14.9-D3: include ETA + processed/total + per-second rate
+            // when the engine reports it.
+            var etaSuffix = prog.EtaSeconds is double eta && eta > 0
+                ? $" · {FormatEta(eta)} left"
+                : string.Empty;
+            OverallProgressText.Text = $"{prog.Processed} / {prog.Total} files{etaSuffix}";
 
             if (!string.IsNullOrEmpty(prog.CurrentPath))
             {
@@ -174,23 +326,72 @@ public sealed partial class DeepAnalyzeView : UserControl
         if (last is not null)
         {
             StreamCaptionText.Text = last.Description ?? string.Empty;
-            StreamProposedNameText.Text = string.IsNullOrEmpty(last.ProposedName)
-                ? string.Empty
-                : $"Proposed name: {last.ProposedName}";
+            if (!string.IsNullOrEmpty(last.ProposedName))
+            {
+                StreamProposedNameText.Text = $"Proposed name: {last.ProposedName}";
+                _proposedNameCount++;
+                SyncProposedNamesPill();
+            }
+            else
+            {
+                StreamProposedNameText.Text = string.Empty;
+            }
         }
 
         if (complete is not null)
         {
             CancelButton.IsEnabled = false;
             AnalyzeAllButton.IsEnabled = true;
+            OverallProgress.IsIndeterminate = false;
             OverallProgressText.Text = complete.Cancelled
                 ? $"Cancelled ({complete.Processed} done, {complete.Failed} failed)"
                 : $"Done — {complete.Processed} captioned in {complete.TotalSeconds:0.#}s ({complete.Failed} failed)";
+            SyncProposedNamesPill();
         }
+    }
+
+    /// <summary>V14.9-D4: smart-names pending-rename pill. Shows the
+    /// running count of ProposedName values the engine has produced
+    /// during this Deep Analyze run. Tap routes to BulkRenameSheet to
+    /// apply or discard them.</summary>
+    private void SyncProposedNamesPill()
+    {
+        if (ProposedNamesPill == null) return;
+        if (_proposedNameCount > 0)
+        {
+            ProposedNamesPill.Visibility = Visibility.Visible;
+            ProposedNamesPillText.Text = _proposedNameCount == 1
+                ? "1 smart name pending rename"
+                : $"{_proposedNameCount} smart names pending rename";
+        }
+        else
+        {
+            ProposedNamesPill.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    private void OnProposedNamesPillClicked(object sender, RoutedEventArgs e)
+    {
+        // BulkRenameSheet is hosted from the Library tab; navigate there
+        // so the user can review + apply the proposed renames.
+        AppViewModel.Instance.ActiveTab = SidebarTab.Library;
+    }
+
+    private static string FormatEta(double seconds)
+    {
+        if (seconds < 60) return $"{seconds:F0}s";
+        if (seconds < 3600) return $"{seconds / 60:F0}m";
+        var hours = seconds / 3600;
+        if (hours > 99) return "99+h";
+        return $"{hours:F1}h";
     }
 
     private async System.Threading.Tasks.Task LoadStreamThumbAsync(string path)
     {
+        // V14.9-A17: swallowing all exceptions left the image at whatever
+        // previous frame was shown — confusing when the user can see the
+        // filename advance but the thumb sticks. Clear the source on any
+        // failure so it falls back to the placeholder glyph instead.
         try
         {
             var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(path);
@@ -202,9 +403,15 @@ public sealed partial class DeepAnalyzeView : UserControl
                 var bmp = new BitmapImage();
                 await bmp.SetSourceAsync(thumb);
                 StreamImage.Source = bmp;
+                return;
             }
+            StreamImage.Source = null;
         }
-        catch { /* fall back to placeholder */ }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"LoadStreamThumbAsync({PathRedactor.Redact(path)}) failed: {ex.Message}");
+            try { StreamImage.Source = null; } catch { }
+        }
     }
 
     private void OnModelCardTapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e)

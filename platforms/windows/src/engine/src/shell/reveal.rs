@@ -11,7 +11,7 @@ use std::path::Path;
 #[cfg(windows)]
 use windows::core::PCWSTR;
 #[cfg(windows)]
-use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 #[cfg(windows)]
 use windows::Win32::UI::Shell::{
     ILCreateFromPathW, ILFree, SHOpenFolderAndSelectItems,

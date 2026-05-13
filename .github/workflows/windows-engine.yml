@@ -132,6 +132,43 @@ jobs:
           $size = (Get-Item $exe).Length / 1MB
           Write-Host ("FileIDEngine.exe size: {0:F1} MB" -f $size)
 
+      # Per-vendor EP smoke: launch the engine, let it emit `ready` on stdout
+      # (carrying HardwareInfo + the chosen executionProvider), then send EOF
+      # via empty stdin so the engine exits cleanly. On CI hosts we expect
+      # CPU fallback (no GPU), so this proves the EP probe + dispatch + JSON
+      # serialization are alive on each target arch. On real-hardware
+      # verification runs the same step surfaces CUDA / DirectML / QNN.
+      - name: Smoke — engine startup + EP probe
+        if: matrix.cross == false
+        shell: pwsh
+        timeout-minutes: 1
+        run: |
+          $exe = "target/${{ matrix.target }}/release/FileIDEngine.exe"
+          New-Item -ItemType File -Path empty-stdin.txt -Force | Out-Null
+          $proc = Start-Process -FilePath $exe -PassThru `
+            -RedirectStandardInput  "empty-stdin.txt" `
+            -RedirectStandardOutput "engine.stdout" `
+            -RedirectStandardError  "engine.stderr" `
+            -NoNewWindow
+          $exited = $proc.WaitForExit(10000)
+          if (-not $exited) {
+            try { $proc.Kill() } catch { }
+            throw "Engine did not exit within 10 s of stdin EOF."
+          }
+          $stdout = Get-Content "engine.stdout" -Raw -ErrorAction SilentlyContinue
+          if ([string]::IsNullOrWhiteSpace($stdout)) { throw "No stdout from engine — startup failed." }
+          # Event JSON is { "t": "...", "payload": { "ready": { "_0": { ... } } } }
+          # so the variant tag appears as a JSON key inside payload — match that.
+          if (-not ($stdout -match '"ready"\s*:')) {
+            Write-Error "engine.stdout did not contain a ready event:`n$stdout"
+            exit 1
+          }
+          if (-not ($stdout -match '"executionProvider"\s*:')) {
+            Write-Error "ready event missing HardwareInfo.executionProvider:`n$stdout"
+            exit 1
+          }
+          Write-Host "Engine startup + EP probe smoke passed. ✅"
+
       # Privacy gate: shipped binary must NOT contain telemetry SDK strings.
       # Failing this is a release blocker — no exception.
       - name: Privacy — telemetry-string scan

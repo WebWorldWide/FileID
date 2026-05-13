@@ -8,7 +8,6 @@
 use anyhow::{Context, Result};
 use std::io::Cursor;
 
-use windows::core::Interface;
 use windows::Graphics::Imaging::{BitmapDecoder, SoftwareBitmap};
 use windows::Media::Ocr::OcrEngine;
 use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream};

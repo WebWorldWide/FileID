@@ -38,9 +38,24 @@ public sealed partial class SidebarProcessingControl : UserControl
                           or nameof(EngineClient.Phase)
                           or nameof(EngineClient.State)
                           or nameof(EngineClient.IsPaused)
-                          or nameof(EngineClient.LastScanDuration))
+                          or nameof(EngineClient.LastScanDuration)
+                          or nameof(EngineClient.LastError))
         {
             DispatcherQueue.TryEnqueue(Sync);
+        }
+        // V14.9-D8: per-batch completion ripple. Engine emits one
+        // BatchSummary per ~100 files (or every 200 ms). Each new
+        // BatchSummary object change triggers a gold ring pulse on
+        // the "Tagged" stat — visual feedback that batches are landing.
+        if (e.PropertyName == nameof(EngineClient.LastBatch))
+        {
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (TaggedStatBorder != null && EngineClient.Instance.LastBatch is { } batch)
+                {
+                    FileID.Theme.Motion.CompletionRipple.SetTrigger(TaggedStatBorder, batch);
+                }
+            });
         }
     }
 
@@ -67,52 +82,74 @@ public sealed partial class SidebarProcessingControl : UserControl
 
     private async void OnStartScanClicked(object sender, RoutedEventArgs e)
     {
-        var vm = AppViewModel.Instance;
-        if (!vm.HasFolder)
+        // F2d (V14.8.3): wrap the whole async void body in a catch-all so a
+        // disposed XamlRoot / broken dialog / engine death between the prompt
+        // and the IPC send can't escape into App.UnhandledException and take
+        // down the process. The user reported "click Start scan, nothing
+        // happens, then the app crashes" — guarding here ensures the worst
+        // we ever do is log the failure and show a clean error sheet.
+        try
         {
-            await ShowAlertAsync("Pick a folder first",
-                "FileID needs a folder to scan. Use the picker at the top of the sidebar.");
-            return;
-        }
-
-        // Pre-scan EP gate: warn if the engine would run on CPU or on
-        // DirectML when a vendor-specific Performance Pack would help.
-        // Skip if the user already accepted in this session.
-        if (!_userAcceptedSuboptimalScan)
-        {
-            var hw = EngineClient.Instance.Info?.Hardware;
-            if (hw is not null)
+            var vm = AppViewModel.Instance;
+            if (!vm.HasFolder)
             {
-                var prompt = BuildPerformancePrompt(hw);
-                if (prompt is not null)
+                await ShowAlertAsync("Pick a folder first",
+                    "FileID needs a folder to scan. Use the picker at the top of the sidebar.");
+                return;
+            }
+
+            // Pre-scan EP gate: warn only when the engine will fall back to
+            // CPU. Performance Packs were removed in V14.8.2 — DirectML on
+            // every D3D12-capable GPU is now the canonical path, so we no
+            // longer prompt users to install a pack that doesn't exist.
+            if (!_userAcceptedSuboptimalScan)
+            {
+                var hw = EngineClient.Instance.Info?.Hardware;
+                if (hw is not null)
                 {
-                    var result = await ShowPerformancePromptAsync(prompt);
-                    switch (result)
+                    var prompt = BuildPerformancePrompt(hw);
+                    if (prompt is not null)
                     {
-                        case PerformancePromptResult.OpenSettings:
-                            AppViewModel.Instance.ActiveTab = SidebarTab.Settings;
-                            return;
-                        case PerformancePromptResult.Cancel:
-                            return;
-                        case PerformancePromptResult.Continue:
-                            _userAcceptedSuboptimalScan = true;
-                            break;
+                        var result = await ShowPerformancePromptAsync(prompt);
+                        switch (result)
+                        {
+                            case PerformancePromptResult.OpenSettings:
+                                AppViewModel.Instance.ActiveTab = SidebarTab.Settings;
+                                return;
+                            case PerformancePromptResult.Cancel:
+                                return;
+                            case PerformancePromptResult.Continue:
+                                _userAcceptedSuboptimalScan = true;
+                                break;
+                        }
                     }
                 }
             }
-        }
 
-        try
-        {
-            await EngineClient.Instance.StartScanAsync(vm.FolderPath!, vm.FolderDisplay);
-            DebugLog.Info($"Sent startScan: {PathRedactor.Redact(vm.FolderPath!)}");
+            try
+            {
+                // Optimistic UI flip: switch into the scanning panel immediately
+                // so the user gets visible feedback on click. The engine's
+                // first PhaseChanged(Discovering) event echoes the same value
+                // (no-op); any later transition (Tagging, Failed, Completed)
+                // overwrites this. If StartScanAsync faults (engine not Ready),
+                // the catch block surfaces an alert and the failure pill takes
+                // over via the Sync() Failed branch.
+                EngineClient.Instance.SetOptimisticScanningPhase();
+                await EngineClient.Instance.StartScanAsync(vm.FolderPath!, vm.FolderDisplay);
+                DebugLog.Info($"Sent startScan: {PathRedactor.Redact(vm.FolderPath!)}");
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Error("StartScan IPC failed: " + ex.Message);
+                await ShowAlertAsync("Scan didn't start",
+                    "FileID couldn't tell the engine to start. Engine status: "
+                    + EngineClient.Instance.State);
+            }
         }
         catch (Exception ex)
         {
-            DebugLog.Error("StartScan IPC failed: " + ex.Message);
-            await ShowAlertAsync("Scan didn't start",
-                "FileID couldn't tell the engine to start. Engine status: "
-                + EngineClient.Instance.State);
+            DebugLog.Error("OnStartScanClicked unexpected exception: " + ex);
         }
     }
 
@@ -128,9 +165,11 @@ public sealed partial class SidebarProcessingControl : UserControl
         var vendor = (hw.GpuVendor ?? string.Empty).ToLowerInvariant();
 
         // Optimal — best EP already active, scan freely.
-        if (ep is "cuda" or "qnn" or "openvino") return null;
+        if (ep is "cuda" or "qnn" or "openvino" or "directml") return null;
 
-        // CPU branch.
+        // CPU branch — the only state we still warn about. Performance Packs
+        // were removed in V14.8.2; DirectML is the universal GPU path now,
+        // so a non-CPU EP is always considered acceptable.
         if (ep == "cpu")
         {
             if (vendor is "" or "none")
@@ -142,24 +181,7 @@ public sealed partial class SidebarProcessingControl : UserControl
             }
             return new PerformancePrompt(
                 "GPU detected but inactive",
-                $"FileID detected a {hw.AdapterName ?? hw.GpuVendor} GPU but is currently running on CPU. Open Settings → Performance to install the right Performance Pack.\n\nScanning now will use CPU (roughly 10× slower).",
-                ShowOpenSettings: true);
-        }
-
-        // DirectML branch — already a real GPU EP. Only warn if a
-        // vendor-specific pack would be a meaningful upgrade.
-        if (ep == "directml")
-        {
-            var packMissing =
-                (vendor == "nvidia"   && !hw.CudaPackPresent) ||
-                (vendor == "intel"    && !hw.OpenvinoPackPresent) ||
-                (vendor == "qualcomm" && !hw.QnnPackPresent);
-            if (!packMissing) return null; // AMD or already-installed pack — silent
-            return new PerformancePrompt(
-                "Performance Pack available",
-                string.IsNullOrEmpty(hw.Recommendation)
-                    ? "A vendor-specific GPU Performance Pack is available for your hardware and would speed up the scan. Open Settings → Performance to install it."
-                    : hw.Recommendation,
+                $"FileID detected a {hw.AdapterName ?? hw.GpuVendor} GPU but is currently running on CPU. Check Settings → Performance for the GPU execution-provider override.\n\nScanning now will use CPU (roughly 10× slower).",
                 ShowOpenSettings: true);
         }
 
@@ -242,6 +264,9 @@ public sealed partial class SidebarProcessingControl : UserControl
         }
     }
 
+    private static readonly SolidColorBrush FailedTextBrush =
+        new(Color.FromArgb(0xFF, 0xFF, 0x6B, 0x6B));
+
     private void Sync()
     {
         var prog = EngineClient.Instance.LastProgress;
@@ -249,10 +274,32 @@ public sealed partial class SidebarProcessingControl : UserControl
 
         bool isInFlight = phase is ScanPhase.Discovering or ScanPhase.Tagging or ScanPhase.PostScan;
         bool isCompleted = phase is ScanPhase.Completed;
+        bool isFailed = phase is ScanPhase.Failed;
+
+        // Failed: surface the engine error in the idle pill in red. Without
+        // this branch a scan failure (e.g. missing model files) reported via
+        // PhaseChanged(Failed) + Error(model_load_failed) falls through to
+        // the default idle text and looks like the click did nothing.
+        if (isFailed)
+        {
+            IdlePanel.Visibility = Visibility.Visible;
+            ScanningPanel.Visibility = Visibility.Collapsed;
+            CompletedPanel.Visibility = Visibility.Collapsed;
+            var err = EngineClient.Instance.LastError;
+            IdleStatusText.Text = err?.Message ?? "Scan failed.";
+            IdleStatusText.Foreground = FailedTextBrush;
+            StartScanButton.IsEnabled = AppViewModel.Instance.HasFolder
+                                      && EngineClient.Instance.State == EngineClient.LifecycleState.Ready;
+            return;
+        }
 
         IdlePanel.Visibility = (!isInFlight && !isCompleted) ? Visibility.Visible : Visibility.Collapsed;
         ScanningPanel.Visibility = isInFlight ? Visibility.Visible : Visibility.Collapsed;
         CompletedPanel.Visibility = isCompleted ? Visibility.Visible : Visibility.Collapsed;
+
+        // Reset foreground so a successful follow-up scan doesn't keep the
+        // red text from the previous failed attempt.
+        IdleStatusText.Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"];
 
         StartScanButton.IsEnabled = AppViewModel.Instance.HasFolder
                                   && EngineClient.Instance.State == EngineClient.LifecycleState.Ready;
@@ -334,19 +381,78 @@ public sealed partial class SidebarProcessingControl : UserControl
     {
         if (seconds < 60) return $"{seconds:F0}s";
         if (seconds < 3600) return $"{seconds / 60:F0}m";
-        return $"{seconds / 3600:F1}h";
+        var hours = seconds / 3600;
+        // V14.9-E6: cap pathological/garbage durations so the UI never
+        // shows a four-digit hour count. Engine never legitimately
+        // produces > 99h scans on supported hardware.
+        if (hours > 99) return "99+ h";
+        return $"{hours:F1}h";
+    }
+
+    // V14.9-C6: AutoPilot trigger. Mirrors the macOS chain of
+    // scan → cluster → caption → plan, all on-device. RunAutoPilotAsync
+    // advances EngineClient.CurrentAutoPilotStage, which drives the
+    // tracker dots above this control.
+    private async void OnAutoPilotClicked(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var vm = AppViewModel.Instance;
+            if (!vm.HasFolder)
+            {
+                await ShowAlertAsync("Pick a folder first",
+                    "AutoPilot needs a folder to scan. Use the picker at the top of the sidebar.");
+                return;
+            }
+            try
+            {
+                AutoPilotButton.IsEnabled = false;
+                StartScanButton.IsEnabled = false;
+                await EngineClient.Instance.RunAutoPilotAsync(vm.FolderPath!, vm.FolderDisplay);
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Error("AutoPilot failed: " + ex.Message);
+                await ShowAlertAsync("AutoPilot stopped",
+                    "AutoPilot didn't complete: " + ex.Message);
+            }
+            finally
+            {
+                AutoPilotButton.IsEnabled = true;
+                StartScanButton.IsEnabled = true;
+            }
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Error("OnAutoPilotClicked unexpected: " + ex);
+        }
     }
 
     private async Task ShowAlertAsync(string title, string body)
     {
-        var dialog = new ContentDialog
+        // V14.9-A8: ContentDialog.ShowAsync can throw on a broken
+        // XamlRoot (mid-shutdown, tab re-host). Catch + log so a failed
+        // alert never escalates to App.UnhandledException.
+        try
         {
-            XamlRoot = this.XamlRoot,
-            Title = title,
-            Content = body,
-            CloseButtonText = "OK",
-            DefaultButton = ContentDialogButton.Close,
-        };
-        await dialog.ShowAsync();
+            if (this.XamlRoot is null)
+            {
+                DebugLog.Warn($"ShowAlertAsync: XamlRoot is null ({title}); skipping dialog.");
+                return;
+            }
+            var dialog = new ContentDialog
+            {
+                XamlRoot = this.XamlRoot,
+                Title = title,
+                Content = body,
+                CloseButtonText = "OK",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            await dialog.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"ShowAlertAsync({title}) threw: " + ex.Message);
+        }
     }
 }

@@ -59,10 +59,17 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             // would throw. Stay closed until the engine has written rows.
             // V14.7.11: File.Exists wrapped — invalid-char paths or denied
             // ACL on the parent dir would otherwise throw.
-            bool dbExists;
-            try { dbExists = File.Exists(_dbPath); }
-            catch (IOException) { dbExists = false; }
-            catch (UnauthorizedAccessException) { dbExists = false; }
+            // V14.9-B2: offload File.Exists to the thread pool. On network
+            // shares or slow USB sticks this sync call can block the UI
+            // for hundreds of ms; the cost on a local SSD is < 1 ms so
+            // there's no downside to always going async here.
+            var dbPath = _dbPath;
+            bool dbExists = await Task.Run(() =>
+            {
+                try { return File.Exists(dbPath); }
+                catch (IOException) { return false; }
+                catch (UnauthorizedAccessException) { return false; }
+            }, ct).ConfigureAwait(false);
             if (!dbExists)
             {
                 return;
@@ -97,13 +104,13 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             return Array.Empty<FileRow>();
         }
         var match = BuildMatchExpression(query);
-        // BUG-9: early-return BEFORE acquiring the gate so the
-        // reentrant call to RecentAsync can take it cleanly.
+        // Empty match → delegate to RecentAsync. Done BEFORE acquiring
+        // the gate so RecentAsync's own gate acquisition isn't reentrant.
         if (string.IsNullOrEmpty(match))
         {
             return await RecentAsync(limit, ct).ConfigureAwait(false);
         }
-        // BUG-9: gate the connection across the entire query lifetime —
+        // Gate the connection across the entire query lifetime —
         // Microsoft.Data.Sqlite connections are NOT thread-safe across
         // simultaneous commands, so two parallel callers would race on
         // the same SqliteConnection's transaction state.

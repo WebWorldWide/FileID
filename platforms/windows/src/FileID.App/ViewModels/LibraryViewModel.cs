@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -39,6 +40,15 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         _store = store;
         _clip = clip;
         _ui = ui;
+        // V14.9-B1: maintain a HashSet of selected tiles in O(1) per
+        // selection change instead of re-walking every Item on each
+        // SelectedCount/SelectedItems read. Subscribe to PropertyChanged
+        // on every tile via the CollectionChanged hook; without this the
+        // VM's SelectedCount binding was actually never re-fired on
+        // per-tile toggle (PropertyChanged on FileTile only raised
+        // IsSelected on itself), so the bulk-action toolbar visibility
+        // was silently stale.
+        Items.CollectionChanged += OnItemsCollectionChanged;
     }
 
     public void Dispose()
@@ -48,35 +58,86 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         try { _searchCts?.Cancel(); } catch { /* swallow */ }
         _searchCts?.Dispose();
         _searchCts = null;
+        // V14.9-B1: detach the per-tile listeners we attached in
+        // OnItemsCollectionChanged so the VM can be GC'd cleanly.
+        Items.CollectionChanged -= OnItemsCollectionChanged;
+        foreach (var t in Items) t.PropertyChanged -= OnTilePropertyChanged;
+        _selected.Clear();
         // ClipSearchService is owned by the view, disposed there.
     }
 
     public ObservableCollection<FileTile> Items { get; } = new();
 
-    public IReadOnlyList<FileTile> SelectedItems
+    private readonly HashSet<FileTile> _selected = new();
+
+    private void OnItemsCollectionChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
     {
-        get
+        // Attach/detach per-tile listeners so we keep _selected in sync.
+        if (e.OldItems is not null)
         {
-            var list = new List<FileTile>();
-            foreach (var t in Items) if (t.IsSelected) list.Add(t);
-            return list;
+            foreach (FileTile t in e.OldItems)
+            {
+                t.PropertyChanged -= OnTilePropertyChanged;
+                if (_selected.Remove(t))
+                {
+                    // implicit deselect on removal; defer the notify until
+                    // after the full collection change so a Reset doesn't
+                    // raise N events.
+                }
+            }
+        }
+        if (e.NewItems is not null)
+        {
+            foreach (FileTile t in e.NewItems)
+            {
+                t.PropertyChanged += OnTilePropertyChanged;
+                if (t.IsSelected) _selected.Add(t);
+            }
+        }
+        if (e.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Reset)
+        {
+            // ObservableCollection.Clear() doesn't surface OldItems; rebuild
+            // from scratch.
+            _selected.Clear();
+            foreach (var t in Items)
+            {
+                t.PropertyChanged -= OnTilePropertyChanged;
+                t.PropertyChanged += OnTilePropertyChanged;
+                if (t.IsSelected) _selected.Add(t);
+            }
+        }
+        OnPropertyChanged(nameof(SelectedCount));
+        OnPropertyChanged(nameof(SelectedItems));
+    }
+
+    private void OnTilePropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(FileTile.IsSelected)) return;
+        if (sender is not FileTile t) return;
+        bool changed = t.IsSelected ? _selected.Add(t) : _selected.Remove(t);
+        if (changed)
+        {
+            OnPropertyChanged(nameof(SelectedCount));
+            OnPropertyChanged(nameof(SelectedItems));
         }
     }
 
-    public int SelectedCount
-    {
-        get
-        {
-            int c = 0;
-            foreach (var t in Items) if (t.IsSelected) c++;
-            return c;
-        }
-    }
+    public IReadOnlyList<FileTile> SelectedItems => _selected.ToList();
+
+    public int SelectedCount => _selected.Count;
 
     public void ClearSelection()
     {
-        foreach (var t in Items) t.IsSelected = false;
+        if (_selected.Count == 0) return;
+        // Snapshot before mutating so the per-tile callback doesn't
+        // remove from a collection we're iterating.
+        var snapshot = _selected.ToList();
+        foreach (var t in snapshot) t.IsSelected = false;
+        // The per-tile callback already raised PropertyChanged for each
+        // toggle; raise once more in case any tile silently failed to
+        // notify (defensive — shouldn't happen).
         OnPropertyChanged(nameof(SelectedCount));
+        OnPropertyChanged(nameof(SelectedItems));
     }
 
     public string Query

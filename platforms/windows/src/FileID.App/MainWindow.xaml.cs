@@ -142,48 +142,63 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        // V14.7.7: ContentDialog by default adds its own padding +
-        // reserves a button row at the bottom. With our custom buttons
-        // inside the sheet, the dialog chrome was eating ~80 DIP and
-        // clipping our action row. Trim padding only -- KEEP the
-        // default Background so ContentDialog's full-screen dim
-        // overlay still hides the underlying tab content (otherwise
-        // the OnboardingSplash + sidebar bleed through and look messy).
-        DebugLog.Info("[INSTALL] constructing WelcomeSheet + ContentDialog.");
+        // V14.9-Bug2: host the sheet in an inline overlay confined to
+        // Row 1 of the main grid (NOT a ContentDialog). The dialog's
+        // full-window smoke layer was intercepting pointer events on
+        // the title bar (Row 0), making the window non-draggable while
+        // Welcome was visible. The inline overlay covers only the
+        // content area — title bar stays exposed + draggable.
+        DebugLog.Info("[INSTALL] constructing WelcomeSheet + inline overlay.");
         var sheet = new Views.WelcomeSheet();
-        var dialog = new ContentDialog
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        void OnDismissed(object? _, EventArgs __)
         {
-            XamlRoot = ((FrameworkElement)Content).XamlRoot,
-            Content = sheet,
-            Padding = new Thickness(0),
-        };
-        // ContentDialog's default ContentDialogMaxWidth (~548 DIP) clips
-        // our 600 DIP UserControl — the per-row Install buttons + the
-        // footer "Skip for now" button get cut off the right edge. Bump
-        // both Min and Max so the dialog is exactly as wide as the sheet.
-        dialog.Resources["ContentDialogMaxWidth"] = 720.0;
-        dialog.Resources["ContentDialogMinWidth"] = 660.0;
-        sheet.Dismissed += (_, _) =>
-        {
-            DebugLog.Info("[INSTALL] WelcomeSheet.Dismissed fired; closing dialog.");
-            try { dialog.Hide(); } catch { }
-        };
+            DebugLog.Info("[INSTALL] WelcomeSheet.Dismissed fired; closing overlay.");
+            try
+            {
+                if (WelcomeOverlay != null)
+                {
+                    WelcomeOverlay.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed;
+                }
+                if (WelcomeOverlayHost != null)
+                {
+                    WelcomeOverlayHost.Content = null;
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn("[INSTALL] overlay teardown threw: " + ex.Message);
+            }
+            tcs.TrySetResult(true);
+        }
+
         try
         {
-            DebugLog.Info("[INSTALL] dialog.ShowAsync awaiting...");
-            await dialog.ShowAsync();
-            DebugLog.Info("[INSTALL] dialog.ShowAsync returned.");
+            sheet.Dismissed += OnDismissed;
+            WelcomeOverlayHost.Content = sheet;
+            WelcomeOverlay.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
+            DebugLog.Info("[INSTALL] WelcomeOverlay shown; awaiting Dismissed.");
+            await tcs.Task.ConfigureAwait(true);
+            DebugLog.Info("[INSTALL] WelcomeOverlay dismissed; returning.");
         }
         catch (Exception ex)
         {
-            DebugLog.Warn("[INSTALL] Welcome sheet ShowAsync threw: " + ex);
+            DebugLog.Warn("[INSTALL] Welcome overlay flow threw: " + ex);
+        }
+        finally
+        {
+            try { sheet.Dismissed -= OnDismissed; } catch { /* swallow */ }
         }
     }
 
     private void ApplyTitleBarChrome()
     {
         ExtendsContentIntoTitleBar = true;
-        SetTitleBar(AppTitleBar);
+        // V14.8.4: SetTitleBar registers a zero-bounds drag region if the
+        // element hasn't been laid out yet. Defer until Loaded so AppTitleBar
+        // has measurable bounds when WinUI captures the non-client region.
+        AppTitleBar.Loaded += (_, _) => SetTitleBar(AppTitleBar);
 
         // V14.7.3: explicit AppWindow icon. The .exe already has the
         // icon embedded via <ApplicationIcon>, so taskbar / Alt-Tab
@@ -264,17 +279,38 @@ public sealed partial class MainWindow : Window
             Theme = SystemBackdropTheme.Dark,
         };
 
+        // V14.9-A16: dispose the controller on a construction-time fault so
+        // we never leak a half-attached MicaController/DesktopAcrylicController.
+        // OnClosed handles the normal disposal path; this guards mid-init.
         if (MicaController.IsSupported())
         {
-            _micaController = new MicaController { Kind = MicaKind.Base };
-            _micaController.AddSystemBackdropTarget(this.As<ICompositionSupportsSystemBackdrop>());
-            _micaController.SetSystemBackdropConfiguration(_backdropConfig);
+            try
+            {
+                _micaController = new MicaController { Kind = MicaKind.Base };
+                _micaController.AddSystemBackdropTarget(this.As<ICompositionSupportsSystemBackdrop>());
+                _micaController.SetSystemBackdropConfiguration(_backdropConfig);
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn("ApplySystemBackdrop: Mica init failed: " + ex.Message);
+                try { _micaController?.Dispose(); } catch { }
+                _micaController = null;
+            }
         }
         else
         {
-            _acrylicController = new DesktopAcrylicController();
-            _acrylicController.AddSystemBackdropTarget(this.As<ICompositionSupportsSystemBackdrop>());
-            _acrylicController.SetSystemBackdropConfiguration(_backdropConfig);
+            try
+            {
+                _acrylicController = new DesktopAcrylicController();
+                _acrylicController.AddSystemBackdropTarget(this.As<ICompositionSupportsSystemBackdrop>());
+                _acrylicController.SetSystemBackdropConfiguration(_backdropConfig);
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn("ApplySystemBackdrop: Acrylic init failed: " + ex.Message);
+                try { _acrylicController?.Dispose(); } catch { }
+                _acrylicController = null;
+            }
         }
     }
 
@@ -434,15 +470,37 @@ public sealed partial class MainWindow : Window
 
     private void ApplySidebarVisibility()
     {
-        if (AppViewModel.Instance.SidebarVisible)
+        var visible = AppViewModel.Instance.SidebarVisible;
+        if (visible)
         {
             SidebarColumn.Width = new GridLength(260);
             SidebarHost.Visibility = Visibility.Visible;
+            // Hamburger on transparent — "open sidebar is here, you can hide it."
+            SidebarToggleGlyph.Glyph = "";
+            SidebarToggleButton.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Colors.Transparent);
+            ToolTipService.SetToolTip(SidebarToggleButton, "Hide sidebar (Ctrl+Shift+S)");
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(SidebarToggleButton, "Hide sidebar");
         }
         else
         {
             SidebarColumn.Width = new GridLength(0);
             SidebarHost.Visibility = Visibility.Collapsed;
+            // Right-chevron on gold — unambiguous "click here to bring the
+            // sidebar back." Previously the button stayed visually identical
+            // when the sidebar was hidden, so users saw the chevron in
+            // SidebarFolderHeader vanish and assumed there was no return path.
+            SidebarToggleGlyph.Glyph = "";
+            try
+            {
+                SidebarToggleButton.Background = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["GoldBrush"];
+            }
+            catch
+            {
+                SidebarToggleButton.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(
+                    Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00));
+            }
+            ToolTipService.SetToolTip(SidebarToggleButton, "Show sidebar (Ctrl+Shift+S)");
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(SidebarToggleButton, "Show sidebar");
         }
     }
 
@@ -506,6 +564,33 @@ public sealed partial class MainWindow : Window
                 if (string.IsNullOrEmpty(canonical) || !System.IO.Directory.Exists(canonical))
                 {
                     DebugLog.Warn($"Drag-drop: rejected non-directory or missing path '{PathRedactor.Redact(canonical)}'.");
+                    return;
+                }
+                // V14.9-A9: reject reparse points (symlinks/junctions). A
+                // user-writable directory could contain a junction to
+                // System32 or another sensitive location; FileID must not
+                // silently scan into that. The legitimate "I want to scan
+                // my Documents folder" case never traverses a junction
+                // at the root, so this is a safe block.
+                try
+                {
+                    var attrs = System.IO.File.GetAttributes(canonical);
+                    if ((attrs & System.IO.FileAttributes.ReparsePoint) != 0)
+                    {
+                        DebugLog.Warn($"Drag-drop: rejected reparse point '{PathRedactor.Redact(canonical)}'.");
+                        await new ContentDialog
+                        {
+                            XamlRoot = ((FrameworkElement)Content).XamlRoot,
+                            Title = "Can't scan a symlink or junction",
+                            Content = "FileID won't scan a folder that's a symlink or junction — please pick the real folder it points to.",
+                            CloseButtonText = "OK",
+                        }.ShowAsync();
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    DebugLog.Warn($"Drag-drop: File.GetAttributes failed: {ex.Message}");
                     return;
                 }
                 AppViewModel.Instance.FolderPath = canonical;

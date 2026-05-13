@@ -18,12 +18,63 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     /// </summary>
     private bool _initializingToggles;
 
+    /// <summary>V14.8.4 Bug 3: expose the singleton ModelInstallerService so
+    /// the Settings model cards can x:Bind to Svc.Arcface / Svc.Clip the same
+    /// way WelcomeSheet does. Without this binding path the cards stayed
+    /// stale after Welcome installed a model — the imperative TextBlock
+    /// mutation only fired when the user clicked the in-card Install button.
+    /// </summary>
+    internal Services.ModelInstallerService Svc => Services.ModelInstallerService.Instance;
+
     public SettingsView()
     {
         InitializeComponent();
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
-        Unloaded += (_, _) => EngineClient.Instance.PropertyChanged -= OnEngineChanged;
-        Loaded += (_, _) => HydrateToggles();
+        Svc.PropertyChanged += OnInstallerChanged;
+        Svc.Clip.PropertyChanged += OnSlotChanged;
+        Svc.Arcface.PropertyChanged += OnSlotChanged;
+        // Settings has no VLM card today (DeepAnalyze tab owns the VLM
+        // surface). Subscribe anyway so a future card or an indirect
+        // x:Bind path picks up VLM state without an asymmetric gap.
+        Svc.Vlm.PropertyChanged += OnSlotChanged;
+        Unloaded += (_, _) =>
+        {
+            EngineClient.Instance.PropertyChanged -= OnEngineChanged;
+            Svc.PropertyChanged -= OnInstallerChanged;
+            Svc.Clip.PropertyChanged -= OnSlotChanged;
+            Svc.Arcface.PropertyChanged -= OnSlotChanged;
+            Svc.Vlm.PropertyChanged -= OnSlotChanged;
+        };
+        Loaded += (_, _) =>
+        {
+            HydrateToggles();
+            // Re-seed from on-disk sentinels in case Welcome / DeepAnalyze
+            // installed a model while a different tab was active.
+            try { Svc.Refresh(); } catch { }
+        };
+    }
+
+    private void OnInstallerChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        // Force a Bindings.Update() pass on x:Bind paths that depend on Svc
+        // aggregates (AllInstalled / IsBusy). x:Bind already observes per-slot
+        // PropertyChanged on its own; the service-level handler only fires
+        // when AllInstalled or IsBusy flip.
+        if (e.PropertyName is nameof(Services.ModelInstallerService.AllInstalled)
+                           or nameof(Services.ModelInstallerService.IsBusy))
+        {
+            DispatcherQueue.TryEnqueue(() => Bindings.Update());
+        }
+    }
+
+    private void OnSlotChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        // x:Bind subscribes to ModelSlot's PropertyChanged automatically for
+        // bound properties. This handler is a safety net for the visibility-
+        // helper functions (which take Status as a value and don't trigger
+        // re-evaluation if Status went via a different route, e.g. Refresh()
+        // calling SeedSlot which mutates without an "x:Bind-traced" assignment).
+        DispatcherQueue.TryEnqueue(() => Bindings.Update());
     }
 
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
@@ -37,6 +88,26 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             OnPropertyChanged(nameof(ExecutionProviderText));
             OnPropertyChanged(nameof(RecommendationText));
             OnPropertyChanged(nameof(RecommendationVisibility));
+            SyncNvidiaSection();
+        }
+    }
+
+    /// <summary>F3c (V14.8.3): toggle the NVIDIA acceleration card based on
+    /// the detected GPU vendor. The card surfaces two affordances: install
+    /// the CUDA-flavored llama.cpp runtime (no cuDNN required) and direct
+    /// the user to NVIDIA's cuDNN download for the CUDA ORT EP.</summary>
+    private void SyncNvidiaSection()
+    {
+        var hw = EngineClient.Instance.Info?.Hardware;
+        var isNvidia = (hw?.GpuVendor ?? "").Equals("nvidia", StringComparison.OrdinalIgnoreCase);
+        NvidiaAccelerationSection.Visibility = isNvidia ? Visibility.Visible : Visibility.Collapsed;
+
+        if (isNvidia)
+        {
+            var ep = (hw?.ExecutionProvider ?? "").ToLowerInvariant();
+            CudnnStatusText.Text = ep == "cuda"
+                ? "✓ CUDA execution provider is active. Scanning uses cuDNN."
+                : "Install NVIDIA cuDNN to unlock the CUDA execution provider for scanning (10-15% faster than DirectML on RTX-class GPUs). FileID can't redistribute cuDNN — get it from NVIDIA's developer site.";
         }
     }
 
@@ -49,6 +120,9 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             HideUnknownToggle.IsOn = s.PeopleHideUnknown;
             CleanupAutoTagToggle.IsOn = s.CleanupAutoTagKept;
             RestructureTreeModeToggle.IsOn = s.RestructureTreeMode;
+            // Inverted: AppSettings stores "Disable…" but the UI shows
+            // "Auto-install on" (truthy = enabled).
+            AutoInstallCudaToggle.IsOn = !s.DisableAutoInstallCuda;
 
             // Hydrate the EP override picker too.
             string current = s.GpuExecutionProviderOverride ?? "auto";
@@ -65,6 +139,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         {
             _initializingToggles = false;
         }
+        SyncNvidiaSection();
     }
 
     private void OnHideUnknownToggled(object sender, RoutedEventArgs e)
@@ -88,6 +163,14 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         if (_initializingToggles) return;
         var s = AppViewModel.Instance.Settings;
         s.RestructureTreeMode = RestructureTreeModeToggle.IsOn;
+        s.Save();
+    }
+
+    private void OnAutoInstallCudaToggled(object sender, RoutedEventArgs e)
+    {
+        if (_initializingToggles) return;
+        var s = AppViewModel.Instance.Settings;
+        s.DisableAutoInstallCuda = !AutoInstallCudaToggle.IsOn;
         s.Save();
     }
 
@@ -210,146 +293,178 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
-    private async void OnVerifyPrivacyClicked(object sender, RoutedEventArgs e)
-    {
-        try
-        {
-            var hits = await PrivacyGrep.RunAsync();
-            var dialog = new ContentDialog
-            {
-                XamlRoot = this.XamlRoot,
-                Title = hits.Count == 0 ? "Privacy verified" : "Suspicious strings found",
-                Content = hits.Count == 0
-                    ? "Scanned the engine binary for telemetry markers (Sentry, AppInsights, Firebase, Segment, Mixpanel, Google Analytics, Amplitude, AppCenter). Zero hits — your engine is telemetry-clean."
-                    : "Found these markers in the engine binary:\n\n" + string.Join("\n", hits),
-                CloseButtonText = "OK",
-                DefaultButton = ContentDialogButton.Close,
-            };
-            await dialog.ShowAsync();
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Warn("PrivacyGrep failed: " + ex);
-        }
-    }
-
-    /// <summary>FEAT-CRIT-4: install one of the local-AI models from the
-    /// new Settings → Local AI cards. Shares the same engine prewarm path
-    /// as the welcome sheet — the engine downloads + verifies SHA, the
-    /// app surfaces a progress bar via ModelInstallerService.</summary>
-    private async void OnInstallModelClicked(object sender, RoutedEventArgs e)
+    /// <summary>V14.8.4 Bug 3: route the Settings install button through the
+    /// shared ModelInstallerService slot, same as WelcomeSheet. Single source
+    /// of truth for status; the x:Bind paths on the card update automatically
+    /// via the slot's PropertyChanged. No more local OnProgress subscription
+    /// (which couldn't pick up state changes that originated in Welcome).</summary>
+    private void OnInstallModelClicked(object sender, RoutedEventArgs e)
     {
         if (sender is not Button button || button.Tag is not string modelKind || string.IsNullOrWhiteSpace(modelKind))
             return;
-        var svc = Services.ModelInstallerService.Instance;
-        var (statusText, progressBar, slot) = modelKind switch
+        var slot = modelKind switch
         {
-            "arcface_buffalo" => (ArcFaceStatusText, ArcFaceProgress, svc.Arcface),
-            "mobileclip_s2"   => (ClipStatusText,    ClipProgress,    svc.Clip),
-            _ => (null!, null!, null!),
+            "arcface_buffalo" => Svc.Arcface,
+            "mobileclip_s2"   => Svc.Clip,
+            _ => null,
         };
-        if (statusText is null || slot is null) return;
-        var originalContent = button.Content;
-        button.IsEnabled = false;
-        button.Content = "Installing…";
-        progressBar.Visibility = Visibility.Visible;
-
-        // Subscribe to slot.Fraction for live updates.
-        void OnProgress(object? _, System.ComponentModel.PropertyChangedEventArgs ev)
+        if (slot is null) return;
+        // Cancel = re-trigger CancelAllAsync (engine has no per-model cancel).
+        if (slot.Status == Services.ModelInstallStatus.Downloading)
         {
-            if (ev.PropertyName != nameof(Services.ModelSlot.Fraction)) return;
-            var pct = slot.Fraction;
-            DispatcherQueue.TryEnqueue(() =>
-            {
-                progressBar.Value = pct;
-                statusText.Text = pct > 0 && pct < 1
-                    ? $"Downloading… {pct * 100:0}%"
-                    : (pct >= 1 ? "Installed" : statusText.Text);
-            });
+            // Pre-flip caption to "Cancelling…" so the user gets instant
+            // feedback — engine confirmation takes 1-5 s. Mirrors macOS
+            // WelcomeSheet.swift:74-82's pre-emptive reset.
+            slot.Message = "Cancelling…";
+            slot.BytesPerSecond = 0;
+            slot.EtaSeconds = 0;
+            _ = SafeRunAsync(() => Svc.CancelAllAsync(), "Cancel " + slot.DisplayLabel);
+            return;
         }
-        slot.PropertyChanged += OnProgress;
+        _ = SafeRunAsync(() => slot.InstallAsync(), "Install " + slot.DisplayLabel);
+    }
+
+    private static async Task SafeRunAsync(Func<Task> action, string label)
+    {
         try
         {
-            await EngineClient.Instance.PrewarmModelAsync(modelKind);
-            button.Content = "Installed";
+            await action().ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            DebugLog.Warn($"Model install '{modelKind}' failed: {ex}");
-            button.Content = originalContent;
-            button.IsEnabled = true;
-            statusText.Text = $"Failed: {ex.Message}";
-        }
-        finally
-        {
-            slot.PropertyChanged -= OnProgress;
-            progressBar.Visibility = Visibility.Collapsed;
+            DebugLog.Warn($"[SETTINGS] {label} threw: {ex}");
         }
     }
 
-    private async void OnInstallPackClicked(object sender, RoutedEventArgs e)
+    // ─── x:Bind helper functions (copied verbatim from WelcomeSheet) ───
+
+    internal Visibility VisibleIfDownloading(Services.ModelInstallStatus s) =>
+        s == Services.ModelInstallStatus.Downloading ? Visibility.Visible : Visibility.Collapsed;
+
+    internal Visibility VisibleIfInstalled(Services.ModelInstallStatus s) =>
+        s == Services.ModelInstallStatus.Installed ? Visibility.Visible : Visibility.Collapsed;
+
+    internal Visibility VisibleIfFailed(Services.ModelInstallStatus s) =>
+        s == Services.ModelInstallStatus.Failed ? Visibility.Visible : Visibility.Collapsed;
+
+    internal Visibility ShowDeterminate(Services.ModelInstallStatus s, double frac) =>
+        s == Services.ModelInstallStatus.Downloading && frac > 0
+            ? Visibility.Visible : Visibility.Collapsed;
+
+    internal Visibility ShowSpinner(Services.ModelInstallStatus s, double frac) =>
+        s == Services.ModelInstallStatus.Downloading && frac <= 0
+            ? Visibility.Visible : Visibility.Collapsed;
+
+    internal bool SpinnerActive(Services.ModelInstallStatus s, double frac) =>
+        s == Services.ModelInstallStatus.Downloading && frac <= 0;
+
+    internal Visibility ShowActionButton(Services.ModelInstallStatus s) =>
+        s != Services.ModelInstallStatus.Installed ? Visibility.Visible : Visibility.Collapsed;
+
+    internal string ButtonLabel(Services.ModelInstallStatus s) => s switch
     {
-        if (sender is not Button button || button.Tag is not string packId || string.IsNullOrWhiteSpace(packId))
-            return;
+        Services.ModelInstallStatus.Downloading => "Cancel",
+        Services.ModelInstallStatus.Failed      => "Retry",
+        _                                       => "Install",
+    };
+
+    internal Visibility ShowRateEta(Services.ModelInstallStatus status, double bytesPerSecond) =>
+        status == Services.ModelInstallStatus.Downloading && bytesPerSecond > 0
+            ? Visibility.Visible : Visibility.Collapsed;
+
+    internal string ProgressLabel(string? message, double fraction, ulong? bytesDone, ulong? totalBytes)
+    {
+        // Prefer the engine's caption (e.g. "Queued — starting download…") while
+        // we're still at 0%, so the row doesn't read "Starting…" forever after
+        // the engine has acknowledged the prewarm.
+        string pct;
+        if (fraction > 0) pct = $"{fraction * 100:0}%";
+        else if (!string.IsNullOrEmpty(message)) pct = message;
+        else pct = "Starting…";
+        var bytes = string.Empty;
+        if (bytesDone is { } done && totalBytes is { } total && total > 0)
+        {
+            bytes = $" · {FormatBytes(done)} of {FormatBytes(total)}";
+        }
+        else if (totalBytes is { } total2)
+        {
+            bytes = $" · of {FormatBytes(total2)}";
+        }
+        return pct + bytes;
+    }
+
+    internal string RateEtaLabel(double bytesPerSecond, double etaSeconds)
+    {
+        if (bytesPerSecond <= 0) return string.Empty;
+        var rate = $"{FormatBytes((ulong)bytesPerSecond)}/s";
+        var eta = etaSeconds > 0 ? " · " + FormatEta(etaSeconds) + " remaining" : string.Empty;
+        return rate + eta;
+    }
+
+    internal string ErrorLabel(string? lastError) =>
+        "Failed: " + (lastError ?? "unknown error");
+
+    private static string FormatBytes(ulong b)
+    {
+        const double KB = 1024.0;
+        const double MB = 1024.0 * 1024.0;
+        const double GB = 1024.0 * 1024.0 * 1024.0;
+        if (b >= GB) return $"{b / GB:0.00} GB";
+        if (b >= MB) return $"{b / MB:0.0} MB";
+        if (b >= KB) return $"{b / KB:0} KB";
+        return $"{b} B";
+    }
+
+    private static string FormatEta(double seconds)
+    {
+        if (seconds < 60) return $"{seconds:0}s";
+        if (seconds < 3600) return $"{seconds / 60:0}m {seconds % 60:00}s";
+        return $"{seconds / 3600:0}h {(seconds % 3600) / 60:00}m";
+    }
+
+    /// <summary>F3c install button: kicks off llama_runtime_cuda_x64
+    /// prewarm. Engine downloads, extracts, then VlmRunner::find prefers
+    /// the CUDA build automatically on the next Deep Analyze.</summary>
+    private async void OnInstallCudaLlamaClicked(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button button) return;
         var originalContent = button.Content;
         try
         {
             button.IsEnabled = false;
             button.Content = "Installing…";
-            await EngineClient.Instance.PrewarmModelAsync(packId);
+            CudaLlamaStatusText.Text = "Downloading CUDA llama.cpp build (~200 MB)…";
+            await EngineClient.Instance.PrewarmModelAsync("llama_runtime_cuda_x64");
             button.Content = "Installed";
-            try
-            {
-                var dialog = new ContentDialog
-                {
-                    XamlRoot = this.XamlRoot,
-                    Title = "Performance Pack installed",
-                    Content = "FileID needs to restart its engine to activate the new execution provider. Restart now?",
-                    PrimaryButtonText = "Restart now",
-                    SecondaryButtonText = "Later",
-                    DefaultButton = ContentDialogButton.Primary,
-                };
-                var choice = await dialog.ShowAsync();
-                if (choice == ContentDialogResult.Primary)
-                {
-                    button.IsEnabled = false;
-                    button.Content = "Restarting…";
-                    try
-                    {
-                        await EngineClient.Instance.RestartAsync();
-                        button.Content = "Active";
-                    }
-                    catch (Exception rex)
-                    {
-                        DebugLog.Warn($"Engine restart after pack install failed: {rex.Message}");
-                        button.Content = "Installed (restart manually)";
-                    }
-                    finally
-                    {
-                        button.IsEnabled = true;
-                    }
-                }
-            }
-            catch { /* dialog show is best-effort */ }
+            CudaLlamaStatusText.Text = "✓ CUDA llama.cpp installed. Deep Analyze will use it on next run.";
         }
         catch (Exception ex)
         {
-            DebugLog.Warn($"Pack install '{packId}' failed: {ex}");
+            DebugLog.Warn($"Install CUDA llama.cpp failed: {ex.Message}");
             button.Content = originalContent;
             button.IsEnabled = true;
-            try
+            CudaLlamaStatusText.Text = $"Install failed: {ex.Message}";
+        }
+    }
+
+    /// <summary>F3c "Get cuDNN" link: opens NVIDIA's official cuDNN download
+    /// page in the user's default browser. No FileID-owned redistribution.
+    /// After install, the engine's system-CUDA probe (runtime.rs) picks up
+    /// cuDNN on next launch and the CUDA EP becomes available.</summary>
+    private void OnOpenCudnnDownloadsClicked(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
             {
-                var dialog = new ContentDialog
-                {
-                    XamlRoot = this.XamlRoot,
-                    Title = "Pack install failed",
-                    Content = ex.Message,
-                    CloseButtonText = "OK",
-                    DefaultButton = ContentDialogButton.Close,
-                };
-                await dialog.ShowAsync();
-            }
-            catch { }
+                FileName = "https://developer.nvidia.com/cudnn-downloads",
+                UseShellExecute = true,
+            };
+            Process.Start(psi);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("Open cuDNN downloads failed: " + ex.Message);
         }
     }
 

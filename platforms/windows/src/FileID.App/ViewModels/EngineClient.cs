@@ -77,6 +77,14 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
     private DateTime _lastDeepAnalyzeFileDone = DateTime.MinValue;
     private static readonly TimeSpan DeepAnalyzeFileDoneThrottle = TimeSpan.FromMilliseconds(500); // 2 Hz
 
+    // Throttle for scan FileDone events. A fast scan can emit hundreds per
+    // second; publishing each through the Rx Subject inflates UI work for
+    // every subscriber (LibraryView, transcript, etc.). Sample every Nth
+    // event so subscribers still see "files are flowing" without
+    // re-running expensive layouts at scan-throughput rate.
+    private int _scanFileDoneEventCounter;
+    private const int ScanFileDoneSampleN = 5;
+
     // PerfAudit-#8: ScanProgress throttle. Engine emits one Progress
     // per discovery/tagging batch; on a fast scan that's 100+ events/s.
     // Throttle at 10 Hz so the sidebar's progress bar / counters don't
@@ -219,6 +227,26 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
         private set => Set(ref _deepAnalyzeStarting, value);
     }
 
+    /// <summary>V14.9 A6: AutoPilot orchestration stage. Drives the
+    /// 4-step sidebar tracker. Set by <see cref="RunAutoPilotAsync"/>
+    /// as it awaits each phase's completion signal. Null when no
+    /// AutoPilot run is in flight.</summary>
+    public enum AutoPilotStage
+    {
+        Scanning,
+        Clustering,
+        Captioning,
+        Planning,
+        Complete,
+    }
+
+    private AutoPilotStage? _autoPilotStage;
+    public AutoPilotStage? CurrentAutoPilotStage
+    {
+        get => _autoPilotStage;
+        private set => Set(ref _autoPilotStage, value);
+    }
+
     private ScanPhase? _phase;
     public ScanPhase? Phase
     {
@@ -272,163 +300,182 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
             // detect that case by checking for the prior State.
         }
 
-        // Notify singleton services that any cached engine state is now
-        // stale and they should re-attach to PropertyChanged. Cheap +
-        // idempotent.
-        try { Services.ModelInstallerService.Instance.Reset(); } catch { /* swallow */ }
-
-        State = LifecycleState.Starting;
-        CrashReason = null;
-        Interlocked.Exchange(ref _expectingExit, 0);
-        _lastSpawnAttempt = DateTime.UtcNow;
-
-        var enginePath = AppPaths.EngineExePath;
-        DebugLog.Info($"EngineClient: spawning {PathRedactor.Redact(enginePath)}");
-
-        // Pin the expected EV thumbprint via msbuild constant or env var
-        // (FILEID_EV_THUMBPRINT, settable at install time). Empty means
-        // dev build — accept Unsigned with a warning. Once a real cert is
-        // in play, ship with the constant defined and the strict path
-        // refuses Unsigned + tamper-mismatched binaries.
-        var expectedThumb = Environment.GetEnvironmentVariable("FILEID_EV_THUMBPRINT");
-        var verdict = WinVerifyTrustChecker.Verify(enginePath, expectedThumbprintHex: expectedThumb);
-        switch (verdict)
-        {
-            case IntegrityVerdict.NotFound:
-                CrashReason = "FileIDEngine.exe not found.";
-                State = LifecycleState.Crashed;
-                DebugLog.Error("EngineClient: engine binary missing — won't spawn.");
-                return;
-
-            case IntegrityVerdict.Untrusted:
-                CrashReason = "Engine signature verification failed. Refusing to spawn.";
-                State = LifecycleState.Crashed;
-                DebugLog.Error("EngineClient: signature verification FAILED — won't spawn.");
-                return;
-
-            case IntegrityVerdict.Unsigned:
-                // If a thumbprint was pinned (release mode), refuse to
-                // spawn. Otherwise warn + continue (dev build).
-                if (!string.IsNullOrEmpty(expectedThumb))
-                {
-                    CrashReason = "Engine binary is unsigned but signature verification is required.";
-                    State = LifecycleState.Crashed;
-                    DebugLog.Error("EngineClient: unsigned engine refused (FILEID_EV_THUMBPRINT set).");
-                    return;
-                }
-                DebugLog.Warn("EngineClient: engine is unsigned. OK in dev; ship builds must be signed.");
-                break;
-
-            case IntegrityVerdict.Trusted:
-                DebugLog.Info("EngineClient: engine signature verified.");
-                break;
-        }
-
-        // SEC: TOCTOU mitigation. Hash the binary AFTER WinVerifyTrust
-        // returned its verdict, then re-hash + compare immediately
-        // before Process.Start. If a privileged adversary swaps the
-        // engine binary between Verify and spawn, the post-spawn hash
-        // diverges and we abort. Skipped in dev (no thumbprint pinned)
-        // because Visual Studio rebuilds change the hash legitimately.
-        byte[]? preSpawnHash = null;
-        if (!string.IsNullOrEmpty(expectedThumb))
-        {
-            try
-            {
-                using var sha = System.Security.Cryptography.SHA256.Create();
-                using var fs = System.IO.File.OpenRead(enginePath);
-                preSpawnHash = sha.ComputeHash(fs);
-            }
-            catch (Exception ex)
-            {
-                CrashReason = "Pre-spawn binary hash failed: " + ex.Message;
-                State = LifecycleState.Crashed;
-                DebugLog.Error("EngineClient: pre-spawn hash failed — refusing to spawn.");
-                return;
-            }
-        }
-
+        // V14.9-A2: every code path below — including early-return on
+        // signature verdicts, hash failures, and the spawn catch — must
+        // release `_isStarting`, otherwise the gate latches at 1 forever
+        // and OnProcessExited's respawn can't claim it. Wrap the whole
+        // body in try/finally so the release is unconditional.
         try
         {
-            // Re-hash + compare immediately before Process.Start.
-            if (preSpawnHash is not null)
+            // Notify singleton services that any cached engine state is now
+            // stale and they should re-attach to PropertyChanged. Cheap +
+            // idempotent.
+            try { Services.ModelInstallerService.Instance.Reset(); } catch { /* swallow */ }
+
+            State = LifecycleState.Starting;
+            CrashReason = null;
+            Interlocked.Exchange(ref _expectingExit, 0);
+            _lastSpawnAttempt = DateTime.UtcNow;
+
+            var enginePath = AppPaths.EngineExePath;
+            DebugLog.Info($"EngineClient: spawning {PathRedactor.Redact(enginePath)}");
+
+            // Pin the expected EV thumbprint via msbuild constant or env var
+            // (FILEID_EV_THUMBPRINT, settable at install time). Empty means
+            // dev build — accept Unsigned with a warning. Once a real cert is
+            // in play, ship with the constant defined and the strict path
+            // refuses Unsigned + tamper-mismatched binaries.
+            var expectedThumb = Environment.GetEnvironmentVariable("FILEID_EV_THUMBPRINT");
+            var verdict = WinVerifyTrustChecker.Verify(enginePath, expectedThumbprintHex: expectedThumb);
+            switch (verdict)
+            {
+                case IntegrityVerdict.NotFound:
+                    CrashReason = "FileIDEngine.exe not found.";
+                    State = LifecycleState.Crashed;
+                    DebugLog.Error("EngineClient: engine binary missing — won't spawn.");
+                    return;
+
+                case IntegrityVerdict.Untrusted:
+                    CrashReason = "Engine signature verification failed. Refusing to spawn.";
+                    State = LifecycleState.Crashed;
+                    DebugLog.Error("EngineClient: signature verification FAILED — won't spawn.");
+                    return;
+
+                case IntegrityVerdict.Unsigned:
+                    // If a thumbprint was pinned (release mode), refuse to
+                    // spawn. Otherwise warn + continue (dev build).
+                    if (!string.IsNullOrEmpty(expectedThumb))
+                    {
+                        CrashReason = "Engine binary is unsigned but signature verification is required.";
+                        State = LifecycleState.Crashed;
+                        DebugLog.Error("EngineClient: unsigned engine refused (FILEID_EV_THUMBPRINT set).");
+                        return;
+                    }
+                    DebugLog.Warn("EngineClient: engine is unsigned. OK in dev; ship builds must be signed.");
+                    break;
+
+                case IntegrityVerdict.Trusted:
+                    DebugLog.Info("EngineClient: engine signature verified.");
+                    break;
+            }
+
+            // SEC: TOCTOU mitigation. Hash the binary AFTER WinVerifyTrust
+            // returned its verdict, then re-hash + compare immediately
+            // before Process.Start. If a privileged adversary swaps the
+            // engine binary between Verify and spawn, the post-spawn hash
+            // diverges and we abort. Skipped in dev (no thumbprint pinned)
+            // because Visual Studio rebuilds change the hash legitimately.
+            byte[]? preSpawnHash = null;
+            if (!string.IsNullOrEmpty(expectedThumb))
             {
                 try
                 {
                     using var sha = System.Security.Cryptography.SHA256.Create();
                     using var fs = System.IO.File.OpenRead(enginePath);
-                    var nowHash = sha.ComputeHash(fs);
-                    if (!System.Linq.Enumerable.SequenceEqual(preSpawnHash, nowHash))
-                    {
-                        CrashReason = "Engine binary changed between Verify and spawn — refusing.";
-                        State = LifecycleState.Crashed;
-                        DebugLog.Error("EngineClient: TOCTOU detected on engine binary — refusing to spawn.");
-                        return;
-                    }
+                    preSpawnHash = sha.ComputeHash(fs);
                 }
                 catch (Exception ex)
                 {
-                    CrashReason = "Post-verify hash failed: " + ex.Message;
+                    CrashReason = "Pre-spawn binary hash failed: " + ex.Message;
                     State = LifecycleState.Crashed;
-                    DebugLog.Error("EngineClient: post-verify hash failed — refusing to spawn.");
+                    DebugLog.Error("EngineClient: pre-spawn hash failed — refusing to spawn.");
                     return;
                 }
             }
 
-            var psi = new ProcessStartInfo
+            try
             {
-                FileName = enginePath,
-                UseShellExecute = false,
-                RedirectStandardInput = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true,
-                StandardInputEncoding = System.Text.Encoding.UTF8,
-                StandardOutputEncoding = System.Text.Encoding.UTF8,
-                StandardErrorEncoding = System.Text.Encoding.UTF8,
-                WorkingDirectory = AppPaths.Root,
-            };
-            // Pass the FILEID_LOG env to control engine tracing verbosity
-            // (debug in dev profiles, info in release).
-            psi.Environment["FILEID_LOG"] = Environment.GetEnvironmentVariable("FILEID_LOG") ?? "info";
+                // Re-hash + compare immediately before Process.Start.
+                if (preSpawnHash is not null)
+                {
+                    try
+                    {
+                        using var sha = System.Security.Cryptography.SHA256.Create();
+                        using var fs = System.IO.File.OpenRead(enginePath);
+                        var nowHash = sha.ComputeHash(fs);
+                        if (!System.Linq.Enumerable.SequenceEqual(preSpawnHash, nowHash))
+                        {
+                            CrashReason = "Engine binary changed between Verify and spawn — refusing.";
+                            State = LifecycleState.Crashed;
+                            DebugLog.Error("EngineClient: TOCTOU detected on engine binary — refusing to spawn.");
+                            return;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        CrashReason = "Post-verify hash failed: " + ex.Message;
+                        State = LifecycleState.Crashed;
+                        DebugLog.Error("EngineClient: post-verify hash failed — refusing to spawn.");
+                        return;
+                    }
+                }
 
-            var p = Process.Start(psi)
-                    ?? throw new InvalidOperationException("Process.Start returned null");
-            _process = p;
-            _stdin = p.StandardInput;
+                var psi = new ProcessStartInfo
+                {
+                    FileName = enginePath,
+                    UseShellExecute = false,
+                    RedirectStandardInput = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                    // V14.9-Bug1: `System.Text.Encoding.UTF8` is the
+                    // BOM-prefixing variant. On first write its
+                    // StreamWriter pushes three bytes (`EF BB BF`) into
+                    // the engine's stdin, which trips serde_json with
+                    // "expected value at line 1 column 1" and used to
+                    // surface as a red toast on every cold launch. The
+                    // explicit `new UTF8Encoding(false)` is identical
+                    // UTF-8 minus the preamble.
+                    StandardInputEncoding  = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+                    StandardOutputEncoding = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+                    StandardErrorEncoding  = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+                    WorkingDirectory = AppPaths.Root,
+                };
+                // Pass the FILEID_LOG env to control engine tracing verbosity
+                // (debug in dev profiles, info in release).
+                psi.Environment["FILEID_LOG"] = Environment.GetEnvironmentVariable("FILEID_LOG") ?? "info";
 
-            _readCts = new CancellationTokenSource();
-            var ct = _readCts.Token;
-            _stdoutLoop = Task.Run(() => StdoutLoopAsync(p.StandardOutput, ct), ct);
-            _stderrLoop = Task.Run(() => StderrLoopAsync(p.StandardError, ct), ct);
+                var p = Process.Start(psi)
+                        ?? throw new InvalidOperationException("Process.Start returned null");
+                _process = p;
+                _stdin = p.StandardInput;
 
-            // Hook exit so we can auto-respawn.
-            p.EnableRaisingEvents = true;
-            p.Exited += OnProcessExited;
+                _readCts = new CancellationTokenSource();
+                var ct = _readCts.Token;
+                _stdoutLoop = Task.Run(() => StdoutLoopAsync(p.StandardOutput, ct), ct);
+                _stderrLoop = Task.Run(() => StderrLoopAsync(p.StandardError, ct), ct);
+
+                // Hook exit so we can auto-respawn.
+                p.EnableRaisingEvents = true;
+                p.Exited += OnProcessExited;
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Error("EngineClient.StartAsync failed: " + ex.Message);
+                CrashReason = ex.Message;
+                State = LifecycleState.Crashed;
+                return;
+            }
+
+            // Send a status request — when the engine returns ready, we'll
+            // populate Info and flip State to Ready.
+            try
+            {
+                await SendCommandAsync(new RequestStatusCommand());
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn("EngineClient: requestStatus failed at spawn: " + ex.Message);
+            }
         }
-        catch (Exception ex)
+        finally
         {
-            DebugLog.Error("EngineClient.StartAsync failed: " + ex.Message);
-            CrashReason = ex.Message;
-            State = LifecycleState.Crashed;
+            // V14.9-A2: unconditional gate release. Every early-return path
+            // above + the spawn-catch + the normal completion path all
+            // converge here so OnProcessExited's respawn can always CAS
+            // the gate back from 0 → 1.
             Interlocked.Exchange(ref _isStarting, 0);
-            return;
         }
-
-        // Send a status request — when the engine returns ready, we'll
-        // populate Info and flip State to Ready.
-        try
-        {
-            await SendCommandAsync(new RequestStatusCommand());
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Warn("EngineClient: requestStatus failed at spawn: " + ex.Message);
-        }
-        // BUG-3: release the in-flight gate now that the spawn is done
-        // (engine launched + status sent). Subsequent OnProcessExited
-        // can re-claim it.
-        Interlocked.Exchange(ref _isStarting, 0);
     }
 
     private async Task StdoutLoopAsync(StreamReader reader, CancellationToken ct)
@@ -566,11 +613,27 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
             // If a second OnProcessExited (impossible in practice — we
             // null _process in Cleanup — but cheap to guard) or a
             // user-initiated StartAsync races, we must run only once.
-            _ = Task.Delay(delay).ContinueWith(_ => _ui.TryEnqueue(() =>
+            // V14.9-A1: the inner StartAsync() call was previously
+            // discarded with `_ =`, so a synchronous throw or async fault
+            // escaped to App.UnhandledException. Wrap the async call in
+            // a try/catch so respawn failures stay diagnosable but never
+            // tear the app.
+            _ = Task.Delay(delay).ContinueWith(_ => _ui.TryEnqueue(async () =>
             {
                 if (Interlocked.CompareExchange(ref _isStarting, 1, 0) == 0)
                 {
-                    _ = StartAsync();
+                    try
+                    {
+                        await StartAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        DebugLog.Error("EngineClient: respawn StartAsync threw: " + ex.Message);
+                        // StartAsync's own finally already released _isStarting;
+                        // mirror it here defensively in case the exception
+                        // escaped before the finally executed.
+                        Interlocked.Exchange(ref _isStarting, 0);
+                    }
                 }
             }));
         });
@@ -759,6 +822,27 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
         return SendCommandAsync(new StartScanCommand(rootPath, rootDisplay));
     }
 
+    /// <summary>Reset Phase + LastError before a fresh user action (e.g. retrying
+    /// Start Scan after a failure). Without this, the sidebar's Failed branch
+    /// keeps showing the previous error message because Phase is still
+    /// <see cref="ScanPhase.Failed"/> at the moment of the new click.</summary>
+    public void ClearPhaseAndError()
+    {
+        Phase = null;
+        LastError = null;
+    }
+
+    /// <summary>Pre-flip Phase to <see cref="ScanPhase.Discovering"/> as soon
+    /// as the user clicks Start Scan, so the sidebar transitions out of the
+    /// idle panel before the engine's first PhaseChanged event lands. The
+    /// engine's own Discovering event echoes the same value (no-op); any
+    /// real phase transition takes over immediately afterwards.</summary>
+    public void SetOptimisticScanningPhase()
+    {
+        Phase = ScanPhase.Discovering;
+        LastError = null;
+    }
+
     // FEAT-1: optimistic pause flag — flipped here on the IPC send so
     // the sidebar UI can bind to IsPaused without waiting for the next
     // ScanProgress event (which doesn't currently surface pause state
@@ -859,6 +943,147 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
         DebugLog.Info("[INSTALL] EngineClient.CancelPrewarmAsync() called.");
         return SendCommandAsync(new CancelPrewarmCommand());
     }
+
+    /// <summary>V14.9 A6: chains the four "AutoPilot" phases — Scan,
+    /// face clustering, Deep Analyze, plan Restructure — into a single
+    /// flow, advancing <see cref="CurrentAutoPilotStage"/> at each
+    /// boundary. App-side orchestration (not engine-side) so we can
+    /// reuse the existing per-phase IPC commands + events without an
+    /// engine refactor. Cancellation: pass a CancellationToken; each
+    /// stage checks before dispatching. The engine's per-stage cancel
+    /// IPCs are wired separately (CancelScanAsync, DeepAnalyzeCancelAsync).</summary>
+    public async Task RunAutoPilotAsync(
+        string rootPath,
+        string? rootDisplay = null,
+        string vlmModelKind = "qwen2_5_vl_3b",
+        bool skipExistingCaptions = true,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(rootPath)) throw new ArgumentNullException(nameof(rootPath));
+        if (CurrentAutoPilotStage is not null && CurrentAutoPilotStage != AutoPilotStage.Complete)
+        {
+            DebugLog.Warn("[AUTOPILOT] already in flight; ignoring duplicate run.");
+            return;
+        }
+        try
+        {
+            // Stage 1: scan.
+            CurrentAutoPilotStage = AutoPilotStage.Scanning;
+            DebugLog.Info("[AUTOPILOT] stage=Scanning");
+            await WaitForReadyAsync(TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            await StartScanAsync(rootPath, rootDisplay).ConfigureAwait(false);
+            await AwaitPhaseAsync(ScanPhase.Completed, ct).ConfigureAwait(false);
+
+            // Stage 2: face clustering.
+            CurrentAutoPilotStage = AutoPilotStage.Clustering;
+            DebugLog.Info("[AUTOPILOT] stage=Clustering");
+            var clusteringTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            void OnFaceClustering(object? _, PropertyChangedEventArgs e)
+            {
+                if (e.PropertyName == nameof(LastFaceClustering) && LastFaceClustering is not null)
+                    clusteringTcs.TrySetResult(true);
+            }
+            PropertyChanged += OnFaceClustering;
+            try
+            {
+                await RunFaceClusteringAsync().ConfigureAwait(false);
+                using var reg = ct.Register(() => clusteringTcs.TrySetCanceled(ct));
+                await clusteringTcs.Task.ConfigureAwait(false);
+            }
+            finally { PropertyChanged -= OnFaceClustering; }
+
+            // Stage 3: deep analyze.
+            CurrentAutoPilotStage = AutoPilotStage.Captioning;
+            DebugLog.Info("[AUTOPILOT] stage=Captioning");
+            var deepAnalyzeTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            void OnDeepAnalyze(object? _, PropertyChangedEventArgs e)
+            {
+                if (e.PropertyName == nameof(DeepAnalyzeComplete) && DeepAnalyzeComplete is not null)
+                    deepAnalyzeTcs.TrySetResult(true);
+            }
+            PropertyChanged += OnDeepAnalyze;
+            try
+            {
+                await DeepAnalyzeAllAsync(vlmModelKind, skipExistingCaptions).ConfigureAwait(false);
+                using var reg = ct.Register(() => deepAnalyzeTcs.TrySetCanceled(ct));
+                await deepAnalyzeTcs.Task.ConfigureAwait(false);
+            }
+            finally { PropertyChanged -= OnDeepAnalyze; }
+
+            // Stage 4: plan restructure.
+            CurrentAutoPilotStage = AutoPilotStage.Planning;
+            DebugLog.Info("[AUTOPILOT] stage=Planning");
+            var planTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            void OnPlan(object? _, PropertyChangedEventArgs e)
+            {
+                if (e.PropertyName == nameof(LastRestructurePlan) && LastRestructurePlan is not null)
+                    planTcs.TrySetResult(true);
+            }
+            PropertyChanged += OnPlan;
+            try
+            {
+                await PlanRestructureAsync(rootPath).ConfigureAwait(false);
+                using var reg = ct.Register(() => planTcs.TrySetCanceled(ct));
+                await planTcs.Task.ConfigureAwait(false);
+            }
+            finally { PropertyChanged -= OnPlan; }
+
+            CurrentAutoPilotStage = AutoPilotStage.Complete;
+            DebugLog.Info("[AUTOPILOT] stage=Complete");
+        }
+        catch (OperationCanceledException)
+        {
+            DebugLog.Info("[AUTOPILOT] cancelled");
+            CurrentAutoPilotStage = null;
+            throw;
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("[AUTOPILOT] failed: " + ex.Message);
+            CurrentAutoPilotStage = null;
+            throw;
+        }
+    }
+
+    /// <summary>Resolve when the engine's <see cref="Phase"/> reaches the
+    /// target value (or transitions to <see cref="ScanPhase.Failed"/>,
+    /// which throws). Used by AutoPilot to await each scan-phase
+    /// completion before advancing.</summary>
+    private Task AwaitPhaseAsync(ScanPhase target, CancellationToken ct)
+    {
+        if (Phase == target) return Task.CompletedTask;
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        PropertyChangedEventHandler? handler = null;
+        handler = (_, e) =>
+        {
+            if (e.PropertyName != nameof(Phase)) return;
+            if (Phase == target)
+            {
+                PropertyChanged -= handler;
+                tcs.TrySetResult(true);
+            }
+            else if (Phase == ScanPhase.Failed)
+            {
+                PropertyChanged -= handler;
+                tcs.TrySetException(new InvalidOperationException(
+                    "Scan failed: " + (LastError?.Message ?? "unknown error")));
+            }
+        };
+        PropertyChanged += handler;
+        using var reg = ct.Register(() =>
+        {
+            PropertyChanged -= handler;
+            tcs.TrySetCanceled(ct);
+        });
+        return tcs.Task;
+    }
+
+    /// <summary>Clear AutoPilot state — used by the cancel path or by
+    /// the host UI when the user dismisses the tracker. Independent of
+    /// the engine's own cancel IPCs (those still need to be called
+    /// separately).</summary>
+    public void ClearAutoPilot() => CurrentAutoPilotStage = null;
     public Task PlanRestructureAsync(string libraryRoot) =>
         SendCommandAsync(new PlanRestructureCommand(libraryRoot));
     public Task ApplyRestructureAsync(string libraryRoot, IReadOnlyList<RestructureMove> moves, bool useSymlinks) =>
@@ -904,8 +1129,22 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
     {
         // Always raise to subscribers first, even if the routing below
         // throws (defense-in-depth — never silently drop an event).
-        try { _events.OnNext(ev); } catch (Exception ex) { DebugLog.Warn("event subject OnNext threw: " + ex.Message); }
+        // Scan FileDone events are sampled (every Nth) because a fast scan
+        // can emit hundreds per second and subscribers (LibraryView) don't
+        // need every one to feel responsive.
+        bool publishToSubject = true;
+        if (ev.Payload is FileDoneEventWrapper)
+        {
+            var n = Interlocked.Increment(ref _scanFileDoneEventCounter);
+            publishToSubject = (n % ScanFileDoneSampleN) == 0;
+        }
+        if (publishToSubject)
+        {
+            try { _events.OnNext(ev); } catch (Exception ex) { DebugLog.Warn("event subject OnNext threw: " + ex.Message); }
+        }
 
+        try
+        {
         switch (ev.Payload)
         {
             case ReadyEvent r:
@@ -1028,6 +1267,15 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
             case MergeSuggestionsEvent ms:
                 LastMergeSuggestions = ms.Suggestions;
                 break;
+        }
+        }
+        catch (Exception ex)
+        {
+            // A null deref or malformed payload in one switch arm must NOT
+            // tear down the UI. Log + carry on. The OnUnhandledException
+            // handler in App.xaml.cs is the absolute last resort; everything
+            // routing-related lands here first.
+            DebugLog.Error($"EngineClient.Apply({ev.Payload?.GetType().Name ?? "<null>"}) threw: {ex}");
         }
     }
 

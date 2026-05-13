@@ -36,8 +36,8 @@ pub fn get_parent_pid() -> Option<u32> {
     let our_pid = std::process::id();
     unsafe {
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
-        // BUG-18: snapshot HANDLE leaked on every exit path. Wrap in a
-        // closure + always close.
+        // Wrap the snapshot walk in a closure so every exit (early return,
+        // loop break) falls through to the CloseHandle below.
         let result = (|| -> Option<u32> {
             let mut entry = PROCESSENTRY32W {
                 dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
@@ -206,4 +206,75 @@ impl Drop for PriorityBoost {
             unsafe { let _ = SetPriorityClass(GetCurrentProcess(), NORMAL_PRIORITY_CLASS); }
         }
     }
+}
+
+// ─── Performance-Pack DLL search ────────────────────────────────────────────
+//
+// SEC-3 locked the DLL search path to System32 + the engine binary's
+// directory only. Performance Packs extract into
+// %LOCALAPPDATA%\FileID\Models\packs\<vendor>\ — outside both. Without
+// teaching the loader about those dirs, an installed CUDA / OpenVINO / QNN
+// pack stays invisible to ORT and the EP probe falls back to DirectML or
+// CPU. AddDllDirectory adds a single trusted dir to the per-process search
+// list; we walk one level deep so DLLs at the root OR in a flat `bin/`
+// subdir of the pack are both reachable.
+
+/// Register every directory under `root` (root itself + each immediate
+/// child) that contains at least one .dll as an additional DLL search
+/// path. Idempotent: called every time a pack is extracted; the loader
+/// dedupes internally. Returns the list of directories that exist + have
+/// DLLs but for which `AddDllDirectory` returned null — callers (notably
+/// main.rs's CUDA toolkit hookup) surface these to the app as a
+/// `cuda_dll_registration_failed` engine error so a missing CUDA EP
+/// becomes diagnosable instead of silently falling back to DirectML.
+#[cfg(windows)]
+pub fn register_dll_dirs_under(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::LibraryLoader::AddDllDirectory;
+
+    fn dir_has_dll(p: &std::path::Path) -> bool {
+        let Ok(rd) = std::fs::read_dir(p) else { return false; };
+        for e in rd.flatten() {
+            if e.path().extension().and_then(|s| s.to_str()).map(|s| s.eq_ignore_ascii_case("dll")).unwrap_or(false) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn add(dir: &std::path::Path) -> bool {
+        let mut wide: Vec<u16> = dir.as_os_str().encode_wide().collect();
+        wide.push(0);
+        let cookie = unsafe { AddDllDirectory(PCWSTR(wide.as_ptr())) };
+        if cookie.is_null() {
+            tracing::warn!(dir = %dir.display(), "AddDllDirectory returned null");
+            false
+        } else {
+            tracing::info!(dir = %dir.display(), "[EP] AddDllDirectory registered pack dir");
+            true
+        }
+    }
+
+    use std::os::windows::ffi::OsStrExt;
+
+    let mut failed: Vec<std::path::PathBuf> = Vec::new();
+    if !root.is_dir() {
+        return failed;
+    }
+    if dir_has_dll(root) && !add(root) {
+        failed.push(root.to_path_buf());
+    }
+    let Ok(rd) = std::fs::read_dir(root) else { return failed; };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.is_dir() && dir_has_dll(&path) && !add(&path) {
+            failed.push(path);
+        }
+    }
+    failed
+}
+
+#[cfg(not(windows))]
+pub fn register_dll_dirs_under(_root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    Vec::new()
 }

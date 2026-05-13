@@ -65,8 +65,10 @@ internal sealed class AppSettings
     /// <summary>
     /// Manual GPU execution provider override. Null = auto-detect (engine
     /// uses RuntimeProbe). Values: "directml", "cuda", "openvino", "qnn",
-    /// "cpu". Persists across launches; engine consumes this when the real
-    /// ML inference path lands (Phase 2.6).
+    /// "cpu". Persists across launches. Read by the engine in
+    /// runtime.rs::read_user_ep_override on every session build, so a
+    /// change applies to the next scan (already-loaded models keep their
+    /// originally-built EP for the current scan's lifetime).
     /// </summary>
     public string? GpuExecutionProviderOverride { get; set; }
 
@@ -75,6 +77,13 @@ internal sealed class AppSettings
     /// user dismisses the sheet for any reason; the sheet still re-shows
     /// on subsequent launches if any required model is missing.</summary>
     public bool WelcomeSheetSeen { get; set; } = false;
+
+    /// <summary>Opt out of the silent CUDA llama.cpp install that fires
+    /// when the engine reports an NVIDIA GPU. False (the default) means
+    /// auto-install is enabled — Deep Analyze gets the 15-25% faster
+    /// CUDA build without the user finding a hidden Settings button.
+    /// True disables the auto-install entirely.</summary>
+    public bool DisableAutoInstallCuda { get; set; } = false;
 
     /// <summary>Schema version of this settings.json. Bumped only on incompatible field renames.</summary>
     public int SchemaVersion { get; set; } = 1;
@@ -110,6 +119,10 @@ internal sealed class AppSettings
         return new AppSettings();
     }
 
+    /// <summary>Current schema version this build understands. Bumped only on
+    /// incompatible field renames. Sanitize() clamps loaded values to this.</summary>
+    private const int CurrentSchemaVersion = 1;
+
     /// <summary>Defensive cleanup of fields a malicious settings.json
     /// could otherwise smuggle through. Currently scrubs the EP override
     /// (rejects anything outside the canonical enum so DLL paths can't
@@ -122,6 +135,17 @@ internal sealed class AppSettings
             DebugLog.Warn($"AppSettings: GpuExecutionProviderOverride '{v}' is not a recognized value; coercing to null (auto-detect).");
             s.GpuExecutionProviderOverride = null;
         }
+        // V14.9-A12: clamp SchemaVersion to a known range. A corrupt or
+        // malicious settings.json could otherwise set 999, and a future
+        // migration path that branches on version could behave unsafely.
+        if (s.SchemaVersion < 0 || s.SchemaVersion > CurrentSchemaVersion)
+        {
+            DebugLog.Warn($"AppSettings: SchemaVersion {s.SchemaVersion} out of supported range [0, {CurrentSchemaVersion}]; coercing to {CurrentSchemaVersion}.");
+            s.SchemaVersion = CurrentSchemaVersion;
+        }
+        // Bound other ranges defensively.
+        if (string.IsNullOrWhiteSpace(s.ActiveTab)) s.ActiveTab = "library";
+        if (string.IsNullOrWhiteSpace(s.LibraryKindFilter)) s.LibraryKindFilter = "all";
     }
 
     public void Save()

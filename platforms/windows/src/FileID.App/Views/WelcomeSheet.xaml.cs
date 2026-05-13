@@ -49,11 +49,9 @@ public sealed partial class WelcomeSheet : UserControl
         // PropertyChanged with no handler attached, the AllInstalled
         // signal is lost, and the auto-dismiss never fires.
         Svc.PropertyChanged += OnServicePropertyChanged;
-        Svc.RecommendedPackInstalled += OnRecommendedPackInstalled;
         Unloaded += (_, _) =>
         {
             Svc.PropertyChanged -= OnServicePropertyChanged;
-            Svc.RecommendedPackInstalled -= OnRecommendedPackInstalled;
             // Cancel in-flight auto-dismiss + restart-prompt tasks so
             // they don't fire TryEnqueue / ShowAsync on a detached control.
             try { _lifetimeCts?.Cancel(); _lifetimeCts?.Dispose(); }
@@ -82,48 +80,6 @@ public sealed partial class WelcomeSheet : UserControl
         if (e.PropertyName == nameof(ModelInstallerService.AllInstalled) && Svc.AllInstalled)
         {
             ScheduleAutoDismiss();
-        }
-    }
-
-    private bool _packRestartPromptShown;
-
-    private async void OnRecommendedPackInstalled(object? sender, string packId)
-    {
-        if (_packRestartPromptShown) return; // one prompt per session
-        _packRestartPromptShown = true;
-        DebugLog.Info($"[INSTALL] Pack '{packId}' installed; prompting for restart.");
-        // Capture the XamlRoot snapshot now — if the user dismisses the
-        // sheet between the install completing and the dialog opening,
-        // XamlRoot reads as null and ShowAsync would throw.
-        var root = this.XamlRoot;
-        if (root is null) return;
-        var ct = _lifetimeCts?.Token ?? CancellationToken.None;
-        try
-        {
-            var dialog = new ContentDialog
-            {
-                XamlRoot = root,
-                Title = "Performance Pack installed",
-                Content = "Restart the FileID engine now to activate the GPU performance pack? Your scan will run with the faster execution provider.",
-                PrimaryButtonText = "Restart now",
-                SecondaryButtonText = "Later",
-                DefaultButton = ContentDialogButton.Primary,
-            };
-            if (ct.IsCancellationRequested) return;
-            var result = await dialog.ShowAsync();
-            if (ct.IsCancellationRequested) return;
-            if (result == ContentDialogResult.Primary)
-            {
-                try { await EngineClient.Instance.RestartAsync(ct); }
-                catch (Exception rex)
-                {
-                    DebugLog.Warn($"Engine restart from Welcome sheet failed: {rex.Message}");
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Warn("RecommendedPackInstalled prompt threw: " + ex.Message);
         }
     }
 
@@ -245,9 +201,16 @@ public sealed partial class WelcomeSheet : UserControl
         status == ModelInstallStatus.Downloading && bytesPerSecond > 0
             ? Visibility.Visible : Visibility.Collapsed;
 
-    internal string ProgressLabel(double fraction, ulong? bytesDone, ulong? totalBytes)
+    internal string ProgressLabel(string? message, double fraction, ulong? bytesDone, ulong? totalBytes)
     {
-        var pct = fraction > 0 ? $"{fraction * 100:0}%" : "Starting…";
+        // Prefer the engine's caption (e.g. "Queued — starting download…") while
+        // we're still at 0% — otherwise the row reads "Starting…" forever even
+        // after the engine has acknowledged the prewarm. Once real progress
+        // lands (fraction > 0), the percentage is more useful than the caption.
+        string pct;
+        if (fraction > 0) pct = $"{fraction * 100:0}%";
+        else if (!string.IsNullOrEmpty(message)) pct = message;
+        else pct = "Starting…";
         var bytes = string.Empty;
         if (bytesDone is { } done && totalBytes is { } total && total > 0)
         {
@@ -271,76 +234,19 @@ public sealed partial class WelcomeSheet : UserControl
     internal string ErrorLabel(string? lastError) =>
         "Failed: " + (lastError ?? "unknown error");
 
-    // ─── Pack-row x:Bind helpers ────────────────────────────────────────
-    //
-    // The pack row binds to Svc.RecommendedPack, which is nullable. Each
-    // helper short-circuits to a safe default when the slot isn't
-    // populated yet (engine still starting, no pack recommended, etc.)
-    // so the XAML never throws on a null path.
+    /// <summary>VLM row title — formats the slot's DisplayLabel for the
+    /// "Deep Analyze (…)" caption. Reads via x:Bind so a RAM-aware
+    /// recommendation change (Qwen 2.5-VL 3B ↔ SmolVLM) updates the
+    /// row text without a page reload.</summary>
+    internal string VlmTitle(string displayLabel) => $"Deep Analyze ({displayLabel})";
 
-    internal Visibility PackRowVisibility(bool show) =>
-        show ? Visibility.Visible : Visibility.Collapsed;
-
-    internal string PackGlyph(ModelSlot? slot) =>
-        slot is null ? GlyphCloud : GlyphFor(slot.Status);
-
-    internal Brush PackIconBrush(ModelSlot? slot) =>
-        slot is null ? GoldBrushResolved : IconBrushFor(slot.Status);
-
-    internal string PackTitle(ModelSlot? slot) => slot?.DisplayLabel ?? string.Empty;
-
-    internal string PackSize(ModelSlot? slot)
+    internal string VlmSize(ulong approxBytes)
     {
-        if (slot is null || slot.ApproxBytes == 0) return string.Empty;
+        const double GB = 1024.0 * 1024.0 * 1024.0;
         const double MB = 1024.0 * 1024.0;
-        const double GB = MB * 1024.0;
-        return slot.ApproxBytes >= (ulong)GB
-            ? $"~{slot.ApproxBytes / GB:0.0} GB"
-            : $"~{slot.ApproxBytes / MB:0} MB";
+        if (approxBytes >= GB) return $"~{approxBytes / GB:0.0} GB";
+        return $"~{approxBytes / MB:0} MB";
     }
-
-    internal double PackFraction(ModelSlot? slot) => slot?.Fraction ?? 0;
-
-    internal Visibility PackShowDeterminate(ModelSlot? slot) =>
-        slot is not null && slot.Status == ModelInstallStatus.Downloading && slot.Fraction > 0
-            ? Visibility.Visible : Visibility.Collapsed;
-
-    internal Visibility PackShowSpinner(ModelSlot? slot) =>
-        slot is not null && slot.Status == ModelInstallStatus.Downloading && slot.Fraction <= 0
-            ? Visibility.Visible : Visibility.Collapsed;
-
-    internal bool PackSpinnerActive(ModelSlot? slot) =>
-        slot is not null && slot.Status == ModelInstallStatus.Downloading && slot.Fraction <= 0;
-
-    internal Visibility PackVisibleIfDownloading(ModelSlot? slot) =>
-        slot?.Status == ModelInstallStatus.Downloading ? Visibility.Visible : Visibility.Collapsed;
-
-    internal Visibility PackVisibleIfFailed(ModelSlot? slot) =>
-        slot?.Status == ModelInstallStatus.Failed ? Visibility.Visible : Visibility.Collapsed;
-
-    internal Visibility PackVisibleIfInstalled(ModelSlot? slot) =>
-        slot?.Status == ModelInstallStatus.Installed ? Visibility.Visible : Visibility.Collapsed;
-
-    internal Visibility PackShowActionButton(ModelSlot? slot) =>
-        slot is not null && slot.Status != ModelInstallStatus.Installed
-            ? Visibility.Visible : Visibility.Collapsed;
-
-    internal string PackButtonLabel(ModelSlot? slot) =>
-        slot is null ? "Install" : ButtonLabel(slot.Status);
-
-    internal string PackProgressLabel(ModelSlot? slot) =>
-        slot is null ? string.Empty
-        : ProgressLabel(slot.Fraction, slot.BytesDone, slot.TotalBytes);
-
-    internal Visibility PackShowRateEta(ModelSlot? slot) =>
-        slot is not null && slot.Status == ModelInstallStatus.Downloading && slot.BytesPerSecond > 0
-            ? Visibility.Visible : Visibility.Collapsed;
-
-    internal string PackRateEtaLabel(ModelSlot? slot) =>
-        slot is null ? string.Empty : RateEtaLabel(slot.BytesPerSecond, slot.EtaSeconds);
-
-    internal string PackErrorLabel(ModelSlot? slot) =>
-        slot is null ? string.Empty : ErrorLabel(slot.LastError);
 
     private static string FormatBytes(ulong b)
     {
@@ -380,20 +286,21 @@ public sealed partial class WelcomeSheet : UserControl
         HandleAction(Svc.Vlm);
     }
 
-    private void OnPackActionClicked(object sender, RoutedEventArgs e)
-    {
-        var slot = Svc.RecommendedPack;
-        if (slot is null) return;
-        DebugLog.Info($"[INSTALL] Performance pack per-row button clicked ({slot.DisplayLabel}).");
-        HandleAction(slot);
-    }
-
     private void HandleAction(ModelSlot slot)
     {
         DebugLog.Info($"[INSTALL] HandleAction({slot.DisplayLabel}) — Status={slot.Status}");
         switch (slot.Status)
         {
             case ModelInstallStatus.Downloading:
+                // Pre-flip caption to "Cancelling…" so the user gets instant
+                // feedback. The engine takes 1-5 s to confirm cancellation
+                // (downloads need to abort their in-flight chunks), and
+                // during that window the stale progress text would otherwise
+                // keep the row reading like nothing happened. Matches
+                // macOS WelcomeSheet.swift:74-82's pre-emptive reset.
+                slot.Message = "Cancelling…";
+                slot.BytesPerSecond = 0;
+                slot.EtaSeconds = 0;
                 _ = SafeRunAsync(() => Svc.CancelAllAsync(), "Cancel " + slot.DisplayLabel);
                 break;
             case ModelInstallStatus.NotInstalled:

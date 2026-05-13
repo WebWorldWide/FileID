@@ -20,11 +20,7 @@
     Title="FileID"
     mc:Ignorable="d">
 
-    <Grid x:Name="RootLayout"
-          AllowDrop="True"
-          DragOver="OnDragOver"
-          DragLeave="OnDragLeave"
-          Drop="OnDrop">
+    <Grid x:Name="RootLayout">
         <Grid.RowDefinitions>
             <RowDefinition Height="32" />
             <RowDefinition Height="*" />
@@ -65,7 +61,8 @@
                 VerticalAlignment="Center"
                 AutomationProperties.Name="Toggle sidebar"
                 ToolTipService.ToolTip="Toggle sidebar (Ctrl+Shift+S)">
-            <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}"
+            <FontIcon x:Name="SidebarToggleGlyph"
+                      FontFamily="{ThemeResource SymbolThemeFontFamily}"
                       Glyph="&#xE700;"
                       FontSize="14" />
         </Button>
@@ -88,7 +85,11 @@
                        Opacity="0.55" />
         </StackPanel>
 
-        <Grid Grid.Row="1">
+        <Grid Grid.Row="1"
+              AllowDrop="True"
+              DragOver="OnDragOver"
+              DragLeave="OnDragLeave"
+              Drop="OnDrop">
             <Grid.ColumnDefinitions>
                 <!-- V14.7.4: bracket the sidebar with MinWidth/MaxWidth so
                      it can't squeeze the detail pane on narrow windows or
@@ -109,6 +110,30 @@
             <Grid x:Name="DetailHost" Grid.Column="2">
                 <views:DetailHostView />
             </Grid>
+        </Grid>
+
+        <!-- V14.9-Bug2: WelcomeSheet host. Confined to Row 1 ONLY so the
+             title bar (Row 0) stays uncovered and draggable. Previously
+             the sheet was hosted inside a `ContentDialog`, which renders
+             a hit-testable full-window smoke layer over Row 0 too and
+             intercepted pointer events on the title bar — user could
+             see Welcome but couldn't drag the window. This inline
+             overlay carries its own dim background (matching the
+             dialog's smoke) but never covers the chrome row. -->
+        <Grid x:Name="WelcomeOverlay"
+              Grid.Row="1"
+              Background="#CC0D0D14"
+              Visibility="Collapsed">
+            <Border MaxWidth="720"
+                    MinWidth="660"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    CornerRadius="12"
+                    Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
+                    BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                    BorderThickness="1">
+                <ContentControl x:Name="WelcomeOverlayHost" />
+            </Border>
         </Grid>
 
         <!-- Drag-drop overlay (visible only while a drag is in flight) -->

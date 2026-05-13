@@ -21,16 +21,46 @@
                     MaxWidth="560">
 
             <StackPanel Spacing="8" HorizontalAlignment="Center">
-                <TextBlock Text="FileID"
-                           FontSize="36"
+                <!-- Rainbow-shimmering title — 1:1 with macOS Detail.swift:159-178.
+                     The LinearGradientBrush's EndPoint is animated by code-behind
+                     over 12 s; ReducedMotion freezes it on solid gold. -->
+                <TextBlock x:Name="TitleText"
+                           Text="FileID"
+                           FontSize="56"
                            FontWeight="Bold"
-                           HorizontalAlignment="Center"
-                           Foreground="{ThemeResource GoldBrush}" />
+                           HorizontalAlignment="Center">
+                    <TextBlock.Foreground>
+                        <LinearGradientBrush x:Name="TitleBrush"
+                                             StartPoint="0,0"
+                                             EndPoint="1,1">
+                            <GradientStop Color="{StaticResource GoldColor}"    Offset="0.0" />
+                            <GradientStop Color="{StaticResource DelightColor}" Offset="0.25" />
+                            <GradientStop Color="{StaticResource AiColor}"      Offset="0.5" />
+                            <GradientStop Color="{StaticResource InfoColor}"    Offset="0.75" />
+                            <GradientStop Color="{StaticResource GoldColor}"    Offset="1.0" />
+                        </LinearGradientBrush>
+                    </TextBlock.Foreground>
+                </TextBlock>
                 <TextBlock Text="On-device AI file organization."
                            Style="{StaticResource SubtitleTextBlockStyle}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                            HorizontalAlignment="Center" />
             </StackPanel>
+
+            <!-- Pick a folder CTA — mirrors macOS Detail.swift:208-219 "Pick a folder"
+                 button. Ctrl+O accelerator wired in code-behind. -->
+            <Button x:Name="PickFolderButton"
+                    HorizontalAlignment="Center"
+                    Padding="18,10"
+                    CornerRadius="10"
+                    Background="{ThemeResource GoldBrush}"
+                    Foreground="Black"
+                    Click="OnPickFolderClicked">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <FontIcon Glyph="&#xE8B7;" FontSize="14" Foreground="Black" />
+                    <TextBlock Text="Pick a folder" FontWeight="SemiBold" />
+                </StackPanel>
+            </Button>
 
             <StackPanel Spacing="10">
                 <!-- Step 1 — Pick a folder (current next action, gold accent) -->

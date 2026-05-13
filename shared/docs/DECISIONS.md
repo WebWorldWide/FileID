@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-05-12 — Windows engine downloader: phase-specific timeouts, not a blanket request cap
+
+The Windows engine's `reqwest::Client` previously used `.timeout(Duration::from_secs(300))` as a single total-per-request cap. That worked for the 14 MB ArcFace and 220 MB MobileCLIP-S2 downloads but reliably killed the 2.1 GB Qwen 2.5-VL 3B GGUF on any connection slower than ~7 MB/s — the body stream simply ran out the 300 s wall clock and reqwest aborted with what surfaced to the user as "reading chunk". Bumping the wall-clock cap to 30 min would have worked for most users but still fails ARM tablets on Wi-Fi and creates a worst-case where a single dead socket holds a request open for half an hour.
+
+We switched to `.connect_timeout(30s) + .read_timeout(120s)`. `read_timeout` (reqwest 0.12.5+, the engine pins 0.12.28) only triggers when **no bytes arrive** for the configured duration, so a slow-but-progressing stream never trips it. The simple-download path was simultaneously rewritten to retry with HTTP `Range:` resume on stream errors (matching the parallel range path's existing retry loop), so even a hard connection reset mid-2GB-stream now recovers cleanly.
+
+Alternatives considered: (a) keep the blanket timeout and just bump to 30 min — rejected, see above; (b) use the OS-level TCP keepalive — rejected, reqwest doesn't expose it portably and the failure mode is server-side aborts more often than dead sockets; (c) chunk the download into smaller HTTP requests with a Range loop — that's what `download_parallel` already does, and the new range-support probe (one-byte `GET Range: 0-0`) gets us onto that path even when HEAD doesn't advertise `Accept-Ranges: bytes` (HuggingFace CDN behavior behind 302).
+
 ## 2026-04-25 — v2 skunkworks rewrite, key architectural calls
 
 The v2 rewrite supersedes the per-batch v1 work. These decisions are the load-bearing ones — the rest follow.
@@ -670,3 +678,55 @@ The knowledge-graph canvas was O(N×M) connection lines + a 6000×6000 DotGridCa
 **Decision:** Build matrix includes `aarch64-pc-windows-msvc` from Phase 0; CI runs on `windows-11-arm` runners; ship `FileID-arm64.msi` alongside `FileID-x64.msi`. Snapdragon X Elite Hexagon NPU access via ONNX Runtime QNN EP (Snapdragon NPU Performance Pack).
 
 **Why first-class (vs ship x64 only and let WoA emulate):** The Hexagon NPU is the closest hardware analog to Apple's Neural Engine on Windows. Native ARM64 + QNN EP gives Snapdragon WoA users the same power-efficient ML inference profile macOS users get on M-series. x64 emulation on WoA loses both performance and power efficiency for what is otherwise a compelling "M1-like" Windows machine. All our deps (ORT, llama.cpp, pdfium, Win2D, windows-rs, WinAppSDK, .NET 8/9 self-contained) have ARM64 builds — no blockers found at plan time.
+
+## 2026-05-11 — [EP] log trail mirrors [INSTALL] trail; AddDllDirectory is the pack-discovery contract
+
+**Decision:** `create_session` emits a positive-outcome `tracing::info!("[EP] built session", ep, vendor, adapter, model)` line in `runtime.rs:245` whenever an EP successfully builds a session. Pack extraction additionally walks the extracted root + one subdir level and calls `AddDllDirectory` on any dir containing `.dll` (via `platform.rs::register_dll_dirs_under`); the same helper is replayed at engine startup for previously-extracted packs.
+
+**Why the [EP] tag (vs leaving the silent positive path):** Diagnostic clarity. The engine already logged `[EP] failed to build; trying next` on the negative path. Without a paired positive line, a user reporting "scanning feels slow on my NVIDIA box" had no way to confirm from `app.log` which EP actually committed. The new line is structurally identical to V14.7.16's `[INSTALL]` discipline: every meaningful state transition logs once.
+
+**Why AddDllDirectory (vs symlinking pack DLLs next to the engine):** SEC-3 locked the default DLL search to System32 + the engine binary's dir. Symlinking would put third-party DLLs next to the trusted engine binary — a smaller attack surface than PATH planting but still mixes installer-managed and user-extracted files in the same dir. `AddDllDirectory` adds a single trusted dir to the per-process search list and leaves the engine's own directory clean. The walk is one level deep because all observed pack layouts (CUDA, OpenVINO, QNN) keep DLLs flat or in one bin/ subdir — deeper recursion would invite long-tail false positives.
+
+**Why replay on startup (vs only post-install):** Without replay, packs installed in a prior session were invisible on the next launch. `AddDllDirectory` is per-process state, not per-machine state — packs need re-registration every engine spawn.
+
+## 2026-05-11 — Audit findings: half were already shipped
+
+**Decision:** When a multi-agent audit produced a "missing parity" gap list, several items (Cleanup per-group menu V14.7.6, People multi-select merge FEAT-CRIT-1, FilePreviewSheet sibling nav V14.7.2, Settings install cards) turned out to already be implemented. Verified by grepping for the named symbols + reading the corresponding views; only the actual gaps (rainbow-shimmer hero, install card rate/ETA, [EP] log line, AddDllDirectory wiring) got engineering work.
+
+**Why verify before implementing:** A multi-agent audit reads excerpts and infers gaps from absence-of-reference. Treating its output as authoritative would have produced duplicate work or, worse, replaced working code with a fresh implementation that subtly broke established behavior. The audit's value is in the AREAS it flags, not the CONCLUSIONS it draws.
+
+**Worked example:** The audit reported "ReadStore concurrent-SQLite race" as a high-severity bug. Reading `ReadStore.cs:106-110` showed the `_gate` IS acquired before any query work — the comment at `:100` describes a delegation path, not the bug. False positive. Treated as a sanity-check anchor (and the comment's wording reviewed for future readers) but no code change.
+
+## 2026-05-11 — GPU Performance Packs removed (no shippable URLs)
+
+**Decision:** Drop the CUDA / OpenVINO / QNN Performance Pack registry entries and the welcome-sheet + Settings install UI. Keep `llama_runtime_x64` (Vulkan llama.cpp from ggml-org's GitHub releases) — it's a real downloadable URL used by Deep Analyze. DirectML becomes the universal GPU path for every D3D12-capable vendor (NVIDIA / AMD / Intel); CPU is the floor for Snapdragon X and no-GPU machines.
+
+**Why removed (per vendor):**
+- **CUDA** — Microsoft's `onnxruntime-win-x64-cuda12-*.zip` (real, ~150 MB) ships the ORT CUDA EP but NOT cuDNN, a hard LoadLibrary dependency. Bundling cuDNN means building + hosting our own composite ZIP under NVIDIA's redistribution license. An engineering project + ongoing legal review, not a URL swap.
+- **OpenVINO** — Intel publishes the OpenVINO runtime, but ORT's OpenVINO EP needs a specific Intel-built ONNX Runtime distribution that isn't redistributed as a standalone ZIP. Wiring two parallel ORT installs that share weights costs more than the perf win.
+- **QNN** — Qualcomm SDK is behind a developer-portal terms-acceptance gate. There is no public download URL we can point at.
+
+**Why keep `llama_runtime_x64`:** The ggml-org GitHub release URL is real, public, and live. Used by `vlm.rs` to spawn `llama-mtmd-cli.exe` for Deep Analyze. Vulkan backend covers NVIDIA + AMD + Intel + Adreno on one binary — no separate per-vendor build needed.
+
+**Why this isn't a scanning regression:** The engine's EP priority chain (`runtime.rs::priority_chain`) already routed everyone through DirectML (or CPU) as the fallback whenever a pack wasn't installed — which was 100% of the time, because the packs never existed. The packs were "max performance" upgrades, not "make it work" plumbing. Per the 2026-05-02 decision ("DirectML universal default ... within 10–20% of CUDA for our model sizes"), DirectML is honest about what it delivers on every vendor.
+
+**Re-introduction path:** Bring back any pack only after three preconditions hold for that pack — (1) a composite ZIP that includes EVERY runtime DLL the EP needs at LoadLibrary time, (2) a license-compliant mirror with the vendor's redistribution license carried inside, (3) Authenticode signatures preserved on every shipped DLL. Today none of CUDA / OpenVINO / QNN clears all three; if any one does later, re-introduction is additive to `registry.rs` + `ModelInstallerService.cs` + the welcome/settings views. The defensive `AddDllDirectory` wiring and `is_*_pack_present` probes stay in place so a power user manually installing a pack-shaped directory still gets the EP picked up.
+
+## 2026-05-11 — NVIDIA acceleration via two honest paths (CUDA llama.cpp + system-CUDA probe)
+
+**Decision:** Deliver real NVIDIA performance through two complementary paths that don't require us to ship cuDNN:
+1. **CUDA llama.cpp for Deep Analyze** — `llama_runtime_cuda_x64` registry entry pointing at ggml-org's official GitHub release. The CUDA backend uses cuBLAS + custom kernels, no cuDNN needed. Works on any modern NVIDIA driver. 15-25% VLM speedup vs the Vulkan default.
+2. **System-CUDA toolkit probe for scanning** — at engine startup, search `CUDA_PATH` / `CUDA_PATH_V12_X` / `%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA\V*\bin\` for the user's existing CUDA Toolkit + cuDNN install. If found, `AddDllDirectory` the bin dir so ORT's CUDA EP can load — `priority_chain` then prepends CUDA for NVIDIA hardware automatically. 10-15% scanning speedup for the subset of NVIDIA users (ML researchers, deep-learning gamers) who already have CUDA installed.
+
+**Why these and not "bundle cuDNN":** cuDNN's NVIDIA redistribution license requires a partner agreement + license file shipped inside any redistributed bundle. That's an engineering + legal project, not a code change. The two paths above sidestep that:
+- llama.cpp CUDA build doesn't need cuDNN at all — it's a real, redistributable, MIT-licensed binary.
+- System-CUDA probe consumes the user's own cuDNN install — we never touch it, just point the loader at it.
+
+**Why these and not "DirectML FP16 tuning":** the `ort` 2.0.0-rc.10 Rust crate doesn't expose FP16 / graph-opt knobs on its DirectML builder (Phase 1 audit confirmed). Upstream feature request territory, not a shippable change today.
+
+**Coverage:**
+- NVIDIA + CUDA installed → CUDA EP for scanning + CUDA llama.cpp for VLM. Full NVIDIA performance.
+- NVIDIA without CUDA → DirectML for scanning + Vulkan llama.cpp for VLM. ~80-90% of native. Settings → Performance offers the "Get cuDNN" link + the "Install CUDA llama.cpp" button.
+- AMD / Intel / Snapdragon → DirectML or CPU per V14.8.2 (unchanged).
+
+**Trade-offs accepted:** the ~20% of NVIDIA users who don't have CUDA Toolkit installed get a Settings affordance pointing at NVIDIA's developer portal. They have to register an NVIDIA developer account to download cuDNN. That's a real friction step — but it's NVIDIA's friction, not ours, and clicking "Get cuDNN" sends them to the canonical source. We never lie about what we can deliver.

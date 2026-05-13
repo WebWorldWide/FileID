@@ -36,14 +36,26 @@ internal enum ModelInstallStatus
 /// </summary>
 internal sealed class ModelSlot : INotifyPropertyChanged
 {
-    public string DisplayLabel { get; }
-    public ulong ApproxBytes { get; }
+    private string _displayLabel;
+    public string DisplayLabel
+    {
+        get => _displayLabel;
+        set => Set(ref _displayLabel, value);
+    }
+
+    private ulong _approxBytes;
+    public ulong ApproxBytes
+    {
+        get => _approxBytes;
+        set => Set(ref _approxBytes, value);
+    }
+
     private readonly Func<Task> _installAction;
 
     public ModelSlot(string displayLabel, ulong approxBytes, Func<Task> installAction)
     {
-        DisplayLabel = displayLabel;
-        ApproxBytes = approxBytes;
+        _displayLabel = displayLabel;
+        _approxBytes = approxBytes;
         _installAction = installAction;
     }
 
@@ -238,33 +250,14 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     public ModelSlot Arcface { get; }
     public ModelSlot Vlm { get; }
 
-    /// <summary>Optional fourth slot — populated when the engine reports
-    /// HardwareInfo with a recommended Performance Pack the user hasn't
-    /// installed. Null when no pack is recommended (e.g. AMD GPU on
-    /// DirectML, or the recommended pack is already present). Welcome
-    /// sheet binds to this; Settings has its own per-pack install UI.
-    /// NOT counted toward AllInstalled — packs are optional speedups.</summary>
-    public ModelSlot? RecommendedPack
-    {
-        get => _recommendedPack;
-        private set
-        {
-            if (ReferenceEquals(_recommendedPack, value)) return;
-            _recommendedPack = value;
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(RecommendedPack)));
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ShowRecommendedPack)));
-        }
-    }
-    private ModelSlot? _recommendedPack;
-
-    public bool ShowRecommendedPack => _recommendedPack is not null;
-
-    /// <summary>Fires when a pack-row install transitions to Installed.
-    /// WelcomeSheet + SettingsView both subscribe so they can prompt the
-    /// user to restart the engine (so the new EP picks up).</summary>
-    public event EventHandler<string>? RecommendedPackInstalled;
-
     private int _installAllInFlight; // 0 = idle, 1 = in flight
+
+    /// <summary>VLM choice can update once we learn the user's RAM
+    /// (from EngineClient.Info). The slot's installAction reads this
+    /// field at click time, so a re-recommendation between app launch
+    /// and click takes effect. Default matches macOS's 8 GB threshold:
+    /// Qwen 2.5-VL 3B on 8 GB+ machines, SmolVLM below.</summary>
+    private string _vlmModelKind = "qwen2_5_vl_3b";
 
     private ModelInstallerService()
     {
@@ -279,7 +272,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         Vlm = new ModelSlot(
             displayLabel: "Qwen 2.5-VL 3B",
             approxBytes: 1_650UL * 1024 * 1024,
-            installAction: () => PrewarmAsync("qwen2_5_vl_3b"));
+            installAction: () => PrewarmAsync(_vlmModelKind));
 
         Clip.PropertyChanged += OnSlotPropertyChanged;
         Arcface.PropertyChanged += OnSlotPropertyChanged;
@@ -287,72 +280,6 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
 
         SeedFromSentinels();
         EngineClient.Instance.PropertyChanged += OnEngineClientChanged;
-        // If Info is already populated by the time we wire up (warm
-        // singleton on engine respawn), evaluate immediately so the
-        // pack slot exists before the Welcome sheet first renders.
-        EvaluateRecommendedPack();
-    }
-
-    /// <summary>Map the engine's HardwareInfo to a recommended pack slot.
-    /// Sets RecommendedPack to a configured ModelSlot if a pack would
-    /// help; clears it otherwise. Idempotent — safe to re-call.</summary>
-    private void EvaluateRecommendedPack()
-    {
-        var hw = EngineClient.Instance.Info?.Hardware;
-        if (hw is null)
-        {
-            // No HardwareInfo yet — leave the slot null. We'll re-evaluate
-            // when the Info PropertyChanged fires.
-            return;
-        }
-        var vendor = (hw.GpuVendor ?? string.Empty).ToLowerInvariant();
-        string? packId = null;
-        string? displayLabel = null;
-        ulong approxBytes = 0;
-        string[] sentinelDirs = Array.Empty<string>();
-        if (vendor == "nvidia" && !hw.CudaPackPresent)
-        {
-            packId = "cuda_pack_x64";
-            displayLabel = "GPU performance pack (CUDA)";
-            approxBytes = 600UL * 1024 * 1024;
-            sentinelDirs = new[] { "packs/cuda" };
-        }
-        else if (vendor == "intel" && !hw.OpenvinoPackPresent)
-        {
-            packId = "openvino_pack_x64";
-            displayLabel = "GPU performance pack (OpenVINO)";
-            approxBytes = 300UL * 1024 * 1024;
-            sentinelDirs = new[] { "packs/openvino" };
-        }
-        else if (vendor == "qualcomm" && !hw.QnnPackPresent)
-        {
-            packId = "qnn_pack_arm64";
-            displayLabel = "NPU performance pack (QNN)";
-            approxBytes = 150UL * 1024 * 1024;
-            sentinelDirs = new[] { "packs/qnn" };
-        }
-
-        if (packId is null)
-        {
-            // No pack recommended (AMD, no GPU, or already installed).
-            if (RecommendedPack is not null)
-            {
-                RecommendedPack.PropertyChanged -= OnSlotPropertyChanged;
-                RecommendedPack = null;
-            }
-            return;
-        }
-
-        // Don't recreate the slot if it already exists for the same id —
-        // would lose any in-flight progress state.
-        if (RecommendedPack is not null && RecommendedPack.CurrentModelKind == packId) return;
-
-        var captured = packId;
-        var newSlot = new ModelSlot(displayLabel!, approxBytes, () => PrewarmAsync(captured));
-        newSlot.PropertyChanged += OnSlotPropertyChanged;
-        // Seed from sentinel — if the user already installed via Settings.
-        SeedSlot(newSlot, sentinelDirs);
-        RecommendedPack = newSlot;
     }
 
     /// <summary>
@@ -403,22 +330,35 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         }
         try
         {
+            // V14.8.4 Bug 1: pre-stamp every not-yet-installed slot to
+            // Downloading + "Queued — starting download…" BEFORE awaiting.
+            // The three TryInstallAsync calls race for EngineClient._writeLock
+            // when their IPC commands serialize; whichever loses both races
+            // looked frozen to the user until its engine "Queued" event finally
+            // landed. Pre-stamping makes the UI flip identical for all three
+            // rows the instant the user clicks Install all, regardless of
+            // which IPC write wins. The engine's F1 Queued event then arrives
+            // and overwrites with the same caption — no visible flicker.
+            // LastProgressAt also resets so the no-progress watchdog (30 s)
+            // doesn't false-fire while the slowest row waits for its IPC turn.
+            var now = DateTime.UtcNow;
+            foreach (var slot in new[] { Clip, Arcface, Vlm })
+            {
+                if (slot.Status == ModelInstallStatus.Installed) continue;
+                slot.ResetForRetry();
+                slot.Status = ModelInstallStatus.Downloading;
+                slot.Message = "Queued — starting download…";
+                slot.LastProgressAt = now;
+            }
+
             // The pack slot is included only when it exists AND isn't
-            // already Installed — matches the row's visibility on the
-            // sheet ("install everything visible"). AMD / no-GPU configs
-            // have no pack; their fourth row stays collapsed and
-            // InstallAllAsync just installs the three AI models.
-            var tasks = new List<Task>(4)
+            // Install the three AI models in parallel.
+            var tasks = new List<Task>(3)
             {
                 TryInstallAsync(Clip),
                 TryInstallAsync(Arcface),
                 TryInstallAsync(Vlm),
             };
-            var pack = RecommendedPack;
-            if (pack is not null && pack.Status != ModelInstallStatus.Installed)
-            {
-                tasks.Add(TryInstallAsync(pack));
-            }
             await Task.WhenAll(tasks).ConfigureAwait(false);
         }
         finally
@@ -442,6 +382,41 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     }
 
     public Task CancelAllAsync() => EngineClient.Instance.CancelPrewarmAsync();
+
+    /// <summary>Re-pick the VLM model based on detected RAM. Mirrors
+    /// macOS <c>AIModelKind.safeDefaultFor(ramGB:)</c>: Qwen 2.5-VL 3B
+    /// on 8 GB+ (≈1.5 GB), SmolVLM on smaller machines (≈700 MB) so
+    /// the user doesn't OOM their box on Welcome's auto-install.
+    /// No-op once the VLM is mid-flight or already installed — never
+    /// change a slot's identity while it's working.</summary>
+    public void UpdateVlmRecommendation(double physicalMemoryGB)
+    {
+        if (Vlm.Status == ModelInstallStatus.Downloading
+            || Vlm.Status == ModelInstallStatus.Installed)
+        {
+            return;
+        }
+        string kind;
+        string label;
+        ulong bytes;
+        if (physicalMemoryGB >= 8.0)
+        {
+            kind = "qwen2_5_vl_3b";
+            label = "Qwen 2.5-VL 3B";
+            bytes = 1_650UL * 1024 * 1024;
+        }
+        else
+        {
+            kind = "smolvlm";
+            label = "SmolVLM 256M";
+            bytes = 700UL * 1024 * 1024;
+        }
+        if (_vlmModelKind == kind) return;
+        DebugLog.Info($"[INSTALL] VLM recommendation: {label} ({physicalMemoryGB:F1} GB RAM)");
+        _vlmModelKind = kind;
+        Vlm.DisplayLabel = label;
+        Vlm.ApproxBytes = bytes;
+    }
 
     private bool _allInstalled;
     public bool AllInstalled
@@ -473,18 +448,6 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     {
         if (e.PropertyName != nameof(ModelSlot.Status)) return;
         RecomputeAggregates();
-
-        // Pack-row install completion → emit so Welcome / Settings can
-        // prompt the user to restart the engine to pick up the new EP.
-        if (sender is ModelSlot slot
-            && ReferenceEquals(slot, RecommendedPack)
-            && slot.Status == ModelInstallStatus.Installed
-            && slot.CurrentModelKind is { } kind)
-        {
-            DebugLog.Info($"[INSTALL] RecommendedPack '{kind}' installed; raising RecommendedPackInstalled");
-            try { RecommendedPackInstalled?.Invoke(this, kind); }
-            catch (Exception ex) { DebugLog.Warn("RecommendedPackInstalled handler threw: " + ex.Message); }
-        }
     }
 
     /// <summary>
@@ -554,11 +517,19 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             return;
         }
 
-        slot.ResetForRetry();
-        slot.Status = ModelInstallStatus.Downloading;
-        slot.Message = "Starting…";
+        // V14.8.4 Bug 1: only reset state if this slot wasn't already
+        // pre-stamped to Downloading by InstallAllAsync. Re-running
+        // ResetForRetry after the pre-stamp would blank Fraction/Message
+        // mid-flight if the engine's first progress event happens to
+        // arrive between pre-stamp and PrewarmAsync entry.
+        if (slot.Status != ModelInstallStatus.Downloading)
+        {
+            slot.ResetForRetry();
+            slot.Status = ModelInstallStatus.Downloading;
+            slot.Message = "Starting…";
+            slot.LastProgressAt = DateTime.UtcNow;
+        }
         slot.CurrentModelKind = modelKind;
-        slot.LastProgressAt = DateTime.UtcNow;
         DebugLog.Info($"[INSTALL] {modelKind} status set to Downloading; sending IPC...");
 
         try
@@ -579,7 +550,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         ScheduleNoProgressWatchdog(slot, modelKind);
     }
 
-    private static void ScheduleNoProgressWatchdog(ModelSlot slot, string modelKind)
+    private static void ScheduleNoProgressWatchdog(ModelSlot slot, string modelKind, CancellationToken ct = default)
     {
         var sentAt = DateTime.UtcNow;
         // Capture the UI dispatcher at schedule time. The watchdog runs on
@@ -592,7 +563,12 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         {
             try
             {
-                await Task.Delay(NoProgressTimeout).ConfigureAwait(false);
+                await Task.Delay(NoProgressTimeout, ct).ConfigureAwait(false);
+                // V14.9-A6: cancellation check after the delay — if the
+                // user cancelled the install during the watchdog window,
+                // don't surface a "no response" error on top of a clean
+                // cancellation flow.
+                if (ct.IsCancellationRequested) return;
                 // Read-only check off-thread is fine (status/timestamp are
                 // primitives + DateTime; no torn-read risk on x64/ARM64).
                 if (slot.Status != ModelInstallStatus.Downloading) return;
@@ -604,17 +580,25 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
                 }
                 else
                 {
-                    // No UI dispatcher available (test/headless); fall back
-                    // to direct mutation. PropertyChanged subscribers must
-                    // tolerate this case anyway.
-                    slot.Fail("No response from engine — try again.");
+                    // V14.9-A5: previously fell through to calling slot.Fail()
+                    // directly on the thread-pool thread, which raises
+                    // PropertyChanged off the UI thread → x:Bind UI hit
+                    // off-thread → potential FrameworkElement violation.
+                    // Refuse to fail the slot when we can't marshal; log
+                    // and let the engine's own error event (if any) drive
+                    // the eventual transition.
+                    DebugLog.Warn($"[INSTALL] {modelKind} watchdog: no UI dispatcher; skipping slot.Fail to avoid off-thread PropertyChanged.");
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                // Cancellation is a normal terminating condition.
             }
             catch (Exception ex)
             {
                 DebugLog.Warn($"[INSTALL] no-progress watchdog threw: {ex.Message}");
             }
-        });
+        }, ct);
     }
 
     private ModelSlot? SlotFor(string? modelKind)
@@ -634,36 +618,30 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             case "gemma_3_4b":
             case "smolvlm":
                 return Vlm;
-            case "cuda_pack_x64":
-            case "openvino_pack_x64":
-            case "qnn_pack_arm64":
-                return RecommendedPack;
             default:
                 return null;
         }
     }
 
-    /// <summary>Map an engine error path (e.g. ".../MobileCLIP/...") to
-    /// the slot that owns it. Falls back to whichever slot currently
-    /// has CurrentModelKind set (one engine-initiated download is in
-    /// flight at a time per the engine's IN_FLIGHT dedup).</summary>
+    /// <summary>Fallback slot lookup by error path. Only used when the
+    /// engine's error event carries no model_kind (legacy emitters, or
+    /// non-model errors that still have a path). Path-substring matching
+    /// is intentionally narrow — we DON'T match on substrings like "cuda"
+    /// because pack paths and model paths can collide. The "in-flight
+    /// fallback" that used to live here was the root cause of D-track
+    /// cross-wiring (CUDA pack 404 + MobileCLIP in flight → MobileCLIP
+    /// row showed cuda.zip error) and has been removed.</summary>
     private ModelSlot? SlotForErrorPath(string? path)
     {
-        if (!string.IsNullOrEmpty(path))
+        if (string.IsNullOrEmpty(path)) return null;
+        if (path.Contains("MobileCLIP", StringComparison.OrdinalIgnoreCase)) return Clip;
+        if (path.Contains("arcface", StringComparison.OrdinalIgnoreCase)) return Arcface;
+        if (path.Contains("Qwen", StringComparison.OrdinalIgnoreCase)
+            || path.Contains("SmolVLM", StringComparison.OrdinalIgnoreCase)
+            || path.Contains("Gemma", StringComparison.OrdinalIgnoreCase))
         {
-            if (path.Contains("MobileCLIP", StringComparison.OrdinalIgnoreCase)) return Clip;
-            if (path.Contains("arcface", StringComparison.OrdinalIgnoreCase)) return Arcface;
-            if (path.Contains("Qwen", StringComparison.OrdinalIgnoreCase)
-                || path.Contains("SmolVLM", StringComparison.OrdinalIgnoreCase)
-                || path.Contains("Gemma", StringComparison.OrdinalIgnoreCase))
-            {
-                return Vlm;
-            }
+            return Vlm;
         }
-        // Last-resort: any slot currently flagged as in-flight.
-        if (Clip.CurrentModelKind is not null) return Clip;
-        if (Arcface.CurrentModelKind is not null) return Arcface;
-        if (Vlm.CurrentModelKind is not null) return Vlm;
         return null;
     }
 
@@ -683,9 +661,8 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         }
         if (e.PropertyName == nameof(EngineClient.Info))
         {
-            // Hardware info just landed (or changed after a respawn) —
-            // re-evaluate whether a Performance Pack is recommended.
-            EvaluateRecommendedPack();
+            var info = EngineClient.Instance.Info;
+            if (info is not null) UpdateVlmRecommendation(info.PhysicalMemoryGB);
             return;
         }
     }
@@ -717,16 +694,24 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         var isInstallError =
             kind == "model_download_failed"
             || kind == "zip_extract_failed"
+            || kind == "pack_not_available"
             || kind.StartsWith("prewarm_", StringComparison.OrdinalIgnoreCase);
         if (!isInstallError) return;
 
         // prewarm_cancelled is user-initiated; don't surface as a failure.
         if (kind == "prewarm_cancelled") return;
 
-        var slot = SlotForErrorPath(error.Path);
+        // D-track fix: route by error.ModelKind first. The engine now stamps
+        // every install-failure event with the originating model id, so we
+        // don't need to infer it from the path string. SlotForErrorPath is
+        // kept as a fallback for legacy emitters / non-model errors that
+        // still carry a path.
+        var slot = !string.IsNullOrEmpty(error.ModelKind)
+            ? SlotFor(error.ModelKind)
+            : SlotForErrorPath(error.Path);
         if (slot is null)
         {
-            DebugLog.Warn($"[INSTALL] engine error '{kind}' has no routable slot (path={error.Path ?? "<null>"})");
+            DebugLog.Warn($"[INSTALL] engine error '{kind}' has no routable slot (modelKind={error.ModelKind ?? "<null>"}, path={error.Path ?? "<null>"})");
             return;
         }
         DebugLog.Info($"[INSTALL] engine error → {slot.DisplayLabel}.Fail(): {error.Message}");
@@ -738,16 +723,6 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         if (ReferenceEquals(slot, Instance.Clip)) return ClipSentinelDirs;
         if (ReferenceEquals(slot, Instance.Arcface)) return ArcfaceSentinelDirs;
         if (ReferenceEquals(slot, Instance.Vlm)) return VlmSentinelDirs;
-        if (ReferenceEquals(slot, Instance.RecommendedPack))
-        {
-            return slot.CurrentModelKind switch
-            {
-                "cuda_pack_x64"     => new[] { "packs/cuda" },
-                "openvino_pack_x64" => new[] { "packs/openvino" },
-                "qnn_pack_arm64"    => new[] { "packs/qnn" },
-                _                    => Array.Empty<string>(),
-            };
-        }
         return Array.Empty<string>();
     }
 

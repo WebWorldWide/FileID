@@ -65,11 +65,71 @@ public partial class App : Application
                     Trace($"EngineClient.StartAsync faulted: {t.Exception?.GetBaseException()}");
                     DebugLog.Error("EngineClient.StartAsync faulted: " + t.Exception?.GetBaseException());
                 }
+                // Surface unrecoverable startup crashes visibly. The sidebar
+                // engine pill (round-2 auto-hide) shows them too, but new
+                // users won't know where to look — a Win32 MessageBox is
+                // hard to miss. Covers three classes:
+                //   1. Binary not found (path resolution failed)
+                //   2. Signature verdict was Untrusted (tamper / bad cert chain)
+                //   3. Release build refused an Unsigned binary (FILEID_EV_THUMBPRINT set)
+                // Recoverable crashes (pure spawn failures, runtime panics
+                // that respawn) keep using the pill alone.
+                try
+                {
+                    if (EngineClient.Instance.State == ViewModels.EngineClient.LifecycleState.Crashed)
+                    {
+                        var reason = EngineClient.Instance.CrashReason ?? string.Empty;
+                        string? title = null;
+                        string? body = null;
+                        if (reason.Contains("not found", StringComparison.OrdinalIgnoreCase))
+                        {
+                            title = "FileID — engine missing";
+                            body = "FileID couldn't find its engine binary.\n\n" +
+                                   $"Expected at:\n{AppPaths.EngineExePath}\n\n" +
+                                   "If you built from source, run the engine build script (build/build.ps1). " +
+                                   "If you installed FileID via MSI, the install is incomplete — reinstall from your downloaded MSI.\n\n" +
+                                   "See %LOCALAPPDATA%\\FileID\\logs\\app.log for details.";
+                        }
+                        else if (reason.Contains("signature verification failed", StringComparison.OrdinalIgnoreCase)
+                                 || reason.Contains("Untrusted", StringComparison.OrdinalIgnoreCase)
+                                 || reason.Contains("changed between Verify and spawn", StringComparison.OrdinalIgnoreCase))
+                        {
+                            title = "FileID — engine signature failed";
+                            body = "FileID's engine binary failed Authenticode verification.\n\n" +
+                                   "Reason: " + reason + "\n\n" +
+                                   "This usually means the install is corrupt or tampered. " +
+                                   "Reinstall FileID from your trusted source.\n\n" +
+                                   "See %LOCALAPPDATA%\\FileID\\logs\\app.log for details.";
+                        }
+                        else if (reason.Contains("unsigned", StringComparison.OrdinalIgnoreCase))
+                        {
+                            title = "FileID — engine unsigned";
+                            body = "FileID's engine binary is unsigned, but this release was built " +
+                                   "to require a valid signature.\n\n" +
+                                   "Reinstall FileID from a trusted source. If you built from source, " +
+                                   "unset the FILEID_EV_THUMBPRINT environment variable for dev builds.\n\n" +
+                                   "See %LOCALAPPDATA%\\FileID\\logs\\app.log for details.";
+                        }
+                        if (title is not null && body is not null)
+                        {
+                            _ = NativeMessageBox(System.IntPtr.Zero, body, title, 0x10u /* MB_ICONERROR */);
+                        }
+                    }
+                }
+                catch (System.Exception ex) { Trace($"engine-crash dialog failed: {ex.Message}"); }
             });
 
             Trace("ScanCompleteToast.Start");
             try { ScanCompleteToast.Start(); }
             catch (System.Exception ex) { Trace($"ScanCompleteToast.Start failed (non-fatal): {ex.Message}"); }
+
+            Trace("CudaAutoInstaller.Hook");
+            try { CudaAutoInstaller.Hook(); }
+            catch (System.Exception ex) { Trace($"CudaAutoInstaller.Hook failed (non-fatal): {ex.Message}"); }
+
+            Trace("WorkflowAutoTabRouter.Hook");
+            try { WorkflowAutoTabRouter.Hook(); }
+            catch (System.Exception ex) { Trace($"WorkflowAutoTabRouter.Hook failed (non-fatal): {ex.Message}"); }
 
             Trace("new MainWindow()");
             var window = new MainWindow();
@@ -110,9 +170,11 @@ public partial class App : Application
     private void OnUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
     {
         DebugLog.Error("Unhandled: " + e.Exception);
-        // Set Handled=false so WER produces a local crash dump (matches
-        // macOS letting CrashReporter take over). The user can attach
-        // %LOCALAPPDATA%\FileID\logs\app.log alongside.
-        e.Handled = false;
+        // Recover rather than terminate. The user has unsaved scan state in
+        // the engine; killing the process loses progress. Unrecoverable
+        // exceptions (StackOverflow, OOM) bypass this handler anyway. WER
+        // crash dumps for diagnosis trade off against the user's open
+        // session — for an on-device app the user's session wins.
+        e.Handled = true;
     }
 }

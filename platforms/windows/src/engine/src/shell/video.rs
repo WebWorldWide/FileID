@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use std::sync::Once;
 
-use windows::core::{Interface, PCWSTR, PROPVARIANT, GUID};
+use windows::core::{PCWSTR, PROPVARIANT, GUID};
 use windows::Win32::Foundation::{S_OK, FALSE, TRUE};
 use windows::Win32::Media::MediaFoundation::{
     IMFAttributes, IMFMediaType, IMFSourceReader, MFCreateAttributes, MFCreateMediaType,

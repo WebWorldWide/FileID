@@ -44,6 +44,9 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         // time the tab is navigated away from and back to.
         ViewModel.PropertyChanged += OnViewModelPropertyChanged;
         ViewModel.Items.CollectionChanged += OnItemsCollectionChanged;
+        // V14.9-D2: subscribe to UndoStack so the toolbar's Undo pill
+        // shows/hides + updates its label as entries come and go.
+        UndoStack.Instance.PropertyChanged += OnUndoStackChanged;
 
         Loaded += async (_, _) =>
         {
@@ -57,7 +60,71 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                 // ReadStore.OpenAsync surfaces errors via ErrorMessage on
                 // refresh — initial open before scan is allowed to no-op.
             }
+            SyncUndoPill();
         };
+    }
+
+    private void OnUndoStackChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is nameof(UndoStack.CanUndo) or nameof(UndoStack.TopLabel))
+        {
+            DispatcherQueue.TryEnqueue(SyncUndoPill);
+        }
+    }
+
+    private void SyncUndoPill()
+    {
+        if (UndoButton == null) return;
+        var stack = UndoStack.Instance;
+        if (stack.CanUndo)
+        {
+            UndoButton.Visibility = Visibility.Visible;
+            UndoButtonText.Text = string.IsNullOrEmpty(stack.TopLabel)
+                ? "Undo"
+                : $"Undo {stack.TopLabel}";
+        }
+        else
+        {
+            UndoButton.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    /// <summary>V14.9-D1: select-all visible toggle. If anything is
+    /// currently selected, clear; otherwise select every visible tile.</summary>
+    private void OnSelectAllClicked(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel.SelectedCount > 0)
+        {
+            ViewModel.ClearSelection();
+            SelectAllText.Text = "Select";
+        }
+        else
+        {
+            foreach (var t in ViewModel.Items) t.IsSelected = true;
+            SelectAllText.Text = "Clear";
+        }
+        UpdateSelectionBar();
+    }
+
+    /// <summary>V14.9-D2: pop the top undo entry. The label update
+    /// follows automatically via the UndoStack PropertyChanged handler.</summary>
+    private async void OnUndoLastClicked(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            UndoButton.IsEnabled = false;
+            var label = await UndoStack.Instance.UndoAsync();
+            DebugLog.Info(string.IsNullOrEmpty(label) ? "Undo: nothing to undo" : $"Undo applied: {label}");
+            await ViewModel.RefreshAsync(CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("OnUndoLastClicked: " + ex.Message);
+        }
+        finally
+        {
+            UndoButton.IsEnabled = true;
+        }
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
@@ -66,6 +133,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         // Detach VM subscriptions so the VM/View graph can be GC'd.
         try { ViewModel.PropertyChanged -= OnViewModelPropertyChanged; } catch { /* swallow */ }
         try { ViewModel.Items.CollectionChanged -= OnItemsCollectionChanged; } catch { /* swallow */ }
+        try { UndoStack.Instance.PropertyChanged -= OnUndoStackChanged; } catch { /* swallow */ }
         // Cancel + dispose every in-flight thumb load so closing the tab
         // doesn't leave background tasks holding BitmapImage refs.
         foreach (var (_, cts) in _inflight)
@@ -430,7 +498,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         if (tile is null) return;
 
         var sheet = new FilePreviewSheet();
-        sheet.SetFile(tile.Path, tile.Kind, tile.SizeBytes, tile.ModifiedAt, tile.Id);
+        sheet.SetFile(tile.Path, tile.Kind, tile.SizeBytes, tile.ModifiedAt, tile.Id, tile.HasFaces, tile.HasText);
         var dialog = new Microsoft.UI.Xaml.Controls.ContentDialog
         {
             XamlRoot = this.XamlRoot,
@@ -473,7 +541,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         if (sender is not MenuFlyoutItem item || item.Tag is not long fileId) return;
         var queryId = Guid.NewGuid().ToString("N");
         var tcs = new System.Threading.Tasks.TaskCompletionSource<float[]?>();
-        EngineClient.Instance.PropertyChanged += OnceHandler;
         void OnceHandler(object? _, System.ComponentModel.PropertyChangedEventArgs ev)
         {
             if (ev.PropertyName != nameof(EngineClient.LastClipTextEmbedding)) return;
@@ -482,26 +549,36 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             EngineClient.Instance.PropertyChanged -= OnceHandler;
             tcs.TrySetResult(emb.Embedding?.ToArray());
         }
+        // V14.9-A4: subscribe + try/finally so any throw between subscribe
+        // and the final unsubscribe still cleans up. -= is idempotent, so
+        // double-removal (handler self-removed + finally) is safe.
+        EngineClient.Instance.PropertyChanged += OnceHandler;
         try
         {
-            await EngineClient.Instance.EmbedImageQueryAsync(fileId, queryId);
+            try
+            {
+                await EngineClient.Instance.EmbedImageQueryAsync(fileId, queryId);
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn("OnContextFindSimilar: EmbedImageQueryAsync threw: " + ex.Message);
+                return;
+            }
+            // 5-second timeout.
+            var timeoutTask = System.Threading.Tasks.Task.Delay(TimeSpan.FromSeconds(5));
+            var done = await System.Threading.Tasks.Task.WhenAny(tcs.Task, timeoutTask);
+            if (done != tcs.Task) return;
+            var seed = await tcs.Task;
+            if (seed == null) return;
+            // Run a semantic search against the existing ReadStore via the
+            // ViewModel's path. We don't need a separate sheet — the Library
+            // grid itself is the result list.
+            await ViewModel.SemanticSearchWithSeedAsync(seed, System.Threading.CancellationToken.None);
         }
-        catch
+        finally
         {
             EngineClient.Instance.PropertyChanged -= OnceHandler;
-            return;
         }
-        // 5-second timeout.
-        var timeoutTask = System.Threading.Tasks.Task.Delay(TimeSpan.FromSeconds(5));
-        var done = await System.Threading.Tasks.Task.WhenAny(tcs.Task, timeoutTask);
-        EngineClient.Instance.PropertyChanged -= OnceHandler;
-        if (done != tcs.Task) return;
-        var seed = await tcs.Task;
-        if (seed == null) return;
-        // Run a semantic search against the existing ReadStore via the
-        // ViewModel's path. We don't need a separate sheet — the Library
-        // grid itself is the result list.
-        await ViewModel.SemanticSearchWithSeedAsync(seed, System.Threading.CancellationToken.None);
     }
 
     private void OnContextCopyPath(object sender, RoutedEventArgs e)

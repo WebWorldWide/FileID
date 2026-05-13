@@ -6,6 +6,7 @@
 
 using System;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -82,13 +83,24 @@ public sealed partial class FilePreviewSheet : UserControl
         if (next < 0 || next >= _siblings.Count) return;
         _siblingIndex = next;
         var t = _siblings[next];
-        SetFile(t.Path, t.Kind, t.SizeBytes, t.ModifiedAt, t.Id);
+        SetFile(t.Path, t.Kind, t.SizeBytes, t.ModifiedAt, t.Id, t.HasFaces, t.HasText);
         UpdateNavButtons();
     }
 
-    public async void SetFile(string path, string kind, long sizeBytes, double? modifiedAt, long fileId = 0)
+    public async void SetFile(string path, string kind, long sizeBytes, double? modifiedAt, long fileId = 0,
+                               bool hasFaces = false, bool hasText = false)
     {
         FileId = fileId;
+        // Toggle the badge overlay synchronously (don't wait for the async
+        // thumbnail render). Tile-level booleans come from the DB — no
+        // additional IPC needed here.
+        FacesBadge.Visibility = hasFaces ? Visibility.Visible : Visibility.Collapsed;
+        TextBadge.Visibility = hasText ? Visibility.Visible : Visibility.Collapsed;
+
+        // Clear stale tag input + status between siblings.
+        TagInput.Text = string.Empty;
+        TagStatusText.Visibility = Visibility.Collapsed;
+
         // Async-void -> must wrap the entire body. Any unhandled exception
         // here would terminate the dispatcher and crash the window.
         try
@@ -216,5 +228,59 @@ public sealed partial class FilePreviewSheet : UserControl
         var dp = new Windows.ApplicationModel.DataTransfer.DataPackage();
         dp.SetText(FilePath);
         Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(dp);
+    }
+
+    private void OnTagInputKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    {
+        if (e.Key == Windows.System.VirtualKey.Enter)
+        {
+            ApplyDraftTags();
+            e.Handled = true;
+        }
+    }
+
+    private void OnApplyTagsClicked(object sender, RoutedEventArgs e) => ApplyDraftTags();
+
+    private async void ApplyDraftTags()
+    {
+        if (FileId <= 0)
+        {
+            ShowTagStatus("Reopen the preview before tagging — no file id.");
+            return;
+        }
+        var raw = (TagInput.Text ?? string.Empty).Trim();
+        if (raw.Length == 0) return;
+        var tags = raw
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(t => t.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (tags.Length == 0)
+        {
+            ShowTagStatus("Type one or more tags separated by commas.");
+            return;
+        }
+        try
+        {
+            ApplyTagsButton.IsEnabled = false;
+            await ViewModels.EngineClient.Instance.ApplyTagsAsync(new long[] { FileId }, tags, mode: "add");
+            ShowTagStatus($"Added {tags.Length} tag" + (tags.Length == 1 ? string.Empty : "s") + ".");
+            TagInput.Text = string.Empty;
+        }
+        catch (Exception ex)
+        {
+            Services.DebugLog.Warn("FilePreviewSheet.ApplyDraftTags failed: " + ex);
+            ShowTagStatus("Failed: " + ex.Message);
+        }
+        finally
+        {
+            ApplyTagsButton.IsEnabled = true;
+        }
+    }
+
+    private void ShowTagStatus(string msg)
+    {
+        TagStatusText.Text = msg;
+        TagStatusText.Visibility = Visibility.Visible;
     }
 }

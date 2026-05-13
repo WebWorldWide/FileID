@@ -215,6 +215,12 @@ pub struct RestructureMove {
     pub source: String,
     pub destination: String,
     pub category: String,
+    /// V14.9 A7: per-move tier — "Anchor" / "Mixed" / "Junk", derived
+    /// from the source folder's `classify_folders` classification. None
+    /// for older engines / cross-version compat; the app falls back to
+    /// its local heuristic when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -552,13 +558,23 @@ pub struct ScanComplete {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EngineError {
     /// Stable kind code: `discovery_failed`, `vision_failed`, `db_failed`,
-    /// `model_load_failed`, `ipc_unknown_command`, `unknown`, ...
+    /// `model_load_failed`, `model_download_failed`, `pack_not_available`,
+    /// `ipc_unknown_command`, `unknown`, ...
     pub kind: String,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// For errors that pertain to a specific model install/download, the
+    /// model id (e.g. `mobileclip_s2`, `cuda_pack_x64`). Lets the app route
+    /// the error to the right install slot without fragile path-string
+    /// matching — pack paths and model paths can collide on substrings
+    /// (e.g. `cuda` appears in both the CUDA pack path and any error
+    /// message that mentions cuda.zip).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -788,7 +804,7 @@ mod tests {
                 assert_eq!(p.root_path, r"C:\Users\adam\Pictures");
                 assert_eq!(p.root_display.as_deref(), Some("Pictures"));
             }
-            _ => panic!("unexpected variant"),
+            other => panic!("expected StartScan variant, got {other:?}"),
         }
     }
 

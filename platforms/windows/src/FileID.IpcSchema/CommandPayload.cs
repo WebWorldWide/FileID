@@ -56,7 +56,11 @@ public sealed record RestructureMove(
     long FileId,
     string Source,
     string Destination,
-    string Category);
+    string Category,
+    /// <summary>V14.9 A7: engine-authoritative per-move tier
+    /// (Anchor / Mixed / Junk). Null on plans from older engine builds —
+    /// callers should fall back to a local heuristic in that case.</summary>
+    string? Tier = null);
 
 public sealed record ApplyTagsCommand(
     System.Collections.Generic.IReadOnlyList<long> FileIds,

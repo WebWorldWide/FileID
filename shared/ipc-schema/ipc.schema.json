@@ -286,9 +286,10 @@
             "additionalProperties": false,
             "required": ["kind", "message"],
             "properties": {
-              "kind":    { "type": "string", "description": "discovery_failed | vision_failed | db_failed | model_load_failed | unknown | ..." },
-              "message": { "type": "string" },
-              "path":    { "type": ["string", "null"] }
+              "kind":      { "type": "string", "description": "discovery_failed | vision_failed | db_failed | model_load_failed | model_download_failed | pack_not_available | unknown | ..." },
+              "message":   { "type": "string" },
+              "path":      { "type": ["string", "null"] },
+              "modelKind": { "type": ["string", "null"], "description": "For errors pertaining to a specific model/pack install (e.g. mobileclip_s2, cuda_pack_x64), the model id. Lets the app route errors to the right install slot without path-string heuristics." }
             }
           }
         }

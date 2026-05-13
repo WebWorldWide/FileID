@@ -126,7 +126,8 @@ public sealed record ScanComplete(
 public sealed record EngineError(
     string Kind,
     string Message,
-    string? Path);
+    string? Path,
+    string? ModelKind = null);
 
 public sealed record LogLine(
     LogLevel Level,

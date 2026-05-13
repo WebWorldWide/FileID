@@ -93,7 +93,7 @@
                                       Foreground="{StaticResource GoldBrush}" />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
-                                   Text="{x:Bind ProgressLabel(Svc.Clip.Fraction, Svc.Clip.BytesDone, Svc.Clip.TotalBytes), Mode=OneWay}"
+                                   Text="{x:Bind ProgressLabel(Svc.Clip.Message, Svc.Clip.Fraction, Svc.Clip.BytesDone, Svc.Clip.TotalBytes), Mode=OneWay}"
                                    Visibility="{x:Bind VisibleIfDownloading(Svc.Clip.Status), Mode=OneWay}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                    TextWrapping="Wrap" />
@@ -164,7 +164,7 @@
                                       Foreground="{StaticResource GoldBrush}" />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
-                                   Text="{x:Bind ProgressLabel(Svc.Arcface.Fraction, Svc.Arcface.BytesDone, Svc.Arcface.TotalBytes), Mode=OneWay}"
+                                   Text="{x:Bind ProgressLabel(Svc.Arcface.Message, Svc.Arcface.Fraction, Svc.Arcface.BytesDone, Svc.Arcface.TotalBytes), Mode=OneWay}"
                                    Visibility="{x:Bind VisibleIfDownloading(Svc.Arcface.Status), Mode=OneWay}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                    TextWrapping="Wrap" />
@@ -212,10 +212,10 @@
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
                             <TextBlock Grid.Column="0"
-                                       Text="Deep Analyze (Qwen 2.5-VL 3B)"
+                                       Text="{x:Bind VlmTitle(Svc.Vlm.DisplayLabel), Mode=OneWay}"
                                        Style="{StaticResource BodyStrongTextBlockStyle}" />
                             <TextBlock Grid.Column="1"
-                                       Text="~1.5 GB"
+                                       Text="{x:Bind VlmSize(Svc.Vlm.ApproxBytes), Mode=OneWay}"
                                        Margin="12,0,0,0"
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
@@ -235,7 +235,7 @@
                                       Foreground="{StaticResource GoldBrush}" />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
-                                   Text="{x:Bind ProgressLabel(Svc.Vlm.Fraction, Svc.Vlm.BytesDone, Svc.Vlm.TotalBytes), Mode=OneWay}"
+                                   Text="{x:Bind ProgressLabel(Svc.Vlm.Message, Svc.Vlm.Fraction, Svc.Vlm.BytesDone, Svc.Vlm.TotalBytes), Mode=OneWay}"
                                    Visibility="{x:Bind VisibleIfDownloading(Svc.Vlm.Status), Mode=OneWay}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                    TextWrapping="Wrap" />
@@ -261,83 +261,6 @@
                                 Content="{x:Bind ButtonLabel(Svc.Vlm.Status), Mode=OneWay}"
                                 MinWidth="86"
                                 Visibility="{x:Bind ShowActionButton(Svc.Vlm.Status), Mode=OneWay}" />
-                    </Grid>
-                </Grid>
-
-                <!-- Optional GPU/NPU Performance Pack — Windows-specific
-                     addition. Visible only when HardwareInfo recommends a
-                     pack the user hasn't installed (NVIDIA without CUDA
-                     pack, Intel without OpenVINO, Snapdragon without QNN).
-                     Hidden on AMD / no-GPU / already-installed configs. -->
-                <Grid x:Name="PackRow"
-                      Padding="0,4"
-                      Visibility="{x:Bind PackRowVisibility(Svc.ShowRecommendedPack), Mode=OneWay}">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="28" />
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-                    <FontIcon Grid.Column="0"
-                              Glyph="{x:Bind PackGlyph(Svc.RecommendedPack), Mode=OneWay}"
-                              Foreground="{x:Bind PackIconBrush(Svc.RecommendedPack), Mode=OneWay}"
-                              FontSize="22"
-                              VerticalAlignment="Top" />
-                    <StackPanel Grid.Column="1" Spacing="4" Margin="12,0,0,0" VerticalAlignment="Center">
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="0"
-                                       Text="{x:Bind PackTitle(Svc.RecommendedPack), Mode=OneWay}"
-                                       Style="{StaticResource BodyStrongTextBlockStyle}" />
-                            <TextBlock Grid.Column="1"
-                                       Text="{x:Bind PackSize(Svc.RecommendedPack), Mode=OneWay}"
-                                       Margin="12,0,0,0"
-                                       Style="{StaticResource CaptionTextBlockStyle}"
-                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                        </Grid>
-                        <TextBlock Text="Optional. Speeds up ML inference for your GPU/NPU. Install up front so the first scan runs at full performance."
-                                   Style="{StaticResource CaptionTextBlockStyle}"
-                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                   TextWrapping="Wrap" />
-                        <ProgressBar Maximum="1"
-                                     Value="{x:Bind PackFraction(Svc.RecommendedPack), Mode=OneWay}"
-                                     Foreground="{StaticResource GoldBrush}"
-                                     Visibility="{x:Bind PackShowDeterminate(Svc.RecommendedPack), Mode=OneWay}" />
-                        <ProgressRing IsActive="{x:Bind PackSpinnerActive(Svc.RecommendedPack), Mode=OneWay}"
-                                      Visibility="{x:Bind PackShowSpinner(Svc.RecommendedPack), Mode=OneWay}"
-                                      Width="18" Height="18"
-                                      HorizontalAlignment="Left"
-                                      Foreground="{StaticResource GoldBrush}" />
-                        <TextBlock FontFamily="Consolas"
-                                   FontSize="11"
-                                   Text="{x:Bind PackProgressLabel(Svc.RecommendedPack), Mode=OneWay}"
-                                   Visibility="{x:Bind PackVisibleIfDownloading(Svc.RecommendedPack), Mode=OneWay}"
-                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   TextWrapping="Wrap" />
-                        <TextBlock FontFamily="Consolas"
-                                   FontSize="11"
-                                   Text="{x:Bind PackRateEtaLabel(Svc.RecommendedPack), Mode=OneWay}"
-                                   Visibility="{x:Bind PackShowRateEta(Svc.RecommendedPack), Mode=OneWay}"
-                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   TextWrapping="Wrap" />
-                        <TextBlock Text="{x:Bind PackErrorLabel(Svc.RecommendedPack), Mode=OneWay}"
-                                   Style="{StaticResource CaptionTextBlockStyle}"
-                                   Foreground="{ThemeResource SystemFillColorCriticalBrush}"
-                                   Visibility="{x:Bind PackVisibleIfFailed(Svc.RecommendedPack), Mode=OneWay}"
-                                   TextWrapping="Wrap" />
-                    </StackPanel>
-                    <Grid Grid.Column="2" Margin="14,0,0,0" VerticalAlignment="Top">
-                        <TextBlock Text="Installed"
-                                   Foreground="{ThemeResource SystemFillColorSuccessBrush}"
-                                   Style="{StaticResource CaptionTextBlockStyle}"
-                                   VerticalAlignment="Center"
-                                   Visibility="{x:Bind PackVisibleIfInstalled(Svc.RecommendedPack), Mode=OneWay}" />
-                        <Button Click="OnPackActionClicked"
-                                Content="{x:Bind PackButtonLabel(Svc.RecommendedPack), Mode=OneWay}"
-                                MinWidth="86"
-                                Visibility="{x:Bind PackShowActionButton(Svc.RecommendedPack), Mode=OneWay}" />
                     </Grid>
                 </Grid>
             </StackPanel>
