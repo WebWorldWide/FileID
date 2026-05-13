@@ -44,9 +44,8 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         // time the tab is navigated away from and back to.
         ViewModel.PropertyChanged += OnViewModelPropertyChanged;
         ViewModel.Items.CollectionChanged += OnItemsCollectionChanged;
-        // V14.9-D2: subscribe to UndoStack so the toolbar's Undo pill
-        // shows/hides + updates its label as entries come and go.
         UndoStack.Instance.PropertyChanged += OnUndoStackChanged;
+        EngineClient.Instance.PropertyChanged += OnEngineScanCompleted;
 
         Loaded += async (_, _) =>
         {
@@ -70,6 +69,17 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         {
             DispatcherQueue.TryEnqueue(SyncUndoPill);
         }
+    }
+
+    private void OnEngineScanCompleted(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(EngineClient.Phase)) return;
+        if (EngineClient.Instance.Phase != FileID.IpcSchema.ScanPhase.Completed) return;
+        DispatcherQueue.TryEnqueue(async () =>
+        {
+            try { await ViewModel.RefreshAsync(CancellationToken.None); }
+            catch (Exception ex) { Services.DebugLog.Warn($"Library refresh on scan complete failed: {ex.Message}"); }
+        });
     }
 
     private void SyncUndoPill()
@@ -134,6 +144,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         try { ViewModel.PropertyChanged -= OnViewModelPropertyChanged; } catch { /* swallow */ }
         try { ViewModel.Items.CollectionChanged -= OnItemsCollectionChanged; } catch { /* swallow */ }
         try { UndoStack.Instance.PropertyChanged -= OnUndoStackChanged; } catch { /* swallow */ }
+        try { EngineClient.Instance.PropertyChanged -= OnEngineScanCompleted; } catch { /* swallow */ }
         // Cancel + dispose every in-flight thumb load so closing the tab
         // doesn't leave background tasks holding BitmapImage refs.
         foreach (var (_, cts) in _inflight)

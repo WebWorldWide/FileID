@@ -351,13 +351,22 @@ public sealed partial class MainWindow : Window
             }
         });
 
-        // Ctrl+R — start scan
-        AddAccelerator(VirtualKey.R, VirtualKeyModifiers.Control, (_, _) =>
+        // Ctrl+R — start scan. Awaited so engine-not-ready exceptions
+        // surface to the debug log instead of being swallowed by a
+        // fire-and-forget Task. The visible symptom of the swallow was
+        // "press Ctrl+R, nothing happens" when the engine had failed
+        // to load models.
+        AddAccelerator(VirtualKey.R, VirtualKeyModifiers.Control, async (_, _) =>
         {
             var vm = AppViewModel.Instance;
-            if (vm.HasFolder)
+            if (!vm.HasFolder) return;
+            try
             {
-                _ = EngineClient.Instance.StartScanAsync(vm.FolderPath!, vm.FolderDisplay);
+                await EngineClient.Instance.StartScanAsync(vm.FolderPath!, vm.FolderDisplay);
+            }
+            catch (Exception ex)
+            {
+                Services.DebugLog.Error($"Ctrl+R scan failed: {ex.Message}");
             }
         });
 

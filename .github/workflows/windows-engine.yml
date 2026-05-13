@@ -122,7 +122,10 @@ jobs:
 
       - name: Test
         if: matrix.cross == false
-        run: cargo test --target ${{ matrix.target }}
+        # --all-targets so the pure-Rust unit tests inside lib modules
+        # (e.g. `pipeline::identity_clustering`) run, not just integration
+        # tests at the workspace root.
+        run: cargo test --target ${{ matrix.target }} --all-targets
 
       - name: Verify binary exists
         shell: pwsh
@@ -168,6 +171,38 @@ jobs:
             exit 1
           }
           Write-Host "Engine startup + EP probe smoke passed. ✅"
+
+      # V14.9-P H6: smoke `verifyCudaPack` so a regression in
+      # probe_cuda_pack() (or the `HardwareReprobed` IPC contract) trips
+      # CI rather than reaching the Windows Settings card.
+      - name: Smoke — verifyCudaPack reprobe
+        if: matrix.cross == false
+        shell: pwsh
+        timeout-minutes: 1
+        run: |
+          $exe = "target/${{ matrix.target }}/release/FileIDEngine.exe"
+          # One UUID-keyed command followed by EOF. Engine should emit a
+          # `hardwareReprobed` event on stdout, then exit on stdin close.
+          $cmd = '{"id":"00000000-0000-0000-0000-000000000001","payload":{"verifyCudaPack":{}}}'
+          Set-Content -Path verify-stdin.txt -Value $cmd -NoNewline
+          Add-Content -Path verify-stdin.txt -Value "`n"
+          $proc = Start-Process -FilePath $exe -PassThru `
+            -RedirectStandardInput  "verify-stdin.txt" `
+            -RedirectStandardOutput "verify.stdout" `
+            -RedirectStandardError  "verify.stderr" `
+            -NoNewWindow
+          $exited = $proc.WaitForExit(15000)
+          if (-not $exited) {
+            try { $proc.Kill() } catch { }
+            throw "Engine did not exit within 15 s of stdin EOF on verifyCudaPack smoke."
+          }
+          $stdout = Get-Content "verify.stdout" -Raw -ErrorAction SilentlyContinue
+          if ([string]::IsNullOrWhiteSpace($stdout)) { throw "No stdout from engine — verifyCudaPack handler unreachable." }
+          if (-not ($stdout -match '"hardwareReprobed"\s*:')) {
+            Write-Error "engine.stdout did not contain a hardwareReprobed event:`n$stdout"
+            exit 1
+          }
+          Write-Host "verifyCudaPack reprobe smoke passed. ✅"
 
       # Privacy gate: shipped binary must NOT contain telemetry SDK strings.
       # Failing this is a release blocker — no exception.

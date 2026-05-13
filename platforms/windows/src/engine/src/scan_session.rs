@@ -145,6 +145,7 @@ impl ScanSession {
         let handle = discovery.spawn();
         let discovered_count = handle.count.clone();
         let discovered_done = handle.done.clone();
+        let discovered_errors = handle.error_count.clone();
         let discovered_rx = handle.rx;
 
         // V14.9-N2.2: emit a live Progress event every 250 ms while
@@ -159,6 +160,7 @@ impl ScanSession {
         let session_id_for_tick = session_id.clone();
         let coord_for_tick = self.coordinator.clone();
         let root_for_tick = root.to_string_lossy().into_owned();
+        let errors_for_tick = discovered_errors.clone();
         let tick = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -187,6 +189,7 @@ impl ScanSession {
                     // produced zero files — close out the scan cleanly
                     // with a "no supported files found" error so the
                     // user knows what happened.
+                    let errs = errors_for_tick.load(std::sync::atomic::Ordering::Relaxed);
                     if count == 0 {
                         let _ = sink_for_tick.try_send(IpcEvent::now(EventPayload::Error(
                             Wrap::new(crate::ipc::EngineError {
@@ -195,6 +198,20 @@ impl ScanSession {
                                     "No supported files found in {}.\n\
                                      Pick a folder with images, videos, PDFs, or documents.",
                                     root_for_tick
+                                ),
+                                path: Some(root_for_tick.clone()),
+                                model_kind: None,
+                            }),
+                        )));
+                    } else if errs > 0 {
+                        // Non-fatal: walk recovered after the failures.
+                        let _ = sink_for_tick.try_send(IpcEvent::now(EventPayload::Error(
+                            Wrap::new(crate::ipc::EngineError {
+                                kind: "discovery_partial".into(),
+                                message: format!(
+                                    "Scanned {} file(s); {} path(s) couldn't be read \
+                                     (permission denied or removed mid-scan). Scan continues.",
+                                    count, errs
                                 ),
                                 path: Some(root_for_tick.clone()),
                                 model_kind: None,

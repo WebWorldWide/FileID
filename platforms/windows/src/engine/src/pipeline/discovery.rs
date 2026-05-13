@@ -96,6 +96,9 @@ pub struct DiscoveryHandle {
     pub rx: mpsc::Receiver<DiscoveredFile>,
     pub count: Arc<AtomicU64>,
     pub done: Arc<std::sync::atomic::AtomicBool>,
+    /// Walk errors swallowed during traversal. Surfaced as a non-fatal
+    /// `discovery_partial` event by the scan orchestrator.
+    pub error_count: Arc<AtomicU64>,
 }
 
 impl Discovery {
@@ -122,8 +125,10 @@ impl Discovery {
         let coordinator = self.coordinator.clone();
         let count = Arc::new(AtomicU64::new(0));
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let error_count = Arc::new(AtomicU64::new(0));
         let count_inner = count.clone();
         let done_inner = done.clone();
+        let error_count_inner = error_count.clone();
 
         tokio::task::spawn_blocking(move || {
             // walkdir: sorted-by-path traversal for I/O locality (sequential
@@ -140,7 +145,10 @@ impl Discovery {
                 }
                 let entry = match entry {
                     Ok(e) => e,
-                    Err(_) => continue, // permissions / vanished mid-walk → skip silently
+                    Err(_) => {
+                        error_count_inner.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
                 };
                 if !entry.file_type().is_file() {
                     continue;
@@ -151,7 +159,10 @@ impl Discovery {
                 }
                 let metadata = match entry.metadata() {
                     Ok(m) => m,
-                    Err(_) => continue,
+                    Err(_) => {
+                        error_count_inner.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
                 };
                 let size = metadata.len();
                 if size > MAX_FILE_BYTES || size == 0 {
@@ -189,7 +200,7 @@ impl Discovery {
             // Channel auto-closes when tx drops here.
         });
 
-        DiscoveryHandle { rx, count, done }
+        DiscoveryHandle { rx, count, done, error_count }
     }
 
     fn should_skip(path: &Path) -> bool {

@@ -136,6 +136,16 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
         private set => Set(ref _lastError, value);
     }
 
+    private EngineError? _lastWarning;
+    /// Non-fatal events the engine still wants the user to see (skipped
+    /// stages, partial discovery, stale-WAL warning). Kept in a separate
+    /// slot so a later per-file error can't clobber the banner.
+    public EngineError? LastWarning
+    {
+        get => _lastWarning;
+        set => Set(ref _lastWarning, value);
+    }
+
     private BatchSummary? _lastBatch;
     public BatchSummary? LastBatch
     {
@@ -840,7 +850,17 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
     {
         Phase = null;
         LastError = null;
+        LastWarning = null;
     }
+
+    private static bool IsNonFatalWarningKind(string? kind) => kind switch
+    {
+        "stages_skipped_missing_models" => true,
+        "discovery_partial" => true,
+        "checkpoint_failed_at_shutdown" => true,
+        "cuda_dll_registration_failed" => true,
+        _ => false,
+    };
 
     /// <summary>Pre-flip Phase to <see cref="ScanPhase.Discovering"/> as soon
     /// as the user clicks Start Scan, so the sidebar transitions out of the
@@ -1224,8 +1244,16 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
                 }
                 break;
             case ErrorEvent e:
-                LastError = e.Error;
-                DebugLog.Warn($"[IPC IN] engine error: kind={e.Error.Kind} msg={e.Error.Message} path={PathRedactor.Redact(e.Error.Path)}");
+                if (IsNonFatalWarningKind(e.Error.Kind))
+                {
+                    LastWarning = e.Error;
+                    DebugLog.Info($"[IPC IN] engine warning: kind={e.Error.Kind} msg={e.Error.Message}");
+                }
+                else
+                {
+                    LastError = e.Error;
+                    DebugLog.Warn($"[IPC IN] engine error: kind={e.Error.Kind} msg={e.Error.Message} path={PathRedactor.Redact(e.Error.Path)}");
+                }
                 break;
             case LogEvent:
                 // Engine LogLine events go to the transcript via Events.

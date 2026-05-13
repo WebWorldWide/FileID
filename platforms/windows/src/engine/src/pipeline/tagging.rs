@@ -251,7 +251,7 @@ async fn process_file(
         FileKind::Image => match load_image_rgb(&file.path).await {
             Ok(t) => Some(t),
             Err(err) => {
-                tracing::warn!(?err, path = %file.path.display(), "image decode failed");
+                tracing::warn!(?err, path = %crate::platform::redact_path_for_log(&file.path), "image decode failed");
                 tagged.failed = true;
                 tagged.error_message = Some(format!("image decode: {err:#}"));
                 None

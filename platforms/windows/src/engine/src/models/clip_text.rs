@@ -1,0 +1,83 @@
+// CLIP text encoder — query-time semantic search. Tokenize a string
+// via `ClipTokenizer`, run the ONNX session, L2-normalize, return 512
+// floats. Held inside a process-static `OnceLock` in main.rs so
+// back-to-back queries reuse the session (avoids the 100-300 ms ORT
+// session-create on every keystroke).
+
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
+use ndarray::Array2;
+use ort::session::{Session, SessionInputValue, SessionOutputs};
+use ort::value::Tensor;
+
+use super::clip_tokenizer::ClipTokenizer;
+use super::runtime::{priority_chain, RuntimeProbe};
+
+const CONTEXT_LEN: usize = 77;
+
+pub struct ClipText {
+    session: Session,
+    tokenizer: ClipTokenizer,
+}
+
+impl ClipText {
+    pub fn load<P: AsRef<Path>>(weights: P, tokenizer: ClipTokenizer) -> Result<Self> {
+        let path = weights.as_ref();
+        if !path.exists() {
+            anyhow::bail!("CLIP text weights missing at {}", path.display());
+        }
+        let probe = RuntimeProbe::detect();
+        let _chain = priority_chain(probe.vendor);
+        let session = Session::builder()
+            .context("ORT session builder")?
+            .commit_from_file(path)
+            .context("ORT session commit (CLIP text)")?;
+        Ok(Self { session, tokenizer })
+    }
+
+    pub fn embed(&mut self, query: &str) -> Result<Vec<f32>> {
+        let tokens = self.tokenizer.encode(query);
+        let mut padded = vec![0i64; CONTEXT_LEN];
+        for (i, t) in tokens.iter().take(CONTEXT_LEN).enumerate() {
+            padded[i] = *t as i64;
+        }
+        let input = Array2::<i64>::from_shape_vec((1, CONTEXT_LEN), padded)
+            .context("CLIP text input shape")?;
+        let tensor = Tensor::from_array(input).context("CLIP text input tensor")?;
+        let input_name = self
+            .session
+            .inputs
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("CLIP text ONNX has no inputs"))?
+            .name
+            .clone();
+        let outputs: SessionOutputs = self
+            .session
+            .run(vec![(input_name, SessionInputValue::from(tensor))])
+            .context("CLIP text session.run")?;
+        let (_, value) = outputs
+            .iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("CLIP text produced no outputs"))?;
+        let (_shape, data) = value
+            .try_extract_tensor::<f32>()
+            .context("extract CLIP text output as f32")?;
+        let mut emb: Vec<f32> = data.to_vec();
+        l2_normalize(&mut emb);
+        Ok(emb)
+    }
+}
+
+fn l2_normalize(v: &mut [f32]) {
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+    for x in v.iter_mut() {
+        *x /= norm;
+    }
+}
+
+pub fn default_weights_path() -> Result<PathBuf> {
+    Ok(crate::paths::models_dir()?
+        .join("clip_text")
+        .join("clip_text.onnx"))
+}

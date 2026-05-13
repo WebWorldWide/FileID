@@ -12,7 +12,7 @@
 // Phase 2.3 cut: implements the single-file path. Phase 4 (Cleanup tab)
 // builds the parallel pool that consumes this.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::Path;
 
 #[cfg(windows)]

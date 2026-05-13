@@ -5,7 +5,7 @@
 // doesn't exist (e.g. the file was moved between Library list and click),
 // we fall back to opening the parent without selection.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::Path;
 
 #[cfg(windows)]

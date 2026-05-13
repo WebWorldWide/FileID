@@ -22,7 +22,7 @@ public sealed partial class SidebarProcessingControl : UserControl
     public SidebarProcessingControl()
     {
         InitializeComponent();
-        Loaded += (_, _) => Sync();
+        Loaded += (_, _) => { Sync(); SyncWarningBanner(); };
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         AppViewModel.Instance.PropertyChanged += OnAppChanged;
         Unloaded += (_, _) =>
@@ -42,6 +42,10 @@ public sealed partial class SidebarProcessingControl : UserControl
                           or nameof(EngineClient.LastError))
         {
             DispatcherQueue.TryEnqueue(Sync);
+        }
+        if (e.PropertyName == nameof(EngineClient.LastWarning))
+        {
+            DispatcherQueue.TryEnqueue(SyncWarningBanner);
         }
         // V14.9-D8: per-batch completion ripple. Engine emits one
         // BatchSummary per ~100 files (or every 200 ms). Each new
@@ -295,6 +299,24 @@ public sealed partial class SidebarProcessingControl : UserControl
 
     private static readonly SolidColorBrush FailedTextBrush =
         new(Color.FromArgb(0xFF, 0xFF, 0x6B, 0x6B));
+
+    private void SyncWarningBanner()
+    {
+        if (WarningBanner == null || WarningBannerText == null) return;
+        var warning = EngineClient.Instance.LastWarning;
+        if (warning is null)
+        {
+            WarningBanner.Visibility = Visibility.Collapsed;
+            return;
+        }
+        WarningBannerText.Text = warning.Message;
+        WarningBanner.Visibility = Visibility.Visible;
+    }
+
+    private void OnDismissWarningClicked(object sender, RoutedEventArgs e)
+    {
+        EngineClient.Instance.LastWarning = null;
+    }
 
     private void Sync()
     {

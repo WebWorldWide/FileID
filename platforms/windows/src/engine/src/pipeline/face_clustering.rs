@@ -52,48 +52,54 @@ pub struct ClusterAnchor {
     pub member_count: u32,
 }
 
-/// Group `faces` into clusters by cosine ≥ COS_HIGH (deterministic
-/// connected components). Returns (assignments, anchors).
+/// Group `faces` into clusters via the two-pass density algorithm in
+/// `identity_clustering` — same algorithm the macOS engine uses, so the
+/// People tab clusters identically across platforms.
+///
+/// Returns (assignments, anchors). Cluster IDs are 1-based and stable
+/// in first-seen order.
 pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>) {
     if faces.is_empty() {
         return (Vec::new(), Vec::new());
     }
 
-    // Union-find for connected components by cosine ≥ COS_HIGH.
+    // Brute-force kNN searcher — quadratic in face count but at scan-time
+    // scale (≤ a few thousand faces per session) this is faster than the
+    // overhead of an HNSW dep, and matches the existing O(n²) pass that
+    // produced uncertain_pairs(). If face counts grow past ~10K we'd swap
+    // this for instant-distance or hora.
+    let embeddings: Vec<Vec<f32>> = faces.iter().map(|f| f.embedding.clone()).collect();
+    let k = super::identity_clustering::Hyperparameters::default().k_nn;
+    let result = super::identity_clustering::cluster(
+        &embeddings,
+        |i| {
+            let mut hits: Vec<super::identity_clustering::Neighbor> = (0..embeddings.len())
+                .filter(|&j| j != i)
+                .map(|j| super::identity_clustering::Neighbor {
+                    idx: j,
+                    similarity: cosine(&embeddings[i], &embeddings[j]),
+                })
+                .collect();
+            hits.sort_by(|a, b| {
+                b.similarity
+                    .partial_cmp(&a.similarity)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            hits.truncate(k);
+            hits
+        },
+        super::identity_clustering::Hyperparameters::default(),
+    );
+
+    // Remap dense 0-based IDs to 1-based stable IDs in first-seen order
+    // — preserves the on-disk schema and IPC contract that callers expect.
     let n = faces.len();
-    let mut parent: Vec<usize> = (0..n).collect();
-    fn find(parent: &mut [usize], i: usize) -> usize {
-        let mut x = i;
-        while parent[x] != x {
-            parent[x] = parent[parent[x]];
-            x = parent[x];
-        }
-        x
-    }
-    fn union(parent: &mut [usize], a: usize, b: usize) {
-        let ra = find(parent, a);
-        let rb = find(parent, b);
-        if ra != rb {
-            parent[ra] = rb;
-        }
-    }
-
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let sim = cosine(&faces[i].embedding, &faces[j].embedding);
-            if sim >= COS_HIGH {
-                union(&mut parent, i, j);
-            }
-        }
-    }
-
-    // Roots → 1-based stable cluster IDs in first-seen order.
-    let mut root_to_id: HashMap<usize, i32> = HashMap::new();
+    let mut dense_to_stable: HashMap<usize, i32> = HashMap::new();
     let mut next_id: i32 = 1;
     let mut assignments = Vec::with_capacity(n);
     for i in 0..n {
-        let root = find(&mut parent, i);
-        let id = *root_to_id.entry(root).or_insert_with(|| {
+        let dense = result.cluster_ids[i];
+        let id = *dense_to_stable.entry(dense).or_insert_with(|| {
             let cur = next_id;
             next_id += 1;
             cur
@@ -111,15 +117,18 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
     }
     let mut anchors = Vec::with_capacity(by_cluster.len());
     for (&cid, members) in &by_cluster {
-        let best_idx = *members
-            .iter()
-            .max_by(|&&a, &&b| {
-                faces[a]
-                    .quality
-                    .partial_cmp(&faces[b].quality)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .unwrap();
+        // identity_clustering shouldn't emit empty clusters; skip rather
+        // than panic if it ever does.
+        debug_assert!(!members.is_empty(), "empty cluster id {cid}");
+        let Some(&best_idx) = members.iter().max_by(|&&a, &&b| {
+            faces[a]
+                .quality
+                .partial_cmp(&faces[b].quality)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }) else {
+            tracing::error!(cluster_id = cid, "skipping anchor for empty cluster");
+            continue;
+        };
         anchors.push(ClusterAnchor {
             cluster_id: cid,
             anchor_face_id: faces[best_idx].face_id,

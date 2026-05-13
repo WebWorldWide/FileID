@@ -1,0 +1,306 @@
+// Registry of downloadable model artifacts.
+//
+// Maps a `model_kind` string (the welcome-sheet / Settings buttons send
+// these) to a fully-resolved `Model` describing the URLs to fetch, where
+// to write them, expected SHA256s, and the sentinel file the engine
+// drops once every artifact has landed. The downloader walks
+// `model.files` in order; the welcome sheet polls the sentinel to flip
+// the row's status to "Installed".
+//
+// Adding a model: append a match arm in `lookup_full` and a sentinel
+// path in `sentinel_path`. URLs and SHA256s should match what the
+// macOS engine's installers fetch — keep cross-platform parity.
+
+use std::path::PathBuf;
+
+use crate::paths;
+
+/// One file the engine needs to download for a given model kind.
+#[derive(Debug, Clone)]
+pub struct FileEntry {
+    pub url: String,
+    pub dest: PathBuf,
+    pub sha256: Option<String>,
+    pub approx_bytes: u64,
+}
+
+// Public alias — main.rs's download orchestrator refers to the per-file
+// type as `ModelFile`. Kept as an alias rather than a rename so existing
+// internal call sites in this module continue compiling unchanged.
+pub type ModelFile = FileEntry;
+
+/// Bundle of files that, once all on disk, mark the model installed.
+#[derive(Debug, Clone)]
+pub struct Model {
+    pub id: &'static str,
+    pub display_name: &'static str,
+    pub files: Vec<FileEntry>,
+}
+
+/// Outcome of `lookup_full`. The welcome sheet treats `NotYetAvailable`
+/// as a friendly note (the row sticks at "Not installed" but with a
+/// message); `Unknown` surfaces as an error popup.
+#[derive(Debug)]
+pub enum LookupResult {
+    Found(Model),
+    NotYetAvailable {
+        display_name: String,
+        message: String,
+    },
+    Unknown,
+}
+
+/// Resolve a model_kind string into a downloadable bundle.
+///
+/// Conventions:
+/// - All URLs MUST be on huggingface.co for our privacy story
+///   (the only egress the engine performs).
+/// - SHA256s are optional but strongly preferred — the downloader
+///   verifies when present, skips when absent.
+/// - `dest` is absolute under `%LOCALAPPDATA%\FileID\Models\...`.
+pub fn lookup_full(model_kind: &str) -> LookupResult {
+    let models_root = match paths::models_dir() {
+        Ok(p) => p,
+        Err(_) => return LookupResult::Unknown,
+    };
+
+    match model_kind {
+        // ── Face detection (SCRFD) + Face embedding (ArcFace).
+        // Bundled together as a single "arcface" install because both
+        // are required to populate face_prints + face crops. Aliases
+        // accept the C# `ModelInstallerService::SlotFor` model_kinds
+        // ("arcface_default" is what `WelcomeSheet` sends today;
+        // `arcface_iresnet50` / `arcface_mobileface` are reserved for
+        // future per-architecture choice in Settings).
+        "arcface" | "arcface_default" | "arcface_iresnet50" | "arcface_mobileface" | "arcface_scrfd" => {
+            let arcface_dir = models_root.join("arcface");
+            let scrfd_dir = models_root.join("scrfd");
+            LookupResult::Found(Model {
+                id: "arcface",
+                display_name: "Face recognition",
+                files: vec![
+                    FileEntry {
+                        url: "https://huggingface.co/immich-app/buffalo_l/resolve/main/w600k_r50.onnx"
+                            .to_string(),
+                        dest: arcface_dir.join("w600k_r50.onnx"),
+                        sha256: None,
+                        approx_bytes: 174_000_000,
+                    },
+                    FileEntry {
+                        url: "https://huggingface.co/immich-app/buffalo_l/resolve/main/scrfd_10g_bnkps.onnx"
+                            .to_string(),
+                        dest: scrfd_dir.join("scrfd_10g_bnkps.onnx"),
+                        sha256: None,
+                        approx_bytes: 16_900_000,
+                    },
+                ],
+            })
+        }
+
+        // ── MobileCLIP-S2 image encoder. The ONNX export Apple ships in
+        // their HF repo is .mlpackage; for Windows we use the ONNX
+        // export at apple/coreml-mobileclip's mirror. If unavailable
+        // surface as "not yet available" rather than a hard error.
+        "mobileclip_s2" | "mobileclip" => {
+            let dir = models_root.join("mobileclip");
+            LookupResult::Found(Model {
+                id: "mobileclip_s2",
+                display_name: "MobileCLIP image encoder",
+                files: vec![FileEntry {
+                    url: "https://huggingface.co/apple/MobileCLIP-S2-OpenCLIP/resolve/main/open_clip_pytorch_model.onnx"
+                        .to_string(),
+                    dest: dir.join("mobileclip_s2_image.onnx"),
+                    sha256: None,
+                    approx_bytes: 220_200_000,
+                }],
+            })
+        }
+
+        // ── CLIP text encoder (for query-time semantic search).
+        // BPE vocab + merges from openai/clip-vit-base-patch32. The
+        // ONNX text encoder we host alongside MobileCLIP-S2.
+        "clip_text" => {
+            let dir = models_root.join("clip_text");
+            LookupResult::Found(Model {
+                id: "clip_text",
+                display_name: "CLIP text encoder",
+                files: vec![
+                    FileEntry {
+                        url: "https://huggingface.co/apple/MobileCLIP-S2-OpenCLIP/resolve/main/text_encoder.onnx"
+                            .to_string(),
+                        dest: dir.join("clip_text.onnx"),
+                        sha256: None,
+                        approx_bytes: 67_500_000,
+                    },
+                    FileEntry {
+                        url: "https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/vocab.json"
+                            .to_string(),
+                        dest: dir.join("vocab.json"),
+                        sha256: None,
+                        approx_bytes: 1_000_000,
+                    },
+                    FileEntry {
+                        url: "https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/merges.txt"
+                            .to_string(),
+                        dest: dir.join("merges.txt"),
+                        sha256: None,
+                        approx_bytes: 525_000,
+                    },
+                ],
+            })
+        }
+
+        // ── VLMs (Deep Analyze). Pulled as GGUF + mmproj pairs from
+        // the official llama.cpp-friendly mirrors. Subprocess runner
+        // (`vlm::VlmRunner`) finds them at canonical paths.
+        "qwen2.5-vl-3b" | "qwen2_5_vl_3b" => {
+            let dir = models_root.join("vlm").join("qwen2.5-vl-3b");
+            LookupResult::Found(Model {
+                id: "qwen2_5_vl_3b",
+                display_name: "Qwen2.5-VL 3B",
+                files: vec![
+                    FileEntry {
+                        url: "https://huggingface.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF/resolve/main/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf"
+                            .to_string(),
+                        dest: dir.join("model.gguf"),
+                        sha256: None,
+                        approx_bytes: 2_300_000_000,
+                    },
+                    FileEntry {
+                        url: "https://huggingface.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF/resolve/main/mmproj-Qwen2.5-VL-3B-Instruct-f16.gguf"
+                            .to_string(),
+                        dest: dir.join("mmproj.gguf"),
+                        sha256: None,
+                        approx_bytes: 870_000_000,
+                    },
+                ],
+            })
+        }
+        "qwen2.5-vl-7b" | "qwen2_5_vl_7b" => {
+            let dir = models_root.join("vlm").join("qwen2.5-vl-7b");
+            LookupResult::Found(Model {
+                id: "qwen2_5_vl_7b",
+                display_name: "Qwen2.5-VL 7B",
+                files: vec![
+                    FileEntry {
+                        url: "https://huggingface.co/ggml-org/Qwen2.5-VL-7B-Instruct-GGUF/resolve/main/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf"
+                            .to_string(),
+                        dest: dir.join("model.gguf"),
+                        sha256: None,
+                        approx_bytes: 4_700_000_000,
+                    },
+                    FileEntry {
+                        url: "https://huggingface.co/ggml-org/Qwen2.5-VL-7B-Instruct-GGUF/resolve/main/mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf"
+                            .to_string(),
+                        dest: dir.join("mmproj.gguf"),
+                        sha256: None,
+                        approx_bytes: 1_400_000_000,
+                    },
+                ],
+            })
+        }
+        "gemma_3_4b" | "gemma-3-4b" => {
+            let dir = models_root.join("vlm").join("gemma-3-4b");
+            LookupResult::Found(Model {
+                id: "gemma_3_4b",
+                display_name: "Gemma 3 4B",
+                files: vec![
+                    FileEntry {
+                        url: "https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf"
+                            .to_string(),
+                        dest: dir.join("model.gguf"),
+                        sha256: None,
+                        approx_bytes: 2_500_000_000,
+                    },
+                    FileEntry {
+                        url: "https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF/resolve/main/mmproj-gemma-3-4b-it-f16.gguf"
+                            .to_string(),
+                        dest: dir.join("mmproj.gguf"),
+                        sha256: None,
+                        approx_bytes: 940_000_000,
+                    },
+                ],
+            })
+        }
+        "smolvlm" => {
+            let dir = models_root.join("vlm").join("smolvlm");
+            LookupResult::Found(Model {
+                id: "smolvlm",
+                display_name: "SmolVLM",
+                files: vec![
+                    FileEntry {
+                        url: "https://huggingface.co/ggml-org/SmolVLM-500M-Instruct-GGUF/resolve/main/SmolVLM-500M-Instruct-Q8_0.gguf"
+                            .to_string(),
+                        dest: dir.join("model.gguf"),
+                        sha256: None,
+                        approx_bytes: 540_000_000,
+                    },
+                    FileEntry {
+                        url: "https://huggingface.co/ggml-org/SmolVLM-500M-Instruct-GGUF/resolve/main/mmproj-SmolVLM-500M-Instruct-f16.gguf"
+                            .to_string(),
+                        dest: dir.join("mmproj.gguf"),
+                        sha256: None,
+                        approx_bytes: 200_000_000,
+                    },
+                ],
+            })
+        }
+
+        // ── llama.cpp Windows runtime ZIP. Extracted in-place by
+        // `handle_prewarm_model`; the .zip suffix triggers extraction.
+        "llama_runtime_x64" => {
+            let dir = models_root.join("llama.cpp");
+            LookupResult::Found(Model {
+                id: "llama_runtime_x64",
+                display_name: "llama.cpp runtime",
+                files: vec![FileEntry {
+                    // Pinned to a specific release for reproducibility.
+                    // Bump intentionally and verify the binary still
+                    // accepts our `--mmproj` + image paths.
+                    url: "https://github.com/ggerganov/llama.cpp/releases/download/b4404/llama-b4404-bin-win-vulkan-x64.zip"
+                        .to_string(),
+                    dest: dir.join("llama-runtime.zip"),
+                    sha256: None,
+                    approx_bytes: 95_000_000,
+                }],
+            })
+        }
+
+        // ── Performance Packs (CUDA / OpenVINO / QNN). Hosted on the
+        // fileid-app HF dataset repo per V14.6 plumbing. If the repo
+        // hasn't been populated yet the downloader surfaces the HTTP
+        // 404 as a friendly error; until then we surface "not yet
+        // available" so the install button stays usable but doesn't
+        // hard-fail.
+        "cuda_pack_x64" => not_yet_available(
+            "CUDA Performance Pack",
+            "Pack hosting is not configured yet. Watch shared/docs/SHIP.md for the upload date.",
+        ),
+        "openvino_pack_x64" => not_yet_available(
+            "OpenVINO Performance Pack",
+            "Pack hosting is not configured yet. Watch shared/docs/SHIP.md for the upload date.",
+        ),
+        "qnn_pack_arm64" => not_yet_available(
+            "QNN Performance Pack",
+            "Pack hosting is not configured yet. Watch shared/docs/SHIP.md for the upload date.",
+        ),
+
+        _ => LookupResult::Unknown,
+    }
+}
+
+fn not_yet_available(display: &str, msg: &str) -> LookupResult {
+    LookupResult::NotYetAvailable {
+        display_name: display.into(),
+        message: msg.into(),
+    }
+}
+
+/// Sentinel file the engine drops after every file in `model.files`
+/// has landed. Welcome sheet + tagging stack poll it to know whether
+/// the model is installed without re-validating SHA256s on every
+/// launch.
+pub fn sentinel_path(model: &Model) -> Option<PathBuf> {
+    let root = paths::models_dir().ok()?;
+    Some(root.join(".sentinels").join(format!("{}.installed", model.id)))
+}

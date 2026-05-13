@@ -34,11 +34,21 @@ public sealed partial class SuggestedMergesSheet : UserControl
         // don't reliably fire Loaded; the WelcomeSheet hit the same wall.
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         Unloaded += (_, _) => EngineClient.Instance.PropertyChanged -= OnEngineChanged;
-        Loaded += (_, _) =>
+        Loaded += async (_, _) =>
         {
             // Trigger a fresh suggestion fetch whenever the sheet opens.
-            _ = EngineClient.Instance.FindMergeSuggestionsAsync();
+            // Awaited so engine-not-ready exceptions surface to the log
+            // rather than silently leaving the sheet on "Looking for…".
             HeaderText.Text = "Looking for similar clusters…";
+            try
+            {
+                await EngineClient.Instance.FindMergeSuggestionsAsync();
+            }
+            catch (Exception ex)
+            {
+                Services.DebugLog.Error($"FindMergeSuggestions failed: {ex.Message}");
+                HeaderText.Text = "Couldn't fetch suggestions — see logs.";
+            }
         };
     }
 

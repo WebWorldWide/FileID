@@ -5,8 +5,66 @@
 //! engine compiles on every host while the Windows-specific surfaces stay
 //! gated behind `#[cfg(windows)]`.
 
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Notify;
+
+/// Redact a user path for logs: keep last two components; pass
+/// app-structural paths verbatim. Mirrors PathRedaction.swift.
+pub fn redact_path_for_log(path: impl AsRef<Path>) -> String {
+    let s = path.as_ref().to_string_lossy().to_string();
+    let s_lower = s.to_lowercase();
+    // App-structural paths: pass through.
+    if s_lower.contains("\\fileid\\")
+        || s_lower.contains("/fileid/")
+        || s_lower.contains("appdata\\local\\fileid")
+    {
+        return s;
+    }
+    let parts: Vec<&str> = path
+        .as_ref()
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+    if parts.is_empty() {
+        return "…".to_string();
+    }
+    let tail = parts
+        .iter()
+        .rev()
+        .take(2)
+        .copied()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("/");
+    if tail.is_empty() { "…".to_string() } else { format!("…/{tail}") }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    #[test]
+    fn redacts_deep_user_path() {
+        let r = redact_path_for_log(r"C:\Users\Adam\Pictures\Vacation\IMG.jpg");
+        assert!(r.starts_with("…/"));
+        assert!(r.ends_with("Vacation/IMG.jpg"));
+        assert!(!r.contains("Adam"));
+    }
+
+    #[test]
+    fn passes_through_app_structural_path() {
+        let s = r"C:\Users\Adam\AppData\Local\FileID\Models\arcface\weights.onnx";
+        assert_eq!(redact_path_for_log(s), s);
+    }
+
+    #[test]
+    fn handles_empty_input() {
+        assert_eq!(redact_path_for_log(""), "…");
+    }
+}
 
 /// Number of tagging workers to spin up by default. Mirrors the macOS
 /// heuristic (14 on M1 Pro = ~physical cores * 1.7).

@@ -10,6 +10,7 @@ pub mod discovery;
 pub mod tagging;
 pub mod dbwriter;
 pub mod face_clustering;
+pub mod identity_clustering;
 pub mod deep_analyze;
 pub mod restructure;
 pub mod restructure_apply;

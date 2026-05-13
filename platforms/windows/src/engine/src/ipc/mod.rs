@@ -549,6 +549,9 @@ pub struct FileDoneEvent {
     pub failed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
+    /// Stages skipped because the model wasn't loaded (e.g. "face_detection").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_stages: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

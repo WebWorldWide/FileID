@@ -30,8 +30,21 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         // symptom.
         ViewModel.PropertyChanged += OnViewModelPropertyChanged;
         ViewModel.Groups.CollectionChanged += OnGroupsCollectionChanged;
+        ViewModels.EngineClient.Instance.PropertyChanged += OnEngineScanCompleted;
         Loaded += OnLoadedAsync;
         Unloaded += OnUnloaded;
+    }
+
+    private void OnEngineScanCompleted(object? sender, PropertyChangedEventArgs e)
+    {
+        if (_unloaded) return;
+        if (e.PropertyName != nameof(ViewModels.EngineClient.Phase)) return;
+        if (ViewModels.EngineClient.Instance.Phase != FileID.IpcSchema.ScanPhase.Completed) return;
+        DispatcherQueue.TryEnqueue(async () =>
+        {
+            try { await ViewModel.RefreshAsync(CancellationToken.None); }
+            catch (Exception ex) { DebugLog.Warn("Cleanup refresh on scan complete failed: " + ex.Message); }
+        });
     }
 
     private async void OnLoadedAsync(object sender, RoutedEventArgs e)
@@ -62,6 +75,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         Loaded -= OnLoadedAsync;
         try { ViewModel.PropertyChanged -= OnViewModelPropertyChanged; } catch { /* swallow */ }
         try { ViewModel.Groups.CollectionChanged -= OnGroupsCollectionChanged; } catch { /* swallow */ }
+        try { ViewModels.EngineClient.Instance.PropertyChanged -= OnEngineScanCompleted; } catch { /* swallow */ }
         try { ViewModel.Dispose(); } catch { /* swallow */ }
     }
 

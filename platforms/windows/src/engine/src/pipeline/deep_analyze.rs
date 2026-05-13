@@ -243,7 +243,7 @@ async fn rasterize_video_keyframe(path: &std::path::Path) -> anyhow::Result<std:
     {
         Ok(f) => f,
         Err(first) => {
-            tracing::warn!(?first, file = %path.display(), "keyframe_25pct failed; retrying once");
+            tracing::warn!(?first, file = %crate::platform::redact_path_for_log(path), "keyframe_25pct failed; retrying once");
             tokio::task::spawn_blocking(move || crate::shell::video::keyframe_25pct(&p))
                 .await??
         }

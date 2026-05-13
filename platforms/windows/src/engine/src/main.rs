@@ -150,14 +150,7 @@ async fn main() -> Result<()> {
 
     let (sink, sink_writer) = Sink::spawn();
 
-    // Emit `ready` first thing so the app sidebar can transition out of
-    // .starting. The handshake is one-way; the app doesn't ack.
-    emit_ready(&sink).await;
-
-    // V14.9 (2.1): surface CUDA-toolkit DLL registration failures so the
-    // user sees an actionable error rather than a silent fall-back to
-    // DirectML. We told them CUDA was detected; if AddDllDirectory failed
-    // they need to know.
+    // Sent before emit_ready so the app can react while still .starting.
     if !cuda_dll_failures.is_empty() {
         let dirs = cuda_dll_failures
             .iter()
@@ -178,6 +171,29 @@ async fn main() -> Result<()> {
         }))))
         .await;
     }
+
+    if db_conn.is_none() {
+        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+            kind: "db_open_failed".into(),
+            message: format!(
+                "Could not open or migrate the database at {}. The engine cannot scan. Check %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl for the underlying error.",
+                db_path.display()
+            ),
+            path: Some(db_path.display().to_string()),
+            model_kind: None,
+        }))))
+        .await;
+        tracing::error!("engine starting without a writable DB — aborting");
+        // Drop the sink so the writer task sees EOF, then await it
+        // (with a cap) to let the error reach the app before exit.
+        drop(sink);
+        let _ = tokio::time::timeout(Duration::from_secs(2), sink_writer).await;
+        return Ok(());
+    }
+
+    // Emit `ready` first thing so the app sidebar can transition out of
+    // .starting. The handshake is one-way; the app doesn't ack.
+    emit_ready(&sink).await;
 
     // Coordinated shutdown signal. set() once, awaited by the stdio loop +
     // the parent watchdog so they cooperate on exit.
@@ -311,12 +327,20 @@ async fn main() -> Result<()> {
     // Wait for shutdown signal (from either source).
     shutdown.notified().await;
 
-    // WAL checkpoint into the main file before exit so the on-disk state is
-    // self-contained (no .wal/.shm sidecars needed to read the DB next time).
+    // Checkpoint before exit so the next opener doesn't need the .wal/.shm
+    // sidecars. On failure, surface to the sink before teardown so the
+    // app's next launch can warn about stale-read.
     if let Some(conn_arc) = &db_conn {
         let guard = conn_arc.lock();
         if let Err(err) = db::checkpoint_truncate(&guard) {
-            tracing::warn!(?err, "WAL checkpoint at shutdown failed; data is still safe in WAL");
+            tracing::warn!(?err, "WAL checkpoint at shutdown failed");
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "checkpoint_failed_at_shutdown".into(),
+                message: "WAL not truncated at shutdown — your data is safe, but a previous read may show stale state on next launch.".into(),
+                path: None,
+                model_kind: None,
+            }))))
+            .await;
         }
     }
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1208,10 +1232,52 @@ async fn handle_prewarm_model(
         );
     }
 
-    // All files landed — drop the sentinel so the app sees Installed.
+    // Atomic write so a kill mid-write can never leave a half-written
+    // sentinel that subsequent runs treat as "installed."
     if let Some(sentinel) = models::registry::sentinel_path(&model) {
-        if let Err(err) = tokio::fs::write(&sentinel, model.id.as_bytes()).await {
-            tracing::warn!(?err, sentinel = %sentinel.display(), "sentinel write failed");
+        if let Some(parent) = sentinel.parent() {
+            if let Err(err) = tokio::fs::create_dir_all(parent).await {
+                tracing::error!(?err, dir = %parent.display(), "could not create .sentinels dir");
+                sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                    kind: "sentinel_dir_create_failed".into(),
+                    message: format!(
+                        "Couldn't create the sentinel directory at {}. Model {} is downloaded but not registered as installed; try again.",
+                        parent.display(),
+                        model.display_name
+                    ),
+                    path: Some(parent.display().to_string()),
+                    model_kind: Some(model_kind.clone()),
+                }))))
+                .await;
+                return;
+            }
+        }
+        let tmp = sentinel.with_extension("installed.tmp");
+        if let Err(err) = tokio::fs::write(&tmp, model.id.as_bytes()).await {
+            tracing::error!(?err, tmp = %tmp.display(), "sentinel tmp write failed");
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "sentinel_write_failed".into(),
+                message: format!("Couldn't write the install marker for {}: {err}", model.display_name),
+                path: Some(tmp.display().to_string()),
+                model_kind: Some(model_kind.clone()),
+            }))))
+            .await;
+            return;
+        }
+        if let Err(err) = tokio::fs::rename(&tmp, &sentinel).await {
+            tracing::error!(?err, from = %tmp.display(), to = %sentinel.display(), "sentinel rename failed");
+            let _ = tokio::fs::remove_file(&tmp).await;
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "sentinel_rename_failed".into(),
+                message: format!(
+                    "Couldn't finalize the install marker for {}: {err}",
+                    model.display_name
+                ),
+                path: Some(sentinel.display().to_string()),
+                model_kind: Some(model_kind.clone()),
+            }))))
+            .await;
+            return;
         }
     }
 
@@ -2172,7 +2238,7 @@ async fn handle_restore_from_trash(
             let allowed = allowed_canonical.iter().any(|root| candidate.starts_with(root));
             if !allowed {
                 tracing::warn!(
-                    path = %item.original_path,
+                    path = %platform::redact_path_for_log(&item.original_path),
                     "SEC-7: refusing restore — path is outside every authorized library root"
                 );
                 failed += 1;
@@ -2958,7 +3024,7 @@ async fn handle_start_scan(
     use ipc::ScanPhase;
     use std::path::PathBuf;
 
-    tracing::info!(root_path = %payload.root_path, "[SCAN] handle_start_scan entered");
+    tracing::info!(root_path = %platform::redact_path_for_log(&payload.root_path), "[SCAN] handle_start_scan entered");
 
     let already_running = scan_state.lock().is_some();
     if already_running {
@@ -2973,26 +3039,24 @@ async fn handle_start_scan(
         return;
     }
 
-    // Pre-flight sentinel check: required models must be installed before
-    // we attempt ModelStack::load_default. Without this, a fresh install
-    // where the user clicked Scan before completing Welcome would wedge
-    // ORT for the full timeout window with no actionable feedback.
-    let missing: Vec<&str> = ["MobileCLIP", "arcfaceMobileFace"]
+    // Pre-flight before ModelStack::load_default. Without this, a user
+    // who clicked Scan before completing Welcome would wedge ORT for the
+    // full timeout window with no actionable feedback.
+    let missing_models: Vec<&str> = ["mobileclip_s2", "arcface", "clip_text"]
         .iter()
-        .filter_map(|dir| {
-            let sentinel = match paths::models_dir() {
-                Ok(p) => p.join(dir).join(".fileid-installed"),
-                Err(_) => return Some(*dir),
+        .filter_map(|kind| {
+            let model = match models::registry::lookup_full(kind) {
+                models::registry::LookupResult::Found(m) => m,
+                _ => return Some(*kind),
             };
-            if sentinel.exists() {
-                None
-            } else {
-                Some(*dir)
+            match models::registry::sentinel_path(&model) {
+                Some(p) if p.exists() => None,
+                _ => Some(*kind),
             }
         })
         .collect();
-    if !missing.is_empty() {
-        tracing::warn!(missing = ?missing, "[SCAN] required models missing; aborting scan");
+    if !missing_models.is_empty() {
+        tracing::warn!(missing = ?missing_models, "[SCAN] required models missing; aborting scan");
         sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
             ScanPhase::Failed,
         ))))
@@ -3001,7 +3065,7 @@ async fn handle_start_scan(
             kind: "models_not_installed".into(),
             message: format!(
                 "Install the AI models from the Welcome screen (or Settings → Local AI) before scanning. Missing: {}.",
-                missing.join(", ")
+                missing_models.join(", ")
             ),
             path: None,
             model_kind: None,
@@ -3103,6 +3167,30 @@ async fn handle_start_scan(
             return;
         }
     };
+
+    // One banner per scan beats N per-file toasts when models are absent.
+    {
+        let mut missing_stages: Vec<&str> = Vec::new();
+        if models.scrfd.is_none() || models.arcface.is_none() {
+            missing_stages.push("face_detection");
+        }
+        if models.mobileclip.is_none() {
+            missing_stages.push("image_embedding");
+        }
+        if !missing_stages.is_empty() {
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "stages_skipped_missing_models".into(),
+                message: format!(
+                    "Some pipeline stages will be skipped this scan because their models didn't load: {}. \
+                     Reinstall from Settings → Local AI to populate those features.",
+                    missing_stages.join(", ")
+                ),
+                path: None,
+                model_kind: None,
+            }))))
+            .await;
+        }
+    }
 
     let worker_count = platform::default_worker_cap() as usize;
     let session = ScanSession::new(coord, db, worker_count, sink.clone(), models);
