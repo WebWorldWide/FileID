@@ -310,12 +310,12 @@ async fn main() -> Result<()> {
                         }
                         Ok(BoundedRead::Eof) => {
                             tracing::info!("stdin EOF; entering shutdown");
-                            dispatch_shutdown.notify_waiters();
+                            dispatch_shutdown.notify_one();
                             break;
                         }
                         Err(err) => {
                             tracing::error!(%err, "stdin read error");
-                            dispatch_shutdown.notify_waiters();
+                            dispatch_shutdown.notify_one();
                             break;
                         }
                     }
@@ -401,7 +401,7 @@ async fn handle_line(
         }
         CommandPayload::Shutdown(_) => {
             tracing::info!("shutdown command received");
-            shutdown.notify_waiters();
+            shutdown.notify_one();
         }
         CommandPayload::PrewarmModel(payload) => {
             // V14.7.4: clear the cancel flag at the start of every NEW

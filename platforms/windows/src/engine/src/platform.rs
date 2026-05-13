@@ -165,7 +165,7 @@ pub async fn watch_parent(parent_pid: u32, shutdown: Arc<Notify>) {
 
     if result.is_ok() {
         tracing::info!("parent process exited; signaling shutdown");
-        shutdown.notify_waiters();
+        shutdown.notify_one();
     } else {
         tracing::warn!("parent watchdog task aborted; falling back to stdin EOF detection");
     }
