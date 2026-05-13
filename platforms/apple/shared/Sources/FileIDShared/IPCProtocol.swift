@@ -37,6 +37,56 @@ public struct IPCCommand: Codable, Sendable {
         /// fetch loop — usually within ~1 s. Safe no-op if no prewarm
         /// is active.
         case cancelPrewarm
+
+        // ── Windows-originated commands ───────────────────────────
+        // These land on mac only when the schema needs to round-trip
+        // them (cross-platform tooling, shared test corpus). The mac
+        // engine dispatcher returns a structured "not_implemented_yet"
+        // error for each; equivalent flows on macOS go through their
+        // pre-existing per-tab actions.
+        case planRestructure(libraryRoot: String)
+        case applyRestructure(libraryRoot: String, moves: [RestructureMove], useSymlinks: Bool)
+        case applyTags(fileIDs: [Int64], tags: [String], mode: String)
+        case renameFiles(renames: [RenameEntry])
+        case trashFiles(fileIDs: [Int64])
+        case mergeClusters(sourcePersonID: Int64, destinationPersonID: Int64)
+        case embedTextQuery(query: String, queryID: String)
+        case renamePerson(personID: Int64, title: String?, firstName: String?, middleName: String?, lastName: String?, suffix: String?)
+        case markPersonsAsUnknown(personIDs: [Int64])
+        case findMergeSuggestions
+        case embedImageQuery(fileID: Int64, queryID: String)
+        case restoreFromTrash(batchID: String)
+        case revertMerge(sourcePersonID: Int64, destinationPersonID: Int64, faceIDsToRevert: [Int64])
+        /// Windows-only: re-probe CUDA + cuDNN. Always returns
+        /// `not_applicable_on_platform` on mac.
+        case verifyCudaPack
+    }
+}
+
+public struct RestructureMove: Codable, Sendable {
+    public let fileID: Int64
+    public let source: String
+    public let destination: String
+    public let category: String
+    public let tier: String?
+
+    public init(fileID: Int64, source: String, destination: String,
+                category: String, tier: String? = nil) {
+        self.fileID = fileID
+        self.source = source
+        self.destination = destination
+        self.category = category
+        self.tier = tier
+    }
+}
+
+public struct RenameEntry: Codable, Sendable {
+    public let fileID: Int64
+    public let newName: String
+
+    public init(fileID: Int64, newName: String) {
+        self.fileID = fileID
+        self.newName = newName
     }
 }
 
@@ -138,13 +188,18 @@ public struct FileDoneEvent: Codable, Sendable {
     public let totalMs: Double
     public let failed: Bool
     public let errorMessage: String?
+    /// Pipeline stages skipped because the model didn't load
+    /// (e.g. "face_detection"). Empty when every stage ran.
+    public let skippedStages: [String]
 
-    public init(path: String, kind: String, totalMs: Double, failed: Bool, errorMessage: String? = nil) {
+    public init(path: String, kind: String, totalMs: Double, failed: Bool,
+                errorMessage: String? = nil, skippedStages: [String] = []) {
         self.path = path
         self.kind = kind
         self.totalMs = totalMs
         self.failed = failed
         self.errorMessage = errorMessage
+        self.skippedStages = skippedStages
     }
 }
 

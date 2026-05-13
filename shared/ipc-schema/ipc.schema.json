@@ -116,7 +116,117 @@
             }
           }
         },
-        { "type": "object", "required": ["cancelPrewarm"], "additionalProperties": false, "properties": { "cancelPrewarm": { "type": "object", "additionalProperties": false } } }
+        { "type": "object", "required": ["cancelPrewarm"], "additionalProperties": false, "properties": { "cancelPrewarm": { "type": "object", "additionalProperties": false } } },
+
+        { "type": "object", "required": ["planRestructure"], "additionalProperties": false,
+          "properties": { "planRestructure": { "type": "object", "additionalProperties": false,
+            "required": ["libraryRoot"],
+            "properties": { "libraryRoot": { "type": "string" } } } } },
+
+        { "type": "object", "required": ["applyRestructure"], "additionalProperties": false,
+          "properties": { "applyRestructure": { "type": "object", "additionalProperties": false,
+            "required": ["libraryRoot", "moves", "useSymlinks"],
+            "properties": {
+              "libraryRoot": { "type": "string" },
+              "moves": { "type": "array", "items": {
+                "type": "object", "additionalProperties": false,
+                "required": ["fileID", "source", "destination", "category"],
+                "properties": {
+                  "fileID": { "type": "integer" },
+                  "source": { "type": "string" },
+                  "destination": { "type": "string" },
+                  "category": { "type": "string" },
+                  "tier": { "type": ["string", "null"] }
+                }
+              } },
+              "useSymlinks": { "type": "boolean" }
+            } } } },
+
+        { "type": "object", "required": ["applyTags"], "additionalProperties": false,
+          "properties": { "applyTags": { "type": "object", "additionalProperties": false,
+            "required": ["fileIDs", "tags", "mode"],
+            "properties": {
+              "fileIDs": { "type": "array", "items": { "type": "integer" } },
+              "tags": { "type": "array", "items": { "type": "string" } },
+              "mode": { "type": "string", "enum": ["add", "replace", "remove"] }
+            } } } },
+
+        { "type": "object", "required": ["renameFiles"], "additionalProperties": false,
+          "properties": { "renameFiles": { "type": "object", "additionalProperties": false,
+            "required": ["renames"],
+            "properties": {
+              "renames": { "type": "array", "items": {
+                "type": "object", "additionalProperties": false,
+                "required": ["fileID", "newName"],
+                "properties": {
+                  "fileID": { "type": "integer" },
+                  "newName": { "type": "string" }
+                }
+              } }
+            } } } },
+
+        { "type": "object", "required": ["trashFiles"], "additionalProperties": false,
+          "properties": { "trashFiles": { "type": "object", "additionalProperties": false,
+            "required": ["fileIDs"],
+            "properties": { "fileIDs": { "type": "array", "items": { "type": "integer" } } } } } },
+
+        { "type": "object", "required": ["mergeClusters"], "additionalProperties": false,
+          "properties": { "mergeClusters": { "type": "object", "additionalProperties": false,
+            "required": ["sourcePersonID", "destinationPersonID"],
+            "properties": {
+              "sourcePersonID": { "type": "integer" },
+              "destinationPersonID": { "type": "integer" }
+            } } } },
+
+        { "type": "object", "required": ["embedTextQuery"], "additionalProperties": false,
+          "properties": { "embedTextQuery": { "type": "object", "additionalProperties": false,
+            "required": ["query", "queryID"],
+            "properties": {
+              "query": { "type": "string" },
+              "queryID": { "type": "string" }
+            } } } },
+
+        { "type": "object", "required": ["renamePerson"], "additionalProperties": false,
+          "properties": { "renamePerson": { "type": "object", "additionalProperties": false,
+            "required": ["personID"],
+            "properties": {
+              "personID": { "type": "integer" },
+              "title": { "type": ["string", "null"] },
+              "firstName": { "type": ["string", "null"] },
+              "middleName": { "type": ["string", "null"] },
+              "lastName": { "type": ["string", "null"] },
+              "suffix": { "type": ["string", "null"] }
+            } } } },
+
+        { "type": "object", "required": ["markPersonsAsUnknown"], "additionalProperties": false,
+          "properties": { "markPersonsAsUnknown": { "type": "object", "additionalProperties": false,
+            "required": ["personIDs"],
+            "properties": { "personIDs": { "type": "array", "items": { "type": "integer" } } } } } },
+
+        { "type": "object", "required": ["findMergeSuggestions"], "additionalProperties": false,
+          "properties": { "findMergeSuggestions": { "type": "object", "additionalProperties": false } } },
+
+        { "type": "object", "required": ["embedImageQuery"], "additionalProperties": false,
+          "properties": { "embedImageQuery": { "type": "object", "additionalProperties": false,
+            "required": ["fileID", "queryID"],
+            "properties": {
+              "fileID": { "type": "integer" },
+              "queryID": { "type": "string" }
+            } } } },
+
+        { "type": "object", "required": ["restoreFromTrash"], "additionalProperties": false,
+          "properties": { "restoreFromTrash": { "type": "object", "additionalProperties": false,
+            "required": ["batchID"],
+            "properties": { "batchID": { "type": "string" } } } } },
+
+        { "type": "object", "required": ["revertMerge"], "additionalProperties": false,
+          "properties": { "revertMerge": { "type": "object", "additionalProperties": false,
+            "required": ["sourcePersonID", "destinationPersonID", "faceIDsToRevert"],
+            "properties": {
+              "sourcePersonID": { "type": "integer" },
+              "destinationPersonID": { "type": "integer" },
+              "faceIDsToRevert": { "type": "array", "items": { "type": "integer" } }
+            } } } }
       ]
     },
 

@@ -342,7 +342,7 @@ public actor DeepAnalyze {
     /// model generates it. Callbacks are awaited inline; throttle on
     /// the caller side if the consumer is slow (caller throttles to 4 Hz
     /// in DeepAnalyzeRunner so the IPC sink isn't flooded).
-    public func analyze(imageURL: URL, faceNames: [String] = [], onToken: ((String) async -> Void)? = nil) async -> AnalysisResult {
+    public func analyze(imageURL: URL, faceNames: [String] = [], onToken: (@Sendable (String) async -> Void)? = nil) async -> AnalysisResult {
         guard let container else {
             return AnalysisResult(description: "Model not loaded.", proposedName: nil)
         }

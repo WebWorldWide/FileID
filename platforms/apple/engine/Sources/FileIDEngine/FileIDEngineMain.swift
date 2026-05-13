@@ -323,6 +323,34 @@ struct FileIDEngineMain {
         case .cancelPrewarm:
             await DeepAnalyze.shared.cancelPrewarm()
             JSONLog.shared.info(ev: "prewarm_cancel_requested")
+
+        // ── Windows-originated commands ──────────────────────────
+        // The schema keeps these symmetric across platforms. Mac
+        // exposes equivalent flows through per-tab UI actions, not
+        // the IPC, so the engine returns a structured pointer rather
+        // than silently dropping.
+        case .planRestructure,
+             .applyRestructure,
+             .applyTags,
+             .renameFiles,
+             .trashFiles,
+             .mergeClusters,
+             .embedTextQuery,
+             .renamePerson,
+             .markPersonsAsUnknown,
+             .findMergeSuggestions,
+             .embedImageQuery,
+             .restoreFromTrash,
+             .revertMerge:
+            await sink.emit(.error(EngineError(
+                kind: "not_implemented_yet",
+                message: "This command is implemented on Windows; mac engine support is planned for V14.10."
+            )))
+        case .verifyCudaPack:
+            await sink.emit(.error(EngineError(
+                kind: "not_applicable_on_platform",
+                message: "CUDA isn't available on Apple Silicon — the AppleProvider EP selects ANE/Metal automatically."
+            )))
         }
     }
 
