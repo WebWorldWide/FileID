@@ -210,8 +210,8 @@ fn has_any_dll(dir: &PathBuf) -> bool {
 #[cfg(windows)]
 fn probe_gpu_vendor() -> (GpuVendor, Option<String>) {
     use windows::Win32::Graphics::Dxgi::{
-        CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, DXGI_ADAPTER_DESC1,
-        DXGI_ADAPTER_FLAG, DXGI_ADAPTER_FLAG_SOFTWARE,
+        CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, DXGI_ADAPTER_FLAG,
+        DXGI_ADAPTER_FLAG_SOFTWARE,
     };
 
     let factory: IDXGIFactory1 = match unsafe { CreateDXGIFactory1() } {
@@ -229,11 +229,13 @@ fn probe_gpu_vendor() -> (GpuVendor, Option<String>) {
             Ok(a) => a,
             Err(_) => break,
         };
-        let mut desc = DXGI_ADAPTER_DESC1::default();
-        if unsafe { adapter.GetDesc1(&mut desc) }.is_err() {
-            idx += 1;
-            continue;
-        }
+        let desc = match unsafe { adapter.GetDesc1() } {
+            Ok(d) => d,
+            Err(_) => {
+                idx += 1;
+                continue;
+            }
+        };
         let flags = DXGI_ADAPTER_FLAG(desc.Flags as i32);
         let is_software = (flags.0 & DXGI_ADAPTER_FLAG_SOFTWARE.0) != 0;
         if is_software {

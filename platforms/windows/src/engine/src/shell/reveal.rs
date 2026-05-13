@@ -6,6 +6,8 @@
 // we fall back to opening the parent without selection.
 
 use anyhow::Result;
+#[cfg(windows)]
+use anyhow::Context;
 use std::path::Path;
 
 #[cfg(windows)]
