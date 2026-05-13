@@ -7,6 +7,76 @@
 
 ---
 
+## 2026-05-13 — Pre-flight sentinel check routes through the canonical registry, not hand-rolled paths
+
+The previous `main.rs::handle_start_scan` pre-flight hand-rolled `<Models>/MobileCLIP/.fileid-installed` and `<Models>/arcfaceMobileFace/.fileid-installed` and checked existence. The canonical writer in the same file used `registry::sentinel_path(&model)`, which returns `<Models>/.sentinels/<model.id>.installed`. These two paths could never agree — every scan failed with "models missing" even after a successful prewarm. The reported "scan does nothing" symptom was dominated by this divergence.
+
+Decision: the pre-flight now iterates a list of required model kinds (`["mobileclip_s2", "arcface", "clip_text"]`) and calls `registry::lookup_full(kind)` + `registry::sentinel_path(&model)` for each — sharing the same source of truth as the writer. Read and write paths can no longer drift without a registry-layer change.
+
+Alternatives considered: (a) maintain a constant of hard-coded sentinel paths next to the registry — rejected, two-place changes still drift; (b) abstract a `is_installed(kind: &str) -> bool` helper on the registry module — equivalent in correctness, more verbose without buying anything since the consumer is one site.
+
+## 2026-05-13 — Sentinel write is atomic (write-tmp + rename) with parent-dir create
+
+The previous sentinel writer (`tokio::fs::write(&sentinel, …).await`) had two failure modes on a fresh install: (a) `.sentinels/` doesn't exist yet → `NotFound`, surfaced only as `tracing::warn!` and never as an `IpcEvent::Error` (the welcome row kept spinning); (b) the process is killed mid-write → half-written sentinel that subsequent runs treated as "installed" but whose payload didn't match.
+
+Decision: ensure parent dir via `tokio::fs::create_dir_all(parent)`, write to `<sentinel>.tmp`, then `tokio::fs::rename(tmp, sentinel)`. Either the sentinel exists with full content or it doesn't exist. Every failure path now emits a structured `EngineError` event (`sentinel_dir_create_failed`, `sentinel_write_failed`, `sentinel_rename_failed`) so the welcome row stops spinning with a clear message.
+
+Alternatives considered: (a) just-ensure-parent + plain write — rejected, doesn't address mid-write kill; (b) use the `tempfile` crate for atomic-write helpers — would have added a dep for a 4-line pattern, not worth it; (c) just retry on failure — doesn't help when the dir genuinely doesn't exist.
+
+## 2026-05-13 — `redact_path_for_log` on the Windows engine mirrors macOS verbatim
+
+User file paths under `C:\Users\<name>\...` were being emitted to the local `engine.jsonl` log unredacted. The privacy gate at CI scans for telemetry SDK strings, not personal-info-in-paths — so log files shared with support could leak names + folder semantics. macOS already had `redactPathForLog(_:)` at `platforms/apple/shared/Sources/FileIDShared/PathRedaction.swift` (keep last 2 path components, pass through app-structural paths under Application Support).
+
+Decision: port the helper as `platform::redact_path_for_log(impl AsRef<Path>) -> String` with identical semantics for Windows: keep last 2 components, pass through paths whose lowercase contains `\fileid\` or `/fileid/` or `appdata\local\fileid` (the app-structural set on Windows). Three `#[cfg(test)]` tests pin the behavior. Wrap at the highest-traffic log sites first (scan entry, restore-from-trash refusal, image decode failure, video keyframe failure) — sweeping every log call site is a follow-up.
+
+Alternatives considered: (a) regex-based sanitizer at the tracing-subscriber layer — rejected, captures everything blindly and can mangle legitimate JSON; (b) opaque log IDs replacing paths entirely — rejected, debugging becomes much harder without the filename suffix; (c) match macOS behavior exactly — chosen. Cross-platform consistency is more important than per-platform optimization.
+
+## 2026-05-13 — Separate `LastWarning` channel (not a queue, not a clobbered `LastError`)
+
+The engine emits both blocker errors and non-fatal warnings as `IpcEvent::Error`. The app's existing `LastError` slot served both, so a per-file image-decode warning could overwrite a session-level "face detection model not installed" banner before the user saw it. Two clean designs:
+
+1. **Queue of warnings + a dismiss-all action.** Captures every warning but adds UX complexity (which one shows? do we stack badges?) for marginal benefit on a desktop app where most users have at most one warning per session.
+2. **Single `LastWarning` slot, distinct from `LastError`, with kind-based routing.** Simple, lossless for the dominant case (one or zero warnings per session), trivially dismissed.
+
+Chose (2). Routing in `EngineClient.Apply(IpcEvent.error)` is an explicit whitelist: `stages_skipped_missing_models`, `discovery_partial`, `checkpoint_failed_at_shutdown`, `cuda_dll_registration_failed`. Anything else stays a `LastError`. The yellow `#FFCC00` banner in `SidebarProcessingControl.xaml` reads from `LastWarning`. Dismiss = set to null. If a session ever ships multiple distinct warnings, the banner shows the latest — acceptable cost given the simplicity win.
+
+## 2026-05-13 — Cross-platform IPC schema is symmetric, but mac engine returns `not_implemented_yet`
+
+Windows C# defines 14 commands the Swift IPCProtocol didn't (`planRestructure`, `applyRestructure`, `applyTags`, `renameFiles`, `trashFiles`, `mergeClusters`, `embedTextQuery`, `renamePerson`, `markPersonsAsUnknown`, `findMergeSuggestions`, `embedImageQuery`, `restoreFromTrash`, `revertMerge`, `verifyCudaPack`). Two options:
+
+1. **Schema-only, keep Swift tight.** Schema documents the wire, Swift only includes cases the mac engine actually handles. Cleaner per-platform, but the schema diverges from reality on mac.
+2. **Schema + Swift cases + dispatch stubs returning structured errors.** Mac decodes every Windows command but emits `IPCEvent.error(kind: "not_implemented_yet")` for the 13 unrelated ones and `not_applicable_on_platform` for `verifyCudaPack`. Wire symmetric; failure paths clear.
+
+Chose (2). The cost is 14 dispatch cases + 14 case enums + 2 DTO structs (`RestructureMove`, `RenameEntry`). The win is that cross-platform tooling (test corpus harness, IPC fuzzer, future shared C# client targeting mac) can route the same command shapes against either engine without per-platform special-casing. Round-trip tests in `Tests/SharedTests/IPCProtocolTests.swift::windowsCommandsRoundTrip` lock the wire shape.
+
+Each `not_implemented_yet` message names the planned implementation milestone (V14.10) so the failure isn't mysterious to a future developer or user.
+
+## 2026-05-13 — Strip narrative comments; keep WHY-only
+
+Per `CLAUDE.md`'s "default to no comments" rule, V14.9-P's 15 narrative comments — explaining the previous bug, the alternatives considered, and the rationale — were stripped. The rationale lives in this DECISIONS.md, the per-finding STATE.md entry, and `git blame`. Comments retained name a non-obvious WHY in the immediate vicinity: a workaround, a subtle invariant (e.g. atomic write), or a Sendable-capture allowance. The bar going forward: if removing the comment wouldn't confuse a reader, it shouldn't exist.
+
+## 2026-05-13 — `.gitignore` scopes the Windows `Models/` rule to App/installer/dist trees
+
+The previous `platforms/windows/**/Models/` rule was case-sensitive — on case-sensitive filesystems it skipped `src/engine/src/models/` (lowercase, our Rust module), but on case-insensitive Windows filesystems it could match and silently gitignore the entire Rust module. Switched to three narrowed rules: `platforms/windows/src/FileID.App/**/Models/`, `platforms/windows/installer/**/Models/`, `platforms/windows/dist/**/Models/`. The engine source tree is now guaranteed unaffected regardless of filesystem case sensitivity.
+
+## 2026-05-13 — Windows `face_clustering` delegates to `identity_clustering` (1:1 mac parity)
+
+Mac uses a two-tier architecture: `FaceClustering.swift` orchestrates I/O and persistence; `IdentityClustering.swift` is the algorithm (two-pass density + Pass 3 quality validation). Windows had `face_clustering.rs` doing both — and the algorithm was a simpler single-pass connected-components at cosine ≥ 0.70, not the same algorithm mac uses. Same library scanned on both machines would produce different person clusters.
+
+Decision: keep `face_clustering` as the orchestration layer (preserves the existing public API `cluster(&[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>)` so `main.rs::handle_run_face_clustering` doesn't need to change) and have it delegate the clustering math to a new `pipeline/identity_clustering` module. This mirrors mac's split exactly.
+
+Alternatives considered: (a) inline the two-pass algorithm directly into `face_clustering.rs` — rejected, then the algorithm isn't independently testable and mac/Windows drift again over time; (b) rip out `face_clustering` and let `main.rs` call `identity_clustering` directly — rejected, would require touching `main.rs::handle_run_face_clustering` (which is in the middle of a +736-line upstream rewrite and we don't want to fight merges).
+
+The kNN inside `face_clustering`'s delegation closure is brute-force O(n²d). Acceptable for ≤ a few thousand faces (matches the existing complexity of `uncertain_pairs()`). If face counts grow past ~10K we swap in `instant-distance` for HNSW — separate decision, separate commit.
+
+## 2026-05-13 — Restore Windows engine `models/` from local stash instead of generating stubs
+
+The upstream commit `231bff5` landed `mod models;` in `main.rs` and consumer imports in `pipeline/tagging.rs` + `pipeline/deep_analyze.rs` but **did not commit the `models/` directory itself**. CI failed every run with E0583. The local stash held 9 files (`arcface.rs`, `clip_text.rs`, `clip_tokenizer.rs`, `mobileclip.rs`, `mod.rs`, `registry.rs`, `runtime.rs`, `scrfd.rs`, `vlm.rs`) whose public APIs matched the consumer call sites verbatim — these were clearly written for those very commits but never pushed.
+
+Decision: restore from `stash@{0}^3` rather than generate stubs. The stash files are ~54 KB of real ORT-backed model wrapping (ArcFace/SCRFD/MobileCLIP/CLIP-text/VLM); stubs would gut the Phase 1 ML pipeline that's already in progress. Three small additive patches closed the API drift between the stashed files and the new `main.rs` (a `ModelFile` type alias, `system_cuda_toolkit_dir()`, `probe_cuda_pack()`) without touching the existing functions.
+
+Alternatives considered: (a) delete `mod models;` from `main.rs` — rejected, the consumer imports in `tagging.rs:24` and `deep_analyze.rs:123` would push the error one file over; (b) stub the module with `unimplemented!()` bodies — rejected, the scan pipeline would compile but silently fail at runtime on every face/embedding inference call.
+
 ## 2026-05-12 — Windows engine downloader: phase-specific timeouts, not a blanket request cap
 
 The Windows engine's `reqwest::Client` previously used `.timeout(Duration::from_secs(300))` as a single total-per-request cap. That worked for the 14 MB ArcFace and 220 MB MobileCLIP-S2 downloads but reliably killed the 2.1 GB Qwen 2.5-VL 3B GGUF on any connection slower than ~7 MB/s — the body stream simply ran out the 300 s wall clock and reqwest aborted with what surfaced to the user as "reading chunk". Bumping the wall-clock cap to 30 min would have worked for most users but still fails ARM tablets on Wi-Fi and creates a worst-case where a single dead socket holds a request open for half an hour.

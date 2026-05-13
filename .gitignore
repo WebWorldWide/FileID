@@ -68,6 +68,13 @@ platforms/windows/**/*.msixbundle
 platforms/windows/installer/bin/
 platforms/windows/installer/obj/
 
+# Smoke harness output (regenerated each run; not source).
+platforms/windows/build/smoke-out/
+
+# Stray dotnet build output redirected by build scripts.
+platforms/windows/stderr.txt
+platforms/windows/stdout.txt
+
 # ─── IDEs ───────────────────────────────────────────────────────────────────
 .vscode/
 .idea/
@@ -93,9 +100,14 @@ platforms/apple/Resources/Models/
 platforms/apple/Resources/**/weights/
 platforms/apple/Resources/**/*.safetensors
 
-# Windows platform model dir (downloaded by the Rust engine into LOCALAPPDATA;
-# this catches any stray model artifacts inside the source tree).
-platforms/windows/**/Models/
+# Windows platform model dir (weights downloaded by the Rust engine
+# land in %LOCALAPPDATA%; these rules catch any strays in the tree).
+# Scoped to App/installer/dist trees — NOT the engine source tree,
+# where `src/engine/src/models/` is the Rust module wrapping
+# ArcFace/SCRFD/MobileCLIP/VLM.
+platforms/windows/src/FileID.App/**/Models/
+platforms/windows/installer/**/Models/
+platforms/windows/dist/**/Models/
 
 # ─── Test corpus — auto-generated, not redistributed ────────────────────────
 # macOS layout

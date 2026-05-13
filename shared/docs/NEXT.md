@@ -4,6 +4,24 @@
 
 ---
 
+## V14.9-Q follow-ups (2026-05-13)
+
+V14.9-O + P + Q together closed every audited Windows scan-flow gap, ported the IdentityClustering algorithm, synced the IPC schema across platforms, added the warning-banner UI, and stripped the session's narrative comments. P3, P4, P6 from V14.9-P are now done in-session. Two items still need the user's hardware/git.
+
+### P1 — Commit + push (user-side)
+
+Working tree spans Rust engine, .NET app, Apple Swift, schema, CI, scripts, docs, and `.gitignore`. Suggested grouping: (1) Q1+Q2+Q3 cleanup (comment strip + unused imports + clippy); (2) Q4 LastWarning channel + banner UI; (3) Q5 .gitignore cherry-pick; (4) Q6 comparison harness; (5) Q7 IPC schema sync (schema + Swift + mac dispatch + tests); (6) Q8 docs. Push, watch `gh run watch windows-engine.yml`.
+
+### P2 — Smoke-test on real Windows hardware
+
+Pull on Windows. `./build.sh -windows --no-wipe`. Open the app, pick a folder, click Start Scan. Pre-flight succeeds; phases transition Discovering → Tagging → Completed; Library/Cleanup populate live without tab switching; warning banner shows if models were absent. Ctrl+R re-scans cleanly. Settings → Performance "Verify CUDA pack" renders diagnostics. `%LOCALAPPDATA%\FileID\logs\engine.jsonl` shows redacted paths.
+
+### P5 — Cross-platform clustering parity
+
+`shared/scripts/compare_face_clustering.sh <mac.sqlite> <windows.sqlite>` after scanning the same library on both. Drift > 10% or Jaccard < 0.85 → tune `pass1Cosine` / `pass2Cosine` in `identity_clustering.rs` (or swap brute-force kNN for `instant-distance`).
+
+---
+
 ## V14.9 — Deferred from the V14.8 parity + GPU + hardening pass (2026-05-11)
 
 Six items were scoped out of V14.8 because they need engine-schema changes, multi-screen view rewrites, or visual review on real hardware that can't be done blind.

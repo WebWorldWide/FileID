@@ -54,6 +54,8 @@ Point FileID at a folder. It reads every file inside — images, video, PDFs, do
 
 That's the only command you need to remember. Defaults pick a sensible "I want to see this run" path: it wipes any prior install, builds Release, drops a runnable copy at `~/Desktop/FileID/`, and launches the app.
 
+> ⚠️ **`./build.sh -windows` defaults to wiping your local install.** It deletes `%LOCALAPPDATA%\FileID\` — including any downloaded model weights (multi-GB) and your scan database. Pass `--no-wipe` to iterate without re-downloading.
+
 If `./build.sh -windows` is too aggressive (it wipes downloaded models — re-downloading is multi-GB), use `--no-wipe`:
 
 ```bash
@@ -85,6 +87,10 @@ Detailed instructions: [Build from source](#build-from-source).
 | **Deep Analyze** | Local vision-language model (Qwen 2.5-VL · Gemma 3 · SmolVLM · MiniCPM-V) writes a caption + smart filename per image, PDF, video keyframe, or doc thumbnail. |
 | **Restructure** | Folder reorganization with a Sankey flow diagram. Apply as shortcuts (reversible), then convert to real moves when you're happy. |
 | **Settings** | Model downloads, GPU acceleration picker, engine info, logs, privacy. |
+
+### Platform status
+
+macOS is the canonical reference and ships every tab end-to-end. The Windows port is mid-Phase-1: the engine, IPC schema, scan pipeline, and all six tabs are wired and compile cleanly; full hardware verification is still ongoing. Database migrations v1–v7 are byte-faithful with macOS GRDB, so a library scanned on one platform opens on the other. Linux is deferred to Phase 5 — the Rust engine builds standalone today, but the UI port (Avalonia or GTK4) hasn't started. See `shared/docs/SHIP.md` for the per-phase breakdown.
 
 ---
 

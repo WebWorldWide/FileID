@@ -2,6 +2,122 @@
 
 > Snapshot of what's working and where we left off. Update at the end of every working session.
 
+## V14.9-Q (2026-05-13) — Full code cleanup + warning-banner UI + cross-platform IPC sync
+
+Cleanup sweep on top of V14.9-O+P. Three orthogonal wins:
+
+**Comment quality + dead code:**
+- Stripped 15 narrative `V14.9-P` archaeology comments. Rationale, root cause, and version pin all belong in commit messages / STATE.md / `git blame`. Code keeps WHY-only one-liners where the next-line code is opaque.
+- Dropped unused `Context` import in `shell/reveal.rs` and `shell/trash.rs` (was the only warning baseline). `cargo check` now produces **0 warnings** (down from 2).
+- Renamed single-letter test bindings in `identity_clustering::tests`; allowed `clippy::similar_names` at `validate_and_split` scope where the 2-means `seed_a_*` / `seed_b_*` pairing is intentional.
+- Fixed pre-existing Swift 6 strict-concurrency error in `apple/.../Pipeline/DeepAnalyze.swift:345` — `onToken: (@Sendable (String) async -> Void)?`. Caller already passed `@Sendable`; apple build now compiles cleanly.
+
+**Warning-banner UI (closes V14.9-P P3 follow-up):**
+- New `LastWarning: EngineError?` property on `EngineClient`. `Apply(IpcEvent.error)` routes by kind: `stages_skipped_missing_models`, `discovery_partial`, `checkpoint_failed_at_shutdown`, `cuda_dll_registration_failed` → `LastWarning`; everything else → `LastError`. A later per-file error now can't clobber a session-level warning.
+- Yellow banner row added at the top of `SidebarProcessingControl.xaml` (#FFCC00 — matches the cross-platform palette token) with an X to dismiss. `OnDismissWarningClicked` clears the slot.
+- `ClearPhaseAndError` resets both `LastError` and `LastWarning`.
+
+**Cross-platform IPC sync (closes V14.9-P P6 follow-up):**
+- Added 13 new commands to `shared/ipc-schema/ipc.schema.json` matching Windows shapes: `planRestructure`, `applyRestructure`, `applyTags`, `renameFiles`, `trashFiles`, `mergeClusters`, `embedTextQuery`, `renamePerson`, `markPersonsAsUnknown`, `findMergeSuggestions`, `embedImageQuery`, `restoreFromTrash`, `revertMerge`. (`verifyCudaPack` was already in the schema.) Schema JSON validates.
+- 14 corresponding Swift cases in `IPCCommand.Payload` plus the `RestructureMove` and `RenameEntry` DTO structs. `FileDoneEvent.skippedStages` added for V14.9-P M2 parity. **`swift build` clean.**
+- 14 dispatch handlers in `FileIDEngineMain.dispatch`: 13 emit `IPCEvent.error(kind: "not_implemented_yet")`, `verifyCudaPack` emits `not_applicable_on_platform`. Mac UI for these flows is per-tab — IPC is symmetric without mac falsely claiming to implement Windows flows.
+- Round-trip tests in `Tests/SharedTests/IPCProtocolTests.swift`: `windowsCommandsRoundTrip` covers all 14; `skippedStagesRoundTrip` covers the new event field. **All 5 tests pass.**
+
+**P4 — stash dropped:** cherry-picked 3 entries from the V14.9-O `stash@{0}` `.gitignore` change (smoke-out exclusion, stderr/stdout exclusion, and the critical scoping of `Models/` rule to *App/installer/dist* trees so the engine's `src/engine/src/models/` Rust module isn't accidentally gitignored on a case-insensitive filesystem). Stash dropped.
+
+**P5 — comparison harness:** new `shared/scripts/compare_face_clustering.sh` — given two SQLite files (one mac, one Windows scan of the same library), reports cluster_count drift % + Jaccard similarity of same-cluster pairs over the face_id intersection. Exits non-zero on >10% drift or Jaccard < 0.85. User runs it after the Windows smoke test.
+
+### Files touched
+
+- Engine: `main.rs`, `pipeline/{discovery,face_clustering,identity_clustering,tagging,deep_analyze}.rs`, `scan_session.rs`, `models/vlm.rs`, `platform.rs`, `ipc/mod.rs`, `shell/{reveal,trash}.rs` — comment strip, unused-import strip, clippy hygiene.
+- App: `EngineClient.cs` (LastWarning + routing), `SidebarProcessingControl.xaml{.cs}` (banner), `Views/Library/LibraryView.xaml.cs` + `Views/Cleanup/CleanupView.xaml.cs` (comment strip).
+- Apple: `IPCProtocol.swift`, `FileIDEngineMain.swift`, `Pipeline/DeepAnalyze.swift` (Sendable fix), `Tests/SharedTests/IPCProtocolTests.swift`.
+- Schema: `shared/ipc-schema/ipc.schema.json`.
+- Scaffolding: `shared/scripts/compare_face_clustering.sh`.
+- Config: `.gitignore`.
+- Docs: this entry; V14.9-P tightened below.
+
+### Verification
+
+- Rust: `cargo check` — same 15 platform-only errors, **0 warnings**. `cargo clippy --release -- -D clippy::correctness -D clippy::suspicious -D clippy::perf` — clean. `cargo fmt --check` — clean.
+- Apple: `swift build` — clean. `swift test --filter IPCProtocolTests` — **5/5 pass.**
+- Schema: `python3 -c "import json; json.load(open(...))"` — valid.
+
+### Outstanding (user-side)
+
+P1 (commit + push) and P2 (Windows smoke test) remain user actions per the no-commit/no-push rule. P5 harness exists; user runs it after collecting two scan outputs.
+
+## V14.9-P (2026-05-13) — Windows end-to-end scan completeness pass
+
+Continuation of V14.9-O. Three parallel Explore agents audited the engine, app, and bridge layer; this entry closes every confirmed finding. (Details superseded by V14.9-Q tightening; one-liners below.)
+
+- **B1 — pre-flight sentinel path mismatch (`main.rs:2980`)**: pre-flight checked `Models/<Dir>/.fileid-installed` but the writer used `Models/.sentinels/<model.id>.installed`. Every scan failed with "models missing" even after successful prewarm. Rewrote pre-flight to share `registry::sentinel_path` with the writer. Closes M5 (added `clip_text` to required list).
+- **B2 — sentinel write isn't atomic + no parent-dir create (`main.rs:1212`)**: `tokio::fs::write` without `create_dir_all` on `.sentinels/`. Now: create_dir_all → write `.tmp` → rename. Structured `EngineError` events on each failure path.
+- **H1 / H2 — Library and Cleanup tabs no auto-refresh on `ScanComplete`**: subscribed to `EngineClient.PropertyChanged`, filter `Phase == Completed`, marshal `ViewModel.RefreshAsync` through DispatcherQueue.
+- **H3 — VLM `sanity_check_binary` too weak (`models/vlm.rs:90`)**: PE-header + size passes on missing DLLs. Now spawns `<binary> --version` so STATUS_DLL_NOT_FOUND surfaces as an actionable Settings → Performance message.
+- **H4 — DB checkpoint shutdown failure silent (`main.rs:343`)**: emits `IpcEvent::Error { kind: "checkpoint_failed_at_shutdown" }` before sink teardown.
+- **H5 — Engine emitted `Ready` even when DB open failed (`main.rs:155`)**: now guarded by `db_conn.is_some()`; on failure emits `db_open_failed` and exits cleanly.
+- **H6 — CI didn't validate identity_clustering tests**: added `--all-targets` to `cargo test`; added a `verifyCudaPack` smoke step.
+- **M1 — discovery walker silently swallowed errors (`pipeline/discovery.rs:143`)**: `error_count: Arc<AtomicU64>` on `DiscoveryHandle`; tick task emits non-fatal `discovery_partial` event.
+- **M2 — skipped pipeline stages not surfaced**: optional `skippedStages: Vec<String>` field on `FileDoneEvent`; one `stages_skipped_missing_models` banner per scan when models are absent.
+- **M3 — CUDA error landed after `emit_ready`**: moved before.
+- **M4 — face_clustering cardinality not validated**: `let Some(...) else` + `debug_assert!`.
+- **M6 — user paths leaked to logs**: ported `redact_path_for_log` to `platform.rs` (3 tests); wrapped highest-traffic log sites.
+- **L1 — README destructive-default warning**: prominent `> ⚠️` banner.
+- **L2 — README platform-status section**: added.
+- **L3 — already covered** by `platforms/windows/CLAUDE.md:29`.
+
+False positive caught: the audit's WelcomeSheet auto-dismiss race claim was wrong — code already subscribes-then-seeds (line 47–58 has the defensive comment).
+
+## V14.9-O (2026-05-13) — Windows CI unblock + IdentityClustering port + Ctrl+R silent-failure fix
+
+Session context: user opened with "the Windows version isn't loading anything when I scan, and the GitHub build is failing." Pulled 3 upstream commits (`231bff5`, `500089e`, `408c3ca`) that landed the engine consumer rewrites for the model layer but **omitted the `engine/src/models/` directory itself** — `main.rs:24` declared `mod models;`, `pipeline/tagging.rs:24` and `pipeline/deep_analyze.rs:123` imported from it, and the directory wasn't on `origin/main`. CI failed every run with `error[E0583]: file not found for module 'models'`.
+
+The 9 missing files were in this machine's local `stash@{0}^3` (untracked tree from the pre-pull stash) and their public APIs matched the consumer call sites verbatim (`ArcFace::load`, `MobileClipImage::load`, `Scrfd::load`, `scrfd::estimate_pose`, `VlmRunner`, `CaptionRequest`, plus per-model `default_weights_path()` helpers). They had been written for these very commits but never committed.
+
+**Fix 1 — Phase A: restore `models/` + close API gaps.**
+- Restored 9 files via `git checkout "stash@{0}^3" -- platforms/windows/src/engine/src/models/`.
+- New `main.rs` (the +736-line rewrite that just landed) referenced 3 symbols the stashed files didn't expose:
+  - `models::registry::ModelFile` — added as a `pub type ModelFile = FileEntry;` alias (cleanest fix — main.rs uses the per-file shape; the existing struct already matched field-for-field).
+  - `models::runtime::system_cuda_toolkit_dir() -> Option<PathBuf>` — added. Resolves the CUDA toolkit's `bin/` for `AddDllDirectory`. Walks `CUDA_PATH`/`CUDA_HOME` env first, then enumerates `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v*\bin` and picks the highest version. `cfg(not(windows))` returns `None` so dev hosts compile clean.
+  - `models::runtime::probe_cuda_pack() -> CudaPackProbe { diagnostics: Option<String> }` — added. Re-runs the pack-DLL probe and produces a non-PII diagnostic string when negative ("CUDA Performance Pack not installed (expected at…). Install from Settings → Performance.") so the Settings → Performance card explains *why* the probe came back ✗ instead of just flashing red.
+- `cargo check` from this Mac: 0 errors in `models/` + `pipeline/`, only Windows-target crate-unresolved errors (`windows::*`, `libc::*`) which are correctly gated to `[target.'cfg(windows)'.dependencies]` and resolve on Windows CI.
+- `cargo clippy --release -- -D clippy::correctness -D clippy::suspicious -D clippy::perf`: 0 errors (only target-related). Only pedantic warnings, not in CI's deny set.
+- `cargo fmt --check`: clean.
+
+**Fix 2 — Phase B: surface engine-not-ready failures at the UI layer.**
+Two fire-and-forget Tasks were silently eating engine errors. When the engine had failed to load models, `SendCommandAsync` returned a faulted Task at `EngineClient.cs:784–788`; the `_ =` discard left the user with zero feedback.
+- `MainWindow.xaml.cs:354–362` Ctrl+R accelerator — converted to `async (_, _) => { try { await StartScanAsync(...); } catch (Exception ex) { Services.DebugLog.Error(...); } }`. The visible "press Ctrl+R, nothing happens" symptom resolves either way (the engine now compiles, so the path that errored before will now succeed), but if it ever errors again, the user gets a log line.
+- `Views/People/SuggestedMergesSheet.xaml.cs:37–42` Loaded handler — same treatment. Adds a user-visible fallback in the header text ("Couldn't fetch suggestions — see logs.") when the call faults.
+
+`OnStartScanClicked` in `SidebarProcessingControl.xaml.cs` (the primary Start Scan button) already uses `WaitForReadyAsync` and was untouched.
+
+**Fix 3 — Phase C: port macOS `IdentityClustering.swift` → Windows Rust.**
+mac uses a two-pass density algorithm (Pass 1 kNN connected components at cosine ≥ 0.55, Pass 2 outlier merge with margin rule, Pass 3 variance/mean validation with recursive 2-means split). Windows `face_clustering::cluster` used a simpler single-pass CC at cosine ≥ 0.70 — produced different cluster topology than mac on the same library.
+
+- New module `platforms/windows/src/engine/src/pipeline/identity_clustering.rs` (~380 lines): faithful Rust port. Hyperparameters struct with same defaults as Swift. `cluster<F: FnMut>(embeddings, searcher, params) -> ClusterResult`. Union-find with path compression + rank. Same 2-means seed selection (face farthest from centroid, then face farthest from that seed). Two `#[cfg(test)]` tests: empty input, and a two-identity 2D separation case.
+- Registered in `pipeline/mod.rs`.
+- Refactored `face_clustering::cluster` to delegate to `identity_clustering::cluster` while preserving the existing `FaceRow → (Vec<ClusterAssignment>, Vec<ClusterAnchor>)` API so `main.rs::handle_run_face_clustering` doesn't need changes. The brute-force kNN searcher inside `face_clustering` is O(n²d) — acceptable for ≤ a few thousand faces and matches the existing `uncertain_pairs()` complexity; swapping in HNSW (e.g. `instant-distance`) is a future option if libraries grow past ~10K faces.
+
+**What's NOT changed this session (audit was stale on these):**
+- Tab views (Library/People/Cleanup/Restructure/DeepAnalyze/Settings) — the upstream merge already turned them into real implementations totaling 9,544 lines. `DetailHostView.xaml`'s "Phase 1 ships placeholder views" comment is stale.
+- VLM caption pipeline — `models/vlm.rs::caption` already invokes `llama-mtmd-cli` as a subprocess; the in-process `vlm-native` feature flag is opt-in and is the only thing still placeholder.
+- IPC schema sync — Windows C# has 14+ commands Swift doesn't (restructure family, bulk rename/tag, merge/revert, etc.); not blocking the user's reported symptoms and adding them to Swift requires matching engine implementation. Left for a future session.
+
+### Files touched
+- `platforms/windows/src/engine/src/models/{arcface.rs, clip_text.rs, clip_tokenizer.rs, mobileclip.rs, mod.rs, registry.rs, runtime.rs, scrfd.rs, vlm.rs}` — restored from local stash (`git checkout stash@{0}^3 -- …`).
+- `platforms/windows/src/engine/src/models/registry.rs` — added `pub type ModelFile = FileEntry;`.
+- `platforms/windows/src/engine/src/models/runtime.rs` — added `system_cuda_toolkit_dir()`, `probe_cuda_pack()`, `CudaPackProbe`.
+- `platforms/windows/src/engine/src/pipeline/identity_clustering.rs` — new file, ~380 lines.
+- `platforms/windows/src/engine/src/pipeline/mod.rs` — declared the new module.
+- `platforms/windows/src/engine/src/pipeline/face_clustering.rs` — `cluster` now delegates to `identity_clustering::cluster`.
+- `platforms/windows/src/FileID.App/MainWindow.xaml.cs` — Ctrl+R awaited with try/catch.
+- `platforms/windows/src/FileID.App/Views/People/SuggestedMergesSheet.xaml.cs` — Loaded handler awaited with try/catch + visible fallback.
+
+### Outstanding for next session
+
+User will commit + push (this session deliberately did not). After CI turns green, smoke-test on the Windows box: scan a real folder, verify Library/People/Cleanup populate end-to-end. If the People tab clusters look different from the mac baseline, the two-pass algorithm's hyperparameters may need tuning (currently exact ports of Swift defaults).
+
 ## V14.9-N (2026-05-13) — two user-reported bugs: Welcome ETA garbage + scan stuck on Discovering
 
 User screenshot 1: MobileCLIP-S2 install row shows `0 B/s · 7726735523606260000000000h 14m remaining` and `578.3 MB of 201.7 MB`. User screenshot 2: clicked Start Scan, sidebar shows "Discovering…" with every stat reading "—" and no Progress event has ever landed.
