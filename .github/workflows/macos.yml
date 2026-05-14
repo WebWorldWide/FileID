@@ -1,0 +1,128 @@
+name: macOS app
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'platforms/apple/**'
+      - 'shared/ipc-schema/**'
+      - '.github/workflows/macos.yml'
+  pull_request:
+    paths:
+      - 'platforms/apple/**'
+      - 'shared/ipc-schema/**'
+      - '.github/workflows/macos.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build app + engine (SwiftPM)
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    defaults:
+      run:
+        working-directory: platforms/apple
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        # macos-15 runners ship multiple Xcode versions; pin to the latest
+        # 16.x so Swift 6 strict concurrency + macOS 15 SDK are guaranteed.
+        run: sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer || sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Swift toolchain info
+        run: swift --version
+
+      - name: Cache SwiftPM
+        # MLX + GRDB + onnxruntime are the long-tail deps. Keyed on
+        # Package.resolved so any dep bump invalidates cleanly.
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            ~/Library/Developer/Xcode/DerivedData
+            platforms/apple/.build
+          key: spm-${{ runner.os }}-${{ hashFiles('platforms/apple/Package.resolved') }}
+          restore-keys: |
+            spm-${{ runner.os }}-
+
+      - name: Resolve packages
+        run: swift package resolve
+
+      - name: Build engine (release)
+        run: swift build -c release --product FileIDEngine
+
+      - name: Build app (release)
+        run: swift build -c release --product FileID
+
+      - name: Run tests
+        # Swift Testing framework. SharedTests + EngineTests. Corpus tests
+        # that need a populated Tests/Corpus/ tree skip themselves when the
+        # corpus isn't present (it's downloaded via scripts/build_corpus.sh
+        # locally and is too slow/fragile to fetch in CI).
+        run: swift test
+
+      - name: Verify binaries exist
+        run: |
+          set -euo pipefail
+          for bin in .build/release/FileID .build/release/FileIDEngine; do
+            if [[ ! -x "$bin" ]]; then
+              echo "::error::Missing executable: $bin"
+              exit 1
+            fi
+            size_mb=$(du -m "$bin" | cut -f1)
+            echo "$bin OK (${size_mb} MB)"
+          done
+
+      # Privacy gate parity with Windows: shipped binaries must NOT contain
+      # telemetry SDK strings. List MUST stay in sync with the Windows
+      # workflow + platforms/windows/build/publish-bundle.ps1.
+      - name: Privacy — telemetry-string scan
+        run: |
+          set -euo pipefail
+          forbidden=(
+            "sentry.io"
+            "io.sentry"
+            "applicationinsights"
+            "applicationinsights.azure.com"
+            "googletagmanager"
+            "google-analytics.com"
+            "segment.io"
+            "segment.com"
+            "mixpanel.com"
+            "amplitude.com"
+            "posthog.com"
+            "datadoghq"
+            "bugsnag"
+            "rollbar.com"
+            "honeycomb.io"
+            "newrelic.com"
+            "raygun.io"
+            "firebase"
+            "firebaseio.com"
+            "appcenter.ms"
+            "in.appcenter.ms"
+            "crashpad"
+            "breakpad"
+          )
+          hits=()
+          for bin in .build/release/FileID .build/release/FileIDEngine; do
+            for needle in "${forbidden[@]}"; do
+              # `strings` extracts printable ASCII + UTF-16 runs; covers both
+              # Swift literal pools and MachO __cstring sections.
+              if strings -a "$bin" | grep -q -F "$needle"; then
+                hits+=("$bin:$needle")
+              fi
+            done
+          done
+          if (( ${#hits[@]} > 0 )); then
+            printf '::error::Telemetry strings found in shipped binary:\n'
+            printf '  %s\n' "${hits[@]}"
+            exit 1
+          fi
+          echo "No telemetry strings detected. ✅"
