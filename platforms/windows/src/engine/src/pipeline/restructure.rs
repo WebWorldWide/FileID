@@ -44,6 +44,7 @@ pub enum FolderClassification {
 
 /// Per-source-folder classification + the dominant destination category.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ClassifiedFolder {
     pub source_folder: PathBuf,
     pub classification: FolderClassification,

@@ -73,6 +73,7 @@ pub struct TaggedFile {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DetectedFace {
     pub bbox: [f32; 4],          // x, y, w, h in image pixels
     pub landmarks: [[f32; 2]; 5],
@@ -112,6 +113,7 @@ impl ModelStack {
         Self { arcface, scrfd, mobileclip }
     }
 
+    #[allow(dead_code)]
     pub fn empty() -> Self {
         Self { arcface: None, scrfd: None, mobileclip: None }
     }
@@ -379,6 +381,7 @@ async fn extract_video_keyframe_blocking(path: PathBuf) -> anyhow::Result<(Vec<u
 /// Arc-shared OCR variant — avoids cloning a multi-MB RGB buffer when
 /// the caller still holds the original. The shared Arc is dropped on
 /// the worker thread when OCR returns; the original Vec stays untouched.
+#[allow(dead_code)]
 async fn run_ocr_blocking_arc(rgb: std::sync::Arc<Vec<u8>>, w: u32, h: u32) -> anyhow::Result<Option<shell::ocr::OcrResult>> {
     tokio::task::spawn_blocking(move || -> anyhow::Result<Option<shell::ocr::OcrResult>> {
         match shell::ocr::recognize(&rgb, w, h) {

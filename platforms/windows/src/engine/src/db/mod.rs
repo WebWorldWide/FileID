@@ -57,6 +57,7 @@ pub fn open_writer(db_path: &Path) -> Result<Connection> {
 /// Open a read-only connection. The writer's WAL allows concurrent readers
 /// without blocking; readers see a snapshot at the time the connection was
 /// opened. App side will use this; the engine creates the writer.
+#[allow(dead_code)]
 pub fn open_reader(db_path: &Path) -> Result<Connection> {
     let conn = Connection::open_with_flags(
         db_path,

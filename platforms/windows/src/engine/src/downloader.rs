@@ -74,6 +74,7 @@ pub fn build_shared_client() -> Result<Arc<reqwest::Client>> {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DownloadProgress {
     pub url: String,
     pub bytes_done: u64,

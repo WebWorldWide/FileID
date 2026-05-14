@@ -20,11 +20,13 @@ use windows::Win32::System::Power::{
 };
 
 /// RAII handle. Drop to release the keep-awake assertion.
+#[allow(dead_code)]
 pub struct SleepGuard {
     #[cfg(windows)]
     prior: EXECUTION_STATE,
 }
 
+#[allow(dead_code)]
 impl SleepGuard {
     #[cfg(windows)]
     pub fn acquire() -> Self {

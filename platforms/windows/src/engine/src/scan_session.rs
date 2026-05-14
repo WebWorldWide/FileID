@@ -32,6 +32,7 @@ use crate::pipeline::tagging::{ModelStack, Tagger, TaggedFile};
 use crate::platform::{PriorityBoost, SleepGuard};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum SessionPhase {
     Idle,
     Discovering,
@@ -57,6 +58,7 @@ impl SessionPhase {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct SessionResult {
     pub processed: u64,
     pub failed: u64,

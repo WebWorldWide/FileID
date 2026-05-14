@@ -63,6 +63,7 @@ pub fn write_tags(path: &Path, tags: &[String]) -> Result<()> {
 
 /// Read the file's tag list. Today: sidecar only. V14.x: also probes
 /// IPropertyStore PKEY_Keywords and de-duplicates the union.
+#[allow(dead_code)]
 pub fn read_tags(path: &Path) -> Result<Vec<String>> {
     let sidecar = sidecar_path(path);
     if !sidecar.exists() {

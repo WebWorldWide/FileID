@@ -63,6 +63,7 @@ impl ScanCoordinator {
 
     /// Reset for a new scan session. Must only be called when no tasks are
     /// observing the coordinator.
+    #[allow(dead_code)]
     pub fn reset(&self) {
         self.inner.paused.store(false, Ordering::Relaxed);
         self.inner.cancelled.store(false, Ordering::Relaxed);

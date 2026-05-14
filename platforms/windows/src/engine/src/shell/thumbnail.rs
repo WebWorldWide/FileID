@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 // Thumbnail — IShellItemImageFactory::GetImage.
 //
 // Mirror of macOS `QLThumbnailGenerator`. Uses the system's

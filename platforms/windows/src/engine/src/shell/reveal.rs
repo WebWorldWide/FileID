@@ -20,6 +20,7 @@ use windows::Win32::UI::Shell::{
 };
 
 #[cfg(windows)]
+#[allow(dead_code)]
 pub fn reveal(path: &Path) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
 

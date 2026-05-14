@@ -55,6 +55,7 @@ impl Default for Hyperparameters {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ClusterResult {
     /// `cluster_ids[i]` = dense cluster ID for embedding i. Always
     /// non-negative; every face gets a cluster (singleton if alone).

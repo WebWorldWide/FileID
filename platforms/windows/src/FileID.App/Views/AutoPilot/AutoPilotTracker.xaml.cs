@@ -19,12 +19,14 @@ public sealed partial class AutoPilotTracker : UserControl
     private static readonly SolidColorBrush GreenBrush =
         new(Color.FromArgb(0xFF, 0x6B, 0xE0, 0x82));
 
+#if DEBUG
     /// <summary>V14.9-K4: tracks whether Sync() has been observed since the
     /// last stage transition. Used by the DEBUG-only `OnEngineChanged`
     /// instrumentation to log a single "tracker became visible" line per
     /// AutoPilot run — so a future regression that hides the control
     /// from the visual tree shows up immediately in engine.jsonl.</summary>
     private bool _debugLoggedVisible;
+#endif
 
     public AutoPilotTracker()
     {
@@ -54,7 +56,9 @@ public sealed partial class AutoPilotTracker : UserControl
         Visibility = stage is null ? Visibility.Collapsed : Visibility.Visible;
         if (stage is null)
         {
+#if DEBUG
             _debugLoggedVisible = false;
+#endif
             return;
         }
 #if DEBUG

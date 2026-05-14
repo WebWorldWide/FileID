@@ -16,6 +16,7 @@
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum VlmModelKind {
     QwenVl3B,
     QwenVl7B,
@@ -23,6 +24,7 @@ pub enum VlmModelKind {
     SmolVlm,
 }
 
+#[allow(dead_code)]
 impl VlmModelKind {
     pub fn id(self) -> &'static str {
         match self {
@@ -65,6 +67,7 @@ impl VlmModelKind {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct VlmModelFiles {
     pub kind: VlmModelKind,
     /// Main GGUF weights file.
@@ -73,6 +76,7 @@ pub struct VlmModelFiles {
     pub mmproj_path: PathBuf,
 }
 
+#[allow(dead_code)]
 impl VlmModelFiles {
     pub fn default_paths(kind: VlmModelKind) -> anyhow::Result<Self> {
         let dir = crate::paths::models_dir()?.join("VLM").join(kind.id());
@@ -91,6 +95,7 @@ impl VlmModelFiles {
 /// Per-file Deep Analyze outcome — whatever the engine writes back to
 /// the DB after a successful caption + smart-rename round-trip.
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct AnalyzeOutcome {
     pub file_id: i64,
     pub description: Option<String>,
@@ -101,6 +106,7 @@ pub struct AnalyzeOutcome {
 
 /// What we want from this file: caption, smart filename, or both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum AnalyzeMode {
     CaptionOnly,
     RenameOnly,

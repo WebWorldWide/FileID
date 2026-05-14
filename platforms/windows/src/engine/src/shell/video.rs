@@ -37,6 +37,7 @@ fn ensure_mf_started() {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct VideoFrame {
     pub width: u32,
     pub height: u32,

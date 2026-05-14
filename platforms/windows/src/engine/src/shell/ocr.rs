@@ -12,6 +12,7 @@ use windows::Graphics::Imaging::{BitmapDecoder, SoftwareBitmap};
 use windows::Media::Ocr::OcrEngine;
 use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream};
 
+#[allow(dead_code)]
 pub struct OcrResult {
     pub text: String,
     pub lines: Vec<OcrLine>,
@@ -19,6 +20,7 @@ pub struct OcrResult {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct OcrLine {
     pub text: String,
     pub bbox: [f32; 4],
@@ -128,6 +130,7 @@ pub fn recognize(rgb: &[u8], width: u32, height: u32) -> Result<OcrResult> {
 /// Best-effort list of locales the engine actually supports on this box.
 /// We probe by trying to create the engine; if it succeeds, return a
 /// single "auto" entry.
+#[allow(dead_code)]
 pub fn user_locales() -> Result<Vec<String>> {
     let _ = OcrEngine::TryCreateFromUserProfileLanguages()
         .context("TryCreateFromUserProfileLanguages")?;

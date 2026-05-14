@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 // JobQueue — single-FIFO queue for background work the engine runs.
 //
 // Mirror of macOS engine/Sources/FileIDEngine/JobQueue.swift. Categories:

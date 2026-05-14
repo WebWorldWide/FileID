@@ -69,6 +69,7 @@ impl Sink {
 
     /// Close the sink. After this, `send` returns immediately (silently).
     /// The writer task will exit once the channel drains.
+    #[allow(dead_code)]
     pub fn close(&self) {
         // Drop the only known sender from this handle isn't enough since
         // clones may exist. We expose this only as a documented hook; in

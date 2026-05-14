@@ -31,6 +31,7 @@ pub const COS_HIGH: f32 = 0.70;
 pub const COS_LOW: f32 = 0.45;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FaceRow {
     pub face_id: i64,
     pub file_id: i64,
@@ -45,6 +46,7 @@ pub struct ClusterAssignment {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ClusterAnchor {
     pub cluster_id: i32,
     pub anchor_face_id: i64,
@@ -142,6 +144,7 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
 
 /// Pairs in the uncertain similarity band 0.45..=0.70. The VLM verifier
 /// (Phase 6) is invoked on these — outputs go back into the union-find.
+#[allow(dead_code)]
 pub fn uncertain_pairs(faces: &[FaceRow]) -> Vec<(i64, i64, f32)> {
     let mut pairs = Vec::new();
     for i in 0..faces.len() {

@@ -236,6 +236,7 @@ impl Discovery {
 
 /// Run the discovery walk and call `progress` periodically with the
 /// running count. Used by tests + the standalone iterate harness.
+#[allow(dead_code)]
 pub async fn enumerate(root: impl AsRef<Path>) -> Result<Vec<DiscoveredFile>> {
     let coordinator = ScanCoordinator::new();
     let discovery = Discovery::new(root.as_ref(), coordinator);
