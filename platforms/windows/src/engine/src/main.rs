@@ -336,6 +336,7 @@ async fn main() -> Result<()> {
 
     // Wait for shutdown signal (from either source).
     main_shutdown.await;
+    tracing::info!("[SHUTDOWN] main woke from shutdown signal");
 
     // Checkpoint before exit so the next opener doesn't need the .wal/.shm
     // sidecars. On failure, surface to the sink before teardown so the
@@ -346,6 +347,7 @@ async fn main() -> Result<()> {
         let guard = conn_arc.lock();
         db::checkpoint_truncate(&guard)
     });
+    tracing::info!("[SHUTDOWN] checkpoint done");
     if let Some(Err(err)) = checkpoint_outcome {
         tracing::warn!(?err, "WAL checkpoint at shutdown failed");
         sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
@@ -358,10 +360,12 @@ async fn main() -> Result<()> {
     }
     tokio::time::sleep(Duration::from_millis(50)).await;
     drop(db_conn);
+    tracing::info!("[SHUTDOWN] db_conn dropped");
 
     // Tear down stdio loop and sink.
     stdio_loop.abort();
     drop(sink);
+    tracing::info!("[SHUTDOWN] sink dropped, awaiting writer");
     let _ = tokio::time::timeout(Duration::from_secs(2), sink_writer).await;
 
     tracing::info!("FileIDEngine exiting cleanly");
