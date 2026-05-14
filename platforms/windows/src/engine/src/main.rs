@@ -199,6 +199,15 @@ async fn main() -> Result<()> {
     // the parent watchdog so they cooperate on exit.
     let shutdown = Arc::new(Notify::new());
 
+    // Register the main-task waiter NOW, before any task that could
+    // call `notify_waiters()` is spawned. `Notify::notify_waiters`
+    // only wakes already-registered waiters, so without this an empty
+    // stdin can EOF inside the spawned stdio loop before main reaches
+    // its own `.notified().await` — the wake-up gets lost and the
+    // engine never sees its own shutdown signal.
+    let main_shutdown = shutdown.notified();
+    tokio::pin!(main_shutdown);
+
     // Parent watchdog: poll OpenProcess(parent_pid) every 5 s. If parent is
     // gone or our handle to it is invalid, set the shutdown notifier.
     let parent_pid = platform::get_parent_pid();
@@ -310,12 +319,12 @@ async fn main() -> Result<()> {
                         }
                         Ok(BoundedRead::Eof) => {
                             tracing::info!("stdin EOF; entering shutdown");
-                            dispatch_shutdown.notify_one();
+                            dispatch_shutdown.notify_waiters();
                             break;
                         }
                         Err(err) => {
                             tracing::error!(%err, "stdin read error");
-                            dispatch_shutdown.notify_one();
+                            dispatch_shutdown.notify_waiters();
                             break;
                         }
                     }
@@ -325,7 +334,7 @@ async fn main() -> Result<()> {
     });
 
     // Wait for shutdown signal (from either source).
-    shutdown.notified().await;
+    main_shutdown.await;
 
     // Checkpoint before exit so the next opener doesn't need the .wal/.shm
     // sidecars. On failure, surface to the sink before teardown so the
@@ -401,7 +410,7 @@ async fn handle_line(
         }
         CommandPayload::Shutdown(_) => {
             tracing::info!("shutdown command received");
-            shutdown.notify_one();
+            shutdown.notify_waiters();
         }
         CommandPayload::PrewarmModel(payload) => {
             // V14.7.4: clear the cancel flag at the start of every NEW
