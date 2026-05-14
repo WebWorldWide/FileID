@@ -42,8 +42,20 @@ use ipc::{
 
 const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let result = rt.block_on(async_main());
+    // Abandon any still-running spawn_blocking tasks (e.g. the parent
+    // watchdog's INFINITE WaitForSingleObject). The OS reaps them on
+    // process exit; without this, a long-lived blocking task can hold
+    // the runtime drop and prevent the process from exiting.
+    rt.shutdown_timeout(std::time::Duration::from_millis(0));
+    result
+}
+
+async fn async_main() -> Result<()> {
     init_tracing()?;
     let _ = paths::ensure_state_dirs()?; // create %LOCALAPPDATA%/FileID/{logs,Models,...}
 
@@ -336,18 +348,15 @@ async fn main() -> Result<()> {
 
     // Wait for shutdown signal (from either source).
     main_shutdown.await;
-    tracing::info!("[SHUTDOWN] main woke from shutdown signal");
 
     // Checkpoint before exit so the next opener doesn't need the .wal/.shm
     // sidecars. On failure, surface to the sink before teardown so the
-    // app's next launch can warn about stale-read. The checkpoint result
-    // is captured into a local so we can drop the mutex guard before
-    // any `await` on the sink.
+    // app's next launch can warn about stale-read. Capture into a local
+    // so the mutex guard drops before any await on the sink.
     let checkpoint_outcome = db_conn.as_ref().map(|conn_arc| {
         let guard = conn_arc.lock();
         db::checkpoint_truncate(&guard)
     });
-    tracing::info!("[SHUTDOWN] checkpoint done");
     if let Some(Err(err)) = checkpoint_outcome {
         tracing::warn!(?err, "WAL checkpoint at shutdown failed");
         sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
@@ -360,12 +369,10 @@ async fn main() -> Result<()> {
     }
     tokio::time::sleep(Duration::from_millis(50)).await;
     drop(db_conn);
-    tracing::info!("[SHUTDOWN] db_conn dropped");
 
     // Tear down stdio loop and sink.
     stdio_loop.abort();
     drop(sink);
-    tracing::info!("[SHUTDOWN] sink dropped, awaiting writer");
     let _ = tokio::time::timeout(Duration::from_secs(2), sink_writer).await;
 
     tracing::info!("FileIDEngine exiting cleanly");

@@ -153,21 +153,31 @@ pub async fn watch_parent(parent_pid: u32, shutdown: Arc<Notify>) {
     // exists. This task is the sole owner of the value across the move.
     let handle_addr = handle.0 as usize;
 
-    // Spawn a blocking task that waits on the handle. WaitForSingleObject
-    // returns WAIT_OBJECT_0 when the parent exits.
-    let result = tokio::task::spawn_blocking(move || {
+    let wait = tokio::task::spawn_blocking(move || {
         let h = HANDLE(handle_addr as *mut core::ffi::c_void);
         let r = unsafe { WaitForSingleObject(h, u32::MAX) };
         unsafe { let _ = CloseHandle(h); }
         r
-    })
-    .await;
+    });
 
-    if result.is_ok() {
-        tracing::info!("parent process exited; signaling shutdown");
-        shutdown.notify_waiters();
-    } else {
-        tracing::warn!("parent watchdog task aborted; falling back to stdin EOF detection");
+    // Race the blocking wait against the shared shutdown signal so EOF /
+    // explicit Shutdown / etc. can unblock us when the parent stays alive
+    // (e.g. test harnesses, debugger sessions). If we lose the race, the
+    // blocking thread keeps its INFINITE wait until process exit; the OS
+    // reaps it. shutdown_timeout(0) on the Runtime ensures the leaked
+    // blocking task does NOT delay process exit.
+    tokio::select! {
+        _ = shutdown.notified() => {
+            tracing::info!("watch_parent cancelled by shutdown signal");
+        }
+        result = wait => {
+            if result.is_ok() {
+                tracing::info!("parent process exited; signaling shutdown");
+                shutdown.notify_waiters();
+            } else {
+                tracing::warn!("parent watchdog task aborted; falling back to stdin EOF detection");
+            }
+        }
     }
 }
 
