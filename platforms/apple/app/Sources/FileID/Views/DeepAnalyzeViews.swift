@@ -27,7 +27,7 @@ struct DeepAnalyzeModelPickerCard: View {
                     Text("Recommended for this Mac (\(Int(ramGB)) GB RAM)")
                         .font(.caption.monospaced()).foregroundStyle(.secondary)
                 }
-                Text("On-device AI that reads images and writes captions + smart filenames. Nothing leaves your Mac.")
+                Text("Reads images and writes captions plus smart filenames.")
                     .font(.callout).foregroundStyle(.secondary)
                 Divider().opacity(0.3)
                 ForEach(top3, id: \.rawValue) { kind in
@@ -319,7 +319,7 @@ struct DeepAnalyzeView: View {
                 .padding(.top, 4)
             VStack(alignment: .leading, spacing: 4) {
                 Text("Deep Analyze").font(.largeTitle.bold())
-                Text("Reads your images with an on-device AI and writes a sentence about each one plus a smart filename. Nothing leaves your Mac.")
+                Text("Reads each of your images and writes a sentence about it plus a smart filename.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }

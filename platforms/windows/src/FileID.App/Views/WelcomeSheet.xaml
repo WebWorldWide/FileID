@@ -39,7 +39,7 @@
                 <StackPanel Spacing="6">
                     <TextBlock Text="Welcome to FileID"
                                Style="{StaticResource TitleLargeTextBlockStyle}" />
-                    <TextBlock Text="FileID runs entirely on your PC. Install the on-device models below to enable semantic search, face clustering, and Deep Analyze. Every model downloads from its canonical upstream repository on HuggingFace — FileID never redistributes weights."
+                    <TextBlock Text="Install the AI models below to enable semantic search, face clustering, and Deep Analyze. Each model downloads once from HuggingFace and runs locally on your hardware."
                                Style="{StaticResource BodyTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                TextWrapping="Wrap" />

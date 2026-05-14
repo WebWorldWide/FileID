@@ -2,6 +2,56 @@
 
 > Snapshot of what's working and where we left off. Update at the end of every working session.
 
+## V14.9-S (2026-05-13) — Fix model-download 404s in welcome sheet
+
+First-run "Install all" hit two HTTP 404s. The Windows engine's `registry.rs` URLs had drifted from current HuggingFace layouts. Fixed and verified via HEAD checks against every URL in the registry.
+
+**Stale URLs replaced (all in `platforms/windows/src/engine/src/models/registry.rs`):**
+
+| Slot | Old URL (404) | New URL (200) |
+|---|---|---|
+| ArcFace iResNet50 | `immich-app/buffalo_l/.../w600k_r50.onnx` | `immich-app/buffalo_l/.../recognition/model.onnx` |
+| SCRFD detector | `immich-app/buffalo_l/.../scrfd_10g_bnkps.onnx` | `immich-app/buffalo_l/.../detection/model.onnx` |
+| MobileCLIP-S2 image | `apple/MobileCLIP-S2-OpenCLIP/.../open_clip_pytorch_model.onnx` | `Xenova/mobileclip_s2/.../onnx/vision_model.onnx` |
+| CLIP text encoder | `apple/MobileCLIP-S2-OpenCLIP/.../text_encoder.onnx` | `Xenova/mobileclip_s2/.../onnx/text_model.onnx` |
+| Gemma 3 4B mmproj | `mmproj-gemma-3-4b-it-f16.gguf` | `mmproj-model-f16.gguf` (ggml-org uses generic naming for Gemma) |
+
+The Immich `buffalo_l` repo reorganized into per-task subdirs (`recognition/`, `detection/`) sometime after the URLs were first wired. The `apple/MobileCLIP-S2-OpenCLIP` repo's ONNX file was removed; `Xenova/mobileclip_s2` is the community ONNX port that transformers.js + the broader ONNX community use. Local destination filenames (`w600k_r50.onnx`, `scrfd_10g_bnkps.onnx`) preserved — only the remote URLs change, so the tagging stack doesn't need to know.
+
+**`approx_bytes` updated** to match actual sizes from HuggingFace's tree API (most were stale by ~20%, the Qwen 3B mmproj was off by ~50%). Real download progress UI is unaffected — that uses HTTP Content-Length — but the pre-flight "≈X GB disk" hint in the welcome sheet now matches reality.
+
+**Inventory audit** of every other URL in `registry.rs` (CLIP BPE vocab + merges, Qwen 3B/7B + mmproj, SmolVLM + mmproj, llama.cpp Windows-Vulkan runtime b4404) all return 200.
+
+**Engine rebuilt** at `target/x86_64-pc-windows-msvc/release/FileIDEngine.exe` (7.8 MB) and restaged into `dist/x64/FileID/`, `bin/x64/Release/.../win-x64/`, and `.../win-x64/publish/`. User needs to either re-launch the app and click Retry on the failed rows, or wipe `%LOCALAPPDATA%\FileID\Models\{arcface,scrfd,mobileclip,clip_text}\` + `.sentinels/` for a clean install.
+
+### Files touched (V14.9-S)
+- `platforms/windows/src/engine/src/models/registry.rs`
+- `shared/docs/MODELS.md` (MobileCLIP-S2 + CLIP text sections — Windows source row split out from macOS)
+- `shared/docs/STATE.md` (this entry)
+
+## V14.9-R (2026-05-13) — Zero-warning Windows build + macOS CI
+
+Build cleanup + new macOS CI workflow. Three threads:
+
+**Windows build now reports 0 warnings, 0 errors:**
+- `AutoPilotTracker.xaml.cs` — wrapped `_debugLoggedVisible` field declaration and its `Sync()` reset in `#if DEBUG`. The field was previously read only inside an `#if DEBUG` block, so Release builds tripped `CS0414` (assigned but never read) and `TreatWarningsAsErrors=true` killed the build. The breadcrumb is preserved in Debug; Release strips it entirely.
+- 41 Rust dead-code warnings silenced via per-item `#[allow(dead_code)]` (12 files: `coordinator`, `db/mod`, `downloader`, `ipc/sink`, `paths`, `pipeline/{discovery,tagging,face_clustering,identity_clustering,deep_analyze,restructure}`, `scan_session`, `shell/{reveal,sleep,tags,ocr,video}`) plus module-level `#![allow(dead_code)]` on `job_queue.rs` and `shell/thumbnail.rs` where every item is staged for a future phase. `[lints.rust] dead_code = "warn"` policy stays — new regressions still flag.
+- Verified `cargo build --release` and `dotnet publish` both run clean.
+
+**macOS CI:**
+- New `.github/workflows/macos.yml`. `macos-15` runner, `swift build -c release` for both `FileIDEngine` + `FileID`, `swift test` (SharedTests + EngineTests), binary smoke + privacy-string gate at parity with the Windows workflow. SwiftPM cache keyed on `Package.resolved`.
+
+**macOS-parity audit:** the 7 gaps the prior plan scoped (multi-merge People, Restructure ApplyBar, Restructure engine classifier, AutoPilot stage tracker overlay, Deep Analyze "name people first" gate, file preview parity, Library thumbnails) turned out to already be wired in the current codebase. Audit confirmed each: `PeopleView.xaml.cs::OnBulkMergeClicked`, `RestructureView.xaml`'s floating ApplyBar (V14.9-M), `main.rs:806` `classify_folders`, `SidebarProcessingControl.xaml:63` `AutoPilotTracker` mount + `EngineClient::RunAutoPilotAsync` driving stages, `DeepAnalyzeView.xaml.cs::RefreshNamePeopleGateAsync`, `FilePreviewSheet.xaml.cs::OnKeyDown` + `SetSiblings` + `TagInput` + Faces/Text badges, `ThumbnailService.cs` LRU + worker queue used by LibraryView. No new code needed — earlier exploration agent had a stale snapshot.
+
+### Files touched (V14.9-R)
+
+- `platforms/windows/src/FileID.App/Views/AutoPilot/AutoPilotTracker.xaml.cs`
+- `platforms/windows/src/engine/src/job_queue.rs`, `shell/thumbnail.rs` (module-level allow)
+- `platforms/windows/src/engine/src/{coordinator,db/mod,downloader,ipc/sink,paths,scan_session}.rs`
+- `platforms/windows/src/engine/src/pipeline/{discovery,tagging,face_clustering,identity_clustering,deep_analyze,restructure}.rs`
+- `platforms/windows/src/engine/src/shell/{reveal,sleep,tags,ocr,video}.rs`
+- `.github/workflows/macos.yml` (new)
+
 ## V14.9-Q (2026-05-13) — Full code cleanup + warning-banner UI + cross-platform IPC sync
 
 Cleanup sweep on top of V14.9-O+P. Three orthogonal wins:

@@ -177,17 +177,6 @@
                 </Border>
             </StackPanel>
 
-            <!-- Privacy stamp -->
-            <Border Padding="14,9"
-                    CornerRadius="20"
-                    Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                    HorizontalAlignment="Center">
-                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                    <FontIcon Glyph="&#xE946;" FontSize="13" Foreground="{ThemeResource AiBrush}" />
-                    <TextBlock Text="Nothing leaves your machine."
-                               Style="{StaticResource CaptionTextBlockStyle}" />
-                </StackPanel>
-            </Border>
         </StackPanel>
     </Grid>
 </UserControl>

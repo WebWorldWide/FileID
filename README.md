@@ -12,14 +12,17 @@
   <img src="https://img.shields.io/badge/Windows-10%2F11%20%2B%20WoA-0078d4?style=flat-square">
   <img src="https://img.shields.io/badge/Linux-Phase%205-orange?style=flat-square">
   <img src="https://img.shields.io/badge/100%25-on--device-green?style=flat-square">
-  <img src="https://img.shields.io/badge/0%25-telemetry-brightgreen?style=flat-square">
+</p>
+
+<p align="center">
+  <a href="https://github.com/AdamNolle/FileID/actions/workflows/windows-engine.yml"><img src="https://github.com/AdamNolle/FileID/actions/workflows/windows-engine.yml/badge.svg" alt="Windows engine"></a>
+  <a href="https://github.com/AdamNolle/FileID/actions/workflows/windows-app.yml"><img src="https://github.com/AdamNolle/FileID/actions/workflows/windows-app.yml/badge.svg" alt="Windows app"></a>
+  <a href="https://github.com/AdamNolle/FileID/actions/workflows/macos.yml"><img src="https://github.com/AdamNolle/FileID/actions/workflows/macos.yml/badge.svg" alt="macOS app"></a>
 </p>
 
 ---
 
 Point FileID at a folder. It reads every file inside — images, video, PDFs, docs — and builds one searchable library that understands what's *in* them. Faces cluster into named cards. Duplicates group by perceptual hash. A local vision-language model writes captions and proposes filenames. Folder reorganization previews before anything moves on disk.
-
-**Nothing leaves your machine.**
 
 ---
 
@@ -28,7 +31,6 @@ Point FileID at a folder. It reads every file inside — images, video, PDFs, do
 **For users**
 - [Quickstart](#quickstart) — get FileID running in under a minute
 - [Features](#features) — what the six tabs do
-- [Privacy](#privacy) — what we don't do (and how it's enforced)
 - [Install](#install) — Windows + macOS download instructions
 
 **For developers**
@@ -37,6 +39,7 @@ Point FileID at a folder. It reads every file inside — images, video, PDFs, do
   - [macOS](#build--macos) — engine + SwiftUI app
 - [Repository layout](#repository-layout) — where things live
 - [Architecture](#architecture) — two-binary IPC design, GPU acceleration, ML stack
+- [Continuous integration](#continuous-integration) — Windows + macOS workflows + privacy gate
 - [Troubleshooting](#troubleshooting) — common build / first-launch errors
 - [Contributing](#contributing) — conventions + persistence files
 
@@ -90,22 +93,11 @@ Detailed instructions: [Build from source](#build-from-source).
 
 ### Platform status
 
-macOS is the canonical reference and ships every tab end-to-end. The Windows port is mid-Phase-1: the engine, IPC schema, scan pipeline, and all six tabs are wired and compile cleanly; full hardware verification is still ongoing. Database migrations v1–v7 are byte-faithful with macOS GRDB, so a library scanned on one platform opens on the other. Linux is deferred to Phase 5 — the Rust engine builds standalone today, but the UI port (Avalonia or GTK4) hasn't started. See `shared/docs/SHIP.md` for the per-phase breakdown.
+macOS is the canonical reference and ships every tab end-to-end. The Windows port is feature-complete on the six tabs (Library / People / Cleanup / Deep Analyze / Restructure / Settings) and the first-run Welcome sheet — engine + IPC schema + scan pipeline + UI all wired. Release build is warning-free across both Rust and .NET; on-hardware GPU verification is ongoing. Database migrations v1–v7 are byte-faithful with macOS GRDB, so a library scanned on one platform opens on the other. Linux is deferred to Phase 5 — the Rust engine builds standalone today, but the UI port (Avalonia or GTK4) hasn't started. See `shared/docs/SHIP.md` for the per-phase breakdown.
 
----
+### First launch
 
-## Privacy
-
-Zero telemetry. Forever.
-
-- **No analytics SDK.** Not Sentry, not Application Insights, not Firebase, not Segment, not Mixpanel, not Google Analytics, not anything.
-- **No crash-reporting service.** Crashes write a structured log to `%LOCALAPPDATA%\FileID\logs\` (Windows) or `~/Library/Logs/FileID/` (macOS) and stay there.
-- **No update pings.** No "checking for updates" call.
-- **No model-download instrumentation.** The downloader fetches the bytes you asked for from HuggingFace and that's it.
-
-The only network code in the app is the user-initiated model downloader. CI grep-gates every shipped binary for telemetry-related strings — zero hits required to ship.
-
-Full guarantees: [`shared/docs/PRIVACY.md`](shared/docs/PRIVACY.md).
+On first launch the **Welcome sheet** offers to install the on-device models: MobileCLIP-S2 (~210 MB, semantic search), ArcFace + SCRFD (~190 MB, face clustering), and a VLM for Deep Analyze (Qwen 2.5-VL 3B ~3 GB recommended, or pick a smaller one). Each model downloads directly from its upstream HuggingFace repo — FileID never redistributes weights. You can defer with "Skip for now" and install later from Settings → AI Models.
 
 ---
 
@@ -326,6 +318,18 @@ DirectML covers every Windows GPU vendor in one shipped backend. Performance Pac
 
 Full mapping: [`shared/docs/ARCHITECTURE.md`](shared/docs/ARCHITECTURE.md).
 
+### Continuous integration
+
+Three GitHub Actions workflows run on every push + PR. All three must stay green.
+
+| Workflow | What it runs | Matrix |
+| --- | --- | --- |
+| [`windows-engine.yml`](.github/workflows/windows-engine.yml) | `cargo fmt`, functional-only clippy, `cargo audit`, `cargo build --release`, `cargo test`, startup smoke (engine emits `ready` + executes a `verifyCudaPack` reprobe), telemetry-string privacy gate | x64 (`windows-latest`) · arm64-native (`windows-11-arm`) · arm64-cross |
+| [`windows-app.yml`](.github/workflows/windows-app.yml) | NuGet restore (locked), `dotnet build` Debug + Release for the WinUI 3 app, IpcSchema xUnit tests | x64 + arm64 (`windows-latest`) |
+| [`macos.yml`](.github/workflows/macos.yml) | SwiftPM resolve + cache, `swift build -c release` for engine + app, `swift test` (Shared + Engine tests), binary smoke, telemetry-string privacy gate | `macos-15` |
+
+The **privacy gate** in the engine + macOS workflows scans every shipped binary for telemetry-SDK URLs (Sentry, Datadog, Firebase, Crashpad, Breakpad, and ~20 others). Zero hits required to ship — same gate `publish-bundle.ps1` enforces locally.
+
 ### State directories
 
 User data lives outside the install dir so an uninstall doesn't wipe it. Use Settings → Advanced → "Wipe local state" when you want a fresh start.
@@ -358,7 +362,8 @@ User data lives outside the install dir so an uninstall doesn't wipe it. Use Set
 | App launches then immediately exits with **`Microsoft.UI.Xaml.dll` faulting at `0xC000027B`** | The main app's `FileID.pri` is missing from the publish folder. `dotnet publish` strips it on .NET 8 + WinAppSDK 1.7+. The `CopyPriFilesToPublish` MSBuild target in `FileID.App.csproj` fixes this — verify with `dir "%LOCALAPPDATA%\FileID-App\FileID.pri"`. |
 | App launches then exits with **`CoreMessagingXP.dll` fault** after activation | Win2D's `CanvasAnimatedControl` is incompatible with the OS build. LavaLamp uses one; if you re-enable it on Windows 11 26200+ you'll see this. Stays disabled until LavaLamp is rewritten on `Microsoft.UI.Composition`. |
 | App launches but engine pill stays **"Starting…"** | `FileIDEngine.exe` isn't beside `FileID.exe`. The build script copies it automatically — verify with `dir "%LOCALAPPDATA%\FileID-App\FileIDEngine.exe"`. |
-| WinAppSDK runtime missing at app launch | Self-contained publish bundles it — but for non-self-contained Debug builds, install the runtime once: `winget install Microsoft.WindowsAppRuntime.1.6` |
+| WinAppSDK runtime missing at app launch | Self-contained publish bundles it — but for non-self-contained Debug builds, install the runtime once: `winget install Microsoft.WindowsAppRuntime.1.7` (pinned in `Directory.Packages.props`). |
+| Welcome sheet shows **"Failed: Couldn't download &lt;model&gt;.onnx: HTTP 404"** | An upstream HuggingFace repo was reorganized after the URL was wired. Check `shared/docs/STATE.md` for the most recent URL-refresh entry; the canonical paths live in `platforms/windows/src/engine/src/models/registry.rs` and `shared/docs/MODELS.md`. Update + rebuild the engine, restage `FileIDEngine.exe` beside `FileID.exe`, click Retry. |
 
 ### macOS
 

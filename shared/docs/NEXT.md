@@ -4,6 +4,20 @@
 
 ---
 
+## V14.9-R follow-ups (2026-05-13)
+
+R1, R2, R3 closed in-session (zero-warning Windows build + new macOS CI workflow + parity-gap audit confirming the prior backlog is already coded). One item needs the user.
+
+### R1 — Push + watch CI
+
+Working tree: 1 C# fix in `AutoPilotTracker.xaml.cs`, dead-code annotations across ~17 Rust files, new `.github/workflows/macos.yml`, plus this doc bump. Suggested grouping: (1) R1 build cleanup (CS0414 + Rust allows); (2) R2 macOS CI workflow; (3) R3 docs. Push, watch `gh run watch windows-engine.yml`, `gh run watch windows-app.yml`, `gh run watch macos.yml`. First macOS run will warm the SwiftPM cache (~10–15 min cold); follow-ups should land in ~5 min.
+
+### R2 — Smoke-test on Windows hardware
+
+Pull on Windows. `pwsh platforms/windows/build/build-all.ps1 -Release -Run`. Build prints "Build complete." with zero warnings. App launches; engine handshake completes; cold scan of a small folder runs through Discovering → Tagging → Completed; the 7 audited parity flows behave per macOS reference (multi-merge People, ApplyBar in Restructure, name-gate in Deep Analyze, sibling nav + badges + tag draft in FilePreviewSheet, Library tiles fetch thumbnails, AutoPilot tracker advances Scan→Cluster→Caption→Plan, Restructure folders classified Anchor/Mixed/Junk).
+
+---
+
 ## V14.9-Q follow-ups (2026-05-13)
 
 V14.9-O + P + Q together closed every audited Windows scan-flow gap, ported the IdentityClustering algorithm, synced the IPC schema across platforms, added the warning-banner UI, and stripped the session's narrative comments. P3, P4, P6 from V14.9-P are now done in-session. Two items still need the user's hardware/git.

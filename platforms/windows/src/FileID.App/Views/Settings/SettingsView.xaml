@@ -1,15 +1,14 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
     SettingsView — model installer cards, engine info, GPU EP override,
-    privacy panel, Performance Pack downloader, system info.
+    Performance Pack downloader, system info.
 
-    Mirror of macOS Settings/SettingsView.swift. Hosts six panels:
+    Mirror of macOS Settings/SettingsView.swift. Hosts five panels:
       1. Models — install / re-install ArcFace, MobileCLIP, OCR
       2. Engine — version, PID, worker cap, "open log folder"
       3. Performance — GPU EP picker + Performance Pack downloader
-      4. Privacy — "What we don't do" panel (zero-telemetry contract)
-      5. Storage — DB path, thumbs cache, model cache
-      6. About — version + open-source credits
+      4. Storage — DB path, thumbs cache, model cache
+      5. About — version + open-source credits
 -->
 <UserControl
     x:Class="FileID.Views.Settings.SettingsView"
@@ -28,38 +27,11 @@
 
             <StackPanel Spacing="4">
                 <TextBlock Text="Settings" Style="{StaticResource TitleTextBlockStyle}"/>
-                <TextBlock Text="Models, GPU acceleration, privacy. All settings are local."
+                <TextBlock Text="Models, GPU acceleration, storage."
                            Style="{StaticResource BodyTextBlockStyle}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                            TextWrapping="Wrap" />
             </StackPanel>
-
-            <!-- Privacy panel — what we don't do. This is a product feature,
-                 surfaced as a contract the user can read. -->
-            <Border CornerRadius="12"
-                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                    BorderThickness="1"
-                    Padding="20">
-                <StackPanel Spacing="8">
-                    <TextBlock Text="What we don't do"
-                               Style="{StaticResource SubtitleTextBlockStyle}"/>
-                    <TextBlock Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap">
-                        <Run FontWeight="SemiBold">No telemetry, ever.</Run>
-                        <LineBreak/>
-                        FileID has no analytics SDK. No crash-reporting service. No update pings.
-                        No license-server check. The only network egress is when YOU explicitly
-                        download an ML model — every other byte stays on your machine.
-                    </TextBlock>
-                    <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
-                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                               TextWrapping="Wrap">
-                        We grep our shipped binaries on every release for telemetry strings (Sentry,
-                        Application Insights, Firebase, Segment, Mixpanel, Google Analytics) — zero
-                        hits required to ship. Source: shared/docs/PRIVACY.md.
-                    </TextBlock>
-                </StackPanel>
-            </Border>
 
             <!-- FEAT-CRIT-4: Models card. Shows install/progress per model
                  kind, mirrors macOS Settings.swift "Local AI" section. -->
@@ -499,7 +471,7 @@
                     <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                TextWrapping="Wrap"
-                               Text="On-device AI file organizer. No cloud. No telemetry. Open audit trail."/>
+                               Text="On-device AI file organizer."/>
                 </StackPanel>
             </Border>
 

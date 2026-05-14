@@ -544,7 +544,7 @@ struct PeopleView: View {
         EmptyStateView(
             icon: "person.crop.circle.badge.exclamationmark",
             title: "Face recognition needs a model",
-            message: "FileID uses an on-device AI model to find and group faces in your photos. Nothing leaves your Mac.",
+            message: "FileID uses a small AI model to find and group faces in your photos.",
             secondaryMessage: "Open Settings → AI Models. Pick the standard model (166 MB) or the lightweight model (13 MB)."
         )
     }

@@ -32,7 +32,7 @@
                 <TextBlock TextWrapping="Wrap"
                            Style="{StaticResource BodyTextBlockStyle}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                           Text="Run a local vision-language model on every image to write captions and propose smart filenames. Whole library, on-device, no cloud." />
+                           Text="Run a local vision-language model on every image to write captions and propose smart filenames. Works across your whole library." />
             </StackPanel>
 
             <!-- llama.cpp runtime banner — visible when not detected. -->
