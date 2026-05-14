@@ -200,13 +200,14 @@ async fn main() -> Result<()> {
     let shutdown = Arc::new(Notify::new());
 
     // Register the main-task waiter NOW, before any task that could
-    // call `notify_waiters()` is spawned. `Notify::notify_waiters`
-    // only wakes already-registered waiters, so without this an empty
-    // stdin can EOF inside the spawned stdio loop before main reaches
-    // its own `.notified().await` — the wake-up gets lost and the
-    // engine never sees its own shutdown signal.
+    // call `notify_waiters()` is spawned. `Notified::enable()` adds
+    // the future to Notify's waiter list explicitly; without it, a
+    // pinned-but-not-yet-polled Notified is NOT a waiter and an early
+    // notify_waiters() fired by the stdio loop on empty-stdin EOF is
+    // lost — the engine then hangs forever on .notified().await.
     let main_shutdown = shutdown.notified();
     tokio::pin!(main_shutdown);
+    main_shutdown.as_mut().enable();
 
     // Parent watchdog: poll OpenProcess(parent_pid) every 5 s. If parent is
     // gone or our handle to it is invalid, set the shutdown notifier.
