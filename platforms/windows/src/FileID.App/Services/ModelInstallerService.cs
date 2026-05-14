@@ -276,12 +276,17 @@ internal sealed class ModelSlot : INotifyPropertyChanged
 
 internal sealed class ModelInstallerService : INotifyPropertyChanged
 {
-    // Sentinel-dir constants. Static field init runs in source order, so
-    // these MUST be declared before Instance — its ctor calls
-    // SeedFromSentinels which reads them.
-    private static readonly string[] ClipSentinelDirs = { "MobileCLIP" };
-    private static readonly string[] ArcfaceSentinelDirs = { "arcfaceMobileFace", "arcfaceIResNet50" };
-    private static readonly string[] VlmSentinelDirs = { "Qwen2.5-VL-3B", "Qwen2.5-VL-7B", "SmolVLM", "Gemma-3-4B" };
+    // Sentinel model-id constants. The engine writes one sentinel file
+    // per installed model bundle at `%LOCALAPPDATA%\FileID\Models\.sentinels\
+    // {model.id}.installed` (atomic temp+rename; see engine main.rs
+    // handle_prewarm_model). The id strings here MUST match `Model.id`
+    // in engine/src/models/registry.rs.
+    //
+    // Static field init runs in source order, so these MUST be declared
+    // before Instance — its ctor calls SeedFromSentinels which reads them.
+    private static readonly string[] ClipSentinelIds = { "mobileclip_s2" };
+    private static readonly string[] ArcfaceSentinelIds = { "arcface" };
+    private static readonly string[] VlmSentinelIds = { "qwen2_5_vl_3b", "qwen2_5_vl_7b", "smolvlm", "gemma_3_4b" };
 
     /// <summary>Time the engine has to reach Ready before an Install
     /// click gives up and surfaces "Engine not ready" to the user.</summary>
@@ -506,9 +511,9 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     /// </summary>
     public void SeedFromSentinels()
     {
-        SeedSlot(Clip, ClipSentinelDirs);
-        SeedSlot(Arcface, ArcfaceSentinelDirs);
-        SeedSlot(Vlm, VlmSentinelDirs);
+        SeedSlot(Clip, ClipSentinelIds);
+        SeedSlot(Arcface, ArcfaceSentinelIds);
+        SeedSlot(Vlm, VlmSentinelIds);
         RecomputeAggregates();
     }
 
@@ -517,16 +522,16 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     /// (MainWindow startup, DeepAnalyzeView model-install panel).</summary>
     public void Refresh() => SeedFromSentinels();
 
-    private static void SeedSlot(ModelSlot slot, string[] candidateDirs)
+    private static void SeedSlot(ModelSlot slot, string[] candidateIds)
     {
         if (slot.Status == ModelInstallStatus.Downloading
             || slot.Status == ModelInstallStatus.Failed)
         {
             return;
         }
-        foreach (var name in candidateDirs)
+        foreach (var id in candidateIds)
         {
-            if (HasSentinel(Path.Combine(AppPaths.ModelsDir, name)))
+            if (SentinelInstalled(id))
             {
                 slot.Status = ModelInstallStatus.Installed;
                 return;
@@ -729,8 +734,8 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             DebugLog.Warn($"[INSTALL] no slot for model_kind '{p.ModelKind}' — progress event dropped.");
             return;
         }
-        var sentinelDirs = SentinelDirsFor(slot);
-        slot.Apply(p, () => SentinelExistsForAnyOf(sentinelDirs));
+        var sentinelIds = SentinelIdsFor(slot);
+        slot.Apply(p, () => SentinelExistsForAnyOf(sentinelIds));
     }
 
     private void HandleEngineError(EngineError? error)
@@ -766,47 +771,34 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         slot.Fail(error.Message);
     }
 
-    private static string[] SentinelDirsFor(ModelSlot slot)
+    private static string[] SentinelIdsFor(ModelSlot slot)
     {
-        if (ReferenceEquals(slot, Instance.Clip)) return ClipSentinelDirs;
-        if (ReferenceEquals(slot, Instance.Arcface)) return ArcfaceSentinelDirs;
-        if (ReferenceEquals(slot, Instance.Vlm)) return VlmSentinelDirs;
+        if (ReferenceEquals(slot, Instance.Clip)) return ClipSentinelIds;
+        if (ReferenceEquals(slot, Instance.Arcface)) return ArcfaceSentinelIds;
+        if (ReferenceEquals(slot, Instance.Vlm)) return VlmSentinelIds;
         return Array.Empty<string>();
     }
 
-    private static bool SentinelExistsForAnyOf(string[] candidateDirs)
+    private static bool SentinelExistsForAnyOf(string[] candidateIds)
     {
-        foreach (var name in candidateDirs)
+        foreach (var id in candidateIds)
         {
-            if (HasSentinel(Path.Combine(AppPaths.ModelsDir, name))) return true;
+            if (SentinelInstalled(id)) return true;
         }
         return false;
     }
 
-    private static bool HasSentinel(string dir)
+    /// <summary>Probe for the engine's canonical install marker at
+    /// `%LOCALAPPDATA%\FileID\Models\.sentinels\{id}.installed`. Engine
+    /// writes the file atomically (tmp+rename) only after every file in
+    /// the bundle has landed successfully, so file presence is sufficient
+    /// — no need for the defensive "is the dir empty?" check we used to
+    /// do under the legacy per-model-dir sentinel layout.</summary>
+    private static bool SentinelInstalled(string modelId)
     {
         try
         {
-            if (!Directory.Exists(dir)) return false;
-            if (!File.Exists(Path.Combine(dir, ".fileid-installed"))) return false;
-            // Defensive: a stray sentinel file in an otherwise-empty
-            // directory shouldn't be trusted (could be left over from a
-            // botched install + manual cleanup, or a malicious drop).
-            // Require at least one non-sentinel file in the dir.
-            foreach (var f in Directory.EnumerateFiles(dir))
-            {
-                var name = Path.GetFileName(f);
-                if (!string.Equals(name, ".fileid-installed", StringComparison.OrdinalIgnoreCase))
-                {
-                    return true;
-                }
-            }
-            // Recurse one level for compound-dir layouts (packs/cuda/...)
-            foreach (var sub in Directory.EnumerateDirectories(dir))
-            {
-                if (Directory.EnumerateFiles(sub).Any()) return true;
-            }
-            return false;
+            return File.Exists(Path.Combine(AppPaths.ModelsDir, ".sentinels", $"{modelId}.installed"));
         }
         catch { return false; }
     }
