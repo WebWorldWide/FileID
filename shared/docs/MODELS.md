@@ -25,20 +25,22 @@ Files live under each platform's models directory. Downloads triggered by the we
 
 | Aspect | Value |
 |---|---|
-| Source | [`apple/coreml-mobileclip`](https://huggingface.co/apple/coreml-mobileclip) |
+| Source (macOS) | [`apple/coreml-mobileclip`](https://huggingface.co/apple/coreml-mobileclip) — `mobileclip_s2_image.mlpackage` |
+| Source (Windows) | [`Xenova/mobileclip_s2`](https://huggingface.co/Xenova/mobileclip_s2) — `onnx/vision_model.onnx` (community ONNX export of Apple's OpenCLIP release; same weights, ONNX format) |
 | License | Apple Sample Code License |
 | macOS layout | `~/Library/Application Support/FileID/Models/mobileclip_image/` (CoreML `.mlpackage`) |
-| Windows layout | `%LOCALAPPDATA%\FileID\Models\mobileclip_image\mobileclip_s2_image.onnx` |
+| Windows layout | `%LOCALAPPDATA%\FileID\Models\mobileclip\mobileclip_s2_image.onnx` |
 | Input | 256×256 BGRA (macOS) / RGB (Windows ONNX) |
 | Output | 512-d float32, L2-normalized |
 | Tag | `mobileclip_s2` (stored in `clip_embeddings.model`) |
 
-### OpenAI CLIP text encoder
+### CLIP text encoder
 
 | Aspect | Value |
 |---|---|
-| Source | [`openai/clip-vit-base-patch32`](https://huggingface.co/openai/clip-vit-base-patch32) (ONNX export) |
-| License | MIT (model + tokenizer) |
+| Source (macOS) | [`openai/clip-vit-base-patch32`](https://huggingface.co/openai/clip-vit-base-patch32) (ONNX export) |
+| Source (Windows) | ONNX text encoder from [`Xenova/mobileclip_s2`](https://huggingface.co/Xenova/mobileclip_s2) — `onnx/text_model.onnx` (OpenCLIP-compatible, paired with the image encoder above). BPE vocab + merges still pulled from `openai/clip-vit-base-patch32`. |
+| License | MIT (tokenizer) + Apple Sample Code License (Xenova ONNX export of Apple's release) |
 | macOS layout | `~/Library/Application Support/FileID/Models/clip_text/` (CoreML `.mlpackage` + `vocab.json` + `merges.txt`) |
 | Windows layout | `%LOCALAPPDATA%\FileID\Models\clip_text\clip_text.onnx` + `vocab.json` + `merges.txt` |
 

@@ -79,46 +79,53 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                 id: "arcface",
                 display_name: "Face recognition",
                 files: vec![
+                    // Immich's Buffalo-L repo lives under per-task subdirs
+                    // (recognition/, detection/) with each subdir's ONNX
+                    // named `model.onnx`. The remote path differs from the
+                    // local filename — keep the local filenames the
+                    // tagging stack expects.
                     FileEntry {
-                        url: "https://huggingface.co/immich-app/buffalo_l/resolve/main/w600k_r50.onnx"
+                        url: "https://huggingface.co/immich-app/buffalo_l/resolve/main/recognition/model.onnx"
                             .to_string(),
                         dest: arcface_dir.join("w600k_r50.onnx"),
                         sha256: None,
-                        approx_bytes: 174_000_000,
+                        approx_bytes: 174_383_860,
                     },
                     FileEntry {
-                        url: "https://huggingface.co/immich-app/buffalo_l/resolve/main/scrfd_10g_bnkps.onnx"
+                        url: "https://huggingface.co/immich-app/buffalo_l/resolve/main/detection/model.onnx"
                             .to_string(),
                         dest: scrfd_dir.join("scrfd_10g_bnkps.onnx"),
                         sha256: None,
-                        approx_bytes: 16_900_000,
+                        approx_bytes: 16_923_827,
                     },
                 ],
             })
         }
 
-        // ── MobileCLIP-S2 image encoder. The ONNX export Apple ships in
-        // their HF repo is .mlpackage; for Windows we use the ONNX
-        // export at apple/coreml-mobileclip's mirror. If unavailable
-        // surface as "not yet available" rather than a hard error.
+        // ── MobileCLIP-S2 image encoder. Apple's own repo ships
+        // `.mlpackage` (CoreML, macOS only). For Windows we pull the
+        // OpenCLIP ONNX exports from Xenova/mobileclip_s2 — the same
+        // mirror transformers.js + the broader ONNX community use. Same
+        // weights, ONNX-graph format, runtime-loadable by our ORT setup.
         "mobileclip_s2" | "mobileclip" => {
             let dir = models_root.join("mobileclip");
             LookupResult::Found(Model {
                 id: "mobileclip_s2",
                 display_name: "MobileCLIP image encoder",
                 files: vec![FileEntry {
-                    url: "https://huggingface.co/apple/MobileCLIP-S2-OpenCLIP/resolve/main/open_clip_pytorch_model.onnx"
+                    url: "https://huggingface.co/Xenova/mobileclip_s2/resolve/main/onnx/vision_model.onnx"
                         .to_string(),
                     dest: dir.join("mobileclip_s2_image.onnx"),
                     sha256: None,
-                    approx_bytes: 220_200_000,
+                    approx_bytes: 143_020_962,
                 }],
             })
         }
 
         // ── CLIP text encoder (for query-time semantic search).
-        // BPE vocab + merges from openai/clip-vit-base-patch32. The
-        // ONNX text encoder we host alongside MobileCLIP-S2.
+        // BPE vocab + merges from openai/clip-vit-base-patch32; the
+        // OpenCLIP-compatible ONNX text encoder from the same Xenova
+        // mirror that hosts the MobileCLIP-S2 image encoder above.
         "clip_text" => {
             let dir = models_root.join("clip_text");
             LookupResult::Found(Model {
@@ -126,11 +133,11 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                 display_name: "CLIP text encoder",
                 files: vec![
                     FileEntry {
-                        url: "https://huggingface.co/apple/MobileCLIP-S2-OpenCLIP/resolve/main/text_encoder.onnx"
+                        url: "https://huggingface.co/Xenova/mobileclip_s2/resolve/main/onnx/text_model.onnx"
                             .to_string(),
                         dest: dir.join("clip_text.onnx"),
                         sha256: None,
-                        approx_bytes: 67_500_000,
+                        approx_bytes: 253_894_023,
                     },
                     FileEntry {
                         url: "https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/vocab.json"
@@ -213,11 +220,14 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                         approx_bytes: 2_500_000_000,
                     },
                     FileEntry {
-                        url: "https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF/resolve/main/mmproj-gemma-3-4b-it-f16.gguf"
+                        // ggml-org's Gemma repo names the projector
+                        // generically as `mmproj-model-f16.gguf` (no
+                        // per-model suffix), unlike Qwen / SmolVLM.
+                        url: "https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF/resolve/main/mmproj-model-f16.gguf"
                             .to_string(),
                         dest: dir.join("mmproj.gguf"),
                         sha256: None,
-                        approx_bytes: 940_000_000,
+                        approx_bytes: 851_251_104,
                     },
                 ],
             })
