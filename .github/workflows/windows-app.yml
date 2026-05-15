@@ -55,6 +55,15 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
+      # V15.2.1: WinUI 3's MrtCore.PriGen targets require Visual Studio's
+      # AppxPackage MSBuild tooling (Microsoft.Build.Packaging.Pri.Tasks.dll).
+      # The standalone .NET SDK on windows-latest doesn't ship that DLL;
+      # it's only present after Visual Studio's UWP / Windows App SDK
+      # workload is installed. setup-msbuild exposes the runner's VS
+      # Build Tools install to dotnet build via PATH + MSBuildExtensionsPath.
+      - name: Setup MSBuild (VS WinUI tooling)
+        uses: microsoft/setup-msbuild@v2
+
       - name: Cache NuGet
         uses: actions/cache@v4
         with:
@@ -67,10 +76,16 @@ jobs:
         run: dotnet restore src/FileID.App/FileID.App.csproj /p:Platform=${{ matrix.arch }}
 
       - name: Build (Debug)
-        run: dotnet build src/FileID.App/FileID.App.csproj -c Debug --no-restore /p:Platform=${{ matrix.arch }}
+        # Use msbuild instead of dotnet build so the VS WinUI tooling
+        # (PriGen, MRT, XAML compiler) on the GitHub runner is found.
+        # `dotnet build` only looks at the standalone .NET SDK layout
+        # which doesn't include the AppxPackage tasks DLL.
+        run: msbuild src/FileID.App/FileID.App.csproj -t:Build -p:Configuration=Debug -p:Platform=${{ matrix.arch }} -m -restore:false
+        shell: pwsh
 
       - name: Build (Release)
-        run: dotnet build src/FileID.App/FileID.App.csproj -c Release --no-restore /p:Platform=${{ matrix.arch }}
+        run: msbuild src/FileID.App/FileID.App.csproj -t:Build -p:Configuration=Release -p:Platform=${{ matrix.arch }} -m -restore:false
+        shell: pwsh
 
       - name: Publish (Release, self-contained)
         # V15.2 — what users actually run. The earlier verify step looked
@@ -78,12 +93,16 @@ jobs:
         # both the privacy gate and smoke test work against the real
         # distributable.
         run: >
-          dotnet publish src/FileID.App/FileID.App.csproj
-          -c Release
-          -r win-${{ matrix.arch }}
-          --self-contained true
-          /p:Platform=${{ matrix.arch }}
-          /p:PublishDir=bin/${{ matrix.arch }}/Release/net8.0-windows10.0.19041.0/win-${{ matrix.arch }}/publish/
+          msbuild src/FileID.App/FileID.App.csproj
+          -t:Publish
+          -p:Configuration=Release
+          -p:Platform=${{ matrix.arch }}
+          -p:RuntimeIdentifier=win-${{ matrix.arch }}
+          -p:SelfContained=true
+          -p:PublishDir=bin/${{ matrix.arch }}/Release/net8.0-windows10.0.19041.0/win-${{ matrix.arch }}/publish/
+          -m
+          -restore:false
+        shell: pwsh
 
       - name: Build IpcSchema tests project (if present)
         # Tests run on x64 only — ARM64 cross-building tests is rarely useful here.
