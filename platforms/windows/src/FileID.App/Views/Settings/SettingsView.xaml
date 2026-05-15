@@ -362,6 +362,15 @@
                                            Margin="0,4,0,0" />
                             </StackPanel>
                             <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
+                                <!-- V15.1: in-app cuDNN install via the engine's
+                                     registry entry. Fetches the ~430 MB redistributable
+                                     directly from NVIDIA's public CDN (no developer-portal
+                                     login, no manual install). Replaces V14.9-U's silent
+                                     auto-installer — now opt-in only. -->
+                                <Button x:Name="InstallCudnnButton"
+                                        Content="Install"
+                                        Click="OnInstallCudnnClicked"
+                                        ToolTipService.ToolTip="Downloads cuDNN ~430 MB from NVIDIA's public CDN and registers it for the ORT CUDA EP. DirectML works fine without this — only install if you want the 10-15% scanning speedup." />
                                 <!-- V14.9-G: re-probe after manual install. Engine doesn't
                                      restart; just re-runs the DLL probe and emits a
                                      hardwareReprobed event so the card flips to ✓ when
@@ -372,7 +381,7 @@
                                         ToolTipService.ToolTip="Re-probe cuDNN after manually installing it from NVIDIA's site." />
                                 <Button Content="Get cuDNN"
                                         Click="OnOpenCudnnDownloadsClicked"
-                                        ToolTipService.ToolTip="Opens developer.nvidia.com/cudnn-downloads in your default browser." />
+                                        ToolTipService.ToolTip="Opens developer.nvidia.com/cudnn-downloads in your default browser. Use this if you want CUDA Toolkit + cuDNN system-wide." />
                             </StackPanel>
                         </Grid>
 

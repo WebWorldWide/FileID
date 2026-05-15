@@ -17,6 +17,8 @@
 #   pwsh build/build-all.ps1 -Run               # Build + launch FileID.exe
 #   pwsh build/build-all.ps1 -Clean             # Wipe build artifacts first
 #   pwsh build/build-all.ps1 -Wipe              # FULL wipe (artifacts + Desktop\FileID + %LOCALAPPDATA%\FileID)
+#   pwsh build/build-all.ps1 -Wipe -PreserveModels  # wipe everything EXCEPT downloaded model weights
+#   pwsh build/build-all.ps1 -WipeDbOnly         # LIGHTEST wipe: only fileid.sqlite{,.wal,.shm}; keeps models, logs, settings, Desktop staging
 #   pwsh build/build-all.ps1 -SkipEngine        # WinUI-only iteration
 #   pwsh build/build-all.ps1 -SkipApp           # Engine-only iteration
 #   pwsh build/build-all.ps1 -RunTests          # cargo test + dotnet test
@@ -46,6 +48,18 @@ param(
     # Forces a fresh "I just installed FileID" experience. Implies -Clean
     # and -Desktop. Use when verifying first-run UX or reproducing bugs.
     [switch]$Wipe,
+    # When set alongside -Wipe, preserve the downloaded model weights
+    # under %LOCALAPPDATA%\FileID\Models\ so iteration doesn't trigger a
+    # multi-GB re-download. The DB, logs, sentinels, and settings still
+    # get wiped — only the model artifact binaries survive.
+    [switch]$PreserveModels,
+    # Lightest-possible wipe: delete ONLY fileid.sqlite{,.wal,.shm} from
+    # %LOCALAPPDATA%\FileID\ (and FileID-App\). Leaves Models, logs,
+    # settings, sentinels, cache, AND Desktop\FileID\ staging intact.
+    # Use when you want a fresh scan but don't want to lose anything else
+    # or rebuild from scratch. Does NOT imply -Clean or -Desktop.
+    # Mutually exclusive with -Wipe.
+    [switch]$WipeDbOnly,
     # ARM64 cross-compile from x64 host. Builds the Rust engine for
     # aarch64-pc-windows-msvc and the .NET app for win-arm64. Implies
     # -Release because debug ARM64 + WinAppSDK has rough edges.
@@ -66,6 +80,14 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
+
+# -Wipe and -WipeDbOnly are mutually exclusive: one is "nuke everything",
+# the other is "touch only the SQLite triplet". Combining them is ambiguous.
+if ($Wipe -and $WipeDbOnly) {
+    Write-Host "ERROR: -Wipe and -WipeDbOnly are mutually exclusive." -ForegroundColor Red
+    Write-Host "       Pick one: -Wipe for a full reset, -WipeDbOnly for just the DB files." -ForegroundColor Yellow
+    exit 1
+}
 
 # -Wipe implies -Clean + -Desktop. Destructive flag -- see param block.
 if ($Wipe) { $Clean = $true; $Desktop = $true }
@@ -141,11 +163,38 @@ if (-not $SkipApp) {
     }
 }
 
+# --- 1.5a. WipeDbOnly (lightest scope) -------------------------------------
+# Only delete the SQLite triplet. Don't touch Desktop\FileID, don't clean
+# build artifacts, don't wipe Models / logs / settings / sentinels / cache.
+# Use case: "I want a fresh scan but want to keep everything else."
+if ($WipeDbOnly) {
+    Write-Host "WIPE-DB-ONLY: deleting only SQLite files; everything else preserved..." -ForegroundColor Yellow
+    foreach ($dir in @(
+        (Join-Path $env:LOCALAPPDATA "FileID"),
+        (Join-Path $env:LOCALAPPDATA "FileID-App")
+    )) {
+        if (-not (Test-Path $dir)) { continue }
+        foreach ($name in @("fileid.sqlite", "fileid.sqlite-wal", "fileid.sqlite-shm")) {
+            $path = Join-Path $dir $name
+            if (Test-Path $path) {
+                Write-Host "  rm $path" -ForegroundColor DarkGray
+                Remove-Item -Force -LiteralPath $path -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    Write-Host "  done -- next launch will rebuild an empty DB; models/logs/settings preserved." -ForegroundColor DarkGreen
+    Write-Host ""
+}
+
 # --- 1.5. Wipe --------------------------------------------------------------
 # Destructive: removes user data dir + Desktop staging dir. The build-artifact
 # cleanup happens in the regular Clean block below (Wipe implies Clean).
 if ($Wipe) {
-    Write-Host "WIPE: removing prior FileID install + user data..." -ForegroundColor Yellow
+    if ($PreserveModels) {
+        Write-Host "WIPE (preserving Models/): removing prior install + user data, keeping downloaded weights..." -ForegroundColor Yellow
+    } else {
+        Write-Host "WIPE: removing prior FileID install + user data..." -ForegroundColor Yellow
+    }
     $DesktopFileID = Join-Path $env:USERPROFILE "Desktop\FileID"
     if (Test-Path $DesktopFileID) {
         Write-Host "  rm -rf $DesktopFileID" -ForegroundColor DarkGray
@@ -157,12 +206,30 @@ if ($Wipe) {
         (Join-Path $env:LOCALAPPDATA "FileID"),
         (Join-Path $env:LOCALAPPDATA "FileID-App")
     )) {
-        if (Test-Path $dir) {
+        if (-not (Test-Path $dir)) { continue }
+        if ($PreserveModels -and $dir -like "*FileID") {
+            # Selective wipe: enumerate top-level entries and skip the
+            # Models subdir so the multi-GB ONNX/GGUF weights survive.
+            # CRITICAL: keep .sentinels/ too. The engine writes sentinels
+            # only at the END of handle_prewarm_model, and prewarm with a
+            # missing sentinel re-downloads from scratch — so wiping
+            # .sentinels while preserving the files forces a re-download
+            # anyway, defeating the whole point of -PreserveModels.
+            foreach ($child in Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue) {
+                if ($child.Name -eq "Models") { continue }
+                Write-Host "  rm -rf $($child.FullName)" -ForegroundColor DarkGray
+                Remove-Item -Recurse -Force -LiteralPath $child.FullName -ErrorAction SilentlyContinue
+            }
+        } else {
             Write-Host "  rm -rf $dir" -ForegroundColor DarkGray
             Remove-Item -Recurse -Force -LiteralPath $dir -ErrorAction SilentlyContinue
         }
     }
-    Write-Host "  done -- next launch will re-download models + start with empty DB." -ForegroundColor DarkGreen
+    if ($PreserveModels) {
+        Write-Host "  done -- model weights preserved; DB + sentinels + logs cleared." -ForegroundColor DarkGreen
+    } else {
+        Write-Host "  done -- next launch will re-download models + start with empty DB." -ForegroundColor DarkGreen
+    }
     Write-Host ""
 }
 
@@ -233,6 +300,45 @@ if (-not $SkipEngine) {
     Copy-Item $EngineBuildExe (Join-Path $StagingDir "FileIDEngine.exe") -Force
     $sz = [math]::Round((Get-Item (Join-Path $StagingDir "FileIDEngine.exe")).Length / 1MB, 1)
     Write-Host ("  FileIDEngine.exe staged ({0} MB)" -f $sz) -ForegroundColor Green
+
+    # V14.9-V: fetch ORT (DirectML build) + DirectML runtime DLLs and drop
+    # them alongside FileIDEngine.exe in every staging location. The `ort`
+    # crate's `download-binaries` feature should do this at compile time
+    # but doesn't (silently falls through with our cuda + directml feature
+    # combo). Without these DLLs the engine LoadLibrary's Windows System32's
+    # onnxruntime.dll (1.17.x), the ort crate panics on version mismatch
+    # ("expected 1.22.x, got 1.17.1"), and even when the version matches
+    # the DirectML EP can't initialize without DirectML.dll → silent
+    # fallback to CPU, no GPU acceleration.
+    $fetchScript = Join-Path $ScriptDir "fetch-runtime-deps.ps1"
+    if (Test-Path $fetchScript) {
+        Write-Host "Fetching runtime DLLs (ORT + DirectML)..." -ForegroundColor Cyan
+        $runtimeOutput = & $fetchScript
+        $runtimeDlls = @{}
+        foreach ($line in $runtimeOutput) {
+            if ($line -match '^RUNTIME_DLL=(.+)$') {
+                $p = $Matches[1]
+                $runtimeDlls[[System.IO.Path]::GetFileName($p)] = $p
+            }
+        }
+        # Drop them in the staging dir (dist/<arch>/FileID/), the cargo
+        # target dir (so iterate.ps1 / standalone engine runs find them),
+        # and later in the App publish dir.
+        $cargoOutDir = Split-Path -Parent $EngineBuildExe
+        foreach ($name in $runtimeDlls.Keys) {
+            $destStaging = Join-Path $StagingDir $name
+            Copy-Item -LiteralPath $runtimeDlls[$name] -Destination $destStaging -Force
+            $mb = [math]::Round((Get-Item $destStaging).Length / 1MB, 1)
+            Write-Host ("  $name staged ({0} MB)" -f $mb) -ForegroundColor Green
+            $destCargo = Join-Path $cargoOutDir $name
+            Copy-Item -LiteralPath $runtimeDlls[$name] -Destination $destCargo -Force -ErrorAction SilentlyContinue
+        }
+        # Stash for the App-staging step below so we don't re-resolve.
+        $script:RuntimeDlls = $runtimeDlls
+    } else {
+        Write-Host "WARN: fetch-runtime-deps.ps1 not found; engine may fail to find ORT/DirectML at runtime." -ForegroundColor Yellow
+        $script:RuntimeDlls = @{}
+    }
 }
 
 # --- 4. App build -----------------------------------------------------------
@@ -292,6 +398,18 @@ if (-not $SkipApp) {
         if (Test-Path $StagedEngine) {
             Copy-Item $StagedEngine (Join-Path $AppOutDir "FileIDEngine.exe") -Force
             Write-Host "  FileIDEngine.exe colocated with FileID.exe" -ForegroundColor Green
+        }
+        # V14.9-V: colocate ORT + DirectML DLLs with the engine in the
+        # publish output. Required so LoadLibrary finds our bundled 1.22
+        # DLL before Windows System32's 1.17 build (which our ort crate
+        # rejects with a fatal version mismatch). DirectML.dll also has
+        # to be next to the engine or DirectML EP silently falls back
+        # to CPU.
+        if ($script:RuntimeDlls) {
+            foreach ($name in $script:RuntimeDlls.Keys) {
+                Copy-Item -LiteralPath $script:RuntimeDlls[$name] -Destination (Join-Path $AppOutDir $name) -Force
+                Write-Host "  $name colocated with FileID.exe" -ForegroundColor Green
+            }
         }
     }
 

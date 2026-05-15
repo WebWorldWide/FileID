@@ -19,6 +19,14 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     internal CleanupViewModel ViewModel { get; }
 
     private bool _unloaded;
+    // Live duplicate-group streaming during a scan. Mirrors macOS
+    // CleanupView's .onChange(of: engine.lastBatch?.batchIndex) — refresh
+    // the group list whenever a new BatchSummary lands, throttled at 1s
+    // so a fast scan doesn't issue 30+ DB reads per second.
+    private long _lastSeenBatchIndex = -1;
+    private DateTime _lastReloadAt = DateTime.MinValue;
+    private static readonly TimeSpan CleanupReloadThrottle = TimeSpan.FromSeconds(1);
+
     public CleanupView()
     {
         ViewModel = new CleanupViewModel(AppPaths.DbPath, Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
@@ -30,20 +38,55 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         // symptom.
         ViewModel.PropertyChanged += OnViewModelPropertyChanged;
         ViewModel.Groups.CollectionChanged += OnGroupsCollectionChanged;
-        ViewModels.EngineClient.Instance.PropertyChanged += OnEngineScanCompleted;
+        ViewModels.EngineClient.Instance.PropertyChanged += OnEngineChanged;
         Loaded += OnLoadedAsync;
         Unloaded += OnUnloaded;
     }
 
-    private void OnEngineScanCompleted(object? sender, PropertyChangedEventArgs e)
+    private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (_unloaded) return;
-        if (e.PropertyName != nameof(ViewModels.EngineClient.Phase)) return;
-        if (ViewModels.EngineClient.Instance.Phase != FileID.IpcSchema.ScanPhase.Completed) return;
+        switch (e.PropertyName)
+        {
+            case nameof(ViewModels.EngineClient.Phase):
+                if (ViewModels.EngineClient.Instance.Phase == FileID.IpcSchema.ScanPhase.Completed)
+                {
+                    RequestCleanupRefresh();
+                }
+                break;
+            case nameof(ViewModels.EngineClient.LastBatch):
+                var summary = ViewModels.EngineClient.Instance.LastBatch;
+                if (summary is null) return;
+                long batchIndex = summary.BatchIndex;
+                if (batchIndex == _lastSeenBatchIndex) return;
+                _lastSeenBatchIndex = batchIndex;
+                if (DateTime.UtcNow - _lastReloadAt < CleanupReloadThrottle) return;
+                RequestCleanupRefresh();
+                break;
+        }
+    }
+
+    // V15.2: debounce refresh requests. A fast scan emits dozens of
+    // BatchSummary events per second; the time throttle above limits us
+    // to one refresh per second, but rapid Phase transitions or a tab
+    // re-enter while the throttle window is hot can still enqueue
+    // multiple RefreshAsync tasks before any of them complete. The flag
+    // ensures only one refresh is ever pending at a time.
+    private int _refreshPending; // 0 = idle, 1 = refresh queued
+
+    private void RequestCleanupRefresh()
+    {
+        _lastReloadAt = DateTime.UtcNow;
+        if (System.Threading.Interlocked.CompareExchange(ref _refreshPending, 1, 0) != 0)
+        {
+            return; // refresh already queued — coalesce
+        }
         DispatcherQueue.TryEnqueue(async () =>
         {
+            if (_unloaded) { System.Threading.Interlocked.Exchange(ref _refreshPending, 0); return; }
             try { await ViewModel.RefreshAsync(CancellationToken.None); }
-            catch (Exception ex) { DebugLog.Warn("Cleanup refresh on scan complete failed: " + ex.Message); }
+            catch (Exception ex) { DebugLog.Warn("Cleanup refresh failed: " + ex.Message); }
+            finally { System.Threading.Interlocked.Exchange(ref _refreshPending, 0); }
         });
     }
 
@@ -75,7 +118,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         Loaded -= OnLoadedAsync;
         try { ViewModel.PropertyChanged -= OnViewModelPropertyChanged; } catch { /* swallow */ }
         try { ViewModel.Groups.CollectionChanged -= OnGroupsCollectionChanged; } catch { /* swallow */ }
-        try { ViewModels.EngineClient.Instance.PropertyChanged -= OnEngineScanCompleted; } catch { /* swallow */ }
+        try { ViewModels.EngineClient.Instance.PropertyChanged -= OnEngineChanged; } catch { /* swallow */ }
         try { ViewModel.Dispose(); } catch { /* swallow */ }
     }
 

@@ -9,9 +9,12 @@
 // keys; subsequent phases append new properties (each new prop must
 // default safely so older settings.json files load cleanly).
 
+using System;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace FileID.Services;
 
@@ -28,15 +31,6 @@ internal sealed class AppSettings
         // declared field individually so an unknown field can't pollute
         // the in-memory state.
     };
-
-    /// <summary>Single-writer gate for Save(). Multiple property setters
-    /// on AppViewModel (ActiveTab, SidebarVisible, FolderPath, ...) all
-    /// call Save() synchronously on the UI thread. Without this lock,
-    /// rapid changes (user spam-clicking tabs) race File.WriteAllBytes +
-    /// File.Move on settings.json — second Save can clobber first
-    /// Save's bytes. The atomic-write protects against crashes, not
-    /// concurrent writers.</summary>
-    private static readonly object s_saveLock = new();
 
     /// <summary>Last-picked folder root. Absolute path or null if never picked.</summary>
     public string? LastFolderPath { get; set; }
@@ -84,6 +78,22 @@ internal sealed class AppSettings
     /// CUDA build without the user finding a hidden Settings button.
     /// True disables the auto-install entirely.</summary>
     public bool DisableAutoInstallCuda { get; set; } = false;
+
+    /// <summary>Default false (auto-install enabled). On engine-ready,
+    /// the Vulkan llama.cpp runtime is fetched silently so Deep Analyze
+    /// works without the user finding the Install button. Vulkan ships
+    /// on every GPU vendor — no NVIDIA gate. True disables the
+    /// auto-install entirely (manual install still available via the
+    /// engine's PrewarmModel IPC if a user-facing button is added).</summary>
+    public bool DisableAutoInstallVulkanRuntime { get; set; } = false;
+
+    /// <summary>Default false (auto-install enabled). On engine-ready
+    /// AND NVIDIA hardware, cuDNN is fetched from NVIDIA's public CDN
+    /// (developer.download.nvidia.com) so the ORT CUDA EP can replace
+    /// DirectML for scanning (~10-15% throughput on RTX-class). True
+    /// disables; users can fall back to system-installed CUDA Toolkit
+    /// + cuDNN if they prefer the BYO path.</summary>
+    public bool DisableAutoInstallCudnn { get; set; } = false;
 
     /// <summary>Schema version of this settings.json. Bumped only on incompatible field renames.</summary>
     public int SchemaVersion { get; set; } = 1;
@@ -148,26 +158,85 @@ internal sealed class AppSettings
         if (string.IsNullOrWhiteSpace(s.LibraryKindFilter)) s.LibraryKindFilter = "all";
     }
 
+    // V15.2: debounce + offload. The previous implementation ran every
+    // UI-thread property setter (ActiveTab, SidebarVisible, FolderPath…)
+    // through a synchronous WriteAllBytes + File.Move chain. On rapid
+    // changes (tab spam, sidebar toggle, scroll-driven kind-filter
+    // changes) that produced a visible UI stutter of 5-15 ms per change.
+    // Now: setters call Save() to bump a debounce timer; the actual
+    // write fires 200 ms after the LAST setter on a thread-pool thread
+    // and is serialized through a SemaphoreSlim so concurrent debounced
+    // saves and the synchronous SaveImmediately path can't race.
+    private static readonly SemaphoreSlim s_writeGate = new(1, 1);
+    private static readonly TimeSpan SaveDebounce = TimeSpan.FromMilliseconds(200);
+    private static CancellationTokenSource? s_pendingSaveCts;
+
     public void Save()
     {
-        // Serialize the entire write through s_saveLock so concurrent
-        // setters can't race File.Move. Brief lock — typical save is
-        // < 5 ms (small JSON, single SSD write).
-        lock (s_saveLock)
+        // Cancel any pending save and replace with a new one. The async
+        // worker observes the new token; if it gets cancelled before the
+        // delay elapses, no IO happens.
+        var newCts = new CancellationTokenSource();
+        var prior = Interlocked.Exchange(ref s_pendingSaveCts, newCts);
+        try { prior?.Cancel(); prior?.Dispose(); } catch { /* swallow */ }
+        var snapshot = CloneForWrite();
+        _ = Task.Run(async () =>
         {
             try
             {
-                AppPaths.EnsureDirectories();
-                var bytes = JsonSerializer.SerializeToUtf8Bytes(this, s_jsonOptions);
-                // Atomic write: temp file + File.Move. Avoids partial files on crash.
-                var tmp = AppPaths.SettingsPath + ".tmp";
-                File.WriteAllBytes(tmp, bytes);
-                File.Move(tmp, AppPaths.SettingsPath, overwrite: true);
+                await Task.Delay(SaveDebounce, newCts.Token).ConfigureAwait(false);
+                await WriteAsync(snapshot).ConfigureAwait(false);
             }
+            catch (OperationCanceledException) { /* superseded */ }
             catch (Exception ex)
             {
-                DebugLog.Warn("AppSettings.Save failed: " + ex.Message);
+                DebugLog.Warn("AppSettings.Save (debounced) failed: " + ex.Message);
             }
+        });
+    }
+
+    /// <summary>Synchronous flush. Use at shutdown to make sure the
+    /// pending debounced save actually lands on disk before exit.</summary>
+    public void SaveImmediately()
+    {
+        try
+        {
+            // Cancel any debounced save — the synchronous write supersedes.
+            var prior = Interlocked.Exchange(ref s_pendingSaveCts, null);
+            try { prior?.Cancel(); prior?.Dispose(); } catch { /* swallow */ }
+            var snapshot = CloneForWrite();
+            WriteAsync(snapshot).GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("AppSettings.SaveImmediately failed: " + ex.Message);
+        }
+    }
+
+    private AppSettings CloneForWrite()
+    {
+        // Settings is value-shaped (all primitive properties). A shallow
+        // copy is enough for serialization — and importantly, the snapshot
+        // captures the state at the moment Save() was called so a setter
+        // mutating the original mid-debounce doesn't corrupt the write.
+        return (AppSettings)this.MemberwiseClone();
+    }
+
+    private static async Task WriteAsync(AppSettings snapshot)
+    {
+        await s_writeGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            AppPaths.EnsureDirectories();
+            var bytes = JsonSerializer.SerializeToUtf8Bytes(snapshot, s_jsonOptions);
+            var tmp = AppPaths.SettingsPath + ".tmp";
+            // Atomic write: temp file + File.Move. Avoids partial files on crash.
+            await File.WriteAllBytesAsync(tmp, bytes).ConfigureAwait(false);
+            File.Move(tmp, AppPaths.SettingsPath, overwrite: true);
+        }
+        finally
+        {
+            s_writeGate.Release();
         }
     }
 }

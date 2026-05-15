@@ -7,7 +7,6 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
-using System.IO;
 using System.Linq;
 using FileID.IpcSchema;
 using FileID.Services;
@@ -47,8 +46,6 @@ public sealed partial class DeepAnalyzeView : UserControl
         ModelInstallerService.Instance.Vlm.PropertyChanged += OnInstallerChanged;
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         SyncCards();
-        SyncRuntimeBanner();
-        SyncCudnnBanner();
         UpdateActiveModelLabel();
         // V14.9-C5: refresh the "Name people first" gate every time the
         // view loads; also refreshed in OnEngineChanged when face
@@ -133,10 +130,6 @@ public sealed partial class DeepAnalyzeView : UserControl
             case nameof(EngineClient.DeepAnalyzeComplete):
                 DispatcherQueue.TryEnqueue(SyncStream);
                 break;
-            case nameof(EngineClient.Info):
-            case nameof(EngineClient.State):
-                DispatcherQueue.TryEnqueue(SyncCudnnBanner);
-                break;
             // V14.9-C5: re-evaluate the "Name people first" gate every
             // time face clustering re-runs (new clusters → new unnamed)
             // or a scan completes (new files → maybe new clusters next
@@ -196,66 +189,6 @@ public sealed partial class DeepAnalyzeView : UserControl
         QwenSmallCard.BorderThickness = _activeModel == "qwen2_5_vl_3b" ? new Thickness(2) : new Thickness(1);
         QwenLargeCard.BorderThickness = _activeModel == "qwen2_5_vl_7b" ? new Thickness(2) : new Thickness(1);
         SmolVlmCard.BorderThickness   = _activeModel == "smolvlm"       ? new Thickness(2) : new Thickness(1);
-    }
-
-    private void SyncRuntimeBanner()
-    {
-        // Probe %LOCALAPPDATA%\FileID\Models\llama.cpp for the runtime.
-        var runtimeRoot = Path.Combine(AppPaths.Root, "Models", "llama.cpp");
-        var cli1 = Path.Combine(runtimeRoot, "llama-mtmd-cli.exe");
-        var cli2 = Path.Combine(runtimeRoot, "llama-mtmd-cli", "llama-mtmd-cli.exe");
-        var present = File.Exists(cli1) || File.Exists(cli2);
-        RuntimeBanner.Visibility = present ? Visibility.Collapsed : Visibility.Visible;
-        if (!present)
-        {
-            RuntimeBannerText.Text = "Deep Analyze needs the llama.cpp runtime (Vulkan x64). " +
-                                     "It's a one-time ~80 MB download from the official llama.cpp release. " +
-                                     "Click Install runtime — files land under %LOCALAPPDATA%\\FileID\\Models\\llama.cpp\\.";
-        }
-    }
-
-    private void SyncCudnnBanner()
-    {
-        // Info-only banner: surfaces when NVIDIA is detected but the engine
-        // is currently routing Deep Analyze through a non-CUDA EP. Doesn't
-        // block — DirectML / CPU works, just slower. Mirrors macOS's
-        // "unavailableCard" pattern but as an advisory rather than a block.
-        var hw = EngineClient.Instance.Info?.Hardware;
-        if (hw is null)
-        {
-            CudnnInfoBanner.Visibility = Visibility.Collapsed;
-            return;
-        }
-        var isNvidia = string.Equals(hw.GpuVendor, "nvidia", StringComparison.OrdinalIgnoreCase);
-        var epIsCuda = string.Equals(hw.ExecutionProvider, "cuda", StringComparison.OrdinalIgnoreCase);
-        if (!isNvidia || epIsCuda)
-        {
-            CudnnInfoBanner.Visibility = Visibility.Collapsed;
-            return;
-        }
-        var currentEp = string.IsNullOrEmpty(hw.ExecutionProvider) ? "CPU" : hw.ExecutionProvider.ToUpperInvariant();
-        CudnnInfoBannerText.Text =
-            $"NVIDIA GPU detected but Deep Analyze is currently running on {currentEp}. " +
-            "Installing cuDNN 12.x adds ~15% throughput on RTX-class hardware (Compute Capability ≥ 7.5). " +
-            "FileID can't redistribute cuDNN — grab it from NVIDIA's developer site and the engine picks it up automatically on next launch.";
-        CudnnInfoBanner.Visibility = Visibility.Visible;
-    }
-
-    private void OnGetCudnnClicked(object sender, RoutedEventArgs e)
-    {
-        try
-        {
-            var psi = new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = "https://developer.nvidia.com/cudnn-downloads",
-                UseShellExecute = true,
-            };
-            System.Diagnostics.Process.Start(psi);
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Warn("Open cuDNN downloads failed: " + ex.Message);
-        }
     }
 
     private void UpdateActiveModelLabel()
@@ -501,32 +434,6 @@ public sealed partial class DeepAnalyzeView : UserControl
         catch (Exception ex)
         {
             DebugLog.Warn("VLM install failed: " + ex);
-        }
-    }
-
-    private async void OnInstallRuntimeClicked(object sender, RoutedEventArgs e)
-    {
-        try
-        {
-            InstallRuntimeButton.IsEnabled = false;
-            try
-            {
-                await EngineClient.Instance.PrewarmModelAsync("llama_runtime_x64");
-                ModelInstallerService.Instance.Refresh();
-                SyncRuntimeBanner();
-            }
-            catch (Exception ex)
-            {
-                RuntimeBannerText.Text = $"Couldn't fetch runtime: {ex.Message}";
-            }
-            finally
-            {
-                InstallRuntimeButton.IsEnabled = true;
-            }
-        }
-        catch (Exception outer)
-        {
-            DebugLog.Warn("Runtime install handler threw: " + outer);
         }
     }
 

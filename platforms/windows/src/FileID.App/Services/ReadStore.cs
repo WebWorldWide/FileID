@@ -64,12 +64,29 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             // for hundreds of ms; the cost on a local SSD is < 1 ms so
             // there's no downside to always going async here.
             var dbPath = _dbPath;
-            bool dbExists = await Task.Run(() =>
+            // V15.2: cap the File.Exists call. On a disconnected SMB
+            // share, the system-call can stall for 30+ seconds before
+            // returning. We'd rather treat it as "DB not present" after
+            // a few seconds than freeze startup.
+            bool dbExists;
+            using (var existsCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
             {
-                try { return File.Exists(dbPath); }
-                catch (IOException) { return false; }
-                catch (UnauthorizedAccessException) { return false; }
-            }, ct).ConfigureAwait(false);
+                existsCts.CancelAfter(TimeSpan.FromSeconds(5));
+                try
+                {
+                    dbExists = await Task.Run(() =>
+                    {
+                        try { return File.Exists(dbPath); }
+                        catch (IOException) { return false; }
+                        catch (UnauthorizedAccessException) { return false; }
+                    }, existsCts.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    DebugLog.Warn($"ReadStore.OpenAsync: File.Exists timed out for {PathRedactor.Redact(dbPath)}; treating as missing.");
+                    return;
+                }
+            }
             if (!dbExists)
             {
                 return;

@@ -1,6 +1,6 @@
 # Performance Packs — status
 
-> Windows-only. Last updated 2026-05-11.
+> Windows-only. Last updated 2026-05-15.
 
 ## Status: not shipped
 
@@ -17,7 +17,7 @@ drop-in ZIP we host:
 
 | Vendor | Blocker |
 |---|---|
-| **NVIDIA (CUDA)** | Microsoft ships `onnxruntime-win-x64-cuda12-*.zip` (~150 MB) on github.com/microsoft/onnxruntime/releases — real and downloadable — but it does NOT include cuDNN. The CUDA EP requires cuDNN at LoadLibrary time. Bundling cuDNN means building our own composite ZIP under NVIDIA's redistribution license (license file required, terms acceptance). That's an engineering project + ongoing legal review, not a URL swap. |
+| **NVIDIA (CUDA)** | Microsoft ships `onnxruntime-win-x64-cuda12-*.zip` (~150 MB) on github.com/microsoft/onnxruntime/releases — real and downloadable — but it does NOT include cuDNN. The CUDA EP requires cuDNN at LoadLibrary time. Bundling cuDNN as part of a composite pack we host would mean operating under NVIDIA's redistribution license. **Update V14.9-U → V15.1:** cuDNN is fetched directly from NVIDIA's public CDN (no composite-ZIP redistribution; we're a downstream fetcher just like with HuggingFace model weights), but as of V15.1 the fetch is user-initiated via Settings → Performance, not automatic. See `## NVIDIA scanning acceleration` below + `DECISIONS.md` 2026-05-15. The original composite-pack scenario is still deferred. |
 | **Intel (OpenVINO)** | Intel publishes the OpenVINO runtime at github.com/openvinotoolkit/openvino/releases, but ORT's OpenVINO EP needs a specific Intel-built ONNX Runtime distribution that isn't redistributed as a standalone ZIP. Wiring up two parallel ORT installs to share weights is more complex than the perf gain justifies. |
 | **Qualcomm (QNN)** | QNN SDK is gated behind Qualcomm's developer portal. There is no public download URL — every consumer has to register and accept terms individually. |
 
@@ -77,31 +77,44 @@ Two real runtime ZIPs are in the registry:
   with the NVIDIA driver, so any Win11 box from the past 2 years has it.
   Expected speedup: 15-25% vs the Vulkan build on NVIDIA.
 
-## NVIDIA scanning acceleration (V14.8.3)
+## NVIDIA scanning acceleration
 
-Beyond Deep Analyze, the engine's ORT-based scanning pipeline (MobileCLIP,
-ArcFace, SCRFD) gets a real CUDA path when the user has the full NVIDIA
-CUDA Toolkit + cuDNN installed system-wide:
+The engine's ORT-based scanning pipeline (MobileCLIP, ArcFace, SCRFD) prefers
+the CUDA execution provider on NVIDIA hardware. CUDA EP needs cuDNN at
+LoadLibrary time. Two paths cover this — preferring whichever is already
+present:
 
-1. `engine/src/models/runtime.rs::system_cuda_toolkit_dir()` searches the
-   user's environment (`CUDA_PATH`, versioned variants, default
-   `%ProgramFiles%\NVIDIA GPU Computing Toolkit\CUDA\V*\bin\`) for the
-   CUDA runtime DLL + cuDNN.
-2. If found, engine startup calls `platform::register_dll_dirs_under` on
-   the toolkit's `bin` directory so the LoadLibrary policy (locked to
-   System32 + app dir + USER_DIRS per SEC-3) can find the DLLs.
-3. `is_cuda_pack_present` now returns true; `priority_chain` prepends
-   ExecutionProvider::Cuda for NVIDIA hardware.
-4. The ORT CUDA EP loads cuDNN from the registered toolkit dir.
+**Path 1 (user has system CUDA Toolkit installed):** `engine/src/models/runtime.rs::system_cuda_toolkit_dir()`
+searches `CUDA_PATH`, versioned variants, and `%ProgramFiles%\NVIDIA GPU
+Computing Toolkit\CUDA\V*\bin\`. If found, engine startup calls
+`platform::register_dll_dirs_under` on the toolkit's `bin` directory so the
+LoadLibrary policy (System32 + app dir + USER_DIRS per SEC-3) can find
+cuDNN.
 
-Expected speedup: 10-15% scanning throughput vs DirectML on RTX-class GPUs
-for the subset of NVIDIA users who have CUDA Toolkit installed.
+**Path 2 (V15.1 — manual install via Settings → Performance):** if no system
+toolkit is detected, the Settings → Performance panel surfaces an "Install"
+button next to the "NVIDIA acceleration (cuDNN)" row. Clicking it pulls a
+pinned cuDNN Windows redistributable from NVIDIA's public CDN
+(`developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/`).
+The archive extracts under `%LOCALAPPDATA%\FileID\Models\cudnn\` and
+`register_dll_dirs_under` is called for that path at engine startup. Engine
+restart picks up the new directory automatically.
 
-For NVIDIA users without CUDA Toolkit installed, Settings → Performance
-surfaces a "Get cuDNN" button that opens
-`https://developer.nvidia.com/cudnn-downloads` in the default browser.
-FileID never redistributes cuDNN — we point users at NVIDIA's canonical
-source and pick it up automatically when they install it.
+V15.1 superseded V14.9-U's silent auto-install — the policy reversal is in
+`DECISIONS.md` 2026-05-15 (TL;DR: DirectML at 38 fps is sufficient for the
+6 GB target, the 10-15% gain doesn't justify a silent 430 MB download +
+startup-time GPU pressure during what was already a hang-prone period). The
+legal framing for the fetch itself is unchanged (NVIDIA's own CDN, downstream
+fetcher, same shape as HuggingFace weight downloads).
+
+Either path lights up the same downstream behavior:
+- `is_cuda_pack_present` returns true.
+- `priority_chain` prepends `ExecutionProvider::Cuda` for NVIDIA hardware.
+- ORT CUDA EP loads cuDNN from whichever directory got registered.
+
+Expected speedup: 10-15% scanning throughput vs DirectML on RTX-class GPUs.
+DirectML remains the default for NVIDIA users who haven't clicked Install, and
+the fallback for any edge case where the CUDA EP fails to initialize.
 
 ## If we re-introduce packs later
 

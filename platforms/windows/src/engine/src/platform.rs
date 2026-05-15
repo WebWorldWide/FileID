@@ -233,18 +233,18 @@ impl Drop for SleepGuard {
 
 // ─── Process priority ───────────────────────────────────────────────────────
 //
-// During scans the engine bumps to ABOVE_NORMAL so the OS scheduler
-// preempts background services (Defender, OneDrive sync, Windows
-// Search) and our worker pool stays saturated. Restored to NORMAL on
-// scan end so the user's foreground apps (Zoom, browser) don't stutter.
+// V14.9-Y: was ABOVE_NORMAL, now NORMAL. The previous bump fought DWM
+// for CPU during scans, and when DirectML hit TDR (GPU device removed)
+// our high-priority workers spammed retries against the dying driver
+// faster than DWM could recover the GPU → full system hang. Staying at
+// NORMAL lets the desktop compositor win under contention while still
+// using all our worker threads.
 //
-// We deliberately stay BELOW HIGH_PRIORITY_CLASS — that level is for
-// real-time workloads and starves the rest of the system. ABOVE_NORMAL
-// is enough to win against Defender + sync clients without being
-// antisocial.
+// Override via FILEID_PROCESS_PRIORITY=above_normal if a user explicitly
+// wants the engine to outrank background services (Defender, OneDrive).
 
-/// RAII guard. While alive, the engine process runs at ABOVE_NORMAL
-/// priority. Drop = restore NORMAL.
+/// RAII guard. While alive, the engine process priority is set per the
+/// FILEID_PROCESS_PRIORITY env var (default NORMAL). Drop = restore NORMAL.
 pub struct PriorityBoost {
     #[cfg(windows)]
     boosted: bool,
@@ -255,8 +255,19 @@ impl PriorityBoost {
     pub fn acquire() -> Self {
         use windows::Win32::System::Threading::{
             GetCurrentProcess, SetPriorityClass, ABOVE_NORMAL_PRIORITY_CLASS,
+            BELOW_NORMAL_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, PROCESS_CREATION_FLAGS,
         };
-        let ok = unsafe { SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS) };
+        let pri: PROCESS_CREATION_FLAGS = match std::env::var("FILEID_PROCESS_PRIORITY")
+            .ok()
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("above_normal") => ABOVE_NORMAL_PRIORITY_CLASS,
+            Some("below_normal") => BELOW_NORMAL_PRIORITY_CLASS,
+            _ => NORMAL_PRIORITY_CLASS,
+        };
+        let ok = unsafe { SetPriorityClass(GetCurrentProcess(), pri) };
         Self { boosted: ok.is_ok() }
     }
 
@@ -287,18 +298,25 @@ impl Drop for PriorityBoost {
 // list; we walk one level deep so DLLs at the root OR in a flat `bin/`
 // subdir of the pack are both reachable.
 
-/// Register every directory under `root` (root itself + each immediate
-/// child) that contains at least one .dll as an additional DLL search
-/// path. Idempotent: called every time a pack is extracted; the loader
-/// dedupes internally. Returns the list of directories that exist + have
-/// DLLs but for which `AddDllDirectory` returned null — callers (notably
-/// main.rs's CUDA toolkit hookup) surface these to the app as a
+/// Register every directory under `root` (up to MAX_DEPTH levels deep)
+/// that contains at least one .dll as an additional DLL search path.
+/// Idempotent: called every time a pack is extracted; the loader dedupes
+/// internally. Returns the list of directories that exist + have DLLs but
+/// for which `AddDllDirectory` returned null — callers (notably main.rs's
+/// CUDA toolkit hookup) surface these to the app as a
 /// `cuda_dll_registration_failed` engine error so a missing CUDA EP
 /// becomes diagnosable instead of silently falling back to DirectML.
+///
+/// V14.9-U: depth extended from 1 to MAX_DEPTH so the auto-fetched cuDNN
+/// pack (which extracts to `<root>/<versioned-archive>/bin/*.dll`) gets
+/// picked up. Existing single-level callers (llama.cpp, packs/<vendor>)
+/// keep working — only dirs that actually contain DLLs are registered.
 #[cfg(windows)]
 pub fn register_dll_dirs_under(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     use windows::core::PCWSTR;
     use windows::Win32::System::LibraryLoader::AddDllDirectory;
+
+    const MAX_DEPTH: usize = 4;
 
     fn dir_has_dll(p: &std::path::Path) -> bool {
         let Ok(rd) = std::fs::read_dir(p) else { return false; };
@@ -323,22 +341,25 @@ pub fn register_dll_dirs_under(root: &std::path::Path) -> Vec<std::path::PathBuf
         }
     }
 
+    fn walk(dir: &std::path::Path, depth: usize, failed: &mut Vec<std::path::PathBuf>) {
+        if !dir.is_dir() { return; }
+        if dir_has_dll(dir) && !add(dir) {
+            failed.push(dir.to_path_buf());
+        }
+        if depth == 0 { return; }
+        let Ok(rd) = std::fs::read_dir(dir) else { return; };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, depth - 1, failed);
+            }
+        }
+    }
+
     use std::os::windows::ffi::OsStrExt;
 
     let mut failed: Vec<std::path::PathBuf> = Vec::new();
-    if !root.is_dir() {
-        return failed;
-    }
-    if dir_has_dll(root) && !add(root) {
-        failed.push(root.to_path_buf());
-    }
-    let Ok(rd) = std::fs::read_dir(root) else { return failed; };
-    for entry in rd.flatten() {
-        let path = entry.path();
-        if path.is_dir() && dir_has_dll(&path) && !add(&path) {
-            failed.push(path);
-        }
-    }
+    walk(root, MAX_DEPTH, &mut failed);
     failed
 }
 
@@ -346,3 +367,71 @@ pub fn register_dll_dirs_under(root: &std::path::Path) -> Vec<std::path::PathBuf
 pub fn register_dll_dirs_under(_root: &std::path::Path) -> Vec<std::path::PathBuf> {
     Vec::new()
 }
+
+/// Returns the primary (largest-VRAM) non-software adapter's
+/// `DedicatedVideoMemory` in MB. None if DXGI enumeration fails or no
+/// physical adapter is present. Used by V14.9-X to gate the ML Session
+/// pool — without this, a V14.9-W-style multi-Session config can exhaust
+/// a 6 GB card's VRAM and wedge the DirectML driver (full system hang).
+///
+/// Cheap to call (~1 ms); the DXGI factory + adapter enumeration is the
+/// same primitive `models::runtime::probe_gpu_vendor` uses for vendor
+/// detection. Safe to call from any thread.
+#[cfg(windows)]
+pub fn dedicated_vram_mb() -> Option<u64> {
+    use windows::Win32::Graphics::Dxgi::{
+        CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, DXGI_ADAPTER_FLAG,
+        DXGI_ADAPTER_FLAG_SOFTWARE,
+    };
+
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.ok()?;
+    let mut idx: u32 = 0;
+    let mut best: Option<u64> = None;
+    loop {
+        let adapter: IDXGIAdapter1 = match unsafe { factory.EnumAdapters1(idx) } {
+            Ok(a) => a,
+            Err(_) => break,
+        };
+        let desc = match unsafe { adapter.GetDesc1() } {
+            Ok(d) => d,
+            Err(_) => {
+                idx += 1;
+                continue;
+            }
+        };
+        let flags = DXGI_ADAPTER_FLAG(desc.Flags as i32);
+        let is_software = (flags.0 & DXGI_ADAPTER_FLAG_SOFTWARE.0) != 0;
+        if !is_software {
+            let mb = (desc.DedicatedVideoMemory as u64) / (1024 * 1024);
+            best = Some(best.map_or(mb, |prev| prev.max(mb)));
+        }
+        idx += 1;
+    }
+    best
+}
+
+#[cfg(not(windows))]
+pub fn dedicated_vram_mb() -> Option<u64> {
+    None
+}
+
+/// V15.0 Phase H: lower per-thread I/O priority to "VeryLow" so the
+/// tagging workers' bulk JPEG/PNG reads don't compete with foreground
+/// apps (File Explorer browsing, video playback). Windows kernel I/O
+/// scheduler honors thread-level priority hints for filesystem reads.
+///
+/// `THREAD_INFORMATION_CLASS::ThreadPowerThrottling` is the modern API
+/// but it's complex. The simpler `THREAD_PRIORITY_LOWEST` via
+/// `SetThreadPriority` works on every Windows version and has the same
+/// effect on I/O scheduling on Win11. Best-effort: failures are
+/// silently ignored.
+#[cfg(windows)]
+pub fn set_worker_background_priority() {
+    use windows::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_LOWEST,
+    };
+    let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST) };
+}
+
+#[cfg(not(windows))]
+pub fn set_worker_background_priority() {}

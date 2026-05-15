@@ -22,7 +22,6 @@ namespace FileID.Services;
 internal static class CudaAutoInstaller
 {
     private const string ModelKind = "llama_runtime_cuda_x64";
-    private const string SentinelDir = "llama.cpp-cuda";
 
     /// <summary>Set after the first attempt in a process so engine respawns
     /// don't re-fire. Bool is enough — the engine itself dedupes via its
@@ -83,10 +82,14 @@ internal static class CudaAutoInstaller
             }
             catch { /* fall through and try anyway */ }
 
-            // Sentinel check — avoid re-downloading an existing install.
+            // Sentinel check — avoid re-firing the prewarm IPC when the
+            // engine already dropped its install marker. Canonical path
+            // matches ModelInstallerService.HasEngineSentinel: the engine
+            // writes `Models/.sentinels/{id}.installed` atomically at the
+            // end of handle_prewarm_model.
             try
             {
-                var sentinel = Path.Combine(AppPaths.ModelsDir, SentinelDir, ".fileid-installed");
+                var sentinel = Path.Combine(AppPaths.ModelsDir, ".sentinels", $"{ModelKind}.installed");
                 if (File.Exists(sentinel))
                 {
                     DebugLog.Info("[CUDA-AUTO] CUDA llama.cpp already installed; skipping.");
@@ -96,11 +99,26 @@ internal static class CudaAutoInstaller
             catch { /* if FS check fails, the engine's own short-circuit will catch it */ }
 
             DebugLog.Info("[CUDA-AUTO] NVIDIA detected + no sentinel — silently installing CUDA llama.cpp runtime.");
-            _ = Task.Run(async () =>
+            // V15.2: attach a fault sink so a Task.Run exception that
+            // escapes the inner try/catch doesn't become an
+            // UnobservedTaskException at GC time. Also bound the prewarm
+            // with a 30-minute timeout — a stuck engine + an unawaited
+            // wait would otherwise pin the closure (and any captured
+            // state) forever.
+            var prewarmTask = Task.Run(async () =>
             {
+                using var timeoutCts = new System.Threading.CancellationTokenSource(TimeSpan.FromMinutes(30));
                 try
                 {
-                    await EngineClient.Instance.PrewarmModelAsync(ModelKind).ConfigureAwait(false);
+                    var prewarm = EngineClient.Instance.PrewarmModelAsync(ModelKind);
+                    var winner = await Task.WhenAny(prewarm, Task.Delay(System.Threading.Timeout.Infinite, timeoutCts.Token))
+                        .ConfigureAwait(false);
+                    if (winner != prewarm)
+                    {
+                        DebugLog.Warn("[CUDA-AUTO] PrewarmModel timed out after 30 min.");
+                        return;
+                    }
+                    await prewarm.ConfigureAwait(false);
                     DebugLog.Info("[CUDA-AUTO] PrewarmModel IPC dispatched.");
                 }
                 catch (Exception ex)
@@ -108,6 +126,9 @@ internal static class CudaAutoInstaller
                     DebugLog.Warn("[CUDA-AUTO] PrewarmModel failed: " + ex.Message);
                 }
             });
+            _ = prewarmTask.ContinueWith(
+                t => DebugLog.Error("[CUDA-AUTO] worker faulted: " + t.Exception),
+                System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted);
         }
         catch (Exception ex)
         {

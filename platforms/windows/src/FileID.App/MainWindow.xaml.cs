@@ -155,22 +155,41 @@ public sealed partial class MainWindow : Window
         void OnDismissed(object? _, EventArgs __)
         {
             DebugLog.Info("[INSTALL] WelcomeSheet.Dismissed fired; closing overlay.");
-            try
+            // V15.2: Dismissed is typically raised on the UI thread by the
+            // sheet's button handler, but a future code path could raise
+            // from a background continuation. Marshal explicitly so
+            // mutating Visibility / Content can never run off-thread —
+            // that's the kind of cross-thread DispatcherObject access
+            // that fast-fails the process.
+            var dq = DispatcherQueue;
+            if (dq is not null && !dq.HasThreadAccess)
             {
-                if (WelcomeOverlay != null)
-                {
-                    WelcomeOverlay.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed;
-                }
-                if (WelcomeOverlayHost != null)
-                {
-                    WelcomeOverlayHost.Content = null;
-                }
+                dq.TryEnqueue(() => OnDismissedOnUi());
             }
-            catch (Exception ex)
+            else
             {
-                DebugLog.Warn("[INSTALL] overlay teardown threw: " + ex.Message);
+                OnDismissedOnUi();
             }
-            tcs.TrySetResult(true);
+
+            void OnDismissedOnUi()
+            {
+                try
+                {
+                    if (WelcomeOverlay != null)
+                    {
+                        WelcomeOverlay.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed;
+                    }
+                    if (WelcomeOverlayHost != null)
+                    {
+                        WelcomeOverlayHost.Content = null;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    DebugLog.Warn("[INSTALL] overlay teardown threw: " + ex.Message);
+                }
+                tcs.TrySetResult(true);
+            }
         }
 
         try
@@ -454,6 +473,15 @@ public sealed partial class MainWindow : Window
 
         // Tell the engine to wrap up so the WAL gets checkpointed cleanly.
         try { _ = EngineClient.Instance.ShutdownAsync(); } catch { }
+
+        // V15.2: flush the debounced AppSettings.Save so pending edits
+        // (e.g. the user toggled sidebar then immediately closed the
+        // window) land on disk before exit.
+        try { AppViewModel.Instance.Settings.SaveImmediately(); } catch { /* swallow */ }
+
+        // V15.2: flip the last-session breadcrumb to clean_exit=true so the
+        // NEXT launch knows this session ended without a native fast-fail.
+        try { DebugLog.MarkCleanExit(); } catch { /* swallow */ }
     }
 
     private void OnThemeChanged(FrameworkElement sender, object args)

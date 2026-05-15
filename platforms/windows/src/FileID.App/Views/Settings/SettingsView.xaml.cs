@@ -148,49 +148,54 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     }
 
     private void OnHideUnknownToggled(object sender, RoutedEventArgs e)
-    {
-        if (_initializingToggles) return;
-        var s = AppViewModel.Instance.Settings;
-        s.PeopleHideUnknown = HideUnknownToggle.IsOn;
-        s.Save();
-    }
+        => DebugLog.SafeRun(nameof(OnHideUnknownToggled), () =>
+        {
+            if (_initializingToggles) return;
+            var s = AppViewModel.Instance.Settings;
+            s.PeopleHideUnknown = HideUnknownToggle.IsOn;
+            s.Save();
+        });
 
     private void OnCleanupAutoTagToggled(object sender, RoutedEventArgs e)
-    {
-        if (_initializingToggles) return;
-        var s = AppViewModel.Instance.Settings;
-        s.CleanupAutoTagKept = CleanupAutoTagToggle.IsOn;
-        s.Save();
-    }
+        => DebugLog.SafeRun(nameof(OnCleanupAutoTagToggled), () =>
+        {
+            if (_initializingToggles) return;
+            var s = AppViewModel.Instance.Settings;
+            s.CleanupAutoTagKept = CleanupAutoTagToggle.IsOn;
+            s.Save();
+        });
 
     private void OnRestructureTreeModeToggled(object sender, RoutedEventArgs e)
-    {
-        if (_initializingToggles) return;
-        var s = AppViewModel.Instance.Settings;
-        s.RestructureTreeMode = RestructureTreeModeToggle.IsOn;
-        s.Save();
-    }
+        => DebugLog.SafeRun(nameof(OnRestructureTreeModeToggled), () =>
+        {
+            if (_initializingToggles) return;
+            var s = AppViewModel.Instance.Settings;
+            s.RestructureTreeMode = RestructureTreeModeToggle.IsOn;
+            s.Save();
+        });
 
     private void OnAutoInstallCudaToggled(object sender, RoutedEventArgs e)
-    {
-        if (_initializingToggles) return;
-        var s = AppViewModel.Instance.Settings;
-        s.DisableAutoInstallCuda = !AutoInstallCudaToggle.IsOn;
-        s.Save();
-    }
+        => DebugLog.SafeRun(nameof(OnAutoInstallCudaToggled), () =>
+        {
+            if (_initializingToggles) return;
+            var s = AppViewModel.Instance.Settings;
+            s.DisableAutoInstallCuda = !AutoInstallCudaToggle.IsOn;
+            s.Save();
+        });
 
     private void OnProviderOverrideChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (_initializingToggles) return;
-        if (ProviderCombo.SelectedItem is not ComboBoxItem item || item.Tag is not string tag) return;
-        var s = AppViewModel.Instance.Settings;
-        s.GpuExecutionProviderOverride = (tag == "auto") ? null : tag;
-        s.Save();
-        // The engine reads this value at startup via runtime.rs's
-        // read_user_ep_override(); to apply a change live, the user
-        // must restart the engine (the Restart button in this view, or
-        // the prompt shown after installing a Performance Pack).
-    }
+        => DebugLog.SafeRun(nameof(OnProviderOverrideChanged), () =>
+        {
+            if (_initializingToggles) return;
+            if (ProviderCombo.SelectedItem is not ComboBoxItem item || item.Tag is not string tag) return;
+            var s = AppViewModel.Instance.Settings;
+            s.GpuExecutionProviderOverride = (tag == "auto") ? null : tag;
+            s.Save();
+            // The engine reads this value at startup via runtime.rs's
+            // read_user_ep_override(); to apply a change live, the user
+            // must restart the engine (the Restart button in this view, or
+            // the prompt shown after installing a Performance Pack).
+        });
 
     public string EngineVersionText
     {
@@ -449,6 +454,36 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             button.Content = originalContent;
             button.IsEnabled = true;
             CudaLlamaStatusText.Text = $"Install failed: {ex.Message}";
+        }
+    }
+
+    /// <summary>V15.1 in-app cuDNN install. Drives the same engine path
+    /// V14.9-U's deleted auto-installer used: PrewarmModelAsync requests
+    /// the engine fetch the cuDNN redist (~430 MB) from NVIDIA's CDN,
+    /// extract it under Models/cudnn/, and call register_dll_dirs_under
+    /// so the ORT CUDA EP can load it on next engine restart. The status
+    /// caption mirrors the macOS download UI. After completion the user
+    /// hits "Verify install" (or restarts the engine) to flip the
+    /// scanning pipeline from DirectML to CUDA EP.</summary>
+    private async void OnInstallCudnnClicked(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button button) return;
+        var originalContent = button.Content;
+        try
+        {
+            button.IsEnabled = false;
+            button.Content = "Installing…";
+            CudnnStatusText.Text = "Downloading cuDNN (~430 MB) from NVIDIA's CDN…";
+            await EngineClient.Instance.PrewarmModelAsync("cudnn_runtime_x64");
+            button.Content = "Installed";
+            CudnnStatusText.Text = "✓ cuDNN installed. Click \"Verify install\" or restart FileID to switch scanning to the CUDA EP.";
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"Install cuDNN failed: {ex.Message}");
+            button.Content = originalContent;
+            button.IsEnabled = true;
+            CudnnStatusText.Text = $"Install failed: {ex.Message}";
         }
     }
 

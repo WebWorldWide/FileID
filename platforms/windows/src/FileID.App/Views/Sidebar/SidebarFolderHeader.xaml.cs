@@ -55,8 +55,19 @@ public sealed partial class SidebarFolderHeader : UserControl
         }
     }
 
+    // V15.2: disable the button while a picker dialog is open so a
+    // double-click can't spawn two concurrent pickers and race their
+    // FolderPath setters.
+    private int _pickInFlight; // 0 = idle, 1 = picker open
+
     private async void OnPickClicked(object sender, RoutedEventArgs e)
     {
+        if (System.Threading.Interlocked.CompareExchange(ref _pickInFlight, 1, 0) != 0)
+        {
+            DebugLog.Info("OnPickClicked: picker already open; ignoring second click.");
+            return;
+        }
+        if (sender is Button btn) btn.IsEnabled = false;
         try
         {
             var hwnd = (this.XamlRoot?.ContentIslandEnvironment?.AppWindowId is { Value: not 0 })
@@ -81,13 +92,17 @@ public sealed partial class SidebarFolderHeader : UserControl
         catch (Exception ex)
         {
             DebugLog.Warn("OnPickClicked threw: " + ex);
+            try { DebugLog.WriteCrashDump("SidebarFolderHeader.OnPickClicked", ex, terminating: false); } catch { }
+        }
+        finally
+        {
+            System.Threading.Interlocked.Exchange(ref _pickInFlight, 0);
+            if (sender is Button btn2) btn2.IsEnabled = true;
         }
     }
 
     private void OnClearClicked(object sender, RoutedEventArgs e)
-    {
-        AppViewModel.Instance.FolderPath = null;
-    }
+        => DebugLog.SafeRun(nameof(OnClearClicked), () => AppViewModel.Instance.FolderPath = null);
 
     private async void OnWipeClicked(object sender, RoutedEventArgs e)
     {
@@ -109,26 +124,26 @@ public sealed partial class SidebarFolderHeader : UserControl
             }
 
             // Real wipe flow:
-            //   1. Tell the engine to shut down (releases the SQLite WAL).
-            //   2. Wait briefly for the process to actually exit so the file
-            //      lock is released — without this the deletes below race.
-            //   3. Delete fileid.sqlite + the WAL/SHM sidecars.
-            //   4. EngineClient's auto-respawn (1s/4s/16s backoff) brings up
-            //      a fresh engine pointing at a fresh DB. Migrations re-apply.
-            //   5. Library/People/Cleanup tabs auto-refresh on the empty DB
-            //      via their existing PropertyChanged listeners.
-            await EngineClient.Instance.ShutdownAsync();
-            await Task.Delay(800);
+            //   1. Tell the engine to shut down AND wait for the process
+            //      to actually exit — without the wait, the SQLite handle
+            //      is still open and the deletes below hit a sharing
+            //      violation.
+            //   2. Delete fileid.sqlite + the WAL/SHM sidecars, retrying
+            //      a few times since the Windows kernel can keep the
+            //      FILE_OBJECT alive for a few hundred ms after the
+            //      process exits.
+            //   3. EngineClient's auto-respawn brings up a fresh engine
+            //      pointing at a fresh DB. Migrations re-apply.
+            //   4. Library/People/Cleanup tabs auto-refresh on the empty
+            //      DB via their existing PropertyChanged listeners.
+            await EngineClient.Instance.StopAndWaitForExitAsync(TimeSpan.FromSeconds(10));
 
             try
             {
                 foreach (var name in new[] { "fileid.sqlite", "fileid.sqlite-wal", "fileid.sqlite-shm" })
                 {
                     var path = System.IO.Path.Combine(AppPaths.Root, name);
-                    if (System.IO.File.Exists(path))
-                    {
-                        System.IO.File.Delete(path);
-                    }
+                    await TryDeleteWithRetryAsync(path);
                 }
                 DebugLog.Info("Wipe-and-rescan: DB files deleted.");
             }
@@ -152,6 +167,26 @@ public sealed partial class SidebarFolderHeader : UserControl
         }
     }
 
+    // Windows can hold a FILE_OBJECT live for a few hundred ms after the
+    // owning process exits — handle-close cleanup is asynchronous. Retry
+    // a couple of times before letting the final IOException propagate to
+    // the caller's try/catch (which surfaces the user-visible error dialog).
+    private static async Task TryDeleteWithRetryAsync(string path)
+    {
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            try
+            {
+                if (System.IO.File.Exists(path)) System.IO.File.Delete(path);
+                return;
+            }
+            catch (System.IO.IOException) when (attempt < 2)
+            {
+                await Task.Delay(200);
+            }
+        }
+    }
+
     private async Task ShowAlertAsync(string title, string body)
     {
         var dialog = new ContentDialog
@@ -166,9 +201,7 @@ public sealed partial class SidebarFolderHeader : UserControl
     }
 
     private void OnCollapseClicked(object sender, RoutedEventArgs e)
-    {
-        AppViewModel.Instance.ToggleSidebar();
-    }
+        => DebugLog.SafeRun(nameof(OnCollapseClicked), () => AppViewModel.Instance.ToggleSidebar());
 
     private IntPtr GetParentHwnd()
     {

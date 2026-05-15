@@ -64,6 +64,12 @@ hex  = "0.4"
 image            = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "bmp", "tiff", "gif"] }
 fast_image_resize = "4"
 kamadak-exif     = "0.5"
+# V14.9-X iteration C: turbojpeg considered + dropped. The crate requires
+# a system libjpeg-turbo install (pkg-config / vcpkg); no `vendored` feature
+# upstream. Adding a system dep just for a JPEG-decode speedup is the wrong
+# trade for the "user just downloads and runs" promise. Revisit once a
+# pure-Rust SIMD JPEG decoder (e.g. an upstream `zune-jpeg` AVX-512 path)
+# closes the gap, or once we can justify shipping a bundled DLL.
 
 # Memory mapping for large image reads.
 memmap2 = "0.9"

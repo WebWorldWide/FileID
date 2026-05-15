@@ -23,6 +23,13 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     internal LibraryViewModel ViewModel { get; }
     private FileTile? _lastClickedTile;
     private readonly ThumbnailService _thumbnails = new();
+    // Live-tile streaming during a scan. Mirrors macOS LibraryView's
+    // .onChange(of: engine.lastBatch?.batchIndex) — refresh the grid
+    // whenever a new BatchSummary lands, but throttled so a fast scan
+    // doesn't issue 30+ DB reads per second.
+    private long _lastSeenBatchIndex = -1;
+    private DateTime _lastReloadAt = DateTime.MinValue;
+    private static readonly TimeSpan LibraryReloadThrottle = TimeSpan.FromSeconds(1);
     // BUG-12: ElementPrepared/ElementClearing fire on the UI thread, but
     // LoadThumbAsync's finally-block .Remove can resume on a worker thread
     // after ConfigureAwait(true) without a SyncContext. ConcurrentDictionary
@@ -45,7 +52,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         ViewModel.PropertyChanged += OnViewModelPropertyChanged;
         ViewModel.Items.CollectionChanged += OnItemsCollectionChanged;
         UndoStack.Instance.PropertyChanged += OnUndoStackChanged;
-        EngineClient.Instance.PropertyChanged += OnEngineScanCompleted;
+        EngineClient.Instance.PropertyChanged += OnEngineChanged;
 
         Loaded += async (_, _) =>
         {
@@ -71,14 +78,35 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         }
     }
 
-    private void OnEngineScanCompleted(object? sender, PropertyChangedEventArgs e)
+    private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName != nameof(EngineClient.Phase)) return;
-        if (EngineClient.Instance.Phase != FileID.IpcSchema.ScanPhase.Completed) return;
+        switch (e.PropertyName)
+        {
+            case nameof(EngineClient.Phase):
+                if (EngineClient.Instance.Phase == FileID.IpcSchema.ScanPhase.Completed)
+                {
+                    RequestLibraryRefresh(force: true);
+                }
+                break;
+            case nameof(EngineClient.LastBatch):
+                var summary = EngineClient.Instance.LastBatch;
+                if (summary is null) return;
+                long batchIndex = summary.BatchIndex;
+                if (batchIndex == _lastSeenBatchIndex) return;
+                _lastSeenBatchIndex = batchIndex;
+                if (DateTime.UtcNow - _lastReloadAt < LibraryReloadThrottle) return;
+                RequestLibraryRefresh(force: false);
+                break;
+        }
+    }
+
+    private void RequestLibraryRefresh(bool force)
+    {
+        _lastReloadAt = DateTime.UtcNow;
         DispatcherQueue.TryEnqueue(async () =>
         {
             try { await ViewModel.RefreshAsync(CancellationToken.None); }
-            catch (Exception ex) { Services.DebugLog.Warn($"Library refresh on scan complete failed: {ex.Message}"); }
+            catch (Exception ex) { Services.DebugLog.Warn($"Library refresh failed (force={force}): {ex.Message}"); }
         });
     }
 
@@ -102,19 +130,20 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     /// <summary>V14.9-D1: select-all visible toggle. If anything is
     /// currently selected, clear; otherwise select every visible tile.</summary>
     private void OnSelectAllClicked(object sender, RoutedEventArgs e)
-    {
-        if (ViewModel.SelectedCount > 0)
+        => DebugLog.SafeRun(nameof(OnSelectAllClicked), () =>
         {
-            ViewModel.ClearSelection();
-            SelectAllText.Text = "Select";
-        }
-        else
-        {
-            foreach (var t in ViewModel.Items) t.IsSelected = true;
-            SelectAllText.Text = "Clear";
-        }
-        UpdateSelectionBar();
-    }
+            if (ViewModel.SelectedCount > 0)
+            {
+                ViewModel.ClearSelection();
+                SelectAllText.Text = "Select";
+            }
+            else
+            {
+                foreach (var t in ViewModel.Items) t.IsSelected = true;
+                SelectAllText.Text = "Clear";
+            }
+            UpdateSelectionBar();
+        });
 
     /// <summary>V14.9-D2: pop the top undo entry. The label update
     /// follows automatically via the UndoStack PropertyChanged handler.</summary>
@@ -137,6 +166,23 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// CRITICAL DISPOSAL ORDER — do not reorder without re-reading this:
+    ///
+    ///   1. Cancel in-flight CTSes (thumb loads).
+    ///   2. Dispose ViewModel FIRST. Its Dispose cancels `_disposalCts`,
+    ///      which propagates through every linked token into in-flight
+    ///      RefreshAsync / SemanticSearch awaits.
+    ///   3. THEN dispose `_clip` and `_thumbnails`. If those go first, a
+    ///      resumed task touches a disposed service and the process dies
+    ///      hard (V14.9-F-A2 — the user's "click sidebar mid-scan → app
+    ///      dies" repro). On Windows there's no Swift / SwiftUI lifecycle
+    ///      to bail us out of an inverted order.
+    ///
+    /// V15.2 emphasis: this is one of three lifecycle-order invariants
+    /// that the macOS app gets for free from SwiftUI but Windows has to
+    /// hand-orchestrate. Do not touch.
+    /// </summary>
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
         Unloaded -= OnUnloaded;
@@ -144,23 +190,20 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         try { ViewModel.PropertyChanged -= OnViewModelPropertyChanged; } catch { /* swallow */ }
         try { ViewModel.Items.CollectionChanged -= OnItemsCollectionChanged; } catch { /* swallow */ }
         try { UndoStack.Instance.PropertyChanged -= OnUndoStackChanged; } catch { /* swallow */ }
-        try { EngineClient.Instance.PropertyChanged -= OnEngineScanCompleted; } catch { /* swallow */ }
-        // Cancel + dispose every in-flight thumb load so closing the tab
-        // doesn't leave background tasks holding BitmapImage refs.
+        try { EngineClient.Instance.PropertyChanged -= OnEngineChanged; } catch { /* swallow */ }
+        // Step 1: cancel + dispose every in-flight thumb load so closing
+        // the tab doesn't leave background tasks holding BitmapImage refs.
         foreach (var (_, cts) in _inflight)
         {
             try { cts.Cancel(); } catch { /* swallow */ }
             cts.Dispose();
         }
         _inflight.Clear();
-        // V14.9-F-A2: dispose ViewModel FIRST. Its Dispose cancels the
-        // VM-level _disposalCts, which propagates through every linked
-        // token into in-flight RefreshAsync / SemanticSearch awaits.
-        // ONLY after that's done is it safe to tear down _clip and
-        // _thumbnails — otherwise a resumed task would touch a disposed
-        // service and crash the process (the user's reported "click a
-        // sidebar tab during a scan and the app dies" symptom).
+        // Step 2: dispose ViewModel FIRST. See the method-level remark
+        // above for why the order is load-bearing.
         try { ViewModel.Dispose(); } catch { /* swallow */ }
+        // Step 3: only AFTER ViewModel has cancelled its disposal CTS,
+        // tear down the services its in-flight tasks may still touch.
         try { _clip.Dispose(); } catch { /* swallow */ }
         try { _thumbnails.Dispose(); } catch { /* swallow */ }
     }
@@ -208,17 +251,16 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             ? Visibility.Visible : Visibility.Collapsed;
 
     private void OnSearchChanged(object sender, TextChangedEventArgs e)
-    {
-        ViewModel.Query = SearchBox.Text;
-    }
+        => DebugLog.SafeRun(nameof(OnSearchChanged), () => ViewModel.Query = SearchBox.Text);
 
     private void OnKindChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (KindFilter.SelectedItem is ComboBoxItem item && item.Tag is string tag)
+        => DebugLog.SafeRun(nameof(OnKindChanged), () =>
         {
-            ViewModel.KindFilter = tag;
-        }
-    }
+            if (KindFilter.SelectedItem is ComboBoxItem item && item.Tag is string tag)
+            {
+                ViewModel.KindFilter = tag;
+            }
+        });
 
     // Right-tap on a tile lets the keyboard accelerate to the same flyout
     // (Shift+F10 / Menu key). The MenuFlyout is wired in XAML; this just
@@ -237,6 +279,9 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                                             Microsoft.UI.Xaml.Controls.ItemsRepeaterElementPreparedEventArgs args)
     {
         if (args.Element is not FrameworkElement el || el.DataContext is not FileTile tile) return;
+        // V15.2: tile is back in the virtualization window — undo the
+        // ElementClearing detach so a fresh thumbnail load can bind.
+        tile.IsDetached = false;
         if (tile.Thumbnail != null) return; // cached on previous prepare
 
         var cts = new CancellationTokenSource();
@@ -254,6 +299,9 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                                            Microsoft.UI.Xaml.Controls.ItemsRepeaterElementClearingEventArgs args)
     {
         if (args.Element is not FrameworkElement el || el.DataContext is not FileTile tile) return;
+        // V15.2: mark detached so a late-arriving thumbnail render
+        // doesn't bind into a stale tile.
+        tile.IsDetached = true;
         if (_inflight.TryRemove(tile, out var cts))
         {
             try { cts.Cancel(); } catch { /* swallow */ }
@@ -265,10 +313,19 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     {
         try
         {
-            var bmp = await _thumbnails.RequestAsync(tile.Path, tile.ModifiedAt, ct).ConfigureAwait(true);
-            if (bmp != null && !ct.IsCancellationRequested)
+            // V15.2: explicit UI dispatcher post for the bind. The previous
+            // ConfigureAwait(true) relied on the captured SynchronizationContext
+            // (DispatcherQueueSynchronizationContext on UI thread), which the
+            // thumbnail service's TCS may or may not honor depending on how
+            // the result is published. Using TryEnqueue makes the
+            // UI-thread assignment unambiguous.
+            var bmp = await _thumbnails.RequestAsync(tile.Path, tile.ModifiedAt, ct).ConfigureAwait(false);
+            if (bmp != null && !ct.IsCancellationRequested && !tile.IsDetached)
             {
-                tile.Thumbnail = bmp;
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (!tile.IsDetached) tile.Thumbnail = bmp;
+                });
             }
         }
         catch { /* swallow -- placeholder stays */ }
@@ -281,48 +338,49 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     // Single tap toggles selection when Ctrl is held; Shift extends from
     // the last clicked tile; otherwise sets a single selection.
     private void OnTileTapped(object sender, TappedRoutedEventArgs e)
-    {
-        if (sender is not FrameworkElement el || el.DataContext is not FileTile tile) return;
-
-        var ctrl = Microsoft.UI.Input.InputKeyboardSource
-            .GetKeyStateForCurrentThread(VirtualKey.Control)
-            .HasFlag(CoreVirtualKeyStates.Down);
-        var shift = Microsoft.UI.Input.InputKeyboardSource
-            .GetKeyStateForCurrentThread(VirtualKey.Shift)
-            .HasFlag(CoreVirtualKeyStates.Down);
-
-        if (shift && _lastClickedTile is not null)
+        => DebugLog.SafeRun(nameof(OnTileTapped), () =>
         {
-            int a = ViewModel.Items.IndexOf(_lastClickedTile);
-            int b = ViewModel.Items.IndexOf(tile);
-            if (a >= 0 && b >= 0)
+            if (sender is not FrameworkElement el || el.DataContext is not FileTile tile) return;
+
+            var ctrl = Microsoft.UI.Input.InputKeyboardSource
+                .GetKeyStateForCurrentThread(VirtualKey.Control)
+                .HasFlag(CoreVirtualKeyStates.Down);
+            var shift = Microsoft.UI.Input.InputKeyboardSource
+                .GetKeyStateForCurrentThread(VirtualKey.Shift)
+                .HasFlag(CoreVirtualKeyStates.Down);
+
+            if (shift && _lastClickedTile is not null)
             {
-                int lo = Math.Min(a, b);
-                int hi = Math.Max(a, b);
-                if (!ctrl) foreach (var t in ViewModel.Items) t.IsSelected = false;
-                for (int i = lo; i <= hi; i++) ViewModel.Items[i].IsSelected = true;
+                int a = ViewModel.Items.IndexOf(_lastClickedTile);
+                int b = ViewModel.Items.IndexOf(tile);
+                if (a >= 0 && b >= 0)
+                {
+                    int lo = Math.Min(a, b);
+                    int hi = Math.Max(a, b);
+                    if (!ctrl) foreach (var t in ViewModel.Items) t.IsSelected = false;
+                    for (int i = lo; i <= hi; i++) ViewModel.Items[i].IsSelected = true;
+                }
             }
-        }
-        else if (ctrl)
-        {
-            tile.IsSelected = !tile.IsSelected;
-            _lastClickedTile = tile;
-        }
-        else
-        {
-            // Plain click — only update selection if user is mid-multi-select;
-            // otherwise let double-tap open the preview without setting any
-            // selection.
-            if (ViewModel.SelectedCount > 0)
+            else if (ctrl)
             {
-                foreach (var t in ViewModel.Items) t.IsSelected = false;
-                tile.IsSelected = true;
+                tile.IsSelected = !tile.IsSelected;
                 _lastClickedTile = tile;
             }
-        }
+            else
+            {
+                // Plain click — only update selection if user is mid-multi-select;
+                // otherwise let double-tap open the preview without setting any
+                // selection.
+                if (ViewModel.SelectedCount > 0)
+                {
+                    foreach (var t in ViewModel.Items) t.IsSelected = false;
+                    tile.IsSelected = true;
+                    _lastClickedTile = tile;
+                }
+            }
 
-        UpdateSelectionBar();
-    }
+            UpdateSelectionBar();
+        });
 
     private void UpdateSelectionBar()
     {
@@ -452,10 +510,11 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     }
 
     private void OnClearSelectionClicked(object sender, RoutedEventArgs e)
-    {
-        ViewModel.ClearSelection();
-        UpdateSelectionBar();
-    }
+        => DebugLog.SafeRun(nameof(OnClearSelectionClicked), () =>
+        {
+            ViewModel.ClearSelection();
+            UpdateSelectionBar();
+        });
 
     // Lets the user drag a tile out of FileID into Explorer / email /
     // Slack as a real file. If multiple tiles are selected, the whole

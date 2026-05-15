@@ -305,19 +305,21 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
     {
         if (_process is { HasExited: false })
         {
-            // Reset the in-flight gate even on this no-op path so the
-            // backoff timer can re-fire.
-            Interlocked.Exchange(ref _isStarting, 0);
+            // Engine is already running. Don't touch _isStarting — another
+            // caller may legitimately hold the gate while completing a
+            // spawn we collided with.
             return;
         }
-        // BUG-3: claim the in-flight gate. If another caller is already
-        // mid-spawn, bail. Released in finally below.
-        if (Interlocked.CompareExchange(ref _isStarting, 1, 0) != 0
-            && _state == LifecycleState.Starting)
+        // V15.2 — strict CAS gate. The earlier formulation (BUG-3 comment)
+        // claimed the gate, then declined to bail when it lost the race,
+        // letting a second StartAsync caller fall through to a parallel
+        // spawn. That produced occasional double-spawn with a shared stdin/
+        // stdout pair — the second engine crashed on bind or fed corrupt
+        // IPC. Now: if we lose the CAS, return immediately.
+        if (Interlocked.CompareExchange(ref _isStarting, 1, 0) != 0)
         {
-            // Already starting from another path — the OnProcessExited
-            // backoff path may have set _isStarting=1 and CALLED us;
-            // detect that case by checking for the prior State.
+            DebugLog.Info("EngineClient.StartAsync: spawn already in flight; skipping.");
+            return;
         }
 
         // V14.9-A2: every code path below — including early-return on
@@ -500,6 +502,20 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
 
     private async Task StdoutLoopAsync(StreamReader reader, CancellationToken ct)
     {
+        // V15.2.1: removed the V15.2 stdout idle watchdog. It killed
+        // healthy idle engines (e.g. after the auto-install of llama
+        // runtimes, the engine sits quietly waiting for the user — 5 min
+        // of "idle" tripped the watchdog and forced a respawn that the
+        // respawn-CAS double-bookkeeping then dropped). A watchdog can't
+        // distinguish "engine hung" from "engine idle waiting for user".
+        // Genuine engine hangs are caught by:
+        //   - the engine's own parent-PID watchdog (which kills the
+        //     engine if the C# app dies),
+        //   - V14.9-Y's GPU TDR detection (sticky cancellation +
+        //     EngineError), and
+        //   - per-command timeouts on the C# side (WaitForReadyAsync,
+        //     CudaAutoInstaller's 30-min cap, etc).
+        // A global stdout idle timer is the wrong granularity.
         while (!ct.IsCancellationRequested)
         {
             string? line;
@@ -629,31 +645,22 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
                 _ => TimeSpan.FromSeconds(16),
             };
             DebugLog.Info($"EngineClient: respawning in {delay.TotalSeconds}s (attempt {_consecutiveFailures}/3).");
-            // BUG-3: guard against double-spawn during the delay window.
-            // If a second OnProcessExited (impossible in practice — we
-            // null _process in Cleanup — but cheap to guard) or a
-            // user-initiated StartAsync races, we must run only once.
-            // V14.9-A1: the inner StartAsync() call was previously
-            // discarded with `_ =`, so a synchronous throw or async fault
-            // escaped to App.UnhandledException. Wrap the async call in
-            // a try/catch so respawn failures stay diagnosable but never
-            // tear the app.
+            // V15.2.1: removed the outer CAS. The original BUG-3 guard
+            // was redundant in V15.2 (StartAsync now has its own strict
+            // CAS at the top) and actively harmful: setting _isStarting
+            // to 1 here caused StartAsync's own CAS to see "already
+            // starting" and bail. Net: every auto-respawn was silently
+            // dropped, leaving the engine dead after the first crash.
+            // Now we just call StartAsync; its gate handles the race.
             _ = Task.Delay(delay).ContinueWith(_ => _ui.TryEnqueue(async () =>
             {
-                if (Interlocked.CompareExchange(ref _isStarting, 1, 0) == 0)
+                try
                 {
-                    try
-                    {
-                        await StartAsync().ConfigureAwait(false);
-                    }
-                    catch (Exception ex)
-                    {
-                        DebugLog.Error("EngineClient: respawn StartAsync threw: " + ex.Message);
-                        // StartAsync's own finally already released _isStarting;
-                        // mirror it here defensively in case the exception
-                        // escaped before the finally executed.
-                        Interlocked.Exchange(ref _isStarting, 0);
-                    }
+                    await StartAsync().ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    DebugLog.Error("EngineClient: respawn StartAsync threw: " + ex.Message);
                 }
             }));
         });
@@ -836,10 +843,10 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
         get => _lastScanDuration;
         private set => Set(ref _lastScanDuration, value);
     }
-    public Task StartScanAsync(string rootPath, string? rootDisplay = null)
+    public Task StartScanAsync(string rootPath, string? rootDisplay = null, bool rescan = false)
     {
         _scanStartedAt = DateTime.UtcNow;
-        return SendCommandAsync(new StartScanCommand(rootPath, rootDisplay));
+        return SendCommandAsync(new StartScanCommand(rootPath, rootDisplay, rescan));
     }
 
     /// <summary>Reset Phase + LastError before a fresh user action (e.g. retrying
@@ -907,6 +914,37 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
         return SendCommandAsync(new ShutdownCommand());
     }
 
+    /// <summary>Send ShutdownCommand and wait for the engine process to
+    /// actually exit (HasExited == true). Returns when the process is
+    /// gone or after <paramref name="timeout"/> elapses (engine wedged —
+    /// caller decides whether to proceed or surface an error). Used by
+    /// RestartAsync and by the in-app wipe flow, which both need the
+    /// SQLite file handle released before continuing.</summary>
+    public async Task StopAndWaitForExitAsync(TimeSpan timeout, CancellationToken ct = default)
+    {
+        try
+        {
+            await ShutdownAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("[ENGINE] StopAndWaitForExitAsync: ShutdownAsync threw: " + ex.Message);
+            // Even if the IPC send failed, OnProcessExited may still fire.
+        }
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.Elapsed < timeout && !ct.IsCancellationRequested)
+        {
+            if (_process is null || _process.HasExited)
+            {
+                DebugLog.Info($"[ENGINE] StopAndWaitForExitAsync: process exited after {sw.ElapsedMilliseconds}ms.");
+                return;
+            }
+            await Task.Delay(100, ct).ConfigureAwait(false);
+        }
+        DebugLog.Warn($"[ENGINE] StopAndWaitForExitAsync: timed out after {sw.ElapsedMilliseconds}ms; process still alive.");
+    }
+
     /// <summary>Cleanly stop the engine and respawn it. Used after a
     /// Performance Pack install so the new EP is picked up — the
     /// RuntimeProbe runs once at startup, so a fresh process is the only
@@ -918,27 +956,7 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
     public async Task RestartAsync(CancellationToken ct = default)
     {
         DebugLog.Info("[ENGINE] RestartAsync requested.");
-        try
-        {
-            await ShutdownAsync().ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Warn("[ENGINE] ShutdownAsync threw during restart: " + ex.Message);
-            // Even if the IPC send failed, OnProcessExited may still fire.
-        }
-
-        // Wait for the process to actually exit. OnProcessExited sets
-        // State to Crashed (per the _expectingExit branch), then schedules
-        // StartAsync via Task.Delay(0..16s) backoff. We don't strictly
-        // need to wait for the exit — but if the engine is wedged and
-        // doesn't exit, restarting blindly is worse.
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        while (sw.Elapsed < TimeSpan.FromSeconds(10) && !ct.IsCancellationRequested)
-        {
-            if (_process is null || _process.HasExited) break;
-            await Task.Delay(100, ct).ConfigureAwait(false);
-        }
+        await StopAndWaitForExitAsync(TimeSpan.FromSeconds(10), ct).ConfigureAwait(false);
 
         // Force a fresh spawn. StartAsync is idempotent if a process is
         // already running, but here we explicitly want a new one. If the
@@ -1314,28 +1332,35 @@ internal sealed class EngineClient : INotifyPropertyChanged, IDisposable
                 LastMergeSuggestions = ms.Suggestions;
                 break;
             case HardwareReprobedEvent hr:
+                if (hr.Result is null)
+                {
+                    DebugLog.Warn("HardwareReprobedEvent with null Result; dropped.");
+                    break;
+                }
                 LastHardwareReprobe = hr.Result;
                 // Also refresh the cached HardwareInfo in Info so Settings
                 // bindings to existing Info.Hardware fields update too.
-                if (Info is { } prevInfo)
+                if (Info is { } prevInfo && hr.Result.Hardware is { } hw)
                 {
                     Info = new EngineInfo(
                         prevInfo.Version,
                         prevInfo.Pid,
                         prevInfo.WorkerCap,
                         prevInfo.PhysicalMemoryGB,
-                        hr.Result.Hardware);
+                        hw);
                 }
                 break;
         }
         }
         catch (Exception ex)
         {
-            // A null deref or malformed payload in one switch arm must NOT
-            // tear down the UI. Log + carry on. The OnUnhandledException
-            // handler in App.xaml.cs is the absolute last resort; everything
-            // routing-related lands here first.
+            // V15.2: route through WriteCrashDump so a routing-side fault
+            // leaves a forensic artifact (not just a log line). A null
+            // deref or malformed payload in one switch arm must NOT tear
+            // down the UI. Log + dump + carry on.
             DebugLog.Error($"EngineClient.Apply({ev.Payload?.GetType().Name ?? "<null>"}) threw: {ex}");
+            try { DebugLog.WriteCrashDump($"EngineClient.Apply({ev.Payload?.GetType().Name ?? "<null>"})", ex, terminating: false); }
+            catch { /* swallow */ }
         }
     }
 

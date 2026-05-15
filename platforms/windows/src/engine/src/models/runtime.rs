@@ -125,6 +125,117 @@ fn push_unique(chain: &mut Vec<ExecutionProvider>, ep: ExecutionProvider) {
     }
 }
 
+/// V14.9-Y CRITICAL SAFETY: detects `DXGI_ERROR_DEVICE_REMOVED`
+/// (HRESULT 0x887A0005) in any ORT/DirectML error string.
+///
+/// When Windows TDR (Timeout Detection and Recovery) kills the GPU
+/// device because an op exceeded the 2-second deadline, every
+/// subsequent `session.run()` returns this error. Without explicit
+/// detection, the engine logs ~100 identical per-file warnings per
+/// second, hammering the dying driver and preventing DWM from
+/// recovering — the user sees a black screen + maxed fans + must hard
+/// reboot.
+///
+/// Callers MUST treat a true result as fatal: cancel the scan, emit
+/// an `EngineError { kind: "gpu_device_removed" }`, and stop
+/// submitting any new GPU work for the rest of the process lifetime.
+/// The GPU device handle the EP holds is permanently invalid; only
+/// a full engine restart can recover.
+///
+/// The match strings cover both the bare HRESULT hex and the
+/// human-readable phrases ORT 2.0-rc.10's DirectML EP emits, plus the
+/// generic "device removed" wording other EPs (CUDA, OpenVINO) use
+/// when their device context dies. Substring match (not regex) keeps
+/// the hot path fast.
+/// Marker substring that callers attach via `.context()` to any
+/// session.run() error that came back as device-removed. The pipeline
+/// layer greps for this in the error chain to know it should cancel
+/// the whole scan instead of just skipping the current file.
+pub const GPU_DEVICE_REMOVED_MARKER: &str = "[FILEID_GPU_DEVICE_REMOVED]";
+
+/// Detects whether an error carries the marker added by the model
+/// wrappers when they classify a session.run failure as device-removed.
+/// Cheap substring check on the formatted error chain.
+pub fn error_has_device_removed_marker(err: &anyhow::Error) -> bool {
+    format!("{err:#}").contains(GPU_DEVICE_REMOVED_MARKER)
+}
+
+/// Helper used by every model wrapper after `session.run()` returns
+/// Err. Inspects the error and, if it looks like GPU device-removed,
+/// attaches the marker so the pipeline layer can detect + cancel the
+/// whole scan. Non-device errors pass through unchanged (single-file
+/// non-fatal failures the pipeline can skip).
+pub fn classify_inference_error(err: anyhow::Error) -> anyhow::Error {
+    if is_device_removed_error(&err) {
+        err.context(GPU_DEVICE_REMOVED_MARKER)
+    } else {
+        err
+    }
+}
+
+pub fn is_device_removed_error(err: &anyhow::Error) -> bool {
+    let s = format!("{err:#}");
+    // HRESULT in hex (both upper and lower-case forms).
+    if s.contains("887A0005") || s.contains("887a0005") {
+        return true;
+    }
+    // DirectML EP wording.
+    if s.contains("DEVICE_REMOVED")
+        || s.contains("device removed")
+        || s.contains("device instance has been suspended")
+    {
+        return true;
+    }
+    // CUDA / generic.
+    if s.contains("CUDA_ERROR_NOT_INITIALIZED")
+        || s.contains("CUDA_ERROR_INVALID_CONTEXT")
+        || s.contains("DXGI_ERROR_DEVICE_HUNG")
+        || s.contains("DXGI_ERROR_DEVICE_RESET")
+    {
+        return true;
+    }
+    false
+}
+
+/// Resolve a priority chain of our internal `ExecutionProvider` variants
+/// into the `ExecutionProviderDispatch` values ORT's `SessionBuilder::
+/// with_execution_providers` consumes.
+///
+/// V14.9-V: every model loader used to compute `priority_chain(...)` and
+/// then drop it on the floor (`let _ = chain;`). ORT silently fell back
+/// to the CPU EP for every model, so the engine pegged a CPU core
+/// regardless of detected GPU. This helper exists so the loaders can do
+/// `builder.with_execution_providers(execution_providers_for_chain(&chain))`
+/// in one line.
+///
+/// CPU is the implicit fallback (ORT always has the CPU EP), so we don't
+/// emit an explicit dispatch for it — letting it fall through means a
+/// failed-to-bind GPU EP cleanly degrades to CPU instead of failing
+/// session creation outright.
+pub fn execution_providers_for_chain(
+    chain: &[ExecutionProvider],
+) -> Vec<ort::execution_providers::ExecutionProviderDispatch> {
+    use ort::execution_providers::{
+        cuda::CUDAExecutionProvider,
+        directml::DirectMLExecutionProvider,
+        openvino::OpenVINOExecutionProvider,
+        qnn::QNNExecutionProvider,
+        tensorrt::TensorRTExecutionProvider,
+    };
+    let mut out = Vec::with_capacity(chain.len());
+    for ep in chain {
+        match ep {
+            ExecutionProvider::Cuda => out.push(CUDAExecutionProvider::default().build()),
+            ExecutionProvider::TensorRt => out.push(TensorRTExecutionProvider::default().build()),
+            ExecutionProvider::OpenVino => out.push(OpenVINOExecutionProvider::default().build()),
+            ExecutionProvider::DirectMl => out.push(DirectMLExecutionProvider::default().build()),
+            ExecutionProvider::Qnn => out.push(QNNExecutionProvider::default().build()),
+            ExecutionProvider::Cpu => { /* CPU is the implicit fallback */ }
+        }
+    }
+    out
+}
+
 /// User-supplied EP override stored in the C# app's `app-settings.json`
 /// under key `gpuExecutionProviderOverride`. Values: `"cuda"` |
 /// `"tensorrt"` | `"openvino"` | `"directml"` | `"qnn"` | `"cpu"` |

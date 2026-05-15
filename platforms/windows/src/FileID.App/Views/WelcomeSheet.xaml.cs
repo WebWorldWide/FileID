@@ -302,6 +302,70 @@ public sealed partial class WelcomeSheet : UserControl
         HandleAction(Svc.Vlm);
     }
 
+    // V15.2.1: GPU Acceleration Pack row. On NVIDIA this kicks off the
+    // cuDNN download via PrewarmModelAsync("cudnn_runtime_x64"). On other
+    // vendors the button isn't shown (ShowAcceleratorButton returns
+    // Collapsed) so this handler can't fire.
+    private void OnAcceleratorActionClicked(object sender, RoutedEventArgs e)
+    {
+        DebugLog.Info("[INSTALL] GPU Acceleration Pack per-row button clicked.");
+        HandleAction(Svc.Accelerator);
+    }
+
+    // V15.2.1 — XAML binding helpers for the Accelerator row.
+    internal Visibility ShowAcceleratorButton(ModelInstallStatus status, bool isRealInstall)
+    {
+        // Show the button only when there's something the user can do:
+        // NVIDIA + cuDNN not yet installed (NotInstalled / Failed) OR
+        // a download in flight (so they can Cancel). On non-NVIDIA we
+        // pre-set Status=Installed AND AcceleratorIsRealInstall=false;
+        // hide the button there.
+        if (status == ModelInstallStatus.Installed && !isRealInstall) return Visibility.Collapsed;
+        return status != ModelInstallStatus.Installed ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    internal Visibility ShowAcceleratorInstalledBadge(ModelInstallStatus status, bool isRealInstall)
+    {
+        // "Installed" badge is shown only after a real cuDNN install
+        // (NVIDIA only). For non-NVIDIA, no badge — the Message text
+        // already explains "DirectML is already optimal".
+        return (status == ModelInstallStatus.Installed && isRealInstall)
+            ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    internal string AcceleratorGlyph(ModelInstallStatus status, bool isRealInstall)
+    {
+        // Reuse the same glyph palette: green check for "really installed",
+        // info chip for "not applicable on this vendor", spinner-ish for
+        // downloading, hint for not-yet-installed.
+        if (status == ModelInstallStatus.Installed && !isRealInstall) return ""; // Info — DirectML optimal
+        return GlyphFor(status);
+    }
+
+    internal Brush AcceleratorIconBrush(ModelInstallStatus status, bool isRealInstall)
+    {
+        // For "DirectML optimal" rows (non-NVIDIA Installed-pseudo) tint
+        // muted instead of green so the row reads as informational, not
+        // success.
+        if (status == ModelInstallStatus.Installed && !isRealInstall)
+        {
+            return (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"];
+        }
+        return IconBrushFor(status);
+    }
+
+    internal string AcceleratorSize(ulong approxBytes, ModelInstallStatus status, bool isRealInstall)
+    {
+        // Hide the "~430 MB" badge when the slot is pseudo-installed for
+        // a non-NVIDIA vendor (Status=Installed, but no real install
+        // happened — DirectML is optimal so the byte count is misleading).
+        if (status == ModelInstallStatus.Installed && !isRealInstall) return string.Empty;
+        if (approxBytes <= 0) return string.Empty;
+        if (approxBytes >= 1024UL * 1024 * 1024)
+            return $"~{approxBytes / (1024.0 * 1024 * 1024):0.#} GB";
+        return $"~{approxBytes / (1024 * 1024)} MB";
+    }
+
     private void HandleAction(ModelSlot slot)
     {
         DebugLog.Info($"[INSTALL] HandleAction({slot.DisplayLabel}) — Status={slot.Status}");

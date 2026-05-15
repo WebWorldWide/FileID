@@ -64,7 +64,13 @@ internal sealed class ThumbnailService : IDisposable
             SingleWriter = false,
             FullMode = BoundedChannelFullMode.DropOldest,
         });
+        // V15.2: attach a fault sink so a DrainAsync exception leaves a
+        // forensic trail instead of becoming an UnobservedTaskException
+        // at GC time.
         _worker = Task.Run(() => DrainAsync(_cts.Token));
+        _ = _worker.ContinueWith(
+            t => DebugLog.Error("ThumbnailService worker faulted: " + t.Exception),
+            TaskContinuationOptions.OnlyOnFaulted);
     }
 
     public Task<BitmapImage?> RequestAsync(string path, double? modifiedAt, CancellationToken ct)
@@ -95,7 +101,12 @@ internal sealed class ThumbnailService : IDisposable
             }
             try
             {
-                var bmp = await RenderAsync(req.Path, _uiDispatcher, ct).ConfigureAwait(false);
+                // V15.2: drop ConfigureAwait(false). The bitmap returned
+                // from RenderAsync is a UI-thread DispatcherObject; the
+                // post-await continuation here completes the caller's
+                // TCS with that handle, and we want the caller's continuation
+                // to also resume on the UI thread when it sets tile.Thumbnail.
+                var bmp = await RenderAsync(req.Path, _uiDispatcher, ct);
                 if (bmp != null)
                 {
                     var key = CacheKey(req.Path, req.ModifiedAt);
@@ -109,6 +120,7 @@ internal sealed class ThumbnailService : IDisposable
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
+                DebugLog.Warn("ThumbnailService.DrainAsync: " + ex.Message);
                 req.Completion.TrySetResult(null);
             }
         }
@@ -131,10 +143,11 @@ internal sealed class ThumbnailService : IDisposable
         {
             return null;
         }
+        Windows.Storage.FileProperties.StorageItemThumbnail? thumb = null;
         try
         {
             var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(path).AsTask(ct).ConfigureAwait(false);
-            using var thumb = await file
+            thumb = await file
                 .GetThumbnailAsync(
                     Windows.Storage.FileProperties.ThumbnailMode.SingleItem,
                     ThumbnailRequestPx,
@@ -143,43 +156,62 @@ internal sealed class ThumbnailService : IDisposable
                 .ConfigureAwait(false);
             if (thumb == null || thumb.Size == 0)
             {
+                thumb?.Dispose();
                 return null;
             }
-            // BitmapImage.SetSourceAsync must run on the UI thread because
-            // BitmapImage is a DispatcherObject. V14.9-A10: use the ctor-
-            // captured dispatcher. Falling back to HostWindow at this
-            // point is unsafe (HostWindow may not yet exist or may have
-            // been torn down); refuse to render rather than touch
-            // BitmapImage from a thread-pool thread.
+            // V15.2 — CRASH FIX: BitmapImage is a WinUI DispatcherObject.
+            // The previous code created the BitmapImage on this worker
+            // thread and only marshalled SetSourceAsync to the UI thread.
+            // WinUI 3's composition layer detects cross-thread access
+            // during the next frame and calls RaiseFailFastException —
+            // bypassing every managed exception handler (no crash-*.txt
+            // is produced). Symptom: thumbnails fail to render, then
+            // the app dies hard during scan. Fix: construct AND set
+            // source AND dispose the underlying stream on the UI
+            // dispatcher in one continuous lambda.
             var dispatcher = uiDispatcher ?? FileID.App.HostWindow?.DispatcherQueue;
             if (dispatcher is null)
             {
                 DebugLog.Warn("ThumbnailService.RenderAsync: no UI dispatcher available; skipping.");
+                thumb.Dispose();
                 return null;
             }
-            var bmp = new BitmapImage();
-            var tcs = new TaskCompletionSource<BitmapImage?>();
+            // Transfer ownership of `thumb` into the UI lambda so the
+            // stream's lifetime spans SetSourceAsync.
+            var capturedThumb = thumb;
+            thumb = null;
+            var tcs = new TaskCompletionSource<BitmapImage?>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
             var enqueued = dispatcher.TryEnqueue(async () =>
             {
                 try
                 {
-                    await bmp.SetSourceAsync(thumb).AsTask(ct);
+                    var bmp = new BitmapImage();
+                    await bmp.SetSourceAsync(capturedThumb).AsTask(ct);
                     tcs.TrySetResult(bmp);
                 }
-                catch
+                catch (Exception ex)
                 {
+                    DebugLog.Warn("ThumbnailService UI render: " + ex.Message);
                     tcs.TrySetResult(null);
+                }
+                finally
+                {
+                    try { capturedThumb.Dispose(); } catch { /* swallow */ }
                 }
             });
             if (!enqueued)
             {
                 DebugLog.Warn("ThumbnailService.RenderAsync: dispatcher.TryEnqueue returned false (shutdown?).");
+                try { capturedThumb.Dispose(); } catch { /* swallow */ }
                 return null;
             }
             return await tcs.Task.ConfigureAwait(false);
         }
-        catch
+        catch (Exception ex)
         {
+            DebugLog.Warn("ThumbnailService.RenderAsync: " + ex.Message);
+            try { thumb?.Dispose(); } catch { /* swallow */ }
             return null;
         }
     }

@@ -14,6 +14,7 @@
 // bottleneck. The bounded mpsc channel applies backpressure when tagging
 // workers fall behind.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -83,6 +84,12 @@ pub struct DiscoveredFile {
 pub struct Discovery {
     root: PathBuf,
     coordinator: ScanCoordinator,
+    /// V15.0 Phase B: paths the orchestrator has determined are already
+    /// scanned-and-current (DB `scanned_at >= modified_unix`). When
+    /// present, Discovery silently skips these instead of yielding them
+    /// to tagging — turning a re-run of a 1M-file corpus into a near-
+    /// instant no-op. Empty = behave as classic full-scan.
+    skip_paths: Arc<HashSet<PathBuf>>,
 }
 
 /// V14.9-N2: handle returned from `Discovery::spawn`. `rx` is the file
@@ -103,9 +110,22 @@ pub struct DiscoveryHandle {
 
 impl Discovery {
     pub fn new(root: impl Into<PathBuf>, coordinator: ScanCoordinator) -> Self {
+        Self::new_with_skip(root, coordinator, Arc::new(HashSet::new()))
+    }
+
+    /// V15.0 Phase B: incremental-rescan-aware constructor. The caller
+    /// (`scan_session.rs`) loads the "already current" path set from
+    /// the DB before spawning Discovery. Honors a `rescan: true` flag
+    /// from the IPC payload by passing an empty set here.
+    pub fn new_with_skip(
+        root: impl Into<PathBuf>,
+        coordinator: ScanCoordinator,
+        skip_paths: Arc<HashSet<PathBuf>>,
+    ) -> Self {
         Self {
             root: root.into(),
             coordinator,
+            skip_paths,
         }
     }
 
@@ -123,12 +143,31 @@ impl Discovery {
         let (tx, rx) = mpsc::channel(DISCOVERY_CHANNEL_CAP);
         let root = self.root.clone();
         let coordinator = self.coordinator.clone();
+        let skip_paths = self.skip_paths.clone();
         let count = Arc::new(AtomicU64::new(0));
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let error_count = Arc::new(AtomicU64::new(0));
         let count_inner = count.clone();
         let done_inner = done.clone();
         let error_count_inner = error_count.clone();
+
+        if !skip_paths.is_empty() {
+            tracing::info!(
+                skip = skip_paths.len(),
+                "[DISCOVERY] skipping N already-scanned files (rescan=false)"
+            );
+        }
+
+        // V14.9-X test gate: cap files yielded by Discovery so a
+        // staging run (e.g. validate VRAM behavior on N=100) can't
+        // wedge the system. Unset / 0 → no cap (default behavior).
+        let test_file_cap: u64 = std::env::var("FILEID_TEST_FILE_CAP")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if test_file_cap > 0 {
+            tracing::warn!(cap = test_file_cap, "[DISCOVERY] FILEID_TEST_FILE_CAP set; will stop discovery after N files");
+        }
 
         tokio::task::spawn_blocking(move || {
             // walkdir: sorted-by-path traversal for I/O locality (sequential
@@ -143,6 +182,9 @@ impl Discovery {
                 if coordinator.is_cancelled() {
                     break;
                 }
+                if test_file_cap > 0 && count_inner.load(Ordering::Relaxed) >= test_file_cap {
+                    break;
+                }
                 let entry = match entry {
                     Ok(e) => e,
                     Err(_) => {
@@ -155,6 +197,13 @@ impl Discovery {
                 }
                 let path = entry.path();
                 if Self::should_skip(path) {
+                    continue;
+                }
+                // V15.0 Phase B: skip files the orchestrator pre-loaded
+                // as already-current. Hash lookup is O(1); a 1M-file set
+                // costs ~80 MB RAM (acceptable) but lets a repeat scan
+                // complete in seconds instead of hours.
+                if skip_paths.contains(path) {
                     continue;
                 }
                 let metadata = match entry.metadata() {

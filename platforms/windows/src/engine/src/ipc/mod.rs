@@ -166,6 +166,12 @@ pub struct StartScanPayload {
     /// Optional human-readable label; if absent, callers default to root_path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_display: Option<String>,
+    /// V15.0 Phase B: when true, force every file to be reprocessed
+    /// even if `scanned_at >= modified_unix` in the DB. Default false =
+    /// incremental rescan (skip already-current files). Backwards-
+    /// compatible via Serde default.
+    #[serde(default)]
+    pub rescan: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

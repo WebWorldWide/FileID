@@ -72,15 +72,30 @@ pub struct ScanSession {
     worker_count: usize,
     sink: Sink,
     models: Arc<ModelStack>,
+    /// V15.0 Phase B: when true, skip the incremental-rescan skip set
+    /// and reprocess every file. Plumbed from `StartScanPayload::rescan`.
+    rescan: bool,
 }
 
 impl ScanSession {
+    #[allow(dead_code)]
     pub fn new(
         coordinator: ScanCoordinator,
         db_conn: Arc<Mutex<Connection>>,
         worker_count: usize,
         sink: Sink,
         models: Arc<ModelStack>,
+    ) -> Self {
+        Self::new_with_options(coordinator, db_conn, worker_count, sink, models, false)
+    }
+
+    pub fn new_with_options(
+        coordinator: ScanCoordinator,
+        db_conn: Arc<Mutex<Connection>>,
+        worker_count: usize,
+        sink: Sink,
+        models: Arc<ModelStack>,
+        rescan: bool,
     ) -> Self {
         Self {
             session_id: Uuid::new_v4().to_string(),
@@ -89,6 +104,7 @@ impl ScanSession {
             worker_count: worker_count.max(1),
             sink,
             models,
+            rescan,
         }
     }
 
@@ -142,8 +158,57 @@ impl ScanSession {
             );
         }
 
+        // V15.0 Phase B: pre-load the "already current" set from DB so
+        // Discovery can skip files whose `scanned_at >= modified_at`.
+        // For a 1M-file repeat scan, this turns an 8-hour redo into a
+        // ~1-second startup query + ~0-second discovery walk. The
+        // rescan flag (Y15.0 IPC addition) forces a full rescan.
+        let skip_paths = if self.rescan {
+            tracing::info!("[SCAN] rescan=true; processing every file regardless of prior scan state");
+            std::sync::Arc::new(std::collections::HashSet::new())
+        } else {
+            let conn = self.db_conn.lock();
+            let mut set = std::collections::HashSet::<std::path::PathBuf>::new();
+            let root_prefix = root.to_string_lossy().to_string();
+            // Diagnostic counts so we can tell at a glance whether (a) the
+            // DB is empty, (b) the LIKE prefix is wrong, or (c) the
+            // scanned_at >= modified_at filter excludes everything.
+            let total_files: i64 = conn
+                .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+                .unwrap_or(0);
+            let prefix_match: i64 = {
+                let like = format!("{}%", root_prefix.trim_end_matches(['\\', '/']));
+                conn.query_row(
+                    "SELECT COUNT(*) FROM files WHERE path_text LIKE ?1",
+                    rusqlite::params![like],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0)
+            };
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT path_text FROM files \
+                 WHERE path_text LIKE ?1 \
+                 AND scanned_at >= modified_at"
+            ) {
+                let like = format!("{}%", root_prefix.trim_end_matches(['\\', '/']));
+                if let Ok(rows) = stmt.query_map(rusqlite::params![like], |r| r.get::<_, String>(0)) {
+                    for p in rows.flatten() {
+                        set.insert(std::path::PathBuf::from(p));
+                    }
+                }
+            }
+            tracing::info!(
+                already_current = set.len(),
+                files_total = total_files,
+                files_under_root = prefix_match,
+                root = %root_prefix,
+                "[SCAN] preloaded skip set for incremental rescan"
+            );
+            std::sync::Arc::new(set)
+        };
+
         // Wire the three pipeline stages with bounded mpsc channels.
-        let discovery = Discovery::new(root, self.coordinator.clone());
+        let discovery = Discovery::new_with_skip(root, self.coordinator.clone(), skip_paths);
         let handle = discovery.spawn();
         let discovered_count = handle.count.clone();
         let discovered_done = handle.done.clone();
@@ -274,7 +339,24 @@ impl ScanSession {
             );
         }
 
-        if self.coordinator.is_cancelled() {
+        if self.coordinator.is_gpu_dead() {
+            // V14.9-Y: distinct error kind so the C# app can show a
+            // "GPU device suspended — restart the app to recover"
+            // banner instead of the generic cancelled state. Emit
+            // BEFORE PhaseChanged(Failed) so the IPC consumer sees
+            // the cause first.
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(
+                crate::ipc::EngineError {
+                    kind: "gpu_device_removed".into(),
+                    message: "Windows reported GPU device removed (TDR). The scan has been aborted to keep the system responsive. Restart the engine to recover; if this repeats, consider lowering FILEID_MODEL_POOL_SIZE or switching to CPU EP via gpuExecutionProviderOverride.".into(),
+                    path: None,
+                    model_kind: None,
+                },
+            ))))
+            .await;
+            on_phase(SessionPhase::Failed);
+            emit_phase(SessionPhase::Failed);
+        } else if self.coordinator.is_cancelled() {
             on_phase(SessionPhase::Cancelled);
             emit_phase(SessionPhase::Cancelled);
         } else {

@@ -210,25 +210,25 @@ public sealed partial class FilePreviewSheet : UserControl
     }
 
     private void OnRevealClicked(object sender, RoutedEventArgs e)
-    {
-        Services.SafeOpen.Reveal(FilePath);
-    }
+        => Services.DebugLog.SafeRun(nameof(OnRevealClicked), () => Services.SafeOpen.Reveal(FilePath));
 
     private void OnOpenClicked(object sender, RoutedEventArgs e)
-    {
-        // SEC-9: ext-gated; falls back to Reveal for non-allowlisted ext.
-        if (!Services.SafeOpen.TryOpenFile(FilePath))
+        => Services.DebugLog.SafeRun(nameof(OnOpenClicked), () =>
         {
-            Services.SafeOpen.Reveal(FilePath);
-        }
-    }
+            // SEC-9: ext-gated; falls back to Reveal for non-allowlisted ext.
+            if (!Services.SafeOpen.TryOpenFile(FilePath))
+            {
+                Services.SafeOpen.Reveal(FilePath);
+            }
+        });
 
     private void OnCopyPathClicked(object sender, RoutedEventArgs e)
-    {
-        var dp = new Windows.ApplicationModel.DataTransfer.DataPackage();
-        dp.SetText(FilePath);
-        Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(dp);
-    }
+        => Services.DebugLog.SafeRun(nameof(OnCopyPathClicked), () =>
+        {
+            var dp = new Windows.ApplicationModel.DataTransfer.DataPackage();
+            dp.SetText(FilePath);
+            Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(dp);
+        });
 
     private void OnTagInputKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
     {

@@ -2,6 +2,330 @@
 
 > Snapshot of what's working and where we left off. Update at the end of every working session.
 
+## V15.2.1 (2026-05-14) — Fix three V15.2 regressions + one-button GPU pack
+
+V15.2 shipped three regressions that broke first-launch on the user's machine. Forensics: `engine.jsonl` showed clean engine teardown after the engine was killed by the new C# watchdog; `app.log` showed the rest of the failure cascade.
+
+**Regression 1 — Stdout watchdog killed idle engines.** V15.2's 5-min idle watchdog (`EngineClient.StdoutLoopAsync`) tripped after the engine auto-installed llama runtimes and went legitimately quiet waiting for user input. The watchdog can't distinguish "engine hung" from "engine idle waiting for user"; it punished idle. **Fix:** removed entirely. The engine's parent-PID watchdog covers the inverse case (C# app dying); GPU TDR is caught by V14.9-Y's `is_gpu_dead`; per-command timeouts (WaitForReadyAsync, CudaAutoInstaller's 30 min) are the right granularity.
+
+**Regression 2 — Respawn CAS gate double-bookkeeping.** Immediately after Bug 1 fired, the respawn path set `_isStarting=1` *before* calling StartAsync; StartAsync's own strict V15.2 CAS saw "already starting" and bailed. Net: every auto-respawn was silently dropped. **Fix:** removed the outer CAS in `OnProcessExited`. StartAsync's own gate handles the race.
+
+**Regression 3 — `ModelSlot.PropertyChanged` thread-affinity crash.** After Bug 2 left the engine dead, Install all fired and `slot.Fail("Engine not running")` invoked PropertyChanged from a thread-pool thread. The welcome sheet's x:Bind forwarded it to `TextBlock.Text` → `COMException 0x8001010E` (RPC_E_WRONG_THREAD). Same class of cross-thread XAML violation as the V15.2 BitmapImage fix, different surface. **Fix:** `ModelSlot.Set<T>` now captures the UI DispatcherQueue at construction and marshals every PropertyChanged invocation through `TryEnqueue` when called off the UI thread.
+
+**Feature — One-button GPU Acceleration Pack on welcome sheet.** Per the user's ask. A 4th row appears on the welcome sheet:
+- **NVIDIA**: "Unlocks ~15% faster scanning on NVIDIA GPUs (~430 MB)." Live Install button → engine downloads cuDNN via `cudnn_runtime_x64` registry arm. Becomes "Installed" badge once sentinel lands.
+- **AMD**: "DirectML is already optimal for your AMD GPU — no install needed." No badge, no button.
+- **Intel**: same, "Intel".
+- **Qualcomm**: same, "Snapdragon" (DirectML + QNN).
+- **CPU only**: "No GPU detected — scanning will run on CPU."
+- **Detection pending**: "Detecting GPU…" until engine Ready event arrives.
+
+Wired through the existing `ModelInstallerService` pattern. New `ModelSlot Accelerator` property; new `AcceleratorIsRealInstall` flag distinguishes "real cuDNN install" from "pseudo-installed for non-NVIDIA"; `UpdateAcceleratorForVendor` adapts on engine Info events. Engine side is unchanged (cuDNN registry arm has been there since V14.9-U).
+
+**Cleanup — runtime-pack progress noise.** ~30 `[INSTALL] no slot for model_kind 'llama_runtime_cuda_x64'` warnings per launch came from the auto-installer's progress events reaching `ModelInstallerService` for kinds it doesn't track. Demoted to Debug-level for known auto-installer kinds (`llama_runtime_x64`, `llama_runtime_cuda_x64`, `llama_runtime_vulkan_x64`).
+
+### Files touched (V15.2.1)
+- `platforms/windows/src/FileID.App/ViewModels/EngineClient.cs` — removed stdout watchdog; removed outer respawn CAS.
+- `platforms/windows/src/FileID.App/Services/ModelInstallerService.cs` — `ModelSlot.Set<T>` UI-thread marshaling; `Accelerator` slot + `AcceleratorIsRealInstall` flag + `UpdateAcceleratorForVendor` + `IsAutoInstallerOnly` helper.
+- `platforms/windows/src/FileID.App/Views/WelcomeSheet.xaml` — 4th row for GPU Acceleration Pack.
+- `platforms/windows/src/FileID.App/Views/WelcomeSheet.xaml.cs` — `OnAcceleratorActionClicked` + per-row XAML binding helpers (`ShowAcceleratorButton`, `ShowAcceleratorInstalledBadge`, `AcceleratorGlyph`, `AcceleratorIconBrush`, `AcceleratorSize`).
+
+### Verification plan (user)
+1. Launch the app. Engine spawns, runtimes auto-install, app sits idle. Wait 10 minutes; engine stays alive (no watchdog respawn line).
+2. Welcome sheet shows 4 rows. 4th row reads "GPU Acceleration Pack (NVIDIA) — Unlocks ~15% faster scanning on NVIDIA GPUs (~430 MB)" with live Install button.
+3. Click "Install all". All 4 rows download in parallel; progress percentages tick visibly.
+4. After installs, scan a folder. Tiles populate with thumbnails. No crash, no `crash-*.txt`. `last-session.txt` ends with `clean_exit=true`.
+
+## V15.2 (2026-05-14) — Scan crash root-caused & fixed, full stability sweep, CI parity
+
+V15.1 wired three managed crash sinks (Application.UnhandledException + AppDomain + UnobservedTaskException) but the user's scan-start crash repro produced ZERO `crash-*.txt` files. The forensic trail in `%LOCALAPPDATA%\FileID\logs\` told the story: engine processed 100 files cleanly then hit `stdin EOF` + `BrokenPipe` — the C# app died hard, bypassing every .NET handler. That signature is a NATIVE fast-fail (`RaiseFailFastException`), and the site is `ThumbnailService.RenderAsync`.
+
+**Root cause:** `var bmp = new BitmapImage();` was being executed on the Task.Run worker thread, then `SetSourceAsync` was marshalled to the UI dispatcher, then the returned BitmapImage was bound into `Image.Source` via XAML. WinUI 3's composition layer detects cross-thread DispatcherObject access during the next frame and fast-fails the process. Three .NET handlers can't intercept native fast-fail. Exact symptom match: items appeared (DB refresh works), no thumbnails (closure faults), then the app died.
+
+### Part A — Crash fix
+- `ThumbnailService.cs`: construct BitmapImage + own the thumbnail stream INSIDE the UI dispatcher lambda. Drop `ConfigureAwait(false)` on the worker await. Attach a fault sink to `_worker` so a DrainAsync exception is logged rather than going unobserved.
+
+### Part B — Stability sweep (every audit finding addressed)
+- **Last-session breadcrumb** (`DebugLog.cs` + `App.xaml.cs` + `MainWindow.xaml.cs`): writes `last-session.txt` on launch with `clean_exit=false`; `MarkCleanExit()` flips it to `true` on graceful Window.Closed. On next launch, if the previous file lacks the marker, write `session-died-without-handler-{ts}.txt` — the only forensic path that survives a native fast-fail.
+- **EngineClient**: strict CAS gate on `StartAsync` (BUG-3 finally closed — old code let a losing CAS still spawn). Stdout watchdog (5-minute idle budget; kill the engine to force respawn). `Apply()` catch path now writes a crash dump. `HardwareReprobedEvent` null-guarded.
+- **LibraryViewModel**: new `BatchObservableCollection<T>` with `ReplaceAll` — a single Reset event instead of Clear+N Adds (was the dominant UI-thread cost on 200-item refreshes). Old per-tile listeners explicitly detached before the batch swap so subscriptions don't leak.
+- **AppViewModel.SidebarFolderHeader**: folder picker has a CAS gate + button `IsEnabled=false` while open. Double-click can't spawn two pickers.
+- **MainWindow Welcome dismissal**: dismissed handler re-marshals onto UI dispatcher if invoked off-thread. Defense against future event-source thread changes.
+- **ClipSearchService**: on `EngineClient.State` transitioning away from `Ready`, fault all in-flight TCSes with "Engine respawned mid-query." instead of letting search hang. Generation counter for future debugging.
+- **AppSettings**: `Save()` is now debounced 200 ms + offloaded to thread pool + serialized through `SemaphoreSlim`. UI setters no longer pay 5-15 ms per change. `SaveImmediately()` flushes at shutdown.
+- **ReadStore**: `File.Exists` now has a 5 s timeout — disconnected SMB share no longer hangs startup for 30+ s.
+- **CudaAutoInstaller**: fire-and-forget Task.Run now has a 30 min timeout AND a `ContinueWith(OnlyOnFaulted)` fault sink.
+- **LibraryView**: thumbnail bind explicitly posts via `DispatcherQueue.TryEnqueue` so a thread-pool-completed TCS can't slip a UI mutation. New `FileTile.IsDetached` flag — `OnRepeaterElementClearing` sets it; the setter no-ops if true; `OnRepeaterElementPrepared` clears it on re-prepare.
+- **CleanupView**: refresh requests coalesce via a `_refreshPending` flag — fast-scan event storm no longer enqueues 100+ pending refreshes.
+- **DebugLog.SafeRun / SafeRunAsync** helpers added; click handlers in `LibraryView`, `SettingsView`, `SidebarFolderHeader`, `FilePreviewSheet` routed through them. Each catch writes a crash dump.
+
+### Part C — CI parity
+- **`.github/workflows/windows-app.yml`**: the verify step was checking `bin/Release/...` while `dotnet build /p:Platform=$arch` actually outputs to `bin/$arch/Release/...` — every run was failing. Now: `dotnet publish` step → verify both `FileID.exe` AND `FileID.dll` exist → 23-string telemetry privacy gate (every published binary, ASCII + UTF-16) matching the engine workflow → x64 launch smoke test (start, hold 5 s, kill cleanly).
+- **`.github/workflows/macos.yml`**: engine smoke launch added for parity — runs `.build/release/FileIDEngine` with stdin EOF, verifies clean exit + `ready` + `executionProvider` field in stdout. Matches the windows-engine smoke shape.
+- **`.github/workflows/windows-engine.yml`**: unchanged (already strong).
+- **Linux**: deliberately no workflow — `platforms/linux/` doesn't exist (deferred to Phase 5). Adding one gated on a non-existent path is just noise; lands with the Phase 5 contribution.
+
+### Files touched (V15.2)
+- `platforms/windows/src/FileID.App/Services/ThumbnailService.cs` — crash fix + worker fault sink.
+- `platforms/windows/src/FileID.App/Services/DebugLog.cs` — `BeginSession`/`MarkCleanExit`/`DetectPriorAbnormalExit` + `SafeRun`/`SafeRunAsync` helpers.
+- `platforms/windows/src/FileID.App/Services/AppSettings.cs` — debounced + offloaded Save + `SaveImmediately`.
+- `platforms/windows/src/FileID.App/Services/ReadStore.cs` — `File.Exists` 5 s timeout.
+- `platforms/windows/src/FileID.App/Services/CudaAutoInstaller.cs` — fault sink + 30 min timeout.
+- `platforms/windows/src/FileID.App/Services/ClipSearchService.cs` — engine-respawn fault + generation counter.
+- `platforms/windows/src/FileID.App/ViewModels/EngineClient.cs` — strict CAS gate + stdout watchdog + Apply crash-dump + null guards.
+- `platforms/windows/src/FileID.App/ViewModels/LibraryViewModel.cs` — atomic `ReplaceItems` + `FileTile.IsDetached`.
+- `platforms/windows/src/FileID.App/ViewModels/BatchObservableCollection.cs` — new file.
+- `platforms/windows/src/FileID.App/App.xaml.cs` — wire `BeginSession`.
+- `platforms/windows/src/FileID.App/MainWindow.xaml.cs` — `MarkCleanExit` + `SaveImmediately` on close; Welcome dismissed re-marshal.
+- `platforms/windows/src/FileID.App/Views/Library/LibraryView.xaml.cs` — explicit dispatcher post + `IsDetached` + handler sweep.
+- `platforms/windows/src/FileID.App/Views/Library/FilePreviewSheet.xaml.cs` — handler sweep.
+- `platforms/windows/src/FileID.App/Views/Cleanup/CleanupView.xaml.cs` — refresh debounce.
+- `platforms/windows/src/FileID.App/Views/Sidebar/SidebarFolderHeader.xaml.cs` — pick-in-flight CAS + handler sweep.
+- `platforms/windows/src/FileID.App/Views/Settings/SettingsView.xaml.cs` — toggle handler sweep.
+- `.github/workflows/windows-app.yml` — fixed + publish + privacy gate + smoke.
+- `.github/workflows/macos.yml` — engine smoke launch.
+- `shared/docs/{STATE,NEXT,DECISIONS}.md`.
+
+### Verification plan (user-driven, real hardware)
+1. **Crash gone.** Pick `~/Desktop/Test Data`, click Start Scan. Tiles populate with visible thumbnails. Scan completes in ~6 s for 100 files. No `crash-*.txt`. Engine.jsonl shows clean teardown.
+2. **AppSettings debounce.** Spam-toggle sidebar/tabs for 5 s. No visible UI stutter; `app-settings.json` mtime updates at most every ~200 ms.
+3. **CI green.** All three workflows pass on push.
+4. **Last-session breadcrumb.** Force-kill via Task Manager. Next launch: `[STARTUP] previous session ended without handler` line in app.log; `session-died-without-handler-*.txt` written.
+5. **Engine respawn during search.** Type a CLIP query, then `Stop-Process -Name FileIDEngine -Force`. Search banner flips to "Search paused — engine restarting." instead of hanging.
+6. **Spam Start Scan 5×.** Engine.jsonl shows exactly one `[SCAN] handle_start_scan entered` line.
+7. **Rapid tab switch during scan.** Library ↔ Cleanup ↔ DeepAnalyze every 200 ms while scanning. No crash, debounced refreshes don't pile up.
+
+## V15.1 (2026-05-15) — Scan-start crash capture + macOS UI parity + cuDNN moved opt-in
+
+User reported clicking "Start Scan" → UI crashes. The engine.jsonl + app.log were silent on the failure — no panic, no stack, no WER report. Three structural fixes, plus the cuDNN auto-install policy reversal the user opened the door for.
+
+**Phase 1 — Crash capture (HIGH priority).** WinUI compositor faults, native callback faults, or `Microsoft.UI.Composition` exceptions kill the process BEFORE managed `try/catch` runs. The existing three exception sinks (`Application.UnhandledException`, `AppDomain.CurrentDomain.UnhandledException`, `TaskScheduler.UnobservedTaskException`) all already exist in `App.xaml.cs` and log to `app.log` — but app.log gets truncated at 10 MB and there was no dedicated dump-per-crash file with context. V15.1 adds `DebugLog.WriteCrashDump(source, exception, terminating)` that writes `%LOCALAPPDATA%\FileID\logs\crash-{timestamp}-{pid}.txt` with: exception type + message + full stack, AppDomain unloading flag, OS/CLR version, last 50 lines of app.log inline. Each handler now calls it. Also added a `[STARTUP] FileID app launched. version=..., pid=..., engine=...` line at OnLaunched so a future crash dump can be correlated to a specific build.
+
+**Phase 2 — Scan-start race fix + macOS-parity Starting state.** macOS uses an `@State startRequested = false` bound to the Start Scan button's `disabled:` modifier — so a second click is impossible until the engine acks the first. Windows had no equivalent: spam-clicking issued N IPC `startScan` commands and N optimistic `Phase = Discovering` flips, racing each other. Added `_startInFlight` bool to `SidebarProcessingControl.xaml.cs`: set true at the top of `OnStartScanClicked`, cleared in the outermost `finally`. The two `StartScanButton.IsEnabled` sites + the post-click pill text now both gate on `!_startInFlight`. When the click has been registered but Phase is still Idle (the gap before engine ack), the pill shows "Starting…" — the same affordance macOS gives.
+
+**Phase 3 — cuDNN policy reversal: auto-install removed, opt-in only.** V14.9-U's silent ~430 MB CDN fetch was overkill for a 10-15 % gain on a 6 GB RTX 2060 where DirectML at 38 fps is fine. The auto-install also added startup-time GPU pressure during what was already a hang-prone period (V14.9-W/X). `CudnnAutoInstaller.cs` deleted; `App.xaml.cs` `Hook()` call removed. Settings → Performance gained a new "Install" button next to the existing "Get cuDNN" (browser link) — same engine path (`PrewarmModelAsync("cudnn_runtime_x64")`) the deleted auto-installer used, but now opt-in. Engine-side `registry.rs::cudnn_runtime_x64` arm + `register_dll_dirs_under(&Models/cudnn)` startup call stay untouched.
+
+**Phase 4 — V15.0 `rescan` flag surfaced in C# DTO.** `StartScanCommand` record now has a trailing positional `bool Rescan = false`. `EngineClient.StartScanAsync(rootPath, rootDisplay = null, rescan = false)` accepts it. No UI affordance yet — a future "Force rescan everything" toggle in Settings or the Sidebar can flip it. Engine already honors the flag (V15.0 Phase B with `#[serde(default)]`).
+
+**Phase 5 — Light parity sweep deferred.** Found ~10 click handlers across Library/People/Restructure/DeepAnalyze without an outer `try/catch`. Phase 1's crash dump now captures any unhandled UI exception with full context, so these aren't silent crashers anymore. Wrapping every handler is a separate hardening round — listed in NEXT.md.
+
+### Build & install state
+- C# app rebuilt + replicated to `%LOCALAPPDATA%\FileID-App\` (FileID.exe, 2026-05-14 21:17).
+- Engine binary preserved (V15.0 build from 2026-05-14 20:51).
+- `onnxruntime.dll` (DirectML build, 1.22.0) + `DirectML.dll` (1.15.4) preserved.
+- `CudnnAutoInstaller.cs` deleted; `AppSettings.DisableAutoInstallCudnn` field kept for back-compat (no longer consulted).
+
+### Verification plan (user-driven, since we don't auto-execute the app)
+1. Launch the app. Check that `app.log` shows the new `[STARTUP] FileID app launched. version=...` line.
+2. Click Start Scan once. Pill flips to "Starting…", then Discovering. Engine log shows exactly ONE `[SCAN] handle_start_scan entered`.
+3. Spam-click Start Scan 5x while scan is in-flight. Still exactly ONE engine entry (the second–fifth clicks bounce off the disabled button).
+4. Settings → Performance → confirm "Install" button visible alongside "Get cuDNN" + "Verify install".
+5. If the app crashes at any point, check `%LOCALAPPDATA%\FileID\logs\crash-*.txt` — that's the forensic artifact this round was built to produce.
+
+### Files touched (V15.1)
+- `platforms/windows/src/FileID.App/Services/DebugLog.cs` — new `WriteCrashDump` helper.
+- `platforms/windows/src/FileID.App/App.xaml.cs` — crash sinks now call `WriteCrashDump`; structured startup log line; removed `CudnnAutoInstaller.Hook()`.
+- `platforms/windows/src/FileID.App/Views/Sidebar/SidebarProcessingControl.xaml.cs` — `_startInFlight` field, gated `IsEnabled`, "Starting…" pill.
+- `platforms/windows/src/FileID.App/Services/CudnnAutoInstaller.cs` — DELETED.
+- `platforms/windows/src/FileID.App/Views/Settings/SettingsView.xaml(.cs)` — new "Install" cuDNN button (in-app fetch).
+- `platforms/windows/src/FileID.IpcSchema/CommandPayload.cs` — `StartScanCommand.Rescan = false` positional.
+- `platforms/windows/src/FileID.App/ViewModels/EngineClient.cs` — `StartScanAsync(..., bool rescan = false)`.
+- `shared/docs/{STATE,NEXT,DECISIONS,PACKS,PRIVACY}.md`.
+
+## V15.0 (2026-05-15) — Scale to 1M files safely; harden against adversarial input
+
+V14.9-Y proved the engine could complete a full 15K scan cleanly. Two new requirements drove V15.0:
+
+1. **Scale to 50K–1M files.** At 35 fps that's 24 minutes to 8 hours. Need resume-after-crash + drift prevention.
+2. **Safety against adversarial input.** Audit found malformed JPEGs, EXIF, or oversized images could panic a worker and crash the engine.
+
+Plus an unexplained system hang AFTER V14.9-Y's clean exit suggested the engine's STARTUP burst (6 DirectML allocations in <2 s) was the residual TDR risk.
+
+**Phase A — startup safety.** `pipeline/tagging.rs::load_pool` now sleeps 250 ms between each model-Session allocation. Every model's `load()` runs a one-shot warmup inference at the end (zero-filled input) so kernel compilation + first-time VRAM allocation happen here, not on the first real file. If warmup hits `DXGI_ERROR_DEVICE_REMOVED`, the marker propagates and the whole pool load aborts cleanly (no half-dead state). Verified: cold-start logs show `warmup_ms=1725` for ArcFace's first slot, `46 ms` for subsequent slots (cached kernels). No startup TDR observed across all V15.0 testing.
+
+**Phase B — incremental rescan.** `StartScanPayload` gets a `rescan: bool` (default false). When false, `ScanSession::run` pre-loads a `HashSet<PathBuf>` from `files WHERE path_text LIKE root% AND scanned_at >= modified_at`. `Discovery::new_with_skip` accepts the set and silently skips matching files during the walk. A 1M-file repeat scan now reduces to: ~100 ms DB query + walking the tree without yielding. Verified at N=1000: log shows `already_current=1000, files_total=1000, files_under_root=1000` after the first run completes.
+
+**Phase C — panic-safe worker + adversarial-input defenses.** `load_image_rgb` now: (a) peeks dimensions before decode and rejects > 50 megapixels (prevents a 100 KB JPEG decoding to 4 GB raw), (b) wraps the decode body in `catch_unwind` so a panicking image-crate codec returns Err instead of crashing the worker, (c) every `process_file` call is wrapped in `tokio::time::timeout(60s, ...)` so a stuck network UNC read or wedged decoder can't stall a worker indefinitely.
+
+**Phase D — GPU-dead short-circuit on OCR.** `process_file` now checks `coord.is_gpu_dead()` before calling `Windows.Media.Ocr`. Belt-and-suspenders: WinRT OCR usually fails-soft, but skipping when the GPU is already dead avoids any recursive device-init.
+
+**Phase E — yield cadence.** Each tagging worker sleeps 50 ms after every 500 files. Total cost on a 1M scan: ~100 s out of 8 hours (<0.5 %). Keeps DWM + foreground apps responsive during multi-hour scans.
+
+**Phase F — `shell::thumbnail::render` fast path.** When face models are inactive (`SCRFD/ArcFace not loaded`), `process_file` tries the Windows shell's pre-cached 512×512 RGBA8 thumbnail first, falls back to full decode on Err. Cache hit is microseconds; CLIP + dhash work fine on 512×512. Face pipeline ACTIVE still does full decode (SCRFD needs detail). `FILEID_FORCE_THUMBNAIL=1` overrides to trade face accuracy for ~30 % CPU savings.
+
+**Phase G — pause/resume verified.** `ScanCoordinator::request_pause/resume` + `coord.check().await` were already plumbed in V14.9-V. `SidebarProcessingControl.xaml.cs::OnPauseResumeClicked` correctly dispatches IPC commands and toggles UI label off `EngineClient.IsPaused`. No code change needed; verified by reading both ends.
+
+**Phase H — `THREAD_PRIORITY_LOWEST` on tagging workers.** Each tokio worker calls `set_worker_background_priority()` at spawn so File Explorer / video playback / browser stay responsive during bulk JPEG reads. Best-effort; failures silently ignored.
+
+**Audit findings — accepted (no action):**
+- `#[allow(dead_code)]` × 32 across 18 files. Almost all Phase 6 (VLM) scaffolding. Keep.
+- 13 `unsafe` blocks. All properly bounded.
+- Comments disciplined per CLAUDE.md guidance. No cleanup needed.
+- WIC native JPEG decode deferred (bigger refactor; thumbnail fast path covers the common case).
+
+**Test discipline tightened.** `iterate.ps1` gained a `-SkipWipe` switch so the harness can test incremental rescan in two runs. `FILEID_TEST_FILE_CAP` from V14.9-X still bounds risk.
+
+**Result on RTX 2060 / 6 GB:** N=1000 throughput 38 fps (slight improvement over V14.9-Y's 35 fps — Phase H + E reduced OS contention more than Phase A+C+E added overhead). Skip-set load adds ~100 ms startup, frees 99 %+ of CPU on a repeat scan. Per-file timeout + panic-safe decode add zero measurable cost on a clean corpus.
+
+### Files touched (V15.0)
+- `platforms/windows/src/engine/src/pipeline/tagging.rs` — Phase A (stagger + warmup detection), C (megapixel cap + catch_unwind + timeout), F (thumbnail fast path), D (OCR gate), E (yield), H (worker priority).
+- `platforms/windows/src/engine/src/models/{arcface,scrfd,mobileclip}.rs` — Phase A warmup inference.
+- `platforms/windows/src/engine/src/models/runtime.rs` — already had `classify_inference_error` from V14.9-Y; reused.
+- `platforms/windows/src/engine/src/pipeline/discovery.rs` — Phase B `skip_paths: Arc<HashSet>`.
+- `platforms/windows/src/engine/src/scan_session.rs` — Phase B skip-set preload, `rescan` field + `new_with_options`.
+- `platforms/windows/src/engine/src/ipc/mod.rs` — Phase B `StartScanPayload::rescan`.
+- `platforms/windows/src/engine/src/main.rs` — Phase B plumbing into ScanSession.
+- `platforms/windows/src/engine/src/platform.rs` — Phase H `set_worker_background_priority`.
+- `platforms/windows/build/iterate.ps1` — `-SkipWipe` for incremental-rescan testing.
+- `shared/docs/STATE.md`, `NEXT.md`, `DECISIONS.md`.
+
+## V14.9-Y (2026-05-15) — Safe GPU saturation; full 15K corpus scans without wedging
+
+Two consecutive multi-day debugging sessions trying to push GPU utilization via Session-pool multiplication ended in hard reboots of the user's RTX 2060 / 6 GB box. Both failures looked like VRAM exhaustion but the actual root cause was found by reading `engine.jsonl` from the second failed run:
+
+```
+WARN MobileCLIP embed failed
+  ...onnxruntime.dll Exception(2954) tid(1790) 887A0005
+  The GPU device instance has been suspended.
+  Use GetDeviceRemovedReason to determine the appropriate action.
+```
+
+`0x887A0005` = `DXGI_ERROR_DEVICE_REMOVED`. Windows TDR (Timeout Detection and Recovery) had killed the GPU device because a DirectML op exceeded the 2-second deadline. After that, **every** `session.run()` returned the same error. The engine's per-error path silently logged a warning and continued — workers kept submitting against the dead device at 100+ requests/second, preventing DWM (Windows compositor) from recovering the GPU. The system wasn't really crashing; our error spam was preventing recovery.
+
+V14.9-Y is the safety + diagnosis pass that breaks this pattern. The full 15K test corpus on `Desktop\Test Data` now scans end-to-end in 424 s at 35 fps with zero system hangs.
+
+**TDR detection (`models/runtime.rs`):** new `is_device_removed_error()` matches HRESULT 0x887A0005, "DEVICE_REMOVED", "device instance has been suspended", and the equivalent CUDA / TensorRT phrases. `classify_inference_error()` attaches a sticky marker context to any matching `session.run` error. Every model wrapper (`arcface.rs`, `scrfd.rs`, `mobileclip.rs`) pipes its inference error through this classifier.
+
+**Sticky cancellation (`coordinator.rs`):** new `is_gpu_dead()` / `mark_gpu_dead()` on `ScanCoordinator`. The first worker to detect device-removed flips the flag (`AcqRel` swap) and is the only caller that returns `true` from `mark_gpu_dead` — guarantees a single ERROR log line and a single IPC event regardless of how many workers raced. `reset()` deliberately does NOT clear this flag; once the GPU device is gone in this process, every ORT session it created is invalid until engine restart.
+
+**Pipeline integration (`pipeline/tagging.rs`):** `process_file` checks `coord.is_gpu_dead()` before each GPU stage and short-circuits. On any model's device-removed error it calls `coord.mark_gpu_dead()`. The Tagger's worker loop already polls `coord.is_cancelled()` so all workers exit at the next checkpoint.
+
+**IPC event (`scan_session.rs`):** on scan teardown, if `coord.is_gpu_dead()` the session emits `EngineError { kind: "gpu_device_removed", message: "Windows reported GPU device removed (TDR)…" }` and flips PhaseChanged to Failed. The app can surface a friendly toast instructing the user to restart the engine.
+
+**Process priority dropped (`platform.rs::PriorityBoost`):** ABOVE_NORMAL → NORMAL (env-tunable via `FILEID_PROCESS_PRIORITY`). The earlier boost competed with DWM for CPU during scans; under GPU stress this contributed to TDR by delaying DWM's GPU-recovery scheduling. The user's foreground apps stay smooth at NORMAL.
+
+**Concurrency caps reverted (`pipeline/tagging.rs`):** `VISION_CONCURRENCY` 8→4, `CLIP_CONCURRENCY` 4→2 — the V14.9-V bumps drove deeper DirectML command-queue depth, increasing the chance of a single op missing the 2 s TDR deadline. Throughput cost in measurement: 40 → 39 → 35 fps as the corpus grew. ~10 % steady-state cost, full system safety.
+
+**Pool sizing pivot:** the V14.9-X per-worker Session pool stays but capped to 1 by default; the VRAM gate (`(dedicated_vram_mb - 1500) / 1500`) clamps an env override to 2 on a 6 GB card. Pool=2 worked stably across the full 15K run.
+
+**Result on RTX 2060 / 6 GB:**
+
+| Metric | V14.9-V baseline | V14.9-W (hung) | V14.9-X (hung) | V14.9-Y (this) |
+|---|---|---|---|---|
+| Throughput (fps, 1000 files) | 19 | crashed | 40 then crashed | 39 |
+| Throughput (fps, 15K files) | n/a (too slow) | crashed | crashed | **35** |
+| System stable on full corpus | — | no | no | **yes** |
+| GPU EP active | DirectML | DirectML | DirectML | DirectML |
+
+**Windows-stack optimizations investigated but NOT shipped this round** (queued in NEXT.md):
+- **`shell::thumbnail::render`** is already bound; would help only when face models are inactive (otherwise the full decode is still required for SCRFD). Deferred.
+- **WIC native decode** — pure code add, features already enabled. Estimated 15-30 % decode speedup. Deferred.
+- **`IDXGIAdapter3::QueryVideoMemoryInfo`** — real-time VRAM monitor. Defense-in-depth; current safety net is sufficient. Deferred.
+- **FP16 ONNX variants** — half VRAM, faster on tensor cores. Requires registry URL swap + smoke test. Deferred.
+
+### Files touched (V14.9-Y)
+- `platforms/windows/src/engine/src/coordinator.rs` — `gpu_dead` flag + `mark_gpu_dead()` API.
+- `platforms/windows/src/engine/src/models/runtime.rs` — `is_device_removed_error` + `classify_inference_error` + `GPU_DEVICE_REMOVED_MARKER`.
+- `platforms/windows/src/engine/src/models/{arcface,scrfd,mobileclip}.rs` — `.map_err(classify_inference_error)` at every `session.run`.
+- `platforms/windows/src/engine/src/pipeline/tagging.rs` — `coord` threaded into `process_file`; `coord.is_gpu_dead()` short-circuit + `coord.mark_gpu_dead()` on detection; concurrency caps reverted.
+- `platforms/windows/src/engine/src/scan_session.rs` — emit `gpu_device_removed` IPC event + PhaseChanged(Failed) when `coord.is_gpu_dead()`.
+- `platforms/windows/src/engine/src/platform.rs` — `PriorityBoost` flipped ABOVE_NORMAL → NORMAL; env override.
+- `shared/docs/STATE.md` / `NEXT.md` / `DECISIONS.md`.
+
+## V14.9-V (2026-05-14) — clip_text install gap, ORT EP wiring, runtime DLL bundling
+
+Three real bugs surfaced when trying to drive an end-to-end scan on Windows. All fixed; engine is now actually using the GPU.
+
+**`clip_text` install gap.** Pre-scan validation (`engine/src/main.rs:3074`) requires three model_kind sentinels: `mobileclip_s2`, `arcface`, `clip_text`. The welcome sheet's CLIP slot only fired `PrewarmAsync("mobileclip_s2")` and `ClipSentinelIds = { "mobileclip_s2" }` only polled one of the two, so the row went green when the image encoder landed but the text encoder (separate registry arm with 3 files: text model + BPE vocab + merges) was never installed. Scan-start then failed with "Missing: clip_text" even though the welcome sheet showed everything green. Fix in `ModelInstallerService.cs`: extend `ClipSentinelIds` to `{ "mobileclip_s2", "clip_text" }`, add a `requireAll` mode to `SeedSlot`, and make the CLIP slot's `installAction` fire both prewarms sequentially. The engine's existing handle_prewarm_model short-circuit means re-firing the mobileclip_s2 prewarm when files are already on disk is a no-op (instant sentinel re-write).
+
+**`ort` 2.0-rc.10 + Windows System32 ORT mismatch + DirectML.dll absent.** Windows 11 now ships `onnxruntime.dll` 1.17.x in System32 for OS-level AI features. The `ort` Rust crate's `download-binaries` Cargo feature was meant to provide our pinned 1.22.x next to the engine binary, but its build script bails at "manual setup" without actually downloading anything (at least with the `cuda` + `directml` feature combo we use). On engine startup, ORT LoadLibrary'd System32's 1.17.x, our crate detected the version mismatch, and panicked. Even after dropping our 1.22 alongside the engine, `DirectML.dll` wasn't present so the DirectML EP couldn't initialize → silent CPU fallback. New `build/fetch-runtime-deps.ps1` fetches both NuGet packages (`Microsoft.ML.OnnxRuntime.DirectML` 1.22.0 + `Microsoft.AI.DirectML` 1.15.4) into a cached vendor dir, and `build-all.ps1` + `iterate.ps1` copy the three DLLs (`onnxruntime.dll`, `onnxruntime_providers_shared.dll`, `DirectML.dll`) into both the engine staging dir and the published-app dir.
+
+**The EP-chain bug that was actually making the engine pound CPU.** Every model loader (`arcface.rs`, `clip_text.rs`, `mobileclip.rs`, `scrfd.rs`) had a pattern like:
+
+```rust
+let probe = RuntimeProbe::detect();
+let chain = priority_chain(probe.vendor);
+let mut builder = Session::builder().context("ORT session builder")?;
+// Register EPs in priority order. ...
+let _ = chain;   // ← chain is dropped on the floor
+
+let session = builder.commit_from_file(path)?;
+```
+
+The priority chain was computed and then immediately discarded. ORT silently defaulted to the CPU EP for every model. So even though the engine's `RuntimeProbe` reported `executionProvider=directml`, no actual DirectML session ever got built. Result: 0% GPU usage during scan, CPU pegged at 66%. New helper `runtime::execution_providers_for_chain(&[ExecutionProvider]) -> Vec<ExecutionProviderDispatch>` maps our enum variants to ORT's per-provider builder types, and every loader now calls `builder.with_execution_providers(providers)` before `commit_from_file`. Added a `tracing::info!(model = "...", chain = ?chain_labels, "EP priority chain registered")` line per loader for diagnostic visibility in `engine.jsonl`. After the fix on an RTX 2060: GPU went from 0% → ~19%, CPU stays high (~65%) because the per-file pipeline still does substantial non-ML work (JPEG decode, resize, SHA256, phash). Pushing GPU above ~20% requires batched inference (collect N preprocessed tensors, run one CLIP call), which is a real refactor — flagged in NEXT.md.
+
+Also bumped `VISION_CONCURRENCY` 4→8 and `CLIP_CONCURRENCY` 2→4 in `pipeline/tagging.rs` — the old caps were sized for CPU-EP throughput and starve the GPU once it's actually wired up. Added `with_intra_threads(1)` to every loader (was only on ArcFace) so the ORT thread pool doesn't fight the tokio scheduler.
+
+**`iterate.ps1` was sending broken IPC.** Wire format used `{ command: { startScan: ... } }` but `ipc::IpcCommand` is `{ id, payload: { startScan: ... } }`. The engine silently dropped the malformed command (`ipc decode failed (silenced)` at warn level), `ready` had already fired, and the harness timed out waiting for `scanComplete`. Fixed both `startScan` and `runFaceClustering` / `shutdown` envelopes. Also moved the harness's stdout capture from PS 7's `+=` event syntax to `Register-ObjectEvent` so it works on Windows PowerShell 5.1.
+
+**Latent V14.9-T sentinel-deletion bug.** `build-all.ps1`'s `-Wipe -PreserveModels` was deleting `Models/.sentinels/` while preserving the model artifacts. The engine writes sentinels only at the end of `handle_prewarm_model`, and prewarm with a missing sentinel re-downloads from scratch — so the wipe was forcing a multi-GB redownload anyway. Fixed: keep sentinels when files are kept.
+
+**A new helper, `prewarm-clip-text.ps1`**, was added under `build/` for users already on a pre-V14.9-V build who have everything installed except `clip_text` (a one-time bootstrap to write the missing sentinel without going through the welcome sheet).
+
+### Files touched (V14.9-V)
+- `platforms/windows/src/engine/src/models/{arcface,clip_text,mobileclip,scrfd}.rs` — wire EPs onto Session builder.
+- `platforms/windows/src/engine/src/models/runtime.rs` — new `execution_providers_for_chain` helper.
+- `platforms/windows/src/engine/src/pipeline/tagging.rs` — concurrency caps 4→8 / 2→4.
+- `platforms/windows/src/FileID.App/Services/ModelInstallerService.cs` — install both halves of CLIP; `SeedSlot` requireAll mode.
+- `platforms/windows/build/fetch-runtime-deps.ps1` (new) — pull ORT-DirectML + DirectML NuGets.
+- `platforms/windows/build/build-all.ps1` — invoke fetch, copy DLLs to staging + publish dirs.
+- `platforms/windows/build/iterate.ps1` — wire format fix, PS 5.1 compat, fetch DLLs.
+- `platforms/windows/build/prewarm-clip-text.ps1` (new) — one-shot bootstrap for stuck installs.
+- `platforms/windows/build/build-all.ps1` — drop sentinel-nuke when `-PreserveModels`.
+- `.gitignore` — exclude `runtime-cache/`.
+
+## V14.9-U (2026-05-14) — Kill the Deep Analyze banners; auto-install everything
+
+User reported the two advisory banners on Deep Analyze ("needs the llama.cpp runtime", "NVIDIA but running on DIRECTML — get cuDNN") plus a follow-up "if I run --no-wipe my AI stuff still says it hasn't loaded." All three trace to the same root: Deep Analyze depends on artifacts (llama.cpp runtime + cuDNN) that were separate manual installs from the VLM weights the welcome sheet handles.
+
+**Auto-install everything Deep Analyze needs.** Two new services in `platforms/windows/src/FileID.App/Services/`:
+
+- `LlamaRuntimeAutoInstaller.cs` — fires the `llama_runtime_x64` prewarm at engine-ready for every Windows user. Vulkan covers all GPU vendors so no NVIDIA gate. Opt-out via `AppSettings.DisableAutoInstallVulkanRuntime`. Sentinel-aware via the canonical `Models/.sentinels/{id}.installed` path; re-fires only when missing.
+- `CudnnAutoInstaller.cs` — fires `cudnn_runtime_x64` prewarm at engine-ready on NVIDIA hardware. Skips itself if the engine already reports `ExecutionProvider=cuda` (i.e., user has system CUDA Toolkit + cuDNN installed — engine's `system_cuda_toolkit_dir()` probe already covered them). Opt-out via `AppSettings.DisableAutoInstallCudnn`. New registry arm in `engine/src/models/registry.rs` pointing at NVIDIA's public CDN at `developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.5.1.17_cuda12-archive.zip` (~430 MB). Engine startup registers the resulting `Models/cudnn/` dir via `register_dll_dirs_under` so ORT's CUDA EP finds the DLLs on the loader path.
+
+Both auto-installers `Hook()` from `App.xaml.cs:135` next to the existing `CudaAutoInstaller.Hook()`.
+
+**Banners removed.** `DeepAnalyzeView.xaml` lost the two `<Border>` blocks (`RuntimeBanner` + `CudnnInfoBanner`). `DeepAnalyzeView.xaml.cs` lost `SyncRuntimeBanner()`, `SyncCudnnBanner()`, `OnInstallRuntimeClicked()`, `OnGetCudnnClicked()`, the `EngineClient.{Info,State}` case in `OnEngineChanged`, and the now-unused `using System.IO;`. The tab is purely about VLM picking + caption streaming again — install plumbing is App-level.
+
+**Policy reversal documented.** PACKS.md's V14.8.2 "cuDNN deferred pending redistribution license" stance only made sense when the developer portal was the lone distribution channel. NVIDIA's public CDN changes that. Updates to `shared/docs/PACKS.md`, `shared/docs/PRIVACY.md` (new disclosed egress: `developer.download.nvidia.com`), and `shared/docs/DECISIONS.md` (two entries: Vulkan auto-install + cuDNN policy reversal).
+
+**Latent V14.9-T bug fixed.** `build-all.ps1`'s `-Wipe -PreserveModels` path was deleting `Models/.sentinels/` while preserving the model artifacts. The engine writes sentinels only at the END of `handle_prewarm_model`, and prewarm with a missing sentinel re-downloads from scratch — so the previous behavior forced a multi-GB redownload anyway, defeating the whole point of `-PreserveModels`. Fix: keep sentinels when files are kept.
+
+### Files touched (V14.9-U)
+- NEW `platforms/windows/src/FileID.App/Services/LlamaRuntimeAutoInstaller.cs`
+- NEW `platforms/windows/src/FileID.App/Services/CudnnAutoInstaller.cs`
+- `platforms/windows/src/FileID.App/Services/AppSettings.cs` — two new opt-out flags.
+- `platforms/windows/src/FileID.App/App.xaml.cs` — wire the two new Hook() calls.
+- `platforms/windows/src/FileID.App/Views/DeepAnalyze/DeepAnalyzeView.xaml` — remove banners.
+- `platforms/windows/src/FileID.App/Views/DeepAnalyze/DeepAnalyzeView.xaml.cs` — remove Sync methods + click handlers + stale using.
+- `platforms/windows/src/engine/src/models/registry.rs` — add `cudnn_runtime_x64` arm.
+- `platforms/windows/src/engine/src/main.rs` — register `Models/cudnn/` for DLL loading.
+- `platforms/windows/build/build-all.ps1` — stop nuking `Models/.sentinels` under `-PreserveModels`.
+- `shared/docs/{PACKS,PRIVACY,DECISIONS,STATE,NEXT}.md`.
+
+## V14.9-T (2026-05-14) — Windows live-scan parity, CUDA registry, build wizard
+
+Four parallel fixes after the user reported the `llama_runtime_cuda_x64` unknown-model toast plus several macOS scan behaviors that weren't reaching Windows.
+
+**CUDA runtime registry (`platforms/windows/src/engine/src/models/registry.rs`):** `llama_runtime_cuda_x64` was advertised in `PACKS.md` and requested by both `CudaAutoInstaller.cs:24` and the manual Settings → Performance install button, but the `lookup_full` match block had no arm for it — every prewarm short-circuited at `LookupResult::Unknown` and surfaced the "is not registered" toast. Added a sibling entry next to `llama_runtime_x64`, pointing at the canonical b4475 `llama-bin-win-cuda-cu12.4-x64.zip` release, extracted into `Models/llama.cpp-cuda/` (matches the directory the engine's `register_dll_dirs_under` and the C# `CudaAutoInstaller` already expect). The sentinel auto-derives from `model.id` via `sentinel_path()`.
+
+**Auto-installer sentinel path drift (`CudaAutoInstaller.cs`):** the C# probe checked `{Models}/llama.cpp-cuda/.fileid-installed` while the engine writes the canonical `{Models}/.sentinels/{id}.installed`. Two different conventions meant the auto-installer re-fired the prewarm IPC on every launch even after a successful install. Replaced with the canonical path so it matches `ModelInstallerService.HasEngineSentinel`.
+
+**Live library/cleanup streaming during scan (`LibraryView.xaml.cs`, `CleanupView.xaml.cs`):** both Windows views only refreshed at `ScanPhase.Completed`. macOS Library + Cleanup both use `.onChange(of: engine.lastBatch?.batchIndex)` to redraw the grid every batch with a 1-second throttle. The engine already emitted `BatchSummaryEvent` and `EngineClient.LastBatch` already raised `PropertyChanged` — only the subscription was missing. Both views now listen on `LastBatch` in addition to `Phase`, gated by the same 1-second throttle the macOS pattern uses. PeopleView and DeepAnalyzeView spot-checked: they correctly listen on `LastFaceClustering` / their own progressive events (macOS reference doesn't stream people via `lastBatch` either), so no change.
+
+**Sankey graph audited, not changed:** the prior research summary claimed `SankeyFlowControl.cs` was a stub. It isn't — 408 lines of bezier-ribbon rendering, hit-testing, hover, and tooltips, with the control template defined in `RestructureView.xaml:22-26` and the host instantiation at `RestructureView.xaml:203`. `SetPlan(plan)` is called in `SyncPlan` at line 80. The visualization-mode combo defaults to `SelectedIndex="0"` (Sankey), and the XAML default visibilities (Sankey=Visible, TreeDiff=Collapsed) match what the toggle handler would produce. The card stays hidden when `plan.Moves.Count == 0`, which is correct. No code change.
+
+**Build script Q&A wizard (`build.sh`, `platforms/windows/build/build-all.ps1`):** `build.sh` now drops into an interactive wizard when invoked with no arguments — picks platform, then one of five presets (Fresh install / Iterate / Tests only / CI release / Custom), and echoes the equivalent flag invocation so power users learn the shortcut. "Fresh install" exposes a sub-prompt for wipe scope: artifacts only / artifacts+DB (preserves models) / everything. Legacy `./build.sh -windows --no-wipe --debug` etc. still work unchanged. New `-PreserveModels` switch on `build-all.ps1` makes the wipe walk top-level entries under `%LOCALAPPDATA%\FileID\` and skip `Models/`, then nuke `Models/.sentinels` so the next launch re-validates each bundle. The DB, logs, and settings still get wiped.
+
+### Files touched (V14.9-T)
+- `platforms/windows/src/engine/src/models/registry.rs` — add `llama_runtime_cuda_x64` arm.
+- `platforms/windows/src/FileID.App/Services/CudaAutoInstaller.cs` — canonical sentinel path.
+- `platforms/windows/src/FileID.App/Views/Library/LibraryView.xaml.cs` — `LastBatch` subscription + throttle.
+- `platforms/windows/src/FileID.App/Views/Cleanup/CleanupView.xaml.cs` — same pattern.
+- `build.sh` — interactive wizard + `--preserve-models` flag.
+- `platforms/windows/build/build-all.ps1` — `-PreserveModels` switch.
+- `shared/docs/STATE.md`, `NEXT.md`, `DECISIONS.md`.
+
 ## V14.9-S (2026-05-13) — Fix model-download 404s in welcome sheet
 
 First-run "Install all" hit two HTTP 404s. The Windows engine's `registry.rs` URLs had drifted from current HuggingFace layouts. Fixed and verified via HEAD checks against every URL in the registry.

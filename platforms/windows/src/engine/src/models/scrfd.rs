@@ -16,7 +16,7 @@ use ndarray::Array4;
 use ort::session::{Session, SessionInputValue, SessionOutputs};
 use ort::value::Tensor;
 
-use super::runtime::{priority_chain, RuntimeProbe};
+use super::runtime::{classify_inference_error, execution_providers_for_chain, priority_chain, RuntimeProbe};
 
 #[derive(Debug, Clone)]
 pub struct Detection {
@@ -44,16 +44,37 @@ impl Scrfd {
             anyhow::bail!("SCRFD weights missing at {}", path.display());
         }
         let probe = RuntimeProbe::detect();
-        let _chain = priority_chain(probe.vendor);
-        let session = Session::builder()
+        let chain = priority_chain(probe.vendor);
+        let mut builder = Session::builder()
             .context("ORT session builder")?
+            .with_intra_threads(1)
+            .context("set intra threads (SCRFD)")?;
+        let chain_labels: Vec<&'static str> = chain.iter().map(|e| e.as_str()).collect();
+        let providers = execution_providers_for_chain(&chain);
+        if !providers.is_empty() {
+            builder = builder
+                .with_execution_providers(providers)
+                .context("register execution providers (SCRFD)")?;
+        }
+        tracing::info!(model = "SCRFD", chain = ?chain_labels, "EP priority chain registered");
+        let session = builder
             .commit_from_file(path)
             .context("ORT session commit (SCRFD)")?;
         // SCRFD-10g default input is 640×640. We resize before feed.
-        Ok(Self {
+        let mut model = Self {
             session,
             input_size: (640, 640),
-        })
+        };
+        // V15.0 Phase A: warmup with a zero 640×640 frame so first-call
+        // kernel compile happens during load_default.
+        let warmup_started = std::time::Instant::now();
+        let _ = model.detect(&vec![0u8; 3 * 640 * 640], 640, 640)?;
+        tracing::info!(
+            model = "SCRFD",
+            warmup_ms = warmup_started.elapsed().as_millis() as u64,
+            "warmup complete"
+        );
+        Ok(model)
     }
 
     /// Detect faces in the given RGB8 image. Returns bboxes in image
@@ -96,7 +117,8 @@ impl Scrfd {
         let _outputs: SessionOutputs = self
             .session
             .run(vec![(input_name, SessionInputValue::from(input))])
-            .context("SCRFD session.run")?;
+            .context("SCRFD session.run")
+            .map_err(classify_inference_error)?;
 
         // Anchor decoding from SCRFD heads (strides 8/16/32, two
         // anchors per location). The exact decode logic is non-trivial

@@ -14,13 +14,14 @@ FileID is on-device software. Your photos, documents, faces, OCR text, EXIF, fil
 
 ## What we do — explicitly, only when you trigger it
 
-Every network egress is initiated by you, with visible UI:
+Every network egress is initiated by you opening the app or hitting a button, with the destination disclosed below:
 
-- **Model downloads.** First time you open Deep Analyze (or click "Get model" in Settings), FileID fetches a model from HuggingFace via `reqwest` (Rust engine). Progress bar, ETA, cancel button. SHA256-pinned per-model. After it lands the app works fully offline.
-- **Performance Pack downloads.** Optional CUDA / OpenVINO / Snapdragon-NPU runtime packages. Same flow — user-initiated, disclosed, SHA256-pinned.
+- **Model downloads (HuggingFace).** First time you open Deep Analyze (or click "Get model" in Settings), FileID fetches model weights from HuggingFace via `reqwest` (Rust engine). Progress bar, ETA, cancel button. SHA256-pinned per-model. After it lands the app works fully offline. Egress hosts: `huggingface.co`, `cdn-lfs.huggingface.co`.
+- **llama.cpp runtime (GitHub releases).** Deep Analyze depends on the official llama.cpp binary. The Vulkan runtime auto-installs on first engine-ready (covers every GPU vendor); the CUDA runtime auto-installs on NVIDIA hardware. Both pulled from the upstream project's GitHub release artifacts. Egress hosts: `github.com`, `objects.githubusercontent.com`. Opt-out: `AppSettings.DisableAutoInstallVulkanRuntime` / `DisableAutoInstallCuda` in `app-settings.json`.
+- **NVIDIA cuDNN (developer.download.nvidia.com).** *User-initiated, opt-in only.* Settings → Performance has an "Install" button next to the "NVIDIA acceleration (cuDNN)" row. Clicking it fetches NVIDIA's public cuDNN Windows redistributable so the ONNX Runtime CUDA execution provider can replace DirectML for scanning (~10-15% throughput on RTX-class). The URL is on NVIDIA's own CDN — same channel NVIDIA's docs point at — no third-party redistribution. SHA256-pinnable in the registry. Egress host: `developer.download.nvidia.com`. V15.1 reverted V14.9-U's silent auto-install in favor of this explicit button; see `DECISIONS.md` 2026-05-15.
 - **Help / docs links.** Clicking a help link in Settings opens your browser via the OS shell (`ShellExecuteW` on Windows, `NSWorkspace.open` on macOS). This is your browser making the request, not FileID.
 
-That's the entire surface. There are no other network code paths in the binaries.
+That's the entire surface — five hosts total. There are no other network code paths in the binaries.
 
 ## How to verify
 

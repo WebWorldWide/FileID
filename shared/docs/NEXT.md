@@ -4,6 +4,130 @@
 
 ---
 
+## V15.2 follow-ups (2026-05-14)
+
+V15.2 root-caused + fixed the scan-start crash (native fast-fail from `BitmapImage` cross-thread construction in `ThumbnailService`), did the full P0/P1/P2 stability sweep from the audit, added a last-session breadcrumb that detects native crashes V15.1's three managed sinks miss, and brought the CI workflows to parity (Windows app workflow now publishes, runs a privacy gate, and smoke-launches the EXE; macOS workflow now smoke-launches the engine).
+
+### V15.2-N1 — Real-hardware verification of every sweep item
+
+Plan v15.2's verification list (STATE.md, item 1-7) should be exercised one at a time so a regression in any of the hardening pieces surfaces. The crash-gone test is the headline; items 2-7 should each visibly behave per the expected outcome.
+
+### V15.2-N2 — Decide whether the new stdout 5-min idle watchdog is too aggressive
+
+The watchdog in `EngineClient.StdoutLoopAsync` kills the engine process when no stdout has arrived for 5 minutes. Healthy scans emit events at 10+ Hz; idle the engine still pumps `ready`/`info` events within seconds. But: cold-starting a massive prewarm-then-scan pipeline on a slow machine might silently miss the budget. If we see any spurious respawns on real hardware, bump the budget to 10 minutes or instrument the watchdog with the time-since-last-stdout in a periodic log line so we can tune empirically.
+
+---
+
+## V15.1 follow-ups (2026-05-15)
+
+V15.1 added top-level crash capture (`Application.UnhandledException` + `AppDomain.CurrentDomain.UnhandledException` + `TaskScheduler.UnobservedTaskException` → `crash-*.txt` with last 50 lines of `app.log` attached), a `_startInFlight` gate on the Start Scan button matching macOS's `@State startRequested`, the cuDNN policy reversal (auto-installer deleted, replaced by a manual button in Settings → Performance), and plumbed `StartScanCommand.Rescan` through the C# DTO + `EngineClient.StartScanAsync`. The follow-ups below assume crash dumps will be available the next time the UI dies.
+
+### V15.1-N1 — `Rescan` UI affordance
+
+`StartScanCommand.Rescan` is now wired through the IPC DTO + `EngineClient.StartScanAsync(rootPath, rootDisplay, rescan)` but has no UI surface. Add either (a) a Sidebar context-menu item "Re-scan everything" next to the existing Start Scan button, or (b) a Settings → Library toggle "Force re-scan files even if up to date" that flips a session-scoped flag the sidebar reads. Engine side is done — the V15.0 incremental-skip path honors the flag.
+
+### V15.1-N2 — Handler try/catch hardening sweep across views — CLOSED in V15.2
+
+Closed in V15.2: `DebugLog.SafeRun`/`SafeRunAsync` helpers introduced; high-risk click/toggle handlers in `LibraryView`, `SettingsView`, `SidebarFolderHeader`, `FilePreviewSheet` routed through them. Each catch writes a `crash-*.txt` so handler-side faults leave a forensic trail without tearing down the UI. (Async handlers that already had explicit try/catch were left alone.)
+
+### V15.1-N3 — Decide whether the cuDNN button should ride on the welcome card
+
+User asked during V15.1 scoping whether the cuDNN install belongs on the first-launch welcome sheet. Settings → Performance was chosen for V15.1 because: (a) welcome sheet is already dense with the four required model rows, (b) cuDNN is a niche 10-15% speedup that shouldn't compete with face/tagging/captioning model installs for the user's first-impression attention, (c) NVIDIA-only — would need conditional rendering. Leave the decision pending real telemetry-free user feedback ("did anyone notice the Settings button exists?"). If not, surface a one-line notice on the welcome card *for NVIDIA users only*: "Faster scanning available — see Settings → Performance after install."
+
+### V15.1-N4 — WIC native decode replacing the `image` crate JPEG path
+
+(Carried from V14.9-Y-N2.) `Win32_Graphics_Imaging` features are already in `Cargo.toml`'s windows-rs config; no new dep. `IWICImagingFactory::CreateDecoderFromFilename` is generally 15-30% faster than zune-jpeg on photo JPEGs. Pure code add in `pipeline/tagging.rs::load_image_rgb`. Higher priority now that V15.0 incremental rescan exposed JPEG decode as the dominant per-file CPU cost on warm-cache scans.
+
+---
+
+## V14.9-Y follow-ups (2026-05-15)
+
+The TDR safety net + lowered priority + concurrency revert proved out — full 15K corpus scans in 424 s at 35 fps with zero hangs. The next round of optimizations should keep that stability budget intact.
+
+### Y-N1 — Wire `shell::thumbnail::render` for non-face scans
+
+The existing `shell/thumbnail.rs::render(path) -> Thumbnail` already binds `IShellItemImageFactory::GetImage` and returns the pre-cached 512×512 RGBA8 Explorer thumbnail. For a corpus where the user explicitly disables face detection (`SettingsView.xaml.cs` could expose a toggle), the thumbnail path skips the dominant 140 ms decode cost.
+
+For face-on scans the full decode is still required by SCRFD (would lose accuracy on small faces at 512×512), so this is a Settings-gated speedup, not a default. Estimated win when active: decode 140 ms → ~2 ms.
+
+### Y-N2 — Native WIC decode replacing the `image` crate JPEG path
+
+`Win32_Graphics_Imaging` features are already in `Cargo.toml`'s windows-rs config; no new dep. `IWICImagingFactory::CreateDecoderFromFilename` is generally 15-30 % faster than zune-jpeg on photo JPEGs. Pure code add in `pipeline/tagging.rs::load_image_rgb`.
+
+### Y-N3 — Real-time VRAM monitor via `IDXGIAdapter3::QueryVideoMemoryInfo`
+
+Defense in depth. Spawn a tokio task in `scan_session::run` that polls every 500 ms; if `current_usage / budget > 0.85` for 3 samples (1.5 s), call `coord.request_cancel()` + emit `EngineError { kind: "gpu_memory_pressure" }`. We didn't need this in V14.9-Y because the TDR catcher is sufficient — but on bigger pools it'd add another layer.
+
+### Y-N4 — FP16 ONNX variants
+
+ArcFace + MobileCLIP have FP16 variants on HuggingFace. Half VRAM, often faster on RTX tensor cores. Requires `registry.rs` URL swap + smoke test for accuracy regressions. Could allow larger pool sizes within the same VRAM budget.
+
+### Y-N5 — CUDA EP with cuDNN
+
+V14.9-U landed cuDNN auto-fetch. If the user installs the CUDA Toolkit DLLs separately (or we bundle the small subset of cuda runtime DLLs), the CUDA EP would be available on NVIDIA hardware and is generally faster + more predictable than DirectML on long-running workloads. Would address the underlying TDR susceptibility rather than just catching it.
+
+---
+
+## V14.9-V follow-ups (2026-05-14)
+
+### V1 — Batched CLIP/SCRFD/ArcFace inference to push GPU utilization >20%
+
+After V14.9-V wired the EPs correctly, an RTX 2060 sits at ~19% GPU during scan while CPU stays at ~65% (10 workers doing JPEG decode + resize + hash). Each model is wrapped in `parking_lot::Mutex<Session>` so only one inference runs at a time per model; the CPU finishes decoding faster than the GPU mutex can drain. The fix is either:
+
+- **Per-worker Session instances:** load CLIP/ArcFace/SCRFD N times (one per worker) and hand each worker its own. Simple, but doubles memory per added copy (~250 MB CLIP, ~80 MB ArcFace, ~50 MB SCRFD). At worker_cap=10 that's a few GB of model weights resident.
+- **Batched inference (preferred):** preprocess N images on CPU, batch them into one `Tensor::from_array` call, run inference once. ORT handles the batch dimension natively; GPU latency per call grows sub-linearly so throughput goes 3-5x. Requires reworking `process_file` to either (a) buffer files into a batch before firing inference, or (b) have the worker push preprocessed tensors into a batched-inference task that flushes when full or after a short timeout (5-20 ms).
+- **Move image decode/resize to GPU:** Windows.Media.Imaging via WIC, or DirectXTex. Would offload the dominant CPU cost (~20 ms/file JPEG decode) onto the GPU. Larger refactor.
+
+Recommend (b) — batched inference. CLIP batch=4 is the sweet spot per Microsoft's DirectML EP perf docs. Tag this V15 if it's not blocking ship.
+
+### V2 — Don't rely on `download-binaries` for the `ort` crate; document the manual fetch
+
+The `ort` 2.0-rc.10 `download-binaries` Cargo feature is set but doesn't actually download anything with our `cuda + directml` feature combo. We work around it with `build/fetch-runtime-deps.ps1`. Bump-check this if upgrading to ort 2.0-rc.11 / 2.0-rc.12 / 2.x stable — if the crate's download script starts working, the fetch-runtime-deps step becomes redundant.
+
+### V3 — Verify ORT is picking DirectML (not silently falling back to CPU)
+
+The diagnostic line `tracing::info!(model = "...", chain = ?chain_labels, "EP priority chain registered")` now lands in `engine.jsonl` per model load. After a scan, also `grep -i "DML\|DirectML\|cpu execution provider" engine.jsonl` to confirm DirectML kernels are actually being selected (ORT itself logs the EP it picks during session creation, at info level). If you see "CPU EP selected" lines, the DirectML registration is failing — most likely cause is `DirectML.dll` missing from the engine's working directory.
+
+---
+
+## V14.9-U follow-ups (2026-05-14)
+
+### U1 — Smoke-test the new auto-installers on Windows + NVIDIA hardware
+
+Pull on Windows. `./build.sh` → "Iterate" preset. App launches with a clean `%LOCALAPPDATA%\FileID\` (or after wiping just sentinels to force re-fire).
+
+**Vulkan runtime auto-install:** engine reaches Ready → `[VULKAN-AUTO] no sentinel — silently installing` in the log → ~80 MB downloads → `Models/llama.cpp/llama-mtmd-cli.exe` + `Models/.sentinels/llama_runtime_x64.installed` land → Deep Analyze opens with no banner. Second launch: `[VULKAN-AUTO] llama.cpp runtime already installed; skipping.`
+
+**cuDNN auto-install (NVIDIA only):** engine reports `gpuVendor=nvidia`. If `ExecutionProvider != cuda` at startup → `[CUDNN-AUTO] silently fetching cuDNN` → ~430 MB downloads → `Models/cudnn/cudnn-windows-x86_64-9.5.1.17_cuda12-archive/` extracts → `register_dll_dirs_under` picks it up → next engine restart sees `ExecutionProvider=cuda` → Settings → Performance reports "CUDA EP active." If user already has a system CUDA Toolkit install with cuDNN → `[CUDNN-AUTO] system cuDNN already detected (EP=cuda); skipping our pack.`
+
+**Privacy spot-check:** Wireshark/Fiddler attached on first launch. Expected egress: HuggingFace (when triggering VLM weight downloads), `github.com` / `objects.githubusercontent.com` (llama.cpp runtimes), `developer.download.nvidia.com` (cuDNN, NVIDIA only). Nothing else.
+
+**`-PreserveModels` round-trip:** wizard → Fresh install → "Build artifacts + library DB (preserves models)". Confirm `Models/.sentinels/` survives. Launch app — welcome sheet sees existing sentinels, skips download.
+
+### U2 — Decide whether cuDNN auto-install needs a first-launch toast disclosure
+
+PRIVACY.md now lists `developer.download.nvidia.com` as a disclosed egress. The CudnnAutoInstaller fires silently after the engine reports NVIDIA hardware. PRIVACY.md's "every network egress is initiated by you, with visible UI" line implies the user should see *something* signaling the cuDNN fetch is starting. Currently they'll see it in download progress under Settings → Performance if they look, but it's not toast-level visible.
+
+If you want a first-launch toast like "FileID is fetching cuDNN from NVIDIA to enable CUDA scanning (~430 MB)…" file a small follow-up. The auto-installer plumbing is already there; just wire a one-shot toast off the same trigger.
+
+---
+
+## V14.9-T follow-ups (2026-05-14)
+
+### T1 — Smoke-test the live-streaming + CUDA + wizard changes on Windows hardware
+
+Pull on Windows. Run `./build.sh` with no args to exercise the new wizard; pick "Iterate" for Windows. App launches.
+
+Live streaming check (Library tab + Cleanup tab): point at an unscanned folder, click Start Scan. Both tabs should populate visibly while the scan is still running — tile count grows every ~1 second, not all-at-once at completion. (macOS reference: `LibraryView.swift:99-108`.)
+
+CUDA registry check (NVIDIA-only): on launch, the `CudaAutoInstaller` should silently begin downloading `llama-b4475-bin-win-cuda-cu12.4-x64.zip` into `%LOCALAPPDATA%\FileID\Models\llama.cpp-cuda\`. After completion, the sentinel lands at `Models\.sentinels\llama_runtime_cuda_x64.installed`. Settings → Performance → manual "Install CUDA llama.cpp" button shows the same flow without the previous "not registered" toast. On a second launch, the auto-installer logs `[CUDA-AUTO] CUDA llama.cpp already installed; skipping.` (proving the sentinel-path fix).
+
+Wizard sanity: `./build.sh` → "Fresh install" → "Build artifacts + library DB (preserves downloaded models)" → confirm Models/ survives but Models/.sentinels and the SQLite WAL are gone. The wizard's echoed `→ Equivalent for next time` line should be a valid flag string that produces the same outcome.
+
+Sankey verification (not a code change, just a check): in Restructure, click "Generate plan" on a folder with at least one classifiable file. Ribbons should render by default. If they don't appear, the issue is plan-emptiness or visibility-gating in `SyncPlan` (see `RestructureView.xaml.cs:78-81`) — file a fresh issue with the move count.
+
+---
+
 ## V14.9-R follow-ups (2026-05-13)
 
 R1, R2, R3 closed in-session (zero-warning Windows build + new macOS CI workflow + parity-gap audit confirming the prior backlog is already coded). One item needs the user.

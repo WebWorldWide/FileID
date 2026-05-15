@@ -8,6 +8,7 @@
 
 pub mod discovery;
 pub mod tagging;
+pub mod batch_clip;
 pub mod dbwriter;
 pub mod face_clustering;
 pub mod identity_clustering;

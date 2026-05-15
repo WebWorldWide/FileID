@@ -79,6 +79,48 @@ jobs:
             echo "$bin OK (${size_mb} MB)"
           done
 
+      # V15.2 — engine smoke launch, parity with windows-engine.yml's
+      # startup + EP probe. Verifies the binary actually runs to the
+      # point of emitting a `ready` event before stdin EOF. Catches the
+      # class of regressions where the binary builds clean but panics
+      # in main() or fails to register a ready event.
+      - name: Smoke — engine startup
+        run: |
+          set -euo pipefail
+          # Launch the engine with stdin closed immediately (EOF). The
+          # engine's parent-PID watchdog should observe the broken pipe
+          # within ~1 s and exit cleanly. We expect a single `ready`
+          # event in stdout before shutdown.
+          : | .build/release/FileIDEngine > engine.stdout 2> engine.stderr &
+          ENGINE_PID=$!
+          # Wait up to 15 s for clean exit.
+          for i in $(seq 1 15); do
+            if ! kill -0 $ENGINE_PID 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          if kill -0 $ENGINE_PID 2>/dev/null; then
+            kill -9 $ENGINE_PID || true
+            echo "::error::FileIDEngine did not exit within 15 s of stdin EOF."
+            echo "----- engine.stdout -----"
+            cat engine.stdout || true
+            echo "----- engine.stderr -----"
+            cat engine.stderr || true
+            exit 1
+          fi
+          if ! grep -q '"ready"' engine.stdout; then
+            echo "::error::engine.stdout did not contain a ready event:"
+            cat engine.stdout || true
+            exit 1
+          fi
+          if ! grep -q '"executionProvider"' engine.stdout; then
+            echo "::error::engine.stdout did not contain an executionProvider field in the ready info:"
+            cat engine.stdout || true
+            exit 1
+          fi
+          echo "Engine startup smoke passed. ✅"
+
       # Privacy gate parity with Windows: shipped binaries must NOT contain
       # telemetry SDK strings. List MUST stay in sync with the Windows
       # workflow + platforms/windows/build/publish-bundle.ps1.

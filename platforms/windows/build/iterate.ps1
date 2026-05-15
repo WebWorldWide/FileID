@@ -19,6 +19,7 @@ param(
     [int]$ThroughputTarget = 100,    # files/sec; tier-default = 100, RTX-class = 140
     [int]$MemoryCapMB = 1500,        # 1.2 GB ceiling per macOS, +25% slack
     [switch]$SkipBuild,
+    [switch]$SkipWipe,               # V15.0 Phase B: skip DB wipe so incremental rescan kicks in
     [switch]$Verbose
 )
 
@@ -59,6 +60,25 @@ if (-not (Test-Path $EnginePath)) {
     exit 2
 }
 
+# V14.9-V: ensure ORT (DirectML) + DirectML DLLs sit beside FileIDEngine.exe
+# so it loads our pinned 1.22 instead of Windows System32's 1.17 (which
+# panics our ort 2.0.0-rc.10 crate) AND so the DirectML EP can initialize
+# (otherwise silent CPU fallback).
+$fetchScript = Join-Path $ScriptDir "fetch-runtime-deps.ps1"
+if (Test-Path $fetchScript) {
+    Step "Ensuring runtime DLLs are colocated with engine"
+    $runtimeOutput = & $fetchScript
+    $cargoOutDir = Split-Path -Parent $EnginePath
+    foreach ($line in $runtimeOutput) {
+        if ($line -match '^RUNTIME_DLL=(.+)$') {
+            $src = $Matches[1]
+            $name = [System.IO.Path]::GetFileName($src)
+            Copy-Item -LiteralPath $src -Destination (Join-Path $cargoOutDir $name) -Force -ErrorAction SilentlyContinue
+        }
+    }
+    OK "ORT + DirectML colocated"
+}
+
 # --- 2. Resolve corpus ------------------------------------------------
 if ([string]::IsNullOrWhiteSpace($Corpus)) {
     # Default: tests/corpus folder if present.
@@ -78,15 +98,19 @@ if ($corpusFiles -lt 10) {
 OK "corpus has $corpusFiles files"
 
 # --- 3. Wipe DB -------------------------------------------------------
-Step "Wiping FileID DB"
 $AppDataRoot = Join-Path $env:LOCALAPPDATA "FileID"
-foreach ($f in @("fileid.sqlite", "fileid.sqlite-wal", "fileid.sqlite-shm")) {
-    $p = Join-Path $AppDataRoot $f
-    if (Test-Path $p) { Remove-Item -Force $p -ErrorAction SilentlyContinue }
+if ($SkipWipe) {
+    Step "Skipping DB wipe (-SkipWipe set; testing incremental rescan)"
+} else {
+    Step "Wiping FileID DB"
+    foreach ($f in @("fileid.sqlite", "fileid.sqlite-wal", "fileid.sqlite-shm")) {
+        $p = Join-Path $AppDataRoot $f
+        if (Test-Path $p) { Remove-Item -Force $p -ErrorAction SilentlyContinue }
+    }
+    $faceCrops = Join-Path $AppDataRoot "face_crops"
+    if (Test-Path $faceCrops) { Remove-Item -Recurse -Force $faceCrops -ErrorAction SilentlyContinue }
+    OK "DB wiped"
 }
-$faceCrops = Join-Path $AppDataRoot "face_crops"
-if (Test-Path $faceCrops) { Remove-Item -Recurse -Force $faceCrops -ErrorAction SilentlyContinue }
-OK "DB wiped"
 
 # --- 4. Drive engine --------------------------------------------------
 Step "Driving engine (scan + cluster)"
@@ -102,13 +126,31 @@ $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError = $true
 $psi.CreateNoWindow = $true
 $psi.Environment["FILEID_LOG"] = "info"
+# V14.9-X: do NOT set FILEID_MODEL_POOL_SIZE here. V14.9-W's pool=6
+# wedged the DirectML driver and locked the entire system requiring a
+# hard reboot. Pool sizing is now VRAM-budgeted inside the engine and
+# defaults to 1. Push GPU saturation via batched inference, not
+# multiplied Sessions.
+# V14.9-X: propagate FILEID_TEST_FILE_CAP from parent shell so a bounded
+# validation run (e.g. N=100) can stop Discovery early without editing
+# this script. Unset/0 = full scan.
+if ($env:FILEID_TEST_FILE_CAP) {
+    $psi.Environment["FILEID_TEST_FILE_CAP"] = $env:FILEID_TEST_FILE_CAP
+}
+if ($env:FILEID_CLIP_BATCH_SIZE) {
+    $psi.Environment["FILEID_CLIP_BATCH_SIZE"] = $env:FILEID_CLIP_BATCH_SIZE
+}
 
 $engineProc = New-Object System.Diagnostics.Process
 $engineProc.StartInfo = $psi
-$engineProc.OutputDataReceived += {
-    if ($_.Data) { Add-Content -Path $eventLog -Value $_.Data }
-}
 [void]$engineProc.Start()
+
+# Register-ObjectEvent works on both Windows PowerShell 5.1 and PowerShell 7;
+# the += operator on events fails on 5.1. Capture stdout/stderr to the temp
+# event log.
+$stdoutSub = Register-ObjectEvent -InputObject $engineProc -EventName 'OutputDataReceived' -Action {
+    if ($EventArgs.Data) { Add-Content -Path $event.MessageData -Value $EventArgs.Data }
+} -MessageData $eventLog
 $engineProc.BeginOutputReadLine()
 $engineProc.BeginErrorReadLine()
 
@@ -137,14 +179,17 @@ if (-not $ready) {
 }
 OK "engine ready"
 
-Send-Cmd @{ command = @{ startScan = @{ rootPath = $Corpus; rootDisplay = $null } } }
+Send-Cmd @{ id = "scan-1"; payload = @{ startScan = @{ rootPath = $Corpus; rootDisplay = $null } } }
 
 $scanStart = Get-Date
-# Wait up to 5 minutes for scanComplete.
+# Wait up to 15 minutes for scanComplete. V14.9-W: bumped 5→15 because a
+# 15K-file corpus at ~40 files/sec takes ~6 minutes wall clock with the
+# current pipeline. iterate harness should reflect the realistic scan
+# floor rather than time out on healthy long runs.
 $scanComplete = $false
 $peakResidentMB = 0
 $totalProcessed = 0
-$deadline = (Get-Date).AddMinutes(5)
+$deadline = (Get-Date).AddMinutes(15)
 while (-not $scanComplete -and (Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 1
     $events = Get-Content $eventLog -ErrorAction SilentlyContinue
@@ -170,11 +215,11 @@ if (-not $scanComplete) {
 OK "scan completed in $([int]$scanElapsed.TotalSeconds)s"
 
 # Trigger face clustering.
-Send-Cmd @{ command = @{ runFaceClustering = @{} } }
+Send-Cmd @{ id = "cluster-1"; payload = @{ runFaceClustering = @{} } }
 Start-Sleep -Seconds 5
 
 # Send shutdown.
-Send-Cmd @{ command = @{ shutdown = @{} } }
+Send-Cmd @{ id = "shutdown-1"; payload = @{ shutdown = @{} } }
 $engineProc.WaitForExit(10000) | Out-Null
 if (-not $engineProc.HasExited) { $engineProc.Kill() }
 

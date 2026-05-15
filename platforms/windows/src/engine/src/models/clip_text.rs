@@ -12,7 +12,7 @@ use ort::session::{Session, SessionInputValue, SessionOutputs};
 use ort::value::Tensor;
 
 use super::clip_tokenizer::ClipTokenizer;
-use super::runtime::{priority_chain, RuntimeProbe};
+use super::runtime::{execution_providers_for_chain, priority_chain, RuntimeProbe};
 
 const CONTEXT_LEN: usize = 77;
 
@@ -28,9 +28,21 @@ impl ClipText {
             anyhow::bail!("CLIP text weights missing at {}", path.display());
         }
         let probe = RuntimeProbe::detect();
-        let _chain = priority_chain(probe.vendor);
-        let session = Session::builder()
+        let chain = priority_chain(probe.vendor);
+        // V14.9-V: actually register the EPs (was a no-op `let _chain` before).
+        let mut builder = Session::builder()
             .context("ORT session builder")?
+            .with_intra_threads(1)
+            .context("set intra threads (CLIP text)")?;
+        let chain_labels: Vec<&'static str> = chain.iter().map(|e| e.as_str()).collect();
+        let providers = execution_providers_for_chain(&chain);
+        if !providers.is_empty() {
+            builder = builder
+                .with_execution_providers(providers)
+                .context("register execution providers (CLIP text)")?;
+        }
+        tracing::info!(model = "CLIP text", chain = ?chain_labels, "EP priority chain registered");
+        let session = builder
             .commit_from_file(path)
             .context("ORT session commit (CLIP text)")?;
         Ok(Self { session, tokenizer })

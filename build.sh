@@ -28,6 +28,8 @@ set -euo pipefail
 # ─── Argument parsing ───────────────────────────────────────────────────────
 TARGET=""
 WIPE="true"
+PRESERVE_MODELS="false"   # only honored when WIPE=true
+WIPE_DB_ONLY="false"      # lightest scope: only SQLite files; mutually exclusive with WIPE
 RELEASE="true"
 DESKTOP="true"
 RUN="true"
@@ -41,6 +43,8 @@ show_help() {
     cat <<'EOF'
 FileID — unified build dispatcher
 
+  ./build.sh                     Interactive wizard (asks plain-English
+                                 questions instead of flag soup)
   ./build.sh -windows [flags]    Build and launch on Windows
   ./build.sh -mac     [flags]    Build and launch on macOS
   ./build.sh -linux   [flags]    Linux (Phase 5 — deferred)
@@ -48,6 +52,12 @@ FileID — unified build dispatcher
 Common flags (after the target):
   --no-wipe        Don't destructively clear prior install + user data
                    (default: wipe ON for fresh-install verification)
+  --preserve-models Keep downloaded model weights when wiping (Windows only;
+                   only meaningful alongside the default wipe)
+  --wipe-db-only   Lightest wipe: delete only fileid.sqlite{,.wal,.shm}.
+                   Preserves models, logs, settings, cache, Desktop staging.
+                   Use to get a fresh scan without losing anything else.
+                   Mutually exclusive with default wipe; implies --no-wipe.
   --no-run         Don't launch the app after build
   --no-desktop     Don't stage to ~/Desktop/FileID/
   --debug          Debug build instead of Release (faster iteration)
@@ -62,6 +72,7 @@ Common flags (after the target):
   --help           Show this message
 
 Examples:
+  ./build.sh                                # interactive wizard
   ./build.sh -windows                       # full fresh-install build + run
   ./build.sh -windows --no-wipe --debug     # iterate without wiping models
   ./build.sh -windows --no-run --tests      # CI-style verification
@@ -71,7 +82,170 @@ EOF
     exit 0
 }
 
-if [ $# -eq 0 ]; then show_help; fi
+# ─── Interactive wizard ─────────────────────────────────────────────────────
+# Fires when build.sh is run with no arguments. Walks the user through the
+# same configuration the flags expose, but as plain-English questions.
+# Defaults shown in [brackets]; press Enter to accept.
+
+ask_yes_no() {
+    # ask_yes_no <prompt> <default y|n>
+    # echoes 'true' or 'false'.
+    local prompt="$1"
+    local default="$2"
+    local hint
+    if [ "$default" = "y" ]; then hint="[Y/n]"; else hint="[y/N]"; fi
+    local reply
+    while true; do
+        read -r -p "$prompt $hint: " reply
+        reply="${reply:-$default}"
+        reply="$(printf '%s' "$reply" | tr '[:upper:]' '[:lower:]')"
+        case "$reply" in
+            y|yes) echo "true"; return ;;
+            n|no)  echo "false"; return ;;
+            *)     echo "Please answer y or n." >&2 ;;
+        esac
+    done
+}
+
+ask_choice() {
+    # ask_choice <prompt> <default-index> <choice1> <choice2> ...
+    local prompt="$1"; shift
+    local default="$1"; shift
+    local i=1
+    echo "$prompt" >&2
+    for choice in "$@"; do
+        echo "  $i) $choice" >&2
+        i=$((i + 1))
+    done
+    local n=$#
+    local reply
+    while true; do
+        read -r -p "  > [$default]: " reply
+        reply="${reply:-$default}"
+        if [[ "$reply" =~ ^[0-9]+$ ]] && [ "$reply" -ge 1 ] && [ "$reply" -le "$n" ]; then
+            echo "$reply"
+            return
+        fi
+        echo "  Enter a number between 1 and $n." >&2
+    done
+}
+
+interactive_wizard() {
+    cat <<'EOF'
+
+────────────────────────────────────────────────────────
+  FileID build wizard
+  Press Enter to accept the default in [brackets].
+────────────────────────────────────────────────────────
+
+EOF
+
+    local plat
+    plat=$(ask_choice "Where are we building?" 1 \
+        "Windows" \
+        "macOS" \
+        "Linux (Phase 5 — not yet supported)")
+    case "$plat" in
+        1) TARGET="windows" ;;
+        2) TARGET="mac" ;;
+        3) TARGET="linux" ;;
+    esac
+    echo ""
+
+    # Linux isn't wired up yet — short-circuit before the rest of the
+    # wizard so the user doesn't answer irrelevant questions just to be
+    # told the platform is deferred.
+    if [ "$TARGET" = "linux" ]; then return; fi
+
+    local preset
+    preset=$(ask_choice "What kind of build?" 2 \
+        "Fresh install — wipe everything, release build, launch (slow, definitive)" \
+        "Iterate — keep models + DB, debug build, launch (fast inner loop)" \
+        "Tests only — no wipe, no launch, run cargo + dotnet tests" \
+        "CI release — release build, sign, no launch (publish artifact)" \
+        "Custom — answer each question individually")
+    echo ""
+
+    case "$preset" in
+        1) # Fresh install
+            WIPE="true"; RELEASE="true"; DESKTOP="true"; RUN="true"
+            RUN_TESTS="false"; FAST="false"
+            if [ "$TARGET" = "windows" ]; then
+                local wipe_scope
+                wipe_scope=$(ask_choice "How much should we wipe?" 3 \
+                    "Build artifacts only (cargo target/, dotnet bin/obj/, dist/)" \
+                    "DB only (lightest — preserves models, logs, settings, cache, Desktop staging)" \
+                    "Build artifacts + library DB (preserves downloaded models — recommended)" \
+                    "Everything — also delete downloaded models (multi-GB redownload)")
+                case "$wipe_scope" in
+                    1) WIPE="false" ;;
+                    2) WIPE="false"; WIPE_DB_ONLY="true" ;;
+                    3) WIPE="true"; PRESERVE_MODELS="true" ;;
+                    4) WIPE="true"; PRESERVE_MODELS="false" ;;
+                esac
+                echo ""
+            fi
+            ;;
+        2) # Iterate
+            WIPE="false"; RELEASE="false"; DESKTOP="false"; RUN="true"
+            RUN_TESTS="false"; FAST="false"
+            ;;
+        3) # Tests only
+            WIPE="false"; RELEASE="false"; DESKTOP="false"; RUN="false"
+            RUN_TESTS="true"; FAST="false"
+            ;;
+        4) # CI release
+            WIPE="true"; PRESERVE_MODELS="false"
+            RELEASE="true"; DESKTOP="false"; RUN="false"
+            RUN_TESTS="false"; FAST="false"
+            if [ "$TARGET" = "windows" ]; then SIGN="true"; fi
+            ;;
+        5) # Custom — walk every toggle
+            WIPE=$(ask_yes_no "Wipe before building?" "y")
+            if [ "$WIPE" = "true" ] && [ "$TARGET" = "windows" ]; then
+                PRESERVE_MODELS=$(ask_yes_no "Preserve downloaded model weights when wiping?" "y")
+            fi
+            RELEASE=$(ask_yes_no "Release build (slower, but standalone)?" "y")
+            DESKTOP=$(ask_yes_no "Stage to Desktop (~/Desktop/FileID*)?" "y")
+            RUN=$(ask_yes_no "Launch the app after build finishes?" "y")
+            RUN_TESTS=$(ask_yes_no "Run cargo + dotnet tests after build?" "n")
+            if [ "$TARGET" = "windows" ]; then
+                ARM64=$(ask_yes_no "Cross-compile for ARM64 (Snapdragon WoA)?" "n")
+                VLM_NATIVE=$(ask_yes_no "Native llama.cpp bindings (cmake required)?" "n")
+                FAST=$(ask_yes_no "Use --fast (thin LTO, faster Rust compile)?" "n")
+                SIGN=$(ask_yes_no "Authenticode-sign all binaries?" "n")
+            fi
+            ;;
+    esac
+
+    # Recap as the equivalent flag invocation so the user can copy it for
+    # next time and skip the wizard.
+    local equiv="./build.sh -$TARGET"
+    [ "$WIPE_DB_ONLY" = "true" ] && equiv="$equiv --wipe-db-only"
+    [ "$WIPE" = "false" ] && [ "$WIPE_DB_ONLY" = "false" ] && equiv="$equiv --no-wipe"
+    [ "$WIPE" = "true"  ] && [ "$PRESERVE_MODELS" = "true" ] && equiv="$equiv --preserve-models"
+    [ "$RELEASE" = "false" ] && equiv="$equiv --debug"
+    [ "$DESKTOP" = "false" ] && equiv="$equiv --no-desktop"
+    [ "$RUN" = "false" ] && equiv="$equiv --no-run"
+    [ "$RUN_TESTS" = "true" ] && equiv="$equiv --tests"
+    [ "$ARM64" = "true" ] && equiv="$equiv --arm64"
+    [ "$VLM_NATIVE" = "true" ] && equiv="$equiv --vlm-native"
+    [ "$FAST" = "true" ] && equiv="$equiv --fast"
+    [ "$SIGN" = "true" ] && equiv="$equiv --sign"
+
+    echo ""
+    echo "→ Equivalent for next time:  $equiv"
+    echo ""
+    local confirm
+    confirm=$(ask_yes_no "Run this build now?" "y")
+    if [ "$confirm" = "false" ]; then
+        echo "Aborted." >&2
+        exit 0
+    fi
+    echo ""
+}
+
+if [ $# -eq 0 ]; then interactive_wizard; fi
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -79,6 +253,8 @@ while [ $# -gt 0 ]; do
         -mac|--mac|-macos|--macos) TARGET="mac" ;;
         -linux|--linux) TARGET="linux" ;;
         --no-wipe) WIPE="false" ;;
+        --preserve-models) PRESERVE_MODELS="true" ;;
+        --wipe-db-only) WIPE_DB_ONLY="true"; WIPE="false" ;;
         --debug) RELEASE="false" ;;
         --no-desktop) DESKTOP="false" ;;
         --no-run) RUN="false" ;;
@@ -113,6 +289,8 @@ case "$TARGET" in
         # flag", false means "omit it".
         ps_args=()
         $WIPE       && ps_args+=("-Wipe")
+        $WIPE && $PRESERVE_MODELS && ps_args+=("-PreserveModels")
+        $WIPE_DB_ONLY && ps_args+=("-WipeDbOnly")
         $RELEASE    && ps_args+=("-Release")
         $DESKTOP    && ps_args+=("-Desktop")
         $RUN        && ps_args+=("-Run")

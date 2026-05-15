@@ -276,6 +276,56 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
             })
         }
 
+        // ── cuDNN for Windows (CUDA 12 line). Public NVIDIA-hosted CDN —
+        // same channel NVIDIA's own developer site points at and the
+        // redistributable URL the cuDNN docs publish. Auto-installed on
+        // NVIDIA hardware by `CudnnAutoInstaller.cs` so the ORT CUDA EP
+        // has the cuDNN DLLs on its loader path (10-15% scanning throughput
+        // win on RTX-class). Engine startup calls
+        // `register_dll_dirs_under(&models_dir.join("cudnn"))` so the
+        // LoadLibrary policy can find the DLLs after extraction.
+        "cudnn_runtime_x64" => {
+            let dir = models_root.join("cudnn");
+            LookupResult::Found(Model {
+                id: "cudnn_runtime_x64",
+                display_name: "NVIDIA cuDNN runtime",
+                files: vec![FileEntry {
+                    // Pinned version. Bump intentionally and verify the
+                    // archive still extracts a `bin/` (or root) directory
+                    // containing `cudnn64_9.dll` + friends. NVIDIA hosts
+                    // each release under a stable filename pattern, so
+                    // URL drift is unlikely between point releases.
+                    url: "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.5.1.17_cuda12-archive.zip"
+                        .to_string(),
+                    dest: dir.join("cudnn-runtime.zip"),
+                    sha256: None,
+                    approx_bytes: 430_000_000,
+                }],
+            })
+        }
+
+        // ── llama.cpp CUDA runtime ZIP. Same extract-in-place flow as
+        // the Vulkan sibling above, but installed into a separate dir
+        // (`llama.cpp-cuda`) so both runtimes can coexist. Auto-installed
+        // on NVIDIA hardware by `CudaAutoInstaller.cs`; manually
+        // installable from Settings → Performance → "CUDA llama.cpp".
+        // SentinelDir in the C# auto-installer is keyed to this folder
+        // name — keep them in sync.
+        "llama_runtime_cuda_x64" => {
+            let dir = models_root.join("llama.cpp-cuda");
+            LookupResult::Found(Model {
+                id: "llama_runtime_cuda_x64",
+                display_name: "llama.cpp runtime (CUDA)",
+                files: vec![FileEntry {
+                    url: "https://github.com/ggml-org/llama.cpp/releases/download/b4475/llama-b4475-bin-win-cuda-cu12.4-x64.zip"
+                        .to_string(),
+                    dest: dir.join("llama-runtime.zip"),
+                    sha256: None,
+                    approx_bytes: 210_000_000,
+                }],
+            })
+        }
+
         // ── Performance Packs (CUDA / OpenVINO / QNN). Hosted on the
         // fileid-app HF dataset repo per V14.6 plumbing. If the repo
         // hasn't been populated yet the downloader surfaces the HTTP

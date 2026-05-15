@@ -79,7 +79,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         // ClipSearchService is owned by the view, disposed there.
     }
 
-    public ObservableCollection<FileTile> Items { get; } = new();
+    public BatchObservableCollection<FileTile> Items { get; } = new();
 
     private readonly HashSet<FileTile> _selected = new();
 
@@ -297,11 +297,18 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
 
     private void ReplaceItems(IReadOnlyList<FileTile> next)
     {
-        Items.Clear();
-        foreach (var t in next)
-        {
-            Items.Add(t);
-        }
+        // V15.2: a Clear+N Add pattern fires N+1 CollectionChanged events;
+        // each event re-enters OnItemsCollectionChanged to rebind per-tile
+        // listeners and re-triggers XAML grid layout. With 200-item refreshes
+        // during a fast scan that's the dominant UI-thread cost. ReplaceAll
+        // suppresses intermediate notifications and raises a single Reset
+        // at the end so the grid recomputes layout once.
+        //
+        // Explicitly detach old-tile listeners first — the Reset path in
+        // OnItemsCollectionChanged can only iterate the NEW items, so old
+        // subscriptions would otherwise leak.
+        foreach (var t in Items) t.PropertyChanged -= OnTilePropertyChanged;
+        Items.ReplaceAll(next);
     }
 
     private void ScheduleRefresh()
@@ -363,6 +370,14 @@ internal sealed class FileTile : INotifyPropertyChanged
         get => _thumbnail;
         set
         {
+            // V15.2: silently no-op once the tile is detached. A thumbnail
+            // render kicked off by ElementPrepared can complete after
+            // ElementClearing already pulled the tile off-screen. Setting
+            // Thumbnail on a stale tile would raise PropertyChanged on a
+            // dead object whose bindings target a recycled FrameworkElement
+            // — harmless in most cases, but a real risk during library
+            // refresh races. Detach is set by LibraryView.OnRepeaterElementClearing.
+            if (IsDetached) return;
             if (ReferenceEquals(_thumbnail, value)) return;
             _thumbnail = value;
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Thumbnail)));
@@ -371,6 +386,13 @@ internal sealed class FileTile : INotifyPropertyChanged
     }
 
     public bool HasThumbnail => _thumbnail != null;
+
+    /// <summary>V15.2: marker the view sets when a tile is cleared
+    /// (scrolled out of the ItemsRepeater virtualization window).
+    /// Suppresses late thumbnail-render results from binding to a
+    /// detached object. Plain field — bound to setter accessed only
+    /// from the UI thread, so no synchronization needed.</summary>
+    public bool IsDetached { get; set; }
 
     /// <summary>Modified-at unix seconds, used as part of the thumbnail cache key.</summary>
     public double? ModifiedAt { get; init; }

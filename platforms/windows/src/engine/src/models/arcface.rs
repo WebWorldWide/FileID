@@ -14,7 +14,7 @@ use ndarray::Array4;
 use ort::session::{Session, SessionInputValue, SessionOutputs};
 use ort::value::Tensor;
 
-use super::runtime::{priority_chain, RuntimeProbe};
+use super::runtime::{classify_inference_error, execution_providers_for_chain, priority_chain, RuntimeProbe};
 
 pub struct ArcFace {
     session: Session,
@@ -36,16 +36,37 @@ impl ArcFace {
         builder = builder
             .with_intra_threads(1)
             .context("set intra threads")?;
-        // Register EPs in priority order. ORT 2.0-rc surfaces register
-        // failures as silent fallbacks at session-create time, so we
-        // don't probe each one — just hand it the ordered list and
-        // let the runtime pick the first that binds.
-        let _ = chain;
+        // V14.9-V: actually register the EPs from the priority chain.
+        // Pre-V14.9-V this was `let _ = chain;` — the priority list got
+        // computed and dropped, so ORT silently picked CPU EP for every
+        // model regardless of GPU detection.
+        let chain_labels: Vec<&'static str> = chain.iter().map(|e| e.as_str()).collect();
+        let providers = execution_providers_for_chain(&chain);
+        if !providers.is_empty() {
+            builder = builder
+                .with_execution_providers(providers)
+                .context("register execution providers (ArcFace)")?;
+        }
+        tracing::info!(model = "ArcFace", chain = ?chain_labels, "EP priority chain registered");
 
         let session = builder
             .commit_from_file(path)
             .context("ORT session commit (ArcFace)")?;
-        Ok(Self { session })
+        // V15.0 Phase A: warmup. Run one inference with a zero buffer so
+        // DirectML kernel compilation + first-time GPU allocation happen
+        // here (during load_default), not on the first real file. If TDR
+        // triggers during warmup, the marker propagates and load_pool
+        // bails the whole stack instead of letting workers see a half-
+        // dead GPU.
+        let mut model = Self { session };
+        let warmup_started = std::time::Instant::now();
+        let _ = model.embed(&[0u8; 3 * 112 * 112])?;
+        tracing::info!(
+            model = "ArcFace",
+            warmup_ms = warmup_started.elapsed().as_millis() as u64,
+            "warmup complete"
+        );
+        Ok(model)
     }
 
     /// Embed a tightly-cropped 112×112 RGB face image. Input is the
@@ -86,7 +107,8 @@ impl ArcFace {
         let outputs: SessionOutputs = self
             .session
             .run(vec![(input_name, SessionInputValue::from(input))])
-            .context("ArcFace session.run")?;
+            .context("ArcFace session.run")
+            .map_err(classify_inference_error)?;
         let (_, value) = outputs
             .iter()
             .next()

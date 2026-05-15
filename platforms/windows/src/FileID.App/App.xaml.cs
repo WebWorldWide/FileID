@@ -60,7 +60,16 @@ public partial class App : Application
             Trace("EnsureDirectories");
             AppPaths.EnsureDirectories();
             Trace($"State dir = {AppPaths.Root}");
-            DebugLog.Info($"FileID launched. State dir: {AppPaths.Root}");
+            // V15.2: last-session breadcrumb. Detects whether the
+            // previous session died via a native fast-fail (which
+            // bypasses every managed crash sink) and writes a
+            // forensic artifact if so. Always-run; idempotent.
+            DebugLog.BeginSession();
+            // V15.1: structured startup line so a `crash-*.txt` from any
+            // session can be correlated to a specific build + engine binary.
+            var asmVersion = typeof(App).Assembly.GetName().Version?.ToString() ?? "unknown";
+            var enginePath = AppPaths.EngineExePath;
+            DebugLog.Info($"[STARTUP] FileID app launched. version={asmVersion}, pid={Environment.ProcessId}, stateDir={AppPaths.Root}, engine={enginePath}");
 
             Trace("EngineClient.StartAsync");
             // Captured on EngineStartedTask so the install flow can poll
@@ -136,6 +145,17 @@ public partial class App : Application
             try { CudaAutoInstaller.Hook(); }
             catch (System.Exception ex) { Trace($"CudaAutoInstaller.Hook failed (non-fatal): {ex.Message}"); }
 
+            Trace("LlamaRuntimeAutoInstaller.Hook");
+            try { LlamaRuntimeAutoInstaller.Hook(); }
+            catch (System.Exception ex) { Trace($"LlamaRuntimeAutoInstaller.Hook failed (non-fatal): {ex.Message}"); }
+
+            // V15.1: CudnnAutoInstaller silent fetch removed. The ~430 MB
+            // background download surprised users and added startup-time
+            // GPU pressure during what was already a hang-prone period.
+            // DirectML at 38 fps is sufficient on the RTX 2060 / 6 GB
+            // target. Power users can opt in via Settings → Performance
+            // → "NVIDIA acceleration (cuDNN)". See DECISIONS.md 2026-05-15.
+
             Trace("WorkflowAutoTabRouter.Hook");
             try { WorkflowAutoTabRouter.Hook(); }
             catch (System.Exception ex) { Trace($"WorkflowAutoTabRouter.Hook failed (non-fatal): {ex.Message}"); }
@@ -178,7 +198,11 @@ public partial class App : Application
     /// </summary>
     private void OnUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
     {
-        DebugLog.Error("Unhandled: " + e.Exception);
+        // V15.1: write a dedicated crash dump BEFORE deciding whether to
+        // recover. Captures last 50 lines of app.log for context — until
+        // this round we had no forensic data on UI-thread crashes.
+        var path = DebugLog.WriteCrashDump("WinUI Application.UnhandledException", e.Exception, terminating: false);
+        DebugLog.Error("Unhandled: " + e.Exception + (string.IsNullOrEmpty(path) ? "" : $" (dump: {path})"));
         // Recover rather than terminate. The user has unsaved scan state in
         // the engine; killing the process loses progress. Unrecoverable
         // exceptions (StackOverflow, OOM) bypass this handler anyway. WER
@@ -193,15 +217,23 @@ public partial class App : Application
         // Log to disk so the next session has forensic info; the user reported
         // "clicking sidebar during a scan crashes the entire app" and these
         // background-thread crashes are the most likely culprit.
-        try { DebugLog.Error("AppDomain.Unhandled (terminating=" + e.IsTerminating + "): " + e.ExceptionObject); }
+        try
+        {
+            var ex = e.ExceptionObject as Exception;
+            var path = DebugLog.WriteCrashDump("AppDomain.UnhandledException", ex, terminating: e.IsTerminating);
+            DebugLog.Error("AppDomain.Unhandled (terminating=" + e.IsTerminating + "): " + e.ExceptionObject + (string.IsNullOrEmpty(path) ? "" : $" (dump: {path})"));
+        }
         catch { }
     }
 
     private static void OnUnobservedTaskException(object? sender, System.Threading.Tasks.UnobservedTaskExceptionEventArgs e)
     {
-        // Mark observed so the process doesn't get torn down. Same logging
-        // story as AppDomain.Unhandled.
-        try { DebugLog.Error("UnobservedTaskException: " + e.Exception); } catch { }
+        try
+        {
+            var path = DebugLog.WriteCrashDump("TaskScheduler.UnobservedTaskException", e.Exception, terminating: false);
+            DebugLog.Error("UnobservedTaskException: " + e.Exception + (string.IsNullOrEmpty(path) ? "" : $" (dump: {path})"));
+        }
+        catch { }
         e.SetObserved();
     }
 }

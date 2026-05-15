@@ -18,7 +18,14 @@ public abstract record CommandPayload;
 
 public sealed record StartScanCommand(
     string RootPath,
-    string? RootDisplay) : CommandPayload;
+    string? RootDisplay,
+    // V15.1: surface the V15.0 engine-side `rescan` flag. Default false
+    // = incremental rescan (engine skips files where `scanned_at >=
+    // modified_at`). Passing true forces every file to be re-tagged.
+    // The engine's StartScanPayload has `#[serde(default)]` so omitting
+    // this is wire-safe; we include it explicitly to keep the DTO
+    // honest about what the engine accepts.
+    bool Rescan = false) : CommandPayload;
 
 public sealed record PauseScanCommand : CommandPayload;
 public sealed record ResumeScanCommand : CommandPayload;

@@ -70,21 +70,141 @@ jobs:
       - name: Build (Release)
         run: dotnet build src/FileID.App/FileID.App.csproj -c Release --no-restore /p:Platform=${{ matrix.arch }}
 
+      - name: Publish (Release, self-contained)
+        # V15.2 — what users actually run. The earlier verify step looked
+        # at `dotnet build` output at a wrong path. Publishing here makes
+        # both the privacy gate and smoke test work against the real
+        # distributable.
+        run: >
+          dotnet publish src/FileID.App/FileID.App.csproj
+          -c Release
+          -r win-${{ matrix.arch }}
+          --self-contained true
+          /p:Platform=${{ matrix.arch }}
+          /p:PublishDir=bin/${{ matrix.arch }}/Release/net8.0-windows10.0.19041.0/win-${{ matrix.arch }}/publish/
+
       - name: Build IpcSchema tests project (if present)
         # Tests run on x64 only — ARM64 cross-building tests is rarely useful here.
         if: matrix.arch == 'x64'
         continue-on-error: true
+        shell: pwsh
         run: |
           if (Test-Path Tests) {
             dotnet test Tests/ -c Debug --no-restore --verbosity minimal
           } else {
             Write-Host "No Tests/ directory; skipping."
           }
-        shell: pwsh
 
-      - name: Verify output assembly
+      - name: Verify published output
         shell: pwsh
         run: |
-          $dll = Get-ChildItem -Path "src/FileID.App/bin/Release/net8.0-windows10.0.19041.0/win-${{ matrix.arch }}" -Filter "FileID.dll" -Recurse | Select-Object -First 1
-          if (-not $dll) { throw "FileID.dll not found in Release output" }
+          # V15.2: the earlier step looked at the wrong path
+          # (bin/Release/... not bin/${arch}/Release/...) and only at
+          # FileID.dll. Verify the real distributable: both EXE + DLL.
+          $publishDir = "src/FileID.App/bin/${{ matrix.arch }}/Release/net8.0-windows10.0.19041.0/win-${{ matrix.arch }}/publish"
+          if (-not (Test-Path $publishDir)) {
+            throw "Publish dir not found at $publishDir"
+          }
+          $exe = Get-ChildItem -Path $publishDir -Filter "FileID.exe" | Select-Object -First 1
+          $dll = Get-ChildItem -Path $publishDir -Filter "FileID.dll" | Select-Object -First 1
+          if (-not $exe) { throw "FileID.exe not found in publish output ($publishDir)" }
+          if (-not $dll) { throw "FileID.dll not found in publish output ($publishDir)" }
+          Write-Host ("FileID.exe size: {0:F1} MB" -f ($exe.Length / 1MB))
           Write-Host ("FileID.dll size: {0:F1} MB" -f ($dll.Length / 1MB))
+          # Surface a count of every dll the publish dropped so it's
+          # visible in the run log without uploading artifacts.
+          $allDlls = Get-ChildItem -Path $publishDir -Filter "*.dll"
+          Write-Host ("publish dir contains {0} dll(s)" -f $allDlls.Count)
+
+      # Privacy gate — parity with macos.yml + windows-engine.yml. The
+      # forbidden-strings list MUST stay in sync across all three
+      # workflows + platforms/windows/build/publish-bundle.ps1. Failing
+      # this is a release blocker — no exception.
+      - name: Privacy — telemetry-string scan
+        shell: pwsh
+        run: |
+          $publishDir = "src/FileID.App/bin/${{ matrix.arch }}/Release/net8.0-windows10.0.19041.0/win-${{ matrix.arch }}/publish"
+          $forbidden = @(
+            "sentry.io",
+            "io.sentry",
+            "applicationinsights",
+            "applicationinsights.azure.com",
+            "googletagmanager",
+            "google-analytics.com",
+            "segment.io",
+            "segment.com",
+            "mixpanel.com",
+            "amplitude.com",
+            "posthog.com",
+            "datadoghq",
+            "bugsnag",
+            "rollbar.com",
+            "honeycomb.io",
+            "newrelic.com",
+            "raygun.io",
+            "firebase",
+            "firebaseio.com",
+            "appcenter.ms",
+            "in.appcenter.ms",
+            "crashpad",
+            "breakpad"
+          )
+          # Scan every shipped binary (EXE + every DLL). The .NET
+          # framework + WinUI runtime DLLs are bundled into self-contained
+          # publish output and could in principle ship telemetry strings;
+          # we want to know.
+          $targets = @()
+          $targets += Get-ChildItem -Path $publishDir -Filter "FileID.exe"
+          $targets += Get-ChildItem -Path $publishDir -Filter "*.dll"
+          $hits = @()
+          foreach ($file in $targets) {
+            $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
+            $textAscii = [System.Text.Encoding]::ASCII.GetString($bytes)
+            $textUtf16 = [System.Text.Encoding]::Unicode.GetString($bytes)
+            foreach ($needle in $forbidden) {
+              if ($textAscii -match [regex]::Escape($needle) -or
+                  $textUtf16 -match [regex]::Escape($needle)) {
+                $hits += "$($file.Name):$needle"
+              }
+            }
+          }
+          if ($hits.Count -gt 0) {
+            Write-Error "Telemetry strings found in shipped binary:`n  $($hits -join "`n  ")"
+            exit 1
+          }
+          Write-Host ("Scanned {0} binaries; no telemetry strings detected. ✅" -f $targets.Count)
+
+      # Launch smoke — verifies the published binary at least starts,
+      # paints chrome, and stays alive for a few seconds. Catches the
+      # class of bug we'd otherwise only learn about from the user.
+      # x64 only — ARM64 needs a hardware runner to actually execute.
+      - name: Smoke — app startup
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $publishDir = "src/FileID.App/bin/${{ matrix.arch }}/Release/net8.0-windows10.0.19041.0/win-${{ matrix.arch }}/publish"
+          $exe = Join-Path $publishDir "FileID.exe"
+          if (-not (Test-Path $exe)) { throw "FileID.exe not found at $exe" }
+          # Launch without redirecting stdin/stdout — the app expects to
+          # spawn its engine and message-pump. The headless runner has no
+          # display, so we expect the app to fail fast OR keep ticking
+          # for a couple seconds before we kill it. Either way, a NULL
+          # ref / startup crash inside OnLaunched would surface as an
+          # immediate exit with non-zero code; the smoke validates we
+          # didn't ship that.
+          $psi = New-Object System.Diagnostics.ProcessStartInfo
+          $psi.FileName = (Resolve-Path $exe).Path
+          $psi.UseShellExecute = $false
+          $psi.WorkingDirectory = (Resolve-Path $publishDir).Path
+          $proc = [System.Diagnostics.Process]::Start($psi)
+          Start-Sleep -Seconds 5
+          if ($proc.HasExited) {
+            $code = $proc.ExitCode
+            if ($code -ne 0) {
+              throw "FileID.exe exited within 5 s with code $code — likely startup crash."
+            }
+            Write-Host "FileID.exe exited cleanly within 5 s (expected on a headless runner)."
+          } else {
+            Write-Host "FileID.exe still running after 5 s — clean startup. Killing for cleanup."
+            try { $proc.Kill() } catch { }
+          }

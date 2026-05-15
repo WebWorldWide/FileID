@@ -84,8 +84,27 @@ public sealed partial class SidebarProcessingControl : UserControl
     /// dialog open, cleared in finally.</summary>
     private bool _prescanDialogShowing;
 
+    /// <summary>V15.1 macOS-parity gate. macOS uses an `@State
+    /// startRequested` flag bound to the button's `disabled:` modifier.
+    /// Without an equivalent on Windows, spam-clicking Start Scan was
+    /// issuing N IPC `startScan` commands in parallel and N optimistic
+    /// `Phase = Discovering` flips, racing each other through the
+    /// state machine. Set true at the top of `OnStartScanClicked`,
+    /// cleared in the outermost `finally`. The Sync() method reads this
+    /// to keep the button disabled for the entire click-to-engine-ack
+    /// window.</summary>
+    private bool _startInFlight;
+
     private async void OnStartScanClicked(object sender, RoutedEventArgs e)
     {
+        // V15.1: short-circuit spam-clicks. The button's IsEnabled
+        // binding (Sync()) already prevents this in the normal case,
+        // but a touch-screen double-tap can squeeze a second click in
+        // before Sync() runs.
+        if (_startInFlight) return;
+        _startInFlight = true;
+        Sync(); // pre-flip button + pill so visual feedback is immediate
+
         // F2d (V14.8.3): wrap the whole async void body in a catch-all so a
         // disposed XamlRoot / broken dialog / engine death between the prompt
         // and the IPC send can't escape into App.UnhandledException and take
@@ -104,22 +123,28 @@ public sealed partial class SidebarProcessingControl : UserControl
 
             // V14.9-F-A1: when the engine isn't Ready yet, instead of
             // silently no-op'ing (the prior "Start Scan does nothing"
-            // symptom) WAIT for Ready up to 15 s with visible inline
-            // feedback. A user-driven retry queue is friendlier than
-            // a disabled button that gives no hint about why.
+            // symptom) WAIT for Ready with visible inline feedback. A
+            // user-driven retry queue is friendlier than a disabled
+            // button that gives no hint about why.
+            // V15.2: bumped 15 s → 30 s for slow-HDD + cold-EP cases.
+            // The macOS engine has no equivalent timeout; on a fresh
+            // boot with a 5400 rpm drive plus cold DirectML probe, the
+            // first Ready event can land at 20-25 s. 30 s is generous
+            // for healthy hardware but still fails fast on a genuinely
+            // dead engine.
             if (EngineClient.Instance.State != EngineClient.LifecycleState.Ready)
             {
                 IdleStatusText.Text = $"Waiting for engine ({EngineClient.Instance.State})…";
                 StartScanButton.IsEnabled = false;
                 try
                 {
-                    await EngineClient.Instance.WaitForReadyAsync(System.TimeSpan.FromSeconds(15));
+                    await EngineClient.Instance.WaitForReadyAsync(System.TimeSpan.FromSeconds(30));
                 }
                 catch (System.Exception ex)
                 {
                     DebugLog.Warn("StartScan: WaitForReadyAsync threw: " + ex.Message);
                     await ShowAlertAsync("Engine isn't ready",
-                        $"FileID's engine hasn't reported ready (status: {EngineClient.Instance.State}).\n\n" +
+                        $"FileID's engine hasn't reported ready after 30 seconds (status: {EngineClient.Instance.State}).\n\n" +
                         "Try restarting the app. If this keeps happening, check the engine log at " +
                         "%LOCALAPPDATA%\\FileID\\logs\\engine.jsonl.");
                     DispatcherQueue.TryEnqueue(Sync);
@@ -183,6 +208,16 @@ public sealed partial class SidebarProcessingControl : UserControl
         catch (Exception ex)
         {
             DebugLog.Error("OnStartScanClicked unexpected exception: " + ex);
+        }
+        finally
+        {
+            // V15.1: clear the in-flight gate AFTER the IPC send returns
+            // (success or failure). The engine's PhaseChanged events will
+            // then drive Sync() to the right state (Discovering / Failed /
+            // etc.). Re-run Sync() once so the button reflects the new
+            // state without waiting for the next PropertyChanged.
+            _startInFlight = false;
+            try { Sync(); } catch { /* swallow */ }
         }
     }
 
@@ -342,8 +377,11 @@ public sealed partial class SidebarProcessingControl : UserControl
             // V14.9-F-A1: Start Scan is enabled on HasFolder alone; the
             // click handler waits for Ready with visible feedback.
             // Exception: a Crashed engine — there's nothing to wait for.
+            // V15.1: also gate on `!_startInFlight` so a touch-double-tap
+            // can't issue a second startScan while the first is in flight.
             StartScanButton.IsEnabled = AppViewModel.Instance.HasFolder
-                                      && EngineClient.Instance.State != EngineClient.LifecycleState.Crashed;
+                                      && EngineClient.Instance.State != EngineClient.LifecycleState.Crashed
+                                      && !_startInFlight;
             return;
         }
 
@@ -362,8 +400,20 @@ public sealed partial class SidebarProcessingControl : UserControl
         // OnStartScanClicked now awaits Ready up to 15 s with inline
         // feedback. Crashed is the one state the click can't recover from,
         // so we still disable for that.
+        // V15.1: also gate on `!_startInFlight` (macOS parity — Swift uses
+        // `disabled: startRequested` on the same button). Without this,
+        // spam-clicking issues N concurrent IPC calls.
         StartScanButton.IsEnabled = AppViewModel.Instance.HasFolder
-                                  && EngineClient.Instance.State != EngineClient.LifecycleState.Crashed;
+                                  && EngineClient.Instance.State != EngineClient.LifecycleState.Crashed
+                                  && !_startInFlight;
+        // V15.1: when the click has been registered but the engine hasn't
+        // yet emitted PhaseChanged(Discovering), show "Starting…" so the
+        // user gets visible feedback. Mirrors macOS's hourglass icon +
+        // "Starting…" label.
+        if (_startInFlight && phase == ScanPhase.Idle)
+        {
+            IdleStatusText.Text = "Starting…";
+        }
 
         // FEAT-1: Pause/Resume label always reflects engine truth.
         PauseResumeText.Text = EngineClient.Instance.IsPaused ? "Resume" : "Pause";

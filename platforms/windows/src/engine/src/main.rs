@@ -113,6 +113,16 @@ async fn async_main() -> Result<()> {
 
     tracing::info!(version = ENGINE_VERSION, "FileIDEngine starting");
 
+    // V14.9-X: probe + log dedicated VRAM at startup. Used by the ML
+    // session-pool sizer to clamp pool size to fit available video
+    // memory — V14.9-W's larger pool exhausted VRAM on a 6 GB RTX 2060
+    // and wedged the DirectML driver requiring a hard reboot.
+    if let Some(vram_mb) = platform::dedicated_vram_mb() {
+        tracing::info!(dedicated_vram_mb = vram_mb, "[VRAM] dedicated video memory probed");
+    } else {
+        tracing::info!("[VRAM] no dedicated GPU detected; ML pool will run at minimum");
+    }
+
     // Replay AddDllDirectory for any Performance Packs already extracted from
     // a prior install. Packs land in %LOCALAPPDATA%\FileID\Models\packs\<vendor>\
     // and the llama.cpp runtime lands in Models\llama.cpp\. After SEC-3 locked
@@ -125,6 +135,11 @@ async fn async_main() -> Result<()> {
         let _ = platform::register_dll_dirs_under(&models_dir.join("packs").join("qnn"));
         let _ = platform::register_dll_dirs_under(&models_dir.join("llama.cpp"));
         let _ = platform::register_dll_dirs_under(&models_dir.join("llama.cpp-cuda"));
+        // V14.9-U: our private cuDNN drop (auto-installed on NVIDIA via
+        // CudnnAutoInstaller). The archive extracts a versioned dir
+        // containing bin/, so register the parent — register_dll_dirs_under
+        // walks subdirs for DLLs.
+        let _ = platform::register_dll_dirs_under(&models_dir.join("cudnn"));
     }
 
     // F3b (V14.8.3): if the user has NVIDIA CUDA Toolkit + cuDNN installed
@@ -3138,13 +3153,15 @@ async fn handle_start_scan(
 
     // Load ML model weights once per session. Heavy enough to belong on a
     // blocking thread (ORT session create can take 100-500ms per model).
-    // 8s timeout: ORT session-create for a healthy local file completes in
-    // well under a second; budget 8s for cold-cache cases. A wedged
-    // commit_from_file (corrupt .onnx) was previously hanging the entire
-    // scan for 30s — that read to users as "Start scan did nothing".
+    // V14.9-W: each model is now a pool of N Sessions (one per worker
+    // slot) so ML inference parallelizes across the GPU command queue
+    // instead of serializing on a single Mutex. Total session loads
+    // scale to N×3, so the per-load budget is multiplied — bumped the
+    // timeout 8→30s to account for cold-cache loads on slower disks.
+    let models_worker_count = platform::default_worker_cap() as usize;
     let models = match tokio::time::timeout(
-        std::time::Duration::from_secs(8),
-        tokio::task::spawn_blocking(ModelStack::load_default),
+        std::time::Duration::from_secs(30),
+        tokio::task::spawn_blocking(move || ModelStack::load_default(models_worker_count)),
     )
     .await
     {
@@ -3198,7 +3215,7 @@ async fn handle_start_scan(
         if models.scrfd.is_none() || models.arcface.is_none() {
             missing_stages.push("face_detection");
         }
-        if models.mobileclip.is_none() {
+        if models.mobileclip_pool.is_none() && models.mobileclip_batch.is_none() {
             missing_stages.push("image_embedding");
         }
         if !missing_stages.is_empty() {
@@ -3217,7 +3234,7 @@ async fn handle_start_scan(
     }
 
     let worker_count = platform::default_worker_cap() as usize;
-    let session = ScanSession::new(coord, db, worker_count, sink.clone(), models);
+    let session = ScanSession::new_with_options(coord, db, worker_count, sink.clone(), models, payload.rescan);
     let root = PathBuf::from(payload.root_path.clone());
 
     let scan_state_release = scan_state.clone();

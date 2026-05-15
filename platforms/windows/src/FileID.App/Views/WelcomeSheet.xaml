@@ -263,6 +263,73 @@
                                 Visibility="{x:Bind ShowActionButton(Svc.Vlm.Status), Mode=OneWay}" />
                     </Grid>
                 </Grid>
+
+                <!-- V15.2.1: GPU Acceleration Pack. Adaptive per-vendor;
+                     ModelInstallerService.UpdateAcceleratorForVendor sets
+                     the status + message based on EngineClient.Info.Hardware.GpuVendor. -->
+                <Grid Padding="0,4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="28" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <FontIcon Grid.Column="0"
+                              Glyph="{x:Bind AcceleratorGlyph(Svc.Accelerator.Status, Svc.AcceleratorIsRealInstall), Mode=OneWay}"
+                              Foreground="{x:Bind AcceleratorIconBrush(Svc.Accelerator.Status, Svc.AcceleratorIsRealInstall), Mode=OneWay}"
+                              FontSize="22"
+                              VerticalAlignment="Top" />
+                    <StackPanel Grid.Column="1" Spacing="4" Margin="12,0,0,0" VerticalAlignment="Center">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0"
+                                       Text="{x:Bind Svc.Accelerator.DisplayLabel, Mode=OneWay}"
+                                       Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <TextBlock Grid.Column="1"
+                                       Text="{x:Bind AcceleratorSize(Svc.Accelerator.ApproxBytes, Svc.Accelerator.Status, Svc.AcceleratorIsRealInstall), Mode=OneWay}"
+                                       Margin="12,0,0,0"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </Grid>
+                        <TextBlock Text="{x:Bind Svc.Accelerator.Message, Mode=OneWay}"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   TextWrapping="Wrap" />
+                        <ProgressBar Maximum="1"
+                                     Value="{x:Bind Svc.Accelerator.Fraction, Mode=OneWay}"
+                                     Foreground="{StaticResource GoldBrush}"
+                                     Visibility="{x:Bind ShowDeterminate(Svc.Accelerator.Status, Svc.Accelerator.Fraction), Mode=OneWay}" />
+                        <ProgressRing IsActive="{x:Bind SpinnerActive(Svc.Accelerator.Status, Svc.Accelerator.Fraction), Mode=OneWay}"
+                                      Visibility="{x:Bind ShowSpinner(Svc.Accelerator.Status, Svc.Accelerator.Fraction), Mode=OneWay}"
+                                      Width="18" Height="18"
+                                      HorizontalAlignment="Left"
+                                      Foreground="{StaticResource GoldBrush}" />
+                        <TextBlock FontFamily="Consolas"
+                                   FontSize="11"
+                                   Text="{x:Bind RateEtaLabel(Svc.Accelerator.BytesPerSecond, Svc.Accelerator.EtaSeconds), Mode=OneWay}"
+                                   Visibility="{x:Bind ShowRateEta(Svc.Accelerator.Status, Svc.Accelerator.BytesPerSecond), Mode=OneWay}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ErrorLabel(Svc.Accelerator.LastError), Mode=OneWay}"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                                   Visibility="{x:Bind VisibleIfFailed(Svc.Accelerator.Status), Mode=OneWay}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                    <Grid Grid.Column="2" Margin="14,0,0,0" VerticalAlignment="Top">
+                        <TextBlock Text="Installed"
+                                   Foreground="{ThemeResource SystemFillColorSuccessBrush}"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   VerticalAlignment="Center"
+                                   Visibility="{x:Bind ShowAcceleratorInstalledBadge(Svc.Accelerator.Status, Svc.AcceleratorIsRealInstall), Mode=OneWay}" />
+                        <Button Click="OnAcceleratorActionClicked"
+                                Content="{x:Bind ButtonLabel(Svc.Accelerator.Status), Mode=OneWay}"
+                                MinWidth="86"
+                                Visibility="{x:Bind ShowAcceleratorButton(Svc.Accelerator.Status, Svc.AcceleratorIsRealInstall), Mode=OneWay}" />
+                    </Grid>
+                </Grid>
             </StackPanel>
         </ScrollViewer>
 

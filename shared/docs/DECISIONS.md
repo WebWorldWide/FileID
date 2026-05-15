@@ -7,6 +7,76 @@
 
 ---
 
+## 2026-05-14 — WinUI 3 DispatcherObjects must be constructed on the UI thread (V15.2)
+
+The Windows app crashed on Start Scan after a few tiles appeared, with NO `crash-*.txt` produced despite V15.1 wiring three managed crash sinks (`Application.UnhandledException`, `AppDomain.CurrentDomain.UnhandledException`, `TaskScheduler.UnobservedTaskException`). Forensics: engine processed 100 files cleanly then got `stdin EOF` + `BrokenPipe` — the C# app died hard. That signature is a native fast-fail (`RaiseFailFastException`), and `RaiseFailFastException` terminates the process before any managed handler runs.
+
+Root cause: `ThumbnailService.RenderAsync` did `var bmp = new BitmapImage();` on its `Task.Run` worker thread, then marshalled `SetSourceAsync(bmp, thumb)` to the UI dispatcher, then returned the BitmapImage to be assigned into `Image.Source` via XAML data binding. WinUI 3's composition layer detects cross-thread `DispatcherObject` access during the next frame and fast-fails the process.
+
+Decision: every WinUI 3 `DispatcherObject` (BitmapImage, BitmapSource, anything inheriting `DependencyObject`) **must** be constructed on the UI thread. Marshalling later mutations to UI thread is not enough — the constructor itself binds the object to whatever thread runs it. In `ThumbnailService`, the fix is to construct AND populate AND own the `StorageItemThumbnail` stream inside one `dispatcher.TryEnqueue` lambda; the worker thread only holds the request and the resulting `TaskCompletionSource`.
+
+Corollary: V15.1's three managed crash sinks are necessary but not sufficient. They cannot intercept native fast-fail. The V15.2 last-session breadcrumb (`DebugLog.BeginSession` / `MarkCleanExit` / `DetectPriorAbnormalExit`) writes `last-session.txt` at launch with `clean_exit=false`, flips it on graceful shutdown, and on the NEXT launch emits a forensic `session-died-without-handler-{ts}.txt` if the prior session lacked the marker. This is the only path that survives a native crash.
+
+Alternatives considered: (a) wrap every BitmapImage interaction in a top-level COM-thread-affinity check at the .NET layer — rejected, the check would itself run on the wrong thread; (b) drop the worker pipeline entirely and decode thumbnails synchronously on the UI thread — rejected, the shell-thumbnail roundtrip is ~5-20 ms per file and a 200-tile refresh would stall the UI for 1-4 seconds; (c) use `SoftwareBitmapSource` instead of `BitmapImage` (cross-thread-safer) — deferred, would require redoing the XAML bindings + storage caching; the construct-on-UI-dispatcher fix is sufficient.
+
+## 2026-05-15 — Revert V14.9-U's silent cuDNN auto-install; replace with a manual Settings button (V15.1)
+
+V14.9-U made cuDNN auto-fetch from NVIDIA's public CDN on every engine-ready on NVIDIA hardware. The legal framing (NVIDIA's own CDN, no redistribution) is still sound — the policy issue is product/UX, not legal.
+
+Three problems surfaced over the following week:
+
+1. **Silent ~430 MB download.** PRIVACY.md's "every network egress is initiated by you, with visible UI" line is technically satisfied by the existing model-install card UI, but in practice users opened the app and saw no acknowledgement that a download was starting; the "FileID is on-device software" framing got muddied.
+2. **Startup VRAM pressure during the most TDR-hang-prone window.** V14.9-W/X investigation into the user's hard hangs identified concurrent DirectML session init + CUDA EP probe as a candidate stressor. Removing the auto-install eliminates one of the contending paths during the first 5-10 seconds after engine spawn — the window where TDR has been most likely to fire.
+3. **The 10-15% speedup doesn't justify those costs at the current target hardware.** DirectML at 38 fps on a 6 GB RTX 2060 is fine for V1. Power users on a 24 GB RTX 4090 can opt in.
+
+Decision: delete `CudnnAutoInstaller.cs` and the matching `App.xaml.cs` hook. Add a single "Install" button in Settings → Performance that drives `EngineClient.PrewarmModelAsync("cudnn_runtime_x64")` — the same code path the deleted auto-installer used. Keep the engine-side `registry::cudnn_runtime_x64` arm and the `register_dll_dirs_under(&models_dir.join("cudnn"))` startup call (no-op when dir absent) so the manual button still works end-to-end.
+
+`AppSettings.DisableAutoInstallCudnn` is kept (no `[Obsolete]` annotation needed since it's an `app-settings.json` field, not a public API) — users who explicitly set it should not have a stale entry surprise them later, and the field's absence is now the default.
+
+Alternatives considered: (a) keep auto-install but add a first-launch toast — rejected, the toast wouldn't change the underlying startup-time GPU pressure, and the 10-15% gain doesn't merit defending an automatic behavior the user actively flagged; (b) gate auto-install behind a Settings opt-in checkbox so the default is off but the auto path stays — rejected, that's strictly worse UX than a single one-shot Install button (two clicks instead of one, plus a hidden background download timing the user can't observe); (c) move the install button to the welcome sheet so first-time users see it on day one — deferred (see NEXT.md V15.1-N3); welcome sheet is already dense with four required model rows.
+
+This supersedes the 2026-05-14 cuDNN auto-fetch entry below. The 2026-05-14 entry's legal analysis (NVIDIA's CDN is a legitimate downstream-fetcher source, identical to HuggingFace for model weights) remains correct and now describes the *manual* fetch the Settings button performs.
+
+## 2026-05-14 — Auto-fetch cuDNN from NVIDIA's public CDN (policy reversal of V14.8.2)
+
+PACKS.md (since V14.8.2) said cuDNN auto-fetch was deferred pending redistribution-license review. The rationale at the time: every cuDNN distribution channel we knew of was either NVIDIA's developer portal (registration + per-user EULA) or a third-party mirror (clear redistribution problem). Bundling required negotiating NVIDIA's license for FileID specifically.
+
+NVIDIA now publishes the cuDNN Windows redistributables on a public CDN at `developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/` with no registration and no per-user EULA gate — the same channel any `pip install nvidia-cudnn-cu12` user pulls from (the wheel content is the same archive). Anyone can fetch from there; it is NVIDIA themselves distributing.
+
+Decision: auto-fetch cuDNN from that CDN on NVIDIA hardware. The legal framing is identical to fetching Qwen weights from HuggingFace — the vendor controls the channel; we are an end user pulling from the canonical source, not redistributing. The new `CudnnAutoInstaller.cs` triggers on engine-ready + NVIDIA detection, opt-out via `AppSettings.DisableAutoInstallCudnn`. The user sees the download progress through the existing model-install card UI.
+
+PRIVACY.md updated to disclose the new egress (`developer.download.nvidia.com`) alongside HuggingFace (model weights) and GitHub releases (llama.cpp runtimes). PACKS.md cuDNN section rewritten to describe the new auto-install behavior.
+
+Alternatives considered: (a) keep cuDNN BYO with a Settings button — rejected, defeats the "everything just works" goal the user has consistently pushed for; (b) bundle cuDNN into our own composite ZIP under a redistribution license — rejected, both the engineering cost and the legal-review cost are out of proportion to the 10-15% scanning perf gain; (c) only auto-install when the user opts in via Settings — rejected, the auto-installer is the opt-in (it fires only on NVIDIA hardware and is single-flag-opt-out), no need for a second opt-in layer.
+
+What's still deliberately BYO: full CUDA Toolkit install (cudart, nvcc, etc.). The engine's `system_cuda_toolkit_dir()` probe detects a system install and the auto-installer skips our private cuDNN drop in that case — no duplicate footprint.
+
+## 2026-05-14 — Auto-install the Vulkan llama.cpp runtime at engine-ready time
+
+Deep Analyze's previous flow surfaced a "Install runtime" banner the first time the user opened the tab. Users routinely missed it and assumed Deep Analyze was broken — captioning would silently no-op. The CudaAutoInstaller pattern (silent install of the CUDA llama.cpp pack on NVIDIA boxes) had proven that automatic install was the better default; this extends the same pattern to the base Vulkan runtime every Windows user needs.
+
+Decision: `LlamaRuntimeAutoInstaller.cs` fires the `llama_runtime_x64` prewarm on engine-ready for every Windows user (no GPU-vendor gate — Vulkan covers NVIDIA + AMD + Intel + Adreno on one binary). Opt-out via `AppSettings.DisableAutoInstallVulkanRuntime`. The two Deep Analyze banners (`RuntimeBanner` + `CudnnInfoBanner`) and their click handlers were removed entirely — install progress shows through the existing welcome-sheet style download cards.
+
+Side note: this also makes `--no-wipe` builds stop surfacing "AI not loaded" advisories on machines where the user had only installed VLM weights but never the runtime — the auto-installer now provides what was previously a separate manual step.
+
+## 2026-05-14 — `build.sh` exposes an interactive wizard by default; legacy flag mode preserved for CI
+
+The flag soup had grown to 12 boolean switches (`--no-wipe`, `--debug`, `--no-run`, `--no-desktop`, `--tests`, `--arm64`, `--vlm-native`, `--fast`, `--sign`, `--preserve-models`, plus the target). The user-reported friction wasn't any single flag — it was remembering which *combination* meant "iterate without wiping models" vs "full fresh install" vs "CI release". Common workflows had become tribal knowledge.
+
+Decision: when `build.sh` is run with no arguments, drop into a plain `read`-based wizard that asks (1) platform, (2) one of five presets (Fresh install / Iterate / Tests only / CI release / Custom), and (3) preset-specific follow-ups (wipe scope when "Fresh install"). The wizard echoes the equivalent flag invocation before running so a power user can copy it for next time. Legacy `./build.sh -windows --no-wipe --debug` continues to work unchanged — CI and existing scripts don't break. The wizard is opt-in via "no args"; opt-out by passing any flag.
+
+Alternatives considered: (a) a separate `setup.sh` wizard, leaving `build.sh` alone — rejected, two entry points means new users learn the wrong one; (b) a curses/dialog TUI — rejected, adds a runtime dep (`dialog`/`whiptail` not on every dev box) for marginal UX gain over `read`; (c) flag aliases like `--preset=iterate` — rejected, still requires memorizing alias names, doesn't address the "what *is* the iterate preset" question.
+
+Related: introduces `-PreserveModels` to `build-all.ps1` so the wipe can spare the multi-GB `Models/` subdir while still nuking the DB, logs, and sentinels. Previously the wipe was all-or-nothing.
+
+## 2026-05-14 — `llama_runtime_cuda_x64` lives in the engine registry, not as ad-hoc plumbing in the C# auto-installer
+
+The `CudaAutoInstaller.cs` service hardcoded `ModelKind = "llama_runtime_cuda_x64"` and a per-install `SentinelDir = "llama.cpp-cuda"` constant, but the engine's `registry.rs` had no match arm for that kind. Every prewarm short-circuited at `LookupResult::Unknown` and surfaced "Add it to engine/src/models/registry.rs" as a user-visible toast. The PACKS.md doc had advertised the artifact for weeks.
+
+Decision: add the arm to `registry.rs` as a sibling of `llama_runtime_x64` (Vulkan), extracting into `Models/llama.cpp-cuda/` (matches the folder the engine's `register_dll_dirs_under` already calls and the C# constant already pointed at). Drop the `SentinelDir` constant from `CudaAutoInstaller.cs` and route its "already installed?" probe through the canonical `Models/.sentinels/{id}.installed` path that `ModelInstallerService.HasEngineSentinel` uses. The two systems now share one source of truth — adding a future runtime can't introduce the same drift again.
+
+Alternatives considered: (a) hardcode the URL + extraction path directly in the C# auto-installer and bypass the engine — rejected, splits the model catalog across languages; the registry is the canonical place; (b) leave the auto-installer's separate `.fileid-installed` sentinel and have the engine write *both* sentinels — rejected, the dual-write is silent failure waiting to happen, the canonical path is good enough.
+
 ## 2026-05-13 — Pre-flight sentinel check routes through the canonical registry, not hand-rolled paths
 
 The previous `main.rs::handle_start_scan` pre-flight hand-rolled `<Models>/MobileCLIP/.fileid-installed` and `<Models>/arcfaceMobileFace/.fileid-installed` and checked existence. The canonical writer in the same file used `registry::sentinel_path(&model)`, which returns `<Models>/.sentinels/<model.id>.installed`. These two paths could never agree — every scan failed with "models missing" even after a successful prewarm. The reported "scan does nothing" symptom was dominated by this divergence.

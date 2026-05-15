@@ -35,73 +35,12 @@
                            Text="Run a local vision-language model on every image to write captions and propose smart filenames. Works across your whole library." />
             </StackPanel>
 
-            <!-- llama.cpp runtime banner — visible when not detected. -->
-            <Border x:Name="RuntimeBanner"
-                    CornerRadius="10"
-                    Padding="14,12"
-                    Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                    BorderBrush="{ThemeResource GoldDimBrush}"
-                    BorderThickness="1"
-                    Visibility="Collapsed">
-                <Grid ColumnSpacing="12">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                    </Grid.ColumnDefinitions>
-                    <FontIcon Grid.Column="0"
-                              Glyph="&#xE946;"
-                              FontSize="16"
-                              Foreground="{ThemeResource GoldBrush}"
-                              VerticalAlignment="Top"
-                              Margin="0,2,0,0" />
-                    <TextBlock Grid.Column="1"
-                               x:Name="RuntimeBannerText"
-                               TextWrapping="Wrap"
-                               Style="{StaticResource CaptionTextBlockStyle}" />
-                    <Button Grid.Column="2"
-                            x:Name="InstallRuntimeButton"
-                            Content="Install runtime"
-                            Click="OnInstallRuntimeClicked"
-                            Style="{StaticResource AccentButtonStyle}"
-                            VerticalAlignment="Center" />
-                </Grid>
-            </Border>
-
-            <!-- NVIDIA-without-cuDNN info banner. Surfaces when an NVIDIA GPU
-                 is detected but the engine is currently routing through
-                 DirectML/CPU because cuDNN isn't on the loader path. Info-only;
-                 Deep Analyze still works, it's just ~15% slower. -->
-            <Border x:Name="CudnnInfoBanner"
-                    CornerRadius="10"
-                    Padding="14,12"
-                    Background="{ThemeResource GoldSelectedBackgroundBrush}"
-                    BorderBrush="{ThemeResource GoldSelectedStrokeBrush}"
-                    BorderThickness="1"
-                    Visibility="Collapsed">
-                <Grid ColumnSpacing="12">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                    </Grid.ColumnDefinitions>
-                    <FontIcon Grid.Column="0"
-                              Glyph="&#xE945;"
-                              FontSize="16"
-                              Foreground="{ThemeResource GoldBrush}"
-                              VerticalAlignment="Top"
-                              Margin="0,2,0,0" />
-                    <TextBlock Grid.Column="1"
-                               x:Name="CudnnInfoBannerText"
-                               TextWrapping="Wrap"
-                               Style="{StaticResource CaptionTextBlockStyle}" />
-                    <Button Grid.Column="2"
-                            x:Name="GetCudnnButton"
-                            Content="Get cuDNN"
-                            Click="OnGetCudnnClicked"
-                            VerticalAlignment="Center" />
-                </Grid>
-            </Border>
+            <!-- V14.9-U: RuntimeBanner + CudnnInfoBanner were removed.
+                 Both are now auto-installed at engine-ready time:
+                 LlamaRuntimeAutoInstaller fires the Vulkan runtime fetch
+                 for every Windows user; CudnnAutoInstaller fires the
+                 cuDNN fetch on NVIDIA hardware. Users see the install
+                 progress through the welcome-sheet style download cards. -->
 
             <!-- V14.9-C5: "Name people first" gate banner. Visible when any
                  person cluster has both name + first_name NULL — Deep

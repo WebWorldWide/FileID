@@ -19,6 +19,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using FileID.IpcSchema;
 using FileID.ViewModels;
+using Microsoft.UI.Dispatching;
 
 namespace FileID.Services;
 
@@ -52,11 +53,25 @@ internal sealed class ModelSlot : INotifyPropertyChanged
 
     private readonly Func<Task> _installAction;
 
+    /// <summary>V15.2.1 — UI dispatcher captured at construction time on
+    /// the UI thread so PropertyChanged notifications can be safely
+    /// marshalled even when Apply/Fail/ResetForRetry run on a worker
+    /// thread (TryInstallAsync's continuations resume off the UI
+    /// SynchronizationContext after Task.WhenAll). Without this, a
+    /// failure path that wrote to LastError fired PropertyChanged from
+    /// a worker thread, the welcome sheet's x:Bind propagated it to
+    /// ErrorLabel.Text, and the TextBlock setter threw
+    /// RPC_E_WRONG_THREAD (COMException 0x8001010E). The instance is
+    /// constructed on the UI thread by ModelInstallerService.Instance's
+    /// static initializer (touched first from App.OnLaunched).</summary>
+    private readonly DispatcherQueue? _ui;
+
     public ModelSlot(string displayLabel, ulong approxBytes, Func<Task> installAction)
     {
         _displayLabel = displayLabel;
         _approxBytes = approxBytes;
         _installAction = installAction;
+        _ui = DispatcherQueue.GetForCurrentThread();
     }
 
     private ModelInstallStatus _status;
@@ -270,7 +285,23 @@ internal sealed class ModelSlot : INotifyPropertyChanged
     {
         if (EqualityComparer<T>.Default.Equals(field, value)) return;
         field = value;
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        // V15.2.1: marshal PropertyChanged to UI thread. x:Bind forwards
+        // property writes into XAML DispatcherObjects (TextBlock.Text,
+        // VisibilityProperty, etc), which throw RPC_E_WRONG_THREAD if
+        // invoked from a worker thread. Without this guard,
+        // ModelSlot.Fail() called from a TryInstallAsync continuation
+        // crashed the welcome sheet with COMException 0x8001010E.
+        var handler = PropertyChanged;
+        if (handler is null) return;
+        var args = new PropertyChangedEventArgs(propertyName);
+        if (_ui is null || _ui.HasThreadAccess)
+        {
+            handler(this, args);
+        }
+        else
+        {
+            _ui.TryEnqueue(() => handler(this, args));
+        }
     }
 }
 
@@ -284,9 +315,22 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     //
     // Static field init runs in source order, so these MUST be declared
     // before Instance — its ctor calls SeedFromSentinels which reads them.
-    private static readonly string[] ClipSentinelIds = { "mobileclip_s2" };
+    //
+    // CLIP needs BOTH the image encoder (mobileclip_s2) and the text encoder
+    // (clip_text) — they're separate model_kinds in the engine's registry
+    // because they download from different paths in the Xenova mobileclip_s2
+    // HuggingFace repo. The pre-scan validation in main.rs::handle_start_scan
+    // requires both sentinels, so the slot's "Installed" state must reflect
+    // that. ArcFace + VLM stay "any-of" — VLM has four alternative weights
+    // (3B / 7B / SmolVLM / Gemma) and any one is enough.
+    private static readonly string[] ClipSentinelIds = { "mobileclip_s2", "clip_text" };
     private static readonly string[] ArcfaceSentinelIds = { "arcface" };
     private static readonly string[] VlmSentinelIds = { "qwen2_5_vl_3b", "qwen2_5_vl_7b", "smolvlm", "gemma_3_4b" };
+    // V15.2.1: one-button GPU acceleration pack on the welcome sheet.
+    // The engine's `cudnn_runtime_x64` registry arm covers NVIDIA. Other
+    // vendors stay no-op (DirectML is bundled with ORT and is the
+    // production path on AMD/Intel/Qualcomm).
+    private static readonly string[] AcceleratorSentinelIds = { "cudnn_runtime_x64" };
 
     /// <summary>Time the engine has to reach Ready before an Install
     /// click gives up and surfaces "Engine not ready" to the user.</summary>
@@ -302,6 +346,24 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     public ModelSlot Clip { get; }
     public ModelSlot Arcface { get; }
     public ModelSlot Vlm { get; }
+    /// <summary>V15.2.1 — one-button GPU acceleration pack. On NVIDIA the
+    /// Install action downloads cuDNN; on AMD/Intel/Qualcomm/CPU the slot
+    /// is pre-marked Installed with an explanatory Message (DirectML is
+    /// already the optimal path). The welcome sheet renders the row
+    /// adaptive to the detected vendor (set in UpdateAcceleratorForVendor).</summary>
+    public ModelSlot Accelerator { get; }
+
+    /// <summary>V15.2.1 — true only if a real cuDNN sentinel exists on
+    /// disk. Distinguishes "user installed cuDNN" from "non-NVIDIA, slot
+    /// set to Installed because DirectML is already optimal". Drives the
+    /// welcome sheet's badge + button visibility (no "Installed" badge
+    /// for non-NVIDIA — they didn't install anything).</summary>
+    public bool AcceleratorIsRealInstall
+    {
+        get => _acceleratorIsRealInstall;
+        private set => Set(ref _acceleratorIsRealInstall, value);
+    }
+    private bool _acceleratorIsRealInstall;
 
     private int _installAllInFlight; // 0 = idle, 1 = in flight
 
@@ -317,7 +379,16 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         Clip = new ModelSlot(
             displayLabel: "MobileCLIP-S2",
             approxBytes: 220UL * 1024 * 1024,
-            installAction: () => PrewarmAsync("mobileclip_s2"));
+            // Install both halves of CLIP: the image encoder (mobileclip_s2)
+            // and the text encoder (clip_text). The engine's pre-scan check
+            // requires both sentinels. Sequential so per-row progress UI
+            // stays sane; the second prewarm short-circuits at the engine if
+            // its files + sentinel are already on disk.
+            installAction: async () =>
+            {
+                await PrewarmAsync("mobileclip_s2").ConfigureAwait(false);
+                await PrewarmAsync("clip_text").ConfigureAwait(false);
+            });
         Arcface = new ModelSlot(
             displayLabel: "ArcFace MobileFace",
             approxBytes: 14UL * 1024 * 1024,
@@ -326,13 +397,88 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             displayLabel: "Qwen 2.5-VL 3B",
             approxBytes: 1_650UL * 1024 * 1024,
             installAction: () => PrewarmAsync(_vlmModelKind));
+        // V15.2.1: GPU Acceleration Pack. Display label + Message are
+        // adaptive — UpdateAcceleratorForVendor() refreshes them as soon
+        // as the engine reports detected hardware. Until then, the row
+        // shows "Detecting GPU…" so the user knows it's waiting.
+        Accelerator = new ModelSlot(
+            displayLabel: "GPU Acceleration Pack",
+            approxBytes: 430UL * 1024 * 1024,
+            installAction: () => PrewarmAsync("cudnn_runtime_x64"));
+        Accelerator.Message = "Detecting GPU…";
 
         Clip.PropertyChanged += OnSlotPropertyChanged;
         Arcface.PropertyChanged += OnSlotPropertyChanged;
         Vlm.PropertyChanged += OnSlotPropertyChanged;
+        Accelerator.PropertyChanged += OnSlotPropertyChanged;
 
         SeedFromSentinels();
         EngineClient.Instance.PropertyChanged += OnEngineClientChanged;
+        // If engine has already published Info (raced our ctor), apply now.
+        UpdateAcceleratorForVendor(EngineClient.Instance.Info?.Hardware?.GpuVendor);
+    }
+
+    /// <summary>V15.2.1 — adapt the Accelerator slot to the detected GPU
+    /// vendor. NVIDIA → installable cuDNN pack. Anything else → already-
+    /// optimal Status=Installed with an explanatory Message. Called on
+    /// engine Info changes + at construction time.</summary>
+    private void UpdateAcceleratorForVendor(string? gpuVendor)
+    {
+        // If user already installed cuDNN earlier, sentinel-seed already
+        // flipped to Installed. Don't downgrade that.
+        if (Accelerator.Status == ModelInstallStatus.Installed
+            && SentinelExistsForAnyOf(AcceleratorSentinelIds))
+        {
+            Accelerator.Message = "cuDNN active — ~15% faster scanning enabled.";
+            return;
+        }
+        var vendor = (gpuVendor ?? string.Empty).ToLowerInvariant();
+        switch (vendor)
+        {
+            case "nvidia":
+                Accelerator.DisplayLabel = "GPU Acceleration Pack (NVIDIA)";
+                Accelerator.Message = "Unlocks ~15% faster scanning on NVIDIA GPUs (~430 MB).";
+                if (Accelerator.Status != ModelInstallStatus.Downloading
+                    && Accelerator.Status != ModelInstallStatus.Installed)
+                {
+                    Accelerator.Status = ModelInstallStatus.NotInstalled;
+                }
+                break;
+            case "amd":
+                Accelerator.DisplayLabel = "GPU Acceleration (AMD)";
+                Accelerator.Message = "DirectML is already optimal for your AMD GPU — no install needed.";
+                Accelerator.Status = ModelInstallStatus.Installed;
+                Accelerator.Fraction = 1.0;
+                break;
+            case "intel":
+                Accelerator.DisplayLabel = "GPU Acceleration (Intel)";
+                Accelerator.Message = "DirectML is already optimal for your Intel GPU — no install needed.";
+                Accelerator.Status = ModelInstallStatus.Installed;
+                Accelerator.Fraction = 1.0;
+                break;
+            case "qualcomm":
+                Accelerator.DisplayLabel = "GPU Acceleration (Snapdragon)";
+                Accelerator.Message = "DirectML + QNN already optimal for your Snapdragon GPU.";
+                Accelerator.Status = ModelInstallStatus.Installed;
+                Accelerator.Fraction = 1.0;
+                break;
+            case "none":
+                Accelerator.DisplayLabel = "GPU Acceleration";
+                Accelerator.Message = "No GPU detected — scanning will run on CPU.";
+                Accelerator.Status = ModelInstallStatus.Installed;
+                Accelerator.Fraction = 1.0;
+                break;
+            case "":
+                Accelerator.DisplayLabel = "GPU Acceleration Pack";
+                Accelerator.Message = "Detecting GPU…";
+                break;
+            default:
+                Accelerator.DisplayLabel = "GPU Acceleration";
+                Accelerator.Message = "DirectML is the production path on your GPU.";
+                Accelerator.Status = ModelInstallStatus.Installed;
+                Accelerator.Fraction = 1.0;
+                break;
+        }
     }
 
     /// <summary>
@@ -511,9 +657,20 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     /// </summary>
     public void SeedFromSentinels()
     {
-        SeedSlot(Clip, ClipSentinelIds);
+        SeedSlot(Clip, ClipSentinelIds, requireAll: true);
         SeedSlot(Arcface, ArcfaceSentinelIds);
         SeedSlot(Vlm, VlmSentinelIds);
+        // V15.2.1: Accelerator slot — only flip to Installed if the
+        // sentinel exists. Otherwise leave it as
+        // UpdateAcceleratorForVendor decided (NotInstalled for NVIDIA,
+        // Installed-with-message for non-NVIDIA / CPU).
+        if (SentinelExistsForAnyOf(AcceleratorSentinelIds))
+        {
+            Accelerator.Status = ModelInstallStatus.Installed;
+            Accelerator.Fraction = 1.0;
+            Accelerator.Message = "cuDNN active — ~15% faster scanning enabled.";
+            AcceleratorIsRealInstall = true;
+        }
         RecomputeAggregates();
     }
 
@@ -522,11 +679,24 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     /// (MainWindow startup, DeepAnalyzeView model-install panel).</summary>
     public void Refresh() => SeedFromSentinels();
 
-    private static void SeedSlot(ModelSlot slot, string[] candidateIds)
+    private static void SeedSlot(ModelSlot slot, string[] candidateIds, bool requireAll = false)
     {
         if (slot.Status == ModelInstallStatus.Downloading
             || slot.Status == ModelInstallStatus.Failed)
         {
+            return;
+        }
+        if (requireAll)
+        {
+            foreach (var id in candidateIds)
+            {
+                if (!SentinelInstalled(id))
+                {
+                    slot.Status = ModelInstallStatus.NotInstalled;
+                    return;
+                }
+            }
+            slot.Status = ModelInstallStatus.Installed;
             return;
         }
         foreach (var id in candidateIds)
@@ -671,9 +841,26 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             case "gemma_3_4b":
             case "smolvlm":
                 return Vlm;
+            // V15.2.1: cuDNN routes to the welcome-sheet Accelerator slot.
+            case "cudnn_runtime_x64":
+                return Accelerator;
             default:
                 return null;
         }
+    }
+
+    /// <summary>V15.2.1: model_kinds the engine auto-installs at startup
+    /// (LlamaRuntime + variants). These flow through ModelDownloadProgress
+    /// events the welcome sheet doesn't have rows for; previously each one
+    /// emitted a "no slot — progress event dropped" warn that flooded
+    /// app.log. Demote them to a single debug line here. The auto-
+    /// installer services (LlamaRuntimeAutoInstaller, CudaAutoInstaller)
+    /// handle these progress events through their own paths.</summary>
+    private static bool IsAutoInstallerOnly(string? modelKind)
+    {
+        return modelKind is "llama_runtime_x64"
+            or "llama_runtime_cuda_x64"
+            or "llama_runtime_vulkan_x64";
     }
 
     /// <summary>Fallback slot lookup by error path. Only used when the
@@ -715,7 +902,11 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         if (e.PropertyName == nameof(EngineClient.Info))
         {
             var info = EngineClient.Instance.Info;
-            if (info is not null) UpdateVlmRecommendation(info.PhysicalMemoryGB);
+            if (info is not null)
+            {
+                UpdateVlmRecommendation(info.PhysicalMemoryGB);
+                UpdateAcceleratorForVendor(info.Hardware?.GpuVendor);
+            }
             return;
         }
     }
@@ -731,7 +922,18 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         var slot = SlotFor(p.ModelKind);
         if (slot is null)
         {
-            DebugLog.Warn($"[INSTALL] no slot for model_kind '{p.ModelKind}' — progress event dropped.");
+            // V15.2.1: well-known auto-installer model_kinds are routed
+            // through their own services (LlamaRuntimeAutoInstaller,
+            // CudaAutoInstaller); demote the no-slot log so app.log
+            // isn't flooded during their auto-install progress streams.
+            if (IsAutoInstallerOnly(p.ModelKind))
+            {
+                DebugLog.Debug($"[INSTALL] runtime-pack progress (no welcome-sheet slot): {p.ModelKind} {p.Fraction:P0}");
+            }
+            else
+            {
+                DebugLog.Warn($"[INSTALL] no slot for model_kind '{p.ModelKind}' — progress event dropped.");
+            }
             return;
         }
         var sentinelIds = SentinelIdsFor(slot);
@@ -776,6 +978,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         if (ReferenceEquals(slot, Instance.Clip)) return ClipSentinelIds;
         if (ReferenceEquals(slot, Instance.Arcface)) return ArcfaceSentinelIds;
         if (ReferenceEquals(slot, Instance.Vlm)) return VlmSentinelIds;
+        if (ReferenceEquals(slot, Instance.Accelerator)) return AcceleratorSentinelIds;
         return Array.Empty<string>();
     }
 
