@@ -79,6 +79,13 @@ let package = Package(
         // SwiftUI app. Spawns FileIDEngine via Process API.
         // GRDB is read-only here — the app opens a DatabaseQueue (not
         // Pool) for snapshot-style reads. The engine is the only writer.
+        //
+        // V15.2.1: language mode .v5 mirrors FileIDEngine. AppKit types
+        // (NSImage) aren't Sendable, and the legacy Task<NSImage?>
+        // patterns in ThumbnailService / LibraryView would require a
+        // larger refactor to satisfy Swift 6 strict concurrency. Code
+        // style (@MainActor on UI surfaces, actor for shared mutable
+        // services) stays per CLAUDE.md.
         .executableTarget(
             name: "FileID",
             dependencies: [
@@ -86,7 +93,7 @@ let package = Package(
                 .product(name: "GRDB", package: "GRDB.swift")
             ],
             path: "app/Sources/FileID",
-            swiftSettings: [.swiftLanguageMode(.v6)]
+            swiftSettings: [.swiftLanguageMode(.v5)]
         ),
 
         .testTarget(
