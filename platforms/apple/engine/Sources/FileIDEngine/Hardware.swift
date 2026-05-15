@@ -47,21 +47,13 @@ public enum Hardware {
         return min(32, max(4, computed))
     }()
 
-    /// V15.2.1: snapshot the kernel task handle once at static-init.
-    /// `mach_task_self_` is declared as a global `var` in Darwin even
-    /// though its value never changes for the process lifetime; Swift 6
-    /// strict concurrency flags reads of a global `var` as
-    /// "concurrency-unsafe shared mutable state". Caching as a `let`
-    /// turns it into a Sendable constant and bypasses the diagnostic.
-    nonisolated(unsafe) private static let cachedTaskSelf: task_t = mach_task_self_
-
     /// Resident-set MB of the current process.
     public static func residentMB() -> Int {
         var info = mach_task_basic_info()
         var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / MemoryLayout<integer_t>.size)
         let kr = withUnsafeMutablePointer(to: &info) {
             $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                task_info(cachedTaskSelf, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
             }
         }
         guard kr == KERN_SUCCESS else { return 0 }

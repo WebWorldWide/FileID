@@ -61,9 +61,18 @@
       from $(AppxMSBuildToolsPath), which defaults to a path under the .NET SDK's
       Microsoft\VisualStudio\v17.0\AppxPackage subdirectory — which doesn't exist
       unless Visual Studio (or Build Tools with the UWP MSBuild component) puts
-      it there. We point directly at the VS Build Tools install. Required for
-      `dotnet build` of unpackaged WinUI 3 projects from CLI.
+      it there. We point directly at the VS install. Required for `dotnet build`
+      / `msbuild` of unpackaged WinUI 3 projects from CLI.
+
+      V15.2.1: also resolve VS 2022 Enterprise paths used by the GitHub
+      windows-latest runner (Visual Studio Enterprise is installed by default
+      under x86 Program Files on that image). Each Condition runs in order;
+      the first matching candidate wins.
     -->
     <AppxMSBuildToolsPath Condition="'$(AppxMSBuildToolsPath)' == '' AND Exists('C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Microsoft\VisualStudio\v17.0\AppxPackage')">C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Microsoft\VisualStudio\v17.0\AppxPackage\</AppxMSBuildToolsPath>
+    <AppxMSBuildToolsPath Condition="'$(AppxMSBuildToolsPath)' == '' AND Exists('C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Microsoft\VisualStudio\v17.0\AppxPackage')">C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Microsoft\VisualStudio\v17.0\AppxPackage\</AppxMSBuildToolsPath>
+    <AppxMSBuildToolsPath Condition="'$(AppxMSBuildToolsPath)' == '' AND Exists('C:\Program Files (x86)\Microsoft Visual Studio\2022\Enterprise\MSBuild\Microsoft\VisualStudio\v17.0\AppxPackage')">C:\Program Files (x86)\Microsoft Visual Studio\2022\Enterprise\MSBuild\Microsoft\VisualStudio\v17.0\AppxPackage\</AppxMSBuildToolsPath>
+    <AppxMSBuildToolsPath Condition="'$(AppxMSBuildToolsPath)' == '' AND Exists('C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VisualStudio\v17.0\AppxPackage')">C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VisualStudio\v17.0\AppxPackage\</AppxMSBuildToolsPath>
+    <AppxMSBuildToolsPath Condition="'$(AppxMSBuildToolsPath)' == '' AND Exists('C:\Program Files\Microsoft Visual Studio\2022\Professional\MSBuild\Microsoft\VisualStudio\v17.0\AppxPackage')">C:\Program Files\Microsoft Visual Studio\2022\Professional\MSBuild\Microsoft\VisualStudio\v17.0\AppxPackage\</AppxMSBuildToolsPath>
   </PropertyGroup>
 </Project>

@@ -255,18 +255,12 @@ public actor DeepAnalyze {
 
         let collector = TokenCollector()
         let params = generateParams
-        // V15.2.1: CIImage is not Sendable in Swift 6 strict mode but is
-        // effectively immutable once initialized; we just hand it to
-        // MLXVLM's processor. Box in an @unchecked Sendable wrapper so
-        // the container.perform closure can capture it cleanly.
-        let ciABoxed = UncheckedSendable(value: ciA)
-        let ciBBoxed = UncheckedSendable(value: ciB)
         do {
             try await container.perform { (context: ModelContext) -> Void in
                 let chat: [Chat.Message] = [
                     .system(systemPrompt),
                     .user("Are these two cropped face photos of the same person?",
-                          images: [.ciImage(ciABoxed.value), .ciImage(ciBBoxed.value)], videos: [])
+                          images: [.ciImage(ciA), .ciImage(ciB)], videos: [])
                 ]
                 var userInput = UserInput(chat: chat)
                 userInput.processing.resize = .init(width: 256, height: 256)
@@ -384,14 +378,12 @@ public actor DeepAnalyze {
 
         let collector = TokenCollector()
         let params = generateParams
-        // V15.2.1: CIImage isn't Sendable; box for the @Sendable closure.
-        let ciImageBoxed = UncheckedSendable(value: ciImage)
         do {
             try await container.perform { (context: ModelContext) -> Void in
                 let chat: [Chat.Message] = [
                     .system(systemPrompt),
                     .user("Describe this image and propose a filename.",
-                          images: [.ciImage(ciImageBoxed.value)], videos: [])
+                          images: [.ciImage(ciImage)], videos: [])
                 ]
                 var userInput = UserInput(chat: chat)
                 userInput.processing.resize = .init(width: 448, height: 448)
@@ -711,14 +703,3 @@ private final class ProgressThrottle: @unchecked Sendable {
     }
 }
 
-/// V15.2.1: minimal @unchecked Sendable wrapper. Lets us pass non-
-/// Sendable value types (CIImage in particular — immutable once
-/// initialized but not marked Sendable in CoreImage) into @Sendable
-/// closures. Safe ONLY when the wrapped value is effectively
-/// immutable from the caller's perspective during the closure
-/// lifetime. CLAUDE.md (apple) permits `@unchecked Sendable` with
-/// explicit lock coverage; here the lock is the immutability
-/// invariant we promise.
-private struct UncheckedSendable<T>: @unchecked Sendable {
-    let value: T
-}
