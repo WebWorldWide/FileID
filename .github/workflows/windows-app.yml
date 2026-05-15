@@ -10,6 +10,7 @@ on:
       - 'platforms/windows/Directory.Packages.props'
       - 'platforms/windows/Directory.Build.props'
       - 'platforms/windows/FileID.sln'
+      - 'platforms/windows/global.json'
       - '.github/workflows/windows-app.yml'
   pull_request:
     paths:
@@ -19,6 +20,7 @@ on:
       - 'platforms/windows/Directory.Packages.props'
       - 'platforms/windows/Directory.Build.props'
       - 'platforms/windows/FileID.sln'
+      - 'platforms/windows/global.json'
       - '.github/workflows/windows-app.yml'
   workflow_dispatch:
 
