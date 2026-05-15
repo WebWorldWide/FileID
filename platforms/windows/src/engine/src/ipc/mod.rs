@@ -842,6 +842,7 @@ mod tests {
             payload: CommandPayload::StartScan(StartScanPayload {
                 root_path: r"C:\Users\adam\Pictures".into(),
                 root_display: Some("Pictures".into()),
+                rescan: false,
             }),
         };
         let j = serde_json::to_string(&cmd).unwrap();

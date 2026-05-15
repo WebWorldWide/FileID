@@ -51,9 +51,14 @@ public enum Hardware {
     public static func residentMB() -> Int {
         var info = mach_task_basic_info()
         var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / MemoryLayout<integer_t>.size)
+        // V15.2.1: read `mach_task_self_` via the explicit accessor so
+        // Swift 6 strict concurrency doesn't flag the global `var` as
+        // shared mutable state. The accessor is `nonisolated(unsafe)`-
+        // equivalent — the kernel handle is never mutated by user code.
+        let task = mach_task_self()
         let kr = withUnsafeMutablePointer(to: &info) {
             $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+                task_info(task, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
             }
         }
         guard kr == KERN_SUCCESS else { return 0 }
