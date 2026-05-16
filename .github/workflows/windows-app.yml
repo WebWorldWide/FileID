@@ -80,27 +80,6 @@ jobs:
         # the matrix arch fail NETSDK1032 (RID/PlatformTarget mismatch).
         run: dotnet restore src/FileID.App/FileID.App.csproj /p:Platform=${{ matrix.arch }} /p:RuntimeIdentifier=win-${{ matrix.arch }}
 
-      # V15.3 Phase 6: enforce dotnet format on every PR (x64 only — the
-      # rules are arch-independent, no value in scanning twice). Catches
-      # whitespace + IDE0xxx style violations before they hit main.
-      - name: Format check (x64 only)
-        if: matrix.arch == 'x64'
-        run: dotnet format FileID.sln --verify-no-changes
-
-      # V15.3 Phase 6: vulnerability scan against transitive deps.
-      # Same cadence as the Rust cargo-audit gate. x64 only — package
-      # graph is identical across archs.
-      - name: Vulnerability scan (x64 only)
-        if: matrix.arch == 'x64'
-        run: |
-          $output = dotnet list package --vulnerable --include-transitive 2>&1 | Out-String
-          Write-Host $output
-          if ($output -match 'has the following vulnerable packages') {
-            Write-Error "Vulnerable packages found — see output above."
-            exit 1
-          }
-        shell: pwsh
-
       - name: Build (Debug)
         # Use msbuild instead of dotnet build so the VS WinUI tooling
         # (PriGen, MRT, XAML compiler) on the GitHub runner is found.
@@ -134,14 +113,41 @@ jobs:
         # V15.3: was IpcSchema-only with continue-on-error. Now runs every
         # discoverable test project in Tests/, fails on red. Tests run on
         # x64 only — ARM64 cross-building tests is rarely useful here.
+        # `dotnet test` triggers its own restore for the Tests/ projects;
+        # safe to run here because the x64 build is already complete.
         if: matrix.arch == 'x64'
         shell: pwsh
         run: |
           if (Test-Path Tests) {
-            dotnet test FileID.sln -c Debug --no-restore --verbosity minimal --filter "TestCategory!=RequiresMacOS"
+            dotnet test FileID.IpcSchema.Tests/ -c Debug --verbosity minimal
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            dotnet test FileID.App.Tests/ -c Debug --verbosity minimal
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } else {
             Write-Host "No Tests/ directory; skipping."
           }
+        working-directory: platforms/windows/Tests
+
+      # V15.3 Phase 6 gates moved AFTER the build: an earlier placement
+      # caused `dotnet format FileID.sln`'s solution-level restore to
+      # clobber the arch-specific obj/ assets written by the per-csproj
+      # restore step above, which then broke `Build (Debug) -restore:false`
+      # on x64. Running them after all builds + publish + test means
+      # they can't interfere with restore state.
+      - name: Format check (x64 only)
+        if: matrix.arch == 'x64'
+        run: dotnet format FileID.sln --verify-no-changes
+
+      - name: Vulnerability scan (x64 only)
+        if: matrix.arch == 'x64'
+        run: |
+          $output = dotnet list package --vulnerable --include-transitive 2>&1 | Out-String
+          Write-Host $output
+          if ($output -match 'has the following vulnerable packages') {
+            Write-Error "Vulnerable packages found — see output above."
+            exit 1
+          }
+        shell: pwsh
 
       - name: Verify published output
         shell: pwsh
