@@ -140,6 +140,52 @@ jobs:
           fi
           echo "Engine startup smoke passed. ✅"
 
+      # Privacy gate parity with Windows: source URL allowlist. Scans
+      # every .swift under platforms/apple/ for any https?:// URL and
+      # asserts every host is on the allowlist. Stops a contributor
+      # from silently adding a new download / telemetry / analytics
+      # endpoint even one that doesn't match the existing deny-list.
+      # MUST stay in sync with the Windows equivalent in windows-engine.yml.
+      - name: Privacy — source URL allowlist scan
+        run: |
+          set -euo pipefail
+          # Allowlist: same hosts as Windows. github.com appears in
+          # Package.swift for SwiftPM deps; huggingface.co for model
+          # downloads at runtime.
+          allowed=(
+            "huggingface.co"
+            "github.com"
+            "developer.download.nvidia.com"
+            "developer.nvidia.com"
+            "schemas.microsoft.com"
+            "schemas.openxmlformats.org"
+          )
+          hits=()
+          # Find all .swift under apple/, excluding .build/ + DerivedData.
+          # Anchor on "(http|https)://([a-zA-Z0-9._-]+)" — group 2 is the host.
+          while IFS= read -r line; do
+            file="${line%%:*}"
+            url="${line#*:}"
+            host=$(echo "$url" | sed -E 's|^https?://([a-zA-Z0-9._-]+).*|\1|' | tr '[:upper:]' '[:lower:]')
+            allowed_match=0
+            for a in "${allowed[@]}"; do
+              if [ "$host" = "$a" ]; then
+                allowed_match=1
+                break
+              fi
+            done
+            if [ "$allowed_match" -eq 0 ]; then
+              hits+=("$file: $url")
+            fi
+          done < <(find . -name '*.swift' -not -path '*/.build/*' -not -path '*/DerivedData/*' \
+            -exec grep -oHE 'https?://[a-zA-Z0-9._/-]+' {} \;)
+          if (( ${#hits[@]} > 0 )); then
+            printf '::error::URLs found that are not on the allowlist:\n'
+            printf '  %s\n' "${hits[@]}"
+            exit 1
+          fi
+          echo "All Swift source URLs are on the allowlist. ✅"
+
       # Privacy gate parity with Windows: shipped binaries must NOT contain
       # telemetry SDK strings. List MUST stay in sync with the Windows
       # workflow + platforms/windows/build/publish-bundle.ps1.
