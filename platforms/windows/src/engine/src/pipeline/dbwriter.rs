@@ -379,3 +379,145 @@ fn save_face_crop(face_id: i64, crop_rgb_112: &[u8]) -> anyhow::Result<()> {
     std::fs::write(&dest, &bytes).with_context(|| format!("write {}", dest.display()))?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline::discovery::FileKind;
+    use std::path::PathBuf;
+
+    /// Minimal mirror of the per-file body in `flush`. Exercises the
+    /// real INSERT_FILE_SQL constant under test so any drift in the
+    /// ON CONFLICT clause shows up here. Skips the embedding/face/ocr
+    /// branches — they have their own contracts; this asserts the
+    /// files-table de-dup contract specifically.
+    fn insert_one(conn: &Connection, f: &TaggedFile) -> Result<()> {
+        let path_text = f.path.to_string_lossy();
+        let path_hash = crate::util::path_safety::stable_path_hash(&path_text);
+        let extension = f
+            .path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        conn.execute(
+            INSERT_FILE_SQL,
+            params![
+                path_text,
+                path_hash,
+                f.size_bytes as i64,
+                None::<f64>,
+                f.modified_unix,
+                f.scanned_unix,
+                f.kind.as_str(),
+                extension,
+                f.phash,
+                None::<f64>,
+                f.has_faces as i64,
+                f.has_text as i64,
+                f.camera_model,
+                f.location_lat,
+                f.location_lon,
+                f.failed as i64,
+                f.error_message,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn fixture(path: &str) -> TaggedFile {
+        TaggedFile {
+            path: PathBuf::from(path),
+            kind: FileKind::Image,
+            size_bytes: 1234,
+            modified_unix: 1_700_000_000.0,
+            scanned_unix: 1_700_000_100.0,
+            has_faces: false,
+            faces: vec![],
+            has_text: false,
+            ocr_text: None,
+            phash: None,
+            clip_embedding: None,
+            camera_model: None,
+            location_lat: None,
+            location_lon: None,
+            vision_ms: 0.0,
+            clip_ms: 0.0,
+            total_ms: 0.0,
+            failed: false,
+            error_message: None,
+        }
+    }
+
+    fn in_memory_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).expect("migrations apply");
+        conn
+    }
+
+    /// V15.3 N7: re-ingesting the same path twice produces exactly one
+    /// row. Guards against the ON CONFLICT clause silently regressing
+    /// to INSERT OR IGNORE (drops update) or being removed entirely.
+    #[test]
+    fn duplicate_path_resolves_to_single_row() {
+        let conn = in_memory_db();
+        let f = fixture(r"C:\Users\adam\Pictures\IMG_0001.jpg");
+        insert_one(&conn, &f).unwrap();
+        insert_one(&conn, &f).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    /// V15.3 N7: ON CONFLICT must UPDATE (not skip) so a rescan that
+    /// finds new size/modified_at writes them. Guards against a
+    /// regression to INSERT OR IGNORE.
+    #[test]
+    fn duplicate_path_updates_size_and_modified() {
+        let conn = in_memory_db();
+        let mut f = fixture(r"C:\a.jpg");
+        insert_one(&conn, &f).unwrap();
+        f.size_bytes = 9999;
+        f.modified_unix = 1_800_000_000.0;
+        insert_one(&conn, &f).unwrap();
+        let (size, modified): (i64, f64) = conn
+            .query_row(
+                "SELECT size_bytes, modified_at FROM files WHERE path_text = ?1",
+                params![r"C:\a.jpg"],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(size, 9999);
+        assert!((modified - 1_800_000_000.0).abs() < 0.5);
+    }
+
+    proptest::proptest! {
+        /// V15.3 N7: arbitrary mix of inserts (with intentional duplicates)
+        /// → row count must equal the number of distinct paths. Prevents
+        /// the file-table from ever leaking duplicate rows under any
+        /// insertion order — the scan resume cursor + the People-tab
+        /// dedup logic both rely on path_text being unique.
+        #[test]
+        fn row_count_equals_distinct_paths(
+            // Generate a small set of candidate paths…
+            paths in proptest::collection::vec(r"C:\\test\\[a-z0-9]{1,8}\\f\.jpg", 1..6),
+            // …then sample with repetition to force duplicates.
+            order in proptest::collection::vec(0usize..6, 1..50),
+        ) {
+            let conn = in_memory_db();
+            for idx in &order {
+                let path = &paths[idx % paths.len()];
+                insert_one(&conn, &fixture(path)).unwrap();
+            }
+            let distinct: std::collections::HashSet<&String> = order
+                .iter()
+                .map(|i| &paths[i % paths.len()])
+                .collect();
+            let n: i64 = conn
+                .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+                .unwrap();
+            proptest::prop_assert_eq!(n as usize, distinct.len());
+        }
+    }
+}

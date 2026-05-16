@@ -886,6 +886,7 @@ mod tests {
     ///   - Empty-struct vs unit-variant mistakes (Swift expects `{}`, not `null`)
     ///   - Field renames inside a payload that break decode
     ///   - Missing `#[serde(default)]` on an optional that becomes required
+    ///
     /// The discriminant check (`std::mem::discriminant`) is compile-time
     /// safe — a new CommandPayload variant added without a corresponding
     /// entry here doesn't trigger the assertion, so when you add a variant
