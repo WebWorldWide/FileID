@@ -89,8 +89,23 @@ jobs:
         # Cargo.toml with a comment, not a CI exception here.
         run: cargo clippy --target ${{ matrix.target }} --all-targets -- -D warnings
 
-      - name: Install cargo-audit + cargo-deny
+      - name: Cache cargo-audit + cargo-deny binaries
         if: matrix.label == 'x64'
+        # V15.3 N9 followup: caches the compiled cargo-audit + cargo-deny
+        # binaries in ~/.cargo/bin so successive runs skip the
+        # `cargo install --locked` recompile (~5 min each from source).
+        # Cache key version (`v1`) is manually bumped to refresh tools.
+        uses: actions/cache@v4
+        id: cache-cargo-tools
+        with:
+          path: |
+            ~/.cargo/bin/cargo-audit*
+            ~/.cargo/bin/cargo-deny*
+          key: cargo-tools-${{ runner.os }}-v1
+
+      - name: Install cargo-audit + cargo-deny
+        if: matrix.label == 'x64' && steps.cache-cargo-tools.outputs.cache-hit != 'true'
+        # Skipped on cache hit.
         run: |
           cargo install --locked cargo-audit
           cargo install --locked cargo-deny
