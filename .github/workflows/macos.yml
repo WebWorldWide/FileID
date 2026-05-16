@@ -114,11 +114,12 @@ jobs:
             cat engine.stdout || true
             exit 1
           fi
-          if ! grep -q '"executionProvider"' engine.stdout; then
-            echo "::error::engine.stdout did not contain an executionProvider field in the ready info:"
-            cat engine.stdout || true
-            exit 1
-          fi
+          # NB: Windows engine smoke also asserts `"executionProvider"`
+          # appears in the ready info. macOS doesn't have that field —
+          # `executionProvider` is the Windows-only ORT EP picker output
+          # (DirectML / CUDA / OpenVINO / QNN). On macOS the ML pipeline
+          # uses MLX + Apple Neural Engine + CoreML with no equivalent
+          # enum to surface. The check is intentionally absent here.
           echo "Engine startup smoke passed. ✅"
 
       # Privacy gate parity with Windows: shipped binaries must NOT contain

@@ -4,6 +4,12 @@
 
 ---
 
+## V15.3.1 — macOS CI fix (2026-05-16)
+
+Single change: removed the `executionProvider` grep assertion from `.github/workflows/macos.yml`'s engine smoke step. That field is Windows-only (ORT EP picker output); macOS engine never emitted it, so the step failed 100% of the time on macOS regardless of engine health. Pre-existing — failing since V15.2. Fix detail in `DECISIONS.md` 2026-05-16 entry.
+
+---
+
 ## V15.3 — Polish engagement follow-ups (2026-05-15)
 
 The polish-mochi engagement landed Phases 1–8 partially. Plan: `~/.claude/plans/i-want-you-to-polished-mochi.md`. Done so far: Windows-side `main.rs` decomposition (3463→678 LOC), `EngineClient.cs` + `ModelInstallerService.cs` partial splits, 135 tests across Rust + IpcSchema + App.Tests (up from 44), Phase 6 lint gates green (`cargo clippy -D warnings`, `dotnet format --verify-no-changes`), 3 perf wins (mmap decode, `cache_spill=0`, prepare_cached hoist), CI gates tightened, pre-commit hook + `tools/git-hooks/`. proptest caught 2 real bugs: `is_safe_filename("A\\")` accepted (SEC); cluster IDs non-deterministic across re-scans (UX). Both fixed.

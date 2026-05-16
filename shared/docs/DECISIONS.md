@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-05-16 — macOS smoke drops `executionProvider` assertion
+
+`.github/workflows/macos.yml`'s engine-startup smoke step was failing on every push because it asserted `grep -q '"executionProvider"' engine.stdout` — but the macOS `EngineInfo` struct (`platforms/apple/shared/Sources/FileIDShared/IPCProtocol.swift:124`) has no such field. The check was added in V15.2 with a comment claiming "parity with windows-engine.yml's startup + EP probe," but the parity assumption was wrong: `executionProvider` exists on Windows because the engine picks between ORT execution providers (DirectML / CUDA / OpenVINO / QNN); on macOS the ML pipeline runs on MLX + Apple Neural Engine + CoreML, dispatched by the OS without an enum to expose. The assertion could never succeed on macOS regardless of engine health.
+
+Removed the 5-line block; kept the load-bearing `"ready"` event check (proves the engine reached IPC handshake and exited cleanly on stdin EOF). The Windows engine's own `executionProvider` smoke (`windows-engine.yml`) is unchanged — it's correct for Windows. Future cross-platform smoke parity should compare via a smaller invariant set: `version` field present, `pid` present, exit-on-stdin-EOF within budget.
+
+---
+
 ## 2026-05-15 — V15.3 Phase 6 + 8 polish: lint-gate tightening, CHANGELOG adoption
 
 Multiple coordinated edits in one engagement; logging as one entry for digestibility.

@@ -23,6 +23,7 @@ Per `shared/docs/PRIVACY.md` and `CLAUDE.md`: this project ships no telemetry, n
 - **`commands/bulk::handle_apply_tags`** hoists per-tag INSERT to `prepare_cached` for prepared-statement reuse across the inner loop.
 - **`identity_clustering::cluster`** now iterates `root_members` in sorted-key order so cluster IDs are deterministic across re-scans. (Previously HashMap iteration order leaked into cluster numbering — re-scans of the same library could renumber People-tab clusters.)
 - **`is_safe_filename`** rejects any input containing `/` or `\` before the path-component walk. `Path::components()` silently strips trailing separators, which previously let inputs like `"A\\"` slip past. Security-relevant: this function is the path-traversal guard for `renameFiles`.
+- **CI macOS smoke** no longer asserts `"executionProvider"` is present in the engine's ready event — that field is Windows-only (ORT execution-provider picker output). The check was added in V15.2 with an incorrect "parity with Windows" assumption and was failing on every push. Windows smoke remains unchanged.
 - **CI clippy gate** tightened from a narrow lint-group filter to `-D warnings` on all targets, paired with documented `[lints.clippy]` allows for style-only pedantic rules.
 - **CI .NET workflow** now runs `dotnet format --verify-no-changes`, `dotnet list package --vulnerable` (hard gate), and `dotnet test FileID.sln` on every project (was IpcSchema-only with `continue-on-error`).
 - **CI Rust toolchain** bumped to 1.90 (matches `rust-toolchain.toml`).
