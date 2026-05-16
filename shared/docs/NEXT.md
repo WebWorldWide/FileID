@@ -65,7 +65,6 @@ The polish-mochi engagement landed Phases 1–8 partially. Plan: `~/.claude/plan
 - Coverage gate (drop > 2 pp blocks merge against `COVERAGE.md` baseline).
 - Parity gate (depends on N7 parity tests existing).
 - Fuzz cron (depends on N7 cargo-fuzz harness existing).
-- Outbound-URL allowlist extension to the existing privacy-string scan.
 
 **N10 — Docs polish.** Done: `COVERAGE.md`, `TESTING.md`, `CONTRIBUTING.md` shipped. Still ahead:
 - Refresh `ARCHITECTURE.md` component + IPC sequence diagrams.

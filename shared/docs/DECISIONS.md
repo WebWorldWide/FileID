@@ -7,6 +7,24 @@
 
 ---
 
+## 2026-05-16 — Outbound-URL allowlist enforced at CI (V15.3 N9)
+
+Adds a new step "Privacy — source URL allowlist scan" in `.github/workflows/windows-engine.yml`. Scans every `*.{rs,cs,xaml,xaml.cs}` under `platforms/windows/src/` (excluding `bin/obj/target/packages/`) for any `https?://` URL, extracts the host, and fails CI if the host isn't on a hardcoded allowlist.
+
+**Allowlist composition.** Two categories:
+1. **Egress hosts** (real network endpoints reached at runtime): `huggingface.co` (model weights), `github.com` (llama.cpp releases), `developer.download.nvidia.com` (cuDNN), `developer.nvidia.com` (user-facing cuDNN help link in Settings).
+2. **XML/XAML namespace identifiers** (URN-like, never resolved): `schemas.microsoft.com`, `schemas.openxmlformats.org`. These appear in XAML `xmlns:` declarations.
+
+**Why source-scan, not binary-scan.** A binary-level URL scan would drown in false positives from ORT / rustc / windows-rs DLL strings (hundreds of legitimate but irrelevant URLs). Source-scan captures intent — what URLs a contributor explicitly wrote — which is the actual privacy/security signal.
+
+**Why this, on top of the deny-list.** The existing 22-string deny-list catches *known* telemetry SDK markers (sentry.io, mixpanel.com, etc.) but a contributor adding a brand-new endpoint never seen before would slip past it. The allowlist flips the gate from "you can ship anything except these 22 strings" to "you can only ship the documented 4 egress hosts". Belt + suspenders.
+
+**Triage when this fires.** Either (a) remove the URL, OR (b) add the host to the allowlist in the workflow file AND add a rationale line here in DECISIONS.md naming the use case. Never extend silently.
+
+Local-verification reference (2026-05-16): 167 source files, 142 URLs found, 0 non-allowlisted.
+
+---
+
 ## 2026-05-16 — `cargo audit` re-tightened to hard gate (V15.3 N9)
 
 Reverses the earlier softening (2026-05-15: `continue-on-error: true` because the CI advisory DB drifted from the local one). The new posture pairs two changes:

@@ -128,6 +128,65 @@ jobs:
         # Never add --ignore without the DECISIONS.md entry.
         run: cargo audit --deny warnings
 
+      - name: Privacy — source URL allowlist scan (x64 only)
+        if: matrix.label == 'x64'
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        # V15.3 N9: outbound-URL allowlist. Scans the SOURCE (not the
+        # compiled binary — that'd drown in false positives from ORT /
+        # rustc / windows-rs DLL strings) for any `https?://` URL and
+        # asserts every host is on the allowlist below. Stops a future
+        # contributor from silently adding a new download site,
+        # telemetry endpoint, or analytics URL — even one that doesn't
+        # match the existing 22-string deny-list.
+        #
+        # Two host categories on the allowlist:
+        #
+        #   Egress hosts (real network endpoints we reach at runtime):
+        #     - huggingface.co                — model weight downloads
+        #     - github.com                    — llama.cpp release binaries
+        #     - developer.download.nvidia.com — cuDNN runtime
+        #     - developer.nvidia.com          — user-facing cuDNN help link
+        #
+        #   XML/XAML namespace identifiers (URN-like; never resolved):
+        #     - schemas.microsoft.com         — WinUI XAML namespace tokens
+        #     - schemas.openxmlformats.org    — XAML markup-compat tokens
+        #
+        # To add a host: edit this list AND add a rationale entry in
+        # shared/docs/DECISIONS.md. Reviewers should reject PRs that
+        # touch this list without the DECISIONS.md entry.
+        run: |
+          $allowedHosts = @(
+            "huggingface.co",
+            "github.com",
+            "developer.download.nvidia.com",
+            "developer.nvidia.com",
+            "schemas.microsoft.com",
+            "schemas.openxmlformats.org"
+          )
+          $sources = Get-ChildItem -Path platforms/windows/src -Recurse -File `
+            -Include *.rs,*.cs,*.xaml,*.xaml.cs |
+            Where-Object { $_.FullName -notmatch '\\(bin|obj|target|packages)\\' }
+          $hits = @()
+          foreach ($file in $sources) {
+            $content = Get-Content -Raw $file.FullName
+            if (-not $content) { continue }
+            $matches = [regex]::Matches($content, 'https?://([a-zA-Z0-9._-]+)')
+            foreach ($m in $matches) {
+              $hostName = $m.Groups[1].Value.ToLowerInvariant()
+              if ($allowedHosts -notcontains $hostName) {
+                $hits += "$($file.FullName): $($m.Value)"
+              }
+            }
+          }
+          Write-Host "Source files scanned: $($sources.Count)"
+          if ($hits.Count -gt 0) {
+            Write-Error "URLs found that are not on the allowlist:"
+            $hits | ForEach-Object { Write-Error "  $_" }
+            exit 1
+          }
+          Write-Host "All source URLs are on the allowlist. ✅"
+
       - name: Build (release)
         run: cargo build --release --target ${{ matrix.target }}
 
