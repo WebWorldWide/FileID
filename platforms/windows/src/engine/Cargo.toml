@@ -11,6 +11,10 @@ description = "FileID engine — owns DB, scan pipeline, ML inference. Spawned a
 license = "TBD"
 publish = false
 
+[lib]
+name = "fileid_engine"
+path = "src/lib.rs"
+
 [[bin]]
 name = "FileIDEngine"
 path = "src/main.rs"
@@ -167,11 +171,21 @@ vlm-native = ["dep:llama-cpp-2"]
 # bloat, no telemetry.
 proptest = { version = "1", default-features = false, features = ["std"] }
 
-# V15.3 Phase 3: criterion micro-benchmarks — DEFERRED. Requires
-# restructuring the crate to lib+bin (`[lib]` target + `src/lib.rs` that
-# re-exports the modules) so benches can `use fileid_engine::*`. The
-# bench scaffold + sample harness are tracked in NEXT.md N3.
-# criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+# V15.3 N3: criterion micro-benchmarks. Dev-only. Bench targets land
+# under `benches/*.rs` and depend on the `fileid_engine` lib (added at
+# the top of this file). No runtime impact, no shipped-binary bloat,
+# no telemetry. Default-features off + cargo_bench_support keeps the
+# build minimal — we don't need the plotters/HTML report machinery in
+# CI.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "tagging_hashes"
+harness = false
+
+[[bench]]
+name = "face_clustering_5k"
+harness = false
 
 [profile.release]
 opt-level     = 3
