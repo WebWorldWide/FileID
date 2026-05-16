@@ -1,4 +1,4 @@
-// CudaAutoInstaller — silent install of the CUDA-flavored llama.cpp runtime
+﻿// CudaAutoInstaller — silent install of the CUDA-flavored llama.cpp runtime
 // when the engine reports an NVIDIA GPU.
 //
 // Deep Analyze runs 15-25% faster on the CUDA build than on the default

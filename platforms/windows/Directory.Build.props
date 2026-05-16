@@ -33,7 +33,16 @@
       polymorphism is the point; CA1805 explicit defaults aid grep-ability).
       All re-evaluatable in Phase 8 polish.
     -->
-    <NoWarn>$(NoWarn);CA1001;CA1305;CA1805;CA1822;CA1859</NoWarn>
+    <NoWarn>$(NoWarn);CA1001;CA1305;CA1805;CA1822;CA1859;IDE1006</NoWarn>
+    <!--
+      V15.3 Phase 6: IDE1006 (naming-style: private fields should be _prefix)
+      added. This fires across WinUI 3 view code-behind where x:Name'd elements
+      become bare fields, and where event-handler captures use bare lambda
+      params. Mass-renaming would touch every code-behind file with no
+      correctness gain. Re-visit if a future Roslyn analyzer offers a
+      narrower scope (e.g. "deny for new code, exempt pre-existing").
+    -->
+    <CodeAnalysisTreatWarningsAsErrors>true</CodeAnalysisTreatWarningsAsErrors>
 
     <!-- Reproducible restores: any drift in transitive deps fails the build. -->
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>

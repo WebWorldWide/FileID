@@ -117,9 +117,9 @@ public static class SpringEasing
         // for the basics we cover here, set via the property API.
         switch (propertyName)
         {
-            case "Opacity":      visual.Opacity = value; break;
-            case "Scale.X":      visual.Scale = new System.Numerics.Vector3(value, visual.Scale.Y, visual.Scale.Z); break;
-            case "Scale.Y":      visual.Scale = new System.Numerics.Vector3(visual.Scale.X, value, visual.Scale.Z); break;
+            case "Opacity": visual.Opacity = value; break;
+            case "Scale.X": visual.Scale = new System.Numerics.Vector3(value, visual.Scale.Y, visual.Scale.Z); break;
+            case "Scale.Y": visual.Scale = new System.Numerics.Vector3(visual.Scale.X, value, visual.Scale.Z); break;
             case "Translation.X":
             case "Translation.Y":
                 // Translation isn't a top-level Visual property; consumers

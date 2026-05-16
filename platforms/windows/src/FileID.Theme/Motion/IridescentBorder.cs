@@ -173,10 +173,10 @@ public sealed class IridescentBorder : Control
         // upgrade to a custom Win2D SVG-shader path.
         var center = new Vector2(width / 2, height / 2);
 
-        var gold    = ResolveColor("GoldColor",    Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00));
+        var gold = ResolveColor("GoldColor", Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00));
         var delight = ResolveColor("DelightColor", Color.FromArgb(0xFF, 0xF2, 0xA6, 0xC0));
-        var ai      = ResolveColor("AiColor",      Color.FromArgb(0xFF, 0xB1, 0x9B, 0xCE));
-        var info    = ResolveColor("InfoColor",    Color.FromArgb(0xFF, 0xA0, 0xE2, 0xEA));
+        var ai = ResolveColor("AiColor", Color.FromArgb(0xFF, 0xB1, 0x9B, 0xCE));
+        var info = ResolveColor("InfoColor", Color.FromArgb(0xFF, 0xA0, 0xE2, 0xEA));
 
         var stops = new[]
         {

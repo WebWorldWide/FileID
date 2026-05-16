@@ -265,7 +265,7 @@ public sealed partial class SidebarProcessingControl : UserControl
         {
             var dialog = new ContentDialog
             {
-                XamlRoot = this.XamlRoot,
+                XamlRoot = XamlRoot,
                 Title = p.Title,
                 Content = p.Body,
                 PrimaryButtonText = p.ShowOpenSettings ? "Open Settings" : "Continue scan",
@@ -283,16 +283,16 @@ public sealed partial class SidebarProcessingControl : UserControl
         {
             return result switch
             {
-                ContentDialogResult.Primary   => PerformancePromptResult.OpenSettings,
+                ContentDialogResult.Primary => PerformancePromptResult.OpenSettings,
                 ContentDialogResult.Secondary => PerformancePromptResult.Continue,
-                _                              => PerformancePromptResult.Cancel,
+                _ => PerformancePromptResult.Cancel,
             };
         }
         // No "Open Settings" affordance: Primary == Continue, Secondary == Cancel.
         return result switch
         {
-            ContentDialogResult.Primary   => PerformancePromptResult.Continue,
-            _                              => PerformancePromptResult.Cancel,
+            ContentDialogResult.Primary => PerformancePromptResult.Continue,
+            _ => PerformancePromptResult.Cancel,
         };
     }
 
@@ -423,9 +423,9 @@ public sealed partial class SidebarProcessingControl : UserControl
             PhaseText.Text = phase switch
             {
                 ScanPhase.Discovering => "Discovering files...",
-                ScanPhase.Tagging     => "Tagging files...",
-                ScanPhase.PostScan    => "Wrapping up...",
-                _                      => "Working...",
+                ScanPhase.Tagging => "Tagging files...",
+                ScanPhase.PostScan => "Wrapping up...",
+                _ => "Working...",
             };
             // V14.7.6: glyphs were empty strings from a prior cp1252 round-trip
             // that ate the PUA chars. Use Unicode escapes (encoding-bulletproof):
@@ -436,9 +436,9 @@ public sealed partial class SidebarProcessingControl : UserControl
             PhaseIcon.Glyph = phase switch
             {
                 ScanPhase.Discovering => "",
-                ScanPhase.Tagging     => "",
-                ScanPhase.PostScan    => "",
-                _                      => "",
+                ScanPhase.Tagging => "",
+                ScanPhase.PostScan => "",
+                _ => "",
             };
 
             if (prog.Total > 0)
@@ -489,12 +489,12 @@ public sealed partial class SidebarProcessingControl : UserControl
             var state = EngineClient.Instance.State;
             IdleStatusText.Text = state switch
             {
-                EngineClient.LifecycleState.Ready    => "Ready when you are.",
+                EngineClient.LifecycleState.Ready => "Ready when you are.",
                 EngineClient.LifecycleState.Starting => "Engine starting…",
-                EngineClient.LifecycleState.Crashed  => EngineClient.Instance.CrashReason is string r && r.Length > 0
+                EngineClient.LifecycleState.Crashed => EngineClient.Instance.CrashReason is string r && r.Length > 0
                     ? $"Engine crashed: {r}"
                     : "Engine crashed — try restarting the app.",
-                _                                     => $"Engine state: {state}",
+                _ => $"Engine state: {state}",
             };
             if (state == EngineClient.LifecycleState.Crashed)
             {
@@ -602,14 +602,14 @@ public sealed partial class SidebarProcessingControl : UserControl
         // alert never escalates to App.UnhandledException.
         try
         {
-            if (this.XamlRoot is null)
+            if (XamlRoot is null)
             {
                 DebugLog.Warn($"ShowAlertAsync: XamlRoot is null ({title}); skipping dialog.");
                 return;
             }
             var dialog = new ContentDialog
             {
-                XamlRoot = this.XamlRoot,
+                XamlRoot = XamlRoot,
                 Title = title,
                 Content = body,
                 CloseButtonText = "OK",

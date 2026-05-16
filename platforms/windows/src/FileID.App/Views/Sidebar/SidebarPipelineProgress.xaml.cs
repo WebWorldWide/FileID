@@ -1,4 +1,4 @@
-// SidebarPipelineProgress code-behind. Builds five stage cells, each
+﻿// SidebarPipelineProgress code-behind. Builds five stage cells, each
 // containing a dot + label + left/right connector halves. 1:1 port of
 // macOS SidebarPipelineProgress.swift: dots and labels share the same
 // 5-equal-column layout so they always align vertically; connectors
@@ -27,7 +27,7 @@ public sealed partial class SidebarPipelineProgress : UserControl
     };
 
     private readonly Ellipse[] _dots = new Ellipse[Stages.Length];
-    private readonly Rectangle?[] _leftConnectors  = new Rectangle?[Stages.Length];
+    private readonly Rectangle?[] _leftConnectors = new Rectangle?[Stages.Length];
     private readonly Rectangle?[] _rightConnectors = new Rectangle?[Stages.Length];
     private readonly TextBlock[] _labels = new TextBlock[Stages.Length];
 
@@ -167,9 +167,9 @@ public sealed partial class SidebarPipelineProgress : UserControl
         int activeIndex = phase switch
         {
             ScanPhase.Discovering => 0,
-            ScanPhase.Tagging     => 1,
-            ScanPhase.PostScan    => 2,
-            _                      => -1,
+            ScanPhase.Tagging => 1,
+            ScanPhase.PostScan => 2,
+            _ => -1,
         };
         if (activeIndex < 0)
         {
@@ -219,7 +219,7 @@ public sealed partial class SidebarPipelineProgress : UserControl
             // the dot it leads from are filled (or the half belongs to the
             // active dot extending toward a filled side).
             // Left half of stage i ← (stage i-1 filled).
-            bool leftFilled  = i > 0 && (i - 1 < activeIndex || activeIndex == 4);
+            bool leftFilled = i > 0 && (i - 1 < activeIndex || activeIndex == 4);
             // Right half of stage i → (stage i filled relative to next).
             bool rightFilled = i < Stages.Length - 1 && filled;
 

@@ -1,4 +1,4 @@
-// OnboardingSplash code-behind. Drives the rainbow-drift animation on the
+﻿// OnboardingSplash code-behind. Drives the rainbow-drift animation on the
 // "FileID" title and routes the "Pick a folder" CTA to the same
 // FolderPickerService the sidebar uses.
 //

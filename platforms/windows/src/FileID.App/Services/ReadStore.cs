@@ -134,15 +134,15 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-        if (_connection == null) return Array.Empty<FileRow>();
-        // Two sources, deduped by file id: ocr_fts (FTS5 over OCR text;
-        // ranked by bm25) UNION filename LIKE matches over files.path_text.
-        // Mirror of macOS Database.swift::searchFiles which combines OCR
-        // hits with filename hits in the same result set.
-        var rows = new List<FileRow>(limit);
-        var seen = new HashSet<long>();
-        using var cmd = _connection.CreateCommand();
-        cmd.CommandText = """
+            if (_connection == null) return Array.Empty<FileRow>();
+            // Two sources, deduped by file id: ocr_fts (FTS5 over OCR text;
+            // ranked by bm25) UNION filename LIKE matches over files.path_text.
+            // Mirror of macOS Database.swift::searchFiles which combines OCR
+            // hits with filename hits in the same result set.
+            var rows = new List<FileRow>(limit);
+            var seen = new HashSet<long>();
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = """
             SELECT f.id, f.path_text, f.kind, f.size_bytes, f.modified_at, f.has_faces, f.has_text
             FROM ocr_fts
             JOIN files f ON f.id = ocr_fts.rowid
@@ -150,64 +150,64 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             ORDER BY bm25(ocr_fts)
             LIMIT $limit
             """;
-        cmd.Parameters.AddWithValue("$match", match);
-        cmd.Parameters.AddWithValue("$limit", limit);
-        using (var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false))
-        {
-            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            cmd.Parameters.AddWithValue("$match", match);
+            cmd.Parameters.AddWithValue("$limit", limit);
+            using (var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false))
             {
-                var row = ReadRow(reader);
-                if (seen.Add(row.Id))
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
                 {
-                    rows.Add(row);
+                    var row = ReadRow(reader);
+                    if (seen.Add(row.Id))
+                    {
+                        rows.Add(row);
+                    }
                 }
             }
-        }
-        if (rows.Count >= limit)
-        {
-            return rows;
-        }
-        // Filename fallback. Each whitespace-separated term must appear
-        // somewhere in path_text; trailing wildcard via LIKE.
-        var likePieces = new List<string>();
-        var likeArgs = new List<(string name, string value)>();
-        var i = 0;
-        foreach (var raw in query.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-        {
-            var token = raw.Trim();
-            if (token.Length < 2) continue;
-            var p = $"$t{i++}";
-            likePieces.Add($"path_text LIKE {p}");
-            likeArgs.Add((p, $"%{token}%"));
-        }
-        if (likePieces.Count == 0)
-        {
-            return rows;
-        }
-        using var cmd2 = _connection.CreateCommand();
-        cmd2.CommandText = $"""
+            if (rows.Count >= limit)
+            {
+                return rows;
+            }
+            // Filename fallback. Each whitespace-separated term must appear
+            // somewhere in path_text; trailing wildcard via LIKE.
+            var likePieces = new List<string>();
+            var likeArgs = new List<(string name, string value)>();
+            var i = 0;
+            foreach (var raw in query.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var token = raw.Trim();
+                if (token.Length < 2) continue;
+                var p = $"$t{i++}";
+                likePieces.Add($"path_text LIKE {p}");
+                likeArgs.Add((p, $"%{token}%"));
+            }
+            if (likePieces.Count == 0)
+            {
+                return rows;
+            }
+            using var cmd2 = _connection.CreateCommand();
+            cmd2.CommandText = $"""
             SELECT id, path_text, kind, size_bytes, modified_at, has_faces, has_text
             FROM files
             WHERE {string.Join(" AND ", likePieces)}
             ORDER BY modified_at DESC NULLS LAST
             LIMIT $limit
             """;
-        foreach (var (n, v) in likeArgs)
-        {
-            cmd2.Parameters.AddWithValue(n, v);
-        }
-        cmd2.Parameters.AddWithValue("$limit", limit);
-        using var reader2 = await cmd2.ExecuteReaderAsync(ct).ConfigureAwait(false);
-        while (await reader2.ReadAsync(ct).ConfigureAwait(false))
-        {
-            if (rows.Count >= limit) break;
-            var row = ReadRow(reader2);
-            if (seen.Add(row.Id))
+            foreach (var (n, v) in likeArgs)
             {
-                rows.Add(row);
+                cmd2.Parameters.AddWithValue(n, v);
             }
-        }
-        return rows;
+            cmd2.Parameters.AddWithValue("$limit", limit);
+            using var reader2 = await cmd2.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            while (await reader2.ReadAsync(ct).ConfigureAwait(false))
+            {
+                if (rows.Count >= limit) break;
+                var row = ReadRow(reader2);
+                if (seen.Add(row.Id))
+                {
+                    rows.Add(row);
+                }
+            }
+            return rows;
         }
         finally { _gate.Release(); }
     }
@@ -258,39 +258,39 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-        if (_connection == null) return Array.Empty<FileRowWithScore>();
-        var heap = new PriorityQueue<FileRowWithScore, float>(limit);
-        using var cmd = _connection.CreateCommand();
-        cmd.CommandText = """
+            if (_connection == null) return Array.Empty<FileRowWithScore>();
+            var heap = new PriorityQueue<FileRowWithScore, float>(limit);
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = """
             SELECT f.id, f.path_text, f.kind, f.size_bytes, f.modified_at,
                    f.has_faces, f.has_text, e.embedding
             FROM clip_embeddings e
             JOIN files f ON f.id = e.file_id
             """;
-        using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
-        while (await reader.ReadAsync(ct).ConfigureAwait(false))
-        {
-            var blob = (byte[])reader.GetValue(7);
-            float score = DotProduct(queryEmbedding, blob);
-            var row = ReadRow(reader);
-            if (heap.Count < limit)
+            using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
             {
-                heap.Enqueue(new FileRowWithScore(row, score), score);
+                var blob = (byte[])reader.GetValue(7);
+                float score = DotProduct(queryEmbedding, blob);
+                var row = ReadRow(reader);
+                if (heap.Count < limit)
+                {
+                    heap.Enqueue(new FileRowWithScore(row, score), score);
+                }
+                else if (heap.TryPeek(out _, out var minScore) && score > minScore)
+                {
+                    heap.Dequeue();
+                    heap.Enqueue(new FileRowWithScore(row, score), score);
+                }
             }
-            else if (heap.TryPeek(out _, out var minScore) && score > minScore)
+            // Heap holds best `limit` ordered worst→best; reverse to best→worst.
+            var sorted = new List<FileRowWithScore>(heap.Count);
+            while (heap.Count > 0)
             {
-                heap.Dequeue();
-                heap.Enqueue(new FileRowWithScore(row, score), score);
+                sorted.Add(heap.Dequeue());
             }
-        }
-        // Heap holds best `limit` ordered worst→best; reverse to best→worst.
-        var sorted = new List<FileRowWithScore>(heap.Count);
-        while (heap.Count > 0)
-        {
-            sorted.Add(heap.Dequeue());
-        }
-        sorted.Reverse();
-        return sorted;
+            sorted.Reverse();
+            return sorted;
         }
         finally { _gate.Release(); }
     }

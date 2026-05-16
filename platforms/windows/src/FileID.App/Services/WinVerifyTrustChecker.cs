@@ -116,7 +116,7 @@ internal static class WinVerifyTrustChecker
         // S_OK (0) = Trusted. TRUST_E_NOSIGNATURE = Unsigned.
         // Anything else = Untrusted (revoked, tampered, expired, etc).
         const int TRUST_E_NOSIGNATURE = unchecked((int)0x800B0100);
-        const int TRUST_E_BAD_DIGEST  = unchecked((int)0x80096010);
+        const int TRUST_E_BAD_DIGEST = unchecked((int)0x80096010);
 
         if (hr == 0)
         {
@@ -162,12 +162,12 @@ internal static class WinVerifyTrustChecker
 
     // ─── Win32 interop ─────────────────────────────────────────────────────
 
-    private const uint WTD_UI_NONE                = 2;
-    private const uint WTD_REVOKE_NONE            = 0;
-    private const uint WTD_REVOKE_WHOLECHAIN      = 1; // SEC-4: actually checks revocation
-    private const uint WTD_CHOICE_FILE            = 1;
-    private const uint WTD_STATEACTION_VERIFY     = 1;
-    private const uint WTD_STATEACTION_CLOSE      = 2;
+    private const uint WTD_UI_NONE = 2;
+    private const uint WTD_REVOKE_NONE = 0;
+    private const uint WTD_REVOKE_WHOLECHAIN = 1; // SEC-4: actually checks revocation
+    private const uint WTD_CHOICE_FILE = 1;
+    private const uint WTD_STATEACTION_VERIFY = 1;
+    private const uint WTD_STATEACTION_CLOSE = 2;
     private const uint WTD_REVOCATION_CHECK_CHAIN = 0x00000040;
 
     private static Guid WINTRUST_ACTION_GENERIC_VERIFY_V2 = new("00AAC56B-CD44-11D0-8CC2-00C04FC295EE");

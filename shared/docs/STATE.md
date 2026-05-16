@@ -1,6 +1,80 @@
 # FileID — State
 
 > Snapshot of what's working and where we left off. Update at the end of every working session.
+>
+> **How to read this file:** newest entry at the top. Each entry is a one-day-or-one-release summary of what landed. For *why* a decision was made, see [`DECISIONS.md`](DECISIONS.md). For *what's next*, see [`NEXT.md`](NEXT.md). For *user-visible release notes*, see [`/CHANGELOG.md`](../../CHANGELOG.md).
+>
+> Older entries below V15.0 are historical context — load-bearing for archaeology, not for current state. Skim if you want the journey; skip if you want the destination.
+
+## 2026-05-15 (afternoon) — V15.3 Phase 6 + 7 + 11 CI hardening
+
+Continuation of the morning's V15.3 engagement. This session locked in the lint + test + CI gates from Phases 6, 7, and 11 of the polish-mochi plan.
+
+**Rust lint gate (Phase 6):** `cargo clippy --all-targets --target x86_64-pc-windows-msvc -- -D warnings` is now **clean**. Approach: targeted `[lints.clippy]` allows for style-only pedantic rules (`uninlined_format_args`, `doc_markdown`, `manual_let_else`, etc.) with documented justifications, leaving correctness lints as `warn → deny`. Per-site fixes for the 4 real lints that remained (PathBuf debug formatting in `restructure_apply.rs`, BITMAPINFO struct-init in `shell/thumbnail.rs`, &&str to_string in `logging.rs`, `!=` redundancy in `pipeline/deep_analyze.rs`). Zero `TODO`/`FIXME` in production code; zero `.unwrap()` outside `#[cfg(test)]` + `fn main()`; 33 `#[allow(dead_code)]` annotations remain as documented Phase 5+ placeholders.
+
+**.NET lint gate (Phase 6):** `dotnet format --verify-no-changes` is now **clean**. Approach: ran `dotnet format` once to auto-apply IDE0003 (this. simplification) across all view code-behind files; added IDE1006 (private-field-prefix style) to `Directory.Build.props` NoWarn list with a documented justification. `<TreatWarningsAsErrors>true</TreatWarningsAsErrors>` + `<AnalysisLevel>latest-recommended</AnalysisLevel>` + `<EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>` already in place; no csproj edits needed.
+
+**Property tests (Phase 7):** `proptest = "1"` adopted as Rust dev-dep. 9 property tests now ship across `util/path_safety`, `util/zip`, and `pipeline/face_clustering`. **proptest paid for itself by catching two real bugs the example tests missed:**
+- `is_safe_filename("A\\")` was accepted because `std::path::Path::components()` silently strips trailing separators. Fixed by adding an explicit `contains('/') || contains('\\')` reject before the components walk. Comment cites the proptest test as the regression guard. Security-relevant: this function is the path-traversal guard for `renameFiles`.
+- `identity_clustering::cluster` produced **non-deterministic cluster IDs across runs** because `for (_, members) in root_members` iterated a HashMap in random order. Fix: collect into a `Vec`, sort by root, iterate sorted. Without this, a re-scan of the same library could renumber the People-tab clusters between sessions (user-visible: "I named Person #1 as Mom, and after a re-scan she's Person #5 now"). Comment cites the proptest test.
+
+**.NET test expansion (Phase 2):** `SafeOpenTests` shipped with 17 cases including a `[Theory]` over 14 executable extensions (`.exe`, `.lnk`, `.bat`, `.ps1`, `.vbs`, etc.) confirming SEC-9's allowlist rejects each. Total `FileID.App.Tests` count: **28** (was 11). Remaining .NET test classes (`EngineProcessManagerTests`, `IpcDispatcherTests`, `ModelInstallerServiceTests`, `ReadStoreTests`, `AppSettingsTests`, etc.) deferred to NEXT.md N5 — each needs significant mock infrastructure (Process, HttpClient, in-memory SQLite).
+
+**Perf scaffolding (Phase 3):** Added `[profile.release-pgo]` to `Cargo.toml` for PGO instrument-train-use flows (8–15% expected on CPU-bound paths; build-time-only cost). Removed `fast_image_resize = "4"` from deps — was declared but never imported, audited via grep. Verified `serde_json::to_writer` is already the direct path in `ipc/sink.rs:90` (the perf-candidate was already realized). Criterion bench scaffold deferred (needs lib+bin crate restructure to expose `pub fn`s to a `benches/` target — tracked in NEXT.md N3).
+
+**CI gate landing (Phase 8):** `.github/workflows/windows-engine.yml` now runs:
+- `cargo fmt --check` (formerly placeholder).
+- `cargo clippy --all-targets -- -D warnings` (formerly narrowed to specific lint groups).
+- `cargo deny check` (new gate, enforces `engine/deny.toml`: license allowlist + advisory + duplicate-version + source allowlist).
+- `cargo audit` (was `continue-on-error: true`, now a hard gate).
+- Rust toolchain bumped from 1.78 → 1.90 to match `rust-toolchain.toml`.
+
+`.github/workflows/windows-app.yml` now runs:
+- `dotnet format --verify-no-changes` (new gate, x64 only).
+- `dotnet list package --vulnerable --include-transitive` with an explicit fail on hits (new gate, x64 only).
+- `dotnet test FileID.sln` (was IpcSchema-only + `continue-on-error: true`, now runs all test projects + fails on red).
+
+**Pre-commit hook (Phase 11):** `tools/git-hooks/pre-commit` shipped — bash script that runs on every `git commit` to catch what's fixable locally faster than CI can: privacy-string scan + `cargo fmt --check` + `cargo clippy --no-deps -D warnings` + `dotnet format --verify-no-changes` + `swift-format lint` (if installed). Designed to finish in < 15 seconds on a warm cache. `tools/git-hooks/README.md` documents the one-command install: `git config core.hooksPath tools/git-hooks`. `CONTRIBUTING.md` references this.
+
+**Final test count this session:** 69 Rust + 30 IpcSchema + 28 App.Tests = **127 tests, all green** (was 105 at start of session, +22; was 44 at engagement start, +83).
+
+**Still pending (NEXT.md V15.3 follow-ups):** macOS Swift extractions (user verifies on Mac), Windows XAML user-control extraction, remaining .NET test classes, criterion benches (needs lib+bin restructure), cargo-fuzz harness, Phase 9 robustness suite (UI E2E, large-library stress, fault injection, migration roll-forward), Phase 10 a11y + i18n readiness, Phase 11 release-engineering polish (reproducible builds, signing, CI cache).
+
+## 2026-05-15 — Phase 1 bloat reduction + Phase 2 test seed + Phase 3 perf wins (Windows)
+
+Per a comprehensive "trim bloat + comprehensive tests + push perf" engagement (plan in `~/.claude/plans/i-want-you-to-polished-mochi.md`). Phase 1 reorg + Phase 2 test seed + Phase 3 perf wins applied to the Windows side; macOS work pending (user verifies on Mac).
+
+**Windows Rust engine** — `main.rs` 3,463 → 678 LOC (−80.4%) without a single behavior change.
+- New `commands/` directory (one submodule per IPC domain): `hardware`, `embed`, `restructure`, `face_clustering`, `bulk`, `trash`, `trash_log`, `deep_analyze`, `prewarm`, `scan`.
+- New `util/` directory: `hmac` (HMAC-SHA256 hand-roll + log-tamper key), `path_safety` (filename/traversal guards + `stable_path_hash` — de-duplicated with `dbwriter.rs`), `zip` (hardened extract with slip + bomb + symlink defenses).
+- New `logging.rs` (tracing init + panic-hook factory) and `ipc/bounded_read.rs` (`BoundedRead` enum + `bounded_read_line` + `drain_to_newline`).
+- `cargo test --release` clean: **58 passed, 0 failed** (was 44 before this work; +14 new).
+
+**Windows .NET app** — `internal sealed partial class EngineClient` split:
+- `ViewModels/EngineClient.cs`: 1,378 → 970 LOC (kept process lifecycle, stdout/stderr loops, Apply event router, observable surface, `Set<T>` helper).
+- `ViewModels/EngineClient.Commands.cs` (new, 419 LOC): every `*Async` command facade + AutoPilot orchestration (`RunAutoPilotAsync`, `AwaitPhaseAsync`, `AutoPilotStage` enum).
+- `Services/ModelInstallerService.cs`: 1,017 → 735 LOC.
+- `Services/ModelSlot.cs` (new, 282 LOC + header): `ModelSlot` class + `ModelInstallStatus` enum split out as separate class.
+- `dotnet build` clean; `dotnet test` clean (30 IpcSchema tests pass).
+
+**Phase 3 perf wins (Windows engine):**
+- `pipeline/tagging.rs`: replaced the **double image decode** (`image::ImageReader::open(&p)` × 2 per file) with a single `memmap2::Mmap` and two `ImageReader::new(Cursor::new(&bytes))` calls. Saves the second open + read per file across every scan (~5 s on a 50k library, more on slow disks).
+- `db/mod.rs`: added `PRAGMA cache_spill = 0` to `SETUP_PRAGMAS`. Pins the 64 MB page cache instead of spilling to a temp file mid-transaction. Worst-case write is a 100-row batch (well under cache); spill never wins.
+
+**Phase 2 tests** added inline for the new modules:
+- `util/hmac` — 2 RFC 4231 test vectors + long-key + constant-time-eq edge cases.
+- `util/zip` — round-trip extract + zip-slip rejection.
+- `ipc/bounded_read` — line read, CR/LF strip, EOF, partial-line-at-EOF, oversized rejection, drain resync.
+- `util/path_safety` — preserved + already had safe-filename + traversal-rejected tests.
+
+**Documented in `DECISIONS.md`** under five new 2026-05-15 entries: (a) main.rs decomposition rationale, (b) EngineClient partial-class split rationale, (c) mmap decode fast path, (d) `cache_spill=0`. Existing perf candidates (batched CLIP inference, prepare_cached audit, PGO, ORT GPU residency check) are listed in the engagement plan but deferred — they need a criterion benchmark harness or shipped-binary measurements before merging.
+
+**Still pending (per the engagement plan):**
+- macOS Swift refactors (LibraryView/PeopleView/RestructureView decomposition; SankeyFlowView layout extraction; ReadStore split + GRDB `cachedStatement` migration; FileIDEngineMain dispatcher extract; FaceClustering decomposition). User to execute + verify on macOS hardware.
+- Windows XAML user-control extraction (SettingsView, RestructureView, WelcomeSheet, DeepAnalyzeView).
+- `tagging.rs` helper extraction (image_io + geometry submodules) — deferred as secondary cleanup.
+- Phase 2 .NET test projects (`FileID.App.Tests`, `FileID.Theme.Tests`) and Phase 2 Swift test extensions (`AppTests/`, extended `EngineTests/` + `SharedTests/`).
+- Phase 3 remaining perf candidates needing measurement: batched CLIP image inference, per-worker thread-local buffer pools, `prepare_cached` audit across hot paths, vectorized L2-normalize, JSON encoding via `to_writer` direct, ORT GPU residency check, PGO release profile.
 
 ## V15.2.1 (2026-05-14) — Fix three V15.2 regressions + one-button GPU pack
 

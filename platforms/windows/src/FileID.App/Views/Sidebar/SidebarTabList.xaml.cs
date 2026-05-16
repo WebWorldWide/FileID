@@ -1,4 +1,4 @@
-// SidebarTabList code-behind. Builds six tab buttons programmatically and
+﻿// SidebarTabList code-behind. Builds six tab buttons programmatically and
 // keeps their selected/disabled visual state in sync with AppViewModel.
 
 using System.ComponentModel;

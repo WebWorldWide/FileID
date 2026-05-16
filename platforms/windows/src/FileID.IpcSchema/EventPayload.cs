@@ -68,28 +68,28 @@ public sealed class EventPayloadJsonConverter : JsonConverter<EventPayload>
 
         EventPayload payload = variant switch
         {
-            "ready"                  => new ReadyEvent(ReadWrapped<EngineInfo>(ref reader, options)),
-            "progress"               => new ProgressEvent(ReadWrapped<ScanProgress>(ref reader, options)),
-            "phaseChanged"           => new PhaseChangedEvent(ReadWrapped<ScanPhase>(ref reader, options)),
-            "discoveryComplete"      => new DiscoveryCompleteEvent(ReadDiscoveryComplete(ref reader)),
-            "fileDone"               => new FileDoneEventWrapper(ReadWrapped<FileDoneEvent>(ref reader, options)),
-            "batchSummary"           => new BatchSummaryEvent(ReadWrapped<BatchSummary>(ref reader, options)),
-            "scanComplete"           => new ScanCompleteEvent(ReadWrapped<ScanComplete>(ref reader, options)),
-            "error"                  => new ErrorEvent(ReadWrapped<EngineError>(ref reader, options)),
-            "log"                    => new LogEvent(ReadWrapped<LogLine>(ref reader, options)),
+            "ready" => new ReadyEvent(ReadWrapped<EngineInfo>(ref reader, options)),
+            "progress" => new ProgressEvent(ReadWrapped<ScanProgress>(ref reader, options)),
+            "phaseChanged" => new PhaseChangedEvent(ReadWrapped<ScanPhase>(ref reader, options)),
+            "discoveryComplete" => new DiscoveryCompleteEvent(ReadDiscoveryComplete(ref reader)),
+            "fileDone" => new FileDoneEventWrapper(ReadWrapped<FileDoneEvent>(ref reader, options)),
+            "batchSummary" => new BatchSummaryEvent(ReadWrapped<BatchSummary>(ref reader, options)),
+            "scanComplete" => new ScanCompleteEvent(ReadWrapped<ScanComplete>(ref reader, options)),
+            "error" => new ErrorEvent(ReadWrapped<EngineError>(ref reader, options)),
+            "log" => new LogEvent(ReadWrapped<LogLine>(ref reader, options)),
             "faceClusteringComplete" => new FaceClusteringCompleteEvent(ReadWrapped<FaceClusteringResult>(ref reader, options)),
-            "deepAnalyzeStarting"    => new DeepAnalyzeStartingEvent(ReadWrapped<DeepAnalyzeStarting>(ref reader, options)),
-            "deepAnalyzeProgress"    => new DeepAnalyzeProgressEvent(ReadWrapped<DeepAnalyzeProgress>(ref reader, options)),
-            "deepAnalyzeFileDone"    => new DeepAnalyzeFileDoneEvent(ReadWrapped<DeepAnalyzeFileDone>(ref reader, options)),
-            "deepAnalyzeComplete"    => new DeepAnalyzeCompleteEvent(ReadWrapped<DeepAnalyzeComplete>(ref reader, options)),
-            "modelDownloadProgress"  => new ModelDownloadProgressEvent(ReadWrapped<ModelDownloadProgress>(ref reader, options)),
-            "queueState"             => new QueueStateEvent(ReadWrapped<QueueState>(ref reader, options)),
-            "restructurePlan"        => new RestructurePlanEvent(ReadWrapped<RestructurePlan>(ref reader, options)),
+            "deepAnalyzeStarting" => new DeepAnalyzeStartingEvent(ReadWrapped<DeepAnalyzeStarting>(ref reader, options)),
+            "deepAnalyzeProgress" => new DeepAnalyzeProgressEvent(ReadWrapped<DeepAnalyzeProgress>(ref reader, options)),
+            "deepAnalyzeFileDone" => new DeepAnalyzeFileDoneEvent(ReadWrapped<DeepAnalyzeFileDone>(ref reader, options)),
+            "deepAnalyzeComplete" => new DeepAnalyzeCompleteEvent(ReadWrapped<DeepAnalyzeComplete>(ref reader, options)),
+            "modelDownloadProgress" => new ModelDownloadProgressEvent(ReadWrapped<ModelDownloadProgress>(ref reader, options)),
+            "queueState" => new QueueStateEvent(ReadWrapped<QueueState>(ref reader, options)),
+            "restructurePlan" => new RestructurePlanEvent(ReadWrapped<RestructurePlan>(ref reader, options)),
             "restructureApplyResult" => new RestructureApplyResultEvent(ReadWrapped<RestructureApplyResult>(ref reader, options)),
-            "bulkActionResult"       => new BulkActionResultEvent(ReadWrapped<BulkActionResult>(ref reader, options)),
-            "clipTextEmbedding"      => new ClipTextEmbeddingEvent(ReadWrapped<ClipTextEmbedding>(ref reader, options)),
-            "mergeSuggestions"       => new MergeSuggestionsEvent(ReadWrapped<MergeSuggestions>(ref reader, options)),
-            "hardwareReprobed"       => new HardwareReprobedEvent(ReadWrapped<HardwareReprobed>(ref reader, options)),
+            "bulkActionResult" => new BulkActionResultEvent(ReadWrapped<BulkActionResult>(ref reader, options)),
+            "clipTextEmbedding" => new ClipTextEmbeddingEvent(ReadWrapped<ClipTextEmbedding>(ref reader, options)),
+            "mergeSuggestions" => new MergeSuggestionsEvent(ReadWrapped<MergeSuggestions>(ref reader, options)),
+            "hardwareReprobed" => new HardwareReprobedEvent(ReadWrapped<HardwareReprobed>(ref reader, options)),
             _ => throw new JsonException($"EventPayload: unknown variant '{variant}'"),
         };
 
@@ -105,28 +105,28 @@ public sealed class EventPayloadJsonConverter : JsonConverter<EventPayload>
         writer.WriteStartObject();
         switch (value)
         {
-            case ReadyEvent v:                  WriteWrapped(writer, "ready", v.Info, options); break;
-            case ProgressEvent v:               WriteWrapped(writer, "progress", v.Progress, options); break;
-            case PhaseChangedEvent v:           WriteWrapped(writer, "phaseChanged", v.Phase, options); break;
-            case DiscoveryCompleteEvent v:      WriteDiscoveryComplete(writer, v); break;
-            case FileDoneEventWrapper v:        WriteWrapped(writer, "fileDone", v.FileDone, options); break;
-            case BatchSummaryEvent v:           WriteWrapped(writer, "batchSummary", v.Summary, options); break;
-            case ScanCompleteEvent v:           WriteWrapped(writer, "scanComplete", v.Result, options); break;
-            case ErrorEvent v:                  WriteWrapped(writer, "error", v.Error, options); break;
-            case LogEvent v:                    WriteWrapped(writer, "log", v.Line, options); break;
+            case ReadyEvent v: WriteWrapped(writer, "ready", v.Info, options); break;
+            case ProgressEvent v: WriteWrapped(writer, "progress", v.Progress, options); break;
+            case PhaseChangedEvent v: WriteWrapped(writer, "phaseChanged", v.Phase, options); break;
+            case DiscoveryCompleteEvent v: WriteDiscoveryComplete(writer, v); break;
+            case FileDoneEventWrapper v: WriteWrapped(writer, "fileDone", v.FileDone, options); break;
+            case BatchSummaryEvent v: WriteWrapped(writer, "batchSummary", v.Summary, options); break;
+            case ScanCompleteEvent v: WriteWrapped(writer, "scanComplete", v.Result, options); break;
+            case ErrorEvent v: WriteWrapped(writer, "error", v.Error, options); break;
+            case LogEvent v: WriteWrapped(writer, "log", v.Line, options); break;
             case FaceClusteringCompleteEvent v: WriteWrapped(writer, "faceClusteringComplete", v.Result, options); break;
-            case DeepAnalyzeStartingEvent v:    WriteWrapped(writer, "deepAnalyzeStarting", v.Starting, options); break;
-            case DeepAnalyzeProgressEvent v:    WriteWrapped(writer, "deepAnalyzeProgress", v.Progress, options); break;
-            case DeepAnalyzeFileDoneEvent v:    WriteWrapped(writer, "deepAnalyzeFileDone", v.FileDone, options); break;
-            case DeepAnalyzeCompleteEvent v:    WriteWrapped(writer, "deepAnalyzeComplete", v.Result, options); break;
-            case ModelDownloadProgressEvent v:  WriteWrapped(writer, "modelDownloadProgress", v.Progress, options); break;
-            case QueueStateEvent v:             WriteWrapped(writer, "queueState", v.State, options); break;
-            case RestructurePlanEvent v:        WriteWrapped(writer, "restructurePlan", v.Plan, options); break;
+            case DeepAnalyzeStartingEvent v: WriteWrapped(writer, "deepAnalyzeStarting", v.Starting, options); break;
+            case DeepAnalyzeProgressEvent v: WriteWrapped(writer, "deepAnalyzeProgress", v.Progress, options); break;
+            case DeepAnalyzeFileDoneEvent v: WriteWrapped(writer, "deepAnalyzeFileDone", v.FileDone, options); break;
+            case DeepAnalyzeCompleteEvent v: WriteWrapped(writer, "deepAnalyzeComplete", v.Result, options); break;
+            case ModelDownloadProgressEvent v: WriteWrapped(writer, "modelDownloadProgress", v.Progress, options); break;
+            case QueueStateEvent v: WriteWrapped(writer, "queueState", v.State, options); break;
+            case RestructurePlanEvent v: WriteWrapped(writer, "restructurePlan", v.Plan, options); break;
             case RestructureApplyResultEvent v: WriteWrapped(writer, "restructureApplyResult", v.Result, options); break;
-            case BulkActionResultEvent v:       WriteWrapped(writer, "bulkActionResult", v.Result, options); break;
-            case ClipTextEmbeddingEvent v:      WriteWrapped(writer, "clipTextEmbedding", v.Embedding, options); break;
-            case MergeSuggestionsEvent v:       WriteWrapped(writer, "mergeSuggestions", v.Suggestions, options); break;
-            case HardwareReprobedEvent v:       WriteWrapped(writer, "hardwareReprobed", v.Result, options); break;
+            case BulkActionResultEvent v: WriteWrapped(writer, "bulkActionResult", v.Result, options); break;
+            case ClipTextEmbeddingEvent v: WriteWrapped(writer, "clipTextEmbedding", v.Embedding, options); break;
+            case MergeSuggestionsEvent v: WriteWrapped(writer, "mergeSuggestions", v.Suggestions, options); break;
+            case HardwareReprobedEvent v: WriteWrapped(writer, "hardwareReprobed", v.Result, options); break;
             default:
                 throw new JsonException($"EventPayload: unknown C# type {value.GetType().FullName}");
         }

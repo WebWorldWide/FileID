@@ -133,9 +133,19 @@ where
     for i in 0..n {
         root_members.entry(uf.find(i)).or_default().push(i);
     }
+    // V15.3 Phase 7: iterate in sorted-key order so cluster-ID assignment
+    // is deterministic across runs. Without this, HashMap iteration order
+    // leaks into `cores`, which leaks into `core_centroids`, which leaks
+    // into the cluster_id remap in `face_clustering::cluster`. A re-scan
+    // of the same library could produce different People-tab cluster
+    // numbers each time. Caught by
+    // `pipeline::face_clustering::tests::clustering_is_deterministic`
+    // (proptest).
+    let mut sorted_groups: Vec<(usize, Vec<usize>)> = root_members.into_iter().collect();
+    sorted_groups.sort_by_key(|(root, _)| *root);
     let mut cores: Vec<Vec<usize>> = Vec::new();
     let mut outliers: Vec<usize> = Vec::new();
-    for (_, members) in root_members {
+    for (_, members) in sorted_groups {
         if members.len() >= 2 {
             cores.push(members);
         } else {

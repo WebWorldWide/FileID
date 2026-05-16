@@ -1,0 +1,80 @@
+# cargo-deny configuration for FileID engine.
+#
+# Run locally: `cargo deny check`
+# CI gate: see .github/workflows/windows-engine.yml (Phase 8).
+#
+# This file enforces four invariants:
+#   1. Every dependency's license is on an allowed SPDX list (no GPL/AGPL
+#      leakage into FileID's eventual public release).
+#   2. No advisory-flagged versions ship (cross-checked against RUSTSEC).
+#   3. No duplicate versions of the same crate in the dependency tree
+#      (helps catch accidental v0.x / v1 splits that bloat the binary).
+#   4. No "banned" crates — currently empty, reserved for future cases
+#      where we explicitly forbid a crate from re-entering the tree.
+
+[graph]
+all-features = false
+no-default-features = false
+# Only check Windows targets — Linux is Phase 5 (deferred) and macOS uses
+# its own Swift package manager, so a Rust dep audit for macOS targets is
+# wasted work.
+targets = [
+    { triple = "x86_64-pc-windows-msvc" },
+    { triple = "aarch64-pc-windows-msvc" },
+]
+
+[advisories]
+# RUSTSEC advisory database. yanked = warn lets us drop in a fix at next
+# update without breaking CI mid-flight; new advisories are deny so a
+# fresh CVE wedges the PR until handled.
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "warn"
+ignore = []
+
+[licenses]
+# SPDX expressions only. Anything else is unknown = deny.
+# These cover the entire transitive tree at lock time. Adding a new dep
+# with a different license requires updating this list AND a DECISIONS.md
+# entry.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "MPL-2.0",                  # firefox-style copyleft; safe to dynamically link
+    "CC0-1.0",
+    "0BSD",
+    "CDLA-Permissive-2.0",      # used by webpki-root-certs / webpki-roots
+                                # (CA cert bundle); Linux Foundation permissive
+                                # license, safe for static link.
+]
+confidence-threshold = 0.92
+
+# FileID's own crate is publish = false; its license field is "TBD" pending
+# the public-release decision (see shared/docs/SHIP.md). The `private` section
+# below tells cargo-deny to skip license enforcement for workspace members.
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+# Crates explicitly banned from the dep tree. Reserved for future use —
+# leaving empty rather than seeding speculative entries.
+deny = []
+# Skip duplicate-version warnings for crates that are stuck behind a
+# slow-moving transitive dep. Audited individually.
+skip = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

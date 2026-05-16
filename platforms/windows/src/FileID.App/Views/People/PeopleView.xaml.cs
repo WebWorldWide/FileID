@@ -135,7 +135,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         sheet.SetPerson(pc.ClusterId, pc.DisplayName);
         var dialog = new ContentDialog
         {
-            XamlRoot = this.XamlRoot,
+            XamlRoot = XamlRoot,
             Title = "Person details",
             Content = sheet,
             PrimaryButtonText = "Save",
@@ -158,7 +158,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         var sheet = new SuggestedMergesSheet();
         var dialog = new ContentDialog
         {
-            XamlRoot = this.XamlRoot,
+            XamlRoot = XamlRoot,
             Title = "Suggested merges",
             Content = sheet,
             CloseButtonText = "Done",
@@ -236,7 +236,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         sheet.SetPerson(pc.ClusterId, pc.DisplayName);
         var dialog = new ContentDialog
         {
-            XamlRoot = this.XamlRoot,
+            XamlRoot = XamlRoot,
             Title = "Person details",
             Content = sheet,
             PrimaryButtonText = "Save",
@@ -273,7 +273,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
 
         var confirm = new ContentDialog
         {
-            XamlRoot = this.XamlRoot,
+            XamlRoot = XamlRoot,
             Title = "Merge clusters?",
             Content = $"Move all faces from #{sourceId} into #{destId}? This can't be auto-undone.",
             PrimaryButtonText = "Merge",

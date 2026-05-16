@@ -1,4 +1,4 @@
-// AutoPilotTracker code-behind. Mirrors EngineClient.CurrentAutoPilotStage
+﻿// AutoPilotTracker code-behind. Mirrors EngineClient.CurrentAutoPilotStage
 // to the dot-tracker UI. Pending dots stay faint; the active stage's dot
 // goes gold + the label brightens; completed stages go green.
 
@@ -79,18 +79,18 @@ public sealed partial class AutoPilotTracker : UserControl
         // Complete state lights all four green.
         int activeIdx = stage switch
         {
-            EngineClient.AutoPilotStage.Scanning   => 0,
+            EngineClient.AutoPilotStage.Scanning => 0,
             EngineClient.AutoPilotStage.Clustering => 1,
             EngineClient.AutoPilotStage.Captioning => 2,
-            EngineClient.AutoPilotStage.Planning   => 3,
-            EngineClient.AutoPilotStage.Complete   => 4,
-            _                                       => -1,
+            EngineClient.AutoPilotStage.Planning => 3,
+            EngineClient.AutoPilotStage.Complete => 4,
+            _ => -1,
         };
 
-        ApplyDot(DotScan,    LabelScan,    0, activeIdx);
+        ApplyDot(DotScan, LabelScan, 0, activeIdx);
         ApplyDot(DotCluster, LabelCluster, 1, activeIdx);
         ApplyDot(DotCaption, LabelCaption, 2, activeIdx);
-        ApplyDot(DotPlan,    LabelPlan,    3, activeIdx);
+        ApplyDot(DotPlan, LabelPlan, 3, activeIdx);
     }
 
     private void ApplyDot(Microsoft.UI.Xaml.Shapes.Ellipse dot, TextBlock label, int idx, int activeIdx)

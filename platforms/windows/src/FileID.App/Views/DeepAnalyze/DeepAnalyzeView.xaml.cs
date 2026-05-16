@@ -185,10 +185,10 @@ public sealed partial class DeepAnalyzeView : UserControl
         var gold = (Brush)Application.Current.Resources["GoldBrush"];
         QwenSmallCard.BorderBrush = _activeModel == "qwen2_5_vl_3b" ? gold : idle;
         QwenLargeCard.BorderBrush = _activeModel == "qwen2_5_vl_7b" ? gold : idle;
-        SmolVlmCard.BorderBrush   = _activeModel == "smolvlm"       ? gold : idle;
+        SmolVlmCard.BorderBrush = _activeModel == "smolvlm" ? gold : idle;
         QwenSmallCard.BorderThickness = _activeModel == "qwen2_5_vl_3b" ? new Thickness(2) : new Thickness(1);
         QwenLargeCard.BorderThickness = _activeModel == "qwen2_5_vl_7b" ? new Thickness(2) : new Thickness(1);
-        SmolVlmCard.BorderThickness   = _activeModel == "smolvlm"       ? new Thickness(2) : new Thickness(1);
+        SmolVlmCard.BorderThickness = _activeModel == "smolvlm" ? new Thickness(2) : new Thickness(1);
     }
 
     private void UpdateActiveModelLabel()
@@ -196,8 +196,8 @@ public sealed partial class DeepAnalyzeView : UserControl
         ActiveModelText.Text = _activeModel switch
         {
             "qwen2_5_vl_7b" => "Active model: Qwen 2.5-VL 7B (best quality)",
-            "smolvlm"       => "Active model: SmolVLM 256M (fastest)",
-            _               => "Active model: Qwen 2.5-VL 3B (balanced)",
+            "smolvlm" => "Active model: SmolVLM 256M (fastest)",
+            _ => "Active model: Qwen 2.5-VL 3B (balanced)",
         };
     }
 
@@ -343,7 +343,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             sheet.SetPlan(plan);
             var dialog = new ContentDialog
             {
-                XamlRoot = this.XamlRoot,
+                XamlRoot = XamlRoot,
                 Title = $"Apply {pending.Count} smart rename{(pending.Count == 1 ? "" : "s")}",
                 Content = sheet,
                 PrimaryButtonText = "Rename",

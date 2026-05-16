@@ -80,6 +80,27 @@ jobs:
         # the matrix arch fail NETSDK1032 (RID/PlatformTarget mismatch).
         run: dotnet restore src/FileID.App/FileID.App.csproj /p:Platform=${{ matrix.arch }} /p:RuntimeIdentifier=win-${{ matrix.arch }}
 
+      # V15.3 Phase 6: enforce dotnet format on every PR (x64 only — the
+      # rules are arch-independent, no value in scanning twice). Catches
+      # whitespace + IDE0xxx style violations before they hit main.
+      - name: Format check (x64 only)
+        if: matrix.arch == 'x64'
+        run: dotnet format FileID.sln --verify-no-changes
+
+      # V15.3 Phase 6: vulnerability scan against transitive deps.
+      # Same cadence as the Rust cargo-audit gate. x64 only — package
+      # graph is identical across archs.
+      - name: Vulnerability scan (x64 only)
+        if: matrix.arch == 'x64'
+        run: |
+          $output = dotnet list package --vulnerable --include-transitive 2>&1 | Out-String
+          Write-Host $output
+          if ($output -match 'has the following vulnerable packages') {
+            Write-Error "Vulnerable packages found — see output above."
+            exit 1
+          }
+        shell: pwsh
+
       - name: Build (Debug)
         # Use msbuild instead of dotnet build so the VS WinUI tooling
         # (PriGen, MRT, XAML compiler) on the GitHub runner is found.
@@ -109,14 +130,15 @@ jobs:
           -m
         shell: pwsh
 
-      - name: Build IpcSchema tests project (if present)
-        # Tests run on x64 only — ARM64 cross-building tests is rarely useful here.
+      - name: Run all test projects
+        # V15.3: was IpcSchema-only with continue-on-error. Now runs every
+        # discoverable test project in Tests/, fails on red. Tests run on
+        # x64 only — ARM64 cross-building tests is rarely useful here.
         if: matrix.arch == 'x64'
-        continue-on-error: true
         shell: pwsh
         run: |
           if (Test-Path Tests) {
-            dotnet test Tests/ -c Debug --no-restore --verbosity minimal
+            dotnet test FileID.sln -c Debug --no-restore --verbosity minimal --filter "TestCategory!=RequiresMacOS"
           } else {
             Write-Host "No Tests/ directory; skipping."
           }

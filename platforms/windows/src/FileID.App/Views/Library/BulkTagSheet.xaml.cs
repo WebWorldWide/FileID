@@ -89,7 +89,7 @@ public sealed partial class BulkTagSheet : UserControl
             // this just signals via FocusManager. The dialog wires its own
             // primary-button handler that calls CommitAsync.
             e.Handled = true;
-            var root = this.XamlRoot;
+            var root = XamlRoot;
             if (root?.Content is FrameworkElement fe)
             {
                 var btn = fe.FindName("BulkTagPrimaryButton") as Button;

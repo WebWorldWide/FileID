@@ -158,7 +158,7 @@ impl DbWriter {
             for f in buffer.iter() {
                 let insert_started = Instant::now();
                 let path_text = f.path.to_string_lossy();
-                let path_hash = stable_path_hash(&path_text);
+                let path_hash = crate::util::path_safety::stable_path_hash(&path_text);
                 let extension = f
                     .path
                     .extension()
@@ -296,33 +296,6 @@ impl DbWriter {
             store_insert_p95_ms: percentile(&mut store, 0.95),
         })
     }
-}
-
-/// Stable 64-bit hash for `path_hash`. Used for cheap probe-by-hash on
-/// resume-cursor updates and dedupe of re-scanned files.
-///
-/// On Windows, NTFS file lookups are case-INsensitive (`C:\Users\Foo`
-/// and `c:\users\foo` resolve to the same file). The hash must therefore
-/// be case-insensitive too; otherwise a re-scan after a path-case change
-/// (Explorer rename, Library import, drive remount) creates a duplicate
-/// row pointing to the same physical file. Lowercase before hashing.
-///
-/// macOS volumes default to case-insensitive HFS+/APFS, so the same
-/// behavior is correct there — but each platform owns its own DB, so
-/// the cross-platform implication is moot. The wire schema stores the
-/// resulting i64 as-is.
-fn stable_path_hash(path: &str) -> i64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    // ASCII lowercase is enough for Windows path comparison — NTFS uses
-    // a Unicode case-folding table that's roughly equivalent to
-    // `to_ascii_lowercase` for typical paths. A pathological filename
-    // with Turkish dotted I would not round-trip exactly, but the
-    // resulting hash collision is bounded and tolerable (worst case:
-    // one duplicate row that the next scan overwrites via UPSERT).
-    let normalized = path.to_ascii_lowercase();
-    normalized.hash(&mut h);
-    h.finish() as i64
 }
 
 fn percentile(values: &mut [f64], p: f64) -> f64 {

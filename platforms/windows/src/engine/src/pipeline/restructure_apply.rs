@@ -47,7 +47,7 @@ impl RestructureApply {
     /// circuits with a friendly message instead of partial writes.
     pub fn apply(&self, moves: &[RestructureMove]) -> Result<RestructureApplyResult> {
         let canonical_root = canonicalize_safely(&self.library_root)
-            .with_context(|| format!("library root {:?}", self.library_root))?;
+            .with_context(|| format!("library root {}", self.library_root.display()))?;
 
         let mut applied = 0u32;
         let mut failed = 0u32;

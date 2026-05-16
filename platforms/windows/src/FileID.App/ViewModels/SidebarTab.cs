@@ -8,12 +8,12 @@ namespace FileID.ViewModels;
 
 internal sealed record SidebarTab(string Id, string Label, string IconGlyph)
 {
-    public static SidebarTab Library     => new("library",     "Library",      ""); // Photo
-    public static SidebarTab People      => new("people",      "People",       ""); // People
-    public static SidebarTab Cleanup     => new("cleanup",     "Cleanup",      ""); // Delete
+    public static SidebarTab Library => new("library", "Library", ""); // Photo
+    public static SidebarTab People => new("people", "People", ""); // People
+    public static SidebarTab Cleanup => new("cleanup", "Cleanup", ""); // Delete
     public static SidebarTab DeepAnalyze => new("deepanalyze", "Deep Analyze", ""); // FontAwesome equivalent of sparkles
-    public static SidebarTab Restructure => new("restructure", "Restructure",  ""); // FolderHorizontal
-    public static SidebarTab Settings    => new("settings",    "Settings",     ""); // Setting
+    public static SidebarTab Restructure => new("restructure", "Restructure", ""); // FolderHorizontal
+    public static SidebarTab Settings => new("settings", "Settings", ""); // Setting
 
     public static IReadOnlyList<SidebarTab> All { get; } = new[]
     {

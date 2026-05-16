@@ -167,7 +167,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         var sizeDisplay = FormatSize(bytes);
         var confirm = new ContentDialog
         {
-            XamlRoot = this.XamlRoot,
+            XamlRoot = XamlRoot,
             Title = "Trash duplicates?",
             Content = $"{ids.Count} non-keeper file{(ids.Count == 1 ? "" : "s")} ({sizeDisplay}) will move to the Recycle Bin. They stay recoverable from there.",
             PrimaryButtonText = "Move to Recycle Bin",
@@ -298,7 +298,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         if (ids.Count == 0) return;
         var confirm = new ContentDialog
         {
-            XamlRoot = this.XamlRoot,
+            XamlRoot = XamlRoot,
             Title = "Trash this group?",
             Content = $"{ids.Count} non-keeper file{(ids.Count == 1 ? "" : "s")} ({FormatSize(bytes)}) will move to the Recycle Bin.",
             PrimaryButtonText = "Move to Recycle Bin",

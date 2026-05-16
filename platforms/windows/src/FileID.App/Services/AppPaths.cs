@@ -14,14 +14,14 @@ internal static class AppPaths
     /// <summary>%LOCALAPPDATA%\FileID\</summary>
     public static string Root { get; } = ResolveRoot();
 
-    public static string DbPath        => Path.Combine(Root, "fileid.sqlite");
-    public static string LogsDir       => Path.Combine(Root, "logs");
-    public static string ModelsDir     => Path.Combine(Root, "Models");
+    public static string DbPath => Path.Combine(Root, "fileid.sqlite");
+    public static string LogsDir => Path.Combine(Root, "logs");
+    public static string ModelsDir => Path.Combine(Root, "Models");
     public static string HuggingFaceDir => Path.Combine(Root, "Models", "HuggingFace");
-    public static string ThumbsDir     => Path.Combine(Root, "thumbs.cache");
-    public static string FacesDir      => Path.Combine(Root, "face_crops");
-    public static string SettingsPath  => Path.Combine(Root, "app-settings.json");
-    public static string AppLogPath    => Path.Combine(LogsDir, "app.log");
+    public static string ThumbsDir => Path.Combine(Root, "thumbs.cache");
+    public static string FacesDir => Path.Combine(Root, "face_crops");
+    public static string SettingsPath => Path.Combine(Root, "app-settings.json");
+    public static string AppLogPath => Path.Combine(LogsDir, "app.log");
 
     /// <summary>
     /// Engine binary path. Looks beside the app first (ship layout where

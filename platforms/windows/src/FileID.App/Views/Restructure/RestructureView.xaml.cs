@@ -38,7 +38,7 @@ public sealed partial class RestructureView : UserControl
         sheet.SetSankeyFilter(plan, ribbon.Source, ribbon.Category);
         var dialog = new ContentDialog
         {
-            XamlRoot = this.XamlRoot,
+            XamlRoot = XamlRoot,
             Title = "Files in this flow",
             Content = sheet,
             CloseButtonText = "Done",
@@ -128,8 +128,8 @@ public sealed partial class RestructureView : UserControl
             return;
         }
         AnchorCountText.Text = engineCounts.AnchorFolders.ToString("N0");
-        MixedCountText.Text  = engineCounts.MixedFolders.ToString("N0");
-        JunkCountText.Text   = engineCounts.JunkFolders.ToString("N0");
+        MixedCountText.Text = engineCounts.MixedFolders.ToString("N0");
+        JunkCountText.Text = engineCounts.JunkFolders.ToString("N0");
         ClassifierStrip.Visibility = Visibility.Visible;
     }
 

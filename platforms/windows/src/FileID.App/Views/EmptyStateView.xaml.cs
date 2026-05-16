@@ -1,4 +1,4 @@
-// EmptyStateView code-behind. Six DPs (Glyph / Title / Body / Secondary /
+﻿// EmptyStateView code-behind. Six DPs (Glyph / Title / Body / Secondary /
 // ActionLabel / ActionGlyph) plus an ActionInvoked routed event.
 
 using Microsoft.UI.Xaml;
@@ -49,12 +49,12 @@ public sealed partial class EmptyStateView : UserControl
         InitializeComponent();
     }
 
-    public string Glyph        { get => (string)GetValue(GlyphProperty); set => SetValue(GlyphProperty, value); }
-    public string Title        { get => (string)GetValue(TitleProperty); set => SetValue(TitleProperty, value); }
-    public string Body         { get => (string)GetValue(BodyProperty); set => SetValue(BodyProperty, value); }
-    public string Secondary    { get => (string)GetValue(SecondaryProperty); set => SetValue(SecondaryProperty, value); }
-    public string ActionLabel  { get => (string)GetValue(ActionLabelProperty); set => SetValue(ActionLabelProperty, value); }
-    public string ActionGlyph  { get => (string)GetValue(ActionGlyphProperty); set => SetValue(ActionGlyphProperty, value); }
+    public string Glyph { get => (string)GetValue(GlyphProperty); set => SetValue(GlyphProperty, value); }
+    public string Title { get => (string)GetValue(TitleProperty); set => SetValue(TitleProperty, value); }
+    public string Body { get => (string)GetValue(BodyProperty); set => SetValue(BodyProperty, value); }
+    public string Secondary { get => (string)GetValue(SecondaryProperty); set => SetValue(SecondaryProperty, value); }
+    public string ActionLabel { get => (string)GetValue(ActionLabelProperty); set => SetValue(ActionLabelProperty, value); }
+    public string ActionGlyph { get => (string)GetValue(ActionGlyphProperty); set => SetValue(ActionGlyphProperty, value); }
 
     /// <summary>Raised when the user clicks the primary action button.</summary>
     public event EventHandler? ActionInvoked;

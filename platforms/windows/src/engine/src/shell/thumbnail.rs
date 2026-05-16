@@ -104,15 +104,17 @@ unsafe fn hbitmap_to_rgba(hbm: HBITMAP) -> Result<Thumbnail> {
     let row_bytes = (width as usize) * 4;
     let mut bgra = vec![0u8; row_bytes * (height as usize)];
 
-    let mut bi = BITMAPINFO::default();
-    bi.bmiHeader = BITMAPINFOHEADER {
-        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-        biWidth: width as i32,
-        // Negative height = top-down DIB; matches our RGBA expectation.
-        biHeight: -(height as i32),
-        biPlanes: 1,
-        biBitCount: 32,
-        biCompression: BI_RGB.0,
+    let mut bi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width as i32,
+            // Negative height = top-down DIB; matches our RGBA expectation.
+            biHeight: -(height as i32),
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
         ..Default::default()
     };
 

@@ -1,4 +1,4 @@
-// Common enum types shared across IPC payloads. Each maps directly onto a
+﻿// Common enum types shared across IPC payloads. Each maps directly onto a
 // case enum in shared/ipc-schema/ipc.schema.json.
 //
 // Naming convention: C# enum names PascalCase; wire form camelCase via

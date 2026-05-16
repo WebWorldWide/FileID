@@ -1,4 +1,4 @@
-// LlamaRuntimeAutoInstaller — silent install of the Vulkan llama.cpp runtime
+﻿// LlamaRuntimeAutoInstaller — silent install of the Vulkan llama.cpp runtime
 // at engine-ready time so Deep Analyze "just works" the first time the user
 // opens the tab.
 //

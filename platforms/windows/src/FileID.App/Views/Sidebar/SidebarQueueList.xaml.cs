@@ -76,10 +76,10 @@ public sealed partial class SidebarQueueList : UserControl
             FontFamily = new FontFamily("Segoe Fluent Icons"),
             Glyph = job.Category switch
             {
-                JobCategory.Scan        => "",
+                JobCategory.Scan => "",
                 JobCategory.FaceCluster => "",
                 JobCategory.DeepAnalyze => "",
-                _                        => "",
+                _ => "",
             },
             FontSize = 11,
             Opacity = isRunning ? 1.0 : 0.55,

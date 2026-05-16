@@ -219,7 +219,7 @@ internal sealed class AppSettings
         // copy is enough for serialization — and importantly, the snapshot
         // captures the state at the moment Save() was called so a setter
         // mutating the original mid-debounce doesn't corrupt the write.
-        return (AppSettings)this.MemberwiseClone();
+        return (AppSettings)MemberwiseClone();
     }
 
     private static async Task WriteAsync(AppSettings snapshot)

@@ -1,4 +1,4 @@
-// WorkflowAutoTabRouter — auto-switches the active sidebar tab when
+﻿// WorkflowAutoTabRouter — auto-switches the active sidebar tab when
 // pipeline milestones complete. Matches macOS MainWindow.swift:95-109's
 // two `.task(id:)` watchers:
 //   1. Face clustering finishes → switch to People (if user was on Library)

@@ -67,12 +67,12 @@ public sealed partial class DetailHostView : UserControl
         {
             child = vm.ActiveTab.Id switch
             {
-                "library"     => (UIElement)new Library.LibraryView(),
-                "people"      => (UIElement)new People.PeopleView(),
-                "cleanup"     => (UIElement)new Cleanup.CleanupView(),
+                "library" => (UIElement)new Library.LibraryView(),
+                "people" => (UIElement)new People.PeopleView(),
+                "cleanup" => (UIElement)new Cleanup.CleanupView(),
                 "deepanalyze" => (UIElement)new DeepAnalyze.DeepAnalyzeView(),
                 "restructure" => (UIElement)new Restructure.RestructureView(),
-                _              => BuildPlaceholder("",  vm.ActiveTab.Label, "Coming soon."),
+                _ => BuildPlaceholder("", vm.ActiveTab.Label, "Coming soon."),
             };
         }
 

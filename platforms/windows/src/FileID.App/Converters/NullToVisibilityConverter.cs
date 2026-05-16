@@ -1,4 +1,4 @@
-// Visible when the bound value is NULL, Collapsed when it has a value.
+﻿// Visible when the bound value is NULL, Collapsed when it has a value.
 // Used to show shimmer placeholders / loading states only while a
 // thumbnail (or other lazily-bound surface) is missing.
 

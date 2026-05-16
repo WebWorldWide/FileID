@@ -7,6 +7,68 @@
 
 ---
 
+## 2026-05-15 — V15.3 Phase 6 + 8 polish: lint-gate tightening, CHANGELOG adoption
+
+Multiple coordinated edits in one engagement; logging as one entry for digestibility.
+
+**Rust clippy posture.** The Cargo.toml `[lints.clippy] pedantic = "warn"` config + a CI gate of `-D warnings` generated ~413 errors against the existing codebase, the majority style-only pedantic noise rather than real bugs. Approach: keep the pedantic group at `warn`, then add per-lint `allow` entries with one-line justifications for the style-only rules (`uninlined_format_args`, `doc_markdown`, `too_many_lines`, `too_many_arguments`, `manual_let_else`, `cast_possible_wrap`, `map_unwrap_or`, `manual_midpoint`, `manual_is_multiple_of`, `unchecked_duration_subtraction`, `redundant_closure`, `needless_continue`, `needless_range_loop`, `large_stack_arrays`, `single_char_pattern`, `ptr_eq`, `needless_borrow`, `match_same_arms`, `manual_range_contains`, `type_complexity`, `items_after_test_module`, `result_large_err`, `trivially_copy_pass_by_ref`, `many_single_char_names`, `struct_field_names`, `ptr_cast_constness`, `stable_sort_primitive`, `if_same_then_else`). Real correctness lints stay `deny`. Fixed the 4 actual problems per-site: `&&str.to_string()` in `logging.rs`, `format!("{:?}", PathBuf)` in `restructure_apply.rs`, the BITMAPINFO struct-init pattern in `shell/thumbnail.rs`, and a `match`-as-if-let in `pipeline/deep_analyze.rs`. Result: `cargo clippy --all-targets -- -D warnings` is now a green hard gate.
+
+**.NET format posture.** Ran `dotnet format FileID.sln` once to auto-apply `IDE0003` (this. simplifications) across every view code-behind file. Added `IDE1006` (private-field-underscore-prefix naming convention) to `Directory.Build.props`'s `NoWarn` list — WinUI 3 code-behind has x:Name'd fields that show up as un-prefixed and mass-renaming would touch every code-behind with no correctness gain. Result: `dotnet format --verify-no-changes` is now a green hard gate.
+
+**CI gate landing.** `.github/workflows/windows-engine.yml`: clippy step narrowed-to-deny replaced with full `-D warnings`; added `cargo deny check` step (enforces `engine/deny.toml`'s license + advisory + dup-version + source allowlists); `cargo audit` flipped from `continue-on-error: true` to hard gate; Rust toolchain bumped 1.78 → 1.90 to match `rust-toolchain.toml`. `.github/workflows/windows-app.yml`: added `dotnet format --verify-no-changes` and `dotnet list package --vulnerable` (hard) gates; `dotnet test` widened from IpcSchema-only with `continue-on-error: true` to every project in `FileID.sln` as a hard gate.
+
+**Pre-commit hook.** Shipped `tools/git-hooks/pre-commit` (bash; works on Windows Git-Bash + macOS). Privacy-string scan + `cargo fmt --check` + `cargo clippy --no-deps -- -D warnings` on changed Rust files + `dotnet format --verify-no-changes` if any .cs changed + `swift-format lint` if installed and .swift changed. Designed to run in < 15 s on a warm cache. One-command install per `CONTRIBUTING.md`: `git config core.hooksPath tools/git-hooks`.
+
+**CHANGELOG.md adopted.** Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). One section per shipped version with Added/Changed/Fixed/Removed/Security. Versions prior to V15.3 not back-filled — their notes live in commit messages + `STATE.md` (top-of-file entries, latest-first). Future tagged releases populate this file at tag time.
+
+**`fast_image_resize` dropped from `Cargo.toml`.** Audit found zero `use fast_image_resize` / `fir::` references across `engine/src/`. The dep was declared as a Phase-3 perf candidate but never imported. Removed to slim the dep tree; will re-add at the call site if a future criterion bench (NEXT.md N3) shows it's needed.
+
+**PGO profile added.** `[profile.release-pgo]` in `Cargo.toml`. Two-pass: `RUSTFLAGS="-Cprofile-generate=/tmp/pgo-data"` build + `iterate.ps1` train + `RUSTFLAGS="-Cprofile-use=/tmp/pgo-data/merged.profdata"` re-build. Inherits `release` so LTO + opt-level + strip stay aligned. Expected 8–15% throughput on CPU-bound paths.
+
+## 2026-05-15 — `is_safe_filename` rejects trailing path separators (Windows, SEC)
+
+`util::path_safety::is_safe_filename` is the path-traversal guard for the `renameFiles` IPC handler — it must accept only single-component Normal names. Adding property-based tests via `proptest` (V15.3 Phase 7 dev-dep) immediately found the minimal failing input `"A\\"`: the function accepted it because `Path::components()` silently strips trailing separators, so a "name" ending in `\` looks like one Component::Normal("A"). Fix: defensively reject any input containing `/` or `\` before reaching the components walk. Test `util::path_safety::tests::any_string_with_slash_is_rejected` (proptest) is now the regression guard. No prod exploit was reachable — bulk rename's destination check still applied — but the defense-in-depth posture of "this function rejects anything that isn't strictly a filename" was leaky. proptest paid for itself on its first run.
+
+## 2026-05-15 — `proptest` adopted as Rust property-testing dep (dev-only)
+
+V15.3 Phase 7: added `proptest = "1"` as a Rust dev-dep so we can write randomized-input invariant tests next to the example-based ones. Dev-only — zero runtime impact, zero shipped-binary impact, doesn't enter the release binary's privacy-string scan surface. Initial four invariants land on `util/path_safety.rs`: (1) any string containing `/` or `\` is rejected; (2) any string with leading or trailing whitespace is rejected; (3) `stable_path_hash` is case-insensitive (NTFS invariant); (4) `stable_path_hash` is deterministic. Alternatives considered: `quickcheck` (older, smaller; same idea), `arbitrary` + a hand-written generator (more boilerplate). `proptest` won because of its built-in shrinking — when a property fails, it shrinks the input to the minimal counterexample, which is how it surfaced `"A\\"` immediately.
+
+## 2026-05-15 — `cargo-deny` configured at `engine/deny.toml`
+
+V15.3 Phase 6: added `deny.toml` to enforce four invariants at PR time (once the Phase 8 CI gate lands): (1) every dep's license is on an SPDX allowlist (Apache-2.0, MIT, BSD-{2,3}-Clause, ISC, Unicode-3.0, Zlib, MPL-2.0, CC0-1.0, 0BSD) — no GPL/AGPL leakage; (2) no RUSTSEC-flagged versions; (3) `multiple-versions = "warn"` flags accidental v0.x / v1 splits that bloat the binary; (4) `unknown-registry = "deny"` + `unknown-git = "deny"` prevents accidental git-dep introduction. Tool-only (no Cargo.toml dep) — `cargo install cargo-deny` for contributors, `cargo deny check` for the gate. Alternatives: `cargo-bundle-licenses` (read-only, no enforcement) — rejected because we want enforcement at PR time.
+
+## 2026-05-15 — `FileID.App.Tests` xUnit project (Windows, Phase 2)
+
+The .NET test surface was IpcSchema-only (30 tests). V15.3 Phase 2 adds `Tests/FileID.App.Tests/` targeting the same WinUI 3 TFM as the app (`net8.0-windows10.0.19041.0`) with `<UseWinUI>true</UseWinUI>`, `xunit` + `coverlet.collector` + `xunit.runner.visualstudio`, plus an `[assembly: InternalsVisibleTo("FileID.App.Tests")]` declaration in `FileID.App/AssemblyInfo.cs` so xUnit can exercise `internal` types like `PathRedactor` and `UndoStack`. 11 tests land first (PathRedactor: 6, UndoStack: 5); remaining classes (`EngineProcessManagerTests`, `IpcDispatcherTests`, `ModelInstallerServiceTests`, `ReadStoreTests`, `AppSettingsTests`, etc.) are listed in NEXT.md N5. Test framework choice locked: xUnit + coverlet match the existing `FileID.IpcSchema.Tests` project so contributors only learn one stack.
+
+## 2026-05-15 — `COVERAGE.md`, `TESTING.md`, `CONTRIBUTING.md` shipped
+
+V15.3 Phase 5 + 8 docs: three new files under `shared/docs/`. `COVERAGE.md` is the per-module line-coverage rollup with targets + actuals + exempt-list (LavaLamp, GPU shaders, Media Foundation video, ORT session loads, `fn main`); it's the source of truth for the > 2 pp drop merge gate landing in Phase 8. `TESTING.md` is the testing philosophy + per-platform commands + how-to-add guide (example/property/integration/parity/fuzz/snapshot). `CONTRIBUTING.md` is the 30-minute onboarding guide for new contributors with the seven hard rules (no telemetry, path redaction, no new deps without DECISIONS entry, single-writer DB, no `--no-verify`, no silent lint suppression, no touching LavaLampBackground). All three documents reflect the actual code shape as of 2026-05-15 — they will rot, see NEXT.md N10 for the polish-pass cadence.
+
+## 2026-05-15 — Engine `main.rs` decomposed into `commands/` + `util/` (Windows)
+
+Phase 1 cleanup: the engine `main.rs` had grown to 3,463 LOC because every IPC command handler lived in one file. Split it into a `commands/` directory (one submodule per domain: `hardware`, `embed`, `restructure`, `face_clustering`, `bulk`, `trash`, `trash_log`, `deep_analyze`, `prewarm`, `scan`) plus a `util/` directory (`hmac`, `path_safety`, `zip`) and a `logging.rs` + `ipc/bounded_read.rs`. Result: `main.rs` 3,463 → 678 LOC (−80.4%) with zero behavior change; the dispatcher (`handle_line`) now delegates to `commands::*::handle_*`. Bonus: `stable_path_hash` is no longer duplicated between `main.rs` and `dbwriter.rs` — single source in `util/path_safety.rs`.
+
+Why directory-based, not partial files (Rust `#[path = "..."] mod foo;`)? Because the existing pattern in this crate is already directory-based (`db/`, `ipc/`, `models/`, `pipeline/`, `shell/`), and command-domain submodules give a clearer mental model for new readers than "main + extension files."
+
+Why keep `ipc/mod.rs` (880 LOC) intact? The big enum lives there for serde wire-shape parity with the schema. Splitting that enum across files requires custom serialization for every variant; the trade isn't worth it.
+
+## 2026-05-15 — `EngineClient.cs` + `ModelInstallerService.cs` split via partial/sibling files (Windows)
+
+The WinUI app's `EngineClient.cs` (1,378 LOC) bundled process lifecycle, IPC dispatch, command facade, and AutoPilot orchestration in one sealed class. Refactored to `internal sealed partial class EngineClient`; the command-facade methods (`StartScanAsync`, `PauseScanAsync`, all `DeepAnalyze*Async`, `ApplyTagsAsync`, etc.) + AutoPilot orchestration (`RunAutoPilotAsync`, `AwaitPhaseAsync`) moved to `EngineClient.Commands.cs`. The main file keeps process spawn/respawn, stdout/stderr loops, `OnProcessExited`, `Apply` event router, observable property surface, and `Set<T>` helper. Public API unchanged. Result: 1,378 → 970 + 419 LOC across two files; same compiled output.
+
+Same approach for `ModelInstallerService.cs` (1,017 LOC): moved the `ModelSlot` class + `ModelInstallStatus` enum (already a distinct class in the same file) into a sibling `ModelSlot.cs` (282 LOC), leaving the orchestrator at 735 LOC.
+
+Alternatives considered: (a) introduce DI-style helper classes (`EngineProcessManager`, `IpcDispatcher`) — rejected for now because everything in `EngineClient` accesses private state, and an extraction would require either passing the whole client by reference or making fields internal-with-friend-access; (b) leave as-is — rejected, the file had grown past comprehension. The `partial class` split is a zero-risk first cut; deeper extraction can land in a later pass if profiling motivates it.
+
+## 2026-05-15 — Image-decode mmap fast path in `pipeline/tagging.rs` (Windows perf)
+
+The Rust `load_image_rgb` opened each file **twice** through `image::ImageReader::open(&p)` — once to peek dimensions (for the 50-megapixel safety cap) and once for the actual decode. Comment in the original code acknowledged "~100 µs per reopen." At 50k files that's ~5 s wasted per full library scan; worse on spinning disks and network shares. Replaced with a single `memmap2::Mmap::map(&file)` followed by two `ImageReader::new(Cursor::new(&mmap[..]))` calls — both peek and decode read from the same memory region with no second open or copy. Dependencies didn't change (`memmap2` was already pulled in). Tests still green. No measured benchmark yet (criterion harness deferred to a follow-up), but the win is structural: one syscall + one mmap vs. two opens + two read paths, on every image in every scan.
+
+## 2026-05-15 — `PRAGMA cache_spill = 0` added to SQLite setup (Windows perf)
+
+Default SQLite behavior under memory pressure is to spill dirty pages from the 64 MB page cache into a temporary file mid-transaction. The engine's worst-case write transaction is a 100-row tagged-file batch (~few KB of dirty pages), well under the cache size, so spill never helps — it only ever costs an unexpected fsync to a temp file. Added `PRAGMA cache_spill = 0` to `SETUP_PRAGMAS`. Read-only connections pick up the pragma harmlessly (no-op on read-only).
+
 ## 2026-05-14 — WinUI 3 DispatcherObjects must be constructed on the UI thread (V15.2)
 
 The Windows app crashed on Start Scan after a few tiles appeared, with NO `crash-*.txt` produced despite V15.1 wiring three managed crash sinks (`Application.UnhandledException`, `AppDomain.CurrentDomain.UnhandledException`, `TaskScheduler.UnobservedTaskException`). Forensics: engine processed 100 files cleanly then got `stdin EOF` + `BrokenPipe` — the C# app died hard. That signature is a native fast-fail (`RaiseFailFastException`), and `RaiseFailFastException` terminates the process before any managed handler runs.

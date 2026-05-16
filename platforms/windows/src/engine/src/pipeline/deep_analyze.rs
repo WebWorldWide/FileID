@@ -152,16 +152,16 @@ pub async fn analyze_file(
     // Rasterize the source into something the CLI accepts (JPEG path).
     // Images: pass directly. Video / PDF: extract a keyframe / page-1
     // image into a temp file. Audio + Other: skip with friendly error.
-    let rasterized: PathBuf = match kind.as_str() {
-        "image" => source_path.clone(),
-        "video" => rasterize_video_keyframe(&source_path).await?,
+    // Branch on kind so we know whether we wrote a temp file (video → yes,
+    // image → no) without a second equality check downstream.
+    let (rasterized, temp_to_clean): (PathBuf, Option<PathBuf>) = match kind.as_str() {
+        "image" => (source_path.clone(), None),
+        "video" => {
+            let r = rasterize_video_keyframe(&source_path).await?;
+            let temp = Some(r.clone());
+            (r, temp)
+        }
         _ => anyhow::bail!("kind '{}' isn't VLM-analyzable yet", kind),
-    };
-    // Track if we wrote a temp file so we can clean it up at the end.
-    let temp_to_clean: Option<PathBuf> = if rasterized != source_path {
-        Some(rasterized.clone())
-    } else {
-        None
     };
 
     let mut description: Option<String> = None;

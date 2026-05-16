@@ -148,10 +148,10 @@ public sealed partial class FilePreviewSheet : UserControl
         {
             "image" => "Image",
             "video" => "Video",
-            "pdf"   => "PDF",
-            "doc"   => "Document",
+            "pdf" => "PDF",
+            "doc" => "Document",
             "audio" => "Audio",
-            _       => kind,
+            _ => kind,
         };
         MetadataText.Text = $"{kindDisplay} * {sizeDisplay} * modified {modifiedDisplay}";
 
@@ -160,10 +160,10 @@ public sealed partial class FilePreviewSheet : UserControl
         {
             "image" => "", // Photo
             "video" => "", // Video
-            "pdf"   => "", // Document
-            "doc"   => "", // Document
+            "pdf" => "", // Document
+            "doc" => "", // Document
             "audio" => "", // Music note
-            _       => "", // Folder / generic
+            _ => "", // Folder / generic
         };
 
         // Show the rendered preview for image/video/pdf via the same
@@ -197,7 +197,7 @@ public sealed partial class FilePreviewSheet : UserControl
         PlaceholderText.Text = kind switch
         {
             "audio" => Path.GetFileName(path),
-            _       => "No preview available for this file type.",
+            _ => "No preview available for this file type.",
         };
     }
 

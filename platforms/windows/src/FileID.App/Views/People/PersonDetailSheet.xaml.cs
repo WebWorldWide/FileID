@@ -79,10 +79,10 @@ public sealed partial class PersonDetailSheet : UserControl
                 using var r = cmd.ExecuteReader();
                 if (r.Read())
                 {
-                    TitleBox.Text  = r.IsDBNull(0) ? "" : r.GetString(0);
-                    FirstBox.Text  = r.IsDBNull(1) ? "" : r.GetString(1);
+                    TitleBox.Text = r.IsDBNull(0) ? "" : r.GetString(0);
+                    FirstBox.Text = r.IsDBNull(1) ? "" : r.GetString(1);
                     MiddleBox.Text = r.IsDBNull(2) ? "" : r.GetString(2);
-                    LastBox.Text   = r.IsDBNull(3) ? "" : r.GetString(3);
+                    LastBox.Text = r.IsDBNull(3) ? "" : r.GetString(3);
                     SuffixBox.Text = r.IsDBNull(4) ? "" : r.GetString(4);
                     var memberCount = r.GetInt32(5);
                     MemberCountText.Text = $"{memberCount} face{(memberCount == 1 ? "" : "s")} clustered.";

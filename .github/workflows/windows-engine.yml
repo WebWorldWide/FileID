@@ -57,7 +57,10 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.78
+          # MSRV pinned to 1.90 in rust-toolchain.toml. Keep both files
+          # in sync — drift here means CI builds with a different toolchain
+          # than contributors use locally.
+          toolchain: 1.90
           targets: ${{ matrix.target }}
           components: rustfmt, clippy
 
@@ -78,43 +81,31 @@ jobs:
         # disable_all_formatting=true setting, this gate starts enforcing.
         run: cargo fmt --all -- --check
 
-      - name: Clippy (functional lints only)
-        # Strict mode (`-D warnings`) generated 427 errors against the
-        # existing codebase, almost all clippy::style / clippy::pedantic
-        # noise rather than real bugs. Narrow to the lint groups that
-        # catch actual defects (correctness, suspicious patterns,
-        # potential panics). Re-tighten after a separate cleanup PR.
-        #
-        # Allow-list:
-        #  * const_is_empty — VLM tests deliberately assert non-empty
-        #    on prompt constants as documentation; clippy sees through
-        #    to "this can never be true" but the assert is intentional.
-        #  * result_large_err — sink.rs's TrySendError carries the full
-        #    IpcEvent (~168 bytes) by design so callers can recover the
-        #    payload after backpressure. Boxing would be churn for no
-        #    measurable win on this cold path.
-        shell: bash
-        run: |
-          cargo clippy --target ${{ matrix.target }} --all-targets -- \
-            -D clippy::correctness \
-            -D clippy::suspicious \
-            -D clippy::perf \
-            -W clippy::style \
-            -W clippy::complexity \
-            -A clippy::const_is_empty \
-            -A clippy::result_large_err
+      - name: Clippy (-D warnings, full)
+        # V15.3 Phase 6: tightened to `-D warnings` after a Cargo.toml
+        # [lints.clippy] cleanup pass moved style-only pedantic rules to
+        # `allow` with documented justifications. Real correctness lints
+        # remain `deny`. Any new style-only noise should land an allow in
+        # Cargo.toml with a comment, not a CI exception here.
+        run: cargo clippy --target ${{ matrix.target }} --all-targets -- -D warnings
 
-      - name: Install cargo-audit
+      - name: Install cargo-audit + cargo-deny
         if: matrix.label == 'x64'
-        run: cargo install --locked cargo-audit
+        run: |
+          cargo install --locked cargo-audit
+          cargo install --locked cargo-deny
+
+      - name: cargo-deny (license + advisory + dup-version + ban gate)
+        if: matrix.label == 'x64'
+        # V15.3 Phase 6: enforces deny.toml. License allowlist + advisory
+        # check + duplicate-version detection + source allowlist.
+        run: cargo deny check
 
       - name: Audit dependencies (x64 only)
         if: matrix.label == 'x64'
-        # Run on x64 only — the lockfile is identical across targets, no
-        # value in scanning three times. Don't fail the build on
-        # advisories yet (a couple of legitimate-but-yanked deps may
-        # exist in the lock); print + warn.
-        continue-on-error: true
+        # V15.3 Phase 6: tightened from continue-on-error to a hard gate
+        # now that the lockfile has been audited. Any new advisory wedges
+        # the PR until handled.
         run: cargo audit
 
       - name: Build (release)

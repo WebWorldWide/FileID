@@ -235,4 +235,91 @@ mod tests {
         let (assignments, _) = cluster(&faces);
         assert!(assignments.iter().all(|a| a.cluster_id == 1));
     }
+
+    // Helper for property tests: deterministic LCG to spread vectors over
+    // the unit sphere so proptest can shrink to reproducible counterexamples.
+    fn random_faces(seed: u64, count: usize) -> Vec<FaceRow> {
+        let mut state = seed | 1;
+        (0..count)
+            .map(|i| {
+                state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                let a = (state >> 32) as i32 as f32 / 2_147_483_647.0;
+                state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                let b = (state >> 32) as i32 as f32 / 2_147_483_647.0;
+                state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                let c = (state >> 32) as i32 as f32 / 2_147_483_647.0;
+                let v = unit(&[a, b, c]);
+                row(i as i64 + 1, i as i64 + 1, v, 0.9)
+            })
+            .collect()
+    }
+
+    // V15.3 Phase 7: property tests proving cluster invariants on randomized
+    // embeddings. The two-pass density algorithm in `identity_clustering`
+    // doesn't guarantee every cluster member is COS_HIGH-close to its
+    // anchor (clusters can chain transitively), but it DOES guarantee
+    // bookkeeping invariants.
+    proptest::proptest! {
+        // Invariant: every face_id appears in exactly one cluster
+        // assignment, and the assignment count equals the input count.
+        #[test]
+        fn each_face_assigned_exactly_once(
+            count in 2usize..15,
+            seed in proptest::num::u64::ANY,
+        ) {
+            let faces = random_faces(seed, count);
+            let (assignments, _) = cluster(&faces);
+            proptest::prop_assert_eq!(assignments.len(), faces.len());
+            let mut ids: Vec<i64> = assignments.iter().map(|a| a.face_id).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            proptest::prop_assert_eq!(ids.len(), faces.len());
+        }
+
+        // Invariant: clustering is deterministic — the same input set
+        // produces identical output across runs. People tab can't have
+        // clusters that shuffle on every scan.
+        #[test]
+        fn clustering_is_deterministic(
+            count in 2usize..15,
+            seed in proptest::num::u64::ANY,
+        ) {
+            let faces = random_faces(seed, count);
+            let (a1, anchors1) = cluster(&faces);
+            let (a2, anchors2) = cluster(&faces);
+            proptest::prop_assert_eq!(a1.len(), a2.len());
+            for (x, y) in a1.iter().zip(a2.iter()) {
+                proptest::prop_assert_eq!(x.face_id, y.face_id);
+                proptest::prop_assert_eq!(x.cluster_id, y.cluster_id);
+            }
+            proptest::prop_assert_eq!(anchors1.len(), anchors2.len());
+        }
+
+        // Invariant: anchor member_count totals equal the input face count.
+        // (Every face goes into exactly one cluster's member count.)
+        #[test]
+        fn anchor_member_counts_sum_to_input(
+            count in 2usize..15,
+            seed in proptest::num::u64::ANY,
+        ) {
+            let faces = random_faces(seed, count);
+            let (_, anchors) = cluster(&faces);
+            let total: u32 = anchors.iter().map(|a| a.member_count).sum();
+            proptest::prop_assert_eq!(total as usize, faces.len());
+        }
+
+        // Invariant: anchor cluster_ids are unique within the result.
+        #[test]
+        fn anchor_cluster_ids_are_unique(
+            count in 2usize..15,
+            seed in proptest::num::u64::ANY,
+        ) {
+            let faces = random_faces(seed, count);
+            let (_, anchors) = cluster(&faces);
+            let mut ids: Vec<i32> = anchors.iter().map(|a| a.cluster_id).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            proptest::prop_assert_eq!(ids.len(), anchors.len());
+        }
+    }
 }

@@ -148,34 +148,34 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
 
         CommandPayload payload = variant switch
         {
-            "startScan"          => JsonSerializer.Deserialize<StartScanCommand>(ref reader, options) ?? throw new JsonException("startScan: null body"),
-            "deepAnalyzeFile"    => JsonSerializer.Deserialize<DeepAnalyzeFileCommand>(ref reader, options) ?? throw new JsonException("deepAnalyzeFile: null body"),
-            "deepAnalyzeFolder"  => JsonSerializer.Deserialize<DeepAnalyzeFolderCommand>(ref reader, options) ?? throw new JsonException("deepAnalyzeFolder: null body"),
-            "deepAnalyzeAll"     => JsonSerializer.Deserialize<DeepAnalyzeAllCommand>(ref reader, options) ?? throw new JsonException("deepAnalyzeAll: null body"),
-            "prewarmModel"       => JsonSerializer.Deserialize<PrewarmModelCommand>(ref reader, options) ?? throw new JsonException("prewarmModel: null body"),
-            "planRestructure"    => JsonSerializer.Deserialize<PlanRestructureCommand>(ref reader, options) ?? throw new JsonException("planRestructure: null body"),
-            "applyRestructure"   => JsonSerializer.Deserialize<ApplyRestructureCommand>(ref reader, options) ?? throw new JsonException("applyRestructure: null body"),
-            "applyTags"          => JsonSerializer.Deserialize<ApplyTagsCommand>(ref reader, options) ?? throw new JsonException("applyTags: null body"),
-            "renameFiles"        => JsonSerializer.Deserialize<RenameFilesCommand>(ref reader, options) ?? throw new JsonException("renameFiles: null body"),
-            "trashFiles"         => JsonSerializer.Deserialize<TrashFilesCommand>(ref reader, options) ?? throw new JsonException("trashFiles: null body"),
-            "mergeClusters"      => JsonSerializer.Deserialize<MergeClustersCommand>(ref reader, options) ?? throw new JsonException("mergeClusters: null body"),
-            "embedTextQuery"     => JsonSerializer.Deserialize<EmbedTextQueryCommand>(ref reader, options) ?? throw new JsonException("embedTextQuery: null body"),
-            "renamePerson"       => JsonSerializer.Deserialize<RenamePersonCommand>(ref reader, options) ?? throw new JsonException("renamePerson: null body"),
+            "startScan" => JsonSerializer.Deserialize<StartScanCommand>(ref reader, options) ?? throw new JsonException("startScan: null body"),
+            "deepAnalyzeFile" => JsonSerializer.Deserialize<DeepAnalyzeFileCommand>(ref reader, options) ?? throw new JsonException("deepAnalyzeFile: null body"),
+            "deepAnalyzeFolder" => JsonSerializer.Deserialize<DeepAnalyzeFolderCommand>(ref reader, options) ?? throw new JsonException("deepAnalyzeFolder: null body"),
+            "deepAnalyzeAll" => JsonSerializer.Deserialize<DeepAnalyzeAllCommand>(ref reader, options) ?? throw new JsonException("deepAnalyzeAll: null body"),
+            "prewarmModel" => JsonSerializer.Deserialize<PrewarmModelCommand>(ref reader, options) ?? throw new JsonException("prewarmModel: null body"),
+            "planRestructure" => JsonSerializer.Deserialize<PlanRestructureCommand>(ref reader, options) ?? throw new JsonException("planRestructure: null body"),
+            "applyRestructure" => JsonSerializer.Deserialize<ApplyRestructureCommand>(ref reader, options) ?? throw new JsonException("applyRestructure: null body"),
+            "applyTags" => JsonSerializer.Deserialize<ApplyTagsCommand>(ref reader, options) ?? throw new JsonException("applyTags: null body"),
+            "renameFiles" => JsonSerializer.Deserialize<RenameFilesCommand>(ref reader, options) ?? throw new JsonException("renameFiles: null body"),
+            "trashFiles" => JsonSerializer.Deserialize<TrashFilesCommand>(ref reader, options) ?? throw new JsonException("trashFiles: null body"),
+            "mergeClusters" => JsonSerializer.Deserialize<MergeClustersCommand>(ref reader, options) ?? throw new JsonException("mergeClusters: null body"),
+            "embedTextQuery" => JsonSerializer.Deserialize<EmbedTextQueryCommand>(ref reader, options) ?? throw new JsonException("embedTextQuery: null body"),
+            "renamePerson" => JsonSerializer.Deserialize<RenamePersonCommand>(ref reader, options) ?? throw new JsonException("renamePerson: null body"),
             "markPersonsAsUnknown" => JsonSerializer.Deserialize<MarkPersonsAsUnknownCommand>(ref reader, options) ?? throw new JsonException("markPersonsAsUnknown: null body"),
             "findMergeSuggestions" => Empty<FindMergeSuggestionsCommand>(ref reader),
-            "embedImageQuery"    => JsonSerializer.Deserialize<EmbedImageQueryCommand>(ref reader, options) ?? throw new JsonException("embedImageQuery: null body"),
-            "restoreFromTrash"   => JsonSerializer.Deserialize<RestoreFromTrashCommand>(ref reader, options) ?? throw new JsonException("restoreFromTrash: null body"),
-            "revertMerge"        => JsonSerializer.Deserialize<RevertMergeCommand>(ref reader, options) ?? throw new JsonException("revertMerge: null body"),
+            "embedImageQuery" => JsonSerializer.Deserialize<EmbedImageQueryCommand>(ref reader, options) ?? throw new JsonException("embedImageQuery: null body"),
+            "restoreFromTrash" => JsonSerializer.Deserialize<RestoreFromTrashCommand>(ref reader, options) ?? throw new JsonException("restoreFromTrash: null body"),
+            "revertMerge" => JsonSerializer.Deserialize<RevertMergeCommand>(ref reader, options) ?? throw new JsonException("revertMerge: null body"),
 
-            "pauseScan"          => Empty<PauseScanCommand>(ref reader),
-            "resumeScan"         => Empty<ResumeScanCommand>(ref reader),
-            "cancelScan"         => Empty<CancelScanCommand>(ref reader),
-            "requestStatus"      => Empty<RequestStatusCommand>(ref reader),
-            "shutdown"           => Empty<ShutdownCommand>(ref reader),
-            "runFaceClustering"  => Empty<RunFaceClusteringCommand>(ref reader),
-            "verifyCudaPack"     => Empty<VerifyCudaPackCommand>(ref reader),
-            "deepAnalyzeCancel"  => Empty<DeepAnalyzeCancelCommand>(ref reader),
-            "cancelPrewarm"      => Empty<CancelPrewarmCommand>(ref reader),
+            "pauseScan" => Empty<PauseScanCommand>(ref reader),
+            "resumeScan" => Empty<ResumeScanCommand>(ref reader),
+            "cancelScan" => Empty<CancelScanCommand>(ref reader),
+            "requestStatus" => Empty<RequestStatusCommand>(ref reader),
+            "shutdown" => Empty<ShutdownCommand>(ref reader),
+            "runFaceClustering" => Empty<RunFaceClusteringCommand>(ref reader),
+            "verifyCudaPack" => Empty<VerifyCudaPackCommand>(ref reader),
+            "deepAnalyzeCancel" => Empty<DeepAnalyzeCancelCommand>(ref reader),
+            "cancelPrewarm" => Empty<CancelPrewarmCommand>(ref reader),
 
             _ => throw new JsonException($"CommandPayload: unknown variant '{variant}'"),
         };
@@ -194,33 +194,33 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
         writer.WriteStartObject();
         switch (value)
         {
-            case StartScanCommand c:           WriteVariant(writer, "startScan", c, options); break;
-            case PauseScanCommand:             WriteEmpty(writer, "pauseScan"); break;
-            case ResumeScanCommand:            WriteEmpty(writer, "resumeScan"); break;
-            case CancelScanCommand:            WriteEmpty(writer, "cancelScan"); break;
-            case RequestStatusCommand:         WriteEmpty(writer, "requestStatus"); break;
-            case ShutdownCommand:              WriteEmpty(writer, "shutdown"); break;
-            case RunFaceClusteringCommand:     WriteEmpty(writer, "runFaceClustering"); break;
-            case VerifyCudaPackCommand:        WriteEmpty(writer, "verifyCudaPack"); break;
-            case DeepAnalyzeFileCommand c:     WriteVariant(writer, "deepAnalyzeFile", c, options); break;
-            case DeepAnalyzeFolderCommand c:   WriteVariant(writer, "deepAnalyzeFolder", c, options); break;
-            case DeepAnalyzeAllCommand c:      WriteVariant(writer, "deepAnalyzeAll", c, options); break;
-            case DeepAnalyzeCancelCommand:     WriteEmpty(writer, "deepAnalyzeCancel"); break;
-            case PrewarmModelCommand c:        WriteVariant(writer, "prewarmModel", c, options); break;
-            case CancelPrewarmCommand:         WriteEmpty(writer, "cancelPrewarm"); break;
-            case PlanRestructureCommand c:     WriteVariant(writer, "planRestructure", c, options); break;
-            case ApplyRestructureCommand c:    WriteVariant(writer, "applyRestructure", c, options); break;
-            case ApplyTagsCommand c:           WriteVariant(writer, "applyTags", c, options); break;
-            case RenameFilesCommand c:         WriteVariant(writer, "renameFiles", c, options); break;
-            case TrashFilesCommand c:          WriteVariant(writer, "trashFiles", c, options); break;
-            case MergeClustersCommand c:       WriteVariant(writer, "mergeClusters", c, options); break;
-            case EmbedTextQueryCommand c:      WriteVariant(writer, "embedTextQuery", c, options); break;
-            case RenamePersonCommand c:        WriteVariant(writer, "renamePerson", c, options); break;
-            case MarkPersonsAsUnknownCommand c:WriteVariant(writer, "markPersonsAsUnknown", c, options); break;
-            case FindMergeSuggestionsCommand:  WriteEmpty(writer, "findMergeSuggestions"); break;
-            case EmbedImageQueryCommand c:     WriteVariant(writer, "embedImageQuery", c, options); break;
-            case RestoreFromTrashCommand c:    WriteVariant(writer, "restoreFromTrash", c, options); break;
-            case RevertMergeCommand c:         WriteVariant(writer, "revertMerge", c, options); break;
+            case StartScanCommand c: WriteVariant(writer, "startScan", c, options); break;
+            case PauseScanCommand: WriteEmpty(writer, "pauseScan"); break;
+            case ResumeScanCommand: WriteEmpty(writer, "resumeScan"); break;
+            case CancelScanCommand: WriteEmpty(writer, "cancelScan"); break;
+            case RequestStatusCommand: WriteEmpty(writer, "requestStatus"); break;
+            case ShutdownCommand: WriteEmpty(writer, "shutdown"); break;
+            case RunFaceClusteringCommand: WriteEmpty(writer, "runFaceClustering"); break;
+            case VerifyCudaPackCommand: WriteEmpty(writer, "verifyCudaPack"); break;
+            case DeepAnalyzeFileCommand c: WriteVariant(writer, "deepAnalyzeFile", c, options); break;
+            case DeepAnalyzeFolderCommand c: WriteVariant(writer, "deepAnalyzeFolder", c, options); break;
+            case DeepAnalyzeAllCommand c: WriteVariant(writer, "deepAnalyzeAll", c, options); break;
+            case DeepAnalyzeCancelCommand: WriteEmpty(writer, "deepAnalyzeCancel"); break;
+            case PrewarmModelCommand c: WriteVariant(writer, "prewarmModel", c, options); break;
+            case CancelPrewarmCommand: WriteEmpty(writer, "cancelPrewarm"); break;
+            case PlanRestructureCommand c: WriteVariant(writer, "planRestructure", c, options); break;
+            case ApplyRestructureCommand c: WriteVariant(writer, "applyRestructure", c, options); break;
+            case ApplyTagsCommand c: WriteVariant(writer, "applyTags", c, options); break;
+            case RenameFilesCommand c: WriteVariant(writer, "renameFiles", c, options); break;
+            case TrashFilesCommand c: WriteVariant(writer, "trashFiles", c, options); break;
+            case MergeClustersCommand c: WriteVariant(writer, "mergeClusters", c, options); break;
+            case EmbedTextQueryCommand c: WriteVariant(writer, "embedTextQuery", c, options); break;
+            case RenamePersonCommand c: WriteVariant(writer, "renamePerson", c, options); break;
+            case MarkPersonsAsUnknownCommand c: WriteVariant(writer, "markPersonsAsUnknown", c, options); break;
+            case FindMergeSuggestionsCommand: WriteEmpty(writer, "findMergeSuggestions"); break;
+            case EmbedImageQueryCommand c: WriteVariant(writer, "embedImageQuery", c, options); break;
+            case RestoreFromTrashCommand c: WriteVariant(writer, "restoreFromTrash", c, options); break;
+            case RevertMergeCommand c: WriteVariant(writer, "revertMerge", c, options); break;
             default:
                 throw new JsonException($"CommandPayload: unknown C# type {value.GetType().FullName}");
         }

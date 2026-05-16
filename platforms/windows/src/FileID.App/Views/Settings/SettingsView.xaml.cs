@@ -210,10 +210,10 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             if (info is not null) return $"Engine v{info.Version} - PID {info.Pid}";
             return ec.State switch
             {
-                EngineClient.LifecycleState.Ready    => "Engine ready",
+                EngineClient.LifecycleState.Ready => "Engine ready",
                 EngineClient.LifecycleState.Starting => "Engine starting...",
-                EngineClient.LifecycleState.Crashed  => "Engine stopped (manual restart required)",
-                _                                     => "Engine state unknown",
+                EngineClient.LifecycleState.Crashed => "Engine stopped (manual restart required)",
+                _ => "Engine state unknown",
             };
         }
     }
@@ -238,12 +238,12 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             if (hw is null) return "GPU detection pending…";
             var vendor = hw.GpuVendor switch
             {
-                "nvidia"   => "NVIDIA",
-                "amd"      => "AMD",
-                "intel"    => "Intel",
+                "nvidia" => "NVIDIA",
+                "amd" => "AMD",
+                "intel" => "Intel",
                 "qualcomm" => "Qualcomm Snapdragon",
-                "none"     => "No discrete GPU detected",
-                _          => "Other / generic GPU",
+                "none" => "No discrete GPU detected",
+                _ => "Other / generic GPU",
             };
             return string.IsNullOrEmpty(hw.AdapterName)
                 ? vendor
@@ -259,13 +259,13 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             if (hw is null) return string.Empty;
             return hw.ExecutionProvider switch
             {
-                "cuda"     => "CUDA — NVIDIA-tuned (highest perf on RTX class)",
+                "cuda" => "CUDA — NVIDIA-tuned (highest perf on RTX class)",
                 "tensorrt" => "TensorRT — NVIDIA optimized graph compilation",
                 "directml" => "DirectML — works on every Windows GPU vendor",
                 "openvino" => "OpenVINO — Intel-tuned",
-                "qnn"      => "QNN — Snapdragon Hexagon NPU (most power-efficient on WoA)",
-                "cpu"      => "CPU — AVX2 / NEON SIMD",
-                _          => hw.ExecutionProvider,
+                "qnn" => "QNN — Snapdragon Hexagon NPU (most power-efficient on WoA)",
+                "cpu" => "CPU — AVX2 / NEON SIMD",
+                _ => hw.ExecutionProvider,
             };
         }
     }
@@ -315,7 +315,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         var slot = modelKind switch
         {
             "arcface_buffalo" => Svc.Arcface,
-            "mobileclip_s2"   => Svc.Clip,
+            "mobileclip_s2" => Svc.Clip,
             _ => null,
         };
         if (slot is null) return;
@@ -374,8 +374,8 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     internal string ButtonLabel(Services.ModelInstallStatus s) => s switch
     {
         Services.ModelInstallStatus.Downloading => "Cancel",
-        Services.ModelInstallStatus.Failed      => "Retry",
-        _                                       => "Install",
+        Services.ModelInstallStatus.Failed => "Retry",
+        _ => "Install",
     };
 
     internal Visibility ShowRateEta(Services.ModelInstallStatus status, double bytesPerSecond) =>

@@ -70,7 +70,7 @@ public sealed partial class SidebarFolderHeader : UserControl
         if (sender is Button btn) btn.IsEnabled = false;
         try
         {
-            var hwnd = (this.XamlRoot?.ContentIslandEnvironment?.AppWindowId is { Value: not 0 })
+            var hwnd = (XamlRoot?.ContentIslandEnvironment?.AppWindowId is { Value: not 0 })
                 ? GetParentHwnd()
                 : GetParentHwnd();
             var result = await FolderPickerService.PickFolderAsync(hwnd);
@@ -110,7 +110,7 @@ public sealed partial class SidebarFolderHeader : UserControl
         {
             var dialog = new ContentDialog
             {
-                XamlRoot = this.XamlRoot,
+                XamlRoot = XamlRoot,
                 Title = "Wipe library + rescan?",
                 Content = "This deletes everything FileID has learned about this folder — tags, face clusters, captions, smart names. The folder itself isn't touched. After wiping, FileID will rescan from scratch.\n\nThis can't be undone.",
                 PrimaryButtonText = "Wipe and rescan",
@@ -191,7 +191,7 @@ public sealed partial class SidebarFolderHeader : UserControl
     {
         var dialog = new ContentDialog
         {
-            XamlRoot = this.XamlRoot,
+            XamlRoot = XamlRoot,
             Title = title,
             Content = body,
             CloseButtonText = "OK",

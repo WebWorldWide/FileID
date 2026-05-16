@@ -250,9 +250,9 @@ public sealed partial class MainWindow : Window
         uint dpi = GetDpiForWindow(WinRT.Interop.WindowNative.GetWindowHandle(this));
         if (dpi == 0) { dpi = 96; }
         double scale = dpi / 96.0;
-        int minWPx    = (int)(MinWidth    * scale);
-        int minHPx    = (int)(MinHeight   * scale);
-        int launchWPx = (int)(LaunchWidth  * scale);
+        int minWPx = (int)(MinWidth * scale);
+        int minHPx = (int)(MinHeight * scale);
+        int launchWPx = (int)(LaunchWidth * scale);
         int launchHPx = (int)(LaunchHeight * scale);
 
         if (AppWindow.Presenter is OverlappedPresenter presenter)

@@ -782,12 +782,22 @@ async fn load_image_rgb(path: &std::path::Path) -> anyhow::Result<(Vec<u8>, u32,
     let p = path.to_path_buf();
     tokio::task::spawn_blocking(move || -> anyhow::Result<(Vec<u8>, u32, u32)> {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> anyhow::Result<(Vec<u8>, u32, u32)> {
-            // Peek dimensions on a first reader (consumed), then re-open for the actual decode.
-            // ImageReader doesn't implement Clone; re-opening a local file is ~100µs.
-            let peek = image::ImageReader::open(&p)
-                .map_err(|e| anyhow::anyhow!("open (peek): {e}"))?
+            // V15.2 perf #1: mmap the file once, drive both the dimension peek
+            // and the full decode from the same memory region. The old
+            // double-open path cost ~100 µs per file (50 ms wasted per 500
+            // files; ~5 s on a 50k library; worse on slow disks).
+            use std::io::Cursor;
+            let file = std::fs::File::open(&p)
+                .map_err(|e| anyhow::anyhow!("open: {e}"))?;
+            let mmap = unsafe {
+                memmap2::Mmap::map(&file)
+                    .map_err(|e| anyhow::anyhow!("mmap: {e}"))?
+            };
+            let bytes: &[u8] = &mmap;
+
+            let peek = image::ImageReader::new(Cursor::new(bytes))
                 .with_guessed_format()
-                .map_err(|e| anyhow::anyhow!("guess format: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("guess format (peek): {e}"))?;
             let (pw, ph) = peek
                 .into_dimensions()
                 .map_err(|e| anyhow::anyhow!("dimensions: {e}"))?;
@@ -798,10 +808,9 @@ async fn load_image_rgb(path: &std::path::Path) -> anyhow::Result<(Vec<u8>, u32,
                     pw, ph, pixels, MAX_DECODED_PIXELS
                 );
             }
-            let reader = image::ImageReader::open(&p)
-                .map_err(|e| anyhow::anyhow!("open (decode): {e}"))?
+            let reader = image::ImageReader::new(Cursor::new(bytes))
                 .with_guessed_format()
-                .map_err(|e| anyhow::anyhow!("guess format: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("guess format (decode): {e}"))?;
             let dyn_img = reader.decode().map_err(|e| anyhow::anyhow!("decode: {e}"))?;
             let rgb = dyn_img.to_rgb8();
             let (w, h) = rgb.dimensions();

@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# FileID pre-commit hook — fast subset of the CI gates.
+#
+# Install once: `git config core.hooksPath tools/git-hooks`
+# (CONTRIBUTING.md documents this.)
+#
+# Runs on every `git commit`. Designed to finish in < 15 seconds on a
+# warm cache; skips heavy gates (full clippy, full test, full dotnet
+# build) and only checks what's likely to surface a problem the dev
+# can fix locally faster than CI can.
+#
+# Honors `--no-verify` only if the user explicitly passes it — per the
+# project's CLAUDE.md, --no-verify must not be the default workflow.
+
+set -eu
+
+red()    { printf '\033[31m%s\033[0m\n' "$*"; }
+yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
+green()  { printf '\033[32m%s\033[0m\n' "$*"; }
+dim()    { printf '\033[2m%s\033[0m\n' "$*"; }
+
+fail=0
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+# Which files are staged for commit? Skip the hook entirely if nothing's staged.
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+if [ -z "$staged" ]; then
+  dim "[pre-commit] no staged files; nothing to check"
+  exit 0
+fi
+
+has_rust_changes=$(printf '%s\n' "$staged" | grep -E '\.rs$' || true)
+has_dotnet_changes=$(printf '%s\n' "$staged" | grep -E '\.(cs|csproj|xaml)$' || true)
+has_swift_changes=$(printf '%s\n' "$staged" | grep -E '\.swift$' || true)
+
+# ── Privacy-string scan (cheap, always run) ─────────────────────────
+# Same allowlist as the CI release gate. Catches a copy-paste of an
+# analytics SDK before it ships.
+forbidden=(
+  "sentry.io" "io.sentry" "applicationinsights"
+  "googletagmanager" "google-analytics" "segment.io"
+  "mixpanel" "amplitude" "posthog" "datadoghq" "bugsnag"
+  "rollbar" "honeycomb" "newrelic" "raygun"
+  "firebase" "firebaseio" "appcenter.ms"
+  "crashpad" "breakpad"
+)
+for needle in "${forbidden[@]}"; do
+  if printf '%s\n' "$staged" | xargs -I{} grep -l --binary-files=without-match -F "$needle" {} 2>/dev/null | head -1 | grep -q .; then
+    red "[pre-commit] privacy gate: '$needle' found in a staged file"
+    red "             FileID forbids every analytics/crash-reporter SDK; see PRIVACY.md"
+    fail=1
+  fi
+done
+
+# ── Rust gates ──────────────────────────────────────────────────────
+if [ -n "$has_rust_changes" ]; then
+  dim "[pre-commit] running cargo fmt --check (Rust)"
+  if ! (cd platforms/windows/src/engine && cargo fmt --check); then
+    red "[pre-commit] cargo fmt --check failed. Run 'cargo fmt' in platforms/windows/src/engine"
+    fail=1
+  fi
+  # Cheap clippy run — `--no-deps` skips dependency analysis; the full
+  # `cargo clippy --all-targets -- -D warnings` is in CI.
+  dim "[pre-commit] running cargo clippy --no-deps (Rust, fast)"
+  if ! (cd platforms/windows/src/engine && cargo clippy --no-deps --target x86_64-pc-windows-msvc -- -D warnings 2>&1 | tail -5); then
+    red "[pre-commit] cargo clippy failed"
+    fail=1
+  fi
+fi
+
+# ── .NET gates ──────────────────────────────────────────────────────
+if [ -n "$has_dotnet_changes" ]; then
+  dim "[pre-commit] running dotnet format --verify-no-changes (.NET)"
+  if ! (cd platforms/windows && dotnet format FileID.sln --verify-no-changes 2>&1 | tail -5); then
+    red "[pre-commit] dotnet format failed. Run 'dotnet format FileID.sln' in platforms/windows"
+    fail=1
+  fi
+fi
+
+# ── Swift gates (best-effort; only run if swift-format is installed) ─
+if [ -n "$has_swift_changes" ] && command -v swift-format >/dev/null 2>&1; then
+  dim "[pre-commit] running swift-format lint --strict"
+  changed=$(printf '%s\n' "$has_swift_changes" | tr '\n' ' ')
+  if ! swift-format lint --strict $changed; then
+    red "[pre-commit] swift-format lint failed"
+    fail=1
+  fi
+elif [ -n "$has_swift_changes" ]; then
+  yellow "[pre-commit] swift-format not installed; skipping Swift lint (install via 'brew install swift-format')"
+fi
+
+if [ "$fail" -eq 1 ]; then
+  red "[pre-commit] one or more gates failed. Fix above and re-commit."
+  red "             To bypass (NOT recommended): git commit --no-verify"
+  exit 1
+fi
+
+green "[pre-commit] all gates green"
+exit 0

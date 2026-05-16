@@ -22,6 +22,10 @@ pub const SETUP_PRAGMAS: &[&str] = &[
     "PRAGMA mmap_size = 268435456",     // 256 MB
     "PRAGMA cache_size = -65536",        // 64 MB (negative = KB)
     "PRAGMA wal_autocheckpoint = 10000", // ~40 MB before checkpoint
+    // V15.2 perf: pin the 64 MB page cache in memory instead of spilling
+    // to a temp file mid-transaction. Our worst transaction is a
+    // 100-row tagged-file batch (well under the cache); spill never wins.
+    "PRAGMA cache_spill = 0",
     "PRAGMA foreign_keys = ON",
 ];
 

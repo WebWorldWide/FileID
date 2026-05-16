@@ -403,7 +403,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         sheet.SetSelection(ids);
         var dialog = new ContentDialog
         {
-            XamlRoot = this.XamlRoot,
+            XamlRoot = XamlRoot,
             Title = "Tag selected files",
             Content = sheet,
             PrimaryButtonText = "Apply",
@@ -437,7 +437,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         sheet.SetPlan(plan);
         var dialog = new ContentDialog
         {
-            XamlRoot = this.XamlRoot,
+            XamlRoot = XamlRoot,
             Title = "Rename selected files",
             Content = sheet,
             PrimaryButtonText = "Rename",
@@ -465,7 +465,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 
         var confirm = new ContentDialog
         {
-            XamlRoot = this.XamlRoot,
+            XamlRoot = XamlRoot,
             Title = "Move to Recycle Bin?",
             Content = $"{countDisplay} ({sizeDisplay}) will be moved to the Recycle Bin. You can recover them from there.",
             PrimaryButtonText = "Move to Recycle Bin",
@@ -578,7 +578,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         sheet.SetFile(tile.Path, tile.Kind, tile.SizeBytes, tile.ModifiedAt, tile.Id, tile.HasFaces, tile.HasText);
         var dialog = new Microsoft.UI.Xaml.Controls.ContentDialog
         {
-            XamlRoot = this.XamlRoot,
+            XamlRoot = XamlRoot,
             Content = sheet,
             CloseButtonText = "Close",
             DefaultButton = Microsoft.UI.Xaml.Controls.ContentDialogButton.Close,

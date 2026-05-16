@@ -1,4 +1,4 @@
-// BatchObservableCollection — ObservableCollection<T> with an atomic
+﻿// BatchObservableCollection — ObservableCollection<T> with an atomic
 // ReplaceAll that emits a single CollectionChanged(Reset) instead of
 // Clear+N Adds (which fires N+1 events and re-runs XAML layout each
 // time). Used by LibraryViewModel + others where a full-list refresh

@@ -83,7 +83,9 @@ public sealed partial class DrillDownSheet : UserControl
 
         var thumbHost = new Border
         {
-            Width = 56, Height = 56, CornerRadius = new CornerRadius(6),
+            Width = 56,
+            Height = 56,
+            CornerRadius = new CornerRadius(6),
             Background = (Brush)Application.Current.Resources["SubtleFillColorTertiaryBrush"],
         };
         var img = new Image { Stretch = Stretch.UniformToFill, Width = 56, Height = 56 };
@@ -129,9 +131,9 @@ public sealed partial class DrillDownSheet : UserControl
         switch (tier)
         {
             case "Anchor": colorAccent = Windows.UI.Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00); break;
-            case "Mixed":  colorAccent = Windows.UI.Color.FromArgb(0xFF, 0xA0, 0xE2, 0xEA); break;
-            case "Junk":   colorAccent = Windows.UI.Color.FromArgb(0xFF, 0xF2, 0xA6, 0xC0); break;
-            default:       return null;
+            case "Mixed": colorAccent = Windows.UI.Color.FromArgb(0xFF, 0xA0, 0xE2, 0xEA); break;
+            case "Junk": colorAccent = Windows.UI.Color.FromArgb(0xFF, 0xF2, 0xA6, 0xC0); break;
+            default: return null;
         }
         var fill = colorAccent; fill.A = 0x33;
         var border = new Border

@@ -1,4 +1,4 @@
-// ThemedTogglePicker code-behind. Three DPs (FalseLabel, TrueLabel,
+﻿// ThemedTogglePicker code-behind. Three DPs (FalseLabel, TrueLabel,
 // Selection) plus pill-fill state mirroring on click.
 //
 // Why not a stock ToggleSwitch with custom labels: ToggleSwitch's chrome
@@ -52,12 +52,12 @@ public sealed partial class ThemedTogglePicker : UserControl
     }
 
     private void OnFalseClicked(object sender, RoutedEventArgs e) => Selection = false;
-    private void OnTrueClicked(object sender, RoutedEventArgs e)  => Selection = true;
+    private void OnTrueClicked(object sender, RoutedEventArgs e) => Selection = true;
 
     private void RefreshFills()
     {
         ApplyState(FalseButton, isActive: !Selection);
-        ApplyState(TrueButton,  isActive: Selection);
+        ApplyState(TrueButton, isActive: Selection);
     }
 
     private static void ApplyState(Button btn, bool isActive)

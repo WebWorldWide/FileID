@@ -208,7 +208,8 @@ public sealed class SankeyFlowControl : Control
                 Width = boxWidth,
                 Height = pos.height,
                 Fill = sourceBrush,
-                RadiusX = 3, RadiusY = 3,
+                RadiusX = 3,
+                RadiusY = 3,
             };
             Canvas.SetLeft(rect, margin);
             Canvas.SetTop(rect, pos.y);
@@ -238,7 +239,8 @@ public sealed class SankeyFlowControl : Control
                 Width = boxWidth,
                 Height = pos.height,
                 Fill = new SolidColorBrush(color),
-                RadiusX = 3, RadiusY = 3,
+                RadiusX = 3,
+                RadiusY = 3,
             };
             Canvas.SetLeft(rect, w - margin - boxWidth);
             Canvas.SetTop(rect, pos.y);

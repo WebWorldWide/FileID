@@ -18,8 +18,8 @@ internal static class DebugLog
     private const long MaxLogBytes = 10 * 1024 * 1024;
     private static readonly object s_writeLock = new();
 
-    public static void Info(string message)  => Write("INFO ", message);
-    public static void Warn(string message)  => Write("WARN ", message);
+    public static void Info(string message) => Write("INFO ", message);
+    public static void Warn(string message) => Write("WARN ", message);
     public static void Error(string message) => Write("ERROR", message);
     public static void Debug(string message) => Write("DEBUG", message);
 

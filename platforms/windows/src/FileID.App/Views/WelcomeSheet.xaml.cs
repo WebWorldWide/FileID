@@ -1,4 +1,4 @@
-// WelcomeSheet code-behind. 1:1 port of platforms/apple/.../WelcomeSheet.swift.
+﻿// WelcomeSheet code-behind. 1:1 port of platforms/apple/.../WelcomeSheet.swift.
 //
 // State authority is ModelInstallerService.Instance — every visual element
 // binds to it via x:Bind OneWay. There is NO polling timer; row updates
@@ -121,17 +121,17 @@ public sealed partial class WelcomeSheet : UserControl
     //   Downloading→ down-arrow circle (matches "arrow.down.circle.fill")
     //   NotInstalled → cloud download (matches "square.and.arrow.down.on.square")
     //   Failed     → warning triangle
-    private const string GlyphCheck   = "\uE73E"; // CheckMark
-    private const string GlyphArrow   = "\uE896"; // Download (tray + arrow)
-    private const string GlyphCloud   = "\uE896"; // same — cloud-download metaphor
+    private const string GlyphCheck = "\uE73E"; // CheckMark
+    private const string GlyphArrow = "\uE896"; // Download (tray + arrow)
+    private const string GlyphCloud = "\uE896"; // same — cloud-download metaphor
     private const string GlyphWarning = "\uEA39"; // Warning
 
     internal string GlyphFor(ModelInstallStatus s) => s switch
     {
-        ModelInstallStatus.Installed    => GlyphCheck,
-        ModelInstallStatus.Downloading  => GlyphArrow,
-        ModelInstallStatus.Failed       => GlyphWarning,
-        _                               => GlyphCloud,
+        ModelInstallStatus.Installed => GlyphCheck,
+        ModelInstallStatus.Downloading => GlyphArrow,
+        ModelInstallStatus.Failed => GlyphWarning,
+        _ => GlyphCloud,
     };
 
     private SolidColorBrush GoldBrushResolved =>
@@ -145,11 +145,11 @@ public sealed partial class WelcomeSheet : UserControl
 
     internal Brush IconBrushFor(ModelInstallStatus s) => s switch
     {
-        ModelInstallStatus.Installed   => GreenBrush,
-        ModelInstallStatus.Failed      => RedBrush,
+        ModelInstallStatus.Installed => GreenBrush,
+        ModelInstallStatus.Failed => RedBrush,
         // NotInstalled + Downloading both use gold — matches macOS line 174
         // which uses Theme.gold for every non-installed state.
-        _                              => GoldBrushResolved,
+        _ => GoldBrushResolved,
     };
 
     // x:Bind functions that drive Visibility return Visibility directly:
@@ -183,8 +183,8 @@ public sealed partial class WelcomeSheet : UserControl
     internal string ButtonLabel(ModelInstallStatus s) => s switch
     {
         ModelInstallStatus.Downloading => "Cancel",
-        ModelInstallStatus.Failed      => "Retry",
-        _                              => "Install",
+        ModelInstallStatus.Failed => "Retry",
+        _ => "Install",
     };
 
     internal string SkipLabel(bool allInstalled) => allInstalled ? "Done" : "Skip for now";
