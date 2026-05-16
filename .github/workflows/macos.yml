@@ -79,47 +79,60 @@ jobs:
             echo "$bin OK (${size_mb} MB)"
           done
 
-      # V15.2 — engine smoke launch, parity with windows-engine.yml's
-      # startup + EP probe. Verifies the binary actually runs to the
-      # point of emitting a `ready` event before stdin EOF. Catches the
-      # class of regressions where the binary builds clean but panics
-      # in main() or fails to register a ready event.
+      # V15.2 — engine smoke launch. Verifies the binary actually runs to
+      # the point of emitting a `ready` event and exits cleanly on stdin
+      # EOF. Catches the class of regressions where the binary builds
+      # clean but panics in main() or fails to register a ready event.
+      #
+      # NB on cross-platform parity: the Windows engine smoke also
+      # asserts `"executionProvider"` appears in the ready info, but
+      # macOS doesn't have that field — `executionProvider` is the
+      # Windows-only ORT EP picker output (DirectML / CUDA / OpenVINO /
+      # QNN). On macOS the ML pipeline uses MLX + Apple Neural Engine +
+      # CoreML with no equivalent enum. The assertion is intentionally
+      # absent here.
       - name: Smoke — engine startup
         run: |
           set -euo pipefail
           # Launch the engine with stdin closed immediately (EOF). The
           # engine's parent-PID watchdog should observe the broken pipe
-          # within ~1 s and exit cleanly. We expect a single `ready`
-          # event in stdout before shutdown.
+          # on the next LineReader read and exit cleanly. We expect a
+          # single `ready` event in stdout before shutdown.
           : | .build/release/FileIDEngine > engine.stdout 2> engine.stderr &
           ENGINE_PID=$!
-          # Wait up to 15 s for clean exit.
-          for i in $(seq 1 15); do
+          # 30 s budget — macos-15 runners' cold-start of GRDB + lazy
+          # MLX capability probe can stretch past the previous 15 s
+          # ceiling on the first run after a cache miss.
+          BUDGET=30
+          for i in $(seq 1 $BUDGET); do
             if ! kill -0 $ENGINE_PID 2>/dev/null; then
+              echo "Engine exited after ${i}s"
               break
             fi
             sleep 1
           done
+
+          # Diagnostic dump ALWAYS (not just on failure) so the workflow
+          # log shows what the engine emitted, regardless of which
+          # assertion fires. Without this the failure cause is opaque
+          # to anyone who can't read the CI logs.
+          echo "----- engine.stdout (size $(wc -c < engine.stdout) bytes) -----"
+          cat engine.stdout || true
+          echo
+          echo "----- engine.stderr (size $(wc -c < engine.stderr) bytes) -----"
+          cat engine.stderr || true
+          echo
+          echo "----- end -----"
+
           if kill -0 $ENGINE_PID 2>/dev/null; then
             kill -9 $ENGINE_PID || true
-            echo "::error::FileIDEngine did not exit within 15 s of stdin EOF."
-            echo "----- engine.stdout -----"
-            cat engine.stdout || true
-            echo "----- engine.stderr -----"
-            cat engine.stderr || true
+            echo "::error::FileIDEngine did not exit within ${BUDGET}s of stdin EOF (still alive on poll)."
             exit 1
           fi
           if ! grep -q '"ready"' engine.stdout; then
-            echo "::error::engine.stdout did not contain a ready event:"
-            cat engine.stdout || true
+            echo "::error::engine.stdout did not contain a ready event (engine exited but never emitted ready)."
             exit 1
           fi
-          # NB: Windows engine smoke also asserts `"executionProvider"`
-          # appears in the ready info. macOS doesn't have that field —
-          # `executionProvider` is the Windows-only ORT EP picker output
-          # (DirectML / CUDA / OpenVINO / QNN). On macOS the ML pipeline
-          # uses MLX + Apple Neural Engine + CoreML with no equivalent
-          # enum to surface. The check is intentionally absent here.
           echo "Engine startup smoke passed. ✅"
 
       # Privacy gate parity with Windows: shipped binaries must NOT contain
