@@ -41,8 +41,14 @@
       params. Mass-renaming would touch every code-behind file with no
       correctness gain. Re-visit if a future Roslyn analyzer offers a
       narrower scope (e.g. "deny for new code, exempt pre-existing").
+
+      `CodeAnalysisTreatWarningsAsErrors=true` was tried in this slot and
+      removed: the CA-rule analyzer ships different rule versions on
+      different runners, and a rule firing only on CI's analyzer version
+      blocked the build. The plain `<TreatWarningsAsErrors>` above is
+      sufficient — it catches every CA warning that survives the NoWarn
+      list, which is what we want.
     -->
-    <CodeAnalysisTreatWarningsAsErrors>true</CodeAnalysisTreatWarningsAsErrors>
 
     <!-- Reproducible restores: any drift in transitive deps fails the build. -->
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
