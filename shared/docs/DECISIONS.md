@@ -7,6 +7,31 @@
 
 ---
 
+## 2026-05-16 — `cargo audit` re-tightened to hard gate (V15.3 N9)
+
+Reverses the earlier softening (2026-05-15: `continue-on-error: true` because the CI advisory DB drifted from the local one). The new posture pairs two changes:
+
+1. **Hard gate.** `.github/workflows/windows-engine.yml` step "Audit dependencies" runs `cargo audit --deny warnings`. Any advisory against any direct or transitive dep fails the build.
+2. **DB cache.** Adds an `actions/cache@v4` step before audit that caches `~/.cargo/advisory-db` keyed on `runner.os` + `github.run_number`. Because the cache key includes the run number, every run gets its own entry, but `restore-keys` falls back to the most-recent entry — so most runs reuse the prior DB instead of pulling whatever HEAD `RustSec/advisory-db` happens to be at. This bounds advisory churn between CI runs, eliminating the "CI red on Monday morning because someone published a transient advisory" failure mode that drove the original softening.
+
+Triage path when this gate fires: (a) bump the dep version, OR (b) add `--ignore RUSTSEC-YYYY-NNNN` to the command WITH a one-line rationale appended to this DECISIONS.md. Never `--ignore` without the DECISIONS entry. Concurrent `cargo deny check` step continues to enforce `engine/deny.toml` (license + ban + source allowlist + duplicate-version) — `cargo audit` covers the advisory dimension specifically.
+
+Local-verification reference: at lock time (2026-05-16) `cargo audit` exits 0 against `Cargo.lock` containing 372 deps after the criterion bench scaffold landed.
+
+---
+
+## 2026-05-16 — `criterion` adopted as Rust micro-bench dep (dev-only); engine restructured lib+bin
+
+V15.3 N3. Two coupled changes:
+
+**1. `criterion = "0.5"` dev-dep.** Standard Rust bench framework (no realistic alternative — `iai` measures cache misses but not wall time; `divan` is newer and less battle-tested). `default-features = false` + `cargo_bench_support` only: skips the plotters/HTML-report machinery, which we don't need in CI. Zero runtime impact, zero shipped-binary bloat, zero telemetry. Used to track regressions on `compute_dhash`, `face_clustering::cluster`, and (forthcoming) `ipc::sink`, `clip_tokenizer`, `HNSW` insert/search.
+
+**2. Engine restructured from bin-only to lib+bin.** Adds `[lib] name = "fileid_engine" path = "src/lib.rs"` alongside the existing `[[bin]]`. `src/lib.rs` declares the same 13 submodules as `src/main.rs` (`pub mod commands;` etc.). This lets `benches/*.rs` and any future integration tests `use fileid_engine::*` without going through stdin/stdout. The bin still owns its own `mod` declarations and compiles its own copy (~30% dev-compile cost; runtime cost zero — the shipped bin still gets release LTO independently). The alternative — refactoring `main.rs`'s 678 LOC of setup into a lib `pub fn run()` so the bin becomes a one-liner — was deferred as out-of-scope for the bench-enablement goal; the duplicate-compile trade-off is the standard Cargo workaround for bin-only crates wanting bench scaffolding without touching the bin's entry path.
+
+Two bench targets initially: `tagging_hashes.rs` (dhash + resize_rgb_nearest at multiple input sizes) and `face_clustering_5k.rs` (cluster() on 5K synthetic 512-d L2-normalized embeddings, sample-size = 10 because clustering 5K faces is a multi-second operation). Both verified locally with `cargo bench -- --quick`.
+
+---
+
 ## 2026-05-16 — macOS smoke drops `executionProvider` assertion
 
 `.github/workflows/macos.yml`'s engine-startup smoke step was failing on every push because it asserted `grep -q '"executionProvider"' engine.stdout` — but the macOS `EngineInfo` struct (`platforms/apple/shared/Sources/FileIDShared/IPCProtocol.swift:124`) has no such field. The check was added in V15.2 with a comment claiming "parity with windows-engine.yml's startup + EP probe," but the parity assumption was wrong: `executionProvider` exists on Windows because the engine picks between ORT execution providers (DirectML / CUDA / OpenVINO / QNN); on macOS the ML pipeline runs on MLX + Apple Neural Engine + CoreML, dispatched by the OS without an enum to expose. The assertion could never succeed on macOS regardless of engine health.

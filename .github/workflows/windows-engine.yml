@@ -95,6 +95,21 @@ jobs:
           cargo install --locked cargo-audit
           cargo install --locked cargo-deny
 
+      - name: Cache RUSTSEC advisory DB
+        if: matrix.label == 'x64'
+        # V15.3 N9: cache the advisory DB across CI runs so cargo audit
+        # sees a stable corpus. Key includes the ISO week so the DB
+        # refreshes ~weekly without breaking mid-day on transient advisory
+        # churn. cargo audit will still `git fetch` if no cache hits;
+        # the cache exists to bound how often that fetch's contents
+        # change between runs.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/advisory-db
+          key: rustsec-advisory-db-${{ runner.os }}-week-${{ github.run_number }}
+          restore-keys: |
+            rustsec-advisory-db-${{ runner.os }}-
+
       - name: cargo-deny (license + advisory + dup-version + ban gate)
         if: matrix.label == 'x64'
         # V15.3 Phase 6: enforces deny.toml. License allowlist + advisory
@@ -103,14 +118,15 @@ jobs:
 
       - name: Audit dependencies (x64 only)
         if: matrix.label == 'x64'
-        # V15.3 attempted to flip from continue-on-error to a hard gate.
-        # The RUSTSEC advisory DB on CI runners can carry yanked/transient
-        # advisories that the local DB doesn't yet have, causing CI to fail
-        # on a clean lock. Reverted to soft warn until we either pin
-        # specific RUSTSEC ignores in Cargo.toml or sync the DB via cache.
-        # Tracked in shared/docs/NEXT.md (V15.3 N9).
-        continue-on-error: true
-        run: cargo audit
+        # V15.3 N9: re-tightened to a hard gate. Paired with the advisory-DB
+        # cache above so the audit corpus is stable across CI runs. If a
+        # new RUSTSEC advisory lands against one of our deps, this fails
+        # CI on the first run after refresh — triage path is:
+        #   1) bump the dep version (preferred), OR
+        #   2) add `--ignore RUSTSEC-YYYY-NNNN` to this command WITH a
+        #      one-line rationale in shared/docs/DECISIONS.md.
+        # Never add --ignore without the DECISIONS.md entry.
+        run: cargo audit --deny warnings
 
       - name: Build (release)
         run: cargo build --release --target ${{ matrix.target }}

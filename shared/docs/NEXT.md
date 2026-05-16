@@ -60,7 +60,7 @@ The polish-mochi engagement landed Phases 1–8 partially. Plan: `~/.claude/plan
 - Sweep 33 remaining `#[allow(dead_code)]` annotations — most are Phase 5+ placeholders, but the audit should retire any that are now used.
 - Swift: write `.swift-format` config + add CI `swift-format lint --strict` gate (user runs on Mac).
 
-**N9 — CI gate landing.** Done in `.github/workflows/windows-engine.yml`: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo deny check`, `cargo audit` (hard gate). Done in `windows-app.yml`: `dotnet format --verify-no-changes`, `dotnet list package --vulnerable` (hard gate), `dotnet test FileID.sln` runs every project. Still ahead:
+**N9 — CI gate landing.** Done in `.github/workflows/windows-engine.yml`: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo deny check`, `cargo audit --deny warnings` (hard gate, paired with an `actions/cache` of `~/.cargo/advisory-db` keyed weekly for stability). Done in `windows-app.yml`: `dotnet format --verify-no-changes`, `dotnet list package --vulnerable` (hard gate), `dotnet test FileID.sln` runs every project. Still ahead:
 - `swift-format lint --strict` job in `macos.yml`.
 - Coverage gate (drop > 2 pp blocks merge against `COVERAGE.md` baseline).
 - Parity gate (depends on N7 parity tests existing).
