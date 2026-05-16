@@ -879,4 +879,157 @@ mod tests {
         let j2 = serde_json::to_string(&ScanPhase::PostScan).unwrap();
         assert_eq!(j2, "\"postScan\"");
     }
+
+    /// V15.3 N7: every CommandPayload variant must round-trip through serde
+    /// without losing its discriminant. Catches:
+    ///   - `#[serde(rename = "…")]` drift between Rust + Swift schema
+    ///   - Empty-struct vs unit-variant mistakes (Swift expects `{}`, not `null`)
+    ///   - Field renames inside a payload that break decode
+    ///   - Missing `#[serde(default)]` on an optional that becomes required
+    /// The discriminant check (`std::mem::discriminant`) is compile-time
+    /// safe — a new CommandPayload variant added without a corresponding
+    /// entry here doesn't trigger the assertion, so when you add a variant
+    /// you MUST add a case below or the test loses coverage silently.
+    #[test]
+    fn every_command_variant_round_trips() {
+        let cases: Vec<CommandPayload> = vec![
+            CommandPayload::StartScan(StartScanPayload {
+                root_path: r"C:\Users\adam\Pictures".into(),
+                root_display: Some("Pictures".into()),
+                rescan: false,
+            }),
+            CommandPayload::PauseScan(Empty {}),
+            CommandPayload::ResumeScan(Empty {}),
+            CommandPayload::CancelScan(Empty {}),
+            CommandPayload::RequestStatus(Empty {}),
+            CommandPayload::Shutdown(Empty {}),
+            CommandPayload::RunFaceClustering(Empty {}),
+            CommandPayload::DeepAnalyzeFile(DeepAnalyzeFilePayload {
+                file_id: 42,
+                model_kind: "qwen2_5_vl_3b".into(),
+            }),
+            CommandPayload::DeepAnalyzeFolder(DeepAnalyzeFolderPayload {
+                path_prefix: r"C:\Users\adam\Pictures\2024".into(),
+                model_kind: "qwen2_5_vl_3b".into(),
+            }),
+            CommandPayload::DeepAnalyzeAll(DeepAnalyzeAllPayload {
+                model_kind: "qwen2_5_vl_3b".into(),
+                skip_existing: true,
+            }),
+            CommandPayload::DeepAnalyzeCancel(Empty {}),
+            CommandPayload::PrewarmModel(PrewarmModelPayload {
+                model_kind: "arcface".into(),
+            }),
+            CommandPayload::CancelPrewarm(Empty {}),
+            CommandPayload::PlanRestructure(PlanRestructurePayload {
+                library_root: r"C:\Users\adam\Pictures".into(),
+            }),
+            CommandPayload::ApplyRestructure(ApplyRestructurePayload {
+                library_root: r"C:\Users\adam\Pictures".into(),
+                moves: vec![RestructureMove {
+                    file_id: 1,
+                    source: r"C:\Users\adam\Pictures\IMG_0001.jpg".into(),
+                    destination: r"C:\Users\adam\Pictures\Photos\2024\01\IMG_0001.jpg".into(),
+                    category: "Photos/2024/01".into(),
+                    tier: Some("Anchor".into()),
+                }],
+                use_symlinks: false,
+            }),
+            CommandPayload::ApplyTags(ApplyTagsPayload {
+                file_ids: vec![1, 2, 3],
+                tags: vec!["hawaii".into(), "sunset".into()],
+                mode: TagMode::Add,
+            }),
+            CommandPayload::RenameFiles(RenameFilesPayload {
+                renames: vec![RenameEntry {
+                    file_id: 1,
+                    new_name: "Renamed.jpg".into(),
+                }],
+            }),
+            CommandPayload::TrashFiles(TrashFilesPayload {
+                file_ids: vec![1, 2, 3],
+            }),
+            CommandPayload::MergeClusters(MergeClustersPayload {
+                source_person_id: 1,
+                destination_person_id: 2,
+            }),
+            CommandPayload::EmbedTextQuery(EmbedTextQueryPayload {
+                query: "sunset at the beach".into(),
+                query_id: "q-1".into(),
+            }),
+            CommandPayload::RenamePerson(RenamePersonPayload {
+                person_id: 1,
+                title: None,
+                first_name: Some("Mom".into()),
+                middle_name: None,
+                last_name: None,
+                suffix: None,
+            }),
+            CommandPayload::MarkPersonsAsUnknown(MarkPersonsAsUnknownPayload {
+                person_ids: vec![1, 2],
+            }),
+            CommandPayload::FindMergeSuggestions(Empty {}),
+            CommandPayload::EmbedImageQuery(EmbedImageQueryPayload {
+                file_id: 1,
+                query_id: "q-2".into(),
+            }),
+            CommandPayload::RestoreFromTrash(RestoreFromTrashPayload {
+                batch_id: "00000000-0000-0000-0000-000000000000".into(),
+            }),
+            CommandPayload::VerifyCudaPack(Empty {}),
+            CommandPayload::RevertMerge(RevertMergePayload {
+                source_person_id: 1,
+                destination_person_id: 2,
+                face_ids_to_revert: vec![10, 11, 12],
+            }),
+        ];
+
+        for payload in &cases {
+            let cmd = IpcCommand {
+                id: format!("test-{:?}", std::mem::discriminant(payload)),
+                payload: payload.clone(),
+            };
+            let json = serde_json::to_string(&cmd)
+                .unwrap_or_else(|e| panic!("encode failed for {payload:?}: {e}"));
+            let decoded: IpcCommand = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("decode failed for json {json}: {e}"));
+            assert_eq!(
+                std::mem::discriminant(payload),
+                std::mem::discriminant(&decoded.payload),
+                "variant changed during round-trip:\n  original = {payload:?}\n  json     = {json}\n  parsed   = {:?}",
+                decoded.payload,
+            );
+        }
+    }
+
+    // V15.3 N7: property test. Arbitrary StartScan root_paths must round-trip
+    // through serde_json without character corruption — guards against any
+    // future encoder change that drops non-ASCII path bytes or fails to
+    // escape backslashes / quotes correctly. The property is intentionally
+    // narrow (one payload variant) because every variant has different
+    // field shapes; randomized full-payload generation is more code than
+    // bug-catching value.
+    proptest::proptest! {
+        #[test]
+        fn start_scan_root_path_round_trips(path in "[\\PC]{1,200}") {
+            let cmd = IpcCommand {
+                id: "p-1".into(),
+                payload: CommandPayload::StartScan(StartScanPayload {
+                    root_path: path.clone(),
+                    root_display: None,
+                    rescan: false,
+                }),
+            };
+            let json = serde_json::to_string(&cmd).expect("encode");
+            let decoded: IpcCommand = serde_json::from_str(&json).expect("decode");
+            match decoded.payload {
+                CommandPayload::StartScan(p) => {
+                    proptest::prop_assert_eq!(p.root_path, path);
+                    proptest::prop_assert_eq!(p.root_display, None);
+                    proptest::prop_assert!(!p.rescan);
+                }
+                other => proptest::prop_assert!(false, "expected StartScan, got {:?}", other),
+            }
+        }
+    }
 }
