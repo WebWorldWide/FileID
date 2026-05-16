@@ -129,8 +129,13 @@ jobs:
             echo "::error::FileIDEngine did not exit within ${BUDGET}s of stdin EOF (still alive on poll)."
             exit 1
           fi
-          if ! grep -q '"ready"' engine.stdout; then
-            echo "::error::engine.stdout did not contain a ready event (engine exited but never emitted ready)."
+          # NB: macOS engine writes IPC events to STDERR, not stdout
+          # (see platforms/apple/engine/.../IPC/IPCSink.swift:108 —
+          # `FileHandle.standardError.write(contentsOf: blob)`).
+          # The Windows engine writes to stdout, hence the stream
+          # asymmetry between this smoke and windows-engine.yml's.
+          if ! grep -q '"ready"' engine.stderr; then
+            echo "::error::engine.stderr did not contain a ready event (engine exited but never emitted ready)."
             exit 1
           fi
           echo "Engine startup smoke passed. ✅"
