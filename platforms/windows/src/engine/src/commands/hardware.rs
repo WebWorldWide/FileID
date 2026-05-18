@@ -11,10 +11,9 @@ use crate::platform;
 
 const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// V14.9-G: build a fresh `HardwareInfo` snapshot by re-running the
-/// detection probe. Shared by `emit_ready` (engine startup) and the
-/// `verifyCudaPack` handler so both surfaces see the same authoritative
-/// shape.
+/// Build a fresh `HardwareInfo` snapshot by re-running the detection probe.
+/// Shared by `emit_ready` (engine startup) and the `verifyCudaPack` handler
+/// so both surfaces see the same authoritative shape.
 pub(crate) fn build_hardware_info() -> HardwareInfo {
     let probe = RuntimeProbe::detect();
     let vendor_str = match probe.vendor {
@@ -73,11 +72,10 @@ pub(crate) async fn emit_ready(sink: &Sink) {
         .await;
 }
 
-/// V14.9-G: handle `verifyCudaPack`. Re-runs the CUDA + cuDNN probe and
-/// emits a `HardwareReprobed` event with the fresh `HardwareInfo` plus a
-/// `diagnostics` string when the pack is absent. Lets the Settings →
-/// Performance card flip to ✓ the moment the user installs cuDNN, without
-/// an engine restart.
+/// Handle `verifyCudaPack`. Re-runs the CUDA + cuDNN probe and emits a
+/// `HardwareReprobed` event with fresh `HardwareInfo` plus a diagnostics
+/// string when the pack is absent. Lets the Settings → Performance card
+/// flip to ✓ without an engine restart after the user installs cuDNN.
 pub(crate) async fn handle_verify_cuda_pack(sink: &Sink) {
     let hardware = build_hardware_info();
     let diagnostics = crate::models::runtime::probe_cuda_pack().diagnostics;

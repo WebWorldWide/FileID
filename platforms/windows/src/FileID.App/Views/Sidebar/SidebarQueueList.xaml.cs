@@ -3,6 +3,7 @@
 
 using System.ComponentModel;
 using FileID.IpcSchema;
+using FileID.Services;
 using FileID.ViewModels;
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
@@ -14,6 +15,15 @@ namespace FileID.Views.Sidebar;
 
 public sealed partial class SidebarQueueList : UserControl
 {
+    // a dedicated StackPanel that holds the per-job rows, created
+    // once and reused. The previous design imperatively rebuilt the
+    // panel's parent's Children on every event — `JobsRepeater.ItemsSource
+    // = null` + sibling removal + new panel insertion mutates the visual
+    // tree mid-event-burst, which on Windows can race with a layout pass
+    // and fast-fail the renderer. Now we own a stable container and only
+    // swap its children content; layout passes see a steady reference.
+    private StackPanel? _rowsContainer;
+
     public SidebarQueueList()
     {
         InitializeComponent();
@@ -23,12 +33,14 @@ public sealed partial class SidebarQueueList : UserControl
     }
 
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
-    {
-        if (e.PropertyName is nameof(EngineClient.QueueState))
+        => DebugLog.SafeRun("SidebarQueueList.OnEngineChanged", () =>
         {
-            DispatcherQueue.TryEnqueue(Sync);
-        }
-    }
+            if (e.PropertyName is nameof(EngineClient.QueueState))
+            {
+                DebugLog.Debug($"[ENGINE-SUB:SidebarQueueList] {e.PropertyName}");
+                DispatcherQueue.TryEnqueue(Sync);
+            }
+        });
 
     private void Sync()
     {
@@ -44,28 +56,38 @@ public sealed partial class SidebarQueueList : UserControl
             ? "≈ " + FormatDuration(eta)
             : "";
 
-        var stack = new StackPanel { Spacing = 4 };
+        // replace the ItemsRepeater with a stable container exactly
+        // ONCE (lazy). Subsequent syncs only mutate that container's
+        // Children — never the parent panel — so the renderer never sees
+        // a sibling list change. See _rowsContainer field comment.
+        if (_rowsContainer is null)
+        {
+            _rowsContainer = new StackPanel { Spacing = 4 };
+            if (JobsRepeater.Parent is StackPanel parent)
+            {
+                int idx = parent.Children.IndexOf(JobsRepeater);
+                // Remove the unused ItemsRepeater + any leftover panels
+                // from earlier imperative-rebuild paths.
+                parent.Children.Remove(JobsRepeater);
+                while (parent.Children.Count > idx)
+                {
+                    parent.Children.RemoveAt(idx);
+                }
+                parent.Children.Add(_rowsContainer);
+            }
+        }
+
+        // Off-tree build, then in-place swap. WinUI 3 tolerates Children
+        // mutation on a panel that's not currently being measured; the
+        // single Clear+AddRange is one Reset notification rather than N.
+        _rowsContainer.Children.Clear();
         if (qs.Running is { } running)
         {
-            stack.Children.Add(BuildRow(running, isRunning: true));
+            _rowsContainer.Children.Add(BuildRow(running, isRunning: true));
         }
         foreach (var job in qs.Pending)
         {
-            stack.Children.Add(BuildRow(job, isRunning: false));
-        }
-        JobsRepeater.ItemsSource = null;
-        // Use a simple StackPanel rather than fighting ItemsRepeater for a
-        // tiny list. Replace JobsRepeater's parent's child with the panel.
-        if (JobsRepeater.Parent is StackPanel parent)
-        {
-            int idx = parent.Children.IndexOf(JobsRepeater);
-            // Clear any previously built panel after JobsRepeater (a sibling
-            // we own).
-            for (int i = parent.Children.Count - 1; i > idx; i--)
-            {
-                parent.Children.RemoveAt(i);
-            }
-            parent.Children.Add(stack);
+            _rowsContainer.Children.Add(BuildRow(job, isRunning: false));
         }
     }
 

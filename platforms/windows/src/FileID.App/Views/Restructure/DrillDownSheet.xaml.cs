@@ -111,7 +111,7 @@ public sealed partial class DrillDownSheet : UserControl
         Grid.SetColumn(labelStack, 1);
         grid.Children.Add(labelStack);
 
-        // V14.9-J: engine-stamped tier badge (Anchor / Mixed / Junk).
+        // engine-stamped tier badge (Anchor / Mixed / Junk).
         // Anchor = gold (#FFCC00), Mixed = cyan (#A0E2EA), Junk = pink (#F2A6C0).
         if (BuildTierBadge(m.Tier) is FrameworkElement badge)
         {
@@ -121,7 +121,7 @@ public sealed partial class DrillDownSheet : UserControl
         return grid;
     }
 
-    /// <summary>V14.9-J: render an Anchor/Mixed/Junk badge for a move,
+    /// <summary>render an Anchor/Mixed/Junk badge for a move,
     /// using the FileID palette colors. Returns null when the move
     /// has no tier (engine version mismatch or skipped move).</summary>
     private static FrameworkElement? BuildTierBadge(string? tier)
@@ -157,21 +157,38 @@ public sealed partial class DrillDownSheet : UserControl
 
     private static async System.Threading.Tasks.Task LoadThumbAsync(Image img, string path)
     {
+        // BitmapImage is a DispatcherObject. Capture img.DispatcherQueue
+        // before any await; constructing the BitmapImage on the worker thread
+        // that resumes the await is a known native fast-fail shape.
+        var dispatcher = img.DispatcherQueue;
+        Windows.Storage.FileProperties.StorageItemThumbnail? thumb = null;
         try
         {
             if (!File.Exists(path)) return;
             var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(path);
-            using var thumb = await file.GetThumbnailAsync(
+            thumb = await file.GetThumbnailAsync(
                 Windows.Storage.FileProperties.ThumbnailMode.SingleItem, 128,
                 Windows.Storage.FileProperties.ThumbnailOptions.UseCurrentScale);
-            if (thumb != null && thumb.Size > 0)
+            if (thumb != null && thumb.Size > 0 && dispatcher != null)
             {
-                var bmp = new BitmapImage();
-                await bmp.SetSourceAsync(thumb);
-                img.Source = bmp;
+                var captured = thumb;
+                thumb = null;
+                var enqueued = dispatcher.TryEnqueue(async () =>
+                {
+                    try
+                    {
+                        var bmp = new BitmapImage();
+                        await bmp.SetSourceAsync(captured);
+                        img.Source = bmp;
+                    }
+                    catch { /* swallow */ }
+                    finally { try { captured.Dispose(); } catch { } }
+                });
+                if (!enqueued) { try { captured.Dispose(); } catch { } }
             }
         }
         catch { /* swallow */ }
+        finally { try { thumb?.Dispose(); } catch { } }
     }
 
     private static string TrimRoot(string p, string root)

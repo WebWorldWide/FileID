@@ -3,7 +3,7 @@
     SettingsView — model installer cards, engine info, GPU EP override,
     Performance Pack downloader, system info.
 
-    Mirror of macOS Settings/SettingsView.swift. Hosts five panels:
+ Hosts five panels:
       1. Models — install / re-install ArcFace, MobileCLIP, OCR
       2. Engine — version, PID, worker cap, "open log folder"
       3. Performance — GPU EP picker + Performance Pack downloader
@@ -20,7 +20,7 @@
 
     <ScrollViewer VerticalScrollBarVisibility="Auto"
                   HorizontalScrollBarVisibility="Disabled">
-        <!-- V14.7.4: HorizontalAlignment=Center (was Stretch) so on wide
+        <!-- HorizontalAlignment=Center (was Stretch) so on wide
              windows the 820-MaxWidth content centers instead of pinning
              to the leading edge with empty right-side gutter. -->
         <StackPanel Padding="32,32,32,32" Spacing="20" MaxWidth="820" HorizontalAlignment="Center">
@@ -47,10 +47,10 @@
                                TextWrapping="Wrap"
                                Text="On-device models. Install once; everything runs locally."/>
 
-                    <!-- ArcFace. V14.8.4 Bug 3: every dynamic surface is now
-                         x:Bind against Svc.Arcface.* so the card reflects
-                         engine state changes regardless of where they
-                         originated (Welcome sheet, another window, etc). -->
+                    <!-- ArcFace. Every dynamic surface x:Binds against
+                         Svc.Arcface.* so the card reflects engine state
+                         changes regardless of where they originated
+                         (Welcome sheet, another window, etc). -->
                     <Grid ColumnSpacing="12" Padding="14,12" CornerRadius="10"
                           Background="{ThemeResource SubtleFillColorTertiaryBrush}">
                         <Grid.ColumnDefinitions>
@@ -260,9 +260,8 @@
                         </StackPanel>
                     </Border>
 
-                    <!-- Manual override. Auto-detect is the default; Settings.json
-                         persistence lands when the engine wires the override
-                         consumer (Phase 2.6). -->
+                    <!-- Manual override. Auto-detect is the default;
+                         Settings.json persistence is wired separately. -->
                     <StackPanel Spacing="4">
                         <TextBlock Text="Override"
                                    Style="{StaticResource CaptionTextBlockStyle}"
@@ -287,7 +286,7 @@
                                    Text="Persisted across launches. Takes effect on the next scan (already-loaded models keep their EP)." />
                     </StackPanel>
 
-                    <!-- F3c (V14.8.3): NVIDIA acceleration. Only visible on
+                    <!-- NVIDIA acceleration. Only visible on
                          NVIDIA hardware. Two affordances:
                          (1) Install the CUDA-flavored llama.cpp for Deep Analyze
                              (works on any modern NVIDIA driver; no separate cuDNN).
@@ -351,7 +350,7 @@
                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                            TextWrapping="Wrap"
                                            Text="Install NVIDIA cuDNN to unlock the CUDA execution provider for scanning (10-15% faster than DirectML on RTX-class GPUs). FileID can't redistribute cuDNN — get it from NVIDIA's developer site." />
-                                <!-- V14.9-G: diagnostics line populated after a Verify install
+                                <!-- diagnostics line populated after a Verify install
                                      click when the engine reports cuDNN absent. Explains
                                      *why* (missing cudart64, wrong directory, etc.). -->
                                 <TextBlock x:Name="CudnnDiagnosticsText"
@@ -362,16 +361,16 @@
                                            Margin="0,4,0,0" />
                             </StackPanel>
                             <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
-                                <!-- V15.1: in-app cuDNN install via the engine's
-                                     registry entry. Fetches the ~430 MB redistributable
-                                     directly from NVIDIA's public CDN (no developer-portal
-                                     login, no manual install). Replaces V14.9-U's silent
-                                     auto-installer — now opt-in only. -->
+                                <!-- Opt-in in-app cuDNN install via the
+                                     engine's registry entry. Fetches the ~430 MB
+                                     redistributable directly from NVIDIA's
+                                     public CDN (no developer-portal login,
+                                     no manual install). -->
                                 <Button x:Name="InstallCudnnButton"
                                         Content="Install"
                                         Click="OnInstallCudnnClicked"
                                         ToolTipService.ToolTip="Downloads cuDNN ~430 MB from NVIDIA's public CDN and registers it for the ORT CUDA EP. DirectML works fine without this — only install if you want the 10-15% scanning speedup." />
-                                <!-- V14.9-G: re-probe after manual install. Engine doesn't
+                                <!-- re-probe after manual install. Engine doesn't
                                      restart; just re-runs the DLL probe and emits a
                                      hardwareReprobed event so the card flips to ✓ when
                                      the user finishes installing cuDNN. -->
@@ -385,12 +384,12 @@
                             </StackPanel>
                         </Grid>
 
-                        <!-- V14.9-G: post-verify success pill. Visible only when the
+                        <!-- post-verify success pill. Visible only when the
                              re-probe confirmed cuDNN is reachable. Offers a one-click
                              engine restart to switch from DirectML to CUDA EP. -->
                         <Border x:Name="CudnnSuccessPill"
-                                Background="#22FFCC00"
-                                BorderBrush="#FFCC00"
+                                Background="{StaticResource GoldSelectedBackgroundBrush}"
+                                BorderBrush="{StaticResource GoldBrush}"
                                 BorderThickness="1"
                                 CornerRadius="8"
                                 Padding="12,8"
@@ -403,7 +402,7 @@
                                 <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
                                     <TextBlock x:Name="CudnnSuccessTitle"
                                                Style="{StaticResource BodyStrongTextBlockStyle}"
-                                               Foreground="#FFCC00"
+                                               Foreground="{StaticResource GoldBrush}"
                                                Text="cuDNN detected — restart engine to switch to CUDA" />
                                     <TextBlock x:Name="CudnnSuccessDetail"
                                                Style="{StaticResource CaptionTextBlockStyle}"

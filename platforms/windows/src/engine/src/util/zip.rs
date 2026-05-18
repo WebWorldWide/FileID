@@ -19,6 +19,9 @@ use anyhow::Context;
 /// Extract every entry of `zip_path` into its parent directory.
 pub(crate) fn extract_into_parent(zip_path: &Path) -> anyhow::Result<()> {
     const MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB cumulative
+    // Per-entry cap is half the cumulative cap so a single bomb entry
+    // can't consume the whole budget before the others are inspected.
+    const MAX_ENTRY_BYTES: u64 = 1024 * 1024 * 1024;
     const MAX_ENTRIES: usize = 10_000;
 
     let parent = zip_path
@@ -56,7 +59,15 @@ pub(crate) fn extract_into_parent(zip_path: &Path) -> anyhow::Result<()> {
             }
         }
         let entry_size = entry.size();
-        if entry_size > MAX_BYTES || total_bytes.saturating_add(entry_size) > MAX_BYTES {
+        if entry_size > MAX_ENTRY_BYTES {
+            anyhow::bail!(
+                "zip rejected: entry '{}' claims {} bytes (per-entry cap {})",
+                name.display(),
+                entry_size,
+                MAX_ENTRY_BYTES
+            );
+        }
+        if total_bytes.saturating_add(entry_size) > MAX_BYTES {
             anyhow::bail!("zip rejected: cumulative size exceeds {} bytes", MAX_BYTES);
         }
         total_bytes = total_bytes.saturating_add(entry_size);
@@ -128,10 +139,9 @@ mod tests {
         std::fs::remove_dir_all(&temp).ok();
     }
 
-    // V15.3 Phase 7: property tests prove the safety invariants of
-    // extract_into_parent on randomized inputs — every output file must
-    // land under `parent`, or the function must return Err. No panic, no
-    // escape, no partial leak.
+    // Property tests prove the safety invariants of extract_into_parent
+    // on randomized inputs — every output file must land under `parent`,
+    // or the function must return Err. No panic, no escape, no leak.
     proptest::proptest! {
         // Invariant: extract_into_parent never panics and never writes
         // outside `parent`, regardless of entry name shape.

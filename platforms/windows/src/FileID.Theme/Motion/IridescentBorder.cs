@@ -1,7 +1,6 @@
 ﻿// IridescentBorder — rotating angular gradient border. 14s linear loop.
 // Frozen to gold under reduced-motion.
 //
-// Mirror of macOS IridescentBorder modifier (MotionPrimitives.swift:110).
 // 5-stop angular gradient: gold → delight → ai → info → gold, rotated
 // 360° over 14s.
 //
@@ -168,9 +167,8 @@ public sealed class IridescentBorder : Control
         // approximation reads as iridescent without going to a custom
         // shader.
         //
-        // Phase 1.17 acceptance review will side-by-side this against the
-        // macOS AngularGradient. If the visual delta is unacceptable, we
-        // upgrade to a custom Win2D SVG-shader path.
+        // If the visual delta vs. a true angular gradient is ever
+        // unacceptable, upgrade to a custom Win2D SVG-shader path.
         var center = new Vector2(width / 2, height / 2);
 
         var gold = ResolveColor("GoldColor", Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00));

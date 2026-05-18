@@ -30,7 +30,7 @@ public sealed partial class SuggestedMergesSheet : UserControl
     {
         InitializeComponent();
         PairRepeater.ItemsSource = _rows;
-        // V14.7.11: subscribe in ctor (not Loaded). ContentDialog hosts
+        // subscribe in ctor (not Loaded). ContentDialog hosts
         // don't reliably fire Loaded; the WelcomeSheet hit the same wall.
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         Unloaded += (_, _) => EngineClient.Instance.PropertyChanged -= OnEngineChanged;
@@ -53,10 +53,12 @@ public sealed partial class SuggestedMergesSheet : UserControl
     }
 
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
-    {
-        if (e.PropertyName != nameof(EngineClient.LastMergeSuggestions)) return;
-        DispatcherQueue.TryEnqueue(Render);
-    }
+        => Services.DebugLog.SafeRun("SuggestedMergesSheet.OnEngineChanged", () =>
+        {
+            if (e.PropertyName != nameof(EngineClient.LastMergeSuggestions)) return;
+            Services.DebugLog.Debug($"[ENGINE-SUB:SuggestedMergesSheet] {e.PropertyName}");
+            DispatcherQueue.TryEnqueue(Render);
+        });
 
     private void Render()
     {

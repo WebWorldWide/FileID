@@ -1,11 +1,10 @@
-//! V14.7.2: HMAC-SHA256 hand-rolled atop the existing `sha2` dependency.
-//! 30 lines beats adding the `hmac` crate for one call site.
+//! HMAC-SHA256 hand-rolled atop the existing `sha2` dependency. 30 lines
+//! beats adding the `hmac` crate for one call site.
 //!
 //! Used by the trash + merge sidecar logs to seal each entry against
 //! local tampering. The key is persisted at
-//! `%LOCALAPPDATA%\FileID\log-hmac.key`; NTFS ACLs on `%LOCALAPPDATA%`
-//! already restrict to the user, which is enough for the threat model
-//! (defense against another local app's tampering).
+//! `%LOCALAPPDATA%\FileID\log-hmac.key`; NTFS ACLs already restrict to the
+//! user, enough for the threat model (defense against another local app).
 
 use crate::paths;
 
@@ -134,5 +133,43 @@ mod tests {
     #[test]
     fn constant_time_eq_rejects_single_bit_diff() {
         assert!(!constant_time_eq_str("abc", "abd"));
+    }
+
+    proptest::proptest! {
+        /// Appending any byte to the message must change the MAC. Catches
+        /// a future regression where the inner-block padding accidentally
+        /// truncates the message at a SHA block boundary.
+        #[test]
+        fn appending_byte_to_msg_changes_mac(
+            key in proptest::collection::vec(proptest::num::u8::ANY, 1..96),
+            msg in proptest::collection::vec(proptest::num::u8::ANY, 0..200),
+            extra in proptest::num::u8::ANY,
+        ) {
+            let base = hmac_sha256(&key, &msg);
+            let mut extended = msg.clone();
+            extended.push(extra);
+            let with_extra = hmac_sha256(&key, &extended);
+            proptest::prop_assert_ne!(base, with_extra);
+        }
+
+        /// Appending any NON-ZERO byte to the key must change the MAC.
+        /// HMAC's RFC 2104 spec zero-pads short keys to the block size,
+        /// so appending a 0 to a short key is a true no-op (intentional);
+        /// this test catches the bug we'd see if the implementation
+        /// silently TRUNCATED the key at the block boundary (64 bytes)
+        /// instead of pre-hashing it — at that point even a non-zero
+        /// extra would land in the truncated tail and not change the MAC.
+        #[test]
+        fn appending_nonzero_byte_to_key_changes_mac(
+            key in proptest::collection::vec(proptest::num::u8::ANY, 1..96),
+            msg in proptest::collection::vec(proptest::num::u8::ANY, 0..200),
+            extra in 1u8..=255,
+        ) {
+            let base = hmac_sha256(&key, &msg);
+            let mut extended_key = key.clone();
+            extended_key.push(extra);
+            let with_extra = hmac_sha256(&extended_key, &msg);
+            proptest::prop_assert_ne!(base, with_extra);
+        }
     }
 }

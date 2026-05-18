@@ -1,7 +1,7 @@
 ﻿// DetailHostView code-behind. Subscribes to AppViewModel and swaps the
 // hosted view when the active tab or folder-picked state changes.
 //
-// V14.2: tab swap is animated with a 220 ms opacity crossfade (the same
+// tab swap is animated with a 220 ms opacity crossfade (the same
 // timing macOS uses). Reduce-motion gates the animation so the swap is
 // instant for users who prefer it.
 
@@ -127,7 +127,7 @@ public sealed partial class DetailHostView : UserControl
         sbOut.Begin();
     }
 
-    /// <summary>V14.9-F-A2: explicitly dispose the outgoing tab's UserControl
+    /// <summary>explicitly dispose the outgoing tab's UserControl
     /// if it implements IDisposable, then clear the host. Without this the
     /// old view became unreachable and waited on GC to finalize, leaving its
     /// ReadStore / ClipSearchService / thumbnail cache alive for an
@@ -151,6 +151,6 @@ public sealed partial class DetailHostView : UserControl
             Glyph = glyph,
             Title = title,
             Body = body,
-            Secondary = "Phase 1 scaffold — visual + interaction parity will land in the phase noted.",
+            Secondary = "Scaffold placeholder — visual + interaction parity in progress.",
         };
 }

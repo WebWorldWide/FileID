@@ -1,4 +1,4 @@
-//! V15.3 N3 — Bench hot-path image hashing primitives.
+//! Bench hot-path image hashing primitives.
 //!
 //! Measures `compute_dhash` and `resize_rgb_nearest` against fixed
 //! synthetic image buffers. These are pure CPU functions that run for

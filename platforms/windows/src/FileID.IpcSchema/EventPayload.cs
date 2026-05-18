@@ -43,9 +43,9 @@ public sealed record BulkActionResultEvent(BulkActionResult Result) : EventPaylo
 public sealed record ClipTextEmbeddingEvent(ClipTextEmbedding Embedding) : EventPayload;
 public sealed record MergeSuggestionsEvent(MergeSuggestions Suggestions) : EventPayload;
 
-/// <summary>V14.9-G: engine reply to a <c>verifyCudaPack</c> command.
-/// Carries fresh hardware probe + optional diagnostics text for the
-/// Settings → Performance "Verify install" affordance.</summary>
+/// <summary>Engine reply to a <c>verifyCudaPack</c> command. Carries
+/// fresh hardware probe + optional diagnostics text for the Settings →
+/// Performance "Verify install" affordance.</summary>
 public sealed record HardwareReprobedEvent(HardwareReprobed Result) : EventPayload;
 
 public sealed class EventPayloadJsonConverter : JsonConverter<EventPayload>

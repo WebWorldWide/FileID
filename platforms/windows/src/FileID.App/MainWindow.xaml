@@ -5,8 +5,7 @@
     content row.
 
     The drag-drop overlay only renders when DragOver is in flight; ditto a
-    "drop a folder to scan" message. Mirror of macOS MainWindow.swift's
-    drop overlay.
+    "drop a folder to scan" message.
 -->
 <Window
     x:Class="FileID.MainWindow"
@@ -26,11 +25,10 @@
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <!-- LavaLamp restored in V14.6 via a pure Microsoft.UI.Composition
-             rewrite (no Win2D). Composition is the right primitive: vsync-
-             driven, GPU-resident, no extra render target, no Win2D dep,
-             and works on every Windows build (the Win2D + CoreMessagingXP
-             interaction that bit us in V12.2 doesn't apply here). -->
+        <!-- LavaLamp via pure Microsoft.UI.Composition (no Win2D).
+             Composition is the right primitive: vsync-driven, GPU-resident,
+             no extra render target, no Win2D dep, and avoids the Win2D +
+             CoreMessagingXP interaction that breaks on Win11 26200+. -->
         <motion:LavaLampBackground Grid.RowSpan="2" />
 
         <!-- AppTitleBar: a transparent drag-region backdrop. Passed to
@@ -91,7 +89,7 @@
               DragLeave="OnDragLeave"
               Drop="OnDrop">
             <Grid.ColumnDefinitions>
-                <!-- V14.7.4: bracket the sidebar with MinWidth/MaxWidth so
+                <!-- bracket the sidebar with MinWidth/MaxWidth so
                      it can't squeeze the detail pane on narrow windows or
                      stretch absurdly on ultra-wide monitors. -->
                 <ColumnDefinition x:Name="SidebarColumn"
@@ -112,7 +110,7 @@
             </Grid>
         </Grid>
 
-        <!-- V14.9-Bug2: WelcomeSheet host. Confined to Row 1 ONLY so the
+        <!-- WelcomeSheet host. Confined to Row 1 ONLY so the
              title bar (Row 0) stays uncovered and draggable. Previously
              the sheet was hosted inside a `ContentDialog`, which renders
              a hit-testable full-window smoke layer over Row 0 too and

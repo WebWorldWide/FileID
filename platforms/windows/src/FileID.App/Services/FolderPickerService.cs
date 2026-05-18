@@ -6,7 +6,7 @@
 // WinRT.Interop.InitializeWithWindow.Initialize before PickSingleFolderAsync.
 // Without it, the picker silently no-ops on unpackaged hosts.
 //
-// Mirror of macOS Sidebar.swift's NSOpenPanel flow (canChooseDirectories,
+//'s NSOpenPanel flow (canChooseDirectories,
 // readability pre-check, alert on failure). The readability check returns
 // false when the folder is on a network share that's offline, a volume the
 // user doesn't have access to, or a redirected location that's broken.

@@ -4,7 +4,7 @@
     deepAnalyze). Hidden when the queue is empty. Each row: category icon,
     title, optional ETA. Total ETA at the top.
 
-    Mirror of macOS Sidebar/SidebarQueueList.swift.
+
 -->
 <UserControl
     x:Class="FileID.Views.Sidebar.SidebarQueueList"

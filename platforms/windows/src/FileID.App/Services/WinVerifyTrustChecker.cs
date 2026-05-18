@@ -1,16 +1,15 @@
 ﻿// WinVerifyTrustChecker — Authenticode integrity check on the engine binary.
 //
-// Mirror of macOS EngineClient.swift's SecCode/SecStaticCode validation. On
+//'s SecCode/SecStaticCode validation. On
 // every spawn, the app verifies that FileIDEngine.exe's Authenticode chain
 // is intact AND chains to a publisher we trust. Refuses to spawn on
 // mismatch — same threat model as macOS (a malicious replacement engine
 // next to FileID.exe should not be loadable).
 //
-// Phase 1: the check runs and surfaces the verdict via the
-// IntegrityVerdict enum. For dev builds (unsigned binaries) the verdict
-// is `Unsigned`; the EngineClient logs a warning and proceeds. Phase 11
-// (ship) tightens this: signed releases must verify against an EV cert
-// thumbprint we pin here.
+// The check runs and surfaces the verdict via the IntegrityVerdict enum.
+// For dev builds (unsigned binaries) the verdict is `Unsigned`; the
+// EngineClient logs a warning and proceeds. Signed releases must verify
+// against an EV cert thumbprint pinned here (set at ship time).
 //
 // References:
 //   docs.microsoft.com/en-us/windows/win32/api/wintrust/nf-wintrust-winverifytrust
@@ -39,13 +38,13 @@ internal static class WinVerifyTrustChecker
     /// <summary>
     /// Verify the Authenticode signature on a file. The optional
     /// <paramref name="expectedThumbprintHex"/> pins the publisher cert SHA-1
-    /// thumbprint; pass null to accept any trusted publisher. For Phase 1 we
-    /// don't have an EV cert yet, so call sites pass null and act on the
-    /// `Trusted` / `Unsigned` distinction; Phase 11 supplies the thumbprint.
+    /// thumbprint; pass null to accept any trusted publisher. Until an EV
+    /// cert is provisioned, call sites pass null and act on the
+    /// `Trusted` / `Unsigned` distinction.
     /// </summary>
     public static IntegrityVerdict Verify(string path, string? expectedThumbprintHex = null)
     {
-        // V14.7.11: File.Exists wrapped — paths with invalid chars or
+        // File.Exists wrapped — paths with invalid chars or
         // denied access on the parent dir would throw.
         bool exists;
         try { exists = System.IO.File.Exists(path); }

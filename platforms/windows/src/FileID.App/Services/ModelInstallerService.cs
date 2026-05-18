@@ -44,7 +44,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     private static readonly string[] ClipSentinelIds = { "mobileclip_s2", "clip_text" };
     private static readonly string[] ArcfaceSentinelIds = { "arcface" };
     private static readonly string[] VlmSentinelIds = { "qwen2_5_vl_3b", "qwen2_5_vl_7b", "smolvlm", "gemma_3_4b" };
-    // V15.2.1: one-button GPU acceleration pack on the welcome sheet.
+    // one-button GPU acceleration pack on the welcome sheet.
     // The engine's `cudnn_runtime_x64` registry arm covers NVIDIA. Other
     // vendors stay no-op (DirectML is bundled with ORT and is the
     // production path on AMD/Intel/Qualcomm).
@@ -64,14 +64,14 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     public ModelSlot Clip { get; }
     public ModelSlot Arcface { get; }
     public ModelSlot Vlm { get; }
-    /// <summary>V15.2.1 — one-button GPU acceleration pack. On NVIDIA the
+    /// <summary> one-button GPU acceleration pack. On NVIDIA the
     /// Install action downloads cuDNN; on AMD/Intel/Qualcomm/CPU the slot
     /// is pre-marked Installed with an explanatory Message (DirectML is
     /// already the optimal path). The welcome sheet renders the row
     /// adaptive to the detected vendor (set in UpdateAcceleratorForVendor).</summary>
     public ModelSlot Accelerator { get; }
 
-    /// <summary>V15.2.1 — true only if a real cuDNN sentinel exists on
+    /// <summary> true only if a real cuDNN sentinel exists on
     /// disk. Distinguishes "user installed cuDNN" from "non-NVIDIA, slot
     /// set to Installed because DirectML is already optimal". Drives the
     /// welcome sheet's badge + button visibility (no "Installed" badge
@@ -115,7 +115,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             displayLabel: "Qwen 2.5-VL 3B",
             approxBytes: 1_650UL * 1024 * 1024,
             installAction: () => PrewarmAsync(_vlmModelKind));
-        // V15.2.1: GPU Acceleration Pack. Display label + Message are
+        // GPU Acceleration Pack. Display label + Message are
         // adaptive — UpdateAcceleratorForVendor() refreshes them as soon
         // as the engine reports detected hardware. Until then, the row
         // shows "Detecting GPU…" so the user knows it's waiting.
@@ -136,7 +136,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         UpdateAcceleratorForVendor(EngineClient.Instance.Info?.Hardware?.GpuVendor);
     }
 
-    /// <summary>V15.2.1 — adapt the Accelerator slot to the detected GPU
+    /// <summary> adapt the Accelerator slot to the detected GPU
     /// vendor. NVIDIA → installable cuDNN pack. Anything else → already-
     /// optimal Status=Installed with an explanatory Message. Called on
     /// engine Info changes + at construction time.</summary>
@@ -247,7 +247,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         }
         try
         {
-            // V14.8.4 Bug 1: pre-stamp every not-yet-installed slot to
+            // pre-stamp every not-yet-installed slot to
             // Downloading + "Queued — starting download…" BEFORE awaiting.
             // The three TryInstallAsync calls race for EngineClient._writeLock
             // when their IPC commands serialize; whichever loses both races
@@ -258,8 +258,22 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             // and overwrites with the same caption — no visible flicker.
             // LastProgressAt also resets so the no-progress watchdog (30 s)
             // doesn't false-fire while the slowest row waits for its IPC turn.
+            //
+            // include Accelerator (cuDNN) when it's a real install
+            // candidate. Previously Install All omitted the Accelerator
+            // entirely, so NVIDIA users who clicked Install All got the
+            // three ML models but no cuDNN — the welcome sheet UX implied
+            // "this button installs everything on the page" but it didn't.
+            // The IncludeAcceleratorInInstallAll() helper returns true only
+            // for NVIDIA + NotInstalled/Failed; non-NVIDIA slots stay
+            // pseudo-Installed and are skipped naturally.
             var now = DateTime.UtcNow;
-            foreach (var slot in new[] { Clip, Arcface, Vlm })
+            var slotsToInstall = new List<ModelSlot> { Clip, Arcface, Vlm };
+            if (IncludeAcceleratorInInstallAll())
+            {
+                slotsToInstall.Add(Accelerator);
+            }
+            foreach (var slot in slotsToInstall)
             {
                 if (slot.Status == ModelInstallStatus.Installed) continue;
                 slot.ResetForRetry();
@@ -268,14 +282,11 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
                 slot.LastProgressAt = now;
             }
 
-            // The pack slot is included only when it exists AND isn't
-            // Install the three AI models in parallel.
-            var tasks = new List<Task>(3)
+            var tasks = new List<Task>(slotsToInstall.Count);
+            foreach (var slot in slotsToInstall)
             {
-                TryInstallAsync(Clip),
-                TryInstallAsync(Arcface),
-                TryInstallAsync(Vlm),
-            };
+                tasks.Add(TryInstallAsync(slot));
+            }
             await Task.WhenAll(tasks).ConfigureAwait(false);
         }
         finally
@@ -296,6 +307,25 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             DebugLog.Warn($"[INSTALL] {slot.DisplayLabel} install threw inside InstallAllAsync: {ex.Message}");
             slot.Fail(ex.Message);
         }
+    }
+
+    /// <summary>decide whether Install All should attempt the
+    /// Accelerator (cuDNN) pack. Yes only when:
+    ///   - vendor is NVIDIA (so the row actually represents a real
+    ///     installable pack rather than a non-NVIDIA pseudo-Installed
+    ///     placeholder), AND
+    ///   - the slot is NotInstalled or Failed (not already installed
+    ///     and not already mid-download).
+    /// All other cases short-circuit. Without this gate, an AMD/Intel/
+    /// Snapdragon machine would re-enter the install pipeline on every
+    /// Install All click even though their Accelerator row is
+    /// pseudo-Installed (DirectML optimal).</summary>
+    private bool IncludeAcceleratorInInstallAll()
+    {
+        var vendor = (EngineClient.Instance.Info?.Hardware?.GpuVendor ?? string.Empty).ToLowerInvariant();
+        if (vendor != "nvidia") return false;
+        return Accelerator.Status is ModelInstallStatus.NotInstalled
+                                 or ModelInstallStatus.Failed;
     }
 
     public Task CancelAllAsync() => EngineClient.Instance.CancelPrewarmAsync();
@@ -378,7 +408,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         SeedSlot(Clip, ClipSentinelIds, requireAll: true);
         SeedSlot(Arcface, ArcfaceSentinelIds);
         SeedSlot(Vlm, VlmSentinelIds);
-        // V15.2.1: Accelerator slot — only flip to Installed if the
+        // Accelerator slot — only flip to Installed if the
         // sentinel exists. Otherwise leave it as
         // UpdateAcceleratorForVendor decided (NotInstalled for NVIDIA,
         // Installed-with-message for non-NVIDIA / CPU).
@@ -458,7 +488,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             return;
         }
 
-        // V14.8.4 Bug 1: only reset state if this slot wasn't already
+        // only reset state if this slot wasn't already
         // pre-stamped to Downloading by InstallAllAsync. Re-running
         // ResetForRetry after the pre-stamp would blank Fraction/Message
         // mid-flight if the engine's first progress event happens to
@@ -505,7 +535,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             try
             {
                 await Task.Delay(NoProgressTimeout, ct).ConfigureAwait(false);
-                // V14.9-A6: cancellation check after the delay — if the
+                // cancellation check after the delay — if the
                 // user cancelled the install during the watchdog window,
                 // don't surface a "no response" error on top of a clean
                 // cancellation flow.
@@ -521,7 +551,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
                 }
                 else
                 {
-                    // V14.9-A5: previously fell through to calling slot.Fail()
+                    // previously fell through to calling slot.Fail()
                     // directly on the thread-pool thread, which raises
                     // PropertyChanged off the UI thread → x:Bind UI hit
                     // off-thread → potential FrameworkElement violation.
@@ -559,7 +589,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             case "gemma_3_4b":
             case "smolvlm":
                 return Vlm;
-            // V15.2.1: cuDNN routes to the welcome-sheet Accelerator slot.
+            // cuDNN routes to the welcome-sheet Accelerator slot.
             case "cudnn_runtime_x64":
                 return Accelerator;
             default:
@@ -567,7 +597,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         }
     }
 
-    /// <summary>V15.2.1: model_kinds the engine auto-installs at startup
+    /// <summary>model_kinds the engine auto-installs at startup
     /// (LlamaRuntime + variants). These flow through ModelDownloadProgress
     /// events the welcome sheet doesn't have rows for; previously each one
     /// emitted a "no slot — progress event dropped" warn that flooded
@@ -606,28 +636,35 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     private int _progressEventCount;
 
     private void OnEngineClientChanged(object? sender, PropertyChangedEventArgs e)
-    {
-        if (e.PropertyName == nameof(EngineClient.ModelDownloadProgress))
+        => DebugLog.SafeRun("ModelInstallerService.OnEngineClientChanged", () =>
         {
-            HandleProgress(EngineClient.Instance.ModelDownloadProgress);
-            return;
-        }
-        if (e.PropertyName == nameof(EngineClient.LastError))
-        {
-            HandleEngineError(EngineClient.Instance.LastError);
-            return;
-        }
-        if (e.PropertyName == nameof(EngineClient.Info))
-        {
-            var info = EngineClient.Instance.Info;
-            if (info is not null)
+            if (e.PropertyName == nameof(EngineClient.ModelDownloadProgress))
             {
-                UpdateVlmRecommendation(info.PhysicalMemoryGB);
-                UpdateAcceleratorForVendor(info.Hardware?.GpuVendor);
+                // No [ENGINE-SUB] line here — HandleProgress already logs
+                // throttled "[INSTALL] OnEngineClientChanged #N" entries
+                // that serve the same purpose; double-logging would flood
+                // app.log during a model install.
+                HandleProgress(EngineClient.Instance.ModelDownloadProgress);
+                return;
             }
-            return;
-        }
-    }
+            if (e.PropertyName == nameof(EngineClient.LastError))
+            {
+                DebugLog.Debug($"[ENGINE-SUB:ModelInstallerService] {e.PropertyName}");
+                HandleEngineError(EngineClient.Instance.LastError);
+                return;
+            }
+            if (e.PropertyName == nameof(EngineClient.Info))
+            {
+                DebugLog.Debug($"[ENGINE-SUB:ModelInstallerService] {e.PropertyName}");
+                var info = EngineClient.Instance.Info;
+                if (info is not null)
+                {
+                    UpdateVlmRecommendation(info.PhysicalMemoryGB);
+                    UpdateAcceleratorForVendor(info.Hardware?.GpuVendor);
+                }
+                return;
+            }
+        });
 
     private void HandleProgress(ModelDownloadProgress? p)
     {
@@ -640,7 +677,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         var slot = SlotFor(p.ModelKind);
         if (slot is null)
         {
-            // V15.2.1: well-known auto-installer model_kinds are routed
+            // well-known auto-installer model_kinds are routed
             // through their own services (LlamaRuntimeAutoInstaller,
             // CudaAutoInstaller); demote the no-slot log so app.log
             // isn't flooded during their auto-install progress streams.

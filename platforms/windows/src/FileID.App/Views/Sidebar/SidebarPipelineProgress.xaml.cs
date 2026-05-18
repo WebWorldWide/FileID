@@ -6,6 +6,7 @@
 
 using System.ComponentModel;
 using FileID.IpcSchema;
+using FileID.Services;
 using FileID.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -31,10 +32,39 @@ public sealed partial class SidebarPipelineProgress : UserControl
     private readonly Rectangle?[] _rightConnectors = new Rectangle?[Stages.Length];
     private readonly TextBlock[] _labels = new TextBlock[Stages.Length];
 
+    // cache the brushes used by SyncStage. SyncStage fires up to
+    // 10 Hz during a scan (one call per Progress event); the previous
+    // version allocated four fresh SolidColorBrush objects on each call —
+    // 10×4×scan_duration brushes pinned on the UI thread plus the
+    // re-evaluation of three theme-resource lookups. Brushes don't change
+    // at runtime; cache once. SolidColorBrush is a DispatcherObject so
+    // ctor must run on the UI thread — done from the ctor below.
+    private SolidColorBrush? _goldBrush;
+    private SolidColorBrush? _fadedGold;
+    private SolidColorBrush? _goldStroke;
+    private Brush? _primaryText;
+    private Brush? _secondaryText;
+    private Brush? _tertiaryText;
+    private SolidColorBrush? _inactiveDot;
+    private SolidColorBrush? _inactiveDotStroke;
+    private SolidColorBrush? _inactiveConnector;
+
     public SidebarPipelineProgress()
     {
         InitializeComponent();
         BuildStages();
+        // Ctor runs on UI thread; cache UI-thread-affined brushes here
+        // so SyncStage never allocates during the scan-event burst.
+        _goldBrush = (SolidColorBrush)Application.Current.Resources["GoldBrush"];
+        _fadedGold = new SolidColorBrush(Color.FromArgb(0x99, 0xFF, 0xCC, 0x00));
+        _goldStroke = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00));
+        _primaryText = (Brush)Application.Current.Resources["TextFillColorPrimaryBrush"];
+        _secondaryText = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"];
+        _tertiaryText = (Brush)Application.Current.Resources["TextFillColorTertiaryBrush"];
+        _inactiveDot = InactiveDotBrush();
+        _inactiveDotStroke = InactiveDotStrokeBrush();
+        _inactiveConnector = InactiveConnectorBrush();
+
         Loaded += (_, _) => SyncStage();
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         Unloaded += (_, _) => EngineClient.Instance.PropertyChanged -= OnEngineChanged;
@@ -135,17 +165,19 @@ public sealed partial class SidebarPipelineProgress : UserControl
     }
 
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
-    {
-        if (e.PropertyName is nameof(EngineClient.Phase)
-                          or nameof(EngineClient.LastFaceClustering)
-                          or nameof(EngineClient.DeepAnalyzeComplete)
-                          or nameof(EngineClient.DeepAnalyzeProgress)
-                          or nameof(EngineClient.DeepAnalyzeStarting)
-                          or nameof(EngineClient.LastProgress))
+        => DebugLog.SafeRun("SidebarPipelineProgress.OnEngineChanged", () =>
         {
-            DispatcherQueue.TryEnqueue(SyncStage);
-        }
-    }
+            if (e.PropertyName is nameof(EngineClient.Phase)
+                              or nameof(EngineClient.LastFaceClustering)
+                              or nameof(EngineClient.DeepAnalyzeComplete)
+                              or nameof(EngineClient.DeepAnalyzeProgress)
+                              or nameof(EngineClient.DeepAnalyzeStarting)
+                              or nameof(EngineClient.LastProgress))
+            {
+                DebugLog.Debug($"[ENGINE-SUB:SidebarPipelineProgress] {e.PropertyName}");
+                DispatcherQueue.TryEnqueue(SyncStage);
+            }
+        });
 
     private void SyncStage()
     {
@@ -159,7 +191,7 @@ public sealed partial class SidebarPipelineProgress : UserControl
         bool peopleDone = EngineClient.Instance.LastFaceClustering is not null;
         bool captionsRunning = EngineClient.Instance.DeepAnalyzeProgress is not null
                             || EngineClient.Instance.DeepAnalyzeStarting is not null;
-        // V14.7.15: any DeepAnalyzeComplete event (cancelled or finished) is
+        // any DeepAnalyzeComplete event (cancelled or finished) is
         // a terminal state — flip the strip to "Done" rather than freezing
         // at Captions when the user cancels.
         bool captionsDone = EngineClient.Instance.DeepAnalyzeComplete is not null;
@@ -178,13 +210,7 @@ public sealed partial class SidebarPipelineProgress : UserControl
             else if (peopleDone) activeIndex = 2;
         }
 
-        var goldBrush = (SolidColorBrush)Application.Current.Resources["GoldBrush"];
-        var fadedGold = new SolidColorBrush(Color.FromArgb(0x99, 0xFF, 0xCC, 0x00));
-        var goldStroke = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00));
-        var primaryText = (Brush)Application.Current.Resources["TextFillColorPrimaryBrush"];
-        var secondaryText = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"];
-        var tertiaryText = (Brush)Application.Current.Resources["TextFillColorTertiaryBrush"];
-
+        // brushes cached at ctor time — see field comments.
         for (int i = 0; i < Stages.Length; i++)
         {
             bool filled = i < activeIndex || activeIndex == 4;
@@ -193,40 +219,38 @@ public sealed partial class SidebarPipelineProgress : UserControl
             // Dot fill + stroke.
             if (filled)
             {
-                _dots[i].Fill = goldBrush;
-                _dots[i].Stroke = goldStroke;
+                _dots[i].Fill = _goldBrush;
+                _dots[i].Stroke = _goldStroke;
                 _dots[i].Width = 10; _dots[i].Height = 10;
             }
             else if (active)
             {
-                _dots[i].Fill = fadedGold;
-                _dots[i].Stroke = goldStroke;
+                _dots[i].Fill = _fadedGold;
+                _dots[i].Stroke = _goldStroke;
                 _dots[i].StrokeThickness = 1.5;
                 _dots[i].Width = 12; _dots[i].Height = 12;
             }
             else
             {
-                _dots[i].Fill = InactiveDotBrush();
-                _dots[i].Stroke = InactiveDotStrokeBrush();
+                _dots[i].Fill = _inactiveDot;
+                _dots[i].Stroke = _inactiveDotStroke;
                 _dots[i].StrokeThickness = 1;
                 _dots[i].Width = 10; _dots[i].Height = 10;
             }
 
             // Label color: active → gold, filled → primary, else → tertiary.
-            _labels[i].Foreground = active ? goldBrush : (filled ? primaryText : tertiaryText);
+            _labels[i].Foreground = active ? _goldBrush : (filled ? _primaryText : _tertiaryText);
 
             // Connectors: a half is "filled" iff the dot it connects to AND
             // the dot it leads from are filled (or the half belongs to the
             // active dot extending toward a filled side).
-            // Left half of stage i ← (stage i-1 filled).
             bool leftFilled = i > 0 && (i - 1 < activeIndex || activeIndex == 4);
-            // Right half of stage i → (stage i filled relative to next).
             bool rightFilled = i < Stages.Length - 1 && filled;
 
             if (_leftConnectors[i] is { } lc)
-                lc.Fill = leftFilled ? goldBrush : InactiveConnectorBrush();
+                lc.Fill = leftFilled ? _goldBrush : _inactiveConnector;
             if (_rightConnectors[i] is { } rc)
-                rc.Fill = rightFilled ? goldBrush : InactiveConnectorBrush();
+                rc.Fill = rightFilled ? _goldBrush : _inactiveConnector;
         }
     }
 

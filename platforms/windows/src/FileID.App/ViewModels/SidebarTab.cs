@@ -1,6 +1,6 @@
 ﻿// SidebarTab -- the six top-level destinations the sidebar exposes.
 //
-// Mirror of macOS Sidebar.swift's tab enum (Library / People / Cleanup /
+//'s tab enum (Library / People / Cleanup /
 // Deep Analyze / Restructure / Settings). Each carries an id (persisted
 // in app-settings.json), a label (displayed), and a Segoe Fluent glyph.
 

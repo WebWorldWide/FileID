@@ -1,16 +1,34 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <!--
-    FilePreviewSheet — modal sheet showing a single file's preview +
-    metadata + a toolbar with reveal/open/copy actions. Hosted via
-    ContentDialog so the close-on-Esc + click-outside-to-dismiss come
-    free.
+    FilePreviewSheet — modal preview matching macOS LibraryView.swift:882-1115.
 
-    Phase 2.6 swaps the placeholder Border for the real preview:
-        * Image: <Image Source="{path}" />
-        * Video: keyframe-at-25% via shell/video.rs → SoftwareBitmapSource
-        * PDF: page-1 render via pdfium → SoftwareBitmapSource
-        * Audio: cover art if embedded, else the audio kind glyph
-        * Other: generic file-kind glyph
+    Layout:
+       Row 0: top toolbar (filename + path, sibling counter, prev/next,
+              Analyze [images], Open, Show in Explorer, Close).
+       Row 1: HStack
+                Left: kind-dispatched preview canvas (Image / MediaPlayer /
+                      placeholder).
+                Right: 360-DIP metadata + tags sidebar.
+
+    Preview kinds (matches macOS, with Windows-only enhancements):
+       image  → BitmapImage at 1024 px via shell IThumbnailProvider chain
+                (handles JPEG, PNG, HEIC, RAW, .pages, anything with a
+                provider).
+       video  → MediaPlayerElement with transport controls (Windows wins
+                here — macOS opens the default app for video; we play
+                inline because WinUI 3 ships a Media Foundation control
+                that handles most codecs out of the box).
+       audio  → MediaPlayerElement with audio-mode UI (kind glyph + filename
+                + Play). Again, in-app vs macOS's default-app handoff.
+       pdf    → 1024 px shell thumbnail (page 1). Multi-page nav delegated
+                to the default PDF viewer via Open button, matching macOS
+                PDFKit-first-page behavior.
+       doc    → 1024 px shell thumbnail. Office providers render these
+                natively on Windows.
+       audio fallback / unknown → kind glyph + filename + caption.
+
+    The sheet is hosted in a ContentDialog from LibraryView; the toolbar
+    Close button raises RequestClose so the host can Hide() the dialog.
 -->
 <UserControl
     x:Class="FileID.Views.Library.FilePreviewSheet"
@@ -19,163 +37,91 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
-    MinWidth="640"
-    MinHeight="520">
+    MinWidth="1080"
+    MinHeight="720">
 
-    <Grid RowSpacing="14" Padding="4,4,4,4">
+    <Grid>
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <!-- Preview surface. Image source binds in code-behind once the
-             file resolves. Falls back to a kind-glyph if the preview
-             can't be rendered (Phase 2.6 hooks the real renderer). -->
+        <!-- ─── Toolbar ───────────────────────────────────────────── -->
         <Grid Grid.Row="0"
+              Padding="20,12"
               Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-              CornerRadius="12">
-            <Image x:Name="PreviewImage"
-                   Stretch="Uniform"
-                   HorizontalAlignment="Center"
-                   VerticalAlignment="Center"
-                   Visibility="Collapsed" />
-            <StackPanel x:Name="PlaceholderPanel"
-                        HorizontalAlignment="Center"
-                        VerticalAlignment="Center"
-                        Spacing="14">
-                <FontIcon x:Name="KindGlyphIcon"
-                          Glyph="&#xE8B7;"
-                          FontSize="64"
-                          Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                          HorizontalAlignment="Center" />
-                <TextBlock x:Name="PlaceholderText"
-                           Text="Preview rendering lands in Phase 2.6 (real ML + thumbnail wiring)."
-                           Style="{StaticResource CaptionTextBlockStyle}"
-                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                           HorizontalAlignment="Center"
-                           TextAlignment="Center"
-                           MaxWidth="380"
-                           TextWrapping="Wrap" />
-            </StackPanel>
-
-            <!-- Badges — top-left overlay. Tile-level badges (Library
-                 grid) ride on the thumbnail; the macOS preview reaches
-                 onto the preview surface itself. Two pills max: faces +
-                 OCR text. Each is a soft-tinted pill with a glyph + label. -->
-            <StackPanel x:Name="BadgesPanel"
-                        Orientation="Horizontal"
-                        Spacing="6"
-                        HorizontalAlignment="Left"
-                        VerticalAlignment="Top"
-                        Margin="14,14,0,0">
-                <Border x:Name="FacesBadge"
-                        Background="#992A2A33"
-                        BorderBrush="{ThemeResource GoldDimBrush}"
-                        BorderThickness="1"
-                        CornerRadius="999"
-                        Padding="8,4"
-                        Visibility="Collapsed">
-                    <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
-                        <FontIcon Glyph="&#xE8D4;" FontSize="11"
-                                  Foreground="{ThemeResource GoldBrush}" />
-                        <TextBlock Text="Faces"
-                                   Style="{StaticResource CaptionTextBlockStyle}"
-                                   Foreground="White" />
-                    </StackPanel>
-                </Border>
-                <Border x:Name="TextBadge"
-                        Background="#992A2A33"
-                        BorderBrush="{ThemeResource GoldDimBrush}"
-                        BorderThickness="1"
-                        CornerRadius="999"
-                        Padding="8,4"
-                        Visibility="Collapsed">
-                    <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
-                        <FontIcon Glyph="&#xE8E9;" FontSize="11"
-                                  Foreground="{ThemeResource GoldBrush}" />
-                        <TextBlock Text="Text"
-                                   Style="{StaticResource CaptionTextBlockStyle}"
-                                   Foreground="White" />
-                    </StackPanel>
-                </Border>
-            </StackPanel>
-        </Grid>
-
-        <!-- Metadata strip. -->
-        <StackPanel Grid.Row="1" Spacing="4">
-            <TextBlock x:Name="FileNameText"
-                       Style="{StaticResource SubtitleTextBlockStyle}"
-                       TextTrimming="CharacterEllipsis" />
-            <TextBlock x:Name="MetadataText"
-                       Style="{StaticResource CaptionTextBlockStyle}"
-                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-            <TextBlock x:Name="PathText"
-                       Style="{StaticResource CaptionTextBlockStyle}"
-                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                       TextTrimming="CharacterEllipsis" />
-
-            <!-- Drafted-tag input. Comma-separated; Enter or the Apply
-                 button writes them through the engine's applyTags IPC. -->
-            <Grid ColumnSpacing="8" Margin="0,6,0,0">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <TextBox Grid.Column="0"
-                         x:Name="TagInput"
-                         PlaceholderText="Add tags (comma-separated, press Enter)"
-                         KeyDown="OnTagInputKeyDown" />
-                <Button Grid.Column="1"
-                        x:Name="ApplyTagsButton"
-                        Click="OnApplyTagsClicked"
-                        Content="Add" />
-            </Grid>
-            <TextBlock x:Name="TagStatusText"
-                       Style="{StaticResource CaptionTextBlockStyle}"
-                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                       Visibility="Collapsed" />
-        </StackPanel>
-
-        <!-- Toolbar. -->
-        <Grid Grid.Row="2" ColumnSpacing="8">
+              BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+              BorderThickness="0,0,0,1"
+              ColumnSpacing="12">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="Auto" />
-                <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
 
-            <!-- V14.7.2: sibling navigation. ←/→ keys also trigger via OnKeyDown. -->
-            <Button Grid.Column="0"
-                    x:Name="PrevButton"
-                    Click="OnPrevClicked"
-                    ToolTipService.ToolTip="Previous file (←)"
-                    AutomationProperties.Name="Previous file">
-                <FontIcon Glyph="&#xE76B;" FontSize="13"/>
-            </Button>
-            <Button Grid.Column="1"
-                    x:Name="NextButton"
-                    Click="OnNextClicked"
-                    ToolTipService.ToolTip="Next file (→)"
-                    AutomationProperties.Name="Next file">
-                <FontIcon Glyph="&#xE76C;" FontSize="13"/>
-            </Button>
+            <!-- Filename + parent path. -->
+            <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+                <TextBlock x:Name="FileNameText"
+                           Style="{StaticResource SubtitleTextBlockStyle}"
+                           TextTrimming="CharacterEllipsis"
+                           MaxLines="1" />
+                <TextBlock x:Name="ParentPathText"
+                           Style="{StaticResource CaptionTextBlockStyle}"
+                           FontFamily="Consolas"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                           TextTrimming="CharacterEllipsis"
+                           MaxLines="1" />
+            </StackPanel>
 
-            <Button Grid.Column="2"
+            <!-- "N of M" counter (visible only when siblings list has > 1). -->
+            <TextBlock Grid.Column="1"
+                       x:Name="SiblingCountText"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       VerticalAlignment="Center"
+                       Visibility="Collapsed" />
+
+            <!-- Prev/Next. -->
+            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                <Button x:Name="PrevButton"
+                        Click="OnPrevClicked"
+                        ToolTipService.ToolTip="Previous file (←)"
+                        AutomationProperties.Name="Previous file">
+                    <FontIcon Glyph="&#xE76B;" FontSize="13"/>
+                </Button>
+                <Button x:Name="NextButton"
+                        Click="OnNextClicked"
+                        ToolTipService.ToolTip="Next file (→)"
+                        AutomationProperties.Name="Next file">
+                    <FontIcon Glyph="&#xE76C;" FontSize="13"/>
+                </Button>
+            </StackPanel>
+
+            <Button Grid.Column="3"
                     x:Name="AnalyzeButton"
                     Click="OnAnalyzeClicked"
-                    HorizontalAlignment="Left"
-                    ToolTipService.ToolTip="Run Deep Analyze (VLM) on this file">
+                    ToolTipService.ToolTip="Run Deep Analyze (VLM) on this file"
+                    Visibility="Collapsed">
                 <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
                     <FontIcon Glyph="&#xE945;" FontSize="13" />
                     <TextBlock Text="Analyze" />
                 </StackPanel>
             </Button>
 
-            <Button Grid.Column="3"
+            <Button Grid.Column="4"
+                    Click="OnOpenClicked"
+                    ToolTipService.ToolTip="Open in the default app">
+                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                    <FontIcon Glyph="&#xE8E5;" FontSize="13" />
+                    <TextBlock Text="Open" />
+                </StackPanel>
+            </Button>
+
+            <Button Grid.Column="5"
                     Click="OnRevealClicked"
                     ToolTipService.ToolTip="Show in Explorer">
                 <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
@@ -183,22 +129,190 @@
                     <TextBlock Text="Show in Explorer" />
                 </StackPanel>
             </Button>
-            <Button Grid.Column="4"
-                    Click="OnOpenClicked"
-                    ToolTipService.ToolTip="Open with the system default app">
-                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
-                    <FontIcon Glyph="&#xE8E5;" FontSize="13" />
-                    <TextBlock Text="Open" />
-                </StackPanel>
+
+            <Button Grid.Column="6"
+                    x:Name="CloseButton"
+                    Click="OnCloseClicked"
+                    ToolTipService.ToolTip="Close (Esc)"
+                    Background="Transparent"
+                    BorderThickness="0"
+                    Padding="6">
+                <FontIcon Glyph="&#xE894;" FontSize="14"
+                          Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
             </Button>
-            <Button Grid.Column="5"
-                    Click="OnCopyPathClicked"
-                    ToolTipService.ToolTip="Copy absolute path to clipboard">
-                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
-                    <FontIcon Glyph="&#xE8C8;" FontSize="13" />
-                    <TextBlock Text="Copy path" />
+        </Grid>
+
+        <!-- ─── Body: preview canvas + metadata sidebar ─────────── -->
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="360" />
+            </Grid.ColumnDefinitions>
+
+            <!-- Preview canvas. One of {PreviewImage, PreviewMedia,
+                 PlaceholderPanel} is visible at a time; SetFileCoreAsync
+                 picks the right one based on file.kind. -->
+            <Grid Grid.Column="0"
+                  x:Name="PreviewCanvas"
+                  Background="#1A000000">
+
+                <Image x:Name="PreviewImage"
+                       Stretch="Uniform"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center"
+                       Margin="20"
+                       Visibility="Collapsed" />
+
+                <!-- MediaPlayerElement handles both video and audio.
+                     AreTransportControlsEnabled=true exposes play/pause/scrub
+                     out of the box; Visibility flips off when the sheet
+                     unloads so any in-flight playback stops. -->
+                <MediaPlayerElement x:Name="PreviewMedia"
+                                    AreTransportControlsEnabled="True"
+                                    AutoPlay="False"
+                                    Margin="20"
+                                    HorizontalAlignment="Stretch"
+                                    VerticalAlignment="Stretch"
+                                    Stretch="Uniform"
+                                    Visibility="Collapsed" />
+
+                <StackPanel x:Name="PlaceholderPanel"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center"
+                            Spacing="14"
+                            Visibility="Collapsed">
+                    <FontIcon x:Name="KindGlyphIcon"
+                              Glyph="&#xE8B7;"
+                              FontSize="64"
+                              Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                              HorizontalAlignment="Center" />
+                    <TextBlock x:Name="PlaceholderText"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               HorizontalAlignment="Center"
+                               TextAlignment="Center"
+                               MaxWidth="380"
+                               TextWrapping="Wrap" />
                 </StackPanel>
-            </Button>
+
+                <!-- Loading indicator while the thumbnail / media source resolves. -->
+                <StackPanel x:Name="LoadingPanel"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center"
+                            Spacing="10"
+                            Visibility="Collapsed">
+                    <ProgressRing IsActive="True" Width="40" Height="40"/>
+                    <TextBlock Text="Loading preview…"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               HorizontalAlignment="Center"/>
+                </StackPanel>
+
+                <!-- Badges — same as before; tile-level booleans (face / OCR text). -->
+                <StackPanel x:Name="BadgesPanel"
+                            Orientation="Horizontal"
+                            Spacing="6"
+                            HorizontalAlignment="Left"
+                            VerticalAlignment="Top"
+                            Margin="20,20,0,0">
+                    <Border x:Name="FacesBadge"
+                            Background="#992A2A33"
+                            BorderBrush="{ThemeResource GoldDimBrush}"
+                            BorderThickness="1"
+                            CornerRadius="999"
+                            Padding="8,4"
+                            Visibility="Collapsed">
+                        <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                            <FontIcon Glyph="&#xE8D4;" FontSize="11"
+                                      Foreground="{ThemeResource GoldBrush}" />
+                            <TextBlock Text="Faces"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="White" />
+                        </StackPanel>
+                    </Border>
+                    <Border x:Name="TextBadge"
+                            Background="#992A2A33"
+                            BorderBrush="{ThemeResource GoldDimBrush}"
+                            BorderThickness="1"
+                            CornerRadius="999"
+                            Padding="8,4"
+                            Visibility="Collapsed">
+                        <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                            <FontIcon Glyph="&#xE8E9;" FontSize="11"
+                                      Foreground="{ThemeResource GoldBrush}" />
+                            <TextBlock Text="Text"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="White" />
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </Grid>
+
+            <!-- Sidebar. Scrolls when content overflows. -->
+            <Border Grid.Column="1"
+                    Background="{ThemeResource SubtleFillColorTertiaryBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1,0,0,0">
+                <ScrollViewer VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Padding="16" Spacing="14">
+
+                        <!-- Metadata card. -->
+                        <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8"
+                                Padding="14">
+                            <StackPanel Spacing="8">
+                                <TextBlock Text="Metadata"
+                                           Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                <Grid x:Name="MetadataGrid"
+                                      RowSpacing="4"
+                                      ColumnSpacing="10">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="80" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <!-- Rows are added dynamically in code-behind so a
+                                         missing field (no date / no camera) doesn't
+                                         leave an empty row. -->
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Tags card. -->
+                        <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8"
+                                Padding="14">
+                            <StackPanel Spacing="8">
+                                <TextBlock Text="Tags"
+                                           Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox Grid.Column="0"
+                                             x:Name="TagInput"
+                                             PlaceholderText="Add tags (comma-separated)"
+                                             KeyDown="OnTagInputKeyDown" />
+                                    <Button Grid.Column="1"
+                                            x:Name="ApplyTagsButton"
+                                            Click="OnApplyTagsClicked"
+                                            Content="Add" />
+                                </Grid>
+                                <TextBlock x:Name="TagStatusText"
+                                           Style="{StaticResource CaptionTextBlockStyle}"
+                                           Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                           Visibility="Collapsed" />
+                            </StackPanel>
+                        </Border>
+
+                    </StackPanel>
+                </ScrollViewer>
+            </Border>
         </Grid>
     </Grid>
 </UserControl>

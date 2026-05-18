@@ -21,20 +21,25 @@
     <OutputName>FileIDSetup</OutputName>
     <OutputPath>$(MSBuildThisFileDirectory)..\..\dist\installer\</OutputPath>
     <IntermediateOutputPath>$(MSBuildThisFileDirectory)obj\</IntermediateOutputPath>
+    <!-- WiX 4's wix.exe accepts only `full` or `none` for -pdbType.
+         Override the platforms-wide `portable` default from
+         Directory.Build.props (intended for .NET assemblies, not bundles). -->
+    <DebugType>full</DebugType>
 
     <!-- Bundle UpgradeCode: must NEVER change. Distinct from per-arch MSI codes. -->
     <BundleUpgradeCode>3D7091C2-6E64-6C8F-BC34-91BC1BF3D7E6</BundleUpgradeCode>
   </PropertyGroup>
 
-  <ItemGroup>
-    <Compile Include="Bundle.wxs" />
-  </ItemGroup>
+  <!-- Bundle.wxs is auto-discovered by the WiX SDK; an explicit Compile
+       Include would double-compile and trip WIX0089 "Multiple entry
+       sections" because the bundle's name appears twice. -->
 
-  <ItemGroup>
-    <DefineConstants Include="BundleUpgradeCode=$(BundleUpgradeCode)" />
-    <DefineConstants Include="MsiX64Path=$(MSBuildThisFileDirectory)..\..\dist\installer\FileID-x64.msi" />
-    <DefineConstants Include="MsiArm64Path=$(MSBuildThisFileDirectory)..\..\dist\installer\FileID-arm64.msi" />
-  </ItemGroup>
+  <!-- WiX 4 takes DefineConstants as a semicolon-separated PropertyGroup
+       entry (not an ItemGroup; that style is WiX 3 and silently no-ops in
+       WiX 4, producing "Undefined preprocessor variable" errors). -->
+  <PropertyGroup>
+    <DefineConstants>BundleUpgradeCode=$(BundleUpgradeCode);MsiX64Path=$(MSBuildThisFileDirectory)..\..\dist\installer\FileID-x64.msi;MsiArm64Path=$(MSBuildThisFileDirectory)..\..\dist\installer\FileID-arm64.msi</DefineConstants>
+  </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="WixToolset.Bal.wixext" />

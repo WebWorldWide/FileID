@@ -3,7 +3,7 @@
 // a renamePerson IPC (DB write only — sidecar tags inherit from the
 // per-file scan).
 //
-// V14.4 cut: structured-name editor + face grid; renamePerson IPC is
+// structured-name editor + face grid; renamePerson IPC is
 // added as part of this sheet's wiring (engine handler + DTO).
 
 using System;

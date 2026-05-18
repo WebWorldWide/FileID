@@ -1,25 +1,19 @@
-// V14.9-X — batched MobileCLIP inference coordinator.
+// Batched MobileCLIP inference coordinator.
 //
-// The pre-V14.9-W pattern was one `Mutex<MobileClipImage>` shared by N
-// tagging workers: every worker's per-file CLIP embed serialized
-// through the lock, GPU did one tiny inference per call (~10-15 ms),
-// per-call dispatch overhead dominated, and GPU utilization sat at ~19%.
-// V14.9-W tried to fix this by loading the model N times — that
-// exhausted VRAM on a 6 GB RTX 2060 and wedged the DirectML driver
-// (full system hang).
+// One Session, batched inputs. A dedicated OS thread owns the
+// `MobileClipImage`. Tagging workers submit (rgb_256, oneshot) requests
+// through a crossbeam channel. The coordinator drains up to BATCH_SIZE
+// requests (or BATCH_TIMEOUT_MS, whichever first), packs them into one
+// (N, 3, 256, 256) tensor, runs `embed_batch` once, and fans the
+// embeddings back through the oneshots. Per-batch GPU dispatch is one
+// wake instead of N, and VRAM stays at single-session footprint.
 //
-// V14.9-X path: ONE Session, BATCHED inputs. A dedicated OS thread
-// owns the `MobileClipImage`. Tagging workers submit (rgb_256, oneshot)
-// requests through a crossbeam channel. The coordinator drains up to
-// BATCH_SIZE requests (or BATCH_TIMEOUT_MS, whichever first), packs
-// them into one (N, 3, 256, 256) tensor, runs `embed_batch` once, and
-// fans the embeddings back through the oneshots. Per-batch GPU
-// dispatch is one wake instead of N, and VRAM stays at single-session
-// footprint.
+// Alternative was N-session pool, which exhausted VRAM on a 6 GB RTX
+// 2060 and wedged the DirectML driver (full system hang).
 //
 // Failure mode: if `embed_batch` errors, every request in that batch
-// receives the error — caller decides whether to skip the file or
-// retry. The coordinator never panics on a single bad input.
+// receives the error — caller decides whether to skip the file or retry.
+// The coordinator never panics on a single bad input.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

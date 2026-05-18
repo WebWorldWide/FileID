@@ -1,6 +1,6 @@
 ﻿// TreeDiffControl — side-by-side current vs proposed folder tree.
 //
-// Mirror of macOS TreeDiffView. Renders two TreeView columns: the
+// Renders two TreeView columns: the
 // current folder structure as discovered, and the proposed structure
 // after applying the plan. Folders that change are highlighted gold;
 // new folders show a "+", deleted/empty folders fade.

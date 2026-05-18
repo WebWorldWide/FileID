@@ -9,9 +9,8 @@
 // We poll on construction + listen to the AnimationsEnabledChanged event,
 // so toggles surfaced while the app is open take effect immediately.
 //
-// Mirror of macOS @Environment(\.accessibilityReduceMotion). Every motion
-// primitive (Shimmer, Ripple, IridescentBorder, LavaLamp, springs) checks
-// `ReducedMotion.IsReduced` before kicking off animation.
+// Every motion primitive (Shimmer, Ripple, IridescentBorder, LavaLamp,
+// springs) checks `ReducedMotion.IsReduced` before kicking off animation.
 
 using System.ComponentModel;
 using Windows.UI.ViewManagement;

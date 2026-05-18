@@ -43,7 +43,7 @@ public partial class App : Application
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
-        // V14.7.2: defensive startup. Every step is wrapped so a single
+        // defensive startup. Every step is wrapped so a single
         // failure surfaces a Win32 MessageBox instead of silently
         // closing the window. The fail-visibly path is what makes
         // "opens then instantly closes" diagnosable.
@@ -60,12 +60,12 @@ public partial class App : Application
             Trace("EnsureDirectories");
             AppPaths.EnsureDirectories();
             Trace($"State dir = {AppPaths.Root}");
-            // V15.2: last-session breadcrumb. Detects whether the
+            // last-session breadcrumb. Detects whether the
             // previous session died via a native fast-fail (which
             // bypasses every managed crash sink) and writes a
             // forensic artifact if so. Always-run; idempotent.
             DebugLog.BeginSession();
-            // V15.1: structured startup line so a `crash-*.txt` from any
+            // structured startup line so a `crash-*.txt` from any
             // session can be correlated to a specific build + engine binary.
             var asmVersion = typeof(App).Assembly.GetName().Version?.ToString() ?? "unknown";
             var enginePath = AppPaths.EngineExePath;
@@ -149,7 +149,7 @@ public partial class App : Application
             try { LlamaRuntimeAutoInstaller.Hook(); }
             catch (System.Exception ex) { Trace($"LlamaRuntimeAutoInstaller.Hook failed (non-fatal): {ex.Message}"); }
 
-            // V15.1: CudnnAutoInstaller silent fetch removed. The ~430 MB
+            // CudnnAutoInstaller silent fetch removed. The ~430 MB
             // background download surprised users and added startup-time
             // GPU pressure during what was already a hang-prone period.
             // DirectML at 38 fps is sufficient on the RTX 2060 / 6 GB
@@ -166,6 +166,16 @@ public partial class App : Application
             Trace("window.Activate()");
             window.Activate();
             Trace("OnLaunched complete");
+
+            // harness auto-scan. When Program.AutoScanFolder is set
+            // (--auto-scan-folder CLI arg), kick off a scan once the engine
+            // reaches Ready. Fire-and-forget on purpose; failures land in
+            // app.log via the catch. The `[AUTO-SCAN]` marker lets the
+            // harness grep the log to assert the path actually ran.
+            if (!string.IsNullOrEmpty(Program.AutoScanFolder))
+            {
+                _ = AutoScanAsync(Program.AutoScanFolder!, Program.AutoExitAfterScan, window);
+            }
         }
         catch (System.Exception ex)
         {
@@ -189,6 +199,60 @@ public partial class App : Application
     [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "MessageBoxW", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
     private static extern int NativeMessageBox(System.IntPtr hWnd, string text, string caption, uint type);
 
+    /// <summary>harness entry point. Awaits engine readiness, sets
+    /// the folder on AppViewModel (so the UI reflects it), kicks off
+    /// StartScanAsync, and — if --auto-exit-after-scan was passed — closes
+    /// the window once ScanCompleteEvent fires so MarkCleanExit runs and
+    /// the harness can assert clean_exit=true.</summary>
+    private static async Task AutoScanAsync(string folderPath, bool exitAfterScan, Window window)
+    {
+        try
+        {
+            DebugLog.Info($"[AUTO-SCAN] requested path={folderPath} exitAfter={exitAfterScan}");
+            await EngineClient.Instance.WaitForReadyAsync(System.TimeSpan.FromSeconds(60));
+            if (EngineClient.Instance.State != ViewModels.EngineClient.LifecycleState.Ready)
+            {
+                DebugLog.Error($"[AUTO-SCAN] engine not Ready after 60s (state={EngineClient.Instance.State}); aborting.");
+                if (exitAfterScan) { window.DispatcherQueue.TryEnqueue(() => window.Close()); }
+                return;
+            }
+            AppViewModel.Instance.FolderPath = folderPath;
+            DebugLog.Info($"[AUTO-SCAN] starting scan; display={AppViewModel.Instance.FolderDisplay}");
+            await EngineClient.Instance.StartScanAsync(folderPath, AppViewModel.Instance.FolderDisplay);
+            if (!exitAfterScan) return;
+
+            // Wait for ScanComplete by watching Phase transition to Completed
+            // (or Failed). PropertyChanged fires on whatever thread the
+            // engine event arrived on — don't touch XAML in the handler.
+            var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            void OnEngineChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+            {
+                if (e.PropertyName != nameof(ViewModels.EngineClient.Phase)) return;
+                var phase = EngineClient.Instance.Phase;
+                if (phase == FileID.IpcSchema.ScanPhase.Completed || phase == FileID.IpcSchema.ScanPhase.Failed)
+                {
+                    tcs.TrySetResult(phase == FileID.IpcSchema.ScanPhase.Completed);
+                }
+            }
+            EngineClient.Instance.PropertyChanged += OnEngineChanged;
+            try
+            {
+                var ok = await tcs.Task;
+                DebugLog.Info($"[AUTO-SCAN] scan ended ok={ok}; closing window.");
+            }
+            finally
+            {
+                EngineClient.Instance.PropertyChanged -= OnEngineChanged;
+            }
+            window.DispatcherQueue.TryEnqueue(() => { try { window.Close(); } catch { } });
+        }
+        catch (System.Exception ex)
+        {
+            DebugLog.Error($"[AUTO-SCAN] failed: {ex.GetType().Name}: {ex.Message}");
+            if (exitAfterScan) { window.DispatcherQueue.TryEnqueue(() => { try { window.Close(); } catch { } }); }
+        }
+    }
+
     /// <summary>
     /// Last-resort handler for exceptions that escape the dispatcher loop.
     /// Logs locally; does NOT phone home (privacy guarantee).
@@ -198,7 +262,7 @@ public partial class App : Application
     /// </summary>
     private void OnUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
     {
-        // V15.1: write a dedicated crash dump BEFORE deciding whether to
+        // write a dedicated crash dump BEFORE deciding whether to
         // recover. Captures last 50 lines of app.log for context — until
         // this round we had no forensic data on UI-thread crashes.
         var path = DebugLog.WriteCrashDump("WinUI Application.UnhandledException", e.Exception, terminating: false);

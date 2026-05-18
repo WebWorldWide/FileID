@@ -34,7 +34,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         // "click sidebar mid-scan → app crash" symptom.
         ViewModel.PropertyChanged += OnViewModelPropertyChanged;
         ViewModel.Clusters.CollectionChanged += OnClustersCollectionChanged;
-        // V14.9-K3: auto-refresh on FaceClusteringComplete. Without this,
+        // auto-refresh on FaceClusteringComplete. Without this,
         // a user who runs `runFaceClustering` (or AutoPilot's clustering
         // stage) while sitting on the People tab sees zero update until
         // they leave + re-enter the tab. Subscribe to the engine event
@@ -46,16 +46,18 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     }
 
     private void OnEngineClientChanged(object? sender, PropertyChangedEventArgs e)
-    {
-        if (_unloaded) return;
-        if (e.PropertyName != nameof(FileID.ViewModels.EngineClient.LastFaceClustering)) return;
-        DispatcherQueue.TryEnqueue(async () =>
+        => DebugLog.SafeRun("PeopleView.OnEngineClientChanged", () =>
         {
             if (_unloaded) return;
-            try { await ViewModel.RefreshAsync(CancellationToken.None); }
-            catch (Exception ex) { DebugLog.Warn("PeopleView post-clustering refresh threw: " + ex.Message); }
+            if (e.PropertyName != nameof(FileID.ViewModels.EngineClient.LastFaceClustering)) return;
+            DebugLog.Debug($"[ENGINE-SUB:PeopleView] {e.PropertyName}");
+            DispatcherQueue.TryEnqueue(async () =>
+            {
+                if (_unloaded) return;
+                try { await ViewModel.RefreshAsync(CancellationToken.None); }
+                catch (Exception ex) { DebugLog.Warn("PeopleView post-clustering refresh threw: " + ex.Message); }
+            });
         });
-    }
 
     private async void OnLoadedAsync(object sender, RoutedEventArgs e)
     {

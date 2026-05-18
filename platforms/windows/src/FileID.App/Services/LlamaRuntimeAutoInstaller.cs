@@ -36,13 +36,15 @@ internal static class LlamaRuntimeAutoInstaller
     }
 
     private static void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
-    {
-        if (e.PropertyName is nameof(EngineClient.State)
-                           or nameof(EngineClient.Info))
+        => DebugLog.SafeRun("LlamaRuntimeAutoInstaller.OnEngineChanged", () =>
         {
-            TryStart();
-        }
-    }
+            if (e.PropertyName is nameof(EngineClient.State)
+                               or nameof(EngineClient.Info))
+            {
+                DebugLog.Debug($"[ENGINE-SUB:LlamaRuntimeAutoInstaller] {e.PropertyName}");
+                TryStart();
+            }
+        });
 
     private static void TryStart()
     {

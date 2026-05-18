@@ -1,7 +1,6 @@
 // ONNX Runtime execution-provider picker + GPU vendor probe.
 //
-// Mirrors the macOS side's hardware capability detection but targets
-// the Windows EP matrix:
+// Windows EP matrix:
 //   NVIDIA  → CUDA (if cuDNN+cudart present), else TensorRT, else DirectML
 //   Intel   → OpenVINO (if present), else DirectML
 //   Snapdragon WoA → QNN (if present), else DirectML on Adreno
@@ -125,32 +124,26 @@ fn push_unique(chain: &mut Vec<ExecutionProvider>, ep: ExecutionProvider) {
     }
 }
 
-/// V14.9-Y CRITICAL SAFETY: detects `DXGI_ERROR_DEVICE_REMOVED`
-/// (HRESULT 0x887A0005) in any ORT/DirectML error string.
+/// CRITICAL SAFETY: detects `DXGI_ERROR_DEVICE_REMOVED` (HRESULT 0x887A0005)
+/// in any ORT/DirectML error string.
 ///
-/// When Windows TDR (Timeout Detection and Recovery) kills the GPU
-/// device because an op exceeded the 2-second deadline, every
-/// subsequent `session.run()` returns this error. Without explicit
-/// detection, the engine logs ~100 identical per-file warnings per
-/// second, hammering the dying driver and preventing DWM from
-/// recovering — the user sees a black screen + maxed fans + must hard
-/// reboot.
+/// When Windows TDR kills the GPU because an op exceeded the 2-second
+/// deadline, every subsequent `session.run()` returns this error. Without
+/// explicit detection, the engine logs ~100 identical per-file warnings
+/// per second, hammering the dying driver and preventing DWM recovery —
+/// user sees a black screen + maxed fans + must hard reboot.
 ///
 /// Callers MUST treat a true result as fatal: cancel the scan, emit
-/// an `EngineError { kind: "gpu_device_removed" }`, and stop
-/// submitting any new GPU work for the rest of the process lifetime.
-/// The GPU device handle the EP holds is permanently invalid; only
-/// a full engine restart can recover.
+/// `EngineError { kind: "gpu_device_removed" }`, and stop submitting GPU
+/// work for the rest of the process lifetime. The EP's GPU device handle
+/// is permanently invalid; only a full engine restart recovers.
 ///
-/// The match strings cover both the bare HRESULT hex and the
-/// human-readable phrases ORT 2.0-rc.10's DirectML EP emits, plus the
-/// generic "device removed" wording other EPs (CUDA, OpenVINO) use
-/// when their device context dies. Substring match (not regex) keeps
-/// the hot path fast.
-/// Marker substring that callers attach via `.context()` to any
-/// session.run() error that came back as device-removed. The pipeline
-/// layer greps for this in the error chain to know it should cancel
-/// the whole scan instead of just skipping the current file.
+/// Match strings cover the bare HRESULT hex, DirectML EP wording, and
+/// generic "device removed" phrases from CUDA / OpenVINO. Substring (not
+/// regex) keeps the hot path fast.
+/// Marker substring attached via `.context()` to any session.run() error
+/// classified as device-removed. The pipeline layer greps for this in the
+/// error chain to know it should cancel the scan rather than skip the file.
 pub const GPU_DEVICE_REMOVED_MARKER: &str = "[FILEID_GPU_DEVICE_REMOVED]";
 
 /// Detects whether an error carries the marker added by the model
@@ -200,13 +193,6 @@ pub fn is_device_removed_error(err: &anyhow::Error) -> bool {
 /// Resolve a priority chain of our internal `ExecutionProvider` variants
 /// into the `ExecutionProviderDispatch` values ORT's `SessionBuilder::
 /// with_execution_providers` consumes.
-///
-/// V14.9-V: every model loader used to compute `priority_chain(...)` and
-/// then drop it on the floor (`let _ = chain;`). ORT silently fell back
-/// to the CPU EP for every model, so the engine pegged a CPU core
-/// regardless of detected GPU. This helper exists so the loaders can do
-/// `builder.with_execution_providers(execution_providers_for_chain(&chain))`
-/// in one line.
 ///
 /// CPU is the implicit fallback (ORT always has the CPU EP), so we don't
 /// emit an explicit dispatch for it — letting it fall through means a
@@ -386,9 +372,8 @@ fn probe_gpu_vendor() -> (GpuVendor, Option<String>) {
 
 // ── System CUDA toolkit lookup ─────────────────────────────────────
 //
-// V14.9 (2.1): when an NVIDIA card is present we register the system
-// CUDA toolkit's bin/ with AddDllDirectory so ORT's CUDA EP can find
-// cudart64_*.dll + the cuDNN DLLs the user installed via the toolkit.
+// When an NVIDIA card is present, register the system CUDA toolkit's bin/
+// with AddDllDirectory so ORT's CUDA EP can find cudart64_*.dll + cuDNN.
 // Without this the EP silently falls back to DirectML.
 //
 // Order: env var (CUDA_PATH then CUDA_HOME) → standard install root.
@@ -492,4 +477,112 @@ pub fn probe_cuda_pack() -> CudaPackProbe {
         };
     }
     CudaPackProbe { diagnostics: None }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression guard: every vendor's EP chain must end at CPU (the
+    /// always-present floor) and must include DirectML (the always-tried
+    /// fallback on Windows). The vendor-specific accelerated EPs come
+    /// first; ORT registers them in order and silently falls through
+    /// when an EP's DLLs aren't present at runtime — so unconditional
+    /// chain entry is correct here, the dynamic gating happens at
+    /// load time, not chain-build time.
+    fn assert_chain_terminates_at_cpu_with_directml(vendor: GpuVendor, chain: &[ExecutionProvider]) {
+        assert_eq!(
+            chain.last(),
+            Some(&ExecutionProvider::Cpu),
+            "{vendor:?} chain must end at CPU, got {chain:?}"
+        );
+        if !matches!(vendor, GpuVendor::None) {
+            assert!(
+                chain.contains(&ExecutionProvider::DirectMl),
+                "{vendor:?} chain must include DirectML, got {chain:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nvidia_chain_starts_with_cuda_then_tensorrt_then_directml_then_cpu() {
+        // Unset the user override so the test isn't poisoned by a developer
+        // box's preferred EP.
+        unsafe { std::env::remove_var("FILEID_GPU_EP_OVERRIDE"); }
+        let chain = priority_chain(GpuVendor::Nvidia);
+        assert_eq!(
+            chain,
+            vec![
+                ExecutionProvider::Cuda,
+                ExecutionProvider::TensorRt,
+                ExecutionProvider::DirectMl,
+                ExecutionProvider::Cpu,
+            ]
+        );
+    }
+
+    #[test]
+    fn amd_chain_is_directml_then_cpu() {
+        unsafe { std::env::remove_var("FILEID_GPU_EP_OVERRIDE"); }
+        let chain = priority_chain(GpuVendor::Amd);
+        assert_eq!(chain, vec![ExecutionProvider::DirectMl, ExecutionProvider::Cpu]);
+    }
+
+    #[test]
+    fn intel_chain_starts_with_openvino_then_directml_then_cpu() {
+        unsafe { std::env::remove_var("FILEID_GPU_EP_OVERRIDE"); }
+        let chain = priority_chain(GpuVendor::Intel);
+        assert_eq!(
+            chain,
+            vec![
+                ExecutionProvider::OpenVino,
+                ExecutionProvider::DirectMl,
+                ExecutionProvider::Cpu,
+            ]
+        );
+    }
+
+    #[test]
+    fn qualcomm_chain_starts_with_qnn_then_directml_then_cpu() {
+        unsafe { std::env::remove_var("FILEID_GPU_EP_OVERRIDE"); }
+        let chain = priority_chain(GpuVendor::Qualcomm);
+        assert_eq!(
+            chain,
+            vec![
+                ExecutionProvider::Qnn,
+                ExecutionProvider::DirectMl,
+                ExecutionProvider::Cpu,
+            ]
+        );
+    }
+
+    #[test]
+    fn other_vendor_chain_is_directml_then_cpu() {
+        unsafe { std::env::remove_var("FILEID_GPU_EP_OVERRIDE"); }
+        let chain = priority_chain(GpuVendor::Other("S3"));
+        assert_eq!(chain, vec![ExecutionProvider::DirectMl, ExecutionProvider::Cpu]);
+    }
+
+    #[test]
+    fn none_vendor_chain_is_cpu_only() {
+        unsafe { std::env::remove_var("FILEID_GPU_EP_OVERRIDE"); }
+        let chain = priority_chain(GpuVendor::None);
+        assert_eq!(chain, vec![ExecutionProvider::Cpu]);
+    }
+
+    #[test]
+    fn every_vendor_chain_invariants_hold() {
+        unsafe { std::env::remove_var("FILEID_GPU_EP_OVERRIDE"); }
+        for vendor in [
+            GpuVendor::Nvidia,
+            GpuVendor::Amd,
+            GpuVendor::Intel,
+            GpuVendor::Qualcomm,
+            GpuVendor::Other("test"),
+            GpuVendor::None,
+        ] {
+            let chain = priority_chain(vendor);
+            assert_chain_terminates_at_cpu_with_directml(vendor, &chain);
+        }
+    }
 }

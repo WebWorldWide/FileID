@@ -1,15 +1,26 @@
-﻿// FilePreviewSheet code-behind. Hosted inside a ContentDialog (so Esc /
-// click-outside dismiss come for free). Real preview body uses the same
-// shell-thumbnail provider chain Explorer uses (handles HEIC, RAW, Office,
-// .pages, etc) -- no special pdfium / Media Foundation roundtrips needed
-// for the visual preview at this fidelity.
+﻿// FilePreviewSheet code-behind. Kind-dispatched preview matching the macOS
+// LibraryView.swift:902-1112 preview sheet:
+//   image  → BitmapImage at 1024 px (shell IThumbnailProvider chain).
+//   video  → MediaPlayerElement with transport controls (in-app playback;
+//            macOS opens default app, we do better).
+//   audio  → MediaPlayerElement audio mode (in-app playback).
+//   pdf    → 1024 px shell thumbnail (page 1, matches macOS PDFKit).
+//   doc    → 1024 px shell thumbnail (Office providers render natively).
+//   other  → kind glyph + "Open in default app" affordance.
+//
+// Lifecycle: SetFile is called once on open and again on every prev/next
+// sibling navigation. CloseInternal is invoked by the toolbar X button,
+// Esc key, or when the host dialog hides — it pauses the media player so
+// audio doesn't keep playing after the sheet closes.
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media.Imaging;
 
 namespace FileID.Views.Library;
 
@@ -18,29 +29,26 @@ public sealed partial class FilePreviewSheet : UserControl
     public string FilePath { get; private set; } = string.Empty;
     public long FileId { get; private set; }
 
-    // V14.7.2: sibling navigation. The host (Library tab) sets the
-    // siblings list + current index when opening the sheet so <-/->
-    // can step through tiles without closing + reopening.
-    private System.Collections.Generic.IReadOnlyList<FileID.ViewModels.FileTile>? _siblings;
+    private IReadOnlyList<FileID.ViewModels.FileTile>? _siblings;
     private int _siblingIndex;
 
+    /// <summary>Raised by the toolbar X button + Esc. Host (LibraryView)
+    /// subscribes and calls <c>ContentDialog.Hide()</c>.</summary>
     public event EventHandler? RequestClose;
 
     public FilePreviewSheet()
     {
         InitializeComponent();
-        // Esc closes the sheet via the dialog's CloseButton; we also
-        // hook the KeyDown for <-/-> siblings nav so users don't have
-        // to bring the dialog buttons into focus.
         KeyDown += OnKeyDown;
+        // media playback must stop when the sheet unloads.
+        // MediaPlayerElement holds an IMediaPlaybackSource that pins the
+        // file handle — without an explicit pause the audio keeps playing
+        // after the dialog dismisses.
+        Unloaded += (_, _) => StopAndClearMedia();
         IsTabStop = true;
     }
 
-    /// <summary>V14.7.2: set the siblings list so the user can <-/->
-    /// through neighboring tiles without closing the sheet.
-    /// Internal because FileTile is internal; LibraryView calls this
-    /// from the same assembly when opening the sheet.</summary>
-    internal void SetSiblings(System.Collections.Generic.IReadOnlyList<FileID.ViewModels.FileTile> siblings, int currentIndex)
+    internal void SetSiblings(IReadOnlyList<FileID.ViewModels.FileTile> siblings, int currentIndex)
     {
         _siblings = siblings;
         _siblingIndex = currentIndex;
@@ -50,8 +58,18 @@ public sealed partial class FilePreviewSheet : UserControl
     private void UpdateNavButtons()
     {
         if (PrevButton == null || NextButton == null) return;
-        PrevButton.IsEnabled = _siblings != null && _siblingIndex > 0;
-        NextButton.IsEnabled = _siblings != null && _siblings.Count > 0 && _siblingIndex < _siblings.Count - 1;
+        var haveSiblings = _siblings is { Count: > 0 };
+        PrevButton.IsEnabled = haveSiblings && _siblingIndex > 0;
+        NextButton.IsEnabled = haveSiblings && _siblingIndex < (_siblings?.Count ?? 0) - 1;
+        if (haveSiblings && _siblings!.Count > 1)
+        {
+            SiblingCountText.Visibility = Visibility.Visible;
+            SiblingCountText.Text = $"{_siblingIndex + 1} of {_siblings.Count}";
+        }
+        else
+        {
+            SiblingCountText.Visibility = Visibility.Collapsed;
+        }
     }
 
     private void OnKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
@@ -67,7 +85,7 @@ public sealed partial class FilePreviewSheet : UserControl
                 e.Handled = true;
                 break;
             case Windows.System.VirtualKey.Escape:
-                RequestClose?.Invoke(this, EventArgs.Empty);
+                RaiseClose();
                 e.Handled = true;
                 break;
         }
@@ -75,6 +93,13 @@ public sealed partial class FilePreviewSheet : UserControl
 
     private void OnPrevClicked(object sender, RoutedEventArgs e) => NavigateSibling(-1);
     private void OnNextClicked(object sender, RoutedEventArgs e) => NavigateSibling(+1);
+    private void OnCloseClicked(object sender, RoutedEventArgs e) => RaiseClose();
+
+    private void RaiseClose()
+    {
+        StopAndClearMedia();
+        RequestClose?.Invoke(this, EventArgs.Empty);
+    }
 
     private void NavigateSibling(int delta)
     {
@@ -91,17 +116,22 @@ public sealed partial class FilePreviewSheet : UserControl
                                bool hasFaces = false, bool hasText = false)
     {
         FileId = fileId;
-        // Toggle the badge overlay synchronously (don't wait for the async
-        // thumbnail render). Tile-level booleans come from the DB — no
-        // additional IPC needed here.
         FacesBadge.Visibility = hasFaces ? Visibility.Visible : Visibility.Collapsed;
         TextBadge.Visibility = hasText ? Visibility.Visible : Visibility.Collapsed;
 
-        // Clear stale tag input + status between siblings.
         TagInput.Text = string.Empty;
         TagStatusText.Visibility = Visibility.Collapsed;
 
-        // Async-void -> must wrap the entire body. Any unhandled exception
+        // Hide every preview surface up front; the kind dispatcher below
+        // re-shows exactly one. Without this a navigation from video →
+        // image would leave both visible.
+        StopAndClearMedia();
+        PreviewImage.Visibility = Visibility.Collapsed;
+        PreviewMedia.Visibility = Visibility.Collapsed;
+        PlaceholderPanel.Visibility = Visibility.Collapsed;
+        LoadingPanel.Visibility = Visibility.Visible;
+
+        // Async-void → must wrap the entire body. Any unhandled exception
         // here would terminate the dispatcher and crash the window.
         try
         {
@@ -110,7 +140,291 @@ public sealed partial class FilePreviewSheet : UserControl
         catch (Exception ex)
         {
             Services.DebugLog.Warn("FilePreviewSheet.SetFile threw: " + ex);
+            ShowPlaceholder(kind, "Preview failed: " + ex.Message);
         }
+        finally
+        {
+            LoadingPanel.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    private async Task SetFileCoreAsync(string path, string kind, long sizeBytes, double? modifiedAt)
+    {
+        FilePath = path;
+        FileNameText.Text = Path.GetFileName(path);
+        ParentPathText.Text = Path.GetDirectoryName(path) ?? string.Empty;
+
+        // Show the Analyze button only for images — matches macOS, which
+        // gates Deep Analyze to image files on the sheet (other kinds
+        // route through the Deep Analyze tab).
+        AnalyzeButton.Visibility = kind == "image" ? Visibility.Visible : Visibility.Collapsed;
+
+        // Build the sidebar metadata grid.
+        BuildMetadata(path, kind, sizeBytes, modifiedAt);
+
+        // Set the kind glyph for the placeholder fallback.
+        KindGlyphIcon.Glyph = GlyphFor(kind);
+
+        // Kind dispatch — matches macOS LibraryView.swift:975-1006.
+        switch (kind)
+        {
+            case "image":
+            case "pdf":
+            case "doc":
+                await LoadShellThumbnailAsync(path, kind);
+                break;
+            case "video":
+                LoadVideoOrAudio(path, kind);
+                break;
+            case "audio":
+                LoadVideoOrAudio(path, kind);
+                break;
+            default:
+                ShowPlaceholder(kind, "No inline preview for this file type — use Open.");
+                break;
+        }
+    }
+
+    /// <summary>Use the Windows shell IThumbnailProvider chain to render
+    /// the file at 1024 px. Same API Explorer uses, so HEIC / RAW / Office
+    /// / .pages / PDF all render correctly when their providers are
+    /// installed. Falls back to the placeholder if the provider returns
+    /// nothing.</summary>
+    private async Task LoadShellThumbnailAsync(string path, string kind)
+    {
+        // BitmapImage is a DispatcherObject. The await on
+        // GetThumbnailAsync can resume on a worker thread; constructing the
+        // BitmapImage there is a known native-fast-fail shape —
+        // RaiseFailFastException, no managed catch. Capture the dispatcher
+        // before any await and marshal the BitmapImage construction +
+        // PreviewImage.Source/Visibility assignment inside one TryEnqueue.
+        var dispatcher = DispatcherQueue;
+        Windows.Storage.FileProperties.StorageItemThumbnail? thumb = null;
+        try
+        {
+            var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(path);
+            thumb = await file.GetThumbnailAsync(
+                Windows.Storage.FileProperties.ThumbnailMode.SingleItem,
+                1024,
+                Windows.Storage.FileProperties.ThumbnailOptions.UseCurrentScale);
+            if (thumb is { Size: > 0 } && dispatcher != null)
+            {
+                var captured = thumb;
+                thumb = null;
+                var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var enqueued = dispatcher.TryEnqueue(async () =>
+                {
+                    try
+                    {
+                        var bmp = new BitmapImage();
+                        await bmp.SetSourceAsync(captured);
+                        PreviewImage.Source = bmp;
+                        PreviewImage.Visibility = Visibility.Visible;
+                        tcs.TrySetResult(true);
+                    }
+                    catch (Exception ex)
+                    {
+                        Services.DebugLog.Warn($"FilePreviewSheet UI render ({kind}): {ex.Message}");
+                        tcs.TrySetResult(false);
+                    }
+                    finally
+                    {
+                        try { captured.Dispose(); } catch { }
+                    }
+                });
+                if (!enqueued)
+                {
+                    Services.DebugLog.Warn("FilePreviewSheet: dispatcher.TryEnqueue returned false.");
+                    try { captured.Dispose(); } catch { }
+                }
+                else if (await tcs.Task)
+                {
+                    return;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Services.DebugLog.Warn($"FilePreviewSheet shell thumbnail failed for {kind}: {ex.Message}");
+        }
+        finally
+        {
+            try { thumb?.Dispose(); } catch { }
+        }
+        ShowPlaceholder(kind, kind switch
+        {
+            "image" => "Image couldn't be decoded by any installed provider.",
+            "pdf" => "PDF preview unavailable — open it in your default reader.",
+            "doc" => "No preview available — Office handler may not be installed.",
+            _ => "No preview available for this file type.",
+        });
+    }
+
+    /// <summary>Hand the file to MediaPlayerElement. Windows ships a
+    /// Media Foundation–backed control that handles most codecs out of
+    /// the box (H.264, HEVC if codec installed, MP3, AAC, WMA, FLAC, …).
+    /// Transport controls are XAML-rendered (AreTransportControlsEnabled
+    /// in the .xaml).
+    ///
+    /// wire MediaFailed for the async failure path. Codec-missing
+    /// (HEVC video without the Store codec extension, exotic container,
+    /// DRM-protected file) fires MediaFailed off-thread; without this
+    /// handler the user would just see a blank media surface forever.
+    /// On failure we fall back to the kind placeholder + "Open in default
+    /// app" hint, matching macOS's "video opens externally" behavior.</summary>
+    private string _currentMediaKind = string.Empty;
+    private void LoadVideoOrAudio(string path, string kind)
+    {
+        try
+        {
+            _currentMediaKind = kind;
+            var uri = new Uri(path, UriKind.Absolute);
+            PreviewMedia.Source = Windows.Media.Core.MediaSource.CreateFromUri(uri);
+            PreviewMedia.Visibility = Visibility.Visible;
+            // Attach failure handler on the MediaPlayer (it's lazily created
+            // when Source is set). Detach the previous subscription so we
+            // don't multi-fire on rapid sibling navigation.
+            if (PreviewMedia.MediaPlayer is { } mp)
+            {
+                mp.MediaFailed -= OnMediaPlayerFailed;
+                mp.MediaFailed += OnMediaPlayerFailed;
+            }
+        }
+        catch (Exception ex)
+        {
+            Services.DebugLog.Warn($"FilePreviewSheet media load failed for {kind}: {ex.Message}");
+            ShowPlaceholder(kind, "Media couldn't load — try Open in default app.");
+        }
+    }
+
+    private void OnMediaPlayerFailed(Windows.Media.Playback.MediaPlayer sender,
+                                     Windows.Media.Playback.MediaPlayerFailedEventArgs args)
+    {
+        // Fires on a Media Foundation worker thread. Marshal to UI thread
+        // before touching XAML state. Capture the kind under the lock so a
+        // navigation that races our failure doesn't bleed kind labels.
+        var kind = _currentMediaKind;
+        var err = args.ErrorMessage ?? args.Error.ToString();
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            Services.DebugLog.Warn($"FilePreviewSheet media failed ({kind}): {err}");
+            ShowPlaceholder(kind, kind switch
+            {
+                "video" => "Video couldn't decode — missing codec? Try Open in default app.",
+                "audio" => "Audio couldn't decode — try Open in default app.",
+                _ => "Media couldn't load.",
+            });
+        });
+    }
+
+    private void ShowPlaceholder(string kind, string caption)
+    {
+        PreviewImage.Visibility = Visibility.Collapsed;
+        PreviewMedia.Visibility = Visibility.Collapsed;
+        PlaceholderPanel.Visibility = Visibility.Visible;
+        PlaceholderText.Text = caption;
+    }
+
+    private void StopAndClearMedia()
+    {
+        try
+        {
+            // MediaPlayer is null until Source is set; guard before
+            // touching to avoid an NRE on the initial hide pass.
+            if (PreviewMedia?.MediaPlayer is { } mp)
+            {
+                try { mp.MediaFailed -= OnMediaPlayerFailed; } catch { /* swallow */ }
+                mp.Pause();
+            }
+            if (PreviewMedia != null)
+            {
+                PreviewMedia.Source = null;
+            }
+            _currentMediaKind = string.Empty;
+        }
+        catch (Exception ex)
+        {
+            Services.DebugLog.Warn("FilePreviewSheet.StopAndClearMedia: " + ex.Message);
+        }
+    }
+
+    private void BuildMetadata(string path, string kind, long sizeBytes, double? modifiedAt)
+    {
+        MetadataGrid.Children.Clear();
+        MetadataGrid.RowDefinitions.Clear();
+
+        AddMetadataRow("Path", path, monospaced: true, wrap: true);
+        AddMetadataRow("Kind", KindDisplay(kind));
+        AddMetadataRow("Size", FormatSize(sizeBytes));
+        if (modifiedAt.HasValue)
+        {
+            var dt = DateTimeOffset.FromUnixTimeMilliseconds((long)(modifiedAt.Value * 1000)).LocalDateTime;
+            AddMetadataRow("Modified", dt.ToString("g"));
+        }
+        if (FacesBadge.Visibility == Visibility.Visible) AddMetadataRow("Faces", "Detected");
+        if (TextBadge.Visibility == Visibility.Visible) AddMetadataRow("Text", "Detected (OCR)");
+    }
+
+    private void AddMetadataRow(string label, string value, bool monospaced = false, bool wrap = false)
+    {
+        var rowIdx = MetadataGrid.RowDefinitions.Count;
+        MetadataGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+        var labelText = new TextBlock
+        {
+            Text = label,
+            Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
+            Foreground = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+            VerticalAlignment = VerticalAlignment.Top,
+        };
+        Grid.SetRow(labelText, rowIdx);
+        Grid.SetColumn(labelText, 0);
+        MetadataGrid.Children.Add(labelText);
+
+        var valueText = new TextBlock
+        {
+            Text = value,
+            Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
+            TextWrapping = wrap ? TextWrapping.Wrap : TextWrapping.NoWrap,
+            TextTrimming = wrap ? TextTrimming.None : TextTrimming.CharacterEllipsis,
+            IsTextSelectionEnabled = true,
+        };
+        if (monospaced)
+        {
+            valueText.FontFamily = new Microsoft.UI.Xaml.Media.FontFamily("Consolas");
+        }
+        Grid.SetRow(valueText, rowIdx);
+        Grid.SetColumn(valueText, 1);
+        MetadataGrid.Children.Add(valueText);
+    }
+
+    private static string KindDisplay(string kind) => kind switch
+    {
+        "image" => "Image",
+        "video" => "Video",
+        "pdf" => "PDF",
+        "doc" => "Document",
+        "audio" => "Audio",
+        _ => kind,
+    };
+
+    private static string GlyphFor(string kind) => kind switch
+    {
+        // Segoe Fluent Icons — match the tile-level glyphs.
+        "image" => "", // Photo
+        "video" => "", // Video
+        "pdf" => "", // Document
+        "doc" => "", // Document
+        "audio" => "", // MusicNote
+        _ => "", // Folder / generic
+    };
+
+    private static string FormatSize(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:0.#} KB";
+        if (bytes < 1024L * 1024 * 1024) return $"{bytes / (1024.0 * 1024):0.#} MB";
+        return $"{bytes / (1024.0 * 1024 * 1024):0.##} GB";
     }
 
     private async void OnAnalyzeClicked(object sender, RoutedEventArgs e)
@@ -119,9 +433,6 @@ public sealed partial class FilePreviewSheet : UserControl
         try
         {
             AnalyzeButton.IsEnabled = false;
-            // Use the recommended VLM model id; the engine will surface
-            // a friendly error if the model isn't installed (Welcome /
-            // Settings -> Install).
             await ViewModels.EngineClient.Instance.DeepAnalyzeFileAsync(FileId, "qwen2_5_vl_3b");
         }
         catch (Exception ex)
@@ -132,81 +443,6 @@ public sealed partial class FilePreviewSheet : UserControl
         {
             AnalyzeButton.IsEnabled = true;
         }
-    }
-
-    private async Task SetFileCoreAsync(string path, string kind, long sizeBytes, double? modifiedAt)
-    {
-        FilePath = path;
-        FileNameText.Text = Path.GetFileName(path);
-        PathText.Text = path;
-
-        var sizeDisplay = FormatSize(sizeBytes);
-        var modifiedDisplay = modifiedAt.HasValue
-            ? DateTimeOffset.FromUnixTimeMilliseconds((long)(modifiedAt.Value * 1000)).LocalDateTime.ToString("g")
-            : "--";
-        var kindDisplay = kind switch
-        {
-            "image" => "Image",
-            "video" => "Video",
-            "pdf" => "PDF",
-            "doc" => "Document",
-            "audio" => "Audio",
-            _ => kind,
-        };
-        MetadataText.Text = $"{kindDisplay} * {sizeDisplay} * modified {modifiedDisplay}";
-
-        // Kind-glyph fallback for non-renderable kinds.
-        KindGlyphIcon.Glyph = kind switch
-        {
-            "image" => "", // Photo
-            "video" => "", // Video
-            "pdf" => "", // Document
-            "doc" => "", // Document
-            "audio" => "", // Music note
-            _ => "", // Folder / generic
-        };
-
-        // Show the rendered preview for image/video/pdf via the same
-        // shell-thumbnail provider chain Explorer uses (handles HEIC,
-        // RAW, Office, .pages, etc). Falls back to the kind glyph for
-        // audio/other/failures.
-        if (kind is "image" or "video" or "pdf" or "doc")
-        {
-            try
-            {
-                var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(path);
-                using var thumb = await file.GetThumbnailAsync(
-                    Windows.Storage.FileProperties.ThumbnailMode.SingleItem,
-                    1024,
-                    Windows.Storage.FileProperties.ThumbnailOptions.UseCurrentScale);
-                if (thumb != null && thumb.Size > 0)
-                {
-                    var bmp = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage();
-                    await bmp.SetSourceAsync(thumb);
-                    PreviewImage.Source = bmp;
-                    PreviewImage.Visibility = Visibility.Visible;
-                    PlaceholderPanel.Visibility = Visibility.Collapsed;
-                    return;
-                }
-            }
-            catch { /* fall through to placeholder */ }
-        }
-
-        PreviewImage.Visibility = Visibility.Collapsed;
-        PlaceholderPanel.Visibility = Visibility.Visible;
-        PlaceholderText.Text = kind switch
-        {
-            "audio" => Path.GetFileName(path),
-            _ => "No preview available for this file type.",
-        };
-    }
-
-    private static string FormatSize(long bytes)
-    {
-        if (bytes < 1024) return $"{bytes} B";
-        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:0.#} KB";
-        if (bytes < 1024L * 1024 * 1024) return $"{bytes / (1024.0 * 1024):0.#} MB";
-        return $"{bytes / (1024.0 * 1024 * 1024):0.##} GB";
     }
 
     private void OnRevealClicked(object sender, RoutedEventArgs e)
@@ -220,14 +456,6 @@ public sealed partial class FilePreviewSheet : UserControl
             {
                 Services.SafeOpen.Reveal(FilePath);
             }
-        });
-
-    private void OnCopyPathClicked(object sender, RoutedEventArgs e)
-        => Services.DebugLog.SafeRun(nameof(OnCopyPathClicked), () =>
-        {
-            var dp = new Windows.ApplicationModel.DataTransfer.DataPackage();
-            dp.SetText(FilePath);
-            Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(dp);
         });
 
     private void OnTagInputKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)

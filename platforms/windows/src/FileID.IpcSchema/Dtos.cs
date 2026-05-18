@@ -22,8 +22,8 @@ public sealed record RestructurePlan(
     string LibraryRoot,
     System.Collections.Generic.IReadOnlyList<RestructureMove> Moves,
     System.Collections.Generic.IReadOnlyList<RestructureCategoryCount> CategoryCounts,
-    /// <summary>V14.7.2: engine-authoritative Anchor/Mixed/Junk counts.
-    /// Null on plans from older engine builds that didn't compute it.</summary>
+    /// <summary>Engine-authoritative Anchor/Mixed/Junk counts. Null on
+    /// plans from older engine builds that didn't compute it.</summary>
     FolderClassificationCounts? FolderClassifications = null);
 
 public sealed record RestructureCategoryCount(string Category, uint Count);
@@ -81,12 +81,10 @@ public sealed record HardwareInfo(
     bool QnnPackPresent,
     string Recommendation);
 
-/// <summary>V14.9-G: payload of the `hardwareReprobed` event. Engine
-/// re-runs the probe in response to a `verifyCudaPack` command from
-/// Settings → Performance "Verify install" and emits this with the
-/// fresh hardware snapshot + a human-readable diagnostics string when
-/// CUDA pack is absent (explains *why* it's absent, e.g. "missing
-/// cudart64_12.dll in the same directory as cudnn64_8.dll").</summary>
+/// <summary>Payload of the `hardwareReprobed` event. Engine re-runs the
+/// probe in response to `verifyCudaPack` (Settings → Performance "Verify
+/// install") and emits this with the fresh hardware snapshot + a
+/// diagnostics string explaining why the CUDA pack is absent.</summary>
 public sealed record HardwareReprobed(
     HardwareInfo Hardware,
     string? Diagnostics);
@@ -160,9 +158,8 @@ public sealed record DeepAnalyzeProgress(
     double? EtaSeconds,
     string? CurrentPath,
     string ModelKind,
-    /// <summary>V14.9-I: partial caption text accumulated as the VLM emits
-    /// tokens. Engine throttles to 4 Hz. Null on non-token progress
-    /// events (e.g. "starting file N").</summary>
+    /// <summary>Partial caption text accumulated as the VLM emits tokens.
+    /// Engine throttles to 4 Hz. Null on non-token progress events.</summary>
     string? CurrentCaption = null);
 
 public sealed record DeepAnalyzeFileDone(

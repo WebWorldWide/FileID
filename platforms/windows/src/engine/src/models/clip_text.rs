@@ -12,7 +12,7 @@ use ort::session::{Session, SessionInputValue, SessionOutputs};
 use ort::value::Tensor;
 
 use super::clip_tokenizer::ClipTokenizer;
-use super::runtime::{execution_providers_for_chain, priority_chain, RuntimeProbe};
+use super::runtime::{classify_inference_error, execution_providers_for_chain, priority_chain, RuntimeProbe};
 
 const CONTEXT_LEN: usize = 77;
 
@@ -29,7 +29,6 @@ impl ClipText {
         }
         let probe = RuntimeProbe::detect();
         let chain = priority_chain(probe.vendor);
-        // V14.9-V: actually register the EPs (was a no-op `let _chain` before).
         let mut builder = Session::builder()
             .context("ORT session builder")?
             .with_intra_threads(1)
@@ -67,7 +66,8 @@ impl ClipText {
         let outputs: SessionOutputs = self
             .session
             .run(vec![(input_name, SessionInputValue::from(tensor))])
-            .context("CLIP text session.run")?;
+            .context("CLIP text session.run")
+            .map_err(classify_inference_error)?;
         let (_, value) = outputs
             .iter()
             .next()

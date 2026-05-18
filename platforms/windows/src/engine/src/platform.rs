@@ -1,17 +1,17 @@
 //! Windows platform helpers — parent-PID watchdog, worker count heuristic,
 //! physical memory probe, sleep guard.
 //!
-//! The non-windows builds (Linux Phase 5) get stub implementations so the
-//! engine compiles on every host while the Windows-specific surfaces stay
-//! gated behind `#[cfg(windows)]`.
+//! Non-Windows builds get stub implementations so the engine compiles on
+//! every host while Windows-specific surfaces stay gated by `#[cfg(windows)]`.
 
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Notify;
 
 /// Redact a user path for logs: keep last two components; pass
-/// app-structural paths verbatim. Mirrors PathRedaction.swift.
+/// app-structural paths verbatim.
 pub fn redact_path_for_log(path: impl AsRef<Path>) -> String {
+    use std::path::Component;
     let s = path.as_ref().to_string_lossy().to_string();
     let s_lower = s.to_lowercase();
     // App-structural paths: pass through.
@@ -21,10 +21,17 @@ pub fn redact_path_for_log(path: impl AsRef<Path>) -> String {
     {
         return s;
     }
+    // Only Normal components are PII candidates — Prefix (drive letter,
+    // UNC server\share) and RootDir are protocol/topology, never PII.
+    // Excluding them ensures C:\ → "…" and \\server\share\user\file.jpg
+    // → "…/user/file.jpg" rather than leaking the drive/server.
     let parts: Vec<&str> = path
         .as_ref()
         .components()
-        .filter_map(|c| c.as_os_str().to_str())
+        .filter_map(|c| match c {
+            Component::Normal(s) => s.to_str(),
+            _ => None,
+        })
         .collect();
     if parts.is_empty() {
         return "…".to_string();
@@ -64,6 +71,35 @@ mod redaction_tests {
     fn handles_empty_input() {
         assert_eq!(redact_path_for_log(""), "…");
     }
+
+    /// UNC path must keep only the last 2 Normal components; the server
+    /// and share name are protocol topology and must not leak into logs.
+    #[test]
+    #[cfg(windows)]
+    fn redacts_unc_path_keeping_last_two_components() {
+        let r = redact_path_for_log(r"\\server\share\user\file.jpg");
+        assert!(r.ends_with("user/file.jpg"), "got: {r}");
+        assert!(!r.contains("server"), "server name leaked: {r}");
+        assert!(!r.contains("share"), "share name leaked: {r}");
+    }
+
+    /// Drive root (Prefix + RootDir, no Normal components) collapses to
+    /// "…" so we don't leak even the drive letter in cases where the
+    /// caller hands us a bare root.
+    #[test]
+    #[cfg(windows)]
+    fn redacts_drive_root_to_ellipsis() {
+        assert_eq!(redact_path_for_log(r"C:\"), "…");
+    }
+
+    /// App structural paths are returned UNCHANGED — they refer to
+    /// FileID's own dirs (logs, models, sentinels) and are useful for
+    /// debugging without redaction.
+    #[test]
+    fn app_structural_logs_path_unchanged() {
+        let s = r"C:\Users\Adam\AppData\Local\FileID\logs\app.log";
+        assert_eq!(redact_path_for_log(s), s);
+    }
 }
 
 /// Number of tagging workers to spin up by default. Mirrors the macOS
@@ -80,6 +116,65 @@ pub fn physical_memory_gb() -> f64 {
     sys.refresh_memory();
     let bytes = sys.total_memory(); // bytes since sysinfo 0.30
     (bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+}
+
+/// Current process RSS (resident set size) in MiB. Mirrors macOS
+/// `Hardware.swift::residentMemoryMB` (task_info MACH_TASK_BASIC_INFO).
+/// Used by the sidebar Memory stat — Windows previously hardcoded 0,
+/// so the user saw "Memory: 0 MB" mid-scan even though ML inference
+/// holds 600 MB-1.2 GB.
+#[cfg(windows)]
+pub fn process_memory_mb() -> u64 {
+    use windows::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    use windows::Win32::System::Threading::GetCurrentProcess;
+
+    unsafe {
+        let mut counters = PROCESS_MEMORY_COUNTERS {
+            cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+            ..Default::default()
+        };
+        let ok = GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            &mut counters,
+            counters.cb,
+        );
+        if ok.is_ok() {
+            (counters.WorkingSetSize / (1024 * 1024)) as u64
+        } else {
+            0
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn process_memory_mb() -> u64 {
+    // Linux: read VmRSS from /proc/self/status (in kB).
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
+            for line in s.lines() {
+                if let Some(rest) = line.strip_prefix("VmRSS:") {
+                    let kb: u64 = rest
+                        .trim()
+                        .trim_end_matches(" kB")
+                        .trim()
+                        .parse()
+                        .unwrap_or(0);
+                    return kb / 1024;
+                }
+            }
+        }
+        return 0;
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // macOS / other POSIX: sysinfo per-process refresh would work but
+        // adds a heavy probe; for now return 0 and let a future Linux/macOS
+        // port slot in the right libc / mach call.
+        0
+    }
 }
 
 /// Get the parent-process PID via OS-specific API. None if unknown.
@@ -189,7 +284,7 @@ pub async fn watch_parent(parent_pid: u32, shutdown: Arc<Notify>) {
     let _ = shutdown;
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        // Stub: real implementation lands in Phase 5 alongside Linux work.
+        // TODO(linux): real implementation.
     }
 }
 
@@ -233,15 +328,13 @@ impl Drop for SleepGuard {
 
 // ─── Process priority ───────────────────────────────────────────────────────
 //
-// V14.9-Y: was ABOVE_NORMAL, now NORMAL. The previous bump fought DWM
-// for CPU during scans, and when DirectML hit TDR (GPU device removed)
-// our high-priority workers spammed retries against the dying driver
-// faster than DWM could recover the GPU → full system hang. Staying at
-// NORMAL lets the desktop compositor win under contention while still
-// using all our worker threads.
+// Default NORMAL (was ABOVE_NORMAL). Higher priority fights DWM for CPU
+// during scans, and when DirectML hits TDR (GPU device removed) the
+// high-priority workers spam retries faster than DWM can recover the GPU
+// → full system hang. NORMAL lets the compositor win under contention.
 //
-// Override via FILEID_PROCESS_PRIORITY=above_normal if a user explicitly
-// wants the engine to outrank background services (Defender, OneDrive).
+// Override via FILEID_PROCESS_PRIORITY=above_normal if the engine should
+// outrank background services (Defender, OneDrive).
 
 /// RAII guard. While alive, the engine process priority is set per the
 /// FILEID_PROCESS_PRIORITY env var (default NORMAL). Drop = restore NORMAL.
@@ -307,10 +400,10 @@ impl Drop for PriorityBoost {
 /// `cuda_dll_registration_failed` engine error so a missing CUDA EP
 /// becomes diagnosable instead of silently falling back to DirectML.
 ///
-/// V14.9-U: depth extended from 1 to MAX_DEPTH so the auto-fetched cuDNN
-/// pack (which extracts to `<root>/<versioned-archive>/bin/*.dll`) gets
-/// picked up. Existing single-level callers (llama.cpp, packs/<vendor>)
-/// keep working — only dirs that actually contain DLLs are registered.
+/// Walks up to MAX_DEPTH so the auto-fetched cuDNN pack (which extracts
+/// to `<root>/<versioned-archive>/bin/*.dll`) gets picked up. Existing
+/// single-level callers keep working — only dirs that actually contain
+/// DLLs are registered.
 #[cfg(windows)]
 pub fn register_dll_dirs_under(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     use windows::core::PCWSTR;
@@ -370,9 +463,9 @@ pub fn register_dll_dirs_under(_root: &std::path::Path) -> Vec<std::path::PathBu
 
 /// Returns the primary (largest-VRAM) non-software adapter's
 /// `DedicatedVideoMemory` in MB. None if DXGI enumeration fails or no
-/// physical adapter is present. Used by V14.9-X to gate the ML Session
-/// pool — without this, a V14.9-W-style multi-Session config can exhaust
-/// a 6 GB card's VRAM and wedge the DirectML driver (full system hang).
+/// physical adapter is present. Used to gate the ML Session pool —
+/// without this, a multi-Session config can exhaust a 6 GB card's VRAM
+/// and wedge the DirectML driver (full system hang).
 ///
 /// Cheap to call (~1 ms); the DXGI factory + adapter enumeration is the
 /// same primitive `models::runtime::probe_gpu_vendor` uses for vendor
@@ -415,10 +508,10 @@ pub fn dedicated_vram_mb() -> Option<u64> {
     None
 }
 
-/// V15.0 Phase H: lower per-thread I/O priority to "VeryLow" so the
-/// tagging workers' bulk JPEG/PNG reads don't compete with foreground
-/// apps (File Explorer browsing, video playback). Windows kernel I/O
-/// scheduler honors thread-level priority hints for filesystem reads.
+/// Lower per-thread I/O priority to "VeryLow" so the tagging workers'
+/// bulk JPEG/PNG reads don't compete with foreground apps (File Explorer
+/// browsing, video playback). The Windows kernel I/O scheduler honors
+/// thread-level priority hints for filesystem reads.
 ///
 /// `THREAD_INFORMATION_CLASS::ThreadPowerThrottling` is the modern API
 /// but it's complex. The simpler `THREAD_PRIORITY_LOWEST` via

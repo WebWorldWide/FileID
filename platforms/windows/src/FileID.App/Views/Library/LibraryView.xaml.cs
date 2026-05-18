@@ -79,26 +79,29 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     }
 
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
-    {
-        switch (e.PropertyName)
+        => Services.DebugLog.SafeRun("LibraryView.OnEngineChanged", () =>
         {
-            case nameof(EngineClient.Phase):
-                if (EngineClient.Instance.Phase == FileID.IpcSchema.ScanPhase.Completed)
-                {
-                    RequestLibraryRefresh(force: true);
-                }
-                break;
-            case nameof(EngineClient.LastBatch):
-                var summary = EngineClient.Instance.LastBatch;
-                if (summary is null) return;
-                long batchIndex = summary.BatchIndex;
-                if (batchIndex == _lastSeenBatchIndex) return;
-                _lastSeenBatchIndex = batchIndex;
-                if (DateTime.UtcNow - _lastReloadAt < LibraryReloadThrottle) return;
-                RequestLibraryRefresh(force: false);
-                break;
-        }
-    }
+            switch (e.PropertyName)
+            {
+                case nameof(EngineClient.Phase):
+                    if (EngineClient.Instance.Phase == FileID.IpcSchema.ScanPhase.Completed)
+                    {
+                        Services.DebugLog.Debug($"[ENGINE-SUB:LibraryView] {e.PropertyName}=Completed");
+                        RequestLibraryRefresh(force: true);
+                    }
+                    break;
+                case nameof(EngineClient.LastBatch):
+                    var summary = EngineClient.Instance.LastBatch;
+                    if (summary is null) return;
+                    long batchIndex = summary.BatchIndex;
+                    if (batchIndex == _lastSeenBatchIndex) return;
+                    _lastSeenBatchIndex = batchIndex;
+                    if (DateTime.UtcNow - _lastReloadAt < LibraryReloadThrottle) return;
+                    Services.DebugLog.Debug($"[ENGINE-SUB:LibraryView] {e.PropertyName} batch={batchIndex}");
+                    RequestLibraryRefresh(force: false);
+                    break;
+            }
+        });
 
     private void RequestLibraryRefresh(bool force)
     {
@@ -127,7 +130,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         }
     }
 
-    /// <summary>V14.9-D1: select-all visible toggle. If anything is
+    /// <summary>select-all visible toggle. If anything is
     /// currently selected, clear; otherwise select every visible tile.</summary>
     private void OnSelectAllClicked(object sender, RoutedEventArgs e)
         => DebugLog.SafeRun(nameof(OnSelectAllClicked), () =>
@@ -145,7 +148,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             UpdateSelectionBar();
         });
 
-    /// <summary>V14.9-D2: pop the top undo entry. The label update
+    /// <summary>pop the top undo entry. The label update
     /// follows automatically via the UndoStack PropertyChanged handler.</summary>
     private async void OnUndoLastClicked(object sender, RoutedEventArgs e)
     {
@@ -175,12 +178,11 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     ///      RefreshAsync / SemanticSearch awaits.
     ///   3. THEN dispose `_clip` and `_thumbnails`. If those go first, a
     ///      resumed task touches a disposed service and the process dies
-    ///      hard (V14.9-F-A2 — the user's "click sidebar mid-scan → app
-    ///      dies" repro). On Windows there's no Swift / SwiftUI lifecycle
-    ///      to bail us out of an inverted order.
+    ///      hard ("click sidebar mid-scan → app dies" crash class). On
+    ///      Windows there's no SwiftUI lifecycle to bail us out of an
+    ///      inverted order.
     ///
-    /// V15.2 emphasis: this is one of three lifecycle-order invariants
-    /// that the macOS app gets for free from SwiftUI but Windows has to
+    /// This is one of three lifecycle-order invariants Windows has to
     /// hand-orchestrate. Do not touch.
     /// </summary>
     private void OnUnloaded(object sender, RoutedEventArgs e)
@@ -279,10 +281,29 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                                             Microsoft.UI.Xaml.Controls.ItemsRepeaterElementPreparedEventArgs args)
     {
         if (args.Element is not FrameworkElement el || el.DataContext is not FileTile tile) return;
-        // V15.2: tile is back in the virtualization window — undo the
+        // tile is back in the virtualization window — undo the
         // ElementClearing detach so a fresh thumbnail load can bind.
         tile.IsDetached = false;
-        if (tile.Thumbnail != null) return; // cached on previous prepare
+
+        // tile entry animation — fade + scale-in, matches macOS
+        // LibraryView.swift:566-575 (.transition(.opacity.combined(with:
+        // .scale(scale: 0.96))) with .easeOut(0.30)). Each tile springs
+        // in from opacity 0 + scale 0.96 to 1/1 on prepare. Recycled
+        // virtualized elements get the same treatment so a scroll-back
+        // looks identical to the first reveal. Reduced-motion users
+        // get a hard snap (no animation).
+        AnimateTileEntry(el);
+
+        if (tile.Thumbnail != null)
+        {
+            // Already-loaded thumbnail (LRU cache hit on re-virtualization).
+            // The XAML Opacity="0" + ImageOpened="OnTileImageOpened" would
+            // wait for a decode event that won't fire if the BitmapImage is
+            // already decoded. Make the thumbnail visible immediately and
+            // let the parent tile-entry spring carry the visual reveal.
+            EnsureThumbnailVisible(el);
+            return;
+        }
 
         var cts = new CancellationTokenSource();
         // BUG-12: TryAdd in case of a re-entrant prepare (rare but cheap to defend).
@@ -295,11 +316,134 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         _ = LoadThumbAsync(tile, cts.Token);
     }
 
+    /// <summary>macOS-parity tile-entry animation. Snap to opacity=0
+    /// + scale=0.96 first, then spring to 1 using Tight tokens (0.35/0.78,
+    /// matches macOS scale-in feel). Operates on the Composition visual
+    /// directly so XAML Opacity bindings don't fight the animation.
+    ///
+    /// Defensive: every Composition call wrapped in try/catch because
+    /// StartAnimation on a detached / mid-recycle element can throw, and a
+    /// throw from a fire-and-forget animation callback is one of the
+    /// fast-fail vectors. Worst case here: the tile snaps in without
+    /// animation — never crashes the app.</summary>
+    private static void AnimateTileEntry(FrameworkElement el)
+    {
+        try
+        {
+            var visual = Microsoft.UI.Xaml.Hosting.ElementCompositionPreview.GetElementVisual(el);
+            // Always stop in-flight animations on this visual (recycled
+            // tiles can have leftover springs from a previous prepare).
+            visual.StopAnimation("Opacity");
+            visual.StopAnimation("Scale.X");
+            visual.StopAnimation("Scale.Y");
+
+            if (FileID.Theme.Motion.ReducedMotion.Instance.IsReduced)
+            {
+                visual.Opacity = 1f;
+                visual.Scale = new System.Numerics.Vector3(1f, 1f, 1f);
+                return;
+            }
+
+            var size = visual.Size;
+            if (size.X <= 0 || size.Y <= 0)
+            {
+                // Pre-layout: scale animation from corner would look wrong.
+                // Skip the scale; do opacity-only fade-in instead. This path
+                // hits during the very first prepare before measure/arrange.
+                visual.Opacity = 0f;
+                visual.Scale = new System.Numerics.Vector3(1f, 1f, 1f);
+                var t1 = FileID.Theme.Motion.SpringEasing.Tokens.Tight;
+                FileID.Theme.Motion.SpringEasing.AnimateOpacity(el, 1f, t1.Response, t1.DampingFraction);
+                return;
+            }
+
+            visual.CenterPoint = new System.Numerics.Vector3(size.X / 2, size.Y / 2, 0);
+            visual.Opacity = 0f;
+            visual.Scale = new System.Numerics.Vector3(0.96f, 0.96f, 1f);
+            var t = FileID.Theme.Motion.SpringEasing.Tokens.Tight;
+            FileID.Theme.Motion.SpringEasing.AnimateOpacity(el, 1f, t.Response, t.DampingFraction);
+            FileID.Theme.Motion.SpringEasing.AnimateScale(el, 1f, t.Response, t.DampingFraction);
+        }
+        catch (Exception ex)
+        {
+            Services.DebugLog.Warn("AnimateTileEntry threw: " + ex.Message);
+            // Snap to final state so the tile is at least visible.
+            try { el.Opacity = 1; } catch { /* swallow */ }
+        }
+    }
+
+    /// <summary>snap a recycled tile's thumbnail Image to opacity=1
+    /// when the BitmapImage is already decoded (ImageOpened won't fire on a
+    /// re-attached, already-decoded source). Operates on the composition
+    /// visual so animation state from a previous tile lifecycle is also
+    /// cleared.</summary>
+    private static void EnsureThumbnailVisible(FrameworkElement tileRoot)
+    {
+        var img = FindBoundImage(tileRoot);
+        if (img is null) return;
+        try
+        {
+            var visual = Microsoft.UI.Xaml.Hosting.ElementCompositionPreview.GetElementVisual(img);
+            visual.StopAnimation("Opacity");
+            visual.Opacity = 1f;
+        }
+        catch (Exception ex)
+        {
+            Services.DebugLog.Warn("EnsureThumbnailVisible: " + ex.Message);
+        }
+    }
+
+    private static Microsoft.UI.Xaml.Controls.Image? FindBoundImage(DependencyObject root)
+    {
+        var count = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(root);
+        for (int i = 0; i < count; i++)
+        {
+            var child = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(root, i);
+            if (child is Microsoft.UI.Xaml.Controls.Image img && img.Source is not null)
+            {
+                return img;
+            }
+            var nested = FindBoundImage(child);
+            if (nested is not null) return nested;
+        }
+        return null;
+    }
+
+    /// <summary>thumbnail crossfade. Fires once per BitmapImage
+    /// decode. The XAML <c>Opacity="0"</c> initial state is the static
+    /// fallback; this snaps composition Opacity to 0 (override any leftover
+    /// animation state) and springs to 1.
+    ///
+    /// Defensive try/catch — this is a XAML event callback that runs
+    /// outside any SafeRun scope, and a throw escapes to the dispatcher.</summary>
+    private void OnTileImageOpened(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Microsoft.UI.Xaml.Controls.Image img) return;
+        try
+        {
+            var visual = Microsoft.UI.Xaml.Hosting.ElementCompositionPreview.GetElementVisual(img);
+            visual.StopAnimation("Opacity");
+            if (FileID.Theme.Motion.ReducedMotion.Instance.IsReduced)
+            {
+                visual.Opacity = 1f;
+                return;
+            }
+            visual.Opacity = 0f;
+            var t = FileID.Theme.Motion.SpringEasing.Tokens.Standard;
+            FileID.Theme.Motion.SpringEasing.AnimateOpacity(img, 1f, t.Response, t.DampingFraction);
+        }
+        catch (Exception ex)
+        {
+            Services.DebugLog.Warn("OnTileImageOpened threw: " + ex.Message);
+            try { img.Opacity = 1; } catch { /* swallow */ }
+        }
+    }
+
     private void OnRepeaterElementClearing(Microsoft.UI.Xaml.Controls.ItemsRepeater sender,
                                            Microsoft.UI.Xaml.Controls.ItemsRepeaterElementClearingEventArgs args)
     {
         if (args.Element is not FrameworkElement el || el.DataContext is not FileTile tile) return;
-        // V15.2: mark detached so a late-arriving thumbnail render
+        // mark detached so a late-arriving thumbnail render
         // doesn't bind into a stale tile.
         tile.IsDetached = true;
         if (_inflight.TryRemove(tile, out var cts))
@@ -307,13 +451,29 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             try { cts.Cancel(); } catch { /* swallow */ }
             cts.Dispose();
         }
+        // reset thumbnail Image composition opacity so the next
+        // recycle gets a fresh crossfade. Setting XAML Opacity alone
+        // isn't enough — a finished StartAnimation leaves the visual
+        // pinned at its final value, decoupled from the XAML property.
+        // Stop the animation explicitly + snap visual.Opacity = 0.
+        var img = FindBoundImage(el);
+        if (img is not null)
+        {
+            try
+            {
+                var visual = Microsoft.UI.Xaml.Hosting.ElementCompositionPreview.GetElementVisual(img);
+                visual.StopAnimation("Opacity");
+                visual.Opacity = 0f;
+            }
+            catch { /* swallow — animation reset is best-effort */ }
+        }
     }
 
     private async Task LoadThumbAsync(FileTile tile, CancellationToken ct)
     {
         try
         {
-            // V15.2: explicit UI dispatcher post for the bind. The previous
+            // explicit UI dispatcher post for the bind. The previous
             // ConfigureAwait(true) relied on the captured SynchronizationContext
             // (DispatcherQueueSynchronizationContext on UI thread), which the
             // thumbnail service's TCS may or may not honor depending on how
@@ -337,6 +497,34 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 
     // Single tap toggles selection when Ctrl is held; Shift extends from
     // the last clicked tile; otherwise sets a single selection.
+    // tile hover scale matching macOS LibraryView.swift:681-682
+    // (scaleEffect 1.012 + 0.18s spring). Composition spring runs on the
+    // GPU; visual fidelity matches SwiftUI's .spring system. CenterPoint
+    // is reset on every hover so resized tiles scale around their actual
+    // current center.
+    private void OnTilePointerEntered(object sender, PointerRoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnTilePointerEntered), () =>
+        {
+            if (sender is not FrameworkElement el) return;
+            ApplyTileScale(el, 1.012f);
+        });
+
+    private void OnTilePointerExited(object sender, PointerRoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnTilePointerExited), () =>
+        {
+            if (sender is not FrameworkElement el) return;
+            ApplyTileScale(el, 1.0f);
+        });
+
+    private static void ApplyTileScale(FrameworkElement el, float scale)
+    {
+        var visual = Microsoft.UI.Xaml.Hosting.ElementCompositionPreview.GetElementVisual(el);
+        visual.CenterPoint = new System.Numerics.Vector3(
+            (float)(el.ActualWidth / 2), (float)(el.ActualHeight / 2), 0);
+        FileID.Theme.Motion.SpringEasing.AnimateScalar(el, "Scale.X", scale, 0.18, 0.8);
+        FileID.Theme.Motion.SpringEasing.AnimateScalar(el, "Scale.Y", scale, 0.18, 0.8);
+    }
+
     private void OnTileTapped(object sender, TappedRoutedEventArgs e)
         => DebugLog.SafeRun(nameof(OnTileTapped), () =>
         {
@@ -429,7 +617,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         {
             FileId = t.Id,
             CurrentPath = t.Path,
-            ProposedName = t.FileName, // Phase 6 will seed VLM-proposed names.
+            ProposedName = t.FileName, // VLM-proposed names will be wired later.
             Include = true,
         }).ToArray();
 
@@ -564,25 +752,47 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     // Double-click any tile → open the FilePreviewSheet modal. The Tag
     // on the tile carries the absolute path; we look up the FileTile in
     // ViewModel.Items to get kind + size + modified for the metadata strip.
+    //
+    // pass the sibling list (frozen at open time so a fresh-batch
+    // refresh mid-preview can't shift indices under the user) and wire
+    // the sheet's own RequestClose to hide the dialog. The sheet's
+    // toolbar X button + Esc key handle close inline, matching macOS's
+    // self-contained preview chrome — no separate dialog CloseButton.
     private async void OnTileDoubleTapped(object sender, Microsoft.UI.Xaml.Input.DoubleTappedRoutedEventArgs e)
     {
         if (sender is not FrameworkElement el || el.Tag is not string path) return;
         FileTile? tile = null;
-        foreach (var t in ViewModel.Items)
+        int tileIndex = -1;
+        for (int i = 0; i < ViewModel.Items.Count; i++)
         {
-            if (t.Path == path) { tile = t; break; }
+            if (ViewModel.Items[i].Path == path) { tile = ViewModel.Items[i]; tileIndex = i; break; }
         }
         if (tile is null) return;
 
+        // Snapshot siblings so a live BatchSummary refresh mid-preview
+        // can't reorder under our feet (matches macOS frozen previewSiblings).
+        var siblings = ViewModel.Items.ToList();
+
         var sheet = new FilePreviewSheet();
+        sheet.SetSiblings(siblings, tileIndex);
         sheet.SetFile(tile.Path, tile.Kind, tile.SizeBytes, tile.ModifiedAt, tile.Id, tile.HasFaces, tile.HasText);
+
         var dialog = new Microsoft.UI.Xaml.Controls.ContentDialog
         {
             XamlRoot = XamlRoot,
             Content = sheet,
-            CloseButtonText = "Close",
-            DefaultButton = Microsoft.UI.Xaml.Controls.ContentDialogButton.Close,
+            // no dialog CloseButton — the sheet's own toolbar X
+            // button (with media-stop + RequestClose) is the canonical
+            // dismissal path. A separate ContentDialog CloseButton would
+            // double-render below the preview.
         };
+        // override the default ContentDialog max bounds so the
+        // preview sheet actually gets the 1080×720 minimum it declares.
+        // WinUI 3's default caps at ~640×480 which would crop our sidebar.
+        dialog.Resources["ContentDialogMaxWidth"] = 1600.0;
+        dialog.Resources["ContentDialogMaxHeight"] = 1100.0;
+        sheet.RequestClose += (_, _) => { try { dialog.Hide(); } catch { /* swallow */ } };
+
         try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
     }
 
@@ -626,7 +836,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             EngineClient.Instance.PropertyChanged -= OnceHandler;
             tcs.TrySetResult(emb.Embedding?.ToArray());
         }
-        // V14.9-A4: subscribe + try/finally so any throw between subscribe
+        // subscribe + try/finally so any throw between subscribe
         // and the final unsubscribe still cleans up. -= is idempotent, so
         // double-removal (handler self-removed + finally) is safe.
         EngineClient.Instance.PropertyChanged += OnceHandler;

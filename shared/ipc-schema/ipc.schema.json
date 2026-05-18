@@ -40,7 +40,8 @@
               "required": ["rootPath"],
               "properties": {
                 "rootPath":    { "type": "string", "description": "Absolute filesystem path to the folder root to scan." },
-                "rootDisplay": { "type": ["string", "null"], "description": "Optional human-readable label (defaults to rootPath if omitted)." }
+                "rootDisplay": { "type": ["string", "null"], "description": "Optional human-readable label (defaults to rootPath if omitted)." },
+                "rescan":      { "type": "boolean", "default": false, "description": "When true, force every file to be reprocessed even if scanned_at >= modified_unix in the DB. Default false = incremental rescan (skip already-current files)." }
               }
             }
           }
@@ -261,6 +262,11 @@
         { "type": "object", "required": ["deepAnalyzeComplete"],     "additionalProperties": false, "properties": { "deepAnalyzeComplete":     { "$ref": "#/$defs/SinglePositional/DeepAnalyzeComplete" } } },
         { "type": "object", "required": ["modelDownloadProgress"],   "additionalProperties": false, "properties": { "modelDownloadProgress":   { "$ref": "#/$defs/SinglePositional/ModelDownloadProgress" } } },
         { "type": "object", "required": ["queueState"],              "additionalProperties": false, "properties": { "queueState":              { "$ref": "#/$defs/SinglePositional/QueueState" } } },
+        { "type": "object", "required": ["restructurePlan"],         "additionalProperties": false, "properties": { "restructurePlan":         { "$ref": "#/$defs/SinglePositional/RestructurePlan" } } },
+        { "type": "object", "required": ["restructureApplyResult"],  "additionalProperties": false, "properties": { "restructureApplyResult":  { "$ref": "#/$defs/SinglePositional/RestructureApplyResult" } } },
+        { "type": "object", "required": ["bulkActionResult"],        "additionalProperties": false, "properties": { "bulkActionResult":        { "$ref": "#/$defs/SinglePositional/BulkActionResult" } } },
+        { "type": "object", "required": ["clipTextEmbedding"],       "additionalProperties": false, "properties": { "clipTextEmbedding":       { "$ref": "#/$defs/SinglePositional/ClipTextEmbedding" } } },
+        { "type": "object", "required": ["mergeSuggestions"],        "additionalProperties": false, "properties": { "mergeSuggestions":        { "$ref": "#/$defs/SinglePositional/MergeSuggestions" } } },
         {
           "type": "object",
           "required": ["hardwareReprobed"],
@@ -575,6 +581,143 @@
               "running":          { "anyOf": [ { "type": "null" }, { "$ref": "#/$defs/QueuedJob" } ] },
               "pending":          { "type": "array", "items": { "$ref": "#/$defs/QueuedJob" } },
               "totalEtaSeconds":  { "type": ["number", "null"] }
+            }
+          }
+        }
+      },
+
+      "RestructurePlan": {
+        "description": "Engine-computed plan for re-organizing files into category folders. On macOS this is returned synchronously from planRestructure; on Windows the engine emits this event so the cross-process app can render the Sankey diagram.",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["_0"],
+        "properties": {
+          "_0": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["libraryRoot", "moves", "categoryCounts"],
+            "properties": {
+              "libraryRoot":           { "type": "string" },
+              "moves":                 { "type": "array", "items": { "type": "object", "additionalProperties": false,
+                "required": ["fileID", "source", "destination", "category"],
+                "properties": {
+                  "fileID":      { "type": "integer" },
+                  "source":      { "type": "string" },
+                  "destination": { "type": "string" },
+                  "category":    { "type": "string" },
+                  "tier":        { "type": ["string", "null"], "description": "V14.9 A7: per-move tier — Anchor / Mixed / Junk." }
+                }
+              } },
+              "categoryCounts":        { "type": "array", "items": { "type": "object", "additionalProperties": false,
+                "required": ["category", "count"],
+                "properties": { "category": { "type": "string" }, "count": { "type": "integer", "minimum": 0 } }
+              } },
+              "folderClassifications": {
+                "anyOf": [
+                  { "type": "null" },
+                  { "type": "object", "additionalProperties": false,
+                    "required": ["anchorFolders", "mixedFolders", "junkFolders"],
+                    "properties": {
+                      "anchorFolders": { "type": "integer", "minimum": 0 },
+                      "mixedFolders":  { "type": "integer", "minimum": 0 },
+                      "junkFolders":   { "type": "integer", "minimum": 0 }
+                    } }
+                ],
+                "description": "V14.7.2: engine-authoritative folder classification counts. Null on older engines."
+              }
+            }
+          }
+        }
+      },
+
+      "RestructureApplyResult": {
+        "description": "Reply to applyRestructure. applied/failed are file counts; privilegeError surfaces a 'Developer Mode required for symlinks' message when the user opted into symlink mode without SeCreateSymbolicLinkPrivilege.",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["_0"],
+        "properties": {
+          "_0": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["applied", "failed"],
+            "properties": {
+              "applied":        { "type": "integer", "minimum": 0 },
+              "failed":         { "type": "integer", "minimum": 0 },
+              "privilegeError": { "type": ["string", "null"] }
+            }
+          }
+        }
+      },
+
+      "BulkActionResult": {
+        "description": "Reply to applyTags / renameFiles / trashFiles / mergeClusters. Action is one of those four string literals; messages carries per-file results.",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["_0"],
+        "properties": {
+          "_0": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["action", "succeeded", "failed", "messages"],
+            "properties": {
+              "action":    { "type": "string", "enum": ["applyTags", "renameFiles", "trashFiles", "mergeClusters"] },
+              "succeeded": { "type": "integer", "minimum": 0 },
+              "failed":    { "type": "integer", "minimum": 0 },
+              "messages":  { "type": "array", "items": { "type": "object", "additionalProperties": false,
+                "required": ["ok"],
+                "properties": {
+                  "fileID":  { "type": ["integer", "null"] },
+                  "ok":      { "type": "boolean" },
+                  "message": { "type": ["string", "null"] }
+                }
+              } }
+            }
+          }
+        }
+      },
+
+      "ClipTextEmbedding": {
+        "description": "Reply to embedTextQuery. The app dot-products this 512-d L2-normalized float32 embedding against clip_embeddings rows to rank Library files by semantic similarity to the user's text query.",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["_0"],
+        "properties": {
+          "_0": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["queryID", "query", "embedding"],
+            "properties": {
+              "queryID":   { "type": "string" },
+              "query":     { "type": "string" },
+              "embedding": { "type": "array", "items": { "type": "number" }, "minItems": 512, "maxItems": 512 }
+            }
+          }
+        }
+      },
+
+      "MergeSuggestions": {
+        "description": "Reply to findMergeSuggestions. Each pair surfaces two person clusters that may belong to the same identity, with a similarity score and the anchor face IDs the user can preview.",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["_0"],
+        "properties": {
+          "_0": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["pairs"],
+            "properties": {
+              "pairs": { "type": "array", "items": { "type": "object", "additionalProperties": false,
+                "required": ["sourcePersonID", "destinationPersonID", "similarity", "sourceAnchorFaceID", "destinationAnchorFaceID", "sourceMemberCount", "destinationMemberCount"],
+                "properties": {
+                  "sourcePersonID":          { "type": "integer" },
+                  "destinationPersonID":     { "type": "integer" },
+                  "similarity":              { "type": "number", "minimum": 0, "maximum": 1 },
+                  "sourceAnchorFaceID":      { "type": "integer" },
+                  "destinationAnchorFaceID": { "type": "integer" },
+                  "sourceMemberCount":       { "type": "integer", "minimum": 0 },
+                  "destinationMemberCount":  { "type": "integer", "minimum": 0 }
+                }
+              } }
             }
           }
         }

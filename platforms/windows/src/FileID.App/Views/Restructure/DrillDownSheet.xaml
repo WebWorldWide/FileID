@@ -2,7 +2,7 @@
 <!--
     DrillDownSheet — modal listing every file flowing through a single
     Sankey ribbon or TreeDiff folder. Each row shows a thumbnail + the
-    pre-move path + the post-move path. Mirror of macOS Restructure
+    pre-move path + the post-move path.
     drill-down behavior.
 -->
 <UserControl

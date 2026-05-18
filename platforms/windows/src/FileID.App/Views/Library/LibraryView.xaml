@@ -2,13 +2,11 @@
 <!--
     LibraryView — search bar + kind filter + thumbnail grid.
 
-    Mirror of macOS Library/LibraryView.swift. Same visual hierarchy:
+ Same visual hierarchy:
       - Top toolbar: search box (Ctrl+F focus), kind segmented control
       - Grid: ItemsRepeater + UniformGridLayout, 256-px tiles
       - Empty state: when no rows match the current query/filter
 
-    Phase 2.5 cut: empty state and toolbar wired to LibraryViewModel.
-    Phase 2.6 swaps in real ThumbnailService bindings + the FilePreviewSheet.
 -->
 <UserControl
     x:Class="FileID.Views.Library.LibraryView"
@@ -38,7 +36,7 @@
                        TextWrapping="Wrap" />
         </StackPanel>
 
-        <!-- Toolbar: search + kind filter + V14.9-D1 Select-all-visible + V14.9-D2 Undo pill. -->
+        <!-- Toolbar: search + kind filter + Select-all-visible + Undo pill. -->
         <Grid Grid.Row="1" ColumnSpacing="12">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
@@ -66,7 +64,7 @@
                 <ComboBoxItem Content="Audio" Tag="audio"/>
             </ComboBox>
 
-            <!-- V14.9-D1: explicit "Select all" affordance. macOS Library
+            <!-- explicit "Select all" affordance. macOS Library
                  tab always exposes this so users don't have to discover
                  Ctrl+Click. Toggling fills the selection bar; clicking
                  again clears. -->
@@ -80,7 +78,7 @@
                 </StackPanel>
             </Button>
 
-            <!-- V14.9-D2: Undo-last-rename header button. Hidden when the
+            <!-- Undo-last-rename header button. Hidden when the
                  UndoStack is empty; shows a tappable pill with the last
                  destructive op's label when entries exist. -->
             <Button x:Name="UndoButton"
@@ -155,9 +153,14 @@
                            ItemsSource="{x:Bind ViewModel.Items, Mode=OneWay}"
                            ElementPrepared="OnRepeaterElementPrepared"
                            ElementClearing="OnRepeaterElementClearing">
+                <!-- matches macOS LibraryView.swift:49
+                     .adaptive(minimum: 160, maximum: 220).
+                     UniformGridLayout's MinItemWidth + ItemsStretch="Fill"
+                     produces the same behavior: tiles start at 160 px,
+                     stretch to fill until a new column fits, then snap. -->
                 <ItemsRepeater.Layout>
-                    <UniformGridLayout MinItemWidth="256"
-                                       MinItemHeight="256"
+                    <UniformGridLayout MinItemWidth="160"
+                                       MinItemHeight="160"
                                        MinRowSpacing="12"
                                        MinColumnSpacing="12"
                                        ItemsStretch="Fill"/>
@@ -165,6 +168,9 @@
 
                 <ItemsRepeater.ItemTemplate>
                     <DataTemplate x:DataType="vm:FileTile">
+                        <!-- PointerEntered/Exited drive a spring
+                             scale (1.012, response 0.18s) matching macOS
+                             LibraryView.swift:681-682 hover affordance. -->
                         <Grid CornerRadius="12"
                               Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                               BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
@@ -176,6 +182,8 @@
                               DoubleTapped="OnTileDoubleTapped"
                               CanDrag="True"
                               DragStarting="OnTileDragStarting"
+                              PointerEntered="OnTilePointerEntered"
+                              PointerExited="OnTilePointerExited"
                               ToolTipService.ToolTip="{x:Bind Path}">
                             <Grid.ContextFlyout>
                                 <MenuFlyout>
@@ -219,15 +227,21 @@
                                     Background="{ThemeResource SubtleFillColorTertiaryBrush}"
                                     CornerRadius="8">
                                 <Grid>
-                                    <!-- V14.7.2: Shimmer placeholder while
+                                    <!-- Shimmer placeholder while
                                          thumbnail loads. Visibility tied to
                                          Thumbnail null-ness via converter. -->
                                     <motion:ShimmerView
                                         Visibility="{x:Bind Thumbnail, Mode=OneWay, Converter={StaticResource NullToVisibility}}"/>
+                                    <!-- Opacity starts at 0; OnTileImageOpened springs
+                                         it to 1 after the BitmapImage decodes. Matches macOS
+                                         `.transition(.opacity).animation(.easeOut(duration:0.40),
+                                         value: thumb != nil)` (LibraryView.swift:809/683). -->
                                     <Image Source="{x:Bind Thumbnail, Mode=OneWay}"
                                            Stretch="UniformToFill"
                                            HorizontalAlignment="Stretch"
-                                           VerticalAlignment="Stretch" />
+                                           VerticalAlignment="Stretch"
+                                           Opacity="0"
+                                           ImageOpened="OnTileImageOpened" />
                                 </Grid>
                             </Border>
                             <Border Grid.Row="0"

@@ -46,6 +46,7 @@ platforms/apple/dist/
 # ─── Rust / Cargo (Windows engine, future Linux engine) ─────────────────────
 platforms/windows/src/engine/target/
 platforms/linux/**/target/
+platforms/linux/target/
 **/*.rs.bk
 Cargo.lock.bak
 

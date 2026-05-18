@@ -4,8 +4,7 @@
 //
 // Inference order: resize-and-letterbox → ImageNet mean/std normalize
 // → CHW float32 → ORT session.run → L2 normalize. Persisted as raw
-// little-endian bytes in `clip_embeddings.embedding` (cross-platform
-// DB compatibility with macOS).
+// little-endian bytes in `clip_embeddings.embedding`.
 
 use std::path::{Path, PathBuf};
 
@@ -47,7 +46,8 @@ impl MobileClipImage {
         let session = builder
             .commit_from_file(path)
             .context("ORT session commit (MobileCLIP image)")?;
-        // V15.0 Phase A: warmup with a zero 256×256 frame.
+        // Warmup with a zero 256×256 frame so first-call kernel compile
+        // happens during load.
         let mut model = Self { session, input_size: 256 };
         let warmup_started = std::time::Instant::now();
         let _ = model.embed(&[0u8; 3 * 256 * 256])?;
@@ -112,15 +112,14 @@ impl MobileClipImage {
         Ok(emb)
     }
 
-    /// V14.9-X: batched inference. Takes N pre-resized 256×256 RGB8
-    /// buffers, packs them into a single (N, 3, 256, 256) tensor, calls
-    /// `session.run` ONCE, and returns N L2-normalized embeddings.
+    /// Batched inference. Takes N pre-resized 256×256 RGB8 buffers, packs
+    /// them into a single (N, 3, 256, 256) tensor, calls `session.run` ONCE,
+    /// and returns N L2-normalized embeddings.
     ///
-    /// Why: per-call dispatch overhead through DirectML is sizable
-    /// (kernel queue submission, fence wait, GPU↔CPU sync). Doing 4
-    /// images in one call ≈ 2× the wall time of one image, so effective
-    /// throughput is ~2× per Session without growing VRAM. Workers
-    /// upstream batch via `pipeline/batch_clip.rs`.
+    /// Per-call dispatch overhead through DirectML is sizable (kernel queue
+    /// submission, fence wait, GPU↔CPU sync). Doing 4 images in one call ≈
+    /// 2× the wall time of one image, so throughput is ~2× per Session
+    /// without growing VRAM.
     pub fn embed_batch(
         &mut self,
         rgb_256_images: &[Vec<u8>],

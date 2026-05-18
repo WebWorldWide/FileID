@@ -1,5 +1,4 @@
 // Two-pass density clustering + quality validation for face identity.
-// Port of macOS engine/Sources/FileIDEngine/Pipeline/IdentityClustering.swift.
 // Replaces Chinese Whispers, which collapsed bridge faces into mega-clusters.
 //
 //   Pass 1 — connected components on a kNN graph at cosine ≥ pass1Cosine.
@@ -133,14 +132,10 @@ where
     for i in 0..n {
         root_members.entry(uf.find(i)).or_default().push(i);
     }
-    // V15.3 Phase 7: iterate in sorted-key order so cluster-ID assignment
-    // is deterministic across runs. Without this, HashMap iteration order
-    // leaks into `cores`, which leaks into `core_centroids`, which leaks
-    // into the cluster_id remap in `face_clustering::cluster`. A re-scan
-    // of the same library could produce different People-tab cluster
-    // numbers each time. Caught by
-    // `pipeline::face_clustering::tests::clustering_is_deterministic`
-    // (proptest).
+    // Iterate in sorted-key order so cluster-ID assignment is deterministic
+    // across runs. Otherwise HashMap iteration order leaks all the way into
+    // People-tab cluster numbers, and a re-scan of the same library produces
+    // different IDs each time.
     let mut sorted_groups: Vec<(usize, Vec<usize>)> = root_members.into_iter().collect();
     sorted_groups.sort_by_key(|(root, _)| *root);
     let mut cores: Vec<Vec<usize>> = Vec::new();
@@ -448,5 +443,68 @@ mod tests {
         assert_eq!(result.cluster_ids[0], result.cluster_ids[1]);
         assert_eq!(result.cluster_ids[2], result.cluster_ids[3]);
         assert_ne!(result.cluster_ids[0], result.cluster_ids[2]);
+    }
+
+    /// All-identical embeddings (same person photographed N times) must
+    /// land in exactly one cluster. Guards against a regression where
+    /// the union-find or the post-DBSCAN refinement step splits a
+    /// genuinely-singular identity into per-instance clusters.
+    #[test]
+    fn all_identical_embeddings_form_one_cluster() {
+        let unit_vec = unit(vec![1.0, 0.0, 0.0, 0.0]);
+        let embeddings: Vec<Vec<f32>> = (0..6).map(|_| unit_vec.clone()).collect();
+        let embeddings_ref = embeddings.clone();
+        let searcher = |i: usize| {
+            (0..embeddings_ref.len())
+                .filter(|&j| j != i)
+                .map(|j| Neighbor {
+                    idx: j,
+                    similarity: dot(&embeddings_ref[i], &embeddings_ref[j]),
+                })
+                .collect()
+        };
+        let result = cluster(&embeddings, searcher, Hyperparameters::default());
+        assert_eq!(result.cluster_count, 1, "all-identical must yield 1 cluster");
+        let first_id = result.cluster_ids[0];
+        for id in &result.cluster_ids {
+            assert_eq!(*id, first_id, "every embedding must share the single cluster_id");
+        }
+    }
+
+    /// Embeddings on orthogonal unit vectors (similarity = 0) must each
+    /// land in their own cluster — they're maximally dissimilar. With
+    /// dimension D ≥ N, we have N orthogonal basis vectors available.
+    #[test]
+    fn orthogonal_embeddings_each_in_own_cluster() {
+        // 5 orthogonal unit vectors in 5-d space.
+        let embeddings: Vec<Vec<f32>> = (0..5)
+            .map(|i| {
+                let mut v = vec![0.0_f32; 5];
+                v[i] = 1.0;
+                v
+            })
+            .collect();
+        let embeddings_ref = embeddings.clone();
+        let searcher = |i: usize| {
+            (0..embeddings_ref.len())
+                .filter(|&j| j != i)
+                .map(|j| Neighbor {
+                    idx: j,
+                    similarity: dot(&embeddings_ref[i], &embeddings_ref[j]),
+                })
+                .collect()
+        };
+        let result = cluster(&embeddings, searcher, Hyperparameters::default());
+        // 5 orthogonal embeddings: each one is its own singleton OR
+        // outlier-as-singleton. Either way, the visible distinct
+        // cluster_ids count must be 5.
+        let unique_ids: std::collections::HashSet<_> =
+            result.cluster_ids.iter().copied().collect();
+        assert_eq!(
+            unique_ids.len(),
+            5,
+            "orthogonal embeddings must produce 5 distinct cluster IDs, got {:?}",
+            result.cluster_ids
+        );
     }
 }

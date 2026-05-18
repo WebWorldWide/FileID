@@ -19,12 +19,9 @@ public abstract record CommandPayload;
 public sealed record StartScanCommand(
     string RootPath,
     string? RootDisplay,
-    // V15.1: surface the V15.0 engine-side `rescan` flag. Default false
-    // = incremental rescan (engine skips files where `scanned_at >=
-    // modified_at`). Passing true forces every file to be re-tagged.
-    // The engine's StartScanPayload has `#[serde(default)]` so omitting
-    // this is wire-safe; we include it explicitly to keep the DTO
-    // honest about what the engine accepts.
+    // `rescan = false` (default) is incremental: engine skips files where
+    // `scanned_at >= modified_at`. `rescan = true` forces every file to
+    // be re-tagged.
     bool Rescan = false) : CommandPayload;
 
 public sealed record PauseScanCommand : CommandPayload;
@@ -34,10 +31,10 @@ public sealed record RequestStatusCommand : CommandPayload;
 public sealed record ShutdownCommand : CommandPayload;
 public sealed record RunFaceClusteringCommand : CommandPayload;
 
-/// <summary>V14.9-G: tell the engine to re-probe CUDA Toolkit + cuDNN
-/// availability without an engine restart. The engine replies with a
-/// `hardwareReprobed` event carrying fresh `HardwareInfo` and a
-/// diagnostics string when the pack is still missing.</summary>
+/// <summary>Tell the engine to re-probe CUDA Toolkit + cuDNN availability
+/// without an engine restart. The engine replies with a `hardwareReprobed`
+/// event carrying fresh `HardwareInfo` and a diagnostics string when the
+/// pack is still missing.</summary>
 public sealed record VerifyCudaPackCommand : CommandPayload;
 
 public sealed record DeepAnalyzeFileCommand(
@@ -70,9 +67,9 @@ public sealed record RestructureMove(
     string Source,
     string Destination,
     string Category,
-    /// <summary>V14.9 A7: engine-authoritative per-move tier
-    /// (Anchor / Mixed / Junk). Null on plans from older engine builds —
-    /// callers should fall back to a local heuristic in that case.</summary>
+    /// <summary>Engine-authoritative per-move tier (Anchor / Mixed / Junk).
+    /// Null on plans from older engine builds — callers should fall back to
+    /// a local heuristic in that case.</summary>
     string? Tier = null);
 
 public sealed record ApplyTagsCommand(

@@ -18,7 +18,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     /// </summary>
     private bool _initializingToggles;
 
-    /// <summary>V14.8.4 Bug 3: expose the singleton ModelInstallerService so
+    /// <summary> expose the singleton ModelInstallerService so
     /// the Settings model cards can x:Bind to Svc.Arcface / Svc.Clip the same
     /// way WelcomeSheet does. Without this binding path the cards stayed
     /// stale after Welcome installed a model — the imperative TextBlock
@@ -51,7 +51,51 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             // Re-seed from on-disk sentinels in case Welcome / DeepAnalyze
             // installed a model while a different tab was active.
             try { Svc.Refresh(); } catch { }
+            // sync the CUDA llama.cpp + cuDNN install buttons to
+            // reflect already-installed state at page load. Before this
+            // the buttons always showed "Install" and the user had to
+            // click them just to see the state flip (matching engine's
+            // immediate sentinel-check short-circuit).
+            try { SyncInstallButtonStates(); } catch { }
         };
+    }
+
+    /// <summary>probe the engine's install sentinels and flip the
+    /// NVIDIA-acceleration card buttons to "Installed" + disabled if the
+    /// runtime is already present on disk. Same sentinel path the engine
+    /// writes after a successful prewarm (atomic temp+rename) — file
+    /// existence is sufficient. Matches <see cref="Services.ModelInstallerService"/>'s
+    /// SentinelInstalled probe.</summary>
+    private void SyncInstallButtonStates()
+    {
+        if (SentinelExists("llama_runtime_cuda_x64"))
+        {
+            InstallCudaLlamaButton.Content = "Installed";
+            InstallCudaLlamaButton.IsEnabled = false;
+            CudaLlamaStatusText.Text = "✓ CUDA llama.cpp installed. Deep Analyze will use it on next run.";
+        }
+        if (SentinelExists("cudnn_runtime_x64"))
+        {
+            InstallCudnnButton.Content = "Installed";
+            InstallCudnnButton.IsEnabled = false;
+            // Leave CudnnStatusText alone — SyncNvidiaSection owns it and
+            // already reflects whether the CUDA EP is actually active in
+            // the current engine session (which depends on engine restart,
+            // not just sentinel presence).
+        }
+    }
+
+    private static bool SentinelExists(string modelId)
+    {
+        try
+        {
+            return System.IO.File.Exists(System.IO.Path.Combine(
+                AppPaths.ModelsDir, ".sentinels", $"{modelId}.installed"));
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private void OnInstallerChanged(object? sender, PropertyChangedEventArgs e)
@@ -78,26 +122,29 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     }
 
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
-    {
-        if (e.PropertyName is nameof(EngineClient.Info)
-            or nameof(EngineClient.State))
+        => Services.DebugLog.SafeRun("SettingsView.OnEngineChanged", () =>
         {
-            OnPropertyChanged(nameof(EngineVersionText));
-            OnPropertyChanged(nameof(WorkerCapText));
-            OnPropertyChanged(nameof(GpuSummaryText));
-            OnPropertyChanged(nameof(ExecutionProviderText));
-            OnPropertyChanged(nameof(RecommendationText));
-            OnPropertyChanged(nameof(RecommendationVisibility));
-            DispatcherQueue.TryEnqueue(SyncNvidiaSection);
-        }
-        else if (e.PropertyName == nameof(EngineClient.LastHardwareReprobe))
-        {
-            // V14.9-G: post-Verify-install update.
-            DispatcherQueue.TryEnqueue(SyncReprobeUi);
-        }
-    }
+            if (e.PropertyName is nameof(EngineClient.Info)
+                or nameof(EngineClient.State))
+            {
+                Services.DebugLog.Debug($"[ENGINE-SUB:SettingsView] {e.PropertyName}");
+                OnPropertyChanged(nameof(EngineVersionText));
+                OnPropertyChanged(nameof(WorkerCapText));
+                OnPropertyChanged(nameof(GpuSummaryText));
+                OnPropertyChanged(nameof(ExecutionProviderText));
+                OnPropertyChanged(nameof(RecommendationText));
+                OnPropertyChanged(nameof(RecommendationVisibility));
+                DispatcherQueue.TryEnqueue(SyncNvidiaSection);
+            }
+            else if (e.PropertyName == nameof(EngineClient.LastHardwareReprobe))
+            {
+                // post-Verify-install update.
+                Services.DebugLog.Debug($"[ENGINE-SUB:SettingsView] {e.PropertyName}");
+                DispatcherQueue.TryEnqueue(SyncReprobeUi);
+            }
+        });
 
-    /// <summary>F3c (V14.8.3): toggle the NVIDIA acceleration card based on
+    /// <summary> toggle the NVIDIA acceleration card based on
     /// the detected GPU vendor. The card surfaces two affordances: install
     /// the CUDA-flavored llama.cpp runtime (no cuDNN required) and direct
     /// the user to NVIDIA's cuDNN download for the CUDA ORT EP.</summary>
@@ -201,7 +248,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     {
         get
         {
-            // V14.7.6: Info can be null even when State==Ready in the brief
+            // Info can be null even when State==Ready in the brief
             // window between spawn + first ready event. Surface State so
             // the Settings card stops claiming "Engine starting..." for
             // a Ready engine.
@@ -303,7 +350,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
-    /// <summary>V14.8.4 Bug 3: route the Settings install button through the
+    /// <summary> route the Settings install button through the
     /// shared ModelInstallerService slot, same as WelcomeSheet. Single source
     /// of truth for status; the x:Bind paths on the card update automatically
     /// via the slot's PropertyChanged. No more local OnProgress subscription
@@ -457,13 +504,11 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
-    /// <summary>V15.1 in-app cuDNN install. Drives the same engine path
-    /// V14.9-U's deleted auto-installer used: PrewarmModelAsync requests
-    /// the engine fetch the cuDNN redist (~430 MB) from NVIDIA's CDN,
-    /// extract it under Models/cudnn/, and call register_dll_dirs_under
-    /// so the ORT CUDA EP can load it on next engine restart. The status
-    /// caption mirrors the macOS download UI. After completion the user
-    /// hits "Verify install" (or restarts the engine) to flip the
+    /// <summary>In-app cuDNN install. PrewarmModelAsync asks the engine to
+    /// fetch the cuDNN redist (~430 MB) from NVIDIA's CDN, extract it
+    /// under Models/cudnn/, and call register_dll_dirs_under so the ORT
+    /// CUDA EP can load it on next engine restart. After completion the
+    /// user hits "Verify install" (or restarts the engine) to flip the
     /// scanning pipeline from DirectML to CUDA EP.</summary>
     private async void OnInstallCudnnClicked(object sender, RoutedEventArgs e)
     {
@@ -508,7 +553,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
-    /// <summary>V14.9-G: ask the engine to re-probe cuDNN availability after
+    /// <summary>ask the engine to re-probe cuDNN availability after
     /// the user manually installs it. The engine replies with a
     /// HardwareReprobed event that lands on
     /// <see cref="EngineClient.LastHardwareReprobe"/>; <see cref="SyncReprobeUi"/>
@@ -536,7 +581,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
-    /// <summary>V14.9-G: render the success pill / diagnostics caption after
+    /// <summary>render the success pill / diagnostics caption after
     /// the engine emits a HardwareReprobed event. Called from the engine
     /// PropertyChanged hook on LastHardwareReprobe.</summary>
     private void SyncReprobeUi()
@@ -582,7 +627,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
-    /// <summary>V14.9-G: shutdown + auto-respawn cycle so the engine re-runs
+    /// <summary>shutdown + auto-respawn cycle so the engine re-runs
     /// the EP picker. EngineClient's existing crash-respawn path picks the
     /// new EP on the next spawn.</summary>
     private async void OnRestartEngineClicked(object sender, RoutedEventArgs e)

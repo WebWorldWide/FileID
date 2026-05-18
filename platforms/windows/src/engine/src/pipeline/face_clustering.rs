@@ -1,33 +1,25 @@
-// Face clustering — IdentityClustering port.
+// Face clustering — IdentityClustering driver.
 //
-// Mirror of macOS engine/Sources/FileIDEngine/Pipeline/FaceClustering.swift.
 // Reads ArcFace embeddings from `arcface_embeddings`, runs deterministic
 // agglomerative clustering by cosine similarity, persists per-face cluster
 // IDs into `face_verifications`, and emits `FaceClusteringResult` IPC.
 //
 // Algorithm:
 //   1. Load every face row that has an embedding (skip low-quality/extreme-pose).
-//   2. Build pairs by cosine ≥ 0.45; route 0.45–0.70 to VLM verify (Phase 6+).
+//   2. Build pairs by cosine ≥ 0.45; route 0.45–0.70 to VLM verify.
 //   3. Connected-components on the high-similarity graph → clusters.
-//   4. Anchor selection per cluster: highest-quality embedding in the
-//      cluster, persisted to `identity_anchors` so future faces compare
-//      against a stable reference.
+//   4. Anchor selection per cluster: highest-quality embedding, persisted
+//      to `identity_anchors` so future faces compare against a stable ref.
 //   5. Emit IPC + write to DB in a single tx so app sidebar refresh is atomic.
-//
-// Phase 3 cut: pure-math clustering core + the persistence wiring. Phase
-// 2.6 lights up the actual ArcFace embedding population so this has data
-// to cluster.
 
 use std::collections::HashMap;
 
-/// Cosine threshold for "definitely same person". Mirrors macOS's
-/// `IdentityClustering.swift` — high enough that false positives are
-/// vanishingly rare on ArcFace's 512-d unit hypersphere.
+/// Cosine threshold for "definitely same person". High enough that false
+/// positives are vanishingly rare on ArcFace's 512-d unit hypersphere.
 pub const COS_HIGH: f32 = 0.70;
 
-/// Cosine threshold for "definitely different person". Below this we
-/// don't even consider them the same. The 0.45..=0.70 band is the
-/// uncertain range that routes through VLM verification (Phase 6).
+/// Cosine threshold for "definitely different person". The 0.45..=0.70
+/// band is the uncertain range that routes through VLM verification.
 pub const COS_LOW: f32 = 0.45;
 
 #[derive(Debug, Clone)]
@@ -55,8 +47,7 @@ pub struct ClusterAnchor {
 }
 
 /// Group `faces` into clusters via the two-pass density algorithm in
-/// `identity_clustering` — same algorithm the macOS engine uses, so the
-/// People tab clusters identically across platforms.
+/// `identity_clustering`.
 ///
 /// Returns (assignments, anchors). Cluster IDs are 1-based and stable
 /// in first-seen order.
@@ -143,7 +134,7 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
 }
 
 /// Pairs in the uncertain similarity band 0.45..=0.70. The VLM verifier
-/// (Phase 6) is invoked on these — outputs go back into the union-find.
+/// is invoked on these — outputs go back into the union-find.
 #[allow(dead_code)]
 pub fn uncertain_pairs(faces: &[FaceRow]) -> Vec<(i64, i64, f32)> {
     let mut pairs = Vec::new();
@@ -254,11 +245,9 @@ mod tests {
             .collect()
     }
 
-    // V15.3 Phase 7: property tests proving cluster invariants on randomized
-    // embeddings. The two-pass density algorithm in `identity_clustering`
-    // doesn't guarantee every cluster member is COS_HIGH-close to its
-    // anchor (clusters can chain transitively), but it DOES guarantee
-    // bookkeeping invariants.
+    // Property tests proving bookkeeping invariants on randomized embeddings.
+    // The two-pass density algorithm doesn't guarantee every cluster member
+    // is COS_HIGH-close to its anchor (clusters can chain transitively).
     proptest::proptest! {
         // Invariant: every face_id appears in exactly one cluster
         // assignment, and the assignment count equals the input count.

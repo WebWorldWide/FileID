@@ -138,12 +138,12 @@ pub enum CommandPayload {
     #[serde(rename = "restoreFromTrash")]
     RestoreFromTrash(RestoreFromTrashPayload),
 
-    /// V14.9-G: re-probe CUDA Toolkit + cuDNN availability without
-    /// restarting the engine. After the user manually installs cuDNN
-    /// from NVIDIA's site, the Settings → Performance "Verify install"
-    /// button sends this; the engine replies with a `hardwareReprobed`
-    /// event carrying fresh `HardwareInfo` + an optional `diagnostics`
-    /// string explaining why a negative probe came back negative.
+    /// Re-probe CUDA Toolkit + cuDNN availability without restarting the
+    /// engine. After the user manually installs cuDNN from NVIDIA's site,
+    /// the Settings → Performance "Verify install" button sends this; the
+    /// engine replies with a `hardwareReprobed` event carrying fresh
+    /// `HardwareInfo` + an optional `diagnostics` string explaining why
+    /// a negative probe came back negative.
     #[serde(rename = "verifyCudaPack")]
     VerifyCudaPack(Empty),
 
@@ -167,10 +167,9 @@ pub struct StartScanPayload {
     /// Optional human-readable label; if absent, callers default to root_path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_display: Option<String>,
-    /// V15.0 Phase B: when true, force every file to be reprocessed
-    /// even if `scanned_at >= modified_unix` in the DB. Default false =
-    /// incremental rescan (skip already-current files). Backwards-
-    /// compatible via Serde default.
+    /// When true, force every file to be reprocessed even if
+    /// `scanned_at >= modified_unix` in the DB. Default false = incremental
+    /// rescan (skip already-current files).
     #[serde(default)]
     pub rescan: bool,
 }
@@ -231,10 +230,9 @@ pub struct RestructureMove {
     pub source: String,
     pub destination: String,
     pub category: String,
-    /// V14.9 A7: per-move tier — "Anchor" / "Mixed" / "Junk", derived
-    /// from the source folder's `classify_folders` classification. None
-    /// for older engines / cross-version compat; the app falls back to
-    /// its local heuristic when absent.
+    /// Per-move tier — "Anchor" / "Mixed" / "Junk", derived from the
+    /// source folder's `classify_folders` classification. None for older
+    /// engines; the app falls back to its local heuristic when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
 }
@@ -429,12 +427,10 @@ pub enum EventPayload {
     #[serde(rename = "mergeSuggestions")]
     MergeSuggestions(Wrap<MergeSuggestions>),
 
-    /// V14.9-G: reply to a `verifyCudaPack` command. Carries fresh
-    /// `HardwareInfo` (so the Settings card can flip to ✓ if the user
-    /// just installed cuDNN) + an optional `diagnostics` string with
-    /// human-readable details about why a negative probe came back
-    /// negative (e.g. "Found `cudnn64_8.dll` at C:\… but missing
-    /// `cudart64_12.dll` in the same dir").
+    /// Reply to a `verifyCudaPack` command. Carries fresh `HardwareInfo`
+    /// (so the Settings card can flip to ✓ if the user just installed
+    /// cuDNN) + an optional `diagnostics` string with human-readable
+    /// details about why a negative probe came back negative.
     #[serde(rename = "hardwareReprobed")]
     HardwareReprobed(Wrap<HardwareReprobed>),
 }
@@ -469,12 +465,10 @@ pub struct EngineInfo {
     pub hardware: Option<HardwareInfo>,
 }
 
-/// V14.9-G: reply payload for the `verifyCudaPack` command. Mirrors
-/// the EngineInfo's `hardware` field shape so the C# side can reuse
-/// the same `HardwareInfo` DTO. `diagnostics` is a non-PII human-
-/// readable explanation when `hardware.cuda_pack_present == false`
-/// (e.g. "Probed C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\
-/// v12.4\bin; cudnn64_*.dll missing.").
+/// Reply payload for the `verifyCudaPack` command. Mirrors the EngineInfo's
+/// `hardware` field shape so the C# side can reuse `HardwareInfo`.
+/// `diagnostics` is a non-PII human-readable explanation when
+/// `hardware.cuda_pack_present == false`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HardwareReprobed {
@@ -664,10 +658,9 @@ pub struct DeepAnalyzeProgress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_path: Option<String>,
     pub model_kind: String,
-    /// V14.9-I: partial caption text accumulated from per-token streaming.
-    /// The engine throttles emissions to every 250 ms so a 50-token-per-
-    /// second VLM doesn't spam the wire. Empty for non-token progress
-    /// events (e.g. "starting file N of M" emitted before inference).
+    /// Partial caption text accumulated from per-token streaming. The
+    /// engine throttles emissions to every 250 ms so a 50-tok/s VLM
+    /// doesn't spam the wire. Empty for non-token progress events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_caption: Option<String>,
 }
@@ -735,10 +728,8 @@ pub struct RestructurePlan {
     pub library_root: String,
     pub moves: Vec<RestructureMove>,
     pub category_counts: Vec<RestructureCategoryCount>,
-    /// V14.7.2: engine-authoritative folder classification.
-    /// Anchor / Mixed / Junk counts per RestructurePlan — replaces the
-    /// C#-side approximation that lived in V14.7. None when the engine
-    /// hasn't computed yet (older plans), keeps cross-version compat.
+    /// Engine-authoritative folder classification — Anchor / Mixed / Junk
+    /// counts per RestructurePlan. None on older plans.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder_classifications: Option<FolderClassificationCounts>,
 }
@@ -880,17 +871,15 @@ mod tests {
         assert_eq!(j2, "\"postScan\"");
     }
 
-    /// V15.3 N7: every CommandPayload variant must round-trip through serde
-    /// without losing its discriminant. Catches:
+    /// Every CommandPayload variant must round-trip through serde without
+    /// losing its discriminant. Catches:
     ///   - `#[serde(rename = "…")]` drift between Rust + Swift schema
     ///   - Empty-struct vs unit-variant mistakes (Swift expects `{}`, not `null`)
     ///   - Field renames inside a payload that break decode
     ///   - Missing `#[serde(default)]` on an optional that becomes required
     ///
-    /// The discriminant check (`std::mem::discriminant`) is compile-time
-    /// safe — a new CommandPayload variant added without a corresponding
-    /// entry here doesn't trigger the assertion, so when you add a variant
-    /// you MUST add a case below or the test loses coverage silently.
+    /// When you add a CommandPayload variant you MUST add a case below or
+    /// the test loses coverage silently.
     #[test]
     fn every_command_variant_round_trips() {
         let cases: Vec<CommandPayload> = vec![
@@ -1003,13 +992,9 @@ mod tests {
         }
     }
 
-    // V15.3 N7: property test. Arbitrary StartScan root_paths must round-trip
-    // through serde_json without character corruption — guards against any
-    // future encoder change that drops non-ASCII path bytes or fails to
-    // escape backslashes / quotes correctly. The property is intentionally
-    // narrow (one payload variant) because every variant has different
-    // field shapes; randomized full-payload generation is more code than
-    // bug-catching value.
+    // Arbitrary StartScan root_paths must round-trip through serde_json
+    // without character corruption — guards against encoder changes that
+    // drop non-ASCII bytes or fail to escape backslashes / quotes.
     proptest::proptest! {
         #[test]
         fn start_scan_root_path_round_trips(path in "[\\PC]{1,200}") {

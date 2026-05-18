@@ -22,7 +22,7 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <!-- V14.7.4: MinHeight (not fixed Height) so long error messages can
+    <!-- MinHeight (not fixed Height) so long error messages can
          expand the banner vertically. CornerRadius bumped to 12 since
          the pill may now be taller than 32 DIP. -->
     <Border Padding="12,8"
@@ -50,12 +50,12 @@
                          Fill="#33FFCC00" />
                 <Ellipse x:Name="StatusDot"
                          Width="10" Height="10"
-                         Fill="#FFFFCC00"
+                         Fill="{StaticResource GoldBrush}"
                          HorizontalAlignment="Center"
                          VerticalAlignment="Center" />
             </Grid>
 
-            <!-- V14.7.4: TextWrapping=Wrap so engine error messages
+            <!-- TextWrapping=Wrap so engine error messages
                  (which can be long) are readable in the 240-DIP-narrow
                  sidebar. Was CharacterEllipsis which silently truncated
                  the actual reason. -->

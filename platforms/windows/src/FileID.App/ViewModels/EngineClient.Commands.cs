@@ -101,6 +101,27 @@ internal sealed partial class EngineClient
         LastWarning = null;
     }
 
+    /// <summary>full UI-state reset for the wipe-and-rescan flow.
+    /// Phase=null + LastProgress=null + LastBatch=null + LastError=null
+    /// + LastWarning=null + LastScanDuration=zero. Without this, the
+    /// sidebar continues to show the previous scan's "Completed" panel
+    /// (with its file count + duration) during the multi-second wipe
+    /// window — the user reports "the old scan stats are still there
+    /// after I wipe", which reads as broken even though the engine is
+    /// in fact tearing down. Call BEFORE the shutdown so the visual
+    /// transition is immediate.</summary>
+    public void ResetForWipe()
+    {
+        Phase = null;
+        LastError = null;
+        LastWarning = null;
+        LastProgress = null;
+        LastBatch = null;
+        LastScanDuration = TimeSpan.Zero;
+        _scanStartedAt = null;
+        IsPaused = false;
+    }
+
     private static bool IsNonFatalWarningKind(string? kind) => kind switch
     {
         "stages_skipped_missing_models" => true,
@@ -147,12 +168,30 @@ internal sealed partial class EngineClient
         return SendCommandAsync(new CancelScanCommand());
     }
     public Task RequestStatusAsync() => SendCommandAsync(new RequestStatusCommand());
-    public Task ShutdownAsync()
+    public async Task ShutdownAsync()
     {
         // BUG-6: mark this exit as user-initiated so OnProcessExited
         // doesn't count it as a crash + auto-respawn.
+        //
+        // the flag has to be paired with the IPC actually landing.
+        // The previous version set _expectingExit=1 unconditionally, then
+        // SendCommandAsync would abort if State != Ready (engine already
+        // gone), leaving the flag latched at 1. The NEXT time the engine
+        // spawned and then crashed for any real reason, OnProcessExited
+        // would see the leftover flag and treat the genuine crash as a
+        // user-initiated exit — no auto-respawn, engine stays dead. Now
+        // we set the flag only AFTER SendCommandAsync succeeds, and clear
+        // it if SendCommandAsync throws.
         Interlocked.Exchange(ref _expectingExit, 1);
-        return SendCommandAsync(new ShutdownCommand());
+        try
+        {
+            await SendCommandAsync(new ShutdownCommand()).ConfigureAwait(false);
+        }
+        catch
+        {
+            Interlocked.Exchange(ref _expectingExit, 0);
+            throw;
+        }
     }
 
     /// <summary>Send ShutdownCommand and wait for the engine process to
@@ -216,7 +255,7 @@ internal sealed partial class EngineClient
     }
     public Task RunFaceClusteringAsync() => SendCommandAsync(new RunFaceClusteringCommand());
 
-    /// <summary>V14.9-G: tell the engine to re-probe CUDA/cuDNN
+    /// <summary>tell the engine to re-probe CUDA/cuDNN
     /// availability. Engine replies with a <c>hardwareReprobed</c> event
     /// which lands on <see cref="LastHardwareReprobe"/>. Used by
     /// Settings → Performance "Verify install" so the user gets
@@ -241,146 +280,13 @@ internal sealed partial class EngineClient
         return SendCommandAsync(new CancelPrewarmCommand());
     }
 
-    /// <summary>V14.9 A6: chains the four "AutoPilot" phases — Scan,
-    /// face clustering, Deep Analyze, plan Restructure — into a single
-    /// flow, advancing <see cref="CurrentAutoPilotStage"/> at each
-    /// boundary. App-side orchestration (not engine-side) so we can
-    /// reuse the existing per-phase IPC commands + events without an
-    /// engine refactor. Cancellation: pass a CancellationToken; each
-    /// stage checks before dispatching. The engine's per-stage cancel
-    /// IPCs are wired separately (CancelScanAsync, DeepAnalyzeCancelAsync).</summary>
-    public async Task RunAutoPilotAsync(
-        string rootPath,
-        string? rootDisplay = null,
-        string vlmModelKind = "qwen2_5_vl_3b",
-        bool skipExistingCaptions = true,
-        CancellationToken ct = default)
-    {
-        if (string.IsNullOrEmpty(rootPath)) throw new ArgumentNullException(nameof(rootPath));
-        if (CurrentAutoPilotStage is not null && CurrentAutoPilotStage != AutoPilotStage.Complete)
-        {
-            DebugLog.Warn("[AUTOPILOT] already in flight; ignoring duplicate run.");
-            return;
-        }
-        try
-        {
-            // Stage 1: scan.
-            CurrentAutoPilotStage = AutoPilotStage.Scanning;
-            DebugLog.Info("[AUTOPILOT] stage=Scanning");
-            await WaitForReadyAsync(TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
-            ct.ThrowIfCancellationRequested();
-            await StartScanAsync(rootPath, rootDisplay).ConfigureAwait(false);
-            await AwaitPhaseAsync(ScanPhase.Completed, ct).ConfigureAwait(false);
+    // RunAutoPilotAsync + AwaitPhaseAsync + ClearAutoPilot removed
+    // along with the AutoPilot button. macOS has no equivalent explicit
+    // pipeline button — auto-advance from scan → face clustering is the
+    // standard behavior (wired in EngineClient.Apply's ScanCompleteEvent
+    // case). Deep Analyze stays manual on both platforms (gated on the
+    // user naming ≥1 person first).
 
-            // Stage 2: face clustering.
-            CurrentAutoPilotStage = AutoPilotStage.Clustering;
-            DebugLog.Info("[AUTOPILOT] stage=Clustering");
-            var clusteringTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            void OnFaceClustering(object? _, PropertyChangedEventArgs e)
-            {
-                if (e.PropertyName == nameof(LastFaceClustering) && LastFaceClustering is not null)
-                    clusteringTcs.TrySetResult(true);
-            }
-            PropertyChanged += OnFaceClustering;
-            try
-            {
-                await RunFaceClusteringAsync().ConfigureAwait(false);
-                using var reg = ct.Register(() => clusteringTcs.TrySetCanceled(ct));
-                await clusteringTcs.Task.ConfigureAwait(false);
-            }
-            finally { PropertyChanged -= OnFaceClustering; }
-
-            // Stage 3: deep analyze.
-            CurrentAutoPilotStage = AutoPilotStage.Captioning;
-            DebugLog.Info("[AUTOPILOT] stage=Captioning");
-            var deepAnalyzeTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            void OnDeepAnalyze(object? _, PropertyChangedEventArgs e)
-            {
-                if (e.PropertyName == nameof(DeepAnalyzeComplete) && DeepAnalyzeComplete is not null)
-                    deepAnalyzeTcs.TrySetResult(true);
-            }
-            PropertyChanged += OnDeepAnalyze;
-            try
-            {
-                await DeepAnalyzeAllAsync(vlmModelKind, skipExistingCaptions).ConfigureAwait(false);
-                using var reg = ct.Register(() => deepAnalyzeTcs.TrySetCanceled(ct));
-                await deepAnalyzeTcs.Task.ConfigureAwait(false);
-            }
-            finally { PropertyChanged -= OnDeepAnalyze; }
-
-            // Stage 4: plan restructure.
-            CurrentAutoPilotStage = AutoPilotStage.Planning;
-            DebugLog.Info("[AUTOPILOT] stage=Planning");
-            var planTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            void OnPlan(object? _, PropertyChangedEventArgs e)
-            {
-                if (e.PropertyName == nameof(LastRestructurePlan) && LastRestructurePlan is not null)
-                    planTcs.TrySetResult(true);
-            }
-            PropertyChanged += OnPlan;
-            try
-            {
-                await PlanRestructureAsync(rootPath).ConfigureAwait(false);
-                using var reg = ct.Register(() => planTcs.TrySetCanceled(ct));
-                await planTcs.Task.ConfigureAwait(false);
-            }
-            finally { PropertyChanged -= OnPlan; }
-
-            CurrentAutoPilotStage = AutoPilotStage.Complete;
-            DebugLog.Info("[AUTOPILOT] stage=Complete");
-        }
-        catch (OperationCanceledException)
-        {
-            DebugLog.Info("[AUTOPILOT] cancelled");
-            CurrentAutoPilotStage = null;
-            throw;
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Warn("[AUTOPILOT] failed: " + ex.Message);
-            CurrentAutoPilotStage = null;
-            throw;
-        }
-    }
-
-    /// <summary>Resolve when the engine's <see cref="Phase"/> reaches the
-    /// target value (or transitions to <see cref="ScanPhase.Failed"/>,
-    /// which throws). Used by AutoPilot to await each scan-phase
-    /// completion before advancing.</summary>
-    private Task AwaitPhaseAsync(ScanPhase target, CancellationToken ct)
-    {
-        if (Phase == target) return Task.CompletedTask;
-        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        PropertyChangedEventHandler? handler = null;
-        handler = (_, e) =>
-        {
-            if (e.PropertyName != nameof(Phase)) return;
-            if (Phase == target)
-            {
-                PropertyChanged -= handler;
-                tcs.TrySetResult(true);
-            }
-            else if (Phase == ScanPhase.Failed)
-            {
-                PropertyChanged -= handler;
-                tcs.TrySetException(new InvalidOperationException(
-                    "Scan failed: " + (LastError?.Message ?? "unknown error")));
-            }
-        };
-        PropertyChanged += handler;
-        using var reg = ct.Register(() =>
-        {
-            PropertyChanged -= handler;
-            tcs.TrySetCanceled(ct);
-        });
-        return tcs.Task;
-    }
-
-    /// <summary>Clear AutoPilot state — used by the cancel path or by
-    /// the host UI when the user dismisses the tracker. Independent of
-    /// the engine's own cancel IPCs (those still need to be called
-    /// separately).</summary>
-    public void ClearAutoPilot() => CurrentAutoPilotStage = null;
     public Task PlanRestructureAsync(string libraryRoot) =>
         SendCommandAsync(new PlanRestructureCommand(libraryRoot));
     public Task ApplyRestructureAsync(string libraryRoot, IReadOnlyList<RestructureMove> moves, bool useSymlinks) =>

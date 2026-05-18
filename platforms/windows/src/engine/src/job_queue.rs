@@ -1,10 +1,9 @@
 #![allow(dead_code)]
 // JobQueue — single-FIFO queue for background work the engine runs.
 //
-// Mirror of macOS engine/Sources/FileIDEngine/JobQueue.swift. Categories:
-// Scan, FaceCluster, DeepAnalyze. Only one job runs at a time; new
-// requests append to the pending list. Each push/pop emits a `queueState`
-// IPC event so the app's sidebar queue list stays in sync.
+// Categories: Scan, FaceCluster, DeepAnalyze. Only one job runs at a time;
+// new requests append to the pending list. Each push/pop emits a
+// `queueState` IPC event so the app's sidebar queue list stays in sync.
 //
 // The queue itself doesn't run jobs — it tracks them. Job runners push
 // before they start and pop when done; the dispatcher in main.rs wires

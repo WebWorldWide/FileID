@@ -214,7 +214,7 @@ public sealed partial class WelcomeSheet : UserControl
         var bytes = string.Empty;
         if (bytesDone is { } done && totalBytes is { } total && total > 0)
         {
-            // V14.9-N1: defensive `Max` so the user never sees "578 MB of 201 MB"
+            // defensive `Max` so the user never sees "578 MB of 201 MB"
             // when the engine's per-file total falls behind the bundle-cumulative
             // BytesDone. ModelSlot.Apply already guards against TotalBytes
             // downgrading; this is belt-and-suspenders for any race window.
@@ -266,7 +266,7 @@ public sealed partial class WelcomeSheet : UserControl
 
     private static string FormatEta(double seconds)
     {
-        // V14.9-N1: clamp pathological values (NaN, infinity, EMA-asymptote
+        // clamp pathological values (NaN, infinity, EMA-asymptote
         // overflow) before any arithmetic so the user never sees
         // "7726735523606260000000000h" again. The slot-side fix in
         // UpdateRate already caps at 99h via MaxEtaSeconds, but a stale
@@ -302,7 +302,7 @@ public sealed partial class WelcomeSheet : UserControl
         HandleAction(Svc.Vlm);
     }
 
-    // V15.2.1: GPU Acceleration Pack row. On NVIDIA this kicks off the
+    // GPU Acceleration Pack row. On NVIDIA this kicks off the
     // cuDNN download via PrewarmModelAsync("cudnn_runtime_x64"). On other
     // vendors the button isn't shown (ShowAcceleratorButton returns
     // Collapsed) so this handler can't fire.
@@ -312,7 +312,7 @@ public sealed partial class WelcomeSheet : UserControl
         HandleAction(Svc.Accelerator);
     }
 
-    // V15.2.1 — XAML binding helpers for the Accelerator row.
+    // XAML binding helpers for the Accelerator row.
     internal Visibility ShowAcceleratorButton(ModelInstallStatus status, bool isRealInstall)
     {
         // Show the button only when there's something the user can do:
@@ -407,7 +407,7 @@ public sealed partial class WelcomeSheet : UserControl
     }
 
     /// <summary>Persist welcomeSheetSeen and raise the Dismissed event.
-    /// Mirror of macOS .onDisappear { welcomeSheetSeen = true }
+    /// { welcomeSheetSeen = true }
     /// (FileIDApp.swift:39). Idempotent — safe to invoke from both the
     /// auto-dismiss path and the manual Skip/Done paths.</summary>
     private void RaiseDismissed()

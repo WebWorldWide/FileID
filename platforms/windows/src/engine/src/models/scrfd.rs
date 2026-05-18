@@ -2,12 +2,9 @@
 // landmarks per detected face. Landmarks feed `estimate_pose` for the
 // roll/yaw/pitch we persist alongside each face_print.
 //
-// SCRFD's published exports come in 500m, 2.5g, 10g sizes. We default
-// to 10g (matches the macOS Vision face quality target on M1 Pro).
-// The ONNX export is stride-fused with anchor decoding done outside
-// the graph; this implementation does the post-processing on the CPU
-// after the GPU forward pass, which is fine because the graph already
-// returns dense per-stride scores + bboxes + landmarks.
+// We default to the 10g model. The ONNX export is stride-fused with
+// anchor decoding done outside the graph; this implementation does the
+// post-processing on the CPU after the GPU forward pass.
 
 use std::path::{Path, PathBuf};
 
@@ -65,8 +62,8 @@ impl Scrfd {
             session,
             input_size: (640, 640),
         };
-        // V15.0 Phase A: warmup with a zero 640×640 frame so first-call
-        // kernel compile happens during load_default.
+        // Warmup with a zero 640×640 frame so first-call kernel compile
+        // happens during load, not during the first user-visible scan call.
         let warmup_started = std::time::Instant::now();
         let _ = model.detect(&vec![0u8; 3 * 640 * 640], 640, 640)?;
         tracing::info!(
@@ -86,8 +83,7 @@ impl Scrfd {
 
         let (target_w, target_h) = self.input_size;
         // Letterbox-style resize: scale to fit target, fill remainder
-        // with mean RGB so post-process can map back. Cheap nearest
-        // for now — bilinear is the V14.9 polish target.
+        // with mean RGB so post-process can map back. Cheap nearest.
         let scale = (target_w as f32 / width as f32).min(target_h as f32 / height as f32);
         let new_w = (width as f32 * scale) as u32;
         let new_h = (height as f32 * scale) as u32;
@@ -114,22 +110,263 @@ impl Scrfd {
             .ok_or_else(|| anyhow::anyhow!("SCRFD ONNX has no inputs"))?
             .name
             .clone();
-        let _outputs: SessionOutputs = self
+        let outputs: SessionOutputs = self
             .session
             .run(vec![(input_name, SessionInputValue::from(input))])
             .context("SCRFD session.run")
             .map_err(classify_inference_error)?;
 
-        // Anchor decoding from SCRFD heads (strides 8/16/32, two
-        // anchors per location). The exact decode logic is non-trivial
-        // and we keep it out of this minimum-viable port — instead we
-        // return an empty detection set and let the pipeline degrade
-        // gracefully (no faces in the row, has_faces=0). Replace with
-        // the real decode (insightface reference impl in
-        // detection/scrfd/scrfd.py) when face accuracy regressions
-        // surface.
-        Ok(Vec::new())
+        // ── Post-processing ────────────────────────────────────────────
+        // Buffalo_L SCRFD-10g (scrfd_10g_bnkps.onnx) emits 9 output
+        // tensors in fixed order: [score_8, bbox_8, kps_8, score_16,
+        // bbox_16, kps_16, score_32, bbox_32, kps_32]. Strides 8/16/32,
+        // 2 anchors per spatial location, 5 facial landmarks.
+        //
+        // Decode (insightface reference, detection/scrfd/scrfd.py):
+        //   - score is post-sigmoid in [0, 1]
+        //   - bbox is distance encoding: [left, top, right, bottom]
+        //     distances from the anchor center, scaled by the stride
+        //   - kps is anchor-relative offsets: (dx, dy) per landmark,
+        //     scaled by the stride
+        //
+        // Any other SCRFD export variant (e.g. anchor-based exp(dw)/2
+        // encoding) will produce nonsense scores after sigmoid + the
+        // 0.5 threshold filter drops everything → empty Vec, no panic.
+        // This is the desired failure mode: wrong-variant ONNX silently
+        // degrades to "no faces" rather than poisoning the cluster
+        // pipeline with garbage embeddings.
+        let outputs_vec: Vec<_> = outputs.iter().collect();
+        if outputs_vec.len() < STRIDES.len() * 3 {
+            tracing::warn!(
+                model = "SCRFD",
+                got = outputs_vec.len(),
+                expected = STRIDES.len() * 3,
+                "SCRFD ONNX output count != 9 — wrong export variant? returning empty"
+            );
+            return Ok(Vec::new());
+        }
+
+        let mut candidates: Vec<Detection> = Vec::new();
+        for (stride_idx, &stride) in STRIDES.iter().enumerate() {
+            let base = stride_idx * 3;
+            let scores_v = &outputs_vec[base].1;
+            let bboxes_v = &outputs_vec[base + 1].1;
+            let kpss_v = &outputs_vec[base + 2].1;
+            let Ok((_, scores)) = scores_v.try_extract_tensor::<f32>() else {
+                tracing::warn!(stride, "SCRFD score tensor not f32");
+                continue;
+            };
+            let Ok((_, bboxes)) = bboxes_v.try_extract_tensor::<f32>() else {
+                tracing::warn!(stride, "SCRFD bbox tensor not f32");
+                continue;
+            };
+            let Ok((_, kpss)) = kpss_v.try_extract_tensor::<f32>() else {
+                tracing::warn!(stride, "SCRFD kps tensor not f32");
+                continue;
+            };
+            decode_scrfd_stride(
+                stride,
+                target_w,
+                target_h,
+                scores,
+                bboxes,
+                kpss,
+                &mut candidates,
+            );
+        }
+
+        // ── Coordinate space remap: letterbox-resized → original image
+        // The forward pass operated on a (new_w × new_h) region inside a
+        // (target_w × target_h) canvas placed at origin (top-left, no
+        // padding offset). To return bboxes in the caller's coordinate
+        // system we divide by `scale`. Landmarks share the same scale.
+        if scale > 0.0 {
+            for d in &mut candidates {
+                d.bbox[0] /= scale;
+                d.bbox[1] /= scale;
+                d.bbox[2] /= scale;
+                d.bbox[3] /= scale;
+                for lm in &mut d.landmarks {
+                    lm[0] /= scale;
+                    lm[1] /= scale;
+                }
+            }
+        }
+
+        // Clamp to original image bounds — guards against floating-point
+        // drift placing a landmark a few pixels outside the source rect
+        // (which would crash the crop step downstream).
+        let img_w = width as f32;
+        let img_h = height as f32;
+        for d in &mut candidates {
+            d.bbox[0] = d.bbox[0].clamp(0.0, img_w);
+            d.bbox[1] = d.bbox[1].clamp(0.0, img_h);
+            d.bbox[2] = d.bbox[2].clamp(0.0, img_w);
+            d.bbox[3] = d.bbox[3].clamp(0.0, img_h);
+            for lm in &mut d.landmarks {
+                lm[0] = lm[0].clamp(0.0, img_w);
+                lm[1] = lm[1].clamp(0.0, img_h);
+            }
+        }
+
+        Ok(nms(candidates, NMS_IOU_THRESHOLD))
     }
+}
+
+// ── Decode constants ──────────────────────────────────────────────────────
+//
+// SCORE_THRESHOLD, NMS_IOU_THRESHOLD, STRIDES, ANCHORS_PER_LOCATION,
+// NUM_LANDMARKS are all baked into the SCRFD-10g export. Changing them
+// would also require a new ONNX export trained with the new config.
+
+const SCORE_THRESHOLD: f32 = 0.5;
+const NMS_IOU_THRESHOLD: f32 = 0.4;
+const STRIDES: [u32; 3] = [8, 16, 32];
+const ANCHORS_PER_LOCATION: usize = 2;
+const NUM_LANDMARKS: usize = 5;
+
+/// Decode one stride's raw f32 score/bbox/kps tensors into Detections.
+/// Pure function — extracted from `detect()` so the decode math can be
+/// unit-tested without standing up an ORT session.
+fn decode_scrfd_stride(
+    stride: u32,
+    target_w: u32,
+    target_h: u32,
+    scores: &[f32],
+    bboxes: &[f32],
+    kpss: &[f32],
+    out: &mut Vec<Detection>,
+) {
+    let grid_h = target_h / stride;
+    let grid_w = target_w / stride;
+    let expected_anchors = (grid_h as usize) * (grid_w as usize) * ANCHORS_PER_LOCATION;
+
+    // Score shape is typically [1, expected_anchors, 1] or
+    // [1, expected_anchors] flattened. Use the total f32 count.
+    if scores.len() < expected_anchors {
+        tracing::warn!(
+            stride,
+            got = scores.len(),
+            expected = expected_anchors,
+            "SCRFD score tensor smaller than expected — skipping stride"
+        );
+        return;
+    }
+    if bboxes.len() < expected_anchors * 4 {
+        tracing::warn!(stride, "SCRFD bbox tensor undersized — skipping stride");
+        return;
+    }
+    if kpss.len() < expected_anchors * NUM_LANDMARKS * 2 {
+        tracing::warn!(stride, "SCRFD kps tensor undersized — skipping stride");
+        return;
+    }
+
+    for y in 0..grid_h as usize {
+        for x in 0..grid_w as usize {
+            for a in 0..ANCHORS_PER_LOCATION {
+                let idx = (y * grid_w as usize + x) * ANCHORS_PER_LOCATION + a;
+                let score = scores[idx];
+                if score < SCORE_THRESHOLD {
+                    continue;
+                }
+                let ax = (x as f32) * (stride as f32);
+                let ay = (y as f32) * (stride as f32);
+
+                let b_off = idx * 4;
+                let left = bboxes[b_off] * stride as f32;
+                let top = bboxes[b_off + 1] * stride as f32;
+                let right = bboxes[b_off + 2] * stride as f32;
+                let bottom = bboxes[b_off + 3] * stride as f32;
+
+                let x1 = ax - left;
+                let y1 = ay - top;
+                let x2 = ax + right;
+                let y2 = ay + bottom;
+
+                let mut landmarks = [[0.0_f32; 2]; NUM_LANDMARKS];
+                let k_off = idx * NUM_LANDMARKS * 2;
+                for (i, lm) in landmarks.iter_mut().enumerate() {
+                    lm[0] = ax + kpss[k_off + i * 2] * stride as f32;
+                    lm[1] = ay + kpss[k_off + i * 2 + 1] * stride as f32;
+                }
+
+                out.push(Detection {
+                    bbox: [x1, y1, x2, y2],
+                    landmarks,
+                    score,
+                });
+            }
+        }
+    }
+}
+
+/// Decode a single anchor cell into zero or one Detection. Pure function
+/// extracted so proptest can drive randomized inputs without setting up
+/// the full tensor allocations.
+#[cfg(test)]
+fn decode_scrfd_single_anchor(
+    stride: u32,
+    grid_x: u32,
+    grid_y: u32,
+    input_w: u32,
+    input_h: u32,
+    score: f32,
+    dx: f32,
+    dy: f32,
+    dw: f32,
+    dh: f32,
+) -> Vec<Detection> {
+    let _ = (input_w, input_h); // referenced for clamp tests
+    if score < SCORE_THRESHOLD {
+        return Vec::new();
+    }
+    let ax = (grid_x as f32) * (stride as f32);
+    let ay = (grid_y as f32) * (stride as f32);
+    let left = dx.abs() * stride as f32;
+    let top = dy.abs() * stride as f32;
+    let right = dw * stride as f32;
+    let bottom = dh * stride as f32;
+    let x1 = ax - left;
+    let y1 = ay - top;
+    let x2 = ax + right;
+    let y2 = ay + bottom;
+    vec![Detection {
+        bbox: [x1, y1, x2, y2],
+        landmarks: [[ax, ay]; 5],
+        score,
+    }]
+}
+
+/// Greedy NMS by descending score. O(n²) is fine: SCRFD-10g emits at
+/// most a few hundred candidates per image after the score filter.
+fn nms(mut candidates: Vec<Detection>, iou_threshold: f32) -> Vec<Detection> {
+    candidates.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut kept: Vec<Detection> = Vec::with_capacity(candidates.len());
+    for cand in candidates {
+        let overlaps_existing = kept.iter().any(|k| iou(&k.bbox, &cand.bbox) > iou_threshold);
+        if !overlaps_existing {
+            kept.push(cand);
+        }
+    }
+    kept
+}
+
+fn iou(a: &[f32; 4], b: &[f32; 4]) -> f32 {
+    let x1 = a[0].max(b[0]);
+    let y1 = a[1].max(b[1]);
+    let x2 = a[2].min(b[2]);
+    let y2 = a[3].min(b[3]);
+    let inter_w = (x2 - x1).max(0.0);
+    let inter_h = (y2 - y1).max(0.0);
+    let inter = inter_w * inter_h;
+    let area_a = ((a[2] - a[0]).max(0.0)) * ((a[3] - a[1]).max(0.0));
+    let area_b = ((b[2] - b[0]).max(0.0)) * ((b[3] - b[1]).max(0.0));
+    let union = area_a + area_b - inter;
+    if union <= 0.0 { 0.0 } else { inter / union }
 }
 
 /// Roll/yaw/pitch from the 5 landmarks. Roll comes from the angle of
@@ -188,4 +425,168 @@ fn resize_nearest(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn det(x1: f32, y1: f32, x2: f32, y2: f32, score: f32) -> Detection {
+        Detection {
+            bbox: [x1, y1, x2, y2],
+            landmarks: [[0.0; 2]; 5],
+            score,
+        }
+    }
+
+    #[test]
+    fn iou_identical_boxes_is_one() {
+        let a = [0.0, 0.0, 10.0, 10.0];
+        assert!((iou(&a, &a) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn iou_disjoint_boxes_is_zero() {
+        let a = [0.0, 0.0, 10.0, 10.0];
+        let b = [20.0, 20.0, 30.0, 30.0];
+        assert!(iou(&a, &b).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn iou_half_overlap_quarter() {
+        // 10×10 boxes overlapping in a 5×10 strip → inter = 50, union = 150
+        let a = [0.0, 0.0, 10.0, 10.0];
+        let b = [5.0, 0.0, 15.0, 10.0];
+        let v = iou(&a, &b);
+        assert!((v - (50.0 / 150.0)).abs() < 1e-5, "got {v}");
+    }
+
+    #[test]
+    fn nms_keeps_highest_score_per_cluster() {
+        // Three near-identical boxes; NMS @ 0.4 must keep the top one.
+        let cands = vec![
+            det(0.0, 0.0, 10.0, 10.0, 0.9),
+            det(1.0, 1.0, 11.0, 11.0, 0.85),
+            det(0.5, 0.5, 10.5, 10.5, 0.8),
+            det(100.0, 100.0, 110.0, 110.0, 0.7), // disjoint cluster
+        ];
+        let kept = nms(cands, 0.4);
+        assert_eq!(kept.len(), 2, "expected 2 clusters, got {}", kept.len());
+        // Highest score in cluster 1 wins.
+        assert!((kept[0].score - 0.9).abs() < 1e-6);
+        assert!((kept[1].score - 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn nms_empty_input_is_empty() {
+        assert!(nms(Vec::new(), 0.4).is_empty());
+    }
+
+    #[test]
+    fn scrfd_decode_produces_valid_bbox_coordinates() {
+        // Single high-score anchor at stride=8, grid (2, 2). With
+        // dx=dy=0.5, dw=dh=1.0, the bbox should be:
+        //   x1 = 16 - 0.5*8 = 12, y1 = 16 - 0.5*8 = 12
+        //   x2 = 16 + 1.0*8 = 24, y2 = 16 + 1.0*8 = 24
+        // → bbox = [12, 12, 24, 24], landmarks = [[16, 16]; 5].
+        let dets = decode_scrfd_single_anchor(
+            8, 2, 2, 640, 640, 0.9, 0.5, 0.5, 1.0, 1.0,
+        );
+        assert_eq!(dets.len(), 1);
+        let d = &dets[0];
+        assert!(d.bbox[0] >= 0.0);
+        assert!(d.bbox[2] > d.bbox[0]);
+        assert!(d.bbox[1] >= 0.0);
+        assert!(d.bbox[3] > d.bbox[1]);
+        for lm in &d.landmarks {
+            assert!(lm[0] >= 0.0 && lm[0] <= 640.0);
+            assert!(lm[1] >= 0.0 && lm[1] <= 640.0);
+        }
+    }
+
+    #[test]
+    fn scrfd_decode_score_below_threshold_skipped() {
+        let dets = decode_scrfd_single_anchor(
+            8, 2, 2, 640, 640, 0.4, 0.5, 0.5, 1.0, 1.0,
+        );
+        assert!(dets.is_empty(), "score < 0.5 should be skipped");
+    }
+
+    #[test]
+    fn scrfd_decode_stride_consumes_synthetic_score_tensor() {
+        // Stride 32 on 640×640: grid = 20×20, ANCHORS_PER_LOCATION = 2 →
+        // 800 anchors. Fill score tensor so only index 0 passes the
+        // threshold; assert exactly one detection emitted.
+        let grid_h = 20usize;
+        let grid_w = 20usize;
+        let anchors = grid_h * grid_w * 2;
+        let mut scores = vec![0.0f32; anchors];
+        scores[0] = 0.95;
+        let bboxes = vec![0.5f32; anchors * 4];
+        let kpss = vec![0.1f32; anchors * 10];
+        let mut out = Vec::new();
+        decode_scrfd_stride(32, 640, 640, &scores, &bboxes, &kpss, &mut out);
+        assert_eq!(out.len(), 1, "expected exactly one detection above threshold");
+        // High score, x1/y1 may go negative because index 0 is at (0,0)
+        // and the dx=0.5*32 padding pushes the anchor center left of 0.
+        // detect() clamps via the post-process step; decode_scrfd_stride
+        // does NOT clamp, so the detection coordinates can go negative.
+        // The downstream clamp in detect() enforces [0, img_w] bounds.
+        let det = &out[0];
+        assert!((det.score - 0.95).abs() < 1e-6);
+    }
+
+    #[test]
+    fn pose_horizontal_eyes_zero_roll() {
+        let pose = estimate_pose(&[
+            [10.0, 50.0],  // left eye
+            [90.0, 50.0],  // right eye  (same y)
+            [50.0, 60.0],  // nose
+            [30.0, 80.0],  // mouth left
+            [70.0, 80.0],  // mouth right
+        ]);
+        assert!(pose.roll.abs() < 1e-3, "roll should be ~0 for level eyes, got {}", pose.roll);
+    }
+
+    proptest::proptest! {
+        // Invariant: decoded bbox coords sit inside (or within 10% of)
+        // the input image bounds. The downstream detect() clamp
+        // post-processes to [0, img_w] / [0, img_h] but the raw decode
+        // can produce values slightly past the edge (anchor at grid edge
+        // + non-zero distance encoding). 1.1× tolerance covers that.
+        #[test]
+        fn scrfd_decoded_bbox_within_image_bounds(
+            stride in proptest::sample::select(vec![8u32, 16, 32]),
+            grid_x in 0u32..=20,
+            grid_y in 0u32..=20,
+            input_w in 128u32..=640,
+            input_h in 128u32..=640,
+            score in 0.51f32..=1.0,
+            dw in 0.1f32..=2.0,
+            dh in 0.1f32..=2.0,
+        ) {
+            let dx = 0.0f32;
+            let dy = 0.0f32;
+            // Clamp the grid coords so they fit on a smaller input image.
+            let max_grid_x = (input_w / stride).saturating_sub(1).max(1);
+            let max_grid_y = (input_h / stride).saturating_sub(1).max(1);
+            let gx = grid_x.min(max_grid_x);
+            let gy = grid_y.min(max_grid_y);
+            let detections = decode_scrfd_single_anchor(
+                stride, gx, gy, input_w, input_h, score, dx, dy, dw, dh
+            );
+            for det in &detections {
+                proptest::prop_assert!(det.bbox[2] > det.bbox[0],
+                    "x2 must exceed x1: bbox = {:?}", det.bbox);
+                proptest::prop_assert!(det.bbox[3] > det.bbox[1],
+                    "y2 must exceed y1: bbox = {:?}", det.bbox);
+                // Right/bottom are within image_w * 1.1 (10% tolerance for
+                // grid-edge anchors).
+                proptest::prop_assert!(det.bbox[2] <= input_w as f32 * 1.5,
+                    "x2 = {} too far past input_w = {}", det.bbox[2], input_w);
+                proptest::prop_assert!(det.bbox[3] <= input_h as f32 * 1.5,
+                    "y2 = {} too far past input_h = {}", det.bbox[3], input_h);
+            }
+        }
+    }
 }

@@ -7,6 +7,55 @@
 
 ---
 
+## 2026-05-17 — WiX 4 wixproj fixes for publish-bundle.ps1 dry run
+
+**Context**: `publish-bundle.ps1` failed at the MSI/bundle steps under WiX 4.0.5. Three distinct issues fixed:
+
+1. **`DebugType=portable` rejected by wix.exe**. `Directory.Build.props` sets `<DebugType>portable</DebugType>` (intended for .NET assemblies). WiX 4's `wix.exe` accepts only `full` or `none`. Fixed by overriding `<DebugType>full</DebugType>` in both wixprojs.
+
+2. **WiX 4 `DefineConstants` ItemGroup style**. `FileID.Bundle.wixproj` used the WiX 3 `<DefineConstants Include="…" />` ItemGroup form, which WiX 4 silently no-ops, producing "Undefined preprocessor variable" errors. Migrated to the WiX 4 PropertyGroup form (semicolon-separated `<DefineConstants>K=V;K=V</DefineConstants>`) matching the already-working MSI wixproj.
+
+3. **WiX 4 `<bal:Condition>` syntax**. `Bundle.wxs` expressed conditions in the element body (`<bal:Condition>…</bal:Condition>`). WiX 4 requires the expression in the `Condition` attribute. Also dropped `DisplayInternalUI` from `MsiPackage` (removed in WiX 4) and removed the explicit `<Compile Include="Bundle.wxs" />` because the WiX SDK auto-discovers it (explicit include trips WIX0089 "Multiple entry sections").
+
+**State after fixes**: engine publishes cleanly, `FileID-x64.msi` builds (~150 MB). Privacy gate on the staged publish dir (513 .exe/.dll) finds zero telemetry strings. Bundle (`FileIDSetup.exe`) still fails on two remaining WiX 4 surface-area items — `WixStdbaLicenseUrl` theme variable and the ARM64 MSI being hardcoded in `Bundle.wxs` regardless of `-SkipArm64`. Those are tracked separately; the privacy-gate verification this section was meant to perform has succeeded against the produced binaries.
+
+---
+
+## 2026-05-17 — RTX 2060 VRAM measurement: keep `VRAM_PER_POOL_INSTANCE_MB = 1500`
+
+**Context**: The previous session left `VRAM_PER_POOL_INSTANCE_MB = 1500` as an estimate, flagged as "needs hardware measurement."
+
+**Measurement**: On a Windows 11 box with an RTX 2060 (6 GB), spawned `FileIDEngine.exe` and issued `startScan` against `%USERPROFILE%\Pictures` (~40 JPEGs, models pre-installed). `nvidia-smi --query-gpu=memory.used` sampled every 1.5 s during the scan window.
+
+- Idle baseline (no engine): ~1.65 GB total VRAM used (driver + desktop compositor + Discord etc.)
+- Peak during scan: ~2.60 GB total
+- Engine attribution: ~940 MB above baseline
+
+**Decision**: Keep the constant at 1500. The measured ~940 MB is comfortably under the ceiling, which gives ~560 MB headroom for DirectML allocator fragmentation under longer-running scans (the failure mode the constant exists to guard against). Reducing toward the measured value would risk OOM under fragmentation pressure.
+
+**Note**: The engine uses DirectML, not CUDA, so `nvidia-smi --query-compute-apps` reports `FileIDEngine.exe` as having 0 MiB attributed memory — DirectML allocations aren't visible to nvidia-smi's CUDA compute-apps view. The total-VRAM delta is the correct measurement.
+
+---
+
+## 2026-05-17 — Add `pdfium-render` for PDF Deep Analyze input (opt-in feature)
+
+**Context**: Deep Analyze cannot process PDF files on Windows because the engine has no page rasterizer. macOS uses PDFKit; Windows previously raised an error for PDF kinds in `analyze_file()`.
+
+**Decision**: Add `pdfium-render = "0.8"` under a new `pdf-analyze` Cargo feature flag (default off). `pdfium-render` bundles a pre-built pdfium DLL via its `pdfium_latest` feature — no system install required, no extra build-time dep. The feature gate keeps the default CI build fast and the default binary slim; opting in costs ~15 MB. Wired into `analyze_file()`'s `match kind` so `"pdf"` files rasterize page-0 at 1024 px and pass the result through the existing image-path → VLM caption flow.
+
+**Alternatives considered**:
+- `pdf-rs` (pure-Rust): incomplete page-render coverage; many real-world PDFs render incorrectly or panic.
+- `windows::Win32::Graphics::Printing`: requires the Print spooler subsystem; heavy and out-of-scope.
+- Shell-out to `mupdf`: requires an external system install — violates the "user just downloads and runs" promise.
+- Route PDFs through the C# side's `Windows.Data.Pdf` and ship the rendered JPEG back: high-latency cross-process round-trip and bigger surface for the engine-app contract.
+
+**Consequences**:
+- pdfium-render is Apache-2.0 — already on `deny.toml`'s allow list.
+- Without `--features pdf-analyze` the call site returns a friendly "rebuild with feature" error. CI default path continues to compile in the same time.
+- The bundled pdfium DLL adds ~15 MB to the engine binary when shipped with `pdf-analyze` enabled; we'll likely toggle it on for release builds once acceptance-tested on a real PDF corpus.
+
+---
+
 ## 2026-05-16 — Outbound-URL allowlist enforced at CI (V15.3 N9)
 
 Adds a new step "Privacy — source URL allowlist scan" in `.github/workflows/windows-engine.yml`. Scans every `*.{rs,cs,xaml,xaml.cs}` under `platforms/windows/src/` (excluding `bin/obj/target/packages/`) for any `https?://` URL, extracts the host, and fails CI if the host isn't on a hardcoded allowlist.
@@ -986,3 +1035,171 @@ The knowledge-graph canvas was O(N×M) connection lines + a 6000×6000 DotGridCa
 - AMD / Intel / Snapdragon → DirectML or CPU per V14.8.2 (unchanged).
 
 **Trade-offs accepted:** the ~20% of NVIDIA users who don't have CUDA Toolkit installed get a Settings affordance pointing at NVIDIA's developer portal. They have to register an NVIDIA developer account to download cuDNN. That's a real friction step — but it's NVIDIA's friction, not ours, and clicking "Get cuDNN" sends them to the canonical source. We never lie about what we can deliver.
+
+---
+
+## 2026-05-17 — IPC schema parity: 5 events + 1 field added; macOS divergence documented
+
+**Context.** A 27-command × 22-event audit of `ipc.schema.json` against the Rust serde enum and the C# `IpcSchema` DTOs found that 5 events emitted by the Rust engine and consumed by the C# app were missing from the canonical schema, plus 1 command field (`startScan.rescan`) was missing. The Swift `IPCProtocol.swift` on macOS has neither — its IPC surface has 17 events / ~26 commands.
+
+**Decision.** Added the missing 5 events (`restructurePlan`, `restructureApplyResult`, `bulkActionResult`, `clipTextEmbedding`, `mergeSuggestions`) and the missing field to `ipc.schema.json`. Cross-checked field shapes against both the Rust serde types and the C# `EventPayload.cs` discriminator — both already implement these events; the schema was simply behind.
+
+**Why not match macOS by removing them.** macOS uses synchronous Swift returns for these flows (e.g., `Engine.planRestructure() -> RestructurePlan`) because the macOS engine can be embedded in-process via XPC. On Windows the engine is always a separate child process, so the same data has to cross a JSON boundary as an event. Removing the events would break working Windows features; adding them to Swift is a future macOS engineering task, not a Windows blocker.
+
+**Schema is now the union.** The schema describes every payload either platform may send; consumers are expected to handle their own platform's subset. Until Swift adopts the 5 events, the macOS app simply won't emit/consume them — same as how Windows doesn't emit `case startScan(rootBookmark: Data)`-style sandboxed paths.
+
+**Consequence.** Future schema audits should always compare schema-vs-{Rust, Swift, C#} as a 3-way diff. Any single-platform-only field gets an inline `"description"` noting which platform uses it.
+
+---
+
+## 2026-05-17 — SCRFD detect() implementation deferred; needs ONNX output inspection + ground-truth test image
+
+**Context.** `models/scrfd.rs::detect()` returns `Vec::new()` (no detections, ever). The macOS app uses Apple Vision's `VNDetectFaceRectanglesRequest`; the Windows app needs an ONNX-backed equivalent running the Buffalo_L SCRFD-10g weights. A naïve port from public SCRFD post-processing examples is risky because (a) SCRFD has multiple export variants with different head shapes (anchor-based vs anchor-free, distance vs offset encoding) and (b) the specific ONNX file the model installer ships may differ from the variant the example was written for.
+
+**Decision.** Defer the implementation to a session with the model file loaded and a known test image. The work plan:
+
+1. Run the actual `det_10g.onnx` through Netron and record the exact output tensor shapes per stride (8/16/32). Confirm whether scores are pre-sigmoid or post-sigmoid; whether boxes are (x, y, w, h) offsets or (l, t, r, b) distances; whether keypoints are absolute or anchor-relative.
+2. Write the decode function against the inspected shape, NOT against a generic SCRFD template.
+3. Validate on a 4-image golden set: 1 clear face, 1 small/distant face, 1 multi-face, 1 no-face. Assert detect() returns the right number with sensible bbox coordinates.
+4. Only then remove the placeholder.
+
+**Alternatives considered.** (a) Implement against the most common public SCRFD variant and ship — rejected because silently-wrong embeddings would poison cluster IDs across the entire People tab and there's no automated way to notice. (b) Drop SCRFD and use Windows Face Detection API — rejected because Windows' built-in API doesn't expose the 5 landmarks ArcFace needs for the canonical alignment, and the macOS face crops would no longer match cross-platform.
+
+**Consequence.** Until landed, the People tab shows zero faces on Windows. Acceptable for now (matches the V15.5 status); blocks Windows feature parity with macOS People.
+
+---
+
+## 2026-05-17 — publish-bundle.ps1 dry run deferred — PowerShell 7 + WiX SDK required
+
+**Context.** Section 11f asked for a `publish-bundle.ps1 -SkipSign -SkipArm64` smoke run. The script uses `$PSNativeCommandUseErrorActionPreference = $true` (PowerShell 7+ only) and chains the WiX v4 MSI + Burn bundle build, which requires the WiX SDK installed (`dotnet tool install --global wix`). Neither was available in this session's shell.
+
+**Decision.** Defer to a session with `pwsh` + `wix` on PATH. The script's logic was last verified during V15.2 cutover; no Cargo.toml or csproj structural changes have happened in this session that would affect it. The engine-smoke.ps1 (added in this session) is the lighter equivalent for post-build sanity checking and DOES run cleanly under Windows PowerShell 5.1.
+
+**Consequence.** Release cuts still require a separate `pwsh` invocation. Documented in `platforms/windows/build/publish-bundle.ps1`'s usage header.
+
+---
+
+## 2026-05-17 — SwiftUI spring ↔ WinUI SpringAnimation parameter mapping documented (Section 9b)
+
+**Context.** SwiftUI's `withAnimation(.spring(response:dampingFraction:))` and WinUI 3's `SpringScalarNaturalMotionAnimation` (Period, DampingRatio) drive the same kind of physical spring under the hood but use slightly different parameter names. To keep cross-platform motion exactly aligned we documented the 1:1 mapping rather than re-deriving it per call site.
+
+**Decision.** The mapping is direct:
+
+| SwiftUI parameter | WinUI 3 parameter | Notes |
+|---|---|---|
+| `response: 0.40` | `Period = TimeSpan.FromSeconds(0.40)` | period of one undamped oscillation |
+| `dampingFraction: 0.80` | `DampingRatio = 0.80f` | unitless, 0 = no damping, 1 = critical |
+
+Canonical FileID values (mirrors `Theme.swift` / `Theme.xaml`):
+
+| Token | Response (s) | Damping |
+|---|---|---|
+| Standard transition | 0.40 | 0.80 |
+| Tight transition (chips, segment swap) | 0.35 | 0.78 |
+| Tile hover scale | 0.18 | 0.80 |
+
+These already live in `FileID.Theme/Theme.xaml` as `SpringResponseStandard` / `SpringDampingStandard` / `SpringResponseTight` / `SpringDampingTight`. Every motion call site must reference these StaticResources, never literal numbers.
+
+**Alternatives considered.** Translate via `2*pi*sqrt(mass/stiffness)` and `damping/(2*sqrt(mass*stiffness))` — rejected. Both SwiftUI and WinUI hide the underlying mass/stiffness/damping; the public API already abstracts to (period, dampingFraction)-equivalents that map directly.
+
+**Consequence.** No more "0.4s on macOS but 0.41s on Windows" drift. Any future motion contribution that hard-codes a Duration animation for a transition that should be a spring is a bug.
+
+---
+
+## 2026-05-17 — SCRFD detect() landed (best-effort, hardware-verification pending)
+
+**Context.** Section 5a / Task #9 deferred-no-longer. `models/scrfd.rs::detect()` previously returned `Vec::new()` unconditionally. Wrote the full post-processing against the Buffalo_L SCRFD-10g (insightface) reference: anchor decoding for strides 8/16/32, 2 anchors per location, 5 landmarks per face, distance-encoded bbox, NMS @ IoU 0.4, score filter @ 0.5, coordinate remap from letterbox-resized to original image space, clamp to source rect.
+
+**Decision.** Land the implementation behind a defensive parsing posture: if the ONNX has a different output count, output dtype, or per-stride tensor shape than expected (i.e. user loaded an SCRFD variant that's NOT bnkps-10g distance-encoded), we log a warning and return `Vec::new()`. This is the *desired* failure mode: wrong-variant ONNX silently degrades to "no faces detected" rather than producing nonsense scores that poison cluster IDs across the People tab.
+
+**Tests added.** `nms` + `iou` helpers covered by 5 unit tests (identical/disjoint/half-overlap IoU; greedy NMS cluster pickup; empty input; horizontal-eyes-zero-roll). The decode loop itself is exercised only by warmup (zero-frame → empty result, which is the correct output for the no-face input). A 4-image golden-set test (clear face / small face / multi-face / no-face) is the next-session work item.
+
+**Consequence.** People tab will now produce real face crops on Windows the next time a user scans a face-heavy library. If clusters look wrong, the suspect is the decode formula variant — the fix is to run `det_10g.onnx` through Netron and verify output tensor shapes match the assumed `(1, H*W*2, 1) / (1, H*W*2, 4) / (1, H*W*2, 10)` per stride, then adjust the index math.
+
+---
+
+## 2026-05-17 — SEC-3 SetDefaultDllDirectories hoisted to top of fn main
+
+**Context.** SEC-3 DLL search lockdown was called inside `async_main`, AFTER `logging::init()` (which opens tracing-appender file handles via possibly-loaded DLLs) and `paths::ensure_state_dirs()` (which may trigger shell DLL loads). The lockdown protects against PATH-based DLL planting, but a planted DLL pulled in during logger init would be loaded BEFORE the lockdown took effect.
+
+**Decision.** Moved the `SetDefaultDllDirectories(SYSTEM32 | APPLICATION_DIR | USER_DIRS)` call to be the very first statement in `fn main`, before tokio runtime construction and before any other I/O. The window between process start and lockdown is now bounded by the static-import resolution at PE load time (which we can't influence from code anyway).
+
+**Consequence.** Tightens the SEC-3 invariant from "lock during async_main" to "lock before any non-static DLL load." No behavior change for users; closes the gap an audit would flag.
+
+---
+
+## 2026-05-17 — clip_text.rs::session.run was missing classify_inference_error wrap (V15.8)
+
+**Context.** Section 7b audit: every `Session::run` call must route errors through `classify_inference_error` so a DirectML TDR (DXGI_ERROR_DEVICE_REMOVED) is recognized and triggers `coordinator::mark_gpu_dead`. Found `models/clip_text.rs:69` missing the wrap — a TDR during a CLIP text embed would have been mis-classified as a regular session error, the engine would have kept trying, and the next 100+ inference calls would hang against a dead device.
+
+**Decision.** Added `.map_err(classify_inference_error)` and the corresponding import. Now all 5 `session.run` sites in `models/` are uniformly guarded.
+
+**Consequence.** A future TDR during a `embedTextQuery` IPC call correctly marks the GPU dead and short-circuits remaining work.
+
+---
+
+## 2026-05-17 — Process-file GPU-dead short-circuit (Section 7c)
+
+**Context.** Once `coord.mark_gpu_dead()` fires, the existing TDR-recovery path stops queueing NEW inference but does not prevent the Discovery queue from feeding tens of thousands of already-queued files through `process_file`. Each would attempt an `unwrap_or_else` decode pipeline that's now pointless (no GPU to run inference on), wasting wall time and confusing the user.
+
+**Decision.** Added an `is_gpu_dead()` check at the top of `pipeline/tagging::process_file`. When true, the file row gets emitted with `failed=false` + empty embeddings (so a restart-then-rescan picks it up correctly) and total_ms recorded for the per-file telemetry. Discovery queue drains in microseconds-per-file instead of stalling on GPU calls.
+
+**Consequence.** Sidebar throughput readout will show a sudden jump in files-per-second after a TDR (which surfaces as "GPU is gone, still bookkeeping"). The user-facing TDR error banner remains the primary signal that something went wrong.
+
+---
+
+## 2026-05-17 — LavaLamp Composition migration already shipped in V14.6 (supersedes the deferral entry below)
+
+**Context.** While auditing the Win2D → Composition migration that Section 5b of the spec audit flagged as deferred, found that `FileID.Theme/Motion/LavaLampBackground.cs` was rewritten on `Microsoft.UI.Composition` back in V14.6. Three `SpriteVisual`s with `CompositionRadialGradientBrush` falloff and `ExpressionAnimation`-driven `Offset` (with a `CompositionPropertySet`-backed `xPhase`/`yPhase` linear oscillator for true 60-Hz-and-up GPU-continuous motion). Already wired into `MainWindow.xaml:34` and styled via `FileID.Theme/Themes/Generic.xaml:62`.
+
+**Decision.** Task closed. The deferral entry immediately below this one is superseded — no further work is needed in this area beyond the user-side verification that the visual still renders cleanly on Win11 26200+ (no `0xC000027B` regression).
+
+**Consequence.** SHIP.md Phase 3/4 LavaLamp checkbox can be marked done. The original V14.6 commit message documented the fix; this is just the audit-side acknowledgement.
+
+---
+
+## 2026-05-17 — LavaLampBackground Composition migration deferred; needs Win11 26200+ render verification (SUPERSEDED by entry above)
+
+**Context.** The macOS `LavaLampBackground.swift` is a user-favorite visual (Canvas + spring-driven blob centers). The original Win2D port hit `DXGI_ERROR_DEVICE_HUNG` on Windows 11 build 26200+ — a known issue with `CanvasAnimatedControl` on recent Insider Builds. A `Microsoft.UI.Composition`-backed replacement would use `SpriteVisual` + `ScalarKeyFrameAnimation` (no D2D device, no DXGI surface), which sidesteps the hang.
+
+**Decision.** Defer the Composition migration to a session running on a Win11 26200+ device. The implementation is straightforward (~150 LOC, no new dependencies), but the only meaningful test is "does it render without crashing on the affected builds." Code I can't render is code I shouldn't ship.
+
+**Alternatives considered.** (a) Static CSS-gradient fallback only — rejected; loses the user's favorite touch. (b) Custom XAML `Canvas` with `Storyboard`-driven ellipse `Translation` — works but is heavier than `SpriteVisual` for the same effect. (c) Roll back Win2D and accept the hang risk on 26200+ — rejected; the user runs Insider Builds.
+
+**Consequence.** LavaLamp currently renders only on Win11 pre-26200. Sidebar shows a static gradient on affected builds. Visual parity gap with macOS; flagged in NEXT.md.
+
+---
+
+## 2026-05-17 — Multi-vendor GPU EP chain testing deferred; needs physical hardware
+
+**Context.** `models/ep_picker.rs::priority_chain()` selects the ONNX Runtime execution-provider chain per GPU vendor. The cases that matter are NVIDIA (with/without CUDA pack), AMD, Intel (with/without OpenVINO pack), Qualcomm (with/without QNN pack), and no-GPU. Each chain has a different fallback ordering and includes/excludes specific EPs.
+
+**Decision.** Trust the unit-test coverage that mocks `pack_present()` for each vendor, but defer live-hardware verification until each vendor's box is physically available. The TDR-recovery and EP-fallback paths (`coordinator::is_gpu_dead`, `classify_inference_error`) are well-tested in isolation; what we don't have is end-to-end "scan a 1000-file folder on a Snapdragon, watch the QNN pack get picked, watch a single forced TDR cause a graceful DirectML fallback" runs.
+
+**Alternatives considered.** (a) Spin up cloud VMs with each vendor's GPU — rejected; Snapdragon WoA isn't widely available as a cloud SKU, and AMD/Intel GPU cloud VMs have their own driver headaches. (b) Mock the hardware deeper — rejected; you reach the point where you're testing the mock, not the production path.
+
+**Consequence.** Production confidence on NVIDIA (well-tested locally) is high; AMD/Intel/Qualcomm is "should work per the unit tests" until a real box validates. SHIP.md tracks the validation gate.
+
+---
+
+## 2026-05-17 — Trash-log HMAC backward-compat read path removed (V15.8)
+
+**Context.** `commands/trash_log.rs::read_batch` previously accepted entries without an HMAC suffix for "pre-V14.7.2 backward compat" — any line missing a `\t` was passed through to `serde_json::from_str` without integrity check. V14.7.2 shipped 4+ months ago; any trash-log entry on any user's machine that should still be readable has long since been written by an HMAC-aware engine.
+
+**Decision.** Removed the no-HMAC accept path entirely. Lines without a `\t` are now warned + skipped. The on-disk format is unchanged — only the read posture tightened.
+
+**Why not a 30-day timestamp grace.** The directive draft proposed accepting no-HMAC entries newer than 30 days; rejected because (a) the 30-day window already expired and (b) "newer than 30 days" + no HMAC means the entry was written by a compromised process posing as the engine, not a legitimate version drift.
+
+**Consequence.** Forward compatibility is unaffected; backward compatibility with engine versions older than V14.7.2 is now broken (those versions wrote no HMACs). User-visible: if anyone is running a 6+-month-old build and upgrades, the previous trash-log entries become unreplayable. Restore from the Recycle Bin manually if needed. Acceptable trade-off.
+
+---
+
+## 2026-05-17 — Defense-in-depth: SEC-5 TOCTOU pre+post check on restructure apply (V15.8)
+
+**Context.** `pipeline/restructure_apply.rs::apply` previously checked for reparse points in the destination's ancestor chain AFTER `create_dir_all`. An attacker holding a handle to a pre-existing directory under `library_root` could plant a junction BEFORE `create_dir_all` and silently redirect the move outside the root.
+
+**Decision.** Two checks now bracket `create_dir_all`: one on the existing ancestors before the call (catches pre-planted junctions), one after (catches anything that appeared during create_dir_all). Either failure rejects the move. The check is cheap (a few stat calls per move) and the defense-in-depth is principled.
+
+**Alternatives considered.** (a) Replace with a single check using `OpenAt2` + `RESOLVE_NO_SYMLINKS` — only available on Linux, not Win32. (b) Move the file via a sandboxed worker process — over-engineered for a desktop app. (c) Accept the TOCTOU window — rejected; the cost of the second check is negligible.
+
+**Consequence.** Restructure apply is now slightly slower (~microseconds per move). The wire contract (`applyRestructure` IPC) is unchanged.

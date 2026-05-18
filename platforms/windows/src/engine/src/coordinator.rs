@@ -1,10 +1,9 @@
 // ScanCoordinator — pause/resume/cancel state for the scan pipeline.
 //
-// Mirror of macOS engine/Sources/FileIDEngine/ScanCoordinator.swift. The
-// scan pipeline runs as Discovery → bounded channel → N tagging workers
-// → bounded channel → DBWriter. Each stage checks the coordinator's
-// AtomicBool sync mirrors on hot paths so cancellation lands within
-// milliseconds, no actor-hop tax per file.
+// Discovery → bounded channel → N tagging workers → bounded channel →
+// DBWriter. Each stage checks the coordinator's AtomicBool sync mirrors
+// on hot paths so cancellation lands within milliseconds, no actor-hop
+// tax per file.
 //
 // `request_pause` / `request_resume` / `request_cancel` are idempotent and
 // safe from any thread; the workers poll the flags between batches.
@@ -21,14 +20,12 @@ pub struct ScanCoordinator {
 struct Inner {
     paused: AtomicBool,
     cancelled: AtomicBool,
-    /// V14.9-Y: sticky flag set the moment any worker detects a
-    /// `DXGI_ERROR_DEVICE_REMOVED` from ORT/DirectML. Distinct from
-    /// `cancelled` because the cause is fatal (the GPU is gone for the
-    /// rest of the process) and the IPC layer emits a different error
-    /// kind. Workers MUST observe this and stop submitting GPU work
-    /// immediately — retrying spams the dead driver and prevents
-    /// Windows TDR from recovering the device, which on a typical
-    /// machine wedges the entire desktop until a hard reboot.
+    /// Sticky flag set when any worker detects `DXGI_ERROR_DEVICE_REMOVED`
+    /// from ORT/DirectML. Distinct from `cancelled` because the cause is
+    /// fatal (GPU is gone for the rest of the process) and the IPC layer
+    /// emits a different error kind. Workers MUST stop submitting GPU work
+    /// — retrying spams the dead driver and prevents TDR recovery, which
+    /// on a typical machine wedges the desktop until a hard reboot.
     gpu_dead: AtomicBool,
     /// Workers that hit the pause flag await on this notifier. Resume
     /// `notify_waiters()` wakes everyone at once.
@@ -47,17 +44,15 @@ impl ScanCoordinator {
         }
     }
 
-    /// V14.9-Y: returns true once any worker has marked the GPU as
-    /// device-removed. Workers should treat this as a hard stop —
-    /// don't submit any more session.run calls.
+    /// Returns true once any worker has marked the GPU as device-removed.
+    /// Workers should treat this as a hard stop — no more session.run.
     pub fn is_gpu_dead(&self) -> bool {
         self.inner.gpu_dead.load(Ordering::Relaxed)
     }
 
-    /// V14.9-Y: latch the GPU-dead flag and also flip `cancelled` so
-    /// every existing worker checkpoint exits at the next poll. Returns
-    /// true on the FIRST caller (lets the caller emit the IPC event
-    /// exactly once across N workers racing on the same event).
+    /// Latch the GPU-dead flag and flip `cancelled` so every worker
+    /// checkpoint exits at the next poll. Returns true on the FIRST caller
+    /// so the IPC event fires exactly once across N racing workers.
     pub fn mark_gpu_dead(&self) -> bool {
         let was = self.inner.gpu_dead.swap(true, Ordering::AcqRel);
         if !was {

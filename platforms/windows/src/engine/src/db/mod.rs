@@ -13,8 +13,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 
-/// PRAGMAs applied at every connection open. Mirror of `Database.swift`'s
-/// `prepareDatabase` block. WAL + NORMAL sync + 256 MB mmap + 64 MB cache.
+/// PRAGMAs applied at every connection open.
+/// WAL + NORMAL sync + 256 MB mmap + 64 MB cache.
 pub const SETUP_PRAGMAS: &[&str] = &[
     "PRAGMA journal_mode = WAL",
     "PRAGMA synchronous = NORMAL",
@@ -22,9 +22,9 @@ pub const SETUP_PRAGMAS: &[&str] = &[
     "PRAGMA mmap_size = 268435456",     // 256 MB
     "PRAGMA cache_size = -65536",        // 64 MB (negative = KB)
     "PRAGMA wal_autocheckpoint = 10000", // ~40 MB before checkpoint
-    // V15.2 perf: pin the 64 MB page cache in memory instead of spilling
-    // to a temp file mid-transaction. Our worst transaction is a
-    // 100-row tagged-file batch (well under the cache); spill never wins.
+    // Pin the 64 MB page cache in memory instead of spilling to a temp
+    // file mid-transaction. Our worst transaction is a 100-row tagged-file
+    // batch (well under cache); spill never wins.
     "PRAGMA cache_spill = 0",
     "PRAGMA foreign_keys = ON",
 ];
@@ -58,26 +58,8 @@ pub fn open_writer(db_path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// Open a read-only connection. The writer's WAL allows concurrent readers
-/// without blocking; readers see a snapshot at the time the connection was
-/// opened. App side will use this; the engine creates the writer.
-#[allow(dead_code)]
-pub fn open_reader(db_path: &Path) -> Result<Connection> {
-    let conn = Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| format!("opening reader at {}", db_path.display()))?;
-    for pragma in SETUP_PRAGMAS {
-        // Some PRAGMAs are no-ops on read-only conns; ignore errors.
-        let _ = conn.execute_batch(pragma);
-    }
-    Ok(conn)
-}
-
 /// Drain WAL into the main DB file. Called at shutdown to keep the on-disk
-/// state self-contained. Mirror of macOS `Database.swift`'s shutdown
-/// `PRAGMA wal_checkpoint(TRUNCATE)`.
+/// state self-contained — `PRAGMA wal_checkpoint(TRUNCATE)`.
 ///
 /// Retries up to 5 times on `SQLITE_BUSY` (a read connection holding an
 /// active txn at shutdown). 50 ms between attempts → ~250 ms worst case,

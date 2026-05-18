@@ -1,7 +1,7 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
     CleanupView — duplicate-group list with keeper selection.
-    Mirror of macOS Cleanup/CleanupView.swift.
+
 -->
 <UserControl
     x:Class="FileID.Views.Cleanup.CleanupView"
@@ -71,12 +71,11 @@
                               Padding="16"
                               Tag="{x:Bind PerceptualHash}"
                               RightTapped="OnGroupRightTapped">
-                            <!-- FEAT-CRIT-2: per-group right-click action menu.
-                                 Mirror of macOS Cleanup group menu.
-                                 V14.7.6: RightTapped seeds the current-group
-                                 cache so MenuFlyoutItem clicks (which don't
-                                 inherit DataContext on WinUI 3) can resolve
-                                 to the correct DuplicateGroup. -->
+                            <!-- Per-group right-click action menu.
+                                 RightTapped seeds the current-group cache so
+                                 MenuFlyoutItem clicks (which don't inherit
+                                 DataContext on WinUI 3) can resolve to the
+                                 correct DuplicateGroup. -->
                             <Grid.ContextFlyout>
                                 <MenuFlyout>
                                     <MenuFlyoutItem Text="Keep first"

@@ -1,11 +1,9 @@
 // ArcFace face embedder. Maps a 112×112 RGB face crop to a 512-d
 // L2-normalized float32 embedding. Stored as raw little-endian bytes
-// in `face_prints.embedding` so the bytes round-trip with macOS's
-// GRDB layout (cross-platform DB compatibility).
+// in `face_prints.embedding` for cross-platform DB compatibility.
 //
-// Loads the ONNX session lazily on `load()` and serialises calls via
-// the `&mut self` borrow in `embed()` (the caller wraps in a Mutex —
-// see `pipeline/tagging.rs::ModelStack::arcface`).
+// Loads the ONNX session on `load()` and serialises calls via the
+// `&mut self` borrow in `embed()` (the caller wraps in a Mutex).
 
 use std::path::{Path, PathBuf};
 
@@ -36,10 +34,6 @@ impl ArcFace {
         builder = builder
             .with_intra_threads(1)
             .context("set intra threads")?;
-        // V14.9-V: actually register the EPs from the priority chain.
-        // Pre-V14.9-V this was `let _ = chain;` — the priority list got
-        // computed and dropped, so ORT silently picked CPU EP for every
-        // model regardless of GPU detection.
         let chain_labels: Vec<&'static str> = chain.iter().map(|e| e.as_str()).collect();
         let providers = execution_providers_for_chain(&chain);
         if !providers.is_empty() {
@@ -52,12 +46,10 @@ impl ArcFace {
         let session = builder
             .commit_from_file(path)
             .context("ORT session commit (ArcFace)")?;
-        // V15.0 Phase A: warmup. Run one inference with a zero buffer so
-        // DirectML kernel compilation + first-time GPU allocation happen
-        // here (during load_default), not on the first real file. If TDR
-        // triggers during warmup, the marker propagates and load_pool
-        // bails the whole stack instead of letting workers see a half-
-        // dead GPU.
+        // Warmup with a zero buffer so DirectML kernel compilation + first
+        // GPU allocation happen here, not on the first real file. If TDR
+        // triggers during warmup, the marker propagates and load_pool bails
+        // the whole stack instead of letting workers see a half-dead GPU.
         let mut model = Self { session };
         let warmup_started = std::time::Instant::now();
         let _ = model.embed(&[0u8; 3 * 112 * 112])?;

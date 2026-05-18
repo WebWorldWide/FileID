@@ -48,7 +48,7 @@ public sealed partial class MainWindow : Window
 
     public MainWindow()
     {
-        // V14.7.2: every step in the constructor is independently
+        // every step in the constructor is independently
         // wrapped so a single failure (e.g. backdrop unsupported on
         // older Win10) doesn't kill the window before it shows. If
         // ANY step fails the rest still run, and the failure goes to
@@ -142,7 +142,7 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        // V14.9-Bug2: host the sheet in an inline overlay confined to
+        // host the sheet in an inline overlay confined to
         // Row 1 of the main grid (NOT a ContentDialog). The dialog's
         // full-window smoke layer was intercepting pointer events on
         // the title bar (Row 0), making the window non-draggable while
@@ -155,7 +155,7 @@ public sealed partial class MainWindow : Window
         void OnDismissed(object? _, EventArgs __)
         {
             DebugLog.Info("[INSTALL] WelcomeSheet.Dismissed fired; closing overlay.");
-            // V15.2: Dismissed is typically raised on the UI thread by the
+            // Dismissed is typically raised on the UI thread by the
             // sheet's button handler, but a future code path could raise
             // from a background continuation. Marshal explicitly so
             // mutating Visibility / Content can never run off-thread —
@@ -214,12 +214,12 @@ public sealed partial class MainWindow : Window
     private void ApplyTitleBarChrome()
     {
         ExtendsContentIntoTitleBar = true;
-        // V14.8.4: SetTitleBar registers a zero-bounds drag region if the
+        // SetTitleBar registers a zero-bounds drag region if the
         // element hasn't been laid out yet. Defer until Loaded so AppTitleBar
         // has measurable bounds when WinUI captures the non-client region.
         AppTitleBar.Loaded += (_, _) => SetTitleBar(AppTitleBar);
 
-        // V14.7.3: explicit AppWindow icon. The .exe already has the
+        // explicit AppWindow icon. The .exe already has the
         // icon embedded via <ApplicationIcon>, so taskbar / Alt-Tab
         // already work. SetIcon makes the WINDOW icon (top-left if a
         // chrome'd window, system menu icon) match — defensive +
@@ -298,7 +298,7 @@ public sealed partial class MainWindow : Window
             Theme = SystemBackdropTheme.Dark,
         };
 
-        // V14.9-A16: dispose the controller on a construction-time fault so
+        // dispose the controller on a construction-time fault so
         // we never leak a half-attached MicaController/DesktopAcrylicController.
         // OnClosed handles the normal disposal path; this guards mid-init.
         if (MicaController.IsSupported())
@@ -354,8 +354,7 @@ public sealed partial class MainWindow : Window
 
     /// <summary>
     /// Register every keyboard shortcut on the root layout so they fire
-    /// regardless of focus location. Mirror of macOS Sidebar.swift's
-    /// keyboardShortcut(...) attachments.
+    /// regardless of focus location.
     /// </summary>
     private void WireKeyboardShortcuts()
     {
@@ -411,9 +410,9 @@ public sealed partial class MainWindow : Window
         AddAccelerator((VirtualKey)0xBC, VirtualKeyModifiers.Control,
             (_, _) => AppViewModel.Instance.ActiveTab = SidebarTab.Settings);
 
-        // Ctrl+F — focus search. Phase 1 has no search field in the
-        // Detail; the accelerator is reserved here so Phase 2 wiring is
-        // a one-liner (raise an event the LibraryView subscribes to).
+        // Ctrl+F — focus search. The accelerator is reserved here so the
+        // LibraryView wiring is a one-liner (raise an event the LibraryView
+        // subscribes to).
         AddAccelerator(VirtualKey.F, VirtualKeyModifiers.Control,
             (_, _) => SearchFocusRequested?.Invoke(this, EventArgs.Empty));
 
@@ -429,7 +428,7 @@ public sealed partial class MainWindow : Window
             });
         }
 
-        // V14.7.15: ShortcutsCheatSheet (F1 / Ctrl+?) removed for strict
+        // ShortcutsCheatSheet (F1 / Ctrl+?) removed for strict
         // macOS parity — macOS has no centralized shortcuts panel.
     }
 
@@ -452,7 +451,7 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Raised by Ctrl+F. Phase 2 LibraryView listens and focuses the search box.
+    /// Raised by Ctrl+F. LibraryView listens and focuses the search box.
     /// </summary>
     public event EventHandler? SearchFocusRequested;
 
@@ -474,12 +473,12 @@ public sealed partial class MainWindow : Window
         // Tell the engine to wrap up so the WAL gets checkpointed cleanly.
         try { _ = EngineClient.Instance.ShutdownAsync(); } catch { }
 
-        // V15.2: flush the debounced AppSettings.Save so pending edits
+        // flush the debounced AppSettings.Save so pending edits
         // (e.g. the user toggled sidebar then immediately closed the
         // window) land on disk before exit.
         try { AppViewModel.Instance.Settings.SaveImmediately(); } catch { /* swallow */ }
 
-        // V15.2: flip the last-session breadcrumb to clean_exit=true so the
+        // flip the last-session breadcrumb to clean_exit=true so the
         // NEXT launch knows this session ended without a native fast-fail.
         try { DebugLog.MarkCleanExit(); } catch { /* swallow */ }
     }
@@ -542,7 +541,7 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// V14.7.16: title-bar sidebar toggle button. Same effect as
+    /// title-bar sidebar toggle button. Same effect as
     /// Ctrl+Shift+S but visible at all times so the user always has a way
     /// to bring the sidebar back after hiding it.
     /// </summary>
@@ -603,7 +602,7 @@ public sealed partial class MainWindow : Window
                     DebugLog.Warn($"Drag-drop: rejected non-directory or missing path '{PathRedactor.Redact(canonical)}'.");
                     return;
                 }
-                // V14.9-A9: reject reparse points (symlinks/junctions). A
+                // reject reparse points (symlinks/junctions). A
                 // user-writable directory could contain a junction to
                 // System32 or another sensitive location; FileID must not
                 // silently scan into that. The legitimate "I want to scan

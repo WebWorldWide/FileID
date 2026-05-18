@@ -1,10 +1,10 @@
 ﻿// EngineClient — owns the FileIDEngine.exe child process lifecycle.
 //
-// Mirror of macOS EngineClient.swift. Responsibilities:
+// Responsibilities:
 //   1. Spawn FileIDEngine.exe with stdin/stdout/stderr redirected.
 //   2. Verify the engine binary's Authenticode signature before each spawn
-//      (Phase 1: warns on Unsigned, refuses on Untrusted; Phase 11 tightens
-//      to require Trusted with a pinned EV thumbprint).
+//      (warns on Unsigned, refuses on Untrusted; will tighten to require
+//      Trusted with a pinned EV thumbprint).
 //   3. Read engine stdout line-by-line, decode each as IpcEvent, dispatch
 //      to the UI thread, raise INotifyPropertyChanged for the relevant
 //      observable property.
@@ -94,10 +94,21 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     private ScanPhase? _lastProgressPhase;
     private static readonly TimeSpan ProgressThrottle = TimeSpan.FromMilliseconds(100); // 10 Hz
 
-    // V14.7.16: throttled diagnostic counter for inbound progress events.
+    // throttled diagnostic counter for inbound progress events.
     // Lets `[IPC IN] ModelDownloadProgress #N` lines correlate with engine
     // activity without flooding app.log.
     private int _modelDownloadEventCount;
+
+    // monotonic Apply-call counter. Used by the [APPLY:N] enter/exit
+    // tracing to localize native fast-fails. The crash signature was an
+    // app process death with NO managed exception and NO crash dump
+    // (last-session.txt clean_exit=false). Without per-event tracing the
+    // only visible signal was a 3-4 s log gap between the StartScan IPC
+    // and process termination. The [APPLY:N] enter/exit pair makes the
+    // last-processed event identifiable from app.log alone — when the app
+    // dies, the highest-numbered `enter` without a matching `exit` is the
+    // killer event.
+    private int _applySeq;
 
     // ─── Observable surface (mirror of macOS @Observable) ──────────────
 
@@ -230,7 +241,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         private set => Set(ref _lastMergeSuggestions, value);
     }
 
-    /// <summary>V14.9-G: latest CUDA/cuDNN re-probe result from the engine.
+    /// <summary>latest CUDA/cuDNN re-probe result from the engine.
     /// Settings → Performance "Verify install" binds to this to flip the
     /// card to ✓ or surface a diagnostics string on failure.</summary>
     private HardwareReprobed? _lastHardwareReprobe;
@@ -247,25 +258,10 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         private set => Set(ref _deepAnalyzeStarting, value);
     }
 
-    /// <summary>V14.9 A6: AutoPilot orchestration stage. Drives the
-    /// 4-step sidebar tracker. Set by <see cref="RunAutoPilotAsync"/>
-    /// as it awaits each phase's completion signal. Null when no
-    /// AutoPilot run is in flight.</summary>
-    public enum AutoPilotStage
-    {
-        Scanning,
-        Clustering,
-        Captioning,
-        Planning,
-        Complete,
-    }
-
-    private AutoPilotStage? _autoPilotStage;
-    public AutoPilotStage? CurrentAutoPilotStage
-    {
-        get => _autoPilotStage;
-        private set => Set(ref _autoPilotStage, value);
-    }
+    // AutoPilotStage enum + CurrentAutoPilotStage property removed.
+    // The AutoPilot button is gone (macOS doesn't have one); auto-advance
+    // from scan → face clustering is wired directly into Apply's
+    // ScanCompleteEvent handler. There's no multi-stage tracker to feed.
 
     private ScanPhase? _phase;
     public ScanPhase? Phase
@@ -310,7 +306,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             // spawn we collided with.
             return;
         }
-        // V15.2 — strict CAS gate. The earlier formulation (BUG-3 comment)
+        // strict CAS gate. The earlier formulation (BUG-3 comment)
         // claimed the gate, then declined to bail when it lost the race,
         // letting a second StartAsync caller fall through to a parallel
         // spawn. That produced occasional double-spawn with a shared stdin/
@@ -322,7 +318,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             return;
         }
 
-        // V14.9-A2: every code path below — including early-return on
+        // every code path below — including early-return on
         // signature verdicts, hash failures, and the spawn catch — must
         // release `_isStarting`, otherwise the gate latches at 1 forever
         // and OnProcessExited's respawn can't claim it. Wrap the whole
@@ -440,7 +436,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     CreateNoWindow = true,
-                    // V14.9-Bug1: `System.Text.Encoding.UTF8` is the
+                    // `System.Text.Encoding.UTF8` is the
                     // BOM-prefixing variant. On first write its
                     // StreamWriter pushes three bytes (`EF BB BF`) into
                     // the engine's stdin, which trips serde_json with
@@ -492,7 +488,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         }
         finally
         {
-            // V14.9-A2: unconditional gate release. Every early-return path
+            // unconditional gate release. Every early-return path
             // above + the spawn-catch + the normal completion path all
             // converge here so OnProcessExited's respawn can always CAS
             // the gate back from 0 → 1.
@@ -502,16 +498,16 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
 
     private async Task StdoutLoopAsync(StreamReader reader, CancellationToken ct)
     {
-        // V15.2.1: removed the V15.2 stdout idle watchdog. It killed
-        // healthy idle engines (e.g. after the auto-install of llama
-        // runtimes, the engine sits quietly waiting for the user — 5 min
+        // No stdout idle watchdog: it killed healthy idle engines (e.g.
+        // after auto-install of llama runtimes the engine sits quietly
+        // waiting for the user — 5 min
         // of "idle" tripped the watchdog and forced a respawn that the
         // respawn-CAS double-bookkeeping then dropped). A watchdog can't
         // distinguish "engine hung" from "engine idle waiting for user".
         // Genuine engine hangs are caught by:
         //   - the engine's own parent-PID watchdog (which kills the
         //     engine if the C# app dies),
-        //   - V14.9-Y's GPU TDR detection (sticky cancellation +
+        //   - the engine's GPU TDR detection (sticky cancellation +
         //     EngineError), and
         //   - per-command timeouts on the C# side (WaitForReadyAsync,
         //     CudaAutoInstaller's 30-min cap, etc).
@@ -645,13 +641,10 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 _ => TimeSpan.FromSeconds(16),
             };
             DebugLog.Info($"EngineClient: respawning in {delay.TotalSeconds}s (attempt {_consecutiveFailures}/3).");
-            // V15.2.1: removed the outer CAS. The original BUG-3 guard
-            // was redundant in V15.2 (StartAsync now has its own strict
-            // CAS at the top) and actively harmful: setting _isStarting
-            // to 1 here caused StartAsync's own CAS to see "already
-            // starting" and bail. Net: every auto-respawn was silently
-            // dropped, leaving the engine dead after the first crash.
-            // Now we just call StartAsync; its gate handles the race.
+            // No outer CAS — StartAsync has its own strict CAS at the top;
+            // an outer one was actively harmful: setting _isStarting=1
+            // here caused StartAsync's own CAS to see "already starting"
+            // and bail, so every auto-respawn was silently dropped.
             _ = Task.Delay(delay).ContinueWith(_ => _ui.TryEnqueue(async () =>
             {
                 try
@@ -775,184 +768,253 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
 
     private void Apply(IpcEvent ev)
     {
-        // Always raise to subscribers first, even if the routing below
-        // throws (defense-in-depth — never silently drop an event).
-        // Scan FileDone events are sampled (every Nth) because a fast scan
-        // can emit hundreds per second and subscribers (LibraryView) don't
-        // need every one to feel responsive.
-        bool publishToSubject = true;
-        if (ev.Payload is FileDoneEventWrapper)
-        {
-            var n = Interlocked.Increment(ref _scanFileDoneEventCounter);
-            publishToSubject = (n % ScanFileDoneSampleN) == 0;
-        }
-        if (publishToSubject)
-        {
-            try { _events.OnNext(ev); } catch (Exception ex) { DebugLog.Warn("event subject OnNext threw: " + ex.Message); }
-        }
+        // per-event diagnostic tracing. See _applySeq comment above
+        // for why this exists. Only logs the event TYPE, never the payload
+        // (payloads can contain user file paths — those route through
+        // existing per-arm logging which already path-redacts).
+        var applySeq = Interlocked.Increment(ref _applySeq);
+        var applyEventName = ev.Payload?.GetType().Name ?? "<null>";
+        DebugLog.Info($"[APPLY:{applySeq}] enter {applyEventName} tid={Environment.CurrentManagedThreadId}");
 
+        // top-level try/wrap so a throw inside Set<T> →
+        // PropertyChanged subscriber fanout cannot escape Apply into the
+        // dispatcher loop. Two layers: inner catches per-arm routing
+        // exceptions + writes a crash dump; outer catches anything else
+        // (subject OnNext, sampling counter increment, the inner catch's
+        // own logging). Worst case: log + carry on.
         try
         {
-            switch (ev.Payload)
+            // Always raise to subscribers first, even if the routing below
+            // throws (defense-in-depth — never silently drop an event).
+            // Scan FileDone events are sampled (every Nth) because a fast scan
+            // can emit hundreds per second and subscribers (LibraryView) don't
+            // need every one to feel responsive.
+            bool publishToSubject = true;
+            if (ev.Payload is FileDoneEventWrapper)
             {
-                case ReadyEvent r:
-                    Info = r.Info;
-                    State = LifecycleState.Ready;
-                    CrashReason = null;
-                    // A successful Ready is the canonical signal that the
-                    // engine has fully recovered from any prior crash.
-                    // Reset both the failure counter AND the failure-window
-                    // timestamp so a subsequent crash doesn't tick toward
-                    // the 3-strike limit using stale state. Without this
-                    // reset, a deterministic-crash file (corrupt .gguf)
-                    // could permanently lock the engine in Crashed even
-                    // after the user removes the bad file.
-                    _consecutiveFailures = 0;
-                    _failureWindowStart = DateTime.MinValue;
-                    break;
-                case ProgressEvent p:
-                    // Throttle to 10 Hz. The engine emits a Progress per
-                    // discovery/tagging batch; on a fast scan that's 100+
-                    // events/s, each rebuilding the sidebar progress bar +
-                    // labels via x:Bind. 10 Hz is plenty for human
-                    // perception and keeps the UI thread idle. The phase
-                    // transition itself (Discovering → Tagging → Completed)
-                    // is captured by PhaseChangedEvent which is NOT
-                    // throttled — it fires once per phase boundary.
-                    var nowProg = DateTime.UtcNow;
-                    if (nowProg - _lastProgressEmit >= ProgressThrottle
-                        || p.Progress.Phase != _lastProgressPhase)
-                    {
-                        LastProgress = p.Progress;
-                        _lastProgressEmit = nowProg;
-                        _lastProgressPhase = p.Progress.Phase;
-                    }
-                    Phase = p.Progress.Phase;
-                    break;
-                case PhaseChangedEvent pc:
-                    Phase = pc.Phase;
-                    break;
-                case DiscoveryCompleteEvent:
-                    // No dedicated property — UI consumes via LastProgress.Total,
-                    // which the engine populates immediately after this event.
-                    break;
-                case FileDoneEventWrapper:
-                    // Per-file events are high-volume; we don't surface them as
-                    // an observable property. Library tab subscribes directly
-                    // via Events when it needs them.
-                    break;
-                case BatchSummaryEvent b:
-                    LastBatch = b.Summary;
-                    break;
-                case ScanCompleteEvent:
-                    Phase = ScanPhase.Completed;
-                    IsPaused = false;
-                    if (_scanStartedAt.HasValue)
-                    {
-                        LastScanDuration = DateTime.UtcNow - _scanStartedAt.Value;
-                        _scanStartedAt = null;
-                    }
-                    break;
-                case ErrorEvent e:
-                    if (IsNonFatalWarningKind(e.Error.Kind))
-                    {
-                        LastWarning = e.Error;
-                        DebugLog.Info($"[IPC IN] engine warning: kind={e.Error.Kind} msg={e.Error.Message}");
-                    }
-                    else
-                    {
-                        LastError = e.Error;
-                        DebugLog.Warn($"[IPC IN] engine error: kind={e.Error.Kind} msg={e.Error.Message} path={PathRedactor.Redact(e.Error.Path)}");
-                    }
-                    break;
-                case LogEvent:
-                    // Engine LogLine events go to the transcript via Events.
-                    // Local app log already captured stderr.
-                    break;
-                case FaceClusteringCompleteEvent fc:
-                    LastFaceClustering = fc.Result;
-                    break;
-                case DeepAnalyzeStartingEvent das:
-                    DeepAnalyzeStarting = das.Starting;
-                    break;
-                case DeepAnalyzeProgressEvent dap:
-                    DeepAnalyzeProgress = dap.Progress;
-                    break;
-                case DeepAnalyzeFileDoneEvent dafd:
-                    // Throttle: 2 Hz. Without this, fast VLM runs spam ~50/s.
-                    var now = DateTime.UtcNow;
-                    if (now - _lastDeepAnalyzeFileDone >= DeepAnalyzeFileDoneThrottle)
-                    {
-                        DeepAnalyzeLast = dafd.FileDone;
-                        _lastDeepAnalyzeFileDone = now;
-                    }
-                    break;
-                case DeepAnalyzeCompleteEvent dac:
-                    DeepAnalyzeComplete = dac.Result;
-                    DeepAnalyzeProgress = null;
-                    DeepAnalyzeStarting = null;
-                    break;
-                case ModelDownloadProgressEvent mdp:
-                    // Throttled to one log line per 1% (~100 events / model) so
-                    // app.log isn't flooded but the trail is dense enough to
-                    // diagnose stuck installs.
-                    _modelDownloadEventCount++;
-                    if (_modelDownloadEventCount <= 5
-                        || _modelDownloadEventCount % 50 == 0
-                        || mdp.Progress.Fraction >= 0.999)
-                    {
-                        DebugLog.Info($"[IPC IN] ModelDownloadProgress #{_modelDownloadEventCount}: {mdp.Progress.ModelKind} {mdp.Progress.Fraction:P0} - {mdp.Progress.Message}");
-                    }
-                    ModelDownloadProgress = mdp.Progress;
-                    break;
-                case QueueStateEvent qs:
-                    QueueState = qs.State;
-                    break;
-                case RestructurePlanEvent rp:
-                    LastRestructurePlan = rp.Plan;
-                    break;
-                case RestructureApplyResultEvent rar:
-                    LastRestructureApplyResult = rar.Result;
-                    break;
-                case BulkActionResultEvent bar:
-                    LastBulkAction = bar.Result;
-                    break;
-                case ClipTextEmbeddingEvent ce:
-                    LastClipTextEmbedding = ce.Embedding;
-                    break;
-                case MergeSuggestionsEvent ms:
-                    LastMergeSuggestions = ms.Suggestions;
-                    break;
-                case HardwareReprobedEvent hr:
-                    if (hr.Result is null)
-                    {
-                        DebugLog.Warn("HardwareReprobedEvent with null Result; dropped.");
-                        break;
-                    }
-                    LastHardwareReprobe = hr.Result;
-                    // Also refresh the cached HardwareInfo in Info so Settings
-                    // bindings to existing Info.Hardware fields update too.
-                    if (Info is { } prevInfo && hr.Result.Hardware is { } hw)
-                    {
-                        Info = new EngineInfo(
-                            prevInfo.Version,
-                            prevInfo.Pid,
-                            prevInfo.WorkerCap,
-                            prevInfo.PhysicalMemoryGB,
-                            hw);
-                    }
-                    break;
+                var n = Interlocked.Increment(ref _scanFileDoneEventCounter);
+                publishToSubject = (n % ScanFileDoneSampleN) == 0;
             }
+            if (publishToSubject)
+            {
+                try { _events.OnNext(ev); } catch (Exception ex) { DebugLog.Warn("event subject OnNext threw: " + ex.Message); }
+            }
+
+            try
+            {
+                switch (ev.Payload)
+                {
+                    case ReadyEvent r:
+                        Info = r.Info;
+                        State = LifecycleState.Ready;
+                        CrashReason = null;
+                        // A successful Ready is the canonical signal that the
+                        // engine has fully recovered from any prior crash.
+                        // Reset both the failure counter AND the failure-window
+                        // timestamp so a subsequent crash doesn't tick toward
+                        // the 3-strike limit using stale state. Without this
+                        // reset, a deterministic-crash file (corrupt .gguf)
+                        // could permanently lock the engine in Crashed even
+                        // after the user removes the bad file.
+                        _consecutiveFailures = 0;
+                        _failureWindowStart = DateTime.MinValue;
+                        break;
+                    case ProgressEvent p:
+                        // Throttle to 10 Hz. The engine emits a Progress per
+                        // discovery/tagging batch; on a fast scan that's 100+
+                        // events/s, each rebuilding the sidebar progress bar +
+                        // labels via x:Bind. 10 Hz is plenty for human
+                        // perception and keeps the UI thread idle. The phase
+                        // transition itself (Discovering → Tagging → Completed)
+                        // is captured by PhaseChangedEvent which is NOT
+                        // throttled — it fires once per phase boundary.
+                        var nowProg = DateTime.UtcNow;
+                        if (nowProg - _lastProgressEmit >= ProgressThrottle
+                            || p.Progress.Phase != _lastProgressPhase)
+                        {
+                            LastProgress = p.Progress;
+                            _lastProgressEmit = nowProg;
+                            _lastProgressPhase = p.Progress.Phase;
+                        }
+                        Phase = p.Progress.Phase;
+                        break;
+                    case PhaseChangedEvent pc:
+                        Phase = pc.Phase;
+                        break;
+                    case DiscoveryCompleteEvent:
+                        // No dedicated property — UI consumes via LastProgress.Total,
+                        // which the engine populates immediately after this event.
+                        break;
+                    case FileDoneEventWrapper:
+                        // Per-file events are high-volume; we don't surface them as
+                        // an observable property. Library tab subscribes directly
+                        // via Events when it needs them.
+                        break;
+                    case BatchSummaryEvent b:
+                        LastBatch = b.Summary;
+                        break;
+                    case ScanCompleteEvent:
+                        Phase = ScanPhase.Completed;
+                        IsPaused = false;
+                        if (_scanStartedAt.HasValue)
+                        {
+                            LastScanDuration = DateTime.UtcNow - _scanStartedAt.Value;
+                            _scanStartedAt = null;
+                        }
+                        // auto-advance to face clustering, matching macOS.
+                        // macOS engine itself auto-enqueues face clustering when the
+                        // scan finishes (FileIDEngineMain.swift:535+ ::
+                        // autoEnqueueFaceClusteringIfNeeded). On Windows the Rust
+                        // engine doesn't have that hook yet, so the app fires the
+                        // IPC after observing ScanComplete. The engine's
+                        // RunFaceClustering handler is a no-op when there are
+                        // zero face_prints (matches macOS's "no faces → skip"
+                        // path), so this is safe even on a library with no images.
+                        // Deep Analyze stays manual — matches macOS, which gates
+                        // it on the user naming ≥1 person first.
+                        _ = AutoTriggerFaceClusteringAsync();
+                        break;
+                    case ErrorEvent e:
+                        if (IsNonFatalWarningKind(e.Error.Kind))
+                        {
+                            LastWarning = e.Error;
+                            DebugLog.Info($"[IPC IN] engine warning: kind={e.Error.Kind} msg={e.Error.Message}");
+                        }
+                        else
+                        {
+                            LastError = e.Error;
+                            DebugLog.Warn($"[IPC IN] engine error: kind={e.Error.Kind} msg={e.Error.Message} path={PathRedactor.Redact(e.Error.Path)}");
+                        }
+                        break;
+                    case LogEvent:
+                        // Engine LogLine events go to the transcript via Events.
+                        // Local app log already captured stderr.
+                        break;
+                    case FaceClusteringCompleteEvent fc:
+                        LastFaceClustering = fc.Result;
+                        break;
+                    case DeepAnalyzeStartingEvent das:
+                        DeepAnalyzeStarting = das.Starting;
+                        break;
+                    case DeepAnalyzeProgressEvent dap:
+                        DeepAnalyzeProgress = dap.Progress;
+                        break;
+                    case DeepAnalyzeFileDoneEvent dafd:
+                        // Throttle: 2 Hz. Without this, fast VLM runs spam ~50/s.
+                        var now = DateTime.UtcNow;
+                        if (now - _lastDeepAnalyzeFileDone >= DeepAnalyzeFileDoneThrottle)
+                        {
+                            DeepAnalyzeLast = dafd.FileDone;
+                            _lastDeepAnalyzeFileDone = now;
+                        }
+                        break;
+                    case DeepAnalyzeCompleteEvent dac:
+                        DeepAnalyzeComplete = dac.Result;
+                        DeepAnalyzeProgress = null;
+                        DeepAnalyzeStarting = null;
+                        break;
+                    case ModelDownloadProgressEvent mdp:
+                        // Throttled to one log line per 1% (~100 events / model) so
+                        // app.log isn't flooded but the trail is dense enough to
+                        // diagnose stuck installs.
+                        _modelDownloadEventCount++;
+                        if (_modelDownloadEventCount <= 5
+                            || _modelDownloadEventCount % 50 == 0
+                            || mdp.Progress.Fraction >= 0.999)
+                        {
+                            DebugLog.Info($"[IPC IN] ModelDownloadProgress #{_modelDownloadEventCount}: {mdp.Progress.ModelKind} {mdp.Progress.Fraction:P0} - {mdp.Progress.Message}");
+                        }
+                        ModelDownloadProgress = mdp.Progress;
+                        break;
+                    case QueueStateEvent qs:
+                        QueueState = qs.State;
+                        break;
+                    case RestructurePlanEvent rp:
+                        LastRestructurePlan = rp.Plan;
+                        break;
+                    case RestructureApplyResultEvent rar:
+                        LastRestructureApplyResult = rar.Result;
+                        break;
+                    case BulkActionResultEvent bar:
+                        LastBulkAction = bar.Result;
+                        break;
+                    case ClipTextEmbeddingEvent ce:
+                        LastClipTextEmbedding = ce.Embedding;
+                        break;
+                    case MergeSuggestionsEvent ms:
+                        LastMergeSuggestions = ms.Suggestions;
+                        break;
+                    case HardwareReprobedEvent hr:
+                        if (hr.Result is null)
+                        {
+                            DebugLog.Warn("HardwareReprobedEvent with null Result; dropped.");
+                            break;
+                        }
+                        LastHardwareReprobe = hr.Result;
+                        // Also refresh the cached HardwareInfo in Info so Settings
+                        // bindings to existing Info.Hardware fields update too.
+                        if (Info is { } prevInfo && hr.Result.Hardware is { } hw)
+                        {
+                            Info = new EngineInfo(
+                                prevInfo.Version,
+                                prevInfo.Pid,
+                                prevInfo.WorkerCap,
+                                prevInfo.PhysicalMemoryGB,
+                                hw);
+                        }
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                // route through WriteCrashDump so a routing-side fault
+                // leaves a forensic artifact (not just a log line). A null
+                // deref or malformed payload in one switch arm must NOT tear
+                // down the UI. Log + dump + carry on.
+                DebugLog.Error($"EngineClient.Apply({ev.Payload?.GetType().Name ?? "<null>"}) threw: {ex}");
+                try { DebugLog.WriteCrashDump($"EngineClient.Apply({ev.Payload?.GetType().Name ?? "<null>"})", ex, terminating: false); }
+                catch { /* swallow */ }
+            }
+
+        }
+        catch (Exception outerEx)
+        {
+            // outer-frame catch — last line of defense before the
+            // dispatcher loop. Anything that escapes the inner switch
+            // try/catch (e.g., the catch itself throwing while writing
+            // a crash dump on a full disk, or a sampling counter
+            // increment hitting a wedge) lands here. Log only — never
+            // re-throw.
+            try { DebugLog.Error($"EngineClient.Apply OUTER catch: {outerEx}"); }
+            catch { /* truly nothing we can do */ }
+        }
+
+        // matching exit line for the [APPLY:N] enter above. After a
+        // native fast-fail, the absence of this exit line for the highest
+        // logged seq identifies the offending event. NOTE: the switch
+        // fires PropertyChanged synchronously, which fans out to every
+        // subscriber — those subscribers' [ENGINE-SUB:Class] entry lines
+        // are logged BEFORE this exit, so the trailing ENGINE-SUB line
+        // identifies the offending subscriber.
+        DebugLog.Info($"[APPLY:{applySeq}] exit {applyEventName}");
+    }
+
+    /// <summary>scan-complete → face-clustering auto-advance.
+    /// Fire-and-forget so the Apply switch returns quickly; any failure
+    /// (engine not ready, IPC throw) is logged and swallowed because
+    /// scan completion itself succeeded — we don't want a downstream
+    /// clustering hiccup to surface as a scan failure.</summary>
+    private async Task AutoTriggerFaceClusteringAsync()
+    {
+        try
+        {
+            await Task.Yield(); // let the rest of Apply complete first
+            DebugLog.Info("[AUTO-ADVANCE] scan complete → triggering face clustering");
+            await RunFaceClusteringAsync().ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            // V15.2: route through WriteCrashDump so a routing-side fault
-            // leaves a forensic artifact (not just a log line). A null
-            // deref or malformed payload in one switch arm must NOT tear
-            // down the UI. Log + dump + carry on.
-            DebugLog.Error($"EngineClient.Apply({ev.Payload?.GetType().Name ?? "<null>"}) threw: {ex}");
-            try { DebugLog.WriteCrashDump($"EngineClient.Apply({ev.Payload?.GetType().Name ?? "<null>"})", ex, terminating: false); }
-            catch { /* swallow */ }
+            DebugLog.Warn("[AUTO-ADVANCE] face clustering trigger threw: " + ex.Message);
         }
     }
 

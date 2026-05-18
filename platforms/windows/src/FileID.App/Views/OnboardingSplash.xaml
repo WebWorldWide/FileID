@@ -1,7 +1,7 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
     OnboardingSplash — 6-step pipeline diagram on the empty Detail when no
-    folder is picked. Mirror of macOS Detail.swift:104-199.
+    folder is picked.
 
     All FontIcon glyphs use numeric XML escapes so the bytes survive
     encoding pipelines.

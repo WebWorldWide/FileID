@@ -1,14 +1,11 @@
-﻿// BadgePill — code-behind for the BadgePill UserControl.
-//
-// Mirror of macOS BadgePill (Theme.swift:71). Two DPs:
+﻿// BadgePill — code-behind for the BadgePill UserControl. Two DPs:
 //   - Label: the displayed text
 //   - Accent: the tint color (a SolidColorBrush; we reach in for the .Color
 //     to derive the 15%-opaque background fill)
 //
-// Default accent is gold to match the macOS default; callers override per
-// semantic role (Ai for AI-running, Info for informational, Delight for
-// success). Keep this control intentionally minimal — anything more is
-// scope creep.
+// Default accent is gold; callers override per semantic role (Ai for
+// AI-running, Info for informational, Delight for success). Keep this
+// control intentionally minimal — anything more is scope creep.
 
 using Microsoft.UI;
 using Microsoft.UI.Xaml;

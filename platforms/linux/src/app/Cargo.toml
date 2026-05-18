@@ -1,0 +1,53 @@
+[package]
+name = "fileid-linux"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.78"
+description = "FileID — Linux GTK4 + libadwaita app. Talks to the shared Rust engine over stdio."
+license = "TBD"
+publish = false
+
+[[bin]]
+name = "fileid-linux"
+path = "src/main.rs"
+
+[dependencies]
+# GTK4 + libadwaita Rust bindings. Both v0.7 lines target gtk4 4.14+ /
+# libadwaita 1.5+, which ship on Ubuntu 24.04, Fedora 40, and Arch
+# rolling. Older distros use the Flatpak.
+gtk = { package = "gtk4", version = "0.7", features = ["v4_14"] }
+adw = { package = "libadwaita", version = "0.6", features = ["v1_5"] }
+glib = "0.18"
+gio  = "0.18"
+
+# Async + IPC plumbing — the GTK app spawns the engine as a child
+# process and reads NDJSON from its stdout. async_channel bridges the
+# engine reader thread → GTK main context for UI updates.
+async-channel = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "process", "sync"] }
+
+# IPC payloads. Reuse the engine's IpcCommand / IpcEvent types directly
+# so the contract can never drift between the GTK app and the engine.
+fileid-engine = { path = "../../../windows/src/engine" }
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Structured local-only logging. Matches the engine's `tracing` setup so
+# both write to the same `~/.local/share/FileID/logs/app.log` (engine
+# writes engine.jsonl; app writes app.log). NEVER transmits.
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender   = "0.2"
+
+anyhow = "1"
+
+[profile.release]
+opt-level     = 3
+lto           = "fat"
+codegen-units = 1
+strip         = "symbols"
+panic         = "abort"
+
+[lints.rust]
+unused_imports = "warn"
+dead_code      = "warn"

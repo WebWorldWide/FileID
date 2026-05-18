@@ -42,7 +42,7 @@ internal sealed class ModelSlot : INotifyPropertyChanged
 
     private readonly Func<Task> _installAction;
 
-    /// <summary>V15.2.1 — UI dispatcher captured at construction time on
+    /// <summary> UI dispatcher captured at construction time on
     /// the UI thread so PropertyChanged notifications can be safely
     /// marshalled even when Apply/Fail/ResetForRetry run on a worker
     /// thread (TryInstallAsync's continuations resume off the UI
@@ -123,7 +123,7 @@ internal sealed class ModelSlot : INotifyPropertyChanged
     {
         Fraction = p.Fraction;
         BytesDone = p.BytesDone;
-        // V14.9-N1: don't let a per-file `total_bytes` from the engine
+        // don't let a per-file `total_bytes` from the engine
         // downgrade the slot's bundle-cumulative total. MobileCLIP-S2
         // ships 4 files; engine emits per-file `total_bytes` while the
         // app's `BytesDone` is the bundle-cumulative byte count. Without
@@ -190,7 +190,7 @@ internal sealed class ModelSlot : INotifyPropertyChanged
         _lastFraction = 0;
     }
 
-    /// <summary>V14.9-N1: number of consecutive stalled (sub-100 B/s) samples
+    /// <summary>number of consecutive stalled (sub-100 B/s) samples
     /// observed. After 5 in a row (≈2.5 s of stall) the Message field flips
     /// to "Stalled — check connection" so the user sees feedback well before
     /// the 30 s no-progress watchdog declares failure.</summary>
@@ -226,7 +226,7 @@ internal sealed class ModelSlot : INotifyPropertyChanged
         var bytesPrev = total * _rateSampleFrac;
         var instant = (bytesNow - bytesPrev) / dt;
 
-        // V14.9-N1: clean stall detection. The previous EMA decayed
+        // clean stall detection. The previous EMA decayed
         // asymptotically toward zero when `instant == 0` (BytesPerSecond
         // *= 0.7 each sample) but never actually hit zero. After enough
         // stall samples BytesPerSecond became a tiny positive ε; the
@@ -274,7 +274,7 @@ internal sealed class ModelSlot : INotifyPropertyChanged
     {
         if (EqualityComparer<T>.Default.Equals(field, value)) return;
         field = value;
-        // V15.2.1: marshal PropertyChanged to UI thread. x:Bind forwards
+        // marshal PropertyChanged to UI thread. x:Bind forwards
         // property writes into XAML DispatcherObjects (TextBlock.Text,
         // VisibilityProperty, etc), which throw RPC_E_WRONG_THREAD if
         // invoked from a worker thread. Without this guard,

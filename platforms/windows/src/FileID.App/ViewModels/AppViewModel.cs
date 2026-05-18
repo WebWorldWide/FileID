@@ -9,7 +9,7 @@
 //
 // Settings persistence: any property setter that maps to a persisted key
 // calls AppSettings.Save() right after raising PropertyChanged. Cheap on
-// modern SSD; debouncing is a Phase 11 polish if profiling demands it.
+// modern SSD; debouncing is a future polish if profiling demands it.
 
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
@@ -31,9 +31,9 @@ internal sealed class AppViewModel : INotifyPropertyChanged
         _sidebarVisible = _settings.SidebarVisible;
         _folderPath = _settings.LastFolderPath;
         _folderDisplay = _settings.LastFolderDisplay;
-
-        // Subscribe to engine events for auto-tab-switching.
-        EngineClient.Instance.PropertyChanged += OnEngineClientPropertyChanged;
+        // auto-tab-switch subscription removed. WorkflowAutoTabRouter
+        // owns that policy (single source of truth) so the tab doesn't flip
+        // twice on the same engine event.
     }
 
     public AppSettings Settings => _settings;
@@ -108,30 +108,8 @@ internal sealed class AppViewModel : INotifyPropertyChanged
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    private void OnEngineClientPropertyChanged(object? sender, PropertyChangedEventArgs e)
-    {
-        // Auto-tab-switch on completed-stage events. Only flip when the user
-        // is on a tab that "feeds into" the next stage; this prevents
-        // interrupting them when they're, say, manually editing People.
-        switch (e.PropertyName)
-        {
-            case nameof(EngineClient.LastFaceClustering):
-                if (EngineClient.Instance.LastFaceClustering is not null
-                    && _activeTab.Id is "library" or "deepanalyze")
-                {
-                    ActiveTab = SidebarTab.People;
-                }
-                break;
-
-            case nameof(EngineClient.DeepAnalyzeComplete):
-                if (EngineClient.Instance.DeepAnalyzeComplete is { Cancelled: false }
-                    && _activeTab.Id is "deepanalyze")
-                {
-                    ActiveTab = SidebarTab.Library;
-                }
-                break;
-        }
-    }
+    // OnEngineClientPropertyChanged removed entirely. Auto-tab-switch
+    // policy lives in Services/WorkflowAutoTabRouter.cs as the single owner.
 
     private bool Set<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
     {

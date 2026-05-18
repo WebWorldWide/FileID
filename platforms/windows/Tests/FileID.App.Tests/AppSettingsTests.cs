@@ -24,7 +24,8 @@ public class AppSettingsTests
         Assert.Null(s.LastFolderDisplay);
         Assert.True(s.SidebarVisible);
         Assert.Equal("library", s.ActiveTab);
-        Assert.False(s.CleanupAutoTagKept);
+        // V15.5b D7: default flipped false → true to match macOS canonical default.
+        Assert.True(s.CleanupAutoTagKept);
         Assert.False(s.RestructureTreeMode);
         Assert.Equal("all", s.LibraryKindFilter);
         Assert.False(s.PeopleHideUnknown);

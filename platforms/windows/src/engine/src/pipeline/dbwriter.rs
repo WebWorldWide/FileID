@@ -1,15 +1,10 @@
 // DBWriter — drains the Tagging → DB channel and writes 100-file or
 // 200ms batches into the single SQLite writer connection.
 //
-// Mirror of macOS engine/Sources/FileIDEngine/Pipeline/DBWriter.swift.
-// Single-writer is by design (matches Database.swift's invariant): WAL
-// permits concurrent readers but only one writer. Every insert + the
-// resume cursor update + the FTS5 OCR row land in the same transaction
-// so a crash mid-batch leaves no partial state.
-//
-// Phase 2.1 cut: writes the `files` row (path, size, kind, scanned_at,
-// modified_at, has_faces, has_text). Phase 2.2 extends it with the EXIF
-// columns + phash + clip_embeddings; 2.3 adds OCR FTS5 + face rows.
+// Single-writer is by design: WAL permits concurrent readers but only
+// one writer. Every insert + the resume cursor update + the FTS5 OCR
+// row land in the same transaction so a crash mid-batch leaves no
+// partial state.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -22,7 +17,7 @@ use tokio::sync::mpsc;
 use crate::coordinator::ScanCoordinator;
 use crate::pipeline::tagging::TaggedFile;
 
-/// Flush trigger thresholds. Mirror of macOS DBWriter.
+/// Flush trigger thresholds.
 const BATCH_SIZE: usize = 100;
 const FLUSH_INTERVAL: Duration = Duration::from_millis(200);
 
@@ -33,6 +28,10 @@ pub struct BatchStats {
     pub batch_index: u32,
     pub files_in_batch: u32,
     pub processed_total: u64,
+    /// Cumulative failed-file count. Plumbed through Progress events so
+    /// the sidebar "Failures" stat updates during scan instead of waiting
+    /// for ScanComplete.
+    pub failed_total: u64,
     pub wall_seconds: f64,
     pub files_per_second: f64,
     pub utilization: f64,
@@ -268,6 +267,15 @@ impl DbWriter {
         // hot scan path.
         const WAL_CHECKPOINT_BATCHES: u32 = 32;
         if batch_index > 0 && batch_index % WAL_CHECKPOINT_BATCHES == 0 {
+            // Invariant: no transaction open at this point — tx.commit
+            // above closes it, and we're the only writer (the mutex
+            // around conn enforces single-writer). Asserting via
+            // is_autocommit() catches a future regression where someone
+            // adds a BEGIN before this block.
+            debug_assert!(
+                conn.is_autocommit(),
+                "WAL checkpoint must not run inside an open transaction"
+            );
             // Best-effort — failure here just means the WAL stays a
             // little larger; it doesn't break correctness. A
             // SQLITE_BUSY here is normal if a reader is mid-query.
@@ -285,9 +293,10 @@ impl DbWriter {
             batch_index,
             files_in_batch,
             processed_total: *total,
+            failed_total: *failed,
             wall_seconds: wall,
             files_per_second: if wall > 0.0 { f64::from(files_in_batch) / wall } else { 0.0 },
-            utilization: 0.0, // Phase 2.2: derive from worker idle samples
+            utilization: 0.0,
             vision_p50_ms: percentile(&mut vision, 0.50),
             vision_p95_ms: percentile(&mut vision, 0.95),
             clip_p50_ms: percentile(&mut clip, 0.50),
@@ -455,9 +464,8 @@ mod tests {
         conn
     }
 
-    /// V15.3 N7: re-ingesting the same path twice produces exactly one
-    /// row. Guards against the ON CONFLICT clause silently regressing
-    /// to INSERT OR IGNORE (drops update) or being removed entirely.
+    /// Re-ingesting the same path twice produces exactly one row. Guards
+    /// against the ON CONFLICT clause regressing to INSERT OR IGNORE.
     #[test]
     fn duplicate_path_resolves_to_single_row() {
         let conn = in_memory_db();
@@ -470,9 +478,8 @@ mod tests {
         assert_eq!(n, 1);
     }
 
-    /// V15.3 N7: ON CONFLICT must UPDATE (not skip) so a rescan that
-    /// finds new size/modified_at writes them. Guards against a
-    /// regression to INSERT OR IGNORE.
+    /// ON CONFLICT must UPDATE (not skip) so a rescan with new
+    /// size/modified_at writes them. Guards against INSERT OR IGNORE.
     #[test]
     fn duplicate_path_updates_size_and_modified() {
         let conn = in_memory_db();
@@ -493,11 +500,10 @@ mod tests {
     }
 
     proptest::proptest! {
-        /// V15.3 N7: arbitrary mix of inserts (with intentional duplicates)
-        /// → row count must equal the number of distinct paths. Prevents
-        /// the file-table from ever leaking duplicate rows under any
-        /// insertion order — the scan resume cursor + the People-tab
-        /// dedup logic both rely on path_text being unique.
+        /// Arbitrary insert mix (with intentional duplicates) → row count
+        /// must equal the number of distinct paths. Both the scan resume
+        /// cursor and the People-tab dedup logic rely on path_text being
+        /// unique.
         #[test]
         fn row_count_equals_distinct_paths(
             // Generate a small set of candidate paths…
@@ -519,5 +525,47 @@ mod tests {
                 .unwrap();
             proptest::prop_assert_eq!(n as usize, distinct.len());
         }
+
+        /// Embedding BLOB round-trip must be byte-for-byte lossless and
+        /// little-endian on every host. Reading via f32::from_le_bytes
+        /// matches what the C# app and the macOS engine do; any future
+        /// switch to to_ne_bytes would silently corrupt embeddings when
+        /// the same DB file moves between architectures.
+        ///
+        /// We generate via u32 → f32::from_bits so NaN bit patterns are
+        /// in scope: byte-level round-trip must preserve NaN payloads
+        /// too, even though value equality wouldn't. We compare on bit
+        /// patterns rather than f32 equality for that reason.
+        #[test]
+        fn embedding_le_bytes_round_trip(
+            bits in proptest::collection::vec(proptest::num::u32::ANY, 1..520),
+        ) {
+            let values: Vec<f32> = bits.iter().copied().map(f32::from_bits).collect();
+            let bytes = floats_to_le_bytes(&values);
+            proptest::prop_assert_eq!(bytes.len(), values.len() * 4);
+            let decoded: Vec<f32> = bytes
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            proptest::prop_assert_eq!(decoded.len(), values.len());
+            for (i, (a, b)) in decoded.iter().zip(values.iter()).enumerate() {
+                proptest::prop_assert_eq!(
+                    a.to_bits(), b.to_bits(),
+                    "mismatch at index {}", i,
+                );
+            }
+        }
+    }
+
+    /// 512-d zero vector → 2048 zero bytes; matches the embedding column
+    /// shape MobileCLIP and ArcFace both produce. Guards against a future
+    /// Vec::with_capacity bug where capacity is allocated but data is not
+    /// written.
+    #[test]
+    fn embedding_le_bytes_zero_vector() {
+        let v = vec![0.0_f32; 512];
+        let bytes = floats_to_le_bytes(&v);
+        assert_eq!(bytes.len(), 2048);
+        assert!(bytes.iter().all(|&b| b == 0));
     }
 }

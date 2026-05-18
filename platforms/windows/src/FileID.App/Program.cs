@@ -28,17 +28,43 @@ internal static class Program
     /// </summary>
     private const string SingleInstanceMutexName = "Global\\FileID-Singleton-{8C9D7C2E-3B87-4F19-8F3F-5A1A1B5E8A8E}";
 
+    /// <summary>harness hook. When the app is launched with
+    /// <c>--auto-scan-folder &lt;path&gt;</c>, App.OnLaunched dispatches a
+    /// StartScanAsync against that path once EngineClient reaches Ready.
+    /// Enables build/gui-regression.ps1 to drive an end-to-end scan from
+    /// the command line without user input. Local-only; no telemetry.</summary>
+    public static string? AutoScanFolder { get; private set; }
+
+    /// <summary>paired with <see cref="AutoScanFolder"/>. When set,
+    /// the app closes its main window after ScanCompleteEvent fires, which
+    /// runs the normal shutdown path (MarkCleanExit) so the harness can
+    /// assert clean_exit=true.</summary>
+    public static bool AutoExitAfterScan { get; private set; }
+
     [STAThread]
     private static int Main(string[] args)
     {
+        // Parse the harness flags before any other startup. Strict shapes;
+        // a lone flag without a value (auto-scan-folder) is ignored.
+        for (int i = 0; i < args.Length; i++)
+        {
+            if (args[i] == "--auto-scan-folder" && i + 1 < args.Length && !string.IsNullOrWhiteSpace(args[i + 1]))
+            {
+                AutoScanFolder = args[i + 1];
+            }
+            else if (args[i] == "--auto-exit-after-scan")
+            {
+                AutoExitAfterScan = true;
+            }
+        }
+
         // Single-instance gate. Hold the mutex for the lifetime of the
         // process — `using` ensures it releases on any exit path.
         using var instanceMutex = new Mutex(initiallyOwned: true, name: SingleInstanceMutexName, out bool createdNew);
         if (!createdNew)
         {
-            // Another FileID is already running. Phase 1 ships a hard exit;
-            // Phase 8 polish wires up SetForegroundWindow on the existing
-            // instance so the user gets the running window raised.
+            // Another FileID is already running. Hard exit; later polish
+            // could SetForegroundWindow on the existing instance.
             return 0;
         }
 

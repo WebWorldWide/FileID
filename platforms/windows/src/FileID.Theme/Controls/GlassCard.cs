@@ -1,6 +1,5 @@
 ﻿// GlassCard — translucent acrylic card with a 1px white-8% stroke and
-// rounded corners. The Windows analog of the SwiftUI GlassCard from
-// platforms/apple/app/Sources/FileID/Theme/Theme.swift:51.
+// rounded corners.
 //
 // Templated control (not UserControl) so callers can drop arbitrary content
 // inside without going through ContentTemplate ceremony:

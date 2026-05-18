@@ -1,8 +1,7 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
-    ThemedTogglePicker — two-state pill picker. Mirror of macOS
-    ThemedTogglePicker (Theme.swift:178). Used for binary mode toggles
-    where labels are clearer than a switch (e.g. "Cards / Tree" in
+    ThemedTogglePicker — two-state pill picker. Used for binary mode
+    toggles where labels are clearer than a switch (e.g. "Cards / Tree" in
     Restructure, "Image / Video" filters).
 
     Usage:

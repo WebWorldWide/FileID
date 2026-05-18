@@ -1,7 +1,7 @@
 # cargo-deny configuration for FileID engine.
 #
 # Run locally: `cargo deny check`
-# CI gate: see .github/workflows/windows-engine.yml (Phase 8).
+# CI gate: see .github/workflows/windows-engine.yml.
 #
 # This file enforces four invariants:
 #   1. Every dependency's license is on an allowed SPDX list (no GPL/AGPL
@@ -15,9 +15,8 @@
 [graph]
 all-features = false
 no-default-features = false
-# Only check Windows targets — Linux is Phase 5 (deferred) and macOS uses
-# its own Swift package manager, so a Rust dep audit for macOS targets is
-# wasted work.
+# Only check Windows targets — Linux is deferred and macOS uses Swift PM,
+# so a Rust dep audit for those targets is wasted work.
 targets = [
     { triple = "x86_64-pc-windows-msvc" },
     { triple = "aarch64-pc-windows-msvc" },

@@ -1,10 +1,9 @@
 ﻿// PeopleViewModel — backs the People tab cluster grid.
 //
-// Mirror of macOS app/Sources/FileID/People/PeopleViewModel.swift. Each
-// cluster has a representative face image, a member count, an optional
-// person name (set by the user), and a list of file IDs that contain
-// faces in this cluster. The view shows them as cards in a wrap layout;
-// tapping a card opens the PersonDetailSheet (Phase 3.x).
+// Each cluster has a representative face image, a member count, an
+// optional person name (set by the user), and a list of file IDs that
+// contain faces in this cluster. The view shows them as cards in a wrap
+// layout; tapping a card opens the PersonDetailSheet.
 
 using System;
 using System.Collections.Generic;
@@ -245,8 +244,7 @@ internal sealed class PersonCluster : INotifyPropertyChanged
     /// BitmapImage of the per-face JPEG written by the engine after
     /// ArcFace embed. Lazily constructed once + cached so the binding
     /// doesn't rebuild it on every refresh (which would flicker / loop).
-    /// Null if the file doesn't exist (cluster from before V14.4 face-crop
-    /// writes, or AnchorFaceId is 0).
+    /// Null if the file doesn't exist or AnchorFaceId is 0.
     /// </summary>
     public Microsoft.UI.Xaml.Media.Imaging.BitmapImage? AnchorImage
     {
@@ -257,7 +255,7 @@ internal sealed class PersonCluster : INotifyPropertyChanged
             if (AnchorFaceId <= 0) return null;
             try
             {
-                var path = System.IO.Path.Combine(Services.AppPaths.Root, "face_crops", $"{AnchorFaceId}.jpg");
+                var path = BuildCropPath(AnchorFaceId);
                 if (!System.IO.File.Exists(path)) return null;
                 _cachedAnchorImage = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(path));
                 return _cachedAnchorImage;
@@ -268,6 +266,12 @@ internal sealed class PersonCluster : INotifyPropertyChanged
             }
         }
     }
+
+    /// <summary>Resolve the absolute path of the per-face JPEG the engine
+    /// writes after ArcFace embed. Pure-function helper so test code can
+    /// assert the path shape without depending on the cache state.</summary>
+    public static string BuildCropPath(long faceId) =>
+        System.IO.Path.Combine(Services.AppPaths.Root, "face_crops", $"{faceId}.jpg");
 
     public string Caption =>
         string.IsNullOrEmpty(DisplayName)

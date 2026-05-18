@@ -17,8 +17,8 @@
     <RootNamespace>FileID</RootNamespace>
     <AssemblyName>FileID</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <!-- V14.7.3: multi-resolution .ico (16/32/48/64/128/256) embedded
-         in FileID.exe. Drives Explorer, taskbar, Alt-Tab, Add/Remove
+    <!-- Multi-resolution .ico (16/32/48/64/128/256) embedded in
+         FileID.exe. Drives Explorer, taskbar, Alt-Tab, Add/Remove
          Programs, and the WiX MSI Icon element. Generated via
          build/make-icon.ps1 from shared/docs/assets/FileID-AppIcon.png. -->
     <ApplicationIcon>Assets\FileID.ico</ApplicationIcon>
@@ -73,7 +73,7 @@
     <ProjectReference Include="..\FileID.IpcSchema\FileID.IpcSchema.csproj" />
   </ItemGroup>
 
-  <!-- V14.7.3: app icon + ms-appx:/// Logo PNGs.
+  <!-- App icon + ms-appx:/// Logo PNGs.
        FileID.ico is referenced by <ApplicationIcon> above (embeds in .exe)
        AND copied to the output dir so AppWindow.SetIcon can find it at
        runtime via AppContext.BaseDirectory.

@@ -23,10 +23,9 @@ pub(crate) async fn handle_restore_from_trash(
 
         // The Recycle Bin restore via IFileOperation::Recycle reverse is
         // non-trivial — IShellFolder enumeration of the bin + matching pidl
-        // by display path. For the V14.6 cut we shell out to PowerShell
-        // which has a direct cmdlet. When restoration succeeds, the file
-        // lands at its original path; we re-INSERT a stripped-down DB row
-        // so the Library tab shows it again.
+        // by display path. Shell out to PowerShell's direct cmdlet instead.
+        // On success, the file lands at its original path; we re-INSERT a
+        // stripped-down DB row so the Library tab shows it again.
         let conn = db.lock();
 
         // SEC-7: collect every authorized scan root from scan_sessions and

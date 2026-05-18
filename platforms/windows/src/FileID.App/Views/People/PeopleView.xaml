@@ -1,10 +1,8 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
-    PeopleView — face cluster cards in a wrap layout.
-
-    Mirror of macOS People/PeopleView.swift. Cards show the cluster's
-    anchor face crop + a caption. Phase 3 cut: card grid + load on tab
-    activation. Phase 3.x adds drag-merge + person-detail sheet.
+    PeopleView — face cluster cards in a wrap layout. Cards show the
+    cluster's anchor face crop + a caption. Drag-merge + person-detail
+    sheet are in progress.
 -->
 <UserControl
     x:Class="FileID.Views.People.PeopleView"
@@ -35,7 +33,7 @@
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                            TextWrapping="Wrap" />
             </StackPanel>
-            <!-- V14.7.4: header action buttons in a horizontal-scroll
+            <!-- header action buttons in a horizontal-scroll
                  wrapper so on narrow windows they scroll instead of
                  overflowing the title's * column. -->
             <ScrollViewer Grid.Column="1"
@@ -56,7 +54,7 @@
                         Click="OnSuggestedMergesClicked"
                         ToolTipService.ToolTip="Find pairs of clusters that might be the same person.">
                     <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                        <!-- V14.9-E1: sparkle glyph mirrors macOS sparkles SF Symbol;
+                        <!-- sparkle glyph mirrors macOS sparkles SF Symbol;
                              previously a link icon (E8B6) which read as "merge",
                              not "AI suggestion". -->
                         <FontIcon FontSize="13" Glyph="&#xE945;" Foreground="{ThemeResource AiBrush}" />

@@ -24,6 +24,10 @@
     <OutputType>Package</OutputType>
     <OutputName Condition="'$(Platform)' == 'x64'">FileID-x64</OutputName>
     <OutputName Condition="'$(Platform)' == 'arm64'">FileID-arm64</OutputName>
+    <!-- WiX 4's wix.exe accepts only `full` or `none` for -pdbType.
+         Override the platforms-wide `portable` default from
+         Directory.Build.props (intended for .NET assemblies, not MSIs). -->
+    <DebugType>full</DebugType>
 
     <!-- Stage everything from the publish folder of the matching arch.
          Pre-condition: dotnet publish FileID.App with the matching RID

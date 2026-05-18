@@ -22,8 +22,8 @@ use crate::models::registry::{self, LookupResult, ModelFile};
 use crate::platform;
 use crate::util;
 
-/// V14.7.5 helper: RAII guard that removes a model_kind from the in-flight
-/// set when the prewarm function returns / unwinds.
+/// RAII guard that removes a model_kind from the in-flight set when the
+/// prewarm function returns or unwinds.
 struct ReleaseOnDrop {
     kind: String,
     set: &'static Mutex<HashSet<String>>,
@@ -41,9 +41,9 @@ pub(crate) async fn handle_prewarm_model(
     http_client: Arc<reqwest::Client>,
     cancel: Arc<AtomicBool>,
 ) {
-    // F1 (V14.8.3): emit an immediate "Queued" progress event so the welcome
-    // sheet row flips out of the captionless-spinner state the moment the
-    // engine sees the prewarm command.
+    // Emit an immediate "Queued" progress event so the welcome sheet row
+    // flips out of the captionless-spinner state the moment the engine
+    // sees the prewarm command.
     sink.send(IpcEvent::now(EventPayload::ModelDownloadProgress(Wrap::new(
         ModelDownloadProgress {
             model_kind: model_kind.clone(),
@@ -57,7 +57,7 @@ pub(crate) async fn handle_prewarm_model(
 
     tracing::info!(model_kind = %model_kind, "[PREWARM] entered handler");
 
-    // V14.7.5: per-model-kind in-flight dedupe.
+    // Per-model-kind in-flight dedupe.
     static IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     let in_flight = IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()));
     // Check + insert under a short-lived guard. parking_lot's MutexGuard is

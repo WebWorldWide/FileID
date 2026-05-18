@@ -1,11 +1,10 @@
 #![allow(dead_code)]
 // Thumbnail — IShellItemImageFactory::GetImage.
 //
-// Mirror of macOS `QLThumbnailGenerator`. Uses the system's
-// IThumbnailProvider chain: the same code path that Explorer uses to
-// render the thumbnail in Detail/List view. This handles every kind we
-// need (Office, RTF, .pages, .key, .numbers, ai, eps, psd, dwg, …)
-// because the provider is whichever the user has installed.
+// Uses the system's IThumbnailProvider chain — the same code path Explorer
+// uses to render thumbnails in Detail/List view. Handles every kind we
+// need (Office, RTF, .pages, .key, .numbers, ai, eps, psd, dwg, …) because
+// the provider is whichever the user has installed.
 //
 // Output: tightly packed RGBA8, 512×512 by default. The Win32 path is
 // HBITMAP-backed BGRA; we swap channels on extraction so callers always

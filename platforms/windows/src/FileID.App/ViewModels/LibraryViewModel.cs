@@ -1,6 +1,6 @@
 ﻿// LibraryViewModel — backs the Library tab grid + search bar.
 //
-// Mirror of macOS app/Sources/FileID/Library/LibraryViewModel.swift. The
+// The
 // shape is the same: a debounced query string, a kind filter, a page of
 // FileTile items, plus a banner state machine. The Windows port runs on
 // INotifyPropertyChanged + DispatcherQueue marshalling instead of
@@ -47,7 +47,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         _store = store;
         _clip = clip;
         _ui = ui;
-        // V14.9-B1: maintain a HashSet of selected tiles in O(1) per
+        // maintain a HashSet of selected tiles in O(1) per
         // selection change instead of re-walking every Item on each
         // SelectedCount/SelectedItems read. Subscribe to PropertyChanged
         // on every tile via the CollectionChanged hook; without this the
@@ -70,7 +70,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         try { _searchCts?.Cancel(); } catch { /* swallow */ }
         _searchCts?.Dispose();
         _searchCts = null;
-        // V14.9-B1: detach the per-tile listeners we attached in
+        // detach the per-tile listeners we attached in
         // OnItemsCollectionChanged so the VM can be GC'd cleanly.
         Items.CollectionChanged -= OnItemsCollectionChanged;
         foreach (var t in Items) t.PropertyChanged -= OnTilePropertyChanged;
@@ -297,7 +297,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
 
     private void ReplaceItems(IReadOnlyList<FileTile> next)
     {
-        // V15.2: a Clear+N Add pattern fires N+1 CollectionChanged events;
+        // a Clear+N Add pattern fires N+1 CollectionChanged events;
         // each event re-enters OnItemsCollectionChanged to rebind per-tile
         // listeners and re-triggers XAML grid layout. With 200-item refreshes
         // during a fast scan that's the dominant UI-thread cost. ReplaceAll
@@ -370,7 +370,7 @@ internal sealed class FileTile : INotifyPropertyChanged
         get => _thumbnail;
         set
         {
-            // V15.2: silently no-op once the tile is detached. A thumbnail
+            // silently no-op once the tile is detached. A thumbnail
             // render kicked off by ElementPrepared can complete after
             // ElementClearing already pulled the tile off-screen. Setting
             // Thumbnail on a stale tile would raise PropertyChanged on a
@@ -387,7 +387,7 @@ internal sealed class FileTile : INotifyPropertyChanged
 
     public bool HasThumbnail => _thumbnail != null;
 
-    /// <summary>V15.2: marker the view sets when a tile is cleared
+    /// <summary>marker the view sets when a tile is cleared
     /// (scrolled out of the ItemsRepeater virtualization window).
     /// Suppresses late thumbnail-render results from binding to a
     /// detached object. Plain field — bound to setter accessed only

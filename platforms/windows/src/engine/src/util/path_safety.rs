@@ -22,8 +22,6 @@ pub(crate) fn is_safe_filename(name: &str) -> bool {
     // SEC: reject ANY occurrence of a path separator. `Path::components()`
     // silently strips trailing separators ("A\\" → ["A"]), which would
     // otherwise let "A\\" sneak past the single-component check below.
-    // Caught by `util::path_safety::tests::any_string_with_slash_is_rejected`
-    // (proptest, V15.3).
     if name.contains('/') || name.contains('\\') {
         return false;
     }
@@ -42,17 +40,18 @@ pub(crate) fn is_safe_filename(name: &str) -> bool {
     if !matches!(first, Component::Normal(_)) {
         return false;
     }
-    // SEC: reject Windows reserved names (CON, PRN, AUX, NUL, COM1..9,
-    // LPT1..9), with or without an extension. MoveFileExW returns
+    // SEC: reject Windows reserved names (CON, PRN, AUX, NUL, COM0..9,
+    // LPT0..9), with or without an extension. MoveFileExW returns
     // cryptic errors and on some shells "rename to NUL" silently
-    // discards the file.
+    // discards the file. COM0 + LPT0 are reserved per Microsoft Naming
+    // Files docs even though the original COM/LPT numbering started at 1.
     let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
     !matches!(
         stem.as_str(),
         "CON" | "PRN" | "AUX" | "NUL"
-            | "COM1" | "COM2" | "COM3" | "COM4" | "COM5"
+            | "COM0" | "COM1" | "COM2" | "COM3" | "COM4" | "COM5"
             | "COM6" | "COM7" | "COM8" | "COM9"
-            | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5"
+            | "LPT0" | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5"
             | "LPT6" | "LPT7" | "LPT8" | "LPT9"
     )
 }
@@ -134,10 +133,8 @@ mod tests {
         assert!(!is_safe_filename("trailing-space.jpg "));
     }
 
-    // V15.3 Phase 7: property-based tests. The invariants below are
-    // documented in is_safe_filename + canonicalize_for_containment; these
-    // tests generate randomized inputs to prove the invariants hold
-    // beyond the example-based cases above.
+    // Property-based tests proving is_safe_filename and
+    // canonicalize_for_containment invariants on randomized inputs.
     proptest::proptest! {
         // Any string containing a forward or back slash must be rejected:
         // is_safe_filename only accepts single Component::Normal names.
@@ -184,5 +181,54 @@ mod tests {
         fn stable_path_hash_is_deterministic(s in "[\\PC]{1,200}") {
             proptest::prop_assert_eq!(stable_path_hash(&s), stable_path_hash(&s));
         }
+
+        // Every Windows reserved device name (CON/PRN/AUX/NUL + COM0..9 +
+        // LPT0..9) must be rejected with or without an extension. Bare
+        // filenames like "COM3" and stems with up to four-letter
+        // extensions like "lpt0.txt" must both fail.
+        #[test]
+        fn reserved_device_names_are_rejected(
+            stem in "(CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])",
+            case in 0u8..4,
+            ext in proptest::option::of("[a-z]{1,4}"),
+        ) {
+            let normalized: String = match case {
+                0 => stem.to_ascii_lowercase(),
+                1 => stem.to_ascii_uppercase(),
+                _ => stem.chars().enumerate().map(|(i, c)| if i % 2 == 0 { c.to_ascii_uppercase() } else { c.to_ascii_lowercase() }).collect(),
+            };
+            let name = if let Some(e) = ext { format!("{normalized}.{e}") } else { normalized };
+            proptest::prop_assert!(!is_safe_filename(&name), "reserved name {name} must be rejected");
+        }
+    }
+
+    // SEC-7: the trash-restore containment check uses `Path::starts_with`
+    // on canonicalized PathBufs. UNC paths must containment-match
+    // correctly — a restore target of \\srv\share\user\file.jpg must
+    // be ACCEPTED if \\srv\share\user is an authorized root, and
+    // REJECTED if it isn't. Rust's Path::starts_with treats UNC paths
+    // component-wise, which is what we want.
+    #[test]
+    #[cfg(windows)]
+    fn unc_path_containment_starts_with_matches_when_nested() {
+        let root = std::path::PathBuf::from(r"\\srv\share\user");
+        let inside = std::path::PathBuf::from(r"\\srv\share\user\photos\trip.jpg");
+        let outside = std::path::PathBuf::from(r"\\srv\share\other-user\file.jpg");
+        let elsewhere = std::path::PathBuf::from(r"C:\Users\u\file.jpg");
+
+        assert!(inside.starts_with(&root), "nested UNC path must be inside root");
+        assert!(!outside.starts_with(&root), "different UNC share-leaf must NOT match root");
+        assert!(!elsewhere.starts_with(&root), "drive-letter path must NOT match UNC root");
+    }
+
+    /// SEC-7 cross-server UNC paths must not collide. `\\srv1\share\x` is
+    /// NOT inside `\\srv2\share\x` even though the trailing components
+    /// match exactly.
+    #[test]
+    #[cfg(windows)]
+    fn unc_paths_with_different_servers_dont_collide() {
+        let root_srv1 = std::path::PathBuf::from(r"\\srv1\share");
+        let path_srv2 = std::path::PathBuf::from(r"\\srv2\share\file.jpg");
+        assert!(!path_srv2.starts_with(&root_srv1));
     }
 }

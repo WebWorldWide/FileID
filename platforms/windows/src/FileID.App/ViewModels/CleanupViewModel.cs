@@ -1,6 +1,5 @@
 ﻿// CleanupViewModel — backs the Cleanup tab duplicate groups list.
 //
-// Mirror of macOS app/Sources/FileID/Cleanup/CleanupViewModel.swift.
 // Groups files by matching `phash` (perceptual hash, 64-bit) to find
 // near-duplicate images. Each group lets the user mark one keeper and
 // trash the others (engine `trashFiles` IPC command, parallel
@@ -92,9 +91,9 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         }.ToString();
         using var conn = new SqliteConnection(connString);
         conn.Open();
-        // Group files by exact phash match. Phase 4.x extends to fuzzy
-        // matches via Hamming distance ≤ 4 bits using the same approach
-        // macOS uses (64-bit popcount on XOR of hash pairs).
+        // Group files by exact phash match. Fuzzy matching via Hamming
+        // distance ≤ 4 bits (64-bit popcount on XOR of hash pairs) is a
+        // future extension.
         using var cmd = conn.CreateCommand();
         // Pull every image with a phash, then group:
         //   1. Exact-phash matches (cheap — straight equality).
@@ -157,7 +156,7 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
             // typically). User can re-pick in the UI.
             indices.Sort((a, b) => rawMembers[b].Size.CompareTo(rawMembers[a].Size));
             var phash = rawMembers[indices[0]].Phash;
-            // V14.7.6: shared GroupName for the keeper RadioButton so
+            // shared GroupName for the keeper RadioButton so
             // mutual exclusion within a duplicate group works. Hex
             // representation of the perceptual hash uniquely identifies
             // the group across the whole tab.
@@ -242,7 +241,7 @@ internal sealed class DuplicateMember : INotifyPropertyChanged
     public required string FileName { get; init; }
     public required long SizeBytes { get; init; }
 
-    /// <summary>V14.7.6: shared per-group key for the keeper RadioButton's
+    /// <summary>shared per-group key for the keeper RadioButton's
     /// GroupName. Was previously bound to `Path` per member, which made
     /// mutual exclusion impossible (each member had its own group). Set
     /// to the parent group's perceptual hash hex string at construction.</summary>

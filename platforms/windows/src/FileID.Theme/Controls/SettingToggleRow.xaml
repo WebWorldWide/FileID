@@ -1,8 +1,8 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
     SettingToggleRow — title + optional subtitle on the left, gold-tinted
-    toggle on the right. Mirror of macOS SettingToggleRow (Theme.swift:88).
-    The subtitle wraps; the toggle is right-aligned and gold-tinted.
+    toggle on the right. The subtitle wraps; the toggle is right-aligned
+    and gold-tinted.
 
     Usage:
         <theme:SettingToggleRow

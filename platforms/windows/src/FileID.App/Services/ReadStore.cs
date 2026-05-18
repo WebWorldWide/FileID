@@ -57,14 +57,14 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             // First-launch guard: the engine creates the DB on first scan.
             // Until then the file doesn't exist; trying to open ReadOnly
             // would throw. Stay closed until the engine has written rows.
-            // V14.7.11: File.Exists wrapped — invalid-char paths or denied
+            // File.Exists wrapped — invalid-char paths or denied
             // ACL on the parent dir would otherwise throw.
-            // V14.9-B2: offload File.Exists to the thread pool. On network
+            // offload File.Exists to the thread pool. On network
             // shares or slow USB sticks this sync call can block the UI
             // for hundreds of ms; the cost on a local SSD is < 1 ms so
             // there's no downside to always going async here.
             var dbPath = _dbPath;
-            // V15.2: cap the File.Exists call. On a disconnected SMB
+            // cap the File.Exists call. On a disconnected SMB
             // share, the system-call can stall for 30+ seconds before
             // returning. We'd rather treat it as "DB not present" after
             // a few seconds than freeze startup.
@@ -137,7 +137,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             if (_connection == null) return Array.Empty<FileRow>();
             // Two sources, deduped by file id: ocr_fts (FTS5 over OCR text;
             // ranked by bm25) UNION filename LIKE matches over files.path_text.
-            // Mirror of macOS Database.swift::searchFiles which combines OCR
+            //::searchFiles which combines OCR
             // hits with filename hits in the same result set.
             var rows = new List<FileRow>(limit);
             var seen = new HashSet<long>();
@@ -245,8 +245,8 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
     /// CLIP semantic search: dot-product the L2-normalized query embedding
     /// against every `clip_embeddings.vector`, take the top-`limit`. The
     /// embedding rows are pre-normalized so cosine similarity == dot product.
-    /// Phase 2.4 cut: scans every embedding (acceptable up to ~50K files);
-    /// Phase 4 swaps in an HNSW or IVF index if benchmarks demand it.
+    /// cut: scans every embedding (acceptable up to ~50K files);
+    /// swaps in an HNSW or IVF index if benchmarks demand it.
     /// </summary>
     public async Task<IReadOnlyList<FileRowWithScore>> SemanticSearchAsync(
         float[] queryEmbedding, int limit, CancellationToken ct)
@@ -295,7 +295,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
         finally { _gate.Release(); }
     }
 
-    /// <summary>V14.9-I: enumerate files that have a VLM-proposed name
+    /// <summary>enumerate files that have a VLM-proposed name
     /// pending. Powers the Deep Analyze "Pending renames (N)" pill so
     /// the user can bulk-apply the VLM's suggestions without manually
     /// walking the library. Mirrors the Files schema's
@@ -332,7 +332,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
         finally { _gate.Release(); }
     }
 
-    /// <summary>V14.9-I: count of files with a VLM-proposed name pending.
+    /// <summary>count of files with a VLM-proposed name pending.
     /// Cheap (COUNT(*) on indexed/sparse column); polled by the Deep
     /// Analyze pill to know whether to show it.</summary>
     public async Task<int> PendingProposedRenameCountAsync(CancellationToken ct)
@@ -469,7 +469,7 @@ internal sealed record FileRow(
 
 internal sealed record FileRowWithScore(FileRow Row, float Score);
 
-/// <summary>V14.9-I: one row of pending VLM-proposed rename, used to seed
+/// <summary>one row of pending VLM-proposed rename, used to seed
 /// the Deep Analyze "Pending renames" bulk-apply sheet.</summary>
 internal sealed record ProposedRenameRow(
     long Id,

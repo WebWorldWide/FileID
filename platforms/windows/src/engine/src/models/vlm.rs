@@ -9,8 +9,8 @@
 // matters for your deployment.
 //
 // Hardening: `find()` only probes `%LOCALAPPDATA%\FileID\Models\
-// llama.cpp\` (PATH removed in V14.6 — supply-chain hardening). Binary
-// is sanity-checked (PE header + size bounds) before spawning.
+// llama.cpp\` (no PATH lookup — supply-chain hardening). Binary is
+// sanity-checked (PE header + size bounds) before spawning.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,8 +19,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
-/// Default caption prompt — matches the macOS canonical prompt so output
-/// shape is identical across platforms.
+/// Default caption prompt.
 pub const CAPTION_PROMPT: &str = "Describe this image in one detailed sentence focused on the most prominent subjects, scene, and any text. No filler.";
 
 /// Default rename prompt — produces a short, kebab-cased filename
@@ -163,9 +162,8 @@ pub async fn caption(
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
         cmd.stdin(std::process::Stdio::null());
-        // BUG-15 (V14.7): kill the child if the parent task is dropped
-        // mid-caption so we don't orphan llama-mtmd-cli for the OS
-        // session.
+        // Kill the child if the parent task is dropped mid-caption so we
+        // don't orphan llama-mtmd-cli for the OS session.
         cmd.kill_on_drop(true);
 
         let mut child = cmd.spawn().with_context(|| format!("spawn {}", runner.binary.display()))?;

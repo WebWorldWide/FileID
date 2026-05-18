@@ -1,9 +1,8 @@
 // Video keyframe extraction — Media Foundation IMFSourceReader.
 //
-// Mirror of macOS `AVAssetImageGenerator`. Pulls a single frame at a
-// requested timestamp (we use 25% of duration with ±0.5 s tolerance,
-// matching the macOS heuristic) so the Library grid has a thumbnail
-// for video files and the video preview sheet has a placeholder.
+// Pulls a single frame at a requested timestamp (25 % of duration with
+// ±0.5 s tolerance) so the Library grid has a thumbnail for video files
+// and the video preview sheet has a placeholder.
 
 use anyhow::{Context, Result};
 use std::path::Path;

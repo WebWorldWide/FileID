@@ -1,7 +1,6 @@
 // Discovery — walks the user-picked root, emitting one DiscoveredFile per
 // readable file the scan should consider.
 //
-// Mirror of macOS engine/Sources/FileIDEngine/Pipeline/Discovery.swift.
 // Filters:
 //   - Hidden / system files: skipped (Windows: starts with `.` OR has
 //     FILE_ATTRIBUTE_HIDDEN or _SYSTEM)
@@ -18,19 +17,15 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use anyhow::Result;
 use tokio::sync::mpsc;
 use walkdir::WalkDir;
 
 use crate::coordinator::ScanCoordinator;
 
-/// Cap per-file size at 500 MB. Larger files (raw video, disk images,
-/// VM images) are skipped because the ML pipeline doesn't process them
-/// usefully and they monopolize a worker. Configurable in Phase 5
-/// Settings.
-const MAX_FILE_BYTES: u64 = 500 * 1024 * 1024;
+// Zero-byte files are skipped (no content to embed/hash). No size cap —
+// all sizes go through the same pipeline.
 
-/// Bounded mpsc capacity (Discovery → Tagging). Matches macOS's 1024.
+/// Bounded mpsc capacity (Discovery → Tagging).
 const DISCOVERY_CHANNEL_CAP: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,7 +50,7 @@ impl FileKind {
         }
     }
 
-    /// Lossy-but-fast classification by extension. Same set as macOS.
+    /// Lossy-but-fast classification by extension.
     pub fn from_extension(ext: &str) -> Self {
         let ext = ext.to_ascii_lowercase();
         match ext.as_str() {
@@ -84,21 +79,19 @@ pub struct DiscoveredFile {
 pub struct Discovery {
     root: PathBuf,
     coordinator: ScanCoordinator,
-    /// V15.0 Phase B: paths the orchestrator has determined are already
-    /// scanned-and-current (DB `scanned_at >= modified_unix`). When
-    /// present, Discovery silently skips these instead of yielding them
-    /// to tagging — turning a re-run of a 1M-file corpus into a near-
-    /// instant no-op. Empty = behave as classic full-scan.
+    /// Paths the orchestrator has determined are already scanned-and-current
+    /// (DB `scanned_at >= modified_unix`). Discovery silently skips these,
+    /// turning a re-run of a 1M-file corpus into a near-instant no-op.
+    /// Empty = classic full-scan.
     skip_paths: Arc<HashSet<PathBuf>>,
 }
 
-/// V14.9-N2: handle returned from `Discovery::spawn`. `rx` is the file
-/// channel; `count` is a live counter the orchestrator polls to emit
-/// Progress events with `discovered=count` (so the user sees the number
-/// climb during a long discovery walk); `done` flips true the instant
-/// the walker exits its loop (used to detect the empty-folder case
-/// where `count` stays at 0 and the orchestrator should surface a
-/// friendly "no supported files found" event instead of hanging).
+/// Handle returned from `Discovery::spawn`. `count` is a live counter the
+/// orchestrator polls to emit Progress events with `discovered=count` so
+/// the user sees the number climb during a long discovery walk; `done`
+/// flips true the instant the walker exits its loop (detects the
+/// empty-folder case where count stays at 0 and we should surface
+/// "no supported files found" instead of hanging).
 pub struct DiscoveryHandle {
     pub rx: mpsc::Receiver<DiscoveredFile>,
     pub count: Arc<AtomicU64>,
@@ -109,14 +102,9 @@ pub struct DiscoveryHandle {
 }
 
 impl Discovery {
-    pub fn new(root: impl Into<PathBuf>, coordinator: ScanCoordinator) -> Self {
-        Self::new_with_skip(root, coordinator, Arc::new(HashSet::new()))
-    }
-
-    /// V15.0 Phase B: incremental-rescan-aware constructor. The caller
-    /// (`scan_session.rs`) loads the "already current" path set from
-    /// the DB before spawning Discovery. Honors a `rescan: true` flag
-    /// from the IPC payload by passing an empty set here.
+    /// Incremental-rescan-aware constructor. The caller loads the
+    /// "already current" path set from the DB before spawning Discovery.
+    /// Honors a `rescan: true` IPC flag by passing an empty set here.
     pub fn new_with_skip(
         root: impl Into<PathBuf>,
         coordinator: ScanCoordinator,
@@ -132,13 +120,6 @@ impl Discovery {
     /// Walk the root, sending each readable file onto the returned receiver.
     /// Spawns a tokio blocking task because walkdir is sync. Closes the
     /// channel when traversal completes OR cancellation is requested.
-    ///
-    /// V14.9-N2: returns a tuple `(rx, count, done)` so the orchestrator can
-    /// emit periodic Progress events with the live `discovered` count and
-    /// detect when discovery has completed (so the empty-folder case
-    /// surfaces a clear "no files found" event instead of hanging on
-    /// "Discovering…"). Both `count` and `done` are shared atomics — no
-    /// need for channels.
     pub fn spawn(self) -> DiscoveryHandle {
         let (tx, rx) = mpsc::channel(DISCOVERY_CHANNEL_CAP);
         let root = self.root.clone();
@@ -158,9 +139,9 @@ impl Discovery {
             );
         }
 
-        // V14.9-X test gate: cap files yielded by Discovery so a
-        // staging run (e.g. validate VRAM behavior on N=100) can't
-        // wedge the system. Unset / 0 → no cap (default behavior).
+        // Test gate: cap files yielded by Discovery so a staging run
+        // (e.g. N=100 to validate VRAM behavior) can't wedge the system.
+        // Unset / 0 → no cap.
         let test_file_cap: u64 = std::env::var("FILEID_TEST_FILE_CAP")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -171,8 +152,7 @@ impl Discovery {
 
         tokio::task::spawn_blocking(move || {
             // walkdir: sorted-by-path traversal for I/O locality (sequential
-            // disk reads). follow_links = false: macOS Discovery treats
-            // symlinks as opaque, we match.
+            // disk reads). follow_links = false — treat symlinks as opaque.
             let walker = WalkDir::new(&root)
                 .follow_links(false)
                 .same_file_system(false)
@@ -199,10 +179,9 @@ impl Discovery {
                 if Self::should_skip(path) {
                     continue;
                 }
-                // V15.0 Phase B: skip files the orchestrator pre-loaded
-                // as already-current. Hash lookup is O(1); a 1M-file set
-                // costs ~80 MB RAM (acceptable) but lets a repeat scan
-                // complete in seconds instead of hours.
+                // Skip files the orchestrator pre-loaded as already-current.
+                // Hash lookup is O(1); a 1M-file set costs ~80 MB RAM but
+                // lets a repeat scan complete in seconds instead of hours.
                 if skip_paths.contains(path) {
                     continue;
                 }
@@ -214,7 +193,7 @@ impl Discovery {
                     }
                 };
                 let size = metadata.len();
-                if size > MAX_FILE_BYTES || size == 0 {
+                if size == 0 {
                     continue;
                 }
                 let modified = metadata
@@ -253,14 +232,14 @@ impl Discovery {
     }
 
     fn should_skip(path: &Path) -> bool {
-        // Hidden files (Windows: starts with `.` is enough; native hidden
-        // attribute requires Win32 GetFileAttributes which we add in Phase 5
-        // when the cost matters).
+        // Hidden files (Windows: starts with `.` is enough — the native
+        // hidden attribute would need GetFileAttributes but we don't
+        // currently pay that cost).
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
             if name.starts_with('.') {
                 return true;
             }
-            // Common build/cache dirs (matches macOS Discovery behavior).
+            // Common build/cache dirs.
             if matches!(name.to_ascii_lowercase().as_str(),
                 "thumbs.db" | "desktop.ini" | "ehthumbs.db" | "$recycle.bin")
             {
@@ -283,19 +262,6 @@ impl Discovery {
     }
 }
 
-/// Run the discovery walk and call `progress` periodically with the
-/// running count. Used by tests + the standalone iterate harness.
-#[allow(dead_code)]
-pub async fn enumerate(root: impl AsRef<Path>) -> Result<Vec<DiscoveredFile>> {
-    let coordinator = ScanCoordinator::new();
-    let discovery = Discovery::new(root.as_ref(), coordinator);
-    let mut handle = discovery.spawn();
-    let mut out = Vec::new();
-    while let Some(f) = handle.rx.recv().await {
-        out.push(f);
-    }
-    Ok(out)
-}
 
 #[cfg(test)]
 mod tests {

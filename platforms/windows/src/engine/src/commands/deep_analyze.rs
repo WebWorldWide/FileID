@@ -14,12 +14,10 @@ use crate::ipc::{
 };
 use crate::pipeline::deep_analyze::{analyze_file, AnalyzeMode};
 
-/// V14.9-K2: append a per-token caption chunk from `llama-mtmd-cli` into
-/// the shared accumulator with normalized single-space separators.
-/// `llama-mtmd-cli` emits one stdout line per `on_token` call; lines may
-/// carry leading/trailing whitespace (alignment padding) or none at all.
-/// Trimming each chunk and joining with exactly one space produces clean
-/// English-prose output regardless of the model's actual whitespace habit.
+/// Append a per-token caption chunk from `llama-mtmd-cli` with normalized
+/// single-space separators. The CLI emits one stdout line per `on_token`
+/// call with variable whitespace; trim + join with one space produces
+/// clean English-prose output regardless of the model's whitespace habit.
 pub(crate) fn append_caption_chunk(buf: &Arc<Mutex<String>>, chunk: &str) {
     let trimmed = chunk.trim();
     if trimmed.is_empty() {
@@ -66,8 +64,8 @@ pub(crate) async fn handle_deep_analyze_file(
     let model_kind_for_progress = model_kind.clone();
     let file_id = payload.file_id;
     let started_at = Instant::now();
-    // V14.9-I: accumulate per-token text so the UI can render the live
-    // caption stream word-by-word. Throttle wire emission to 4 Hz so a
+    // Accumulate per-token text so the UI can render the live caption
+    // stream word-by-word. Throttle wire emission to 4 Hz so a
     // 50-tok/sec VLM doesn't flood the sink.
     let caption_buf = Arc::new(Mutex::new(String::new()));
     let last_emit = Arc::new(Mutex::new(Instant::now() - Duration::from_millis(500)));

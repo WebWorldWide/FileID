@@ -8,8 +8,7 @@
 // the row's status to "Installed".
 //
 // Adding a model: append a match arm in `lookup_full` and a sentinel
-// path in `sentinel_path`. URLs and SHA256s should match what the
-// macOS engine's installers fetch — keep cross-platform parity.
+// path in `sentinel_path`.
 
 use std::path::PathBuf;
 
@@ -327,11 +326,10 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
         }
 
         // ── Performance Packs (CUDA / OpenVINO / QNN). Hosted on the
-        // fileid-app HF dataset repo per V14.6 plumbing. If the repo
-        // hasn't been populated yet the downloader surfaces the HTTP
-        // 404 as a friendly error; until then we surface "not yet
-        // available" so the install button stays usable but doesn't
-        // hard-fail.
+        // fileid-app HF dataset repo. If the repo hasn't been populated
+        // yet the downloader surfaces the HTTP 404 as a friendly error;
+        // until then we surface "not yet available" so the install button
+        // stays usable but doesn't hard-fail.
         "cuda_pack_x64" => not_yet_available(
             "CUDA Performance Pack",
             "Pack hosting is not configured yet. Watch shared/docs/SHIP.md for the upload date.",

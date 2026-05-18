@@ -4,9 +4,9 @@
 
     Plan: button → engine planRestructure IPC → category-summary list.
     Apply: floating bar → engine applyRestructure IPC → result count.
-    Phase 7.x adds the Win2D Sankey + tree-diff drill-down; today the
-    plan summary is a per-category card list which is fully functional
-    and renders in any device-agnostic environment.
+    Win2D Sankey + tree-diff drill-down is in progress; today the plan
+    summary is a per-category card list which is fully functional and
+    renders in any device-agnostic environment.
 -->
 <UserControl
     x:Class="FileID.Views.Restructure.RestructureView"
@@ -245,7 +245,7 @@
             </StackPanel>
         </ScrollViewer>
 
-        <!-- V14.9-M: floating ApplyBar — port of macOS RestructureApplyBar.swift.
+        <!-- floating ApplyBar — port of macOS RestructureApplyBar.swift.
              Frosted Acrylic backdrop, selection summary on the left, two-step
              chip flow in the middle, gold-gradient primary + outline secondary
              on the right. Springs at response 0.28 / dampingFraction 0.7 on

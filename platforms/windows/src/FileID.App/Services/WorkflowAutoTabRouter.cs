@@ -21,12 +21,12 @@ internal static class WorkflowAutoTabRouter
     }
 
     private static void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
-    {
-        try
+        => DebugLog.SafeRun("WorkflowAutoTabRouter.OnEngineChanged", () =>
         {
             if (e.PropertyName == nameof(EngineClient.LastFaceClustering))
             {
                 if (EngineClient.Instance.LastFaceClustering is null) return;
+                DebugLog.Debug($"[ENGINE-SUB:WorkflowAutoTabRouter] {e.PropertyName}");
                 var active = AppViewModel.Instance.ActiveTab;
                 if (active.Id == SidebarTab.Library.Id)
                 {
@@ -37,6 +37,7 @@ internal static class WorkflowAutoTabRouter
             else if (e.PropertyName == nameof(EngineClient.DeepAnalyzeComplete))
             {
                 if (EngineClient.Instance.DeepAnalyzeComplete is null) return;
+                DebugLog.Debug($"[ENGINE-SUB:WorkflowAutoTabRouter] {e.PropertyName}");
                 var active = AppViewModel.Instance.ActiveTab;
                 if (active.Id == SidebarTab.DeepAnalyze.Id)
                 {
@@ -44,10 +45,5 @@ internal static class WorkflowAutoTabRouter
                     AppViewModel.Instance.ActiveTab = SidebarTab.Library;
                 }
             }
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Warn("[AUTOTAB] router threw: " + ex.Message);
-        }
-    }
+        });
 }

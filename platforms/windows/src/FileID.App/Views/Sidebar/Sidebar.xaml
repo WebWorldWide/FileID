@@ -17,7 +17,7 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <!-- V14.7.4: rows 0-4 live inside a ScrollViewer so on short windows
+    <!-- rows 0-4 live inside a ScrollViewer so on short windows
          the queue list overflows scrollably instead of pushing the engine
          pill (the most important "is the engine running" indicator) below
          the visible area. The engine pill stays anchored at row 1 of the

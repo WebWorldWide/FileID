@@ -3,8 +3,8 @@
     ShimmerView — gold→lavender diagonal sweep over a placeholder surface.
     1.6s linear loop, infinite. Disabled (frozen) under reduced-motion.
 
-    Mirror of macOS ShimmerView (MotionPrimitives.swift:14). Used as a
-    loading-state overlay (thumbnail tiles, model installer cards, etc.).
+    Used as a loading-state overlay (thumbnail tiles, model installer
+    cards, etc.).
 
     The animation drives the GradientStop offsets across the full width
     via a Storyboard so it composites on the GPU. The brush itself uses

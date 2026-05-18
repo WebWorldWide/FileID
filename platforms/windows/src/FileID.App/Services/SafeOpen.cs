@@ -127,7 +127,7 @@ internal static class SafeOpen
 
     /// <summary>
     /// File.Exists wrapper that swallows IOException / UnauthorizedAccessException.
-    /// V14.7.11: an unguarded File.Exists can throw on paths with invalid
+    /// an unguarded File.Exists can throw on paths with invalid
     /// characters or denied access — defensive wrap returns false in
     /// those cases so callers don't crash.
     /// </summary>

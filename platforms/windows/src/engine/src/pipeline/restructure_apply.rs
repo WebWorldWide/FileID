@@ -64,20 +64,31 @@ impl RestructureApply {
             }
 
             if let Some(parent) = dest.parent() {
+                // SEC-5: TOCTOU defense, pass 1. Check the EXISTING ancestor
+                // chain BEFORE create_dir_all extends it — an attacker may
+                // have planted a junction in a pre-existing folder under
+                // library_root that would silently redirect the write
+                // outside the root the moment we resolve through it.
+                if has_reparse_point_in_chain(parent, &canonical_root) {
+                    tracing::warn!(
+                        parent=%parent.display(),
+                        "rejecting move: pre-existing reparse point in destination parent chain"
+                    );
+                    failed += 1;
+                    continue;
+                }
                 if let Err(err) = std::fs::create_dir_all(parent) {
                     tracing::warn!(?err, parent=%parent.display(), "create_dir_all failed");
                     failed += 1;
                     continue;
                 }
-                // SEC-5: TOCTOU defense. Between canonicalize_safely and
-                // MoveFileExW, a junction at the destination's parent
-                // could redirect outside library_root. Refuse moves
-                // where any ancestor of the destination (up to the
-                // library root) is a reparse point.
+                // SEC-5: TOCTOU defense, pass 2. Re-check after
+                // create_dir_all. The window between the pre-check and
+                // here is small but non-zero; defense in depth is cheap.
                 if has_reparse_point_in_chain(parent, &canonical_root) {
                     tracing::warn!(
                         parent=%parent.display(),
-                        "rejecting move: reparse point in destination parent chain"
+                        "rejecting move: reparse point appeared after create_dir_all"
                     );
                     failed += 1;
                     continue;

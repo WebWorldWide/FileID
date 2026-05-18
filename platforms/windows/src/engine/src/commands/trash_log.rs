@@ -34,10 +34,9 @@ pub(crate) fn append(entry: &TrashLogEntry) -> anyhow::Result<()> {
         std::fs::create_dir_all(parent).ok();
     }
     let json = serde_json::to_string(entry)?;
-    // V14.7.2: HMAC-sign each entry so a local attacker who appends a forged
-    // entry can't get it accepted by restoreFromTrash. The entry format is
-    // `{json}\t{hex_hmac}` — the existing single-line JSON parser is updated
-    // to split on \t and verify before parse.
+    // HMAC-sign each entry so a local attacker who appends a forged
+    // entry can't get it accepted by restoreFromTrash. Entry format is
+    // `{json}\t{hex_hmac}`.
     let mac = hmac::hmac_sha256_hex(&hmac::log_hmac_key()?, json.as_bytes());
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -61,20 +60,17 @@ pub(crate) fn read_batch(batch_id: &str) -> anyhow::Result<Option<TrashLogEntry>
         if line.trim().is_empty() {
             continue;
         }
-        // V14.7.2: split json + HMAC. Pre-V14.7.2 entries (no tab) are
-        // accepted in read-only mode for backward compat; new writes always
-        // carry a HMAC. After 14 days of run-time the legacy-entries path
-        // gets rotated out organically.
-        let (payload, mac_hex) = match line.find('\t') {
-            Some(i) => (&line[..i], Some(&line[i + 1..])),
-            None => (line, None),
+        // Split {json}\t{hex_hmac}. Entries without the HMAC suffix
+        // (legacy writes or forged appends) are rejected.
+        let Some(tab) = line.find('\t') else {
+            tracing::warn!("trash_log entry missing HMAC suffix -- rejecting");
+            continue;
         };
-        if let Some(expected) = mac_hex {
-            let actual = hmac::hmac_sha256_hex(&key, payload.as_bytes());
-            if !hmac::constant_time_eq_str(&actual, expected) {
-                tracing::warn!("trash_log entry HMAC mismatch -- rejecting forged entry");
-                continue;
-            }
+        let (payload, expected) = (&line[..tab], &line[tab + 1..]);
+        let actual = hmac::hmac_sha256_hex(&key, payload.as_bytes());
+        if !hmac::constant_time_eq_str(&actual, expected) {
+            tracing::warn!("trash_log entry HMAC mismatch -- rejecting forged entry");
+            continue;
         }
         if let Ok(entry) = serde_json::from_str::<TrashLogEntry>(payload) {
             if entry.batch_id == batch_id {

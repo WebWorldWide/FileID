@@ -2,14 +2,10 @@
 //! `main.rs` so external test/bench harnesses can depend on the engine's
 //! internals without going through stdin/stdout.
 //!
-//! V15.3 N3: this lives alongside `main.rs` (both targets, same crate)
-//! so `benches/*.rs` and integration tests can `use fileid_engine::*`.
 //! Each module is compiled twice (once for the bin, once for the lib);
-//! the dev-compile-time cost is ~30% versus a single bin target, and
-//! the runtime cost is zero — the bin still links its own copy with
-//! release LTO. This is the standard Cargo workaround for bin-only
-//! crates wanting bench/test scaffolding without a wholesale refactor
-//! of `main.rs`'s 600+ LOC of setup code.
+//! ~30 % dev-compile-time cost, zero runtime cost (the bin still links
+//! its own LTO copy). Standard Cargo workaround for bin-only crates
+//! wanting bench/test scaffolding.
 
 #![allow(clippy::needless_return)]
 #![allow(dead_code)]

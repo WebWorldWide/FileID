@@ -1,8 +1,7 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
-    EmptyStateView — reusable empty-state template. Mirror of macOS
-    Views/EmptyStateView.swift:7. Big gold icon, title, body callout,
-    optional secondary message, optional primary action button.
+    EmptyStateView — reusable empty-state template. Big gold icon, title,
+    body callout, optional secondary message, optional primary action button.
 
     Usage:
         <views:EmptyStateView

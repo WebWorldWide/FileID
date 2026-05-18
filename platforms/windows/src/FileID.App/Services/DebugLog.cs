@@ -23,12 +23,11 @@ internal static class DebugLog
     public static void Error(string message) => Write("ERROR", message);
     public static void Debug(string message) => Write("DEBUG", message);
 
-    /// <summary>V15.2 — handler-wrap helper. UI click handlers that call
-    /// IPC or touch the file system should route through this so a thrown
+    /// <summary>Handler-wrap helper. UI click handlers that call IPC or
+    /// touch the file system should route through this so a thrown
     /// exception logs + dumps + stays caught instead of escaping into the
-    /// dispatcher loop (which is the V15.1 last-resort handler). Caller
-    /// supplies a short label (typically `nameof(OnFooClicked)`) for the
-    /// log line.</summary>
+    /// dispatcher loop. Caller supplies a short label (typically
+    /// `nameof(OnFooClicked)`) for the log line.</summary>
     public static void SafeRun(string label, Action body)
     {
         try { body(); }
@@ -59,9 +58,8 @@ internal static class DebugLog
         {
             AppPaths.EnsureDirectories();
             var path = AppPaths.AppLogPath;
-            // Bound disk usage by truncating when oversized. Crude but
-            // sufficient for a desktop app log. Phase 11 polish replaces
-            // with date-rolling files via Microsoft.Extensions.Logging.
+            // Bound disk usage by truncating when oversized. Date-rolling
+            // files via Microsoft.Extensions.Logging is a future polish.
             if (File.Exists(path))
             {
                 var info = new FileInfo(path);
@@ -85,7 +83,7 @@ internal static class DebugLog
     }
 
     /// <summary>
-    /// V15.1: Write a dedicated crash-{timestamp}-{pid}.txt file with the
+    /// Write a dedicated crash-{timestamp}-{pid}.txt file with the
     /// exception, the source handler, and the last 50 lines of app.log
     /// for context. Designed for cases where the process is about to die
     /// (or already is) and we want a forensic artifact survivors can read
@@ -155,13 +153,12 @@ internal static class DebugLog
         }
     }
 
-    // V15.2 — last-session breadcrumb. The V15.1 crash sinks
-    // (Application.UnhandledException / AppDomain / TaskScheduler) catch
-    // every managed crash but cannot intercept a native fast-fail. WinUI
-    // 3's composition layer calls RaiseFailFastException on cross-thread
-    // DispatcherObject misuse (and similar invariant violations), which
-    // terminates the process without unwinding the CLR — no crash-*.txt
-    // is produced.
+    // Last-session breadcrumb. The managed crash sinks (Application.
+    // UnhandledException / AppDomain / TaskScheduler) catch every managed
+    // crash but cannot intercept a native fast-fail. WinUI 3's composition
+    // layer calls RaiseFailFastException on cross-thread DispatcherObject
+    // misuse, which terminates the process without unwinding the CLR — no
+    // crash-*.txt is produced.
     //
     // Breadcrumb pattern: at startup, BeginSession writes last-session.txt
     // with start time + pid + a clean_exit=false marker. MarkCleanExit

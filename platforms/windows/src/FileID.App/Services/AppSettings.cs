@@ -1,13 +1,9 @@
-﻿// AppSettings — durable user preferences. The Windows analog of the macOS
-// `AppStorage` / `UserDefaults` keys.
+﻿// AppSettings — durable user preferences.
 //
 // Persisted as JSON at %LOCALAPPDATA%\FileID\app-settings.json. Atomic
 // writes via temp-file + File.Move so a crash mid-save doesn't corrupt
-// the file.
-//
-// Mirror of macOS Core/AppSettings.swift. Phase 1 ships a small set of
-// keys; subsequent phases append new properties (each new prop must
-// default safely so older settings.json files load cleanly).
+// the file. Every new property must default safely so older settings.json
+// files load cleanly.
 
 using System;
 using System.IO;
@@ -44,8 +40,11 @@ internal sealed class AppSettings
     /// <summary>Active tab id. Stored as the string identifier (matches macOS RawValue persistence).</summary>
     public string ActiveTab { get; set; } = "library";
 
-    /// <summary>Tag kept files after Cleanup auto-trash (macOS Settings.swift toggle).</summary>
-    public bool CleanupAutoTagKept { get; set; } = false;
+    /// <summary>Tag kept files after Cleanup auto-trash (macOS Settings.swift toggle).
+    /// default flipped to true to match macOS canonical default
+    /// (`cleanup.autoTagKeepers` defaults true). Without this, the same
+    /// user on different OSes saw different post-cleanup tagging behavior.</summary>
+    public bool CleanupAutoTagKept { get; set; } = true;
 
     /// <summary>Restructure view mode: false = cards, true = tree-diff.</summary>
     public bool RestructureTreeMode { get; set; } = false;
@@ -145,7 +144,7 @@ internal sealed class AppSettings
             DebugLog.Warn($"AppSettings: GpuExecutionProviderOverride '{v}' is not a recognized value; coercing to null (auto-detect).");
             s.GpuExecutionProviderOverride = null;
         }
-        // V14.9-A12: clamp SchemaVersion to a known range. A corrupt or
+        // clamp SchemaVersion to a known range. A corrupt or
         // malicious settings.json could otherwise set 999, and a future
         // migration path that branches on version could behave unsafely.
         if (s.SchemaVersion < 0 || s.SchemaVersion > CurrentSchemaVersion)
@@ -158,7 +157,7 @@ internal sealed class AppSettings
         if (string.IsNullOrWhiteSpace(s.LibraryKindFilter)) s.LibraryKindFilter = "all";
     }
 
-    // V15.2: debounce + offload. The previous implementation ran every
+    // debounce + offload. The previous implementation ran every
     // UI-thread property setter (ActiveTab, SidebarVisible, FolderPath…)
     // through a synchronous WriteAllBytes + File.Move chain. On rapid
     // changes (tab spam, sidebar toggle, scroll-driven kind-filter

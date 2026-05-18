@@ -1,9 +1,8 @@
-//! SQLite migration stack — direct port of `Database.swift`'s GRDB
-//! `DatabaseMigrator`.
+//! SQLite migration stack.
 //!
 //! Tracks applied migrations in `grdb_migrations` (same table name + format
-//! GRDB uses) so a database built by either engine can be opened by the
-//! other. Identifiers MUST match the macOS Swift strings byte-for-byte:
+//! as GRDB) so a database built by either engine can be opened by the
+//! other. Identifiers MUST match the canonical strings byte-for-byte:
 //!
 //!   v1_core_tables, v2_clip_embeddings, v3_deep_analyze,
 //!   v4_face_verifications, v5_person_naming_structured,
@@ -70,12 +69,17 @@ pub fn apply(conn: &Connection) -> Result<()> {
 
 // ─── Migration SQL ──────────────────────────────────────────────────────────
 //
-// Each constant below is the exact SQL the corresponding GRDB Swift
-// migration produces. GRDB's TableDefinition DSL lowercases column types,
-// so we match: INTEGER → integer, TEXT → text, BLOB → blob, REAL → double.
+// Each constant below mirrors the SQL the corresponding GRDB Swift
+// migration produces. GRDB's `Database.ColumnType` enum holds UPPERCASE
+// affinity strings (`INTEGER`, `TEXT`, `BLOB`, `DOUBLE`), and its
+// `TableDefinition` DSL emits them verbatim — so we keep UPPERCASE here
+// to match what `sqlite_master.sql` reads back as on a macOS-created DB.
+// SQLite affinity matching is case-insensitive (column INTEGER and
+// integer produce the same storage class) but the literal text in
+// sqlite_master MUST agree across platforms so an ORM doing
+// schema-text comparisons doesn't see drift.
 //
-// Verified against engine/Sources/FileIDEngine/Storage/Database.swift v7
-// (via `git log`).
+// Verified against engine/Sources/FileIDEngine/Storage/Database.swift v7.
 
 const V1_CORE_TABLES: &str = r#"
 CREATE TABLE IF NOT EXISTS files (
@@ -259,10 +263,21 @@ mod tests {
             );
         "#).unwrap();
 
-        let hits: i64 = conn
-            .query_row("SELECT COUNT(*) FROM ocr_fts WHERE ocr_fts MATCH 'fox'", [], |r| r.get(0))
+        let file_id: i64 = conn
+            .query_row("SELECT id FROM files WHERE path_text = '/test/a.png'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(hits, 1);
+
+        // Hit: matching word returns the file's rowid (== file_id).
+        let matched_rowid: i64 = conn
+            .query_row("SELECT rowid FROM ocr_fts WHERE ocr_fts MATCH 'fox'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(matched_rowid, file_id, "FTS rowid must match files.id");
+
+        // Miss: a word that isn't in the indexed text returns zero hits.
+        let misses: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ocr_fts WHERE ocr_fts MATCH 'aardvark'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(misses, 0, "FTS must not match a word that isn't indexed");
     }
 
     #[test]

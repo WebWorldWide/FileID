@@ -56,9 +56,9 @@
         </Setter>
     </Style>
 
-    <!-- LavaLampBackground (V14.6) draws via Microsoft.UI.Composition
-         directly — no Win2D, no template part needed. The default style
-         just enforces that the control is hit-transparent. -->
+    <!-- LavaLampBackground draws via Microsoft.UI.Composition directly —
+         no Win2D, no template part needed. The default style just enforces
+         that the control is hit-transparent. -->
     <Style TargetType="motion:LavaLampBackground">
         <Setter Property="IsHitTestVisible" Value="False" />
     </Style>

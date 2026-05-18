@@ -26,10 +26,10 @@ pub(crate) async fn handle_apply_tags(
         let mut messages = Vec::new();
         let conn = db.lock();
         let tx = conn.unchecked_transaction()?;
-        // V15.2 perf: hoist + cache the prepared statements outside the
-        // per-file loop. With raw `tx.execute(sql, ...)`, SQLite re-parses
-        // the SQL string on every call; `prepare_cached` keeps the parsed
-        // statement on the connection so per-tag inserts reuse it.
+        // Cache prepared statements outside the per-file loop. Raw
+        // `tx.execute(sql, ...)` re-parses SQL on every call;
+        // `prepare_cached` keeps the parsed statement on the connection
+        // so per-tag inserts reuse it.
         for fid in &payload.file_ids {
             let path: Result<String, _> = tx
                 .prepare_cached("SELECT path_text FROM files WHERE id = ?1")?
@@ -240,7 +240,7 @@ pub(crate) async fn handle_trash_files(
         let conn = db.lock();
         let tx = conn.unchecked_transaction()?;
         let mut log_items: Vec<TrashLogItem> = Vec::new();
-        for ((fid, path), trashed_ok) in path_for_id.iter().zip(outcomes.into_iter()) {
+        for ((fid, path), trashed_ok) in path_for_id.iter().zip(outcomes) {
             if trashed_ok {
                 let _ = tx.execute("DELETE FROM files WHERE id = ?1", rusqlite::params![fid]);
                 succeeded += 1;

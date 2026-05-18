@@ -77,13 +77,13 @@ pub(crate) async fn handle_plan_restructure(
     let proposed = classify(&files, library_root_path);
     let category_summary = restructure::category_counts(&proposed);
 
-    // V14.7.2: engine-authoritative folder classification.
+    // Engine-authoritative folder classification.
     let folder_class = restructure::classify_folders(&proposed);
     let mut anchor = 0u32;
     let mut mixed = 0u32;
     let mut junk = 0u32;
-    // V14.9 A7: index classification by source folder so we can stamp
-    // per-move tiers without re-classifying.
+    // Index classification by source folder so per-move tiers can be
+    // stamped without re-classifying.
     let mut tier_by_folder: std::collections::HashMap<PathBuf, &'static str> =
         std::collections::HashMap::with_capacity(folder_class.len());
     for f in &folder_class {

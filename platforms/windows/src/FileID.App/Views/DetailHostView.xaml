@@ -1,12 +1,10 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
     DetailHostView — the right-hand pane. Switches between the active tab's
-    view and the onboarding splash when no folder is picked. Phase 1 ships
-    placeholder views per tab; Phase 2+ swaps each placeholder for its
-    real implementation.
+    view and the onboarding splash when no folder is picked.
 
-    Tab crossfade animation (0.22s easeInOut) lands here once Phase 8
-    polish stitches everything together. For now: snap.
+    Tab crossfade animation (0.22s easeInOut) is a future polish item.
+    For now: snap.
 -->
 <UserControl
     x:Class="FileID.Views.DetailHostView"

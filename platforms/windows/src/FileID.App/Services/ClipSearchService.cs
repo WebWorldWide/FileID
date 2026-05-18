@@ -12,9 +12,9 @@
 // replies with the L2-normalized 512-d float32 vector. The app then runs
 // the dot-product locally via ReadStore.SemanticSearchAsync.
 //
-// Phase 2.4 cut: the wiring + a stubbed embedding path that returns the
-// FTS5 fallback set so the UI is exercisable end-to-end. Phase 2.6
-// (engine ML wiring complete) lights up the real CLIP IPC round-trip.
+// FTS5 fallback returns matching results when the CLIP embedding path
+// isn't available; otherwise the engine reply lights up real semantic
+// search via the IPC round-trip.
 
 using System;
 using System.Collections.Concurrent;
@@ -34,7 +34,7 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
     private readonly ConcurrentDictionary<string, TaskCompletionSource<float[]?>> _inflight = new();
     private bool _disposed;
 
-    // V15.2: generation counter, bumped each time the engine's lifecycle
+    // generation counter, bumped each time the engine's lifecycle
     // transitions away from Ready (respawn or crash). Each in-flight TCS
     // captures the generation it was created in; an embedding that arrives
     // from a stale generation completes the wrong caller's TCS, which we
@@ -78,38 +78,41 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
     }
 
     private void OnEngineClientChanged(object? sender, PropertyChangedEventArgs e)
-    {
-        if (e.PropertyName == nameof(EngineClient.State))
+        => DebugLog.SafeRun("ClipSearchService.OnEngineClientChanged", () =>
         {
-            // V15.2: any State transition (respawn / crash / shutdown)
-            // invalidates pending embeddings — the engine that received
-            // the embedTextQuery is now gone. Bump the generation +
-            // fault all in-flight TCSes so callers don't hang.
-            var newState = EngineClient.Instance.State;
-            if (newState != EngineClient.LifecycleState.Ready)
+            if (e.PropertyName == nameof(EngineClient.State))
             {
-                Interlocked.Increment(ref _generation);
-                if (!_inflight.IsEmpty)
+                DebugLog.Debug($"[ENGINE-SUB:ClipSearchService] {e.PropertyName}");
+                // any State transition (respawn / crash / shutdown)
+                // invalidates pending embeddings — the engine that received
+                // the embedTextQuery is now gone. Bump the generation +
+                // fault all in-flight TCSes so callers don't hang.
+                var newState = EngineClient.Instance.State;
+                if (newState != EngineClient.LifecycleState.Ready)
                 {
-                    DebugLog.Info($"[CLIP] engine state={newState}; faulting {_inflight.Count} pending search(es).");
-                    foreach (var kv in _inflight)
+                    Interlocked.Increment(ref _generation);
+                    if (!_inflight.IsEmpty)
                     {
-                        kv.Value.TrySetException(
-                            new InvalidOperationException("Engine respawned mid-query."));
+                        DebugLog.Info($"[CLIP] engine state={newState}; faulting {_inflight.Count} pending search(es).");
+                        foreach (var kv in _inflight)
+                        {
+                            kv.Value.TrySetException(
+                                new InvalidOperationException("Engine respawned mid-query."));
+                        }
+                        _inflight.Clear();
                     }
-                    _inflight.Clear();
                 }
+                return;
             }
-            return;
-        }
-        if (e.PropertyName != nameof(EngineClient.LastClipTextEmbedding)) return;
-        var emb = EngineClient.Instance.LastClipTextEmbedding;
-        if (emb is null) return;
-        if (_inflight.TryRemove(emb.QueryId, out var tcs))
-        {
-            tcs.TrySetResult(emb.Embedding?.ToArray());
-        }
-    }
+            if (e.PropertyName != nameof(EngineClient.LastClipTextEmbedding)) return;
+            DebugLog.Debug($"[ENGINE-SUB:ClipSearchService] {e.PropertyName}");
+            var emb = EngineClient.Instance.LastClipTextEmbedding;
+            if (emb is null) return;
+            if (_inflight.TryRemove(emb.QueryId, out var tcs))
+            {
+                tcs.TrySetResult(emb.Embedding?.ToArray());
+            }
+        });
 
     /// <summary>
     /// Sends an `embedTextQuery` IPC command and awaits the engine's
@@ -169,7 +172,7 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("respawned", StringComparison.Ordinal))
         {
-            // V15.2: engine died mid-query. Surface a clear banner; the
+            // engine died mid-query. Surface a clear banner; the
             // caller (LibraryView search) treats null as "fall through to
             // FTS5" so the user still gets results.
             DebugLog.Warn("[CLIP] embed-await: engine respawned; returning null.");

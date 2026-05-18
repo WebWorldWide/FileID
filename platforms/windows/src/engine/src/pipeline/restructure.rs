@@ -1,14 +1,9 @@
-// Restructure — pure-logic FolderClassifier port.
+// Restructure — pure-logic FolderClassifier.
 //
-// Mirror of macOS engine/Sources/FileIDEngine/Pipeline/Restructure.swift
-// + FolderClassifier.swift. Inputs are file metadata + tags + (optional)
-// VLM categories from Deep Analyze; outputs are proposed destinations.
-// No I/O happens here — this module just decides *where* each file
-// should go. Phase 7 also adds the apply layer that does the real
-// `MoveFileExW` (default) or `CreateSymbolicLinkW` (advanced).
-//
-// Phase 7 cut: the classifier rule set + tree-build helpers. Apply
-// happens in `shell/restructure_apply.rs` (Phase 7.x).
+// Inputs are file metadata + tags + (optional) VLM categories from Deep
+// Analyze; outputs are proposed destinations. No I/O happens here — this
+// module just decides *where* each file should go. The apply layer lives
+// in `shell/restructure_apply.rs`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -26,8 +21,7 @@ pub struct ProposedMove {
     pub category: String,
 }
 
-/// V14.7.2: three-tier folder classification.
-/// Mirrors macOS engine `Restructure.swift` `FolderClassification` enum.
+/// Three-tier folder classification.
 ///
 /// - **Anchor** = source folder where ≥80% of moves go to ONE destination
 ///   category (homogeneous; folder gets renamed in place).
@@ -182,7 +176,7 @@ pub fn category_counts(moves: &[ProposedMove]) -> Vec<CategorySummary> {
         .into_iter()
         .map(|(category, count)| CategorySummary { category, count })
         .collect();
-    out.sort_by(|a, b| b.count.cmp(&a.count));
+    out.sort_by_key(|s| std::cmp::Reverse(s.count));
     out
 }
 

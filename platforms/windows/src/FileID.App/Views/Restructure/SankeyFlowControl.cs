@@ -1,6 +1,6 @@
 ﻿// SankeyFlowControl — pure-XAML Sankey diagram (no Win2D dep).
 //
-// Mirror of macOS SankeyFlowView. Renders source-folder → category
+// Renders source-folder → category
 // flows with cubic-bezier ribbons whose thickness is proportional to
 // the file count flowing through them. Bezier paths use
 // Microsoft.UI.Xaml.Shapes.Path with PathFigure + BezierSegment so

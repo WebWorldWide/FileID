@@ -1,18 +1,27 @@
-//! State directory layout under %LOCALAPPDATA%\FileID\.
+//! Per-OS state directory layout.
 //!
-//! Mirror of `AppSupportPath.swift` on macOS. The engine writes only inside
-//! these directories; the app reads from the same paths. None of these are
-//! ever transmitted off-device.
+//! - Windows: `%LOCALAPPDATA%\FileID\` (mirror of macOS `AppSupportPath.swift`).
+//! - Linux/BSD: `$XDG_DATA_HOME/FileID/` → `~/.local/share/FileID/`.
+//! - macOS (if engine ever runs natively here): `~/Library/Application Support/FileID/`.
+//!
+//! The engine writes only inside these directories; the app reads from
+//! the same paths. None of these are ever transmitted off-device.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-/// Root state directory: `%LOCALAPPDATA%\FileID\`.
+/// Root state directory.
 ///
 /// On Windows we honor `LOCALAPPDATA` first (the canonical envvar); fall
-/// back to `%USERPROFILE%\AppData\Local\FileID` if it's missing (rare —
-/// Server Core can disable it but it's set on every consumer SKU).
+/// back to `%USERPROFILE%\AppData\Local\FileID` if it's missing.
+///
+/// On non-Windows platforms we follow the XDG Base Directory spec:
+/// `XDG_DATA_HOME` (defaults to `~/.local/share`) joined with `FileID`.
+/// macOS-native deployments override XDG_DATA_HOME → `~/Library/Application Support`
+/// at the system level if you set it, but otherwise default to the
+/// XDG path which is also the natural location for a cross-platform engine.
+#[cfg(windows)]
 pub fn root() -> Result<PathBuf> {
     if let Ok(s) = std::env::var("LOCALAPPDATA") {
         return Ok(PathBuf::from(s).join("FileID"));
@@ -21,6 +30,19 @@ pub fn root() -> Result<PathBuf> {
         return Ok(PathBuf::from(home).join("AppData").join("Local").join("FileID"));
     }
     anyhow::bail!("could not resolve %LOCALAPPDATA% or %USERPROFILE% for FileID state dir")
+}
+
+#[cfg(not(windows))]
+pub fn root() -> Result<PathBuf> {
+    if let Ok(s) = std::env::var("XDG_DATA_HOME") {
+        if !s.is_empty() {
+            return Ok(PathBuf::from(s).join("FileID"));
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return Ok(PathBuf::from(home).join(".local").join("share").join("FileID"));
+    }
+    anyhow::bail!("could not resolve $XDG_DATA_HOME or $HOME for FileID state dir")
 }
 
 pub fn db_path()      -> Result<PathBuf> { Ok(root()?.join("fileid.sqlite")) }

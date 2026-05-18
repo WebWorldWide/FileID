@@ -264,7 +264,7 @@
                     </Grid>
                 </Grid>
 
-                <!-- V15.2.1: GPU Acceleration Pack. Adaptive per-vendor;
+                <!-- GPU Acceleration Pack. Adaptive per-vendor;
                      ModelInstallerService.UpdateAcceleratorForVendor sets
                      the status + message based on EngineClient.Info.Hardware.GpuVendor. -->
                 <Grid Padding="0,4">

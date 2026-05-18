@@ -75,22 +75,19 @@ pub(crate) async fn handle_start_scan(
         return;
     }
 
-    // V14.8.4 Bug 5: emit Discovering immediately so the UI flips out of
-    // IdlePanel within microseconds, regardless of how long ModelStack
-    // takes to load. Use .await (not try_send) so the event can't be
-    // silently dropped under sink load.
+    // Emit Discovering immediately so the UI flips out of IdlePanel within
+    // microseconds, regardless of how long ModelStack takes to load. Use
+    // .await (not try_send) so the event can't be silently dropped under
+    // sink load.
     sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
         ScanPhase::Discovering,
     ))))
     .await;
 
-    // V14.9-N2.1: baseline Progress so the sidebar stats flip from "—" to
-    // "0" immediately. Previously, if no file ever reached the DBWriter
-    // (empty folder, all-filtered, or a stall anywhere downstream),
-    // LastProgress stayed null and every stat row in the sidebar rendered
-    // "—" forever — looked identical to "scan did nothing". This baseline
-    // event guarantees the user always sees a confirmation that the scan
-    // started.
+    // Baseline Progress so the sidebar stats flip from "—" to "0"
+    // immediately. Without it, if no file ever reaches DBWriter (empty
+    // folder, all-filtered, or a downstream stall), every stat row stays
+    // at "—" indefinitely — identical to "scan did nothing".
     let session_id_baseline = uuid::Uuid::new_v4().to_string();
     sink.send(IpcEvent::now(EventPayload::Progress(Wrap::new(ScanProgress {
         session_id: session_id_baseline.clone(),
@@ -111,8 +108,8 @@ pub(crate) async fn handle_start_scan(
 
     // Load ML model weights once per session. Heavy enough to belong on a
     // blocking thread (ORT session create can take 100-500ms per model).
-    // V14.9-W: each model is now a pool of N Sessions (one per worker slot)
-    // so ML inference parallelizes across the GPU command queue instead of
+    // Each model is a pool of N Sessions (one per worker slot) so ML
+    // inference parallelizes across the GPU command queue instead of
     // serializing on a single Mutex.
     let models_worker_count = platform::default_worker_cap() as usize;
     let models = match tokio::time::timeout(

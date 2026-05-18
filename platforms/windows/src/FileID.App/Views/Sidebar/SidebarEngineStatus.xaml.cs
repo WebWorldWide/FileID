@@ -3,6 +3,7 @@
 // for that "live status" feel.
 
 using System.ComponentModel;
+using FileID.Services;
 using FileID.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -22,15 +23,17 @@ public sealed partial class SidebarEngineStatus : UserControl
     }
 
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
-    {
-        if (e.PropertyName is nameof(EngineClient.State)
-                          or nameof(EngineClient.Info)
-                          or nameof(EngineClient.CrashReason)
-                          or nameof(EngineClient.LastError))
+        => DebugLog.SafeRun("SidebarEngineStatus.OnEngineChanged", () =>
         {
-            DispatcherQueue.TryEnqueue(Sync);
-        }
-    }
+            if (e.PropertyName is nameof(EngineClient.State)
+                              or nameof(EngineClient.Info)
+                              or nameof(EngineClient.CrashReason)
+                              or nameof(EngineClient.LastError))
+            {
+                DebugLog.Debug($"[ENGINE-SUB:SidebarEngineStatus] {e.PropertyName}");
+                DispatcherQueue.TryEnqueue(Sync);
+            }
+        });
 
     private void Sync()
     {

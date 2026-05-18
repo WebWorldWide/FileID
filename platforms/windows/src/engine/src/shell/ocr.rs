@@ -1,9 +1,8 @@
 // OCR — Windows.Media.Ocr (WinRT).
 //
-// Mirror of macOS `VNRecognizeText` fast tier. Built into Windows since
-// 1809 (no install, no model download). Multi-language (locales picked
-// per call); falls back to English if the requested locale isn't
-// installed. Privacy: runs entirely on-device.
+// Built into Windows since 1809 (no install, no model download).
+// Multi-language (locales picked per call); falls back to English if the
+// requested locale isn't installed. Privacy: runs entirely on-device.
 
 use anyhow::{Context, Result};
 use std::io::Cursor;

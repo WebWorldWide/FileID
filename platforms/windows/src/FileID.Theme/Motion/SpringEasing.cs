@@ -14,8 +14,8 @@
 //   dampingFraction      → DampingRatio
 //
 // On reduced-motion, callers should skip the animation entirely and snap
-// the property to its final value. The ReducedMotion bridge (Phase 1.6)
-// exposes an IObservable<bool> that animation orchestrators consume.
+// the property to its final value. The ReducedMotion bridge exposes an
+// IObservable<bool> that animation orchestrators consume.
 
 using Microsoft.UI.Composition;
 using Microsoft.UI.Xaml;
@@ -124,9 +124,8 @@ public static class SpringEasing
             case "Translation.Y":
                 // Translation isn't a top-level Visual property; consumers
                 // that need a hard snap should set the parent's
-                // RenderTransform or use a CompositionPropertySet. Phase 1.6
-                // wires the small set of consumers that need this; for now
-                // it's an explicit no-op + a debug warning.
+                // RenderTransform or use a CompositionPropertySet. Explicit
+                // no-op + debug warning until a consumer needs it.
                 System.Diagnostics.Debug.WriteLine(
                     $"SpringEasing.SetScalar({propertyName}): direct set not supported for Translation; use a TranslateTransform.");
                 break;

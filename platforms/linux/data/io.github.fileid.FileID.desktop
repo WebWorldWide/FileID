@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=FileID
+GenericName=File Organizer
+Comment=Tag, dedupe, restructure, rename tens of thousands of files locally with on-device AI
+Exec=fileid-linux %F
+Icon=io.github.fileid.FileID
+Terminal=false
+Categories=Utility;FileTools;
+Keywords=files;organizer;tags;ai;photos;
+MimeType=inode/directory;
+StartupNotify=true
+StartupWMClass=io.github.fileid.FileID

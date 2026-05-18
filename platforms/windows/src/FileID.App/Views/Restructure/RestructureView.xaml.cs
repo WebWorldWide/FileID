@@ -48,16 +48,19 @@ public sealed partial class RestructureView : UserControl
     }
 
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
-    {
-        if (e.PropertyName == nameof(EngineClient.LastRestructurePlan))
+        => Services.DebugLog.SafeRun("RestructureView.OnEngineChanged", () =>
         {
-            DispatcherQueue.TryEnqueue(SyncPlan);
-        }
-        else if (e.PropertyName == nameof(EngineClient.LastRestructureApplyResult))
-        {
-            DispatcherQueue.TryEnqueue(SyncApplyResult);
-        }
-    }
+            if (e.PropertyName == nameof(EngineClient.LastRestructurePlan))
+            {
+                Services.DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
+                DispatcherQueue.TryEnqueue(SyncPlan);
+            }
+            else if (e.PropertyName == nameof(EngineClient.LastRestructureApplyResult))
+            {
+                Services.DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
+                DispatcherQueue.TryEnqueue(SyncApplyResult);
+            }
+        });
 
     private void SyncPlan()
     {
@@ -80,10 +83,10 @@ public sealed partial class RestructureView : UserControl
         Sankey.SetPlan(plan);
         TreeDiff.SetPlan(plan);
 
-        // FEAT-CRIT-3: compute Anchor / Mixed / Junk classification from
-        // per-source-folder move ratios. Engine doesn't classify
-        // authoritatively yet (deferred to V14.8); the UI derives the
-        // tiers from move counts vs total-file counts.
+        // Compute Anchor / Mixed / Junk classification from per-source-
+        // folder move ratios when the engine's authoritative classifier
+        // isn't present; the UI derives the tiers from move counts vs
+        // total-file counts.
         ComputeAndShowClassifier(plan);
 
         var hasWork = moveCount > 0;
@@ -93,7 +96,7 @@ public sealed partial class RestructureView : UserControl
             ? $"Ready to apply {moveCount:N0} moves into '{plan.LibraryRoot}'."
             : "Nothing to apply.";
 
-        // V14.9-M: update ApplyBar selection summary + step chips + primary
+        // update ApplyBar selection summary + step chips + primary
         // button label to reflect the plan count. macOS reference at
         // platforms/apple/.../RestructureApplyBar.swift.
         ApplyBarSelectedCount.Text = moveCount.ToString("N0");
@@ -112,13 +115,9 @@ public sealed partial class RestructureView : UserControl
     }
 
     /// <summary>
-    /// V14.7.2: engine-authoritative Anchor/Mixed/Junk counts when the
-    /// plan ships them (`FolderClassifications`). Falls back to the
-    /// V14.9-J: engine-authoritative classifier. The engine (since V14.9 A7)
-    /// always emits `FolderClassifications` in the plan event. The previous
-    /// C# fallback (≥80% homogeneity heuristic in lines 119-153 of the prior
-    /// build) was dead code with the current engine and has been removed —
-    /// the engine is the single source of truth for Anchor/Mixed/Junk.
+    /// Display engine-authoritative Anchor/Mixed/Junk counts from
+    /// `plan.FolderClassifications`. The engine always emits this in the
+    /// plan event; the engine is the single source of truth for these tiers.
     /// </summary>
     private void ComputeAndShowClassifier(RestructurePlan plan)
     {
@@ -145,7 +144,7 @@ public sealed partial class RestructureView : UserControl
         ApplyStatusText.Text = r.Failed == 0
             ? $"Applied {r.Applied:N0} moves successfully."
             : $"Applied {r.Applied:N0}, failed {r.Failed:N0}. Check %LOCALAPPDATA%\\FileID\\logs\\.";
-        // V14.9-M: step chip 2 fills once an Apply has succeeded. Visual
+        // step chip 2 fills once an Apply has succeeded. Visual
         // affordance that the two-step flow has advanced past "shortcuts".
         if (r.Failed == 0 && r.Applied > 0)
         {

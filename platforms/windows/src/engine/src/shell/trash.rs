@@ -1,16 +1,11 @@
 // Trash — IFileOperation::DeleteItem with FOF_ALLOWUNDO.
 //
-// Mirror of macOS `FileManager.trashItem`. Each delete goes into the
-// user's Recycle Bin so the action is reversible from Explorer's "Restore"
-// in case the user changes their mind.
+// Each delete goes into the user's Recycle Bin so the action is reversible
+// from Explorer's "Restore" in case the user changes their mind.
 //
 // Concurrency: each worker thread owns its own STA COM apartment (per
 // the IFileOperation contract). The pool is built by the caller; we
-// just expose the per-call API. macOS uses an 8-parallel trash pattern
-// and we match it from the Cleanup tab.
-//
-// Phase 2.3 cut: implements the single-file path. Phase 4 (Cleanup tab)
-// builds the parallel pool that consumes this.
+// just expose the per-call API. The Cleanup tab uses an 8-parallel pool.
 
 use anyhow::Result;
 #[cfg(windows)]

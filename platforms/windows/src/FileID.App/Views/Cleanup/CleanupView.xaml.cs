@@ -44,29 +44,32 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     }
 
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
-    {
-        if (_unloaded) return;
-        switch (e.PropertyName)
+        => Services.DebugLog.SafeRun("CleanupView.OnEngineChanged", () =>
         {
-            case nameof(ViewModels.EngineClient.Phase):
-                if (ViewModels.EngineClient.Instance.Phase == FileID.IpcSchema.ScanPhase.Completed)
-                {
+            if (_unloaded) return;
+            switch (e.PropertyName)
+            {
+                case nameof(ViewModels.EngineClient.Phase):
+                    if (ViewModels.EngineClient.Instance.Phase == FileID.IpcSchema.ScanPhase.Completed)
+                    {
+                        Services.DebugLog.Debug($"[ENGINE-SUB:CleanupView] {e.PropertyName}=Completed");
+                        RequestCleanupRefresh();
+                    }
+                    break;
+                case nameof(ViewModels.EngineClient.LastBatch):
+                    var summary = ViewModels.EngineClient.Instance.LastBatch;
+                    if (summary is null) return;
+                    long batchIndex = summary.BatchIndex;
+                    if (batchIndex == _lastSeenBatchIndex) return;
+                    _lastSeenBatchIndex = batchIndex;
+                    if (DateTime.UtcNow - _lastReloadAt < CleanupReloadThrottle) return;
+                    Services.DebugLog.Debug($"[ENGINE-SUB:CleanupView] {e.PropertyName} batch={batchIndex}");
                     RequestCleanupRefresh();
-                }
-                break;
-            case nameof(ViewModels.EngineClient.LastBatch):
-                var summary = ViewModels.EngineClient.Instance.LastBatch;
-                if (summary is null) return;
-                long batchIndex = summary.BatchIndex;
-                if (batchIndex == _lastSeenBatchIndex) return;
-                _lastSeenBatchIndex = batchIndex;
-                if (DateTime.UtcNow - _lastReloadAt < CleanupReloadThrottle) return;
-                RequestCleanupRefresh();
-                break;
-        }
-    }
+                    break;
+            }
+        });
 
-    // V15.2: debounce refresh requests. A fast scan emits dozens of
+    // debounce refresh requests. A fast scan emits dozens of
     // BatchSummary events per second; the time throttle above limits us
     // to one refresh per second, but rapid Phase transitions or a tab
     // re-enter while the throttle window is hot can still enqueue
@@ -212,7 +215,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
 
     // ─── FEAT-CRIT-2: Per-group action menu handlers ─────────────────
 
-    // V14.7.6: WinUI 3 MenuFlyoutItem inside a Grid.ContextFlyout does NOT
+    // WinUI 3 MenuFlyoutItem inside a Grid.ContextFlyout does NOT
     // inherit the parent Grid's DataContext, so the prior version's
     // `item.DataContext as DuplicateGroup` always returned null and every
     // per-group action silently no-op'd. Fix: cache the right-tapped group

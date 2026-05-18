@@ -2,16 +2,10 @@
 // run the per-file ML pipeline, and emit TaggedFile rows that DBWriter
 // batches into SQLite.
 //
-// Mirror of macOS engine/Sources/FileIDEngine/Pipeline/Tagging.swift.
-// Worker count: physical_cores * 1.7 (matches macOS's 14-on-M1Pro
-// heuristic). ANE-style semaphores cap concurrent ORT inferences to
-// prevent VRAM thrash on the GPU EP — 4 for vision models, 2 for CLIP.
-//
-// V14.3: per-file body fans out per-kind into the real handlers —
-// EXIF + dHash + SCRFD/ArcFace + MobileCLIP for images. Video/PDF/OCR
-// land as their shell helpers fill in. Models are loaded into a
-// ModelStack at scan start; missing models gracefully degrade
-// (the pipeline emits TaggedFile with the missing fields = None).
+// Worker count: physical_cores * 1.7. Semaphores cap concurrent ORT
+// inferences to prevent VRAM thrash on the GPU EP — 4 for vision models,
+// 2 for CLIP. Missing models gracefully degrade (the pipeline emits a
+// TaggedFile with the missing fields = None).
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,10 +22,9 @@ use crate::pipeline::batch_clip::ClipBatchCoordinator;
 use crate::pipeline::discovery::{DiscoveredFile, FileKind};
 use crate::shell;
 
-/// V14.9-W stats rollup. Each worker adds its per-file µs into these
-/// atomics; every STATS_PERIOD files we emit one info-level [STATS] line
-/// to `engine.jsonl` summarising avg stage timings. Lets us see whether
-/// each new optimization iteration actually shrunk what it claimed.
+/// Per-file stage timings. Each worker adds its µs into these atomics;
+/// every STATS_PERIOD files an info-level [STATS] line summarises the
+/// average so optimization wins (or regressions) show up in engine.jsonl.
 static STATS_FILES: AtomicU64 = AtomicU64::new(0);
 static STATS_DECODE_US: AtomicU64 = AtomicU64::new(0);
 static STATS_EXIF_US: AtomicU64 = AtomicU64::new(0);
@@ -61,18 +54,14 @@ fn maybe_emit_stats() {
     let clip = STATS_CLIP_US.load(Ordering::Relaxed) / n;
     let total = STATS_TOTAL_US.load(Ordering::Relaxed) / n;
     let ocr_ran = STATS_OCR_RAN.load(Ordering::Relaxed);
-    let ocr_avg = if ocr_ran > 0 {
-        STATS_OCR_US.load(Ordering::Relaxed) / ocr_ran
-    } else {
-        0
-    };
+    let ocr_avg = STATS_OCR_US
+        .load(Ordering::Relaxed)
+        .checked_div(ocr_ran)
+        .unwrap_or(0);
     let batch_count = crate::pipeline::batch_clip::STATS_BATCH_COUNT.load(Ordering::Relaxed);
     let batch_sum = crate::pipeline::batch_clip::STATS_BATCH_SIZE_SUM.load(Ordering::Relaxed);
-    let avg_batch = if batch_count > 0 {
-        (batch_sum * 10) / batch_count // ×10 so we can see 4.2 as "42"
-    } else {
-        0
-    };
+    // ×10 so we can see 4.2 as "42"
+    let avg_batch = (batch_sum * 10).checked_div(batch_count).unwrap_or(0);
     tracing::info!(
         target: "FileIDEngine::stats",
         processed = n,
@@ -90,30 +79,29 @@ fn maybe_emit_stats() {
     );
 }
 
-/// Bounded channel capacity, Tagging → DBWriter. Matches macOS's 256 —
-/// one transaction worth + slack so workers don't stall on a slow flush.
+/// Bounded channel capacity, Tagging → DBWriter. One transaction worth
+/// + slack so workers don't stall on a slow flush.
 pub const TAGGING_CHANNEL_CAP: usize = 256;
 
-/// Cap concurrent ORT vision-model inferences.
-/// V14.9-Y: reverted 8→4. V14.9-V's bump put more pressure on the
-/// DirectML command queue, which under load contributed to the 2 s
-/// TDR deadline being missed and the GPU device getting removed. The
-/// throughput cost of 4 vs 8 is ~10 % at the upper end; the safety
-/// cost of TDR is a full system hang.
+/// Cap concurrent ORT vision-model inferences. Higher values pressure the
+/// DirectML command queue past the 2 s TDR deadline and the GPU device
+/// gets removed — a full system hang. The ~10 % throughput cost of 4 vs
+/// 8 is the price of staying inside the TDR ceiling.
 const VISION_CONCURRENCY: usize = 4;
 
-/// Cap concurrent CLIP image embeds.
-/// V14.9-Y: reverted 4→2 for the same TDR-pressure reason.
+/// Cap concurrent CLIP image embeds. Same TDR-pressure reason as
+/// VISION_CONCURRENCY.
 const CLIP_CONCURRENCY: usize = 2;
 
-/// Padding fraction added to the SCRFD bbox before cropping. ArcFace
-/// trains on tightly-cropped faces with ~25% slack; over-tight crops
-/// degrade embedding quality.
-const FACE_CROP_PAD: f32 = 0.25;
+/// Padding fraction added to the SCRFD bbox before cropping. Must match
+/// the macOS value (FaceClustering.swift = 0.15) so the same library
+/// produces the same ArcFace embeddings → same cluster IDs across
+/// platforms. Clustering parity is the biggest single regression guard.
+const FACE_CROP_PAD: f32 = 0.15;
 
 /// One per file post-tagging. The DBWriter batches these into a single
 /// transaction. Embeddings are L2-normalized float32 vectors stored as
-/// raw little-endian bytes (matches macOS GRDB layout).
+/// raw little-endian bytes.
 #[derive(Debug, Clone)]
 pub struct TaggedFile {
     pub path: PathBuf,
@@ -161,35 +149,31 @@ pub struct DetectedFace {
 }
 
 /// Loaded ML weights shared across tagging workers. Each model is
-/// optional — missing weights at scan start cause the corresponding
-/// stage to no-op so a partial install doesn't fail the whole scan.
+/// optional — missing weights cause the corresponding stage to no-op so
+/// a partial install doesn't fail the whole scan.
 ///
-/// V14.9-W: each model is now a POOL of independent Sessions instead of
-/// a single `Mutex<T>`. Workers index into the pool by `worker_idx %
-/// pool.len()` so multiple inferences can run in parallel against the
-/// GPU's command queue. Pool size capped at `MODEL_POOL_SIZE` to keep
-/// VRAM usage bounded; on machines with fewer workers the pool shrinks
-/// to match.
+/// Each model is a POOL of independent Sessions; workers index by
+/// `worker_idx % pool.len()` so multiple inferences run in parallel
+/// against the GPU's command queue. Pool size capped at MODEL_POOL_SIZE
+/// to keep VRAM bounded.
 pub struct ModelStack {
     pub arcface: Option<Vec<Mutex<ArcFace>>>,
     pub scrfd: Option<Vec<Mutex<Scrfd>>>,
-    /// V14.9-X: MobileCLIP carries TWO alternate paths:
-    /// - `mobileclip_pool` (default) — N-Session pool, same shape as
-    ///   ArcFace/SCRFD. VRAM-clamped via `resolve_pool_size`. Empirically
-    ///   the throughput winner for MobileCLIP-S2 on DirectML.
-    /// - `mobileclip_batch` — single Session behind `ClipBatchCoordinator`.
-    ///   Opt-in via `FILEID_CLIP_USE_BATCH=1`. Kept for future experiments
-    ///   with CUDA EP or larger models where batching DOES amortize.
+    /// MobileCLIP has two paths:
+    /// - `mobileclip_pool` (default) — N-Session pool, VRAM-clamped via
+    ///   `resolve_pool_size`. Throughput winner for MobileCLIP-S2 on DirectML.
+    /// - `mobileclip_batch` — single Session behind `ClipBatchCoordinator`,
+    ///   opt-in via `FILEID_CLIP_USE_BATCH=1`. Kept for experiments with
+    ///   CUDA EP or larger models where batching amortizes.
     pub mobileclip_pool: Option<Vec<Mutex<MobileClipImage>>>,
     pub mobileclip_batch: Option<Arc<ClipBatchCoordinator>>,
 }
 
-/// Aspirational pool size — the actual cap is `min(this, vram_cap, worker_count)`
-/// computed in `resolve_pool_size`. The VRAM gate is the safety belt that
-/// prevents V14.9-W's system-hang regression (pool=4 on a 6 GB RTX 2060
-/// exhausted VRAM and wedged the DirectML driver). On a 6 GB card the gate
-/// clamps to 2; on 12 GB cards it allows up to ~7. Tunable per-user via
-/// `FILEID_MODEL_POOL_SIZE`, but the env value is ALSO clamped by the gate.
+/// Aspirational pool size — actual cap is `min(this, vram_cap, worker_count)`
+/// computed in `resolve_pool_size`. The VRAM gate prevents a wedged DirectML
+/// driver: pool=4 on a 6 GB RTX 2060 exhausts VRAM and requires a hard reboot.
+/// On a 6 GB card the gate clamps to 2; on 12 GB cards it allows up to ~7.
+/// Tunable per-user via `FILEID_MODEL_POOL_SIZE` (also gated).
 const MODEL_POOL_SIZE: usize = 4;
 
 /// Estimated VRAM headroom per pooled-Session of (ArcFace + SCRFD +
@@ -197,6 +181,12 @@ const MODEL_POOL_SIZE: usize = 4;
 /// tensors. Conservative upper bound — used to clamp pool size to fit
 /// available `DedicatedVideoMemory`. Real per-session residency varies
 /// by model and EP; treat this as a ceiling, not a measurement.
+///
+/// Measured on RTX 2060 6 GB during a scan against ~40 JPEGs in
+/// %USERPROFILE%\Pictures: total dedicated VRAM peaked at ~2.6 GB from a
+/// ~1.65 GB idle baseline, i.e. ~940 MB attributed to the engine. Keeping
+/// the ceiling at 1500 MB preserves a ~560 MB safety margin for DirectML
+/// allocator fragmentation under longer-running scans.
 const VRAM_PER_POOL_INSTANCE_MB: u64 = 1500;
 
 /// Always-reserved VRAM headroom (Windows desktop compositor + other
@@ -309,20 +299,17 @@ where
     }
     let mut pool = Vec::with_capacity(pool_size);
     for idx in 0..pool_size {
-        // V15.0 Phase A: stagger each Session allocation by 250 ms so a
-        // 6-session pool (2 × 3 models) doesn't burst DirectML's command
-        // queue at engine startup. Empirically the riskiest TDR window.
-        // First iteration (idx=0) doesn't sleep; subsequent slots wait.
+        // Stagger each Session allocation by 250 ms so a 6-session pool
+        // (2 × 3 models) doesn't burst DirectML's command queue at engine
+        // startup — the riskiest TDR window.
         if idx > 0 {
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
         match loader(p.clone()) {
             Ok(model) => pool.push(Mutex::new(model)),
             Err(err) => {
-                // V15.0 Phase A: if any slot's load (which now includes a
-                // warmup inference) hit device-removed, the marker is on
-                // the error. Bail the whole stack rather than try further
-                // slots that will hit the same dead GPU.
+                // If a slot's warmup hit device-removed, bail the whole
+                // stack rather than try further slots against the dead GPU.
                 use crate::models::runtime::error_has_device_removed_marker;
                 if error_has_device_removed_marker(&err) {
                     tracing::error!(model = label, slot = idx, ?err, "[STARTUP-TDR] device-removed during warmup; aborting pool load");
@@ -388,26 +375,21 @@ impl Tagger {
             let models = self.models.clone();
 
             tokio::spawn(async move {
-                // V15.0 Phase H: drop the per-worker thread priority to
-                // LOWEST so foreground apps (File Explorer, browser)
-                // stay snappy during scans. tokio worker threads inherit
-                // the parent process priority by default; we explicitly
-                // demote ourselves.
+                // Drop per-worker thread priority to LOWEST so foreground
+                // apps stay snappy during scans. tokio worker threads
+                // inherit the parent process priority by default.
                 crate::platform::set_worker_background_priority();
-                // V15.0 Phase E: yield cadence. After every YIELD_AFTER
-                // files this worker processes, sleep briefly to give
-                // foreground apps + DWM breathing room. Costs <1 % at
-                // 50 ms × 1/500 files, but lets multi-hour scans stay
-                // friendly to a desktop being actively used.
+                // After every YIELD_AFTER files, sleep briefly to give
+                // foreground apps + DWM breathing room. <1 % cost; keeps
+                // multi-hour scans friendly to an actively-used desktop.
                 const YIELD_AFTER: u64 = 500;
                 let mut files_done: u64 = 0;
                 while let Ok(file) = rx.recv().await {
                     if coord.check().await.is_err() {
                         break;
                     }
-                    // V15.0 Phase C: per-file timeout. Image decoders or
-                    // network UNC reads can hang indefinitely; a 60-second
-                    // ceiling lets the worker abandon and move on.
+                    // Per-file timeout — image decoders or network UNC reads
+                    // can hang indefinitely.
                     let fut = process_file(&file, &models, &vision_sem, &clip_sem, worker_idx, &coord);
                     let tagged = match tokio::time::timeout(
                         std::time::Duration::from_secs(60),
@@ -505,10 +487,23 @@ async fn process_file(
         error_message: None,
     };
 
-    // V15.0 Phase F: face pipeline gate. SCRFD needs the full-resolution
-    // frame for accurate face detection. CLIP / dhash / OCR work fine on
-    // a 512×512 shell thumbnail. Force-disable via FILEID_FORCE_THUMBNAIL=1
-    // to trade face accuracy for ~30 % CPU savings.
+    // SEC/perf: once the GPU is marked dead (TDR or device-removed),
+    // skip the whole ML pipeline for the rest of this process lifetime.
+    // mark_gpu_dead is one-shot (see coordinator.rs:96 — never reset),
+    // so this also prevents the remaining Discovery queue from queueing
+    // up tens of thousands of doomed inference calls behind us. The row
+    // is still emitted (with failed=false, empty embeddings) so the
+    // file row exists in the DB and a future scan after restart picks
+    // it up.
+    if coord.is_gpu_dead() {
+        tagged.total_ms = started.elapsed().as_secs_f64() * 1000.0;
+        return tagged;
+    }
+
+    // Face pipeline gate. SCRFD needs the full-resolution frame for
+    // accurate face detection. CLIP / dhash / OCR work fine on a 512×512
+    // shell thumbnail. Force-disable via FILEID_FORCE_THUMBNAIL=1 to trade
+    // face accuracy for ~30 % CPU savings.
     let force_thumb = std::env::var("FILEID_FORCE_THUMBNAIL")
         .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
@@ -566,10 +561,9 @@ async fn process_file(
                 tagged.phash = Some(compute_dhash(&rgb, w as usize, h as usize));
                 record_stage(&STATS_DHASH_US, dhash_started);
 
-                // V14.9-Y: short-circuit GPU stages if a prior file
-                // already detected device-removed. Don't submit any new
-                // work against the dead GPU device — that's what wedges
-                // the system when TDR fires.
+                // Short-circuit GPU stages if a prior file already detected
+                // device-removed. Submitting new work against the dead GPU
+                // device wedges the system when TDR fires.
                 let gpu_alive = !coord.is_gpu_dead();
                 if gpu_alive {
                 if let (Some(scrfd_pool), Some(arcface_pool)) = (&models.scrfd, &models.arcface) {
@@ -684,15 +678,12 @@ async fn process_file(
                 }
                 }
 
-                // V14.9-W gate: OCR is the biggest CPU per file (~30-50 ms).
-                // For camera photos (EXIF camera_model present) it returns
-                // nothing useful, so skip. Document-like files (screenshots,
-                // scans, PNG over a quality threshold) still run OCR.
-                // V15.0 Phase D: belt-and-suspenders GPU-dead short-circuit
-                // for OCR. Windows.Media.Ocr usually fails-soft on driver
-                // issues, but skipping the call if we already know the GPU
-                // is dead saves CPU + avoids any chance of a recursive
-                // device-init that could complicate driver recovery.
+                // OCR is the biggest CPU per file (~30-50 ms). For camera
+                // photos (EXIF camera_model present) it returns nothing
+                // useful, so skip. Documents/screenshots still run OCR.
+                // Also short-circuit when the GPU is already known dead —
+                // Windows.Media.Ocr fails-soft on driver issues but skipping
+                // avoids any recursive device-init.
                 if matches!(file.kind, FileKind::Image) && !coord.is_gpu_dead() && should_run_ocr(&file.path, &tagged, file.size_bytes) {
                     let ocr_started = Instant::now();
                     if let Ok(Some(ocr)) = run_ocr_blocking(rgb.clone(), w, h).await {
@@ -712,9 +703,8 @@ async fn process_file(
     tagged
 }
 
-/// V14.9-W: heuristic OCR gate. Most photo libraries are 99% camera
-/// snapshots where OCR is wasted CPU. Skip in that case; keep running
-/// for document/screenshot-shaped inputs.
+/// Heuristic OCR gate. Photo libraries are 99% camera snapshots where OCR
+/// is wasted CPU; skip in that case but keep running for documents/screenshots.
 fn should_run_ocr(path: &std::path::Path, tagged: &TaggedFile, _size_bytes: u64) -> bool {
     if tagged.camera_model.is_some() {
         return false;
@@ -745,18 +735,15 @@ fn should_run_ocr(path: &std::path::Path, tagged: &TaggedFile, _size_bytes: u64)
     false
 }
 
-/// V15.0 Phase C: hard cap on image dimensions. A 100 KB JPEG can
-/// decode to a 4 GB raw buffer; reject before decode to avoid OOM-ing
-/// a worker. 50 megapixels = ~150 MB raw RGB8, well within budget but
-/// big enough for legitimate photo + scanner output.
+/// Hard cap on image dimensions. A 100 KB JPEG can decode to a 4 GB raw
+/// buffer; reject before decode to avoid OOM-ing a worker. 50 MP =
+/// ~150 MB RGB8 — within budget for legitimate photo + scanner output.
 const MAX_DECODED_PIXELS: u64 = 50_000_000;
 
-/// V15.0 Phase F: thumbnail fast path. Uses Windows IThumbnailProvider
-/// (via `shell::thumbnail::render`) to pull the pre-cached 512×512 RGBA8
-/// File Explorer has already indexed for almost every image in the user's
-/// Pictures library. Cache hit ≈ 1 ms vs ~30 ms for full JPEG decode.
-/// Converts RGBA8 → RGB8 to match the rest of the pipeline's expected
-/// format.
+/// Thumbnail fast path via Windows IThumbnailProvider. Pulls the pre-cached
+/// 512×512 RGBA8 File Explorer already indexed for almost every image in
+/// the user's Pictures library — ~1 ms cache hit vs ~30 ms full JPEG decode.
+/// Converts RGBA8 → RGB8 to match the rest of the pipeline.
 async fn try_shell_thumbnail(path: PathBuf) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     tokio::task::spawn_blocking(move || -> anyhow::Result<(Vec<u8>, u32, u32)> {
         let thumb = crate::shell::thumbnail::render(&path)?;
@@ -772,20 +759,17 @@ async fn try_shell_thumbnail(path: PathBuf) -> anyhow::Result<(Vec<u8>, u32, u32
 }
 
 /// Load an image from disk and return its RGB8 bytes + dimensions.
-/// Done on a blocking thread to keep the tokio reactor free.
-///
-/// V15.0 Phase C: peeks header to reject pathological dimensions BEFORE
-/// decode, and wraps the decode body in `catch_unwind` so a panicking
-/// image-crate codec (e.g. malformed JPEG) propagates as Err instead of
+/// Runs on a blocking thread. Peeks header to reject pathological
+/// dimensions before decode, and wraps the decode body in `catch_unwind`
+/// so a panicking codec (malformed JPEG) propagates as Err instead of
 /// crashing the worker.
 async fn load_image_rgb(path: &std::path::Path) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     let p = path.to_path_buf();
     tokio::task::spawn_blocking(move || -> anyhow::Result<(Vec<u8>, u32, u32)> {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> anyhow::Result<(Vec<u8>, u32, u32)> {
-            // V15.2 perf #1: mmap the file once, drive both the dimension peek
-            // and the full decode from the same memory region. The old
-            // double-open path cost ~100 µs per file (50 ms wasted per 500
-            // files; ~5 s on a 50k library; worse on slow disks).
+            // mmap the file once, drive both the dimension peek and the
+            // full decode from the same memory region. The old double-open
+            // path cost ~100 µs per file.
             use std::io::Cursor;
             let file = std::fs::File::open(&p)
                 .map_err(|e| anyhow::anyhow!("open: {e}"))?;
@@ -961,7 +945,6 @@ fn crop_and_resize_face(
 
 /// Nearest-neighbor resize for interleaved RGB. Fast, fine for ML
 /// preprocessing where the model is robust to interpolation choice.
-/// Bilinear/Lanczos via `fast-image-resize` is a Phase 2.6 polish.
 pub fn resize_rgb_nearest(
     rgb: &[u8],
     src_w: usize,

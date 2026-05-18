@@ -1,0 +1,8 @@
+# Linux workspace. Single member today (the GTK4 app); the engine lives
+# at platforms/windows/src/engine/ and is referenced via path dependency
+# from src/app/Cargo.toml. TODO: relocate engine to shared/engine/ so
+# neither platform "owns" it (tracked in shared/docs/NEXT.md).
+
+[workspace]
+resolver = "2"
+members = ["src/app"]

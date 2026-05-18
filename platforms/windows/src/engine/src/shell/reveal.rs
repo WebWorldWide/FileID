@@ -1,4 +1,4 @@
-// Reveal-in-Explorer — analog of NSWorkspace.activateFileViewerSelecting.
+// Reveal-in-Explorer.
 //
 // `SHOpenFolderAndSelectItems(parent_pidl, [child_pidl], 0)` opens the
 // containing folder in Explorer and pre-selects the file. If the path

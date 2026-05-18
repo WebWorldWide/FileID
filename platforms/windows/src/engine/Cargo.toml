@@ -20,7 +20,7 @@ name = "FileIDEngine"
 path = "src/main.rs"
 
 [dependencies]
-# Async runtime + bounded channels — direct analog of Swift's AsyncChannel + actors.
+# Async runtime + bounded channels.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io-std", "sync", "time", "signal", "fs", "process"] }
 tokio-util = { version = "0.7", features = ["io"] }
 async-channel = "2"
@@ -34,7 +34,7 @@ uuid       = { version = "1", features = ["v4", "serde"] }
 # 0.4.20+ for RUSTSEC-2020-0071 / RUSTSEC-2020-0159 (panic-on-invalid-timestamp + localtime_r soundness).
 chrono     = { version = "0.4.20", features = ["serde"] }
 
-# SQLite — drop-in for GRDB. Bundled libsqlite3 + FTS5 for byte-faithful schema with macOS.
+# SQLite. Bundled libsqlite3 + FTS5 for byte-faithful schema parity.
 rusqlite = { version = "0.31", features = ["bundled", "blob", "chrono", "limits", "modern_sqlite"] }
 # FTS5 ships in `bundled` since rusqlite 0.31; explicit feature flag isn't needed but documented here.
 
@@ -63,29 +63,22 @@ futures-util = "0.3"
 sha2 = "0.10"
 hex  = "0.4"
 
-# Image pipeline — replaces CGImage / ImageIO on macOS.
-# image-rs covers JPEG/PNG/WebP/TIFF; HEIC needs the libheif feature gated by libheif-rs separately.
+# Image pipeline. image-rs covers JPEG/PNG/WebP/TIFF; HEIC would need
+# libheif-rs separately.
 image            = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "bmp", "tiff", "gif"] }
-# V15.3 Phase 6: `fast_image_resize` was a Phase 3 perf-candidate dep but
-# was never actually imported (audit grepped zero call sites). Removed
-# to slim the dep tree. If batch CLIP inference (NEXT.md N3) wants SIMD
-# resize, re-add at that time with the actual call site.
-# fast_image_resize = "4"
 kamadak-exif     = "0.5"
-# V14.9-X iteration C: turbojpeg considered + dropped. The crate requires
-# a system libjpeg-turbo install (pkg-config / vcpkg); no `vendored` feature
-# upstream. Adding a system dep just for a JPEG-decode speedup is the wrong
-# trade for the "user just downloads and runs" promise. Revisit once a
-# pure-Rust SIMD JPEG decoder (e.g. an upstream `zune-jpeg` AVX-512 path)
-# closes the gap, or once we can justify shipping a bundled DLL.
+# turbojpeg considered + dropped: requires a system libjpeg-turbo install
+# (no `vendored` feature upstream). The system-dep cost beats the JPEG-decode
+# speedup for the "user just downloads and runs" promise. Revisit when a
+# pure-Rust SIMD JPEG decoder lands.
 
 # Memory mapping for large image reads.
 memmap2 = "0.9"
 
-# PDF rendering — for now we route PDF previews through the C# side's
-# Windows.Data.Pdf (bundled in Windows 10+). pdfium-render lives in the
-# plan as a Phase 6 addition for VLM Deep Analyze input where we need
-# headless engine-side rendering.
+# PDF rendering — PDF previews route through the C# side's Windows.Data.Pdf
+# (bundled in Windows 10+). pdfium-render is gated behind the `pdf-analyze`
+# feature for engine-side rasterization (Deep Analyze input).
+pdfium-render = { version = "0.8", optional = true }
 
 # Lock-free queues for the hottest hot paths if benchmarks justify it.
 crossbeam-channel = "0.5"
@@ -99,18 +92,21 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # requires cmake at build time. Toggle via `cargo build --features vlm-native`.
 llama-cpp-2 = { version = "0.1", optional = true }
 
-# ONNX Runtime bindings + ndarray for tensor wrangling. Both crates pinned
-# to EXACT versions (no caret) because the 2.0 RC line had ABI churn
-# between rc.10 / rc.11 / rc.12 (rc.12 dropped a function rc.10's API
-# referenced). Exact pins prevent silent breakage on `cargo update`.
+# ONNX Runtime bindings + ndarray for tensor wrangling. Both pinned to
+# EXACT versions (no caret) because the 2.0 RC line had ABI churn between
+# rc.10 / rc.11 / rc.12. Exact pins prevent silent breakage on `cargo update`.
 #
-# V14.7.6: `download-binaries` MUST be on so the ORT runtime DLLs
-# (onnxruntime.dll + DirectML.dll + onnxruntime_providers_shared.dll)
-# ship in the build output. Without it, `Session::builder()` fails
-# IMMEDIATELY for every EP including DirectML/CPU because the engine
-# can't find onnxruntime.dll. CUDA/OpenVINO/QNN feature gates remain
-# enabled so the session-creation API compiles; their EP DLLs are
-# delivered separately via Performance Packs (Settings -> Performance -> Install).
+# `download-binaries` MUST be on so the ORT runtime DLLs (onnxruntime.dll
+# + DirectML.dll + onnxruntime_providers_shared.dll) ship in the build
+# output — without it, `Session::builder()` fails immediately for every
+# EP including DirectML/CPU. CUDA/OpenVINO/QNN feature gates stay enabled
+# so the session-creation API compiles; their EP DLLs are delivered
+# separately via Performance Packs.
+# `ort` moved to per-target deps so non-Windows builds don't pull `directml`.
+ort-sys = "=2.0.0-rc.10"
+ndarray = "0.16"
+
+[target.'cfg(windows)'.dependencies]
 ort = { version = "=2.0.0-rc.10", default-features = false, features = [
     "load-dynamic",
     "download-binaries",
@@ -120,10 +116,6 @@ ort = { version = "=2.0.0-rc.10", default-features = false, features = [
     "openvino",
     "qnn",
 ] }
-ort-sys = "=2.0.0-rc.10"
-ndarray = "0.16"
-
-[target.'cfg(windows)'.dependencies]
 # Windows-rs — IFileOperation, IFileOpenDialog, Windows.Media.Ocr (WinRT), IThumbnailProvider,
 # SetThreadExecutionState, WinVerifyTrust, Media Foundation IMFSourceReader, IPropertyStore,
 # Authenticode, GlobalMemoryStatusEx.
@@ -133,6 +125,7 @@ windows = { version = "0.58", features = [
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_LibraryLoader",
+    "Win32_System_ProcessStatus",
     "Win32_System_Threading",
     "Win32_System_Power",
     "Win32_System_SystemInformation",
@@ -157,26 +150,37 @@ windows = { version = "0.58", features = [
 ] }
 windows-core = "0.58"
 
+# Non-Windows deps. ort with CPU + CUDA + OpenVINO (no DirectML).
+# libc for getppid() / parent-death detection in platform.rs.
+[target.'cfg(not(windows))'.dependencies]
+ort = { version = "=2.0.0-rc.10", default-features = false, features = [
+    "load-dynamic",
+    "download-binaries",
+    "ndarray",
+    "cuda",
+    "openvino",
+] }
+libc = "0.2"
+
 [features]
 default = []
 # Native (in-process) llama.cpp VLM inference. Off by default to keep CI
 # build time low — adds ~150 MB build artifacts + needs cmake. Toggle via
 # `cargo build --features vlm-native --release`.
 vlm-native = ["dep:llama-cpp-2"]
+# Engine-side PDF rasterization via pdfium-render. Off by default; bundles
+# a pre-built pdfium DLL when enabled (~15 MB binary cost). Required for
+# Deep Analyze on PDF files.
+pdf-analyze = ["dep:pdfium-render"]
 
 [dev-dependencies]
-# V15.3 Phase 7: property-based tests. Generates randomized inputs to verify
-# invariants of pure functions (path safety, dHash determinism, HMAC roundtrip,
-# zip extraction safety). Dev-only — no runtime impact, no shipped-binary
-# bloat, no telemetry.
+# Property-based tests for pure-function invariants (path safety, dHash
+# determinism, HMAC roundtrip, zip extraction safety). Dev-only.
 proptest = { version = "1", default-features = false, features = ["std"] }
 
-# V15.3 N3: criterion micro-benchmarks. Dev-only. Bench targets land
-# under `benches/*.rs` and depend on the `fileid_engine` lib (added at
-# the top of this file). No runtime impact, no shipped-binary bloat,
-# no telemetry. Default-features off + cargo_bench_support keeps the
-# build minimal — we don't need the plotters/HTML report machinery in
-# CI.
+# Criterion micro-benchmarks. Dev-only. Bench targets under `benches/*.rs`
+# depend on the `fileid_engine` lib. default-features off keeps the build
+# minimal — no plotters/HTML report machinery in CI.
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 
 [[bench]]
@@ -209,15 +213,12 @@ inherits      = "release"
 lto           = "thin"
 codegen-units = 16
 
-# V15.3 Phase 3: profile-guided optimization. Two-pass: first build with
-# `RUSTFLAGS="-Cprofile-generate=/tmp/pgo-data"` and run `iterate.ps1`
-# against a representative corpus to populate the profile; then rebuild
-# with `RUSTFLAGS="-Cprofile-use=/tmp/pgo-data/merged.profdata"`. Expected
-# ~8-15% throughput on CPU-bound paths (tagging, dHash, clustering).
-# Inherits `release` so LTO + opt-level + strip stay aligned with ship
-# builds; the only difference is the PGO instrument/use flag, set via
-# RUSTFLAGS at invocation time (NOT here, to keep the profile usable
-# with both the instrument and use phases).
+# Profile-guided optimization. Two-pass: build with
+# `RUSTFLAGS="-Cprofile-generate=/tmp/pgo-data"` and run `iterate.ps1` on
+# a representative corpus, then rebuild with
+# `RUSTFLAGS="-Cprofile-use=/tmp/pgo-data/merged.profdata"`. Expected
+# ~8-15 % on CPU-bound paths. The instrument/use flag is set via RUSTFLAGS
+# at invocation time, not here.
 [profile.release-pgo]
 inherits      = "release"
 
@@ -246,10 +247,9 @@ missing_errors_doc      = "allow"
 missing_panics_doc      = "allow"
 must_use_candidate      = "allow"
 return_self_not_must_use = "allow"
-# V15.3 Phase 6: style-only pedantic rules that fire constantly across the
-# codebase and have no correctness value. Disabling these keeps the CI gate
-# (`-D warnings`) meaningful — the remaining pedantic checks are signal,
-# not noise.
+# Style-only pedantic rules that fire constantly across the codebase
+# without correctness value. Disabling these keeps the CI gate (`-D warnings`)
+# meaningful — the remaining pedantic checks are signal, not noise.
 uninlined_format_args   = "allow"  # `format!("{x}")` vs `format!("{}", x)` — style preference
 ignored_unit_patterns   = "allow"  # `_ = expr` vs `() = expr` — style preference
 too_many_lines          = "allow"  # function-length lint; orthogonal to readability
@@ -278,7 +278,7 @@ cast_possible_wrap      = "allow"  # u32→i32 conversions for SQLite parameter 
 map_unwrap_or           = "allow"  # `map().unwrap_or()` is at least as readable as `map_or()`
 manual_midpoint         = "allow"  # `(a + b) / 2` is fine where overflow is impossible
 manual_is_multiple_of   = "allow"  # `x % n == 0` is idiomatic Rust
-unchecked_duration_subtraction = "allow"  # call sites are within elapsed-time logic where subtrahend < minuend by construction
+unchecked_time_subtraction = "allow"  # call sites are within elapsed-time logic where subtrahend < minuend by construction
 redundant_closure       = "allow"  # readability sometimes wins over conciseness
 needless_continue       = "allow"  # explicit continue in long loops aids readability
 needless_range_loop     = "allow"  # range-loop with index is sometimes clearer than iter

@@ -9,9 +9,9 @@
 //     pays the shell-thumbnail cost.
 //   - Returns a SoftwareBitmapSource the WinUI grid binds directly into.
 //
-// Phase 2.4 cut: the cache + render orchestration. The actual interop call
-// stays a stub until Phase 2.6 ties it to the engine's shell::thumbnail
-// helper or a direct CsWinRT IShellItemImageFactory binding.
+// Implements the cache + render orchestration. The actual interop call
+// either routes through the engine's shell::thumbnail helper or uses a
+// direct CsWinRT IShellItemImageFactory binding.
 
 using System;
 using System.Collections.Generic;
@@ -23,6 +23,15 @@ using Microsoft.Extensions.Caching.Memory;
 using Microsoft.UI.Xaml.Media.Imaging;
 
 namespace FileID.Services;
+
+/// <summary>counters exposed via <see cref="ThumbnailService.Stats"/>
+/// so the Settings diagnostics block can surface silent failure modes
+/// (null dispatcher, dropped enqueues) the user previously couldn't see.</summary>
+public readonly record struct ThumbnailDiagnostics(
+    long RenderedOk,
+    long RenderedFailed,
+    long DroppedDispatcher,
+    long FallbackUsed);
 
 internal sealed class ThumbnailService : IDisposable
 {
@@ -40,7 +49,20 @@ internal sealed class ThumbnailService : IDisposable
     private readonly Channel<ThumbnailRequest> _queue;
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _worker;
-    /// <summary>V14.9-A10: captured at construction time on the UI thread
+    private static long _renderedOk;
+    private static long _renderedFailed;
+    private static long _droppedDispatcher;
+    private static long _fallbackUsed;
+
+    /// <summary>snapshot of the silent-failure counters. Wire into
+    /// Settings diagnostics so the user can see when thumbnails are
+    /// invisibly failing.</summary>
+    public static ThumbnailDiagnostics Stats => new(
+        Interlocked.Read(ref _renderedOk),
+        Interlocked.Read(ref _renderedFailed),
+        Interlocked.Read(ref _droppedDispatcher),
+        Interlocked.Read(ref _fallbackUsed));
+    /// <summary>captured at construction time on the UI thread
     /// so the worker (running on a thread-pool thread) always has a
     /// reliable dispatcher to marshal BitmapImage.SetSourceAsync back to.
     /// Late-binding to <c>GetForCurrentThread()</c> in <c>RenderAsync</c>
@@ -51,7 +73,7 @@ internal sealed class ThumbnailService : IDisposable
 
     public ThumbnailService()
     {
-        // V14.9-A10: capture the UI dispatcher at ctor time. Service is
+        // capture the UI dispatcher at ctor time. Service is
         // expected to be constructed on the UI thread.
         _uiDispatcher = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
         // Bigger queue: a fast scroll on a 256-px tile grid generates
@@ -64,7 +86,7 @@ internal sealed class ThumbnailService : IDisposable
             SingleWriter = false,
             FullMode = BoundedChannelFullMode.DropOldest,
         });
-        // V15.2: attach a fault sink so a DrainAsync exception leaves a
+        // attach a fault sink so a DrainAsync exception leaves a
         // forensic trail instead of becoming an UnobservedTaskException
         // at GC time.
         _worker = Task.Run(() => DrainAsync(_cts.Token));
@@ -101,7 +123,7 @@ internal sealed class ThumbnailService : IDisposable
             }
             try
             {
-                // V15.2: drop ConfigureAwait(false). The bitmap returned
+                // drop ConfigureAwait(false). The bitmap returned
                 // from RenderAsync is a UI-thread DispatcherObject; the
                 // post-await continuation here completes the caller's
                 // TCS with that handle, and we want the caller's continuation
@@ -129,10 +151,21 @@ internal sealed class ThumbnailService : IDisposable
     /// <summary>
     /// Render a thumbnail via the Windows.Storage shell-thumbnail API
     /// (which uses the same IThumbnailProvider chain Explorer does — Office,
-    /// raw, .heic, .pages all work). 256-px request, scaled by the system.
-    /// Returns a BitmapImage with the JPEG bytes set, ready for binding.
+    /// raw, .heic, .pages all work). 192-px request, scaled by the system.
+    /// dropped from 256 → 192 px to match macOS
+    /// `ThumbnailService.swift:27` (size: 192). Same display target, ~44%
+    /// less memory per cached tile.
     /// </summary>
-    private const uint ThumbnailRequestPx = 256;
+    private const uint ThumbnailRequestPx = 192;
+
+    /// <summary>extensions where we have a WIC-backed fallback if
+    /// the shell provider chain returns nothing. Matches what Explorer's
+    /// Photos app would render. Other extensions get null + a failure
+    /// counter bump.</summary>
+    private static readonly HashSet<string> ImageExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp",
+    };
 
     private static async Task<BitmapImage?> RenderAsync(
         string path,
@@ -141,6 +174,7 @@ internal sealed class ThumbnailService : IDisposable
     {
         if (!File.Exists(path))
         {
+            Interlocked.Increment(ref _renderedFailed);
             return null;
         }
         Windows.Storage.FileProperties.StorageItemThumbnail? thumb = null;
@@ -154,66 +188,168 @@ internal sealed class ThumbnailService : IDisposable
                     Windows.Storage.FileProperties.ThumbnailOptions.UseCurrentScale)
                 .AsTask(ct)
                 .ConfigureAwait(false);
-            if (thumb == null || thumb.Size == 0)
-            {
-                thumb?.Dispose();
-                return null;
-            }
-            // V15.2 — CRASH FIX: BitmapImage is a WinUI DispatcherObject.
-            // The previous code created the BitmapImage on this worker
-            // thread and only marshalled SetSourceAsync to the UI thread.
-            // WinUI 3's composition layer detects cross-thread access
-            // during the next frame and calls RaiseFailFastException —
-            // bypassing every managed exception handler (no crash-*.txt
-            // is produced). Symptom: thumbnails fail to render, then
-            // the app dies hard during scan. Fix: construct AND set
-            // source AND dispose the underlying stream on the UI
-            // dispatcher in one continuous lambda.
+            // CRASH FIX: BitmapImage is a WinUI DispatcherObject.
+            // Constructing it on the worker thread that resumed our await
+            // is what RaiseFailFastException's the process from
+            // Composition's next-frame check — bypassing every managed
+            // exception handler. Construct + SetSourceAsync + Dispose all
+            // happen inside the dispatcher lambda below.
             var dispatcher = uiDispatcher ?? FileID.App.HostWindow?.DispatcherQueue;
             if (dispatcher is null)
             {
+                Interlocked.Increment(ref _droppedDispatcher);
                 DebugLog.Warn("ThumbnailService.RenderAsync: no UI dispatcher available; skipping.");
-                thumb.Dispose();
+                thumb?.Dispose();
                 return null;
             }
-            // Transfer ownership of `thumb` into the UI lambda so the
-            // stream's lifetime spans SetSourceAsync.
+            if (thumb == null || thumb.Size == 0)
+            {
+                thumb?.Dispose();
+                thumb = null;
+                // shell provider returned nothing. For known image
+                // formats this is the most common reason the user sees
+                // "blank tiles" — fall back to BitmapImage(Uri), the same
+                // path Explorer's Photos uses. DecodePixelWidth caps memory.
+                var ext = Path.GetExtension(path);
+                if (ImageExtensions.Contains(ext))
+                {
+                    var fallback = await RenderImageFallbackOnDispatcherAsync(path, dispatcher, ct).ConfigureAwait(false);
+                    if (fallback != null)
+                    {
+                        Interlocked.Increment(ref _fallbackUsed);
+                        Interlocked.Increment(ref _renderedOk);
+                        return fallback;
+                    }
+                }
+                Interlocked.Increment(ref _renderedFailed);
+                return null;
+            }
             var capturedThumb = thumb;
             thumb = null;
-            var tcs = new TaskCompletionSource<BitmapImage?>(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            var enqueued = dispatcher.TryEnqueue(async () =>
-            {
-                try
-                {
-                    var bmp = new BitmapImage();
-                    await bmp.SetSourceAsync(capturedThumb).AsTask(ct);
-                    tcs.TrySetResult(bmp);
-                }
-                catch (Exception ex)
-                {
-                    DebugLog.Warn("ThumbnailService UI render: " + ex.Message);
-                    tcs.TrySetResult(null);
-                }
-                finally
-                {
-                    try { capturedThumb.Dispose(); } catch { /* swallow */ }
-                }
-            });
-            if (!enqueued)
-            {
-                DebugLog.Warn("ThumbnailService.RenderAsync: dispatcher.TryEnqueue returned false (shutdown?).");
-                try { capturedThumb.Dispose(); } catch { /* swallow */ }
-                return null;
-            }
-            return await tcs.Task.ConfigureAwait(false);
+            var bmp = await RenderShellThumbOnDispatcherAsync(capturedThumb, dispatcher, ct).ConfigureAwait(false);
+            if (bmp != null) { Interlocked.Increment(ref _renderedOk); }
+            else { Interlocked.Increment(ref _renderedFailed); }
+            return bmp;
         }
         catch (Exception ex)
         {
+            Interlocked.Increment(ref _renderedFailed);
             DebugLog.Warn("ThumbnailService.RenderAsync: " + ex.Message);
             try { thumb?.Dispose(); } catch { /* swallow */ }
             return null;
         }
+    }
+
+    private static async Task<BitmapImage?> RenderShellThumbOnDispatcherAsync(
+        Windows.Storage.FileProperties.StorageItemThumbnail capturedThumb,
+        Microsoft.UI.Dispatching.DispatcherQueue dispatcher,
+        CancellationToken ct)
+    {
+        var tcs = new TaskCompletionSource<BitmapImage?>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!TryEnqueueWithRetry(dispatcher, () => RunSetSource(capturedThumb, tcs, ct)))
+        {
+            Interlocked.Increment(ref _droppedDispatcher);
+            DebugLog.Warn("ThumbnailService: dispatcher.TryEnqueue returned false after retry (shutdown?).");
+            try { capturedThumb.Dispose(); } catch { /* swallow */ }
+            return null;
+        }
+        return await tcs.Task.ConfigureAwait(false);
+    }
+
+    private static async void RunSetSource(
+        Windows.Storage.FileProperties.StorageItemThumbnail capturedThumb,
+        TaskCompletionSource<BitmapImage?> tcs,
+        CancellationToken ct)
+    {
+        try
+        {
+            var bmp = new BitmapImage();
+            await bmp.SetSourceAsync(capturedThumb).AsTask(ct);
+            tcs.TrySetResult(bmp);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("ThumbnailService UI render: " + ex.Message);
+            tcs.TrySetResult(null);
+        }
+        finally
+        {
+            try { capturedThumb.Dispose(); } catch { /* swallow */ }
+        }
+    }
+
+    private static async Task<BitmapImage?> RenderImageFallbackOnDispatcherAsync(
+        string path,
+        Microsoft.UI.Dispatching.DispatcherQueue dispatcher,
+        CancellationToken ct)
+    {
+        // open the file as a random-access stream on this worker
+        // thread, then SetSourceAsync on the UI dispatcher. Eager-decode
+        // pattern mirrors the shell path's RunSetSource (known-good).
+        // The UriSource-lazy alternative leaves BitmapImages stuck
+        // un-decoded for mid-scan files; this guarantees the bitmap
+        // either populates or we log + return null + bump _renderedFailed.
+        Windows.Storage.StorageFile file;
+        Windows.Storage.Streams.IRandomAccessStream stream;
+        try
+        {
+            file = await Windows.Storage.StorageFile.GetFileFromPathAsync(path)
+                .AsTask(ct).ConfigureAwait(false);
+            stream = await file.OpenAsync(Windows.Storage.FileAccessMode.Read)
+                .AsTask(ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"ThumbnailService image-fallback open ({path}): {ex.Message}");
+            return null;
+        }
+
+        var tcs = new TaskCompletionSource<BitmapImage?>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var enqueued = TryEnqueueWithRetry(dispatcher, () => RunFallbackSetSource(stream, path, tcs, ct));
+        if (!enqueued)
+        {
+            Interlocked.Increment(ref _droppedDispatcher);
+            try { stream.Dispose(); } catch { /* swallow */ }
+            return null;
+        }
+        return await tcs.Task.ConfigureAwait(false);
+    }
+
+    private static async void RunFallbackSetSource(
+        Windows.Storage.Streams.IRandomAccessStream stream,
+        string path,
+        TaskCompletionSource<BitmapImage?> tcs,
+        CancellationToken ct)
+    {
+        try
+        {
+            var bmp = new BitmapImage { DecodePixelWidth = (int)ThumbnailRequestPx };
+            await bmp.SetSourceAsync(stream).AsTask(ct);
+            tcs.TrySetResult(bmp);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"ThumbnailService image-fallback decode ({path}): {ex.Message}");
+            tcs.TrySetResult(null);
+        }
+        finally
+        {
+            try { stream.Dispose(); } catch { /* swallow */ }
+        }
+    }
+
+    /// <summary>try once, then sleep 50 ms and retry once. TryEnqueue
+    /// can return false during compositor shutdown races. A single retry
+    /// covers the transient case without spinning.</summary>
+    private static bool TryEnqueueWithRetry(
+        Microsoft.UI.Dispatching.DispatcherQueue dispatcher,
+        Microsoft.UI.Dispatching.DispatcherQueueHandler action)
+    {
+        if (dispatcher.TryEnqueue(action)) return true;
+        Thread.Sleep(50);
+        return dispatcher.TryEnqueue(action);
     }
 
     private static string CacheKey(string path, double? modifiedAt)

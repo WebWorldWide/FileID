@@ -79,14 +79,9 @@ impl Sink {
 }
 
 fn write_frame<W: Write>(w: &mut W, event: &IpcEvent) -> std::io::Result<()> {
-    // serde_json with `preserve_order` doesn't emit sorted keys by default.
-    // For byte-for-byte cross-platform parity with Swift's sortedKeys, we
-    // serialize via a Value first, then emit via a custom sorted writer.
-    //
-    // For the Phase 0 cut we accept default (insertion-order) keys; the
-    // round-trip tests still pass because consumers don't care about key
-    // order. A follow-up issue tracks the canonicalization to a sorted
-    // emitter once we have a perf budget.
+    // Insertion-order keys are fine — consumers don't care about JSON key
+    // order. Byte-for-byte parity with sorted output would require a
+    // custom sorted-key writer.
     serde_json::to_writer(&mut *w, event).map_err(std::io::Error::other)?;
     w.write_all(b"\n")?;
     w.flush()

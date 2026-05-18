@@ -1,6 +1,5 @@
 ﻿// CompletionRipple — a one-shot gold ring pulse used as a "nice job"
-// completion affordance. Mirror of macOS CompletionRipple modifier
-// (MotionPrimitives.swift:63).
+// completion affordance.
 //
 // Scale 0.4 → 2.6, opacity 0.85 → 0 over 0.9s easeOut. Fires on any
 // trigger value change (not just false→true). Skips entirely when
@@ -45,27 +44,44 @@ public static class CompletionRipple
 
     private static void OnTriggerChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
-        if (d is not FrameworkElement target)
+        // Hard try/catch. OnTriggerChanged is invoked by the dependency-
+        // property system OUTSIDE any subscriber's SafeRun scope — a throw
+        // here escapes into the dispatcher loop and (with the prior unrooted-
+        // Popup bug) caused a mid-scan native fast-fail.
+        try
         {
-            return;
+            if (d is not FrameworkElement target)
+            {
+                return;
+            }
+            // First-time set during XAML load: don't fire (would ripple on every
+            // page load). Subsequent changes do fire.
+            if (e.OldValue is null && e.NewValue is not null)
+            {
+                return;
+            }
+            if (Equals(e.OldValue, e.NewValue))
+            {
+                return;
+            }
+            if (ReducedMotion.Instance.IsReduced)
+            {
+                // Honor the OS preference: completion event still happened,
+                // just no animated decoration.
+                return;
+            }
+            // Never ripple if the target isn't laid out or rooted in a
+            // window. The popup logic below would either no-op silently or
+            // try to open an unrooted Popup and trigger a native fast-fail.
+            if (target.XamlRoot is null) return;
+            if (target.ActualWidth <= 0 || target.ActualHeight <= 0) return;
+
+            FireRipple(target);
         }
-        // First-time set during XAML load: don't fire (would ripple on every
-        // page load). Subsequent changes do fire.
-        if (e.OldValue is null && e.NewValue is not null)
+        catch (Exception ex)
         {
-            return;
+            System.Diagnostics.Debug.WriteLine($"CompletionRipple.OnTriggerChanged threw: {ex}");
         }
-        if (Equals(e.OldValue, e.NewValue))
-        {
-            return;
-        }
-        if (ReducedMotion.Instance.IsReduced)
-        {
-            // Honor the OS preference: completion event still happened, just
-            // no animated decoration. Keep this consistent with macOS.
-            return;
-        }
-        FireRipple(target);
     }
 
     private static void FireRipple(FrameworkElement target)
@@ -74,9 +90,15 @@ public static class CompletionRipple
         // The simplest hostable surface is the visual root's Popup layer:
         // construct an Ellipse, attach it to a Popup positioned over the
         // target, animate, then dispose.
+        //
+        // Popup REQUIRES XamlRoot in WinUI 3 (unlike UWP) — opening an
+        // unrooted Popup is a native fast-fail. The OnTriggerChanged guard
+        // rejects null XamlRoot above; also set it on the new Popup so a
+        // future code path bypassing that check still gets a valid host.
         var popup = new Popup
         {
             IsHitTestVisible = false,
+            XamlRoot = target.XamlRoot,
         };
 
         Color goldColor = ResolveGoldColor();
@@ -97,6 +119,9 @@ public static class CompletionRipple
         popup.Child = ring;
 
         // Position the popup so the ring is centered on the target.
+        // TransformToVisual(null) returns the transform relative to the
+        // visual root — the same coord space the Popup uses when XamlRoot
+        // is set, so the offsets line up.
         var transform = target.TransformToVisual(null);
         var topLeft = transform.TransformPoint(new Point(0, 0));
         popup.HorizontalOffset = topLeft.X;
@@ -122,7 +147,7 @@ public static class CompletionRipple
         sb.Children.Add(opacity);
         sb.Completed += (_, _) =>
         {
-            popup.IsOpen = false;
+            try { popup.IsOpen = false; } catch { /* popup may already be closed via XamlRoot teardown */ }
         };
         sb.Begin();
     }

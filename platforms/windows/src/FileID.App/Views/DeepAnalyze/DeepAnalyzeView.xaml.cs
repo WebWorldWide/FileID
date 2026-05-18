@@ -47,13 +47,13 @@ public sealed partial class DeepAnalyzeView : UserControl
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         SyncCards();
         UpdateActiveModelLabel();
-        // V14.9-C5: refresh the "Name people first" gate every time the
+        // refresh the "Name people first" gate every time the
         // view loads; also refreshed in OnEngineChanged when face
         // clustering finishes.
         _ = RefreshNamePeopleGateAsync();
     }
 
-    /// <summary>V14.9-C5: query the DB for any person row with NULL
+    /// <summary>query the DB for any person row with NULL
     /// name + first_name. Disables Analyze All + shows the gate banner
     /// when the count is non-zero.</summary>
     private async System.Threading.Tasks.Task RefreshNamePeopleGateAsync()
@@ -121,25 +121,28 @@ public sealed partial class DeepAnalyzeView : UserControl
         => DispatcherQueue.TryEnqueue(SyncCards);
 
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
-    {
-        switch (e.PropertyName)
+        => DebugLog.SafeRun("DeepAnalyzeView.OnEngineChanged", () =>
         {
-            case nameof(EngineClient.DeepAnalyzeStarting):
-            case nameof(EngineClient.DeepAnalyzeProgress):
-            case nameof(EngineClient.DeepAnalyzeLast):
-            case nameof(EngineClient.DeepAnalyzeComplete):
-                DispatcherQueue.TryEnqueue(SyncStream);
-                break;
-            // V14.9-C5: re-evaluate the "Name people first" gate every
-            // time face clustering re-runs (new clusters → new unnamed)
-            // or a scan completes (new files → maybe new clusters next
-            // run).
-            case nameof(EngineClient.Phase):
-            case nameof(EngineClient.LastFaceClustering):
-                _ = RefreshNamePeopleGateAsync();
-                break;
-        }
-    }
+            switch (e.PropertyName)
+            {
+                case nameof(EngineClient.DeepAnalyzeStarting):
+                case nameof(EngineClient.DeepAnalyzeProgress):
+                case nameof(EngineClient.DeepAnalyzeLast):
+                case nameof(EngineClient.DeepAnalyzeComplete):
+                    DebugLog.Debug($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
+                    DispatcherQueue.TryEnqueue(SyncStream);
+                    break;
+                // re-evaluate the "Name people first" gate every
+                // time face clustering re-runs (new clusters → new unnamed)
+                // or a scan completes (new files → maybe new clusters next
+                // run).
+                case nameof(EngineClient.Phase):
+                case nameof(EngineClient.LastFaceClustering):
+                    DebugLog.Debug($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
+                    _ = RefreshNamePeopleGateAsync();
+                    break;
+            }
+        });
 
     private void SyncCards()
     {
@@ -213,7 +216,7 @@ public sealed partial class DeepAnalyzeView : UserControl
 
         if (starting is null && prog is null && last is null && complete is null) return;
 
-        // V14.9-D5: starting-card pre-progress. Engine emits
+        // starting-card pre-progress. Engine emits
         // DeepAnalyzeStarting with phase = Queued / Loading / Resolving
         // BEFORE the first DeepAnalyzeProgress event. Surface the phase
         // text so the user knows we're not stalled while the VLM warms
@@ -240,7 +243,7 @@ public sealed partial class DeepAnalyzeView : UserControl
 
             var pct = prog.Total == 0 ? 0 : (double)prog.Processed / prog.Total;
             OverallProgress.Value = pct;
-            // V14.9-D3: include ETA + processed/total + per-second rate
+            // include ETA + processed/total + per-second rate
             // when the engine reports it.
             var etaSuffix = prog.EtaSeconds is double eta && eta > 0
                 ? $" · {FormatEta(eta)} left"
@@ -254,7 +257,7 @@ public sealed partial class DeepAnalyzeView : UserControl
                 _captionAccumulator = string.Empty;
                 StreamCaptionText.Text = string.Empty;
             }
-            // V14.9-I: live caption stream. Engine emits the partial
+            // live caption stream. Engine emits the partial
             // accumulated text at 4 Hz; show it directly in the caption
             // line so the user sees the model generating word-by-word.
             if (!string.IsNullOrEmpty(prog.CurrentCaption))
@@ -291,7 +294,7 @@ public sealed partial class DeepAnalyzeView : UserControl
         }
     }
 
-    /// <summary>V14.9-D4: smart-names pending-rename pill. Shows the
+    /// <summary>smart-names pending-rename pill. Shows the
     /// running count of ProposedName values the engine has produced
     /// during this Deep Analyze run. Tap routes to BulkRenameSheet to
     /// apply or discard them.</summary>
@@ -311,7 +314,7 @@ public sealed partial class DeepAnalyzeView : UserControl
         }
     }
 
-    /// <summary>V14.9-I: open BulkRenameSheet pre-seeded with every
+    /// <summary>open BulkRenameSheet pre-seeded with every
     /// VLM-proposed rename pending in the DB. One-click bulk-apply
     /// of the model's smart filename suggestions, no need to
     /// navigate to Library + multi-select first.</summary>
@@ -381,30 +384,68 @@ public sealed partial class DeepAnalyzeView : UserControl
 
     private async System.Threading.Tasks.Task LoadStreamThumbAsync(string path)
     {
-        // V14.9-A17: swallowing all exceptions left the image at whatever
-        // previous frame was shown — confusing when the user can see the
-        // filename advance but the thumb sticks. Clear the source on any
-        // failure so it falls back to the placeholder glyph instead.
+        // BitmapImage is a DispatcherObject. The await on GetThumbnailAsync
+        // can resume on a worker thread, and constructing the BitmapImage
+        // off the UI thread is a known crash shape — native
+        // RaiseFailFastException, no managed catch. Capture the dispatcher
+        // before any await and marshal both the BitmapImage construction
+        // AND the StreamImage.Source assignment inside one TryEnqueue
+        // lambda. On any failure we explicitly null the source so the
+        // placeholder glyph shows instead of a stale frame.
+        var dispatcher = DispatcherQueue;
+        Windows.Storage.FileProperties.StorageItemThumbnail? thumb = null;
         try
         {
             var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(path);
-            using var thumb = await file.GetThumbnailAsync(
+            thumb = await file.GetThumbnailAsync(
                 Windows.Storage.FileProperties.ThumbnailMode.SingleItem, 320,
                 Windows.Storage.FileProperties.ThumbnailOptions.UseCurrentScale);
-            if (thumb != null && thumb.Size > 0)
+            if (thumb != null && thumb.Size > 0 && dispatcher != null)
             {
-                var bmp = new BitmapImage();
-                await bmp.SetSourceAsync(thumb);
-                StreamImage.Source = bmp;
+                var captured = thumb;
+                thumb = null;
+                var enqueued = dispatcher.TryEnqueue(async () =>
+                {
+                    try
+                    {
+                        var bmp = new BitmapImage();
+                        await bmp.SetSourceAsync(captured);
+                        StreamImage.Source = bmp;
+                    }
+                    catch (Exception ex)
+                    {
+                        DebugLog.Warn($"LoadStreamThumbAsync UI render: {ex.Message}");
+                        try { StreamImage.Source = null; } catch { }
+                    }
+                    finally
+                    {
+                        try { captured.Dispose(); } catch { }
+                    }
+                });
+                if (!enqueued)
+                {
+                    DebugLog.Warn("LoadStreamThumbAsync: dispatcher.TryEnqueue returned false.");
+                    try { captured.Dispose(); } catch { }
+                }
                 return;
             }
-            StreamImage.Source = null;
+            ClearStreamImageOnDispatcher(dispatcher);
         }
         catch (Exception ex)
         {
             DebugLog.Warn($"LoadStreamThumbAsync({PathRedactor.Redact(path)}) failed: {ex.Message}");
-            try { StreamImage.Source = null; } catch { }
+            ClearStreamImageOnDispatcher(dispatcher);
         }
+        finally
+        {
+            try { thumb?.Dispose(); } catch { }
+        }
+    }
+
+    private void ClearStreamImageOnDispatcher(Microsoft.UI.Dispatching.DispatcherQueue? dispatcher)
+    {
+        if (dispatcher is null) return;
+        dispatcher.TryEnqueue(() => { try { StreamImage.Source = null; } catch { } });
     }
 
     private void OnModelCardTapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e)
@@ -425,7 +466,7 @@ public sealed partial class DeepAnalyzeView : UserControl
     {
         try
         {
-            // V14.7.6: previous version ignored the Tag and ALWAYS installed
+            // previous version ignored the Tag and ALWAYS installed
             // qwen2_5_vl_3b. Now uses the per-card model id from Tag so each
             // model card actually installs its own model.
             if (sender is not Button b || b.Tag is not string modelId || string.IsNullOrWhiteSpace(modelId)) return;

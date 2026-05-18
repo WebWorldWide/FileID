@@ -8,11 +8,6 @@
 //! Lifetime is bound to the parent: parent-stdin EOF or the parent process
 //! disappearing (detected by a periodic OpenProcess poll on Windows) triggers
 //! a clean shutdown — drain the WAL, flush the sink, exit zero.
-//!
-//! This is the Phase 0 cut: it stands up the IPC loop, the parent watchdog,
-//! settings/state directories, structured logging, and the response shell
-//! for `ready` / `requestStatus` / `shutdown`. The real ML pipeline,
-//! database, scan coordinator, and downloader land in subsequent phases.
 
 #![allow(clippy::needless_return)]
 
@@ -47,6 +42,30 @@ use ipc::{
 const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn main() -> Result<()> {
+    // SEC-3: lock DLL search FIRST. Must run before tokio::runtime spins
+    // worker threads, before logging::init() opens tracing-appender file
+    // handles, and before anything else that might trigger an implicit
+    // LoadLibrary. Default Windows search includes CWD + every PATH
+    // entry — an attacker dropping `onnxruntime_providers_*.dll` in any
+    // of those gets code exec when we later register the EP. The
+    // SetDefaultDllDirectories call restricts to System32 + the engine
+    // binary's directory + AddDllDirectory-registered Performance Pack
+    // dirs only.
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::System::LibraryLoader::{
+            SetDefaultDllDirectories, LOAD_LIBRARY_FLAGS,
+        };
+        const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x800;
+        const LOAD_LIBRARY_SEARCH_APPLICATION_DIR: u32 = 0x200;
+        const LOAD_LIBRARY_SEARCH_USER_DIRS: u32 = 0x400;
+        let _ = SetDefaultDllDirectories(LOAD_LIBRARY_FLAGS(
+            LOAD_LIBRARY_SEARCH_SYSTEM32
+                | LOAD_LIBRARY_SEARCH_APPLICATION_DIR
+                | LOAD_LIBRARY_SEARCH_USER_DIRS,
+        ));
+    }
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -64,36 +83,12 @@ async fn async_main() -> Result<()> {
     let _ = paths::ensure_state_dirs()?; // create %LOCALAPPDATA%/FileID/{logs,Models,...}
     logging::install_panic_hook();
 
-    // SEC-3: lock down DLL search path before any LoadLibrary. Default
-    // search includes the engine's CWD (which may be writable user space)
-    // + every PATH entry. An attacker who drops `onnxruntime_providers_*.dll`
-    // in any of those gets code execution next time we load the EP.
-    // SetDefaultDllDirectories restricts to System32 + the engine binary's
-    // directory only.
-    #[cfg(windows)]
-    unsafe {
-        use windows::Win32::System::LibraryLoader::{
-            SetDefaultDllDirectories, LOAD_LIBRARY_FLAGS,
-        };
-        const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x800;
-        const LOAD_LIBRARY_SEARCH_APPLICATION_DIR: u32 = 0x200;
-        const LOAD_LIBRARY_SEARCH_USER_DIRS: u32 = 0x400;
-        let _ = SetDefaultDllDirectories(LOAD_LIBRARY_FLAGS(
-            LOAD_LIBRARY_SEARCH_SYSTEM32
-                | LOAD_LIBRARY_SEARCH_APPLICATION_DIR
-                | LOAD_LIBRARY_SEARCH_USER_DIRS,
-        ));
-        // USER_DIRS is included so AddDllDirectory()'d Performance Pack
-        // dirs work -- but the default no-PATH posture defends against
-        // PATH-based DLL planting.
-    }
-
     tracing::info!(version = ENGINE_VERSION, "FileIDEngine starting");
 
-    // V14.9-X: probe + log dedicated VRAM at startup. Used by the ML
-    // session-pool sizer to clamp pool size to fit available video
-    // memory — V14.9-W's larger pool exhausted VRAM on a 6 GB RTX 2060
-    // and wedged the DirectML driver requiring a hard reboot.
+    // VRAM probe at startup. The ML session-pool sizer clamps pool size to
+    // fit available video memory — without this clamp, a larger pool
+    // exhausts VRAM on a 6 GB RTX 2060 and wedges the DirectML driver
+    // requiring a hard reboot.
     if let Some(vram_mb) = platform::dedicated_vram_mb() {
         tracing::info!(dedicated_vram_mb = vram_mb, "[VRAM] dedicated video memory probed");
     } else {
@@ -112,24 +107,19 @@ async fn async_main() -> Result<()> {
         let _ = platform::register_dll_dirs_under(&models_dir.join("packs").join("qnn"));
         let _ = platform::register_dll_dirs_under(&models_dir.join("llama.cpp"));
         let _ = platform::register_dll_dirs_under(&models_dir.join("llama.cpp-cuda"));
-        // V14.9-U: our private cuDNN drop (auto-installed on NVIDIA via
-        // CudnnAutoInstaller). The archive extracts a versioned dir
-        // containing bin/, so register the parent — register_dll_dirs_under
-        // walks subdirs for DLLs.
+        // Private cuDNN drop (auto-installed on NVIDIA via CudnnAutoInstaller).
+        // The archive extracts a versioned dir containing bin/, so register the
+        // parent — register_dll_dirs_under walks subdirs for DLLs.
         let _ = platform::register_dll_dirs_under(&models_dir.join("cudnn"));
     }
 
-    // F3b (V14.8.3): if the user has NVIDIA CUDA Toolkit + cuDNN installed
-    // system-wide (common on ML/research/dev machines), register the toolkit
-    // bin directory so ORT's CUDA EP can LoadLibrary the runtime DLLs. SEC-3
-    // locked the default search path to System32 + app dir, so without this
-    // step the toolkit on PATH would be invisible to the loader. Falls back
-    // silently if no toolkit is present.
-    //
-    // V14.9 (2.1): capture any AddDllDirectory failures so we can surface
-    // them via the IPC sink once it's built. Without this, the CUDA EP would
-    // silently fall back to DirectML and the user would have no idea why
-    // their NVIDIA card isn't being used.
+    // If a system-wide NVIDIA CUDA Toolkit + cuDNN is present, register the
+    // toolkit bin dir so ORT's CUDA EP can LoadLibrary the runtime DLLs.
+    // SEC-3 locked the default search path to System32 + app dir, so without
+    // this step the toolkit on PATH is invisible to the loader. Capture any
+    // AddDllDirectory failures so we can surface them via the sink — a silent
+    // fallback to DirectML would leave the user wondering why their NVIDIA
+    // card isn't being used.
     let cuda_dll_failures: Vec<std::path::PathBuf> =
         if let Some(cuda_bin) = models::runtime::system_cuda_toolkit_dir() {
             tracing::info!(dir = %cuda_bin.display(), "[EP] registering system CUDA toolkit bin dir");
@@ -252,9 +242,9 @@ async fn async_main() -> Result<()> {
         Arc::new(std::sync::atomic::AtomicBool::new(false));
     let dispatch_deep_cancel = deep_analyze_cancel.clone();
 
-    // V14.7.4: shared HTTP client (HTTP/2 + connection pool) for the
-    // 12-way parallel downloader. Built once at engine startup; cloned
-    // cheaply via Arc into every prewarm task.
+    // Shared HTTP client (HTTP/2 + connection pool) for the 12-way parallel
+    // downloader. Built once at engine startup; cloned cheaply via Arc into
+    // every prewarm task.
     let http_client = match crate::downloader::build_shared_client() {
         Ok(c) => c,
         Err(err) => {
@@ -265,8 +255,8 @@ async fn async_main() -> Result<()> {
     };
     let dispatch_http_client = http_client.clone();
 
-    // V14.7.4: prewarm cancel flag. CancelPrewarm flips it; the
-    // download_parallel inner loop polls it after every chunk.
+    // Prewarm cancel flag. CancelPrewarm flips it; download_parallel polls
+    // it after every chunk.
     let prewarm_cancel: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
     let dispatch_prewarm_cancel = prewarm_cancel.clone();
@@ -283,13 +273,10 @@ async fn async_main() -> Result<()> {
                 }
                 read = bounded_read::bounded_read_line(&mut reader, &mut buf, MAX_FRAME_BYTES) => {
                     match read {
-                        // V14.9-Bug1: drop empty lines AND lines that are
-                        // nothing but a BOM (`\u{FEFF}`) or other zero-info
-                        // whitespace. .NET's StreamWriter for Process.
-                        // StandardInput can push a UTF-8 BOM on first
-                        // init, which otherwise lands here as a single
-                        // codepoint and trips serde_json with
-                        // "expected value at line 1 column 1".
+                        // Drop empty lines and BOM-only / whitespace-only lines.
+                        // .NET's StreamWriter for Process.StandardInput can push
+                        // a UTF-8 BOM on first init, which otherwise trips
+                        // serde_json with "expected value at line 1 column 1".
                         Ok(BoundedRead::Line(text))
                             if text
                                 .trim_start_matches('\u{FEFF}')
@@ -381,11 +368,9 @@ async fn handle_line(
     prewarm_cancel: &Arc<std::sync::atomic::AtomicBool>,
     line: &str,
 ) {
-    // V14.9-Bug1: strip a leading UTF-8 BOM defensively. The C# side
-    // (EngineClient.cs ProcessStartInfo) was switched to BOM-less
-    // UTF-8, but legacy installs or third-party wrappers may still
-    // push `EF BB BF` on the first byte of stdin. Trim before the
-    // deserializer sees it.
+    // Strip a leading UTF-8 BOM defensively. The C# side ships BOM-less UTF-8,
+    // but legacy installs or third-party wrappers may push `EF BB BF` on the
+    // first byte of stdin. Trim before the deserializer sees it.
     let line = line.trim_start_matches('\u{FEFF}').trim_start();
     if line.is_empty() {
         return;
@@ -393,12 +378,9 @@ async fn handle_line(
     let cmd: IpcCommand = match serde_json::from_str(line) {
         Ok(c) => c,
         Err(err) => {
-            // V14.9-Bug1: decode failures used to bubble up as a red
-            // toast (`ipc_decode_failed` EngineError emitted to the
-            // sink). That's diagnostic noise the user can't act on —
-            // any stray byte on the pipe would alarm them. Log at
-            // warn level so the engine.jsonl still records the event
-            // for debugging, but DON'T surface it in the UI.
+            // Don't surface decode failures in the UI — any stray byte on the
+            // pipe would otherwise paint a red toast the user can't act on.
+            // The warn log still records it for debugging.
             tracing::warn!(%err, "ipc decode failed (silenced)");
             return;
         }
@@ -417,10 +399,10 @@ async fn handle_line(
             shutdown.notify_waiters();
         }
         CommandPayload::PrewarmModel(payload) => {
-            // V14.7.4: clear the cancel flag at the start of every NEW
-            // prewarm call (an in-flight cancel from a prior call shouldn't
-            // immediately abort this one). Downloads from different prewarm
-            // calls run concurrently against the shared http_client pool.
+            // Clear the cancel flag at the start of every NEW prewarm call —
+            // an in-flight cancel from a prior call shouldn't immediately abort
+            // this one. Downloads run concurrently against the shared
+            // http_client pool.
             prewarm_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
             let sink = sink.clone();
             let model_kind = payload.model_kind.clone();
@@ -431,8 +413,6 @@ async fn handle_line(
             });
         }
         CommandPayload::CancelPrewarm(_) => {
-            // V14.7.4: previously parsed but silently dropped. Now actually
-            // cancels the in-flight prewarm by flipping the AtomicBool.
             prewarm_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             tracing::info!("CancelPrewarm received; in-flight downloads will abort");
         }

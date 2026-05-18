@@ -55,7 +55,7 @@ public sealed partial class SidebarFolderHeader : UserControl
         }
     }
 
-    // V15.2: disable the button while a picker dialog is open so a
+    // disable the button while a picker dialog is open so a
     // double-click can't spawn two concurrent pickers and race their
     // FolderPath setters.
     private int _pickInFlight; // 0 = idle, 1 = picker open
@@ -104,10 +104,30 @@ public sealed partial class SidebarFolderHeader : UserControl
     private void OnClearClicked(object sender, RoutedEventArgs e)
         => DebugLog.SafeRun(nameof(OnClearClicked), () => AppViewModel.Instance.FolderPath = null);
 
+    // re-entrancy guard. The wipe flow is multi-second (shutdown +
+    // wait + file delete + respawn). A second click that lands while the
+    // first is in flight would race the deletes against the new engine's
+    // open + likely corrupt the fresh DB. Set true at the top of the
+    // confirmed wipe, cleared in finally.
+    private int _wipeInFlight; // 0 = idle, 1 = wipe running
+
     private async void OnWipeClicked(object sender, RoutedEventArgs e)
     {
+        // gate BEFORE the confirmation dialog. The dialog itself
+        // is modal but WinUI 3 still dispatches click events even while a
+        // ContentDialog is open; a fast double-click could open two
+        // sequential dialogs and run two wipes back-to-back if the gate
+        // were placed after confirmation. Moving the gate here also means
+        // the button doesn't appear to respond to a rapid second click,
+        // matching the "first wipe wins" expectation.
+        if (System.Threading.Interlocked.CompareExchange(ref _wipeInFlight, 1, 0) != 0)
+        {
+            DebugLog.Info("[WIPE] already in flight; ignoring second click.");
+            return;
+        }
         try
         {
+            DebugLog.Info("[WIPE] OnWipeClicked entered");
             var dialog = new ContentDialog
             {
                 XamlRoot = XamlRoot,
@@ -120,50 +140,106 @@ public sealed partial class SidebarFolderHeader : UserControl
             var result = await dialog.ShowAsync();
             if (result != ContentDialogResult.Primary)
             {
+                DebugLog.Info("[WIPE] cancelled at confirm dialog");
                 return;
             }
 
-            // Real wipe flow:
-            //   1. Tell the engine to shut down AND wait for the process
-            //      to actually exit — without the wait, the SQLite handle
-            //      is still open and the deletes below hit a sharing
-            //      violation.
-            //   2. Delete fileid.sqlite + the WAL/SHM sidecars, retrying
-            //      a few times since the Windows kernel can keep the
-            //      FILE_OBJECT alive for a few hundred ms after the
-            //      process exits.
-            //   3. EngineClient's auto-respawn brings up a fresh engine
-            //      pointing at a fresh DB. Migrations re-apply.
-            //   4. Library/People/Cleanup tabs auto-refresh on the empty
-            //      DB via their existing PropertyChanged listeners.
-            await EngineClient.Instance.StopAndWaitForExitAsync(TimeSpan.FromSeconds(10));
-
-            try
-            {
-                foreach (var name in new[] { "fileid.sqlite", "fileid.sqlite-wal", "fileid.sqlite-shm" })
-                {
-                    var path = System.IO.Path.Combine(AppPaths.Root, name);
-                    await TryDeleteWithRetryAsync(path);
-                }
-                DebugLog.Info("Wipe-and-rescan: DB files deleted.");
-            }
-            catch (Exception ex)
-            {
-                await ShowAlertAsync(
-                    "Wipe partially failed",
-                    $"Couldn't delete DB files: {ex.Message}\n\n" +
-                    "Close FileID, delete %LOCALAPPDATA%\\FileID\\fileid.sqlite manually, " +
-                    "and relaunch — the engine will rebuild on next start.");
-                return;
-            }
-
-            // Force the engine to come back up now (don't wait for the
-            // backoff window; user explicitly asked for a rescan).
-            await EngineClient.Instance.StartAsync();
+            await RunWipeAsync();
         }
         catch (Exception ex)
         {
-            DebugLog.Warn("OnWipeClicked threw: " + ex);
+            DebugLog.Warn("[WIPE] OnWipeClicked threw: " + ex);
+        }
+        finally
+        {
+            System.Threading.Interlocked.Exchange(ref _wipeInFlight, 0);
+        }
+    }
+
+    /// <summary>extracted from OnWipeClicked so the engine ALWAYS
+    /// comes back up — even when file delete fails. Previously every
+    /// failure path early-returned without calling StartAsync, leaving
+    /// the engine permanently Crashed and the entire app unusable. The
+    /// finally block now restarts the engine unconditionally; the user
+    /// sees "Wipe partially failed" alert but still has a working app.
+    ///
+    /// Stages (each logged so a wipe hang or silent failure is
+    /// localizable from app.log alone — the original wipe code logged
+    /// only the IPC OUT line and went silent for 27 s on the user's
+    /// first repro):
+    ///   1. ClearPhaseAndError + reset LastProgress/LastBatch — sidebar
+    ///      stops showing the prior scan's "Completed" panel during the
+    ///      shutdown window.
+    ///   2. StopAndWaitForExitAsync — releases the SQLite handle.
+    ///   3. Delete fileid.sqlite + WAL/SHM with retry (kernel FILE_OBJECT
+    ///      can stay live ~200 ms past process exit).
+    ///   4. StartAsync — fresh engine respawns, migrations re-apply on the
+    ///      empty DB. ALWAYS attempted in the finally so a delete failure
+    ///      doesn't strand the user.</summary>
+    private async Task RunWipeAsync()
+    {
+        DebugLog.Info("[WIPE] stage 1: clear stale UI state");
+        try
+        {
+            EngineClient.Instance.ResetForWipe();
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("[WIPE] ResetForWipe threw (non-fatal): " + ex.Message);
+        }
+
+        DebugLog.Info("[WIPE] stage 2: shutdown engine");
+        try
+        {
+            await EngineClient.Instance.StopAndWaitForExitAsync(TimeSpan.FromSeconds(10));
+            DebugLog.Info("[WIPE] stage 2 complete");
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("[WIPE] stage 2 (shutdown) threw: " + ex.Message);
+            // Continue anyway — engine may already be dead.
+        }
+
+        DebugLog.Info("[WIPE] stage 3: delete DB files");
+        string? deleteError = null;
+        try
+        {
+            foreach (var name in new[] { "fileid.sqlite", "fileid.sqlite-wal", "fileid.sqlite-shm" })
+            {
+                var path = System.IO.Path.Combine(AppPaths.Root, name);
+                DebugLog.Info($"[WIPE] deleting {PathRedactor.Redact(path)}");
+                await TryDeleteWithRetryAsync(path);
+            }
+            DebugLog.Info("[WIPE] stage 3 complete (DB files deleted)");
+        }
+        catch (Exception ex)
+        {
+            deleteError = ex.Message;
+            DebugLog.Warn("[WIPE] stage 3 (delete) threw: " + ex);
+        }
+
+        // ALWAYS attempt restart, even when the delete failed.
+        // Without this, a single locked WAL leaves the user with a dead
+        // engine and no recovery path short of relaunching the app.
+        DebugLog.Info("[WIPE] stage 4: restart engine");
+        try
+        {
+            await EngineClient.Instance.StartAsync();
+            DebugLog.Info("[WIPE] stage 4 complete (StartAsync returned)");
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("[WIPE] stage 4 (StartAsync) threw: " + ex);
+        }
+
+        if (deleteError is not null)
+        {
+            await ShowAlertAsync(
+                "Wipe partially failed",
+                $"Couldn't delete DB files: {deleteError}\n\n" +
+                "The engine has been restarted, but the old library state may still be present. " +
+                "If a scan still surfaces old data, close FileID, delete " +
+                "%LOCALAPPDATA%\\FileID\\fileid.sqlite manually, and relaunch.");
         }
     }
 

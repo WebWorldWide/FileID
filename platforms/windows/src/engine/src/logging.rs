@@ -48,12 +48,12 @@ pub(crate) fn init() -> Result<()> {
     Ok(())
 }
 
-/// F2 (V14.8.3): capture every panic into the tracing pipeline. Without this
-/// hook, a panic anywhere in the scan pipeline crashes the engine silently
-/// — the C# app sees a broken pipe and the user sees "the app crashed" with
-/// no traceable cause. The hook leaves default unwinding behavior intact;
-/// it just forces a tracing::error line first so the next crash report has
-/// a file:line + backtrace to point at.
+/// Capture every panic into the tracing pipeline. Without this hook, a
+/// panic anywhere in the scan pipeline crashes the engine silently — the
+/// C# app sees a broken pipe and the user sees "app crashed" with no
+/// traceable cause. The hook leaves default unwinding behavior intact;
+/// it just forces a tracing::error first so the next crash report has a
+/// file:line + backtrace.
 pub(crate) fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         let location = info

@@ -1,7 +1,7 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
     DeepAnalyzeView — VLM picker + analyze controls + live caption
-    stream. Mirror of macOS DeepAnalyze/DeepAnalyzeView.swift.
+    stream.
 
     Layout:
       Row 0: Page header (title + subtitle)
@@ -22,7 +22,7 @@
     mc:Ignorable="d">
 
     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-        <!-- V14.7.4: HorizontalAlignment=Center (was Stretch) for the
+        <!-- HorizontalAlignment=Center (was Stretch) for the
              same reason as Settings — center the MaxWidth-capped column
              on wide windows. -->
         <StackPanel Padding="32,32,32,32" Spacing="20" MaxWidth="980" HorizontalAlignment="Center">
@@ -35,14 +35,14 @@
                            Text="Run a local vision-language model on every image to write captions and propose smart filenames. Works across your whole library." />
             </StackPanel>
 
-            <!-- V14.9-U: RuntimeBanner + CudnnInfoBanner were removed.
+            <!-- RuntimeBanner + CudnnInfoBanner were removed.
                  Both are now auto-installed at engine-ready time:
                  LlamaRuntimeAutoInstaller fires the Vulkan runtime fetch
                  for every Windows user; CudnnAutoInstaller fires the
                  cuDNN fetch on NVIDIA hardware. Users see the install
                  progress through the welcome-sheet style download cards. -->
 
-            <!-- V14.9-C5: "Name people first" gate banner. Visible when any
+            <!-- "Name people first" gate banner. Visible when any
                  person cluster has both name + first_name NULL — Deep
                  Analyze on unnamed people produces less-useful captions
                  ("a person at a party" vs "Adam at a party"). Mirror of
@@ -289,7 +289,7 @@
                 </StackPanel>
             </Border>
 
-            <!-- V14.9-D4: smart-names pending-rename pill. Visible after
+            <!-- smart-names pending-rename pill. Visible after
                  Deep Analyze produces one or more ProposedName values.
                  Tap routes back to the Library so the user can apply
                  the proposed names via BulkRenameSheet. -->

@@ -1,6 +1,5 @@
 // Deep Analyze — VLM-powered captioning + smart-rename.
 //
-// Mirror of macOS engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift.
 // Pipeline:
 //   1. Pick a model (Qwen2.5-VL 3B / 7B / Gemma 3 4B / SmolVLM).
 //   2. Load via llama.cpp (Vulkan / CUDA / DirectML / CPU backend by EP).
@@ -8,10 +7,6 @@
 //      first-page render → resize to model context → caption + smart name.
 //   4. Persist to `deep_analyze_results` (migration v3).
 //   5. Emit `deepAnalyzeProgress` IPC events on every N files.
-//
-// Phase 6 cut: API contract + the model registry (model id → file path
-// + SHA256 + size). The actual llama.cpp binding lights up alongside
-// the 12-way downloader once it's verified end-to-end.
 
 use std::path::PathBuf;
 
@@ -161,6 +156,11 @@ pub async fn analyze_file(
             let temp = Some(r.clone());
             (r, temp)
         }
+        "pdf" => {
+            let r = rasterize_pdf_page(&source_path).await?;
+            let temp = Some(r.clone());
+            (r, temp)
+        }
         _ => anyhow::bail!("kind '{}' isn't VLM-analyzable yet", kind),
     };
 
@@ -233,14 +233,11 @@ pub async fn analyze_file(
 /// reboot — fine for one-off analysis).
 async fn rasterize_video_keyframe(path: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
     let p = path.to_path_buf();
-    // V14.9-I: first attempt the 25%-of-duration keyframe. If Media
-    // Foundation can read the container but seeking fails (some
-    // VFR/fragmented MP4s have unreliable duration metadata), the
-    // function internally falls back to offset 0. We catch the rare
-    // case where the helper itself errors out: weird codecs, gap
-    // notifications only, etc. — and retry one more time before
-    // surfacing the failure. A single retry is cheap and rescues
-    // most one-shot transient I/O issues on USB drives / network shares.
+    // First attempt the 25 %-of-duration keyframe. If Media Foundation
+    // can read the container but seeking fails (some VFR/fragmented MP4s
+    // have unreliable duration metadata), the helper internally falls back
+    // to offset 0. We retry once on top-level errors to rescue most
+    // one-shot transient I/O issues on USB drives / network shares.
     let frame = match tokio::task::spawn_blocking({
         let p = p.clone();
         move || crate::shell::video::keyframe_25pct(&p)
@@ -263,6 +260,47 @@ async fn rasterize_video_keyframe(path: &std::path::Path) -> anyhow::Result<std:
             .ok_or_else(|| anyhow::anyhow!("video frame buffer mismatch"))?;
     image::DynamicImage::ImageRgb8(img).save(&dest)?;
     Ok(dest)
+}
+
+/// Render the first page of a PDF to a temp JPEG via the bundled
+/// pdfium-render binary. Gated behind the `pdf-analyze` feature.
+#[cfg(feature = "pdf-analyze")]
+async fn rasterize_pdf_page(path: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    use pdfium_render::prelude::*;
+    let p = path.to_path_buf();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<std::path::PathBuf> {
+        let pdfium = Pdfium::default();
+        let doc = pdfium
+            .load_pdf_from_file(&p, None)
+            .map_err(|e| anyhow::anyhow!("pdfium load: {e}"))?;
+        let page = doc
+            .pages()
+            .get(0)
+            .map_err(|_| anyhow::anyhow!("PDF has no pages"))?;
+        let render_config = PdfRenderConfig::new()
+            .set_target_width(1024)
+            .set_maximum_height(1024);
+        let bitmap = page
+            .render_with_config(&render_config)
+            .map_err(|e| anyhow::anyhow!("pdfium render: {e}"))?;
+        let img = bitmap.as_image();
+        let dest = std::env::temp_dir().join(format!(
+            "fileid-pdf-{}.jpg",
+            uuid::Uuid::new_v4()
+        ));
+        img.save(&dest)?;
+        Ok(dest)
+    })
+    .await?
+}
+
+#[cfg(not(feature = "pdf-analyze"))]
+#[allow(clippy::unused_async)]
+async fn rasterize_pdf_page(_path: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    anyhow::bail!(
+        "PDF analysis requires the pdf-analyze feature flag. \
+         Rebuild with: cargo build --features pdf-analyze"
+    )
 }
 
 /// Clean up a VLM-proposed filename: lowercase, hyphen-separated, strip
@@ -350,5 +388,25 @@ mod tests {
     fn size_estimates_increase_with_capability() {
         assert!(VlmModelKind::SmolVlm.approx_size_mb() < VlmModelKind::QwenVl3B.approx_size_mb());
         assert!(VlmModelKind::QwenVl3B.approx_size_mb() < VlmModelKind::QwenVl7B.approx_size_mb());
+    }
+
+    #[cfg(feature = "pdf-analyze")]
+    #[test]
+    fn rasterize_pdf_page_rejects_missing_file() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(rasterize_pdf_page(std::path::Path::new(
+            "C:\\does-not-exist-fileid-test.pdf",
+        )));
+        assert!(result.is_err(), "expected Err for missing PDF, got {:?}", result);
+    }
+
+    #[cfg(not(feature = "pdf-analyze"))]
+    #[test]
+    fn rasterize_pdf_page_without_feature_errors() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(rasterize_pdf_page(std::path::Path::new("any.pdf")));
+        assert!(result.is_err(), "expected feature-gate Err");
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(err.contains("pdf-analyze"), "err should mention feature flag: {err}");
     }
 }

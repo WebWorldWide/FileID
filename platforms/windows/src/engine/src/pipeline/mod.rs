@@ -1,4 +1,4 @@
-// Scan pipeline modules. Mirror of macOS engine/Sources/FileIDEngine/Pipeline/.
+// Scan pipeline modules.
 //
 //   discovery → bounded mpsc → tagging workers → bounded mpsc → dbwriter
 //

@@ -317,7 +317,7 @@ where
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// V14.7.4: real 12-way parallel range-GET path.
+// 12-way parallel range-GET download path.
 // ─────────────────────────────────────────────────────────────────────
 
 /// Download a single file using up to PARALLEL_PARTS concurrent

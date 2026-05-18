@@ -38,13 +38,15 @@ internal static class CudaAutoInstaller
     }
 
     private static void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
-    {
-        if (e.PropertyName is nameof(EngineClient.State)
-                           or nameof(EngineClient.Info))
+        => DebugLog.SafeRun("CudaAutoInstaller.OnEngineChanged", () =>
         {
-            TryStart();
-        }
-    }
+            if (e.PropertyName is nameof(EngineClient.State)
+                               or nameof(EngineClient.Info))
+            {
+                DebugLog.Debug($"[ENGINE-SUB:CudaAutoInstaller] {e.PropertyName}");
+                TryStart();
+            }
+        });
 
     private static void TryStart()
     {
@@ -99,7 +101,7 @@ internal static class CudaAutoInstaller
             catch { /* if FS check fails, the engine's own short-circuit will catch it */ }
 
             DebugLog.Info("[CUDA-AUTO] NVIDIA detected + no sentinel — silently installing CUDA llama.cpp runtime.");
-            // V15.2: attach a fault sink so a Task.Run exception that
+            // attach a fault sink so a Task.Run exception that
             // escapes the inner try/catch doesn't become an
             // UnobservedTaskException at GC time. Also bound the prewarm
             // with a 30-minute timeout — a stuck engine + an unawaited

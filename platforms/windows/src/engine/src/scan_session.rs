@@ -3,14 +3,10 @@
 // emission. Acquires a process-priority boost and a sleep-prevention
 // guard for the duration of the scan.
 //
-// Mirror of macOS engine/Sources/FileIDEngine/ScanSession.swift. One
-// session = one "scan a folder" run. Holds the coordinator + child
-// pipeline tasks, calls into the IPC sink for `phaseChanged`,
-// `progress`, `batchSummary`, `scanComplete` events.
-//
-// Follow-on phases (face clustering → deep analyze → restructure plan)
-// each live in their own handler so individual phases stay testable in
-// isolation; ScanSession is intentionally just one "scan a folder" run.
+// One session = one "scan a folder" run. Holds the coordinator + child
+// pipeline tasks, calls into the IPC sink for `phaseChanged`, `progress`,
+// `batchSummary`, `scanComplete` events. Follow-on phases (face clustering,
+// deep analyze, restructure plan) each live in their own handler.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -72,8 +68,8 @@ pub struct ScanSession {
     worker_count: usize,
     sink: Sink,
     models: Arc<ModelStack>,
-    /// V15.0 Phase B: when true, skip the incremental-rescan skip set
-    /// and reprocess every file. Plumbed from `StartScanPayload::rescan`.
+    /// When true, skip the incremental-rescan skip set and reprocess
+    /// every file. Plumbed from `StartScanPayload::rescan`.
     rescan: bool,
 }
 
@@ -158,11 +154,10 @@ impl ScanSession {
             );
         }
 
-        // V15.0 Phase B: pre-load the "already current" set from DB so
-        // Discovery can skip files whose `scanned_at >= modified_at`.
-        // For a 1M-file repeat scan, this turns an 8-hour redo into a
-        // ~1-second startup query + ~0-second discovery walk. The
-        // rescan flag (Y15.0 IPC addition) forces a full rescan.
+        // Pre-load the "already current" set from DB so Discovery can skip
+        // files whose `scanned_at >= modified_at`. For a 1M-file repeat
+        // scan this turns an 8-hour redo into ~1-second startup + ~0
+        // discovery walk. The rescan flag forces a full rescan.
         let skip_paths = if self.rescan {
             tracing::info!("[SCAN] rescan=true; processing every file regardless of prior scan state");
             std::sync::Arc::new(std::collections::HashSet::new())
@@ -185,9 +180,14 @@ impl ScanSession {
                 )
                 .unwrap_or(0)
             };
+            // failed=0 excludes prior failures (they must retry every scan).
+            // modified_at IS NULL rows fall out automatically: NULL comparisons
+            // are NULL → treated as false in WHERE, so the row is omitted from
+            // the skip set and gets reprocessed.
             if let Ok(mut stmt) = conn.prepare(
                 "SELECT path_text FROM files \
                  WHERE path_text LIKE ?1 \
+                 AND failed = 0 \
                  AND scanned_at >= modified_at"
             ) {
                 let like = format!("{}%", root_prefix.trim_end_matches(['\\', '/']));
@@ -215,26 +215,27 @@ impl ScanSession {
         let discovered_errors = handle.error_count.clone();
         let discovered_rx = handle.rx;
 
-        // V14.9-N2.2: emit a live Progress event every 250 ms while
-        // discovery is walking the tree. Without this, the user saw the
-        // sidebar stuck on "Discovering…" with every stat row reading
-        // "—" until the first DBWriter batch flushed (often >1 s on
-        // cold cache; never, if every file was filtered out). The tick
-        // task also detects "discovery finished with 0 files" and
-        // surfaces a clean empty-folder event so the UI exits Discovering
-        // instead of hanging forever.
+        // Emit a live Progress event every 250 ms while discovery walks
+        // the tree. Without this, the sidebar stays on "Discovering…" with
+        // every stat row reading "—" until the first DBWriter batch flushes
+        // (often >1 s on cold cache; never if every file was filtered out).
+        // Also surfaces an empty-folder event so the UI doesn't hang.
         let sink_for_tick = sink.clone();
         let session_id_for_tick = session_id.clone();
         let coord_for_tick = self.coordinator.clone();
         let root_for_tick = root.to_string_lossy().into_owned();
         let errors_for_tick = discovered_errors.clone();
+        // Clone the discovery counter for the ticker; the original stays
+        // in scope so the tagging callback can also read it for Progress
+        // event totals.
+        let discovered_count_for_tick = discovered_count.clone();
         let tick = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                 if coord_for_tick.is_cancelled() {
                     return;
                 }
-                let count = discovered_count.load(std::sync::atomic::Ordering::Relaxed);
+                let count = discovered_count_for_tick.load(std::sync::atomic::Ordering::Relaxed);
                 let finished = discovered_done.load(std::sync::atomic::Ordering::Acquire);
                 let _ = sink_for_tick.try_send(IpcEvent::now(EventPayload::Progress(Wrap::new(
                     ScanProgress {
@@ -246,16 +247,15 @@ impl ScanSession {
                         failed: 0,
                         files_per_second: 0.0,
                         eta_seconds: None,
-                        resident_mb: 0,
+                        resident_mb: crate::platform::process_memory_mb(),
                         available_mb: 0,
                     },
                 ))));
                 if finished {
-                    // V14.9-N2.3: graceful empty-folder path. Tagging will
-                    // wait on its input channel forever if discovery
-                    // produced zero files — close out the scan cleanly
-                    // with a "no supported files found" error so the
-                    // user knows what happened.
+                    // Empty-folder path: tagging would wait forever on its
+                    // input channel if discovery produced zero files.
+                    // Close out cleanly with a "no supported files found"
+                    // error so the user knows what happened.
                     let errs = errors_for_tick.load(std::sync::atomic::Ordering::Relaxed);
                     if count == 0 {
                         let _ = sink_for_tick.try_send(IpcEvent::now(EventPayload::Error(
@@ -304,23 +304,28 @@ impl ScanSession {
         let sink_for_batch = sink.clone();
         let session_id_for_batch = session_id.clone();
         let progress_state_for_batch = progress_state.clone();
+        // Clone the discovery counter for the tagging callback so Progress
+        // events during tagging report the real discovered total — else
+        // the sidebar progress bar pegs at 100 % during tagging.
+        let discovered_count_for_batch = discovered_count.clone();
 
         let (total, failed) = writer
             .run(tagged_rx, move |stats: BatchStats| {
                 emit_batch_summary(&sink_for_batch, &stats);
+                let discovered = discovered_count_for_batch.load(std::sync::atomic::Ordering::Relaxed);
                 maybe_emit_progress(
                     &sink_for_batch,
                     &progress_state_for_batch,
                     &session_id_for_batch,
                     &stats,
+                    discovered,
                 );
             })
             .await?;
 
-        // V14.9-N2: tick task exits on its own once discovery's `done`
-        // flips true, so this abort is belt-and-suspenders for the rare
-        // case where DBWriter returns before tick observes the done flag
-        // (e.g. cancellation mid-walk).
+        // Tick exits on its own once discovery's `done` flips true; this
+        // abort is belt-and-suspenders for the rare case where DBWriter
+        // returns before tick observes the done flag (cancel mid-walk).
         tick.abort();
 
         let elapsed = started.elapsed().as_secs_f64();
@@ -340,11 +345,10 @@ impl ScanSession {
         }
 
         if self.coordinator.is_gpu_dead() {
-            // V14.9-Y: distinct error kind so the C# app can show a
-            // "GPU device suspended — restart the app to recover"
-            // banner instead of the generic cancelled state. Emit
-            // BEFORE PhaseChanged(Failed) so the IPC consumer sees
-            // the cause first.
+            // Distinct error kind so the C# app can show a
+            // "GPU device suspended — restart the app to recover" banner
+            // instead of the generic cancelled state. Emit BEFORE
+            // PhaseChanged(Failed) so IPC consumers see the cause first.
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(
                 crate::ipc::EngineError {
                     kind: "gpu_device_removed".into(),
@@ -415,7 +419,7 @@ fn emit_batch_summary(sink: &Sink, stats: &BatchStats) {
         clip_p95_ms: stats.clip_p95_ms,
         store_insert_p50_ms: stats.store_insert_p50_ms,
         store_insert_p95_ms: stats.store_insert_p95_ms,
-        resident_mb: 0,
+        resident_mb: crate::platform::process_memory_mb(),
         available_mb: 0,
     };
     // Intentional try_send. Per-batch BatchSummary events (one per ~100
@@ -432,6 +436,7 @@ fn maybe_emit_progress(
     state: &Arc<Mutex<ProgressState>>,
     session_id: &str,
     stats: &BatchStats,
+    discovered_total: u64,
 ) {
     let now = Instant::now();
     let should_emit = {
@@ -448,16 +453,31 @@ fn maybe_emit_progress(
         st.last_emit = now;
         st.last_total = stats.processed_total;
     }
+    // Progress payload fields:
+    //   total            = discovered file count (from Discovery's atomic
+    //                      counter; persisted through tagging so the
+    //                      progress bar shows correct fill, not 100%).
+    //   eta_seconds      = (total - processed) / files_per_second when
+    //                      both are known; None during ramp-up.
+    //   failed           = cumulative failed-file count from DBWriter.
+    //   resident_mb      = process RSS via Win32 GetProcessMemoryInfo.
+    let total = discovered_total.max(stats.processed_total);
+    let remaining = total.saturating_sub(stats.processed_total);
+    let eta_seconds = if stats.files_per_second > 0.5 && remaining > 0 {
+        Some(remaining as f64 / stats.files_per_second)
+    } else {
+        None
+    };
     let progress = ScanProgress {
         session_id: session_id.into(),
         phase: ScanPhase::Tagging,
-        total: stats.processed_total,
-        discovered: stats.processed_total,
+        total,
+        discovered: discovered_total,
         processed: stats.processed_total,
-        failed: 0,
+        failed: stats.failed_total,
         files_per_second: stats.files_per_second,
-        eta_seconds: None,
-        resident_mb: 0,
+        eta_seconds,
+        resident_mb: crate::platform::process_memory_mb(),
         available_mb: 0,
     };
     // Intentional try_send. Progress events are throttled to 10 Hz / 1k
