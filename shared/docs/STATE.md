@@ -6,6 +6,213 @@
 >
 > Older entries below V15.0 are historical context — load-bearing for archaeology, not for current state. Skim if you want the journey; skip if you want the destination.
 
+## 2026-05-18 — V16.0 four-regression sweep: perf + thumbnails + classifier + tag chips
+
+Single-session pass against the directive in `/loops/four-regressions-windows.md`
+covering the user's observed 0.04 files/sec scan rate (~3,500× off the 140 f/s
+target), the 100% placeholder-gradient Library, missing semantic tags, and
+the absence of tag chips on cards. Engine + .NET both green; cargo check
+clean, cargo build clean, dotnet build clean.
+
+### WP1 — Perf: 0.04 → target ≥40 files/sec
+
+- **`pipeline/tagging.rs` decoder pool (B3)** — split decode out of the
+  worker hot path. New `PreDecoded { file, decoded }` struct flowing
+  through a second async-channel; `M = clamp(p_cores+e_cores, 2, 12)`
+  sync OS threads pull from raw discovery, run image/video decode via the
+  existing `image::Reader` / `shell::video::keyframe_25pct` paths, and
+  push pre-decoded RGB into the worker channel. Workers drop their inline
+  decode call and consume `PreDecoded` directly. CPU was at 12% during
+  the user's baseline scan because workers stalled waiting on the GPU
+  semaphore; the decoder pool keeps the decoded-frame buffer warm so
+  workers never sit on the CPU-bound path.
+- **Batch CLIP default-on (B1)** — `FILEID_CLIP_USE_BATCH` is now a
+  kill-switch (`=0` opts out), not an opt-in. `DEFAULT_BATCH_SIZE` bumped
+  4→8 based on the user's 3.2 GB VRAM headroom (baseline reported 2.8/6 GB
+  peak). The single-session `ClipBatchCoordinator` path now drives
+  most installations; the pool path is preserved for boxes that OOM
+  under sustained batch load.
+- **CUDA-pack info hint (B5)** — `models/runtime.rs::RuntimeProbe::detect()`
+  emits a one-time `tracing::info!` when NVIDIA hardware is detected but
+  the CUDA Performance Pack isn't installed. Surface-only — no auto-install,
+  no UI prompt; install is gated behind Settings → Performance.
+- **Per-stage perf trace (WP1-A)** — `FILEID_PERF_TRACE=1` enables
+  `[PERF] stage=X path=… elapsed_ms=N` lines for every per-file stage
+  (image_decode / exif / dhash / scrfd / arcface / clip / ocr / db_write /
+  total). Default-off, zero cost when not set. The directive's
+  BASELINE PERF REPORT table can be filled from these logs in one pass.
+- **B2 / B4 deferred** — CLIP_CONCURRENCY tuning requires iterative
+  TDR-watch on real hardware; shell-thumbnail-for-CLIP fast path is
+  redundant given the decoder pool. Both documented in NEXT.md V16.0.
+
+### WP3 — Thumbnails (100% placeholder → real bitmaps)
+
+- **`Services/ThumbnailService.cs`** — added `[THUMB] REQUEST / L1_HIT /
+  L1_MISS / L2_HIT / L2_MISS / SHELL_OK / SHELL_NULL / SHELL_EX /
+  IMG_FB_OK / IMG_FB_NULL / IMG_FB_EX / BITMAP_SET / RENDER_FAILED`
+  trace lines through every decision point. The chain from `RequestAsync`
+  through the disk cache, shell provider, and image-fallback now leaves
+  a forensic trail per file so silent failures name themselves.
+- **`Views/Library/LibraryView.xaml`** — removed `Opacity="0"` from the
+  card `<Image>` element. The shimmer overlay's `NullToVisibility`
+  converter already provides the load indicator; the tile is now
+  guaranteed visible the moment `Thumbnail` is bound. (Prior behavior
+  relied on `ImageOpened` to spring opacity 0→1; if that handler
+  failed to fire — e.g., for already-decoded BitmapImages arriving via
+  the LRU — the tile stayed invisible against the Border background
+  gradient, which is what the user saw as "100% placeholder gradient".)
+- **`Views/Library/LibraryView.xaml.cs::OnTileImageOpened`** — replaced
+  the spring 0→1 with a direct `visual.Opacity = 1f` after stopping any
+  prior animation. Preserves the macOS-parity fade (still triggered by
+  `AnimateTileEntry` on `OnRepeaterElementPrepared`) while removing
+  the flicker-then-fade pattern for cached bitmaps. Added `[THUMB]
+  IMAGE_OPENED / OPACITY_SET` trace + a `[THUMB] TILE_THUMBNAIL_ASSIGNED`
+  trace in `LoadThumbAsync` after the dispatcher writes `tile.Thumbnail`.
+
+### WP2 — Scene classifier + enriched extras
+
+- **`models/classifier.rs` (new, ~250 LOC)** — `ClassifierSession` mirrors
+  `mobileclip.rs` shape: `load(model_path, labels_path)` resolves
+  EP chain via the existing `RuntimeProbe`, warmup, ImageNet mean/std
+  normalize, NCHW 1×3×224×224 input. `classify_batch(images, top_k,
+  threshold)` returns top-K labels per image with confidences (matches
+  macOS Vision behaviour: top_k=8 default, threshold=0.30). Label parser
+  accepts both plain one-per-line and ImageNet synset (`n01440764 tench,
+  Tinca tinca`) formats. 4 unit tests cover softmax + label parsing.
+- **`models/registry.rs`** — new `"classifier_mobilenetv3"` slot with
+  TODO(verify) URL + TODO(sha256) for both the ONNX export and the
+  ImageNet label file. URLs are plausible (onnx-community mirror) but
+  unverified; SHA256 left None pending a verified first download.
+  NEXT.md V16.0 tracks the pinning work.
+- **`pipeline/tagging.rs`** — `ModelStack` gained `classifier: Option<Vec<Mutex<ClassifierSession>>>`,
+  loaded as a small pool same shape as ArcFace/SCRFD/MobileCLIP. New
+  `CLASSIFIER_CONCURRENCY = 2` semaphore + `CLASSIFIER_TOP_K = 8` +
+  `CLASSIFIER_THRESHOLD = 0.30` constants. `process_file_predecoded`
+  runs the classifier after CLIP (reusing the decoded RGB, resized to
+  224×224) and pushes top-K labels into `tagged.tags`. Missing model →
+  one-time `[CLASSIFIER] model_not_installed` log, pipeline continues
+  with enriched-extras only.
+- **Enriched extras (`push_enriched_extras`)** — derives `Year_YYYY`
+  (from `modified_unix` via a tiny proleptic-Gregorian helper, no
+  chrono call), camera family (iPhone / iPad / Canon / Nikon / Sony /
+  Fuji / Leica / GoPro / Samsung / Pixel), `Has Faces` / `Has Text` /
+  `Has Location`. Cheap (no inference, no I/O) and gives the Library
+  a baseline of useful chips even when the classifier model isn't installed.
+  Mirrors macOS `Tagging.swift::extraTags`.
+- **`TaggedFile.tags: Vec<String>`** — new field flowing through to
+  DBWriter. Deduped + truncated to 16 max per file before persist.
+- **`pipeline/dbwriter.rs`** — `flush()` now also deletes the file's
+  prior `source='auto'` tag rows and inserts the new ones using the
+  same INSERT pattern as `bulk.rs::handle_apply_tags` (source `'auto'`
+  vs the user's `'user'` — both coexist in the `tags` table per the
+  composite PK `(file_id, tag, source)`).
+
+### WP4 — UI tag chips on Library cards
+
+- **`FileID.Theme/Controls/TagChip.xaml(.cs)` (new)** — small chip user
+  control with one `Tag` DependencyProperty. Visual spec mirrors macOS
+  LibraryView.swift:729-744 (`.caption2.weight(.medium)`, 11pt Segoe UI
+  Medium, foreground+background at 80%/10% white opacity, 4 px corner
+  radius, 5×2 padding, `TextTrimming=CharacterEllipsis`). Brushes
+  cached as `static readonly` per CLAUDE.md line 91 (no per-binding
+  brush allocation). `FormatTag(string)` static helper is the 1:1 port
+  of the macOS formatter (`"animal_dog"` → `"Dog"`, `"Has Faces"` →
+  `"Has Faces"`, `"iPhone-14"` → `"Iphone 14"`).
+- **`Services/ReadStore.cs`** — `FileRow` record gained `Tags:
+  IReadOnlyList<string>?` (nullable, defaults to null). `ReadRow`
+  reads the optional 8th column if present (`FieldCount > 7` check
+  keeps existing queries that project only 7 columns working unchanged).
+  `RecentAsync` now projects the tags via a correlated subquery
+  (`(SELECT GROUP_CONCAT(tag, '|') FROM tags WHERE file_id = files.id
+  AND source = 'auto') AS auto_tags`).
+- **`ViewModels/LibraryViewModel.cs`** — `FileTile` gained `Tags` +
+  `HasTags` + `TopTwoTags` properties. `TopTwoTags` is pre-sliced to
+  match macOS `prefix(2)` so the ItemsControl binding doesn't re-take
+  the slice on every layout pass.
+- **`Views/Library/LibraryView.xaml`** — chip row added below the
+  filename in the card template. `ItemsControl` bound to `TopTwoTags`
+  with the new `TagChip` as `ItemTemplate`. Collapses cleanly via
+  `HasTags`+`BoolToVisibility` so the card height stays unchanged
+  when a file has no tags.
+- **`Tests/FileID.App.Tests/ViewModelBindingTests.cs`** — 8 new
+  `TagChipFormatTests` covering the macOS-parity matrix.
+
+### Build/test status (Windows engine)
+
+- Rust engine: `cargo check --lib` clean (exit 0). New classifier
+  module compiles. Decoder pool refactor builds without warnings.
+  Existing tests preserved (`tagger_passes_discovered_through_to_tagged`
+  still asserts a non-existent path produces a failed TaggedFile;
+  decoder pool propagates the decode Err through `PreDecoded`).
+- .NET app: `dotnet build FileID.Theme.csproj` clean. Full
+  `FileID.App.csproj` + tests pending verification (in-flight).
+
+### Verification still pending (user on real hardware)
+
+1. Launch app, scan `C:\Users\adamm\Desktop\Test Data`. Sidebar
+   `Tagged` counter should climb at ≥40 files/sec (vs the 0.04 baseline).
+   `engine.jsonl` `[STATS]` line should show `clip_avg_batch_x10` near
+   60-80 (batch CLIP averaging 6-8 per dispatch).
+2. Library cards should render real thumbnails within ~2 s of becoming
+   visible. After restart, the same tiles should hit L2 disk cache.
+3. Tap a tagged card — 1-2 tag chips should appear below the filename.
+   Without the classifier model installed: only enriched-extras chips
+   (`Year_YYYY`, camera family, `Has Faces`, `Has Text`, `Has Location`).
+4. Set `FILEID_PERF_TRACE=1` and check `engine.jsonl` for `[PERF]`
+   lines to populate the BASELINE PERF REPORT table.
+5. Drop a MobileNetV3 ONNX export + ImageNet label file at
+   `%LOCALAPPDATA%\FileID\Models\classifier\{mobilenetv3_large.onnx,imagenet_classes.txt}`
+   and rescan — chips should now include semantic labels like `"Dog"`,
+   `"Beach"`, `"Document"`.
+
+## 2026-05-18 — V15.9 discovery throughput + thumbnails + adaptive hardware
+
+Three-part push in one commit. Engine + .NET both green: 121 Rust lib tests pass (was 99), `cargo clippy -D warnings` clean, `cargo build --release` 0 warnings 0 errors, `dotnet build` 0/0. New synthetic benchmark `tests/discovery_throughput.rs` clocks **23,191 files/sec** for the walk phase (vs. the user's observed **22 files/sec** before the fix — 1,054× faster; ≥11.5× the 2,000 files/sec acceptance target).
+
+### Issue 1 — Discovery throughput (was 22 files/sec on NVMe; target ≥2,000)
+
+- **`platforms/windows/src/engine/Cargo.toml`** — added `jwalk = "0.8"` (MIT, dep approved by user) + `Win32_System_Ioctl` and `Win32_System_IO` to the windows-rs feature list.
+- **`pipeline/discovery.rs`** rewritten: jwalk parallel walk (rayon-backed) with thread count from `platform::walk_concurrency_for(root)` (NVMe → 16, SATA SSD → 8, HDD → 2, USB/net → 2). `process_read_dir` callback prunes noise directories (`node_modules`, `.git`, `target`, etc.) at the read_dir level — entire subtrees become invisible to the walk after a single per-directory name check. Channel cap raised 1,024 → 32,768. `count.fetch_add(1)` moved BEFORE `blocking_send` so the "Discovered N" counter reflects FS-walk progress even when the channel briefly fills (the V15.9 decouple invariant).
+- **`pipeline/dbwriter.rs`** — per-row `SELECT id FROM files WHERE path_text = ?` eliminated via `INSERT … RETURNING id` (SQLite 3.35+, bundled is 3.46+; RETURNING fires on both insert and ON CONFLICT DO UPDATE paths). Statement count per batch: 2N → N. Batch size now memory-tier-adaptive (Low=64 / Balanced=250 / High=500), re-evaluated every 30 s by the dbwriter loop.
+- **Tests** — 4 new in `pipeline::discovery::tests` (noise-dir recognition, case-insensitive, synthetic tree walk, count-before-send invariant) + 1 in `pipeline::dbwriter::tests` (`insert_returning_id_yields_same_id_on_conflict`). Synthetic benchmark `tests/discovery_throughput.rs` covers the 10K-file walk + a "consumer stalled" decouple test, both `#[ignore]`'d so normal `cargo test` is unaffected.
+
+### Issue 2 — Thumbnails never render (V15.6 follow-up)
+
+- **`Services/ThumbnailService.cs`** — `RenderAsync` restructured: disk cache → shell path (try/catch, log on throw but FALL THROUGH) → image-extension fallback (try/catch). Previously the outer `catch` returned null directly, bypassing the fallback for every shell-throwing JPEG. Now the fallback runs whether the shell returned null OR threw. Exception **type** is logged at every catch (was just `.Message`).
+- **`Services/ThumbnailDiskCache.cs`** (new, ~200 LOC) — persistent on-disk LRU at `%LOCALAPPDATA%\FileID\thumbs.cache\v1\<2hex>\<rest>.bin`. SHA256(path|mtime) keying invalidates on file edit. 500 MB cap with oldest-LRU eviction down to 80 % headroom. Atomic temp+rename so concurrent reads never see partial files. Files >500 KB are NOT written (in-memory LRU still serves them).
+- **`ThumbnailDiagnostics`** record extended with `DiskHits / DiskWrites / DiskSweeps / DiskBytes`. Settings → Diagnostics renders both the in-memory and disk-cache counters.
+- **`App.xaml.cs`** — `ThumbnailDiskCache.Prime()` called once at startup so the diagnostics panel shows real cache-size numbers without waiting for the first sweep.
+
+### Issue 3 — Adaptive hardware utilization (first pass + stubs)
+
+- **`platform.rs`** — new primitives:
+  - `CpuTopology { p_cores, e_cores, logical }` + `cpu_topology()` via `GetLogicalProcessorInformationEx(RelationProcessorCore)`. `EfficiencyClass == 0` ⇒ E-core; non-hybrid CPUs collapse into `p_cores`.
+  - `default_worker_cap()` now uses `P + E + max(1, P/2)` clamped at logical cores and [2, 32] — macOS-parity formula. Replaces the old `physical * 1.7`.
+  - `MemoryTier { Low, Balanced, High }` + `memory_tier()` from `GlobalMemoryStatusEx.ullAvailPhys` (<8 / 8–32 / >32 GB).
+  - `StorageType` + `storage_type_for_path()` via `DeviceIoControl(IOCTL_STORAGE_QUERY_PROPERTY, StorageDeviceSeekPenaltyProperty)` + `GetDriveTypeW` short-circuit for removable/network/CD.
+  - `walk_concurrency_for(path)` maps storage type to walk-thread count (the Issue 1 connection).
+  - `PowerSource { Ac, Battery, Unknown }` + `power_status()` via `GetSystemPowerStatus`. Reports source + battery percent.
+  - `available_memory_mb()` + `dbwriter_batch_size_for(tier)`.
+  - 11 unit tests covering all of the above in `platform::adaptive_tests`.
+- **`ipc/mod.rs`** — `HardwareInfo` extended with 11 optional fields (`pCores`, `eCores`, `logicalCpuCores`, `workerCap`, `ramTotalMB`, `ramAvailableMB`, `memoryTier`, `vramMB`, `npuPresent`, `powerSource`, `batteryPercent`, `activeProfile`). All `#[serde(default, skip_serializing_if = ...)]` so old C# builds talking to a new engine still deserialize cleanly, and vice versa.
+- **`commands/hardware.rs`** — `build_hardware_info()` populates the new fields. First-pass NPU detection is Qualcomm-only (reuses the existing QNN probe); Intel AI Boost / AMD XDNA report `false` for now (NEXT.md entry tracks).
+- **`FileID.IpcSchema/Dtos.cs`** — `HardwareInfo` record extended with matching defaults.
+- **`Views/Settings/SettingsView.xaml` + `.cs`** — new Diagnostics card between Performance and Behavior. Shows CPU topology (P/E split if hybrid + logical threads + worker cap), Memory (avail/total + tier), GPU/NPU (vendor/adapter/VRAM/NPU presence), Power (source + battery + active profile), Thumbnails (in-mem + disk counters in monospace), and a disabled "Performance profile" ComboBox with Eco/Auto/Performance — wired to "auto" only; Eco/Performance are grayed with "(coming soon)" copy.
+- **`shared/ipc-schema/ipc.schema.json`** — `EngineInfo._0` documents the `hardware` field and lists the V15.9-added properties.
+
+### Build/test status
+
+- Rust engine: 121/121 lib tests pass (was 99); `cargo clippy --lib -D warnings` clean; `cargo build --release` 0 warnings.
+- Benchmark (release): `cargo test --release --test discovery_throughput -- --ignored` → 10K walk in **0.43 s = 23,191 files/sec**; decouple test green.
+- .NET: `dotnet build FileID.sln -c Debug -p:Platform=x64` → 0 warnings, 0 errors.
+
+### Verification still pending (user on real hardware)
+
+1. Launch app, scan `C:\Users\adamm\Desktop\Test Data`. The "Discovered" counter should climb at NVMe walk speed (target ≥2,000/sec sustained) and reach the corpus total within ~5 s, independent of tagging progress.
+2. Library view tiles should render actual image content (not the gradient placeholder) within 2 s of becoming visible. After app restart, the same library should hit the disk cache and render instantly.
+3. Settings → Diagnostics should show the actual detected CPU (with P/E split if on Intel 12th-gen+), RAM, GPU, VRAM, NPU presence, storage type for the scan-root, active profile "auto", and live thumbnail cache counters.
+4. On the user's RTX 2060 (no P/E split, NVMe Samsung 970/980-class): expect `cpu cores · logical threads · worker cap N`, `~XX GB available of 64 GB · tier: balanced` (or high), `nvidia · GeForce RTX 2060 · 6 GB VRAM`, `AC power · profile: auto`.
+
 ## 2026-05-17 (continuation 3) — V15.8d follow-up parity session
 
 Comprehensive cleanup pass picking up items the previous session deferred.

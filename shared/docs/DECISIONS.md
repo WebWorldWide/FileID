@@ -7,6 +7,266 @@
 
 ---
 
+## 2026-05-18 — V16.0 batch CLIP is now default-on (env var inverted to kill-switch)
+
+**Context**: User-observed scan rate of 0.04 files/sec on RTX 2060 / Ryzen 5
+3600 against a 15K JPEG corpus. GPU sat at 61% utilization with 12% CPU —
+i.e., the CLIP semaphore (`CLIP_CONCURRENCY=2`) plus the VRAM-clamped pool
+of ~1 MobileCLIP Session was bottlenecking ML dispatch. The batch path
+(`ClipBatchCoordinator`, single Session with batched tensor inputs)
+existed but was gated on `FILEID_CLIP_USE_BATCH=1`, off by default.
+
+**Decision**: Flip the env var to be a kill-switch (`=0` opts out, default
+on). The batch coordinator runs one Session with `(N, 3, 256, 256)` tensors
+sized by `DEFAULT_BATCH_SIZE = 8` (bumped from 4 based on the user's
+3.2 GB VRAM headroom; baseline reported 2.8/6 GB peak so the headroom
+gates we already have allow batch=8 without VRAM pressure). On boxes that
+OOM under sustained batch load, set `FILEID_CLIP_USE_BATCH=0` to revert.
+
+**Throughput model**: pool path with `CLIP_CONCURRENCY=2` and clamped
+pool_size=1 = 1 effective concurrent inference. Batch path with batch=8 ≈
+8 effective parallel (amortized per-call DirectML dispatch overhead). On
+the user's hardware this should drop steady-state CLIP wall time by
+4-8×, depending on how much dispatch dominates inference. NEXT.md V16.0
+tracks the verification metric (`clip_avg_batch_x10` in `[STATS]` lines
+should hover 60-80 = average batch of 6-8 images).
+
+**Alternatives considered + rejected**:
+- Leave the env var as opt-in: the user has no way to discover the
+  3-8× win exists. Default-on is the only sensible posture once the
+  pool path has been demonstrated to underperform on consumer GPUs.
+- Drop pool path entirely: risk for installations that genuinely OOM
+  on batch=8 on a 4 GB GPU. Kept as the kill-switch fallback.
+
+---
+
+## 2026-05-18 — V16.0 decoder pool: split decode out of the ML worker hot path
+
+**Context**: Baseline scan rate 0.04 f/s on RTX 2060 with CPU at 12% (one
+core) and GPU at 61% of one 3D engine. The Discovery → fan-out →
+N tagging workers architecture pulled `DiscoveredFile` into each worker,
+which then ran the decode (via `tokio::task::spawn_blocking`) and the ML
+stages serially. Workers spent most of their time awaiting the
+`vision_sem` / `clip_sem` semaphores, so the spawn_blocking decoder pool
+never saturated even with 512 available threads — workers only pulled
+new files once they freed up from prior ML waits, so the inflight set
+was bounded by the worker count (14 on a Ryzen 5 3600).
+
+**Decision**: Insert an explicit decoder-pool stage between discovery and
+the workers:
+
+```
+Discovery → async-channel<DiscoveredFile>
+            ↓
+[M sync OS threads decode in parallel] → async-channel<PreDecoded>
+                                          ↓
+                                          [N async workers run ML only]
+                                          ↓
+                                          DBWriter
+```
+
+- M = `clamp(p_cores + e_cores, 2, 12)` — matches macOS-parity formula,
+  clamped to avoid oversaturating tiny boxes or starving the WinUI app.
+- Channel cap = `max(worker_count * 2, 8)` — small read-ahead buffer
+  without ballooning RAM with decoded RGB bytes (~50 MB per 12 MP frame).
+- Decoders use `async_channel::Receiver::recv_blocking()` /
+  `Sender::send_blocking()` so they run as pure sync OS threads (no
+  tokio overhead). `PreDecoded { file, decoded: Option<Result<...>> }`
+  carries the original `DiscoveredFile` plus the decode outcome.
+- Decode failure → `PreDecoded { decoded: Some(Err(_)) }` → worker emits
+  a failed TaggedFile (same semantics as before, just observed from a
+  different stage).
+- Cancellation: each decoder loop checks `coord.is_cancelled()` per
+  iteration; channel closure propagates naturally when all sender clones
+  drop.
+
+**Alternative considered**: `crossbeam_channel::bounded` for the decoded
+buffer. Rejected because `async_channel` already supports both
+sync (`recv_blocking`/`send_blocking`) and async (`recv().await`)
+consumers natively — no bridge task needed. `crossbeam` would have
+required either `block_on(tx.send)` (needs the tokio Handle) or an
+intermediate spawn_blocking adapter task.
+
+**Side effects**:
+- `load_image_rgb` / `try_shell_thumbnail` / `extract_video_keyframe_blocking`
+  async wrappers deleted (no callers post-refactor). Sync siblings
+  (`decode_image_sync` / `decode_video_keyframe_sync`) replace them
+  inside `run_decoder_thread`.
+- `FILEID_FORCE_THUMBNAIL=1` env-var fast path (shell thumbnail used
+  in lieu of full decode when face pipeline disabled) intentionally
+  removed. Justification: decoder pool already hides decode latency
+  from the inference workers, so the original ~30% CPU savings the
+  fast path provided no longer translates to throughput gain. The
+  shell thumbnail itself is still used by `ThumbnailService` for the
+  Library UI; only the engine-side ML preprocessing path uses full decode.
+
+---
+
+## 2026-05-18 — V16.0 scene classifier (MobileNetV3) + enriched extras → tags table
+
+**Context**: Library cards have nothing useful in them beyond filename and
+size — no semantic chips, no scene labels. macOS shows tag chips via
+Vision's classifier output (1000 ImageNet classes) merged with extras
+derived from EXIF + face/OCR signals (`Tagging.swift::extraTags`).
+Windows has the CLIP image embedding (used for semantic search) but no
+discrete labels, and the tag pipeline only persists when the user
+manually applies a tag (`bulk.rs::handle_apply_tags`, `source='user'`).
+
+**Decision**: Add a MobileNetV3-Large ImageNet-1k classifier to the scan
+pipeline, output stored in the existing `tags` table with
+`source='auto'`, alongside enriched-extras derived from existing per-file
+signals. Composite PK `(file_id, tag, source)` already supports both
+user-applied (`'user'`) and auto-generated (`'auto'`) tags coexisting.
+
+**Component shape**:
+
+1. **`models/classifier.rs`** — `ClassifierSession::classify_batch(images,
+   top_k, threshold)` returns top-K (label, confidence) per input,
+   sorted descending. ImageNet mean/std normalize, NCHW 1×3×224×224
+   input, softmax-then-top-K + threshold filter. Accepts 1000- or
+   1001-class exports (some MobileNetV3 variants ship with a background
+   class). Reuses the existing `RuntimeProbe` for EP chain selection so
+   it gets the same CUDA/DirectML/CPU fallback as MobileCLIP. Pool
+   loading mirrors ArcFace/SCRFD: small N-Session pool with 250 ms
+   inter-load stagger, fail-soft on missing weights, marker-checked TDR
+   abort during warmup.
+
+2. **`pipeline/tagging.rs`** — new `CLASSIFIER_CONCURRENCY=2` semaphore
+   (separate from CLIP/VISION so neither starves the other) + constants
+   `CLASSIFIER_TOP_K=8` and `CLASSIFIER_THRESHOLD=0.30` matching macOS
+   Vision behaviour. Classifier runs after CLIP, reuses the same decoded
+   RGB resized separately to 224×224 (MobileNetV3 input dim; CLIP wants
+   256×256). `TaggedFile.tags: Vec<String>` carries the result through
+   to DBWriter.
+
+3. **Enriched extras (`push_enriched_extras`)** — derives `Year_YYYY`,
+   camera family (iPhone / iPad / Canon / Nikon / Sony / Fuji / Leica /
+   GoPro / Samsung / Pixel), `Has Faces`, `Has Text`, `Has Location`
+   from `TaggedFile` data we already populated. Cheap (no inference, no
+   I/O), gives useful chips even when the classifier model isn't
+   installed. Format choices align with macOS LibraryView's `formatTag`
+   so the chip display matches (`"Year_2024"` strips the prefix to
+   `"2024"`, `"Has Faces"` passes through unchanged).
+
+4. **`pipeline/dbwriter.rs`** — flush() now also deletes the file's prior
+   `source='auto'` tag rows and inserts the new ones using the same
+   `INSERT OR REPLACE INTO tags (file_id, tag, source, score) VALUES
+   (?1, ?2, 'auto', NULL)` SQL pattern as `bulk.rs::handle_apply_tags`.
+   User tags (`source='user'`) untouched on rescan.
+
+5. **`models/registry.rs`** — new `classifier_mobilenetv3` slot with
+   TODO(verify) URLs (`onnx-community/mobilenetv3_large_100.ra_in1k`
+   mirror + `imagenet-1k/classes.txt`) and TODO(sha256) markers. Until
+   pinned, this slot installs without integrity verification —
+   acceptable for private dev, blocker for shipping (NEXT.md V16.0
+   tracks). The `ClassifierSession::load` validates the output dim
+   against the label-file row count at warmup so a wrong-class-count
+   export fails loud rather than silently shipping garbage labels.
+
+6. **`Services/ReadStore.cs` `FileRow`** — gained optional
+   `Tags: IReadOnlyList<string>?` (default null). `ReadRow` reads the
+   optional 8th column if `FieldCount > 7`. `RecentAsync` adds a
+   correlated subquery
+   `(SELECT GROUP_CONCAT(tag, '|') FROM tags WHERE file_id = files.id
+   AND source = 'auto')`. Other queries (search via ocr_fts, semantic
+   via clip_embeddings) get `Tags = null` and the card binding collapses
+   the chip row — they can be extended in a follow-up if the user wants
+   tags visible in search results too.
+
+**Alternatives considered + rejected**:
+
+- **Per-file IPC event carrying the tags list** (directive suggested it
+  as an option). Rejected because there is no existing per-file IPC
+  event for the C# UI to consume — the read-side already polls
+  `ReadStore` for the library refresh, and adding a tags column to that
+  query is a smaller surface than introducing a new event type.
+- **Stuff tags as a TEXT column on `files`**. Rejected because the
+  existing `tags` table is the canonical denormalized store (with
+  per-tag indexing for future tag-filter UI), and adding a denormalized
+  copy on `files` invites drift between the two.
+- **Wait for a verified classifier model URL + SHA256 before shipping
+  the wiring**. Rejected — the wiring is the bigger part of the work
+  and degrades cleanly when the model is absent (`[CLASSIFIER]
+  model_not_installed` log, enriched-extras-only tags). Pinning the
+  download is a one-line follow-up once a verified URL is known.
+
+**Cost**:
+- Per-file classifier inference: ~10-15 ms on DirectML on the user's
+  RTX 2060. Runs concurrently with CLIP under a separate semaphore;
+  steady-state added cost should be ≤ 15% of per-file total ms.
+- Per-file enriched-extras: negligible (string ops + integer arithmetic).
+- DB overhead: one DELETE + up-to-16 INSERTs per rescan per file in the
+  same transaction as the existing inserts.
+
+---
+
+## 2026-05-18 — V15.9 discovery decoupling: jwalk parallel walk over walkdir blocking_send
+
+**Context**: User's scan of an NVMe Desktop\Test Data corpus reached "Discovered 1,324" after 60 s — ~22 files/sec, 91× off the ≥2,000 files/sec NVMe target and 3,000× off the in-source claim of "50K files/s for the walk phase alone". Root cause was confirmed by reading `pipeline/discovery.rs`: walkdir + single-threaded `tx.blocking_send` on a 1,024-slot mpsc channel meant any tagging stall blocked the walk; the "Discovered" counter advanced in lockstep with ML throughput, not FS throughput.
+
+**Decision**: Two changes, smallest diff that hits acceptance:
+
+1. **Parallel walk via `jwalk` (new dep, MIT)**. `walkdir`'s sequential traversal saturates one thread on metadata() calls; `jwalk` distributes the stat/read_dir work across a rayon pool sized by `platform::walk_concurrency_for(root)` (NVMe → 16, SATA SSD → 8, HDD → 2, USB/net → 2). Considered hand-rolling parallel `std::fs::read_dir` over a rayon scope (no dep cost, ~1.5× the code, same perf). Picked jwalk for the smaller surface area + the built-in `process_read_dir` callback that prunes noise directories at the read_dir level (one name check per directory, not per file). `ignore::WalkBuilder` was a third option but pulls more transitive surface (gitignore parser we don't need).
+
+2. **Decouple FS-walk counter from tagging via channel-resize + count-before-send**. Atomic `count.fetch_add(1)` fires BEFORE `tx.blocking_send` so the "Discovered N" sidebar reflects what the walk has seen even when the channel briefly fills. Channel cap raised 1,024 → 32,768 (~6 MB at ~200 B/path); on typical user corpora (<50K files) the channel never fills in practice, fully decoupling discovery rate from ML rate. The pending_files DB-queue alternative would also work but requires a v8 migration; resisted because the channel-resize meets acceptance with no schema change.
+
+**dbwriter eliminations**: per-row `SELECT id FROM files WHERE path_text = ?` round trip dropped via `INSERT … RETURNING id` (SQLite 3.35+, bundled is 3.46+). RETURNING fires on both INSERT and ON CONFLICT DO UPDATE paths — verified by new test `insert_returning_id_yields_same_id_on_conflict`. Statement count per batch drops from 2N to N. Batch size is now memory-tier-adaptive (Low=64 / Balanced=250 / High=500) refreshed every 30 s via `dbwriter_batch_size_for(memory_tier())`.
+
+**Measured throughput**: synthetic 10K-file benchmark under `tests/discovery_throughput.rs` clocks **23,191 files/sec** on this Windows box in release mode (vs. 22 files/sec observed before the fix on the user's NVMe corpus). The `count_advances_independently_of_consumer_drain` companion test verifies the counter still climbs to 5K when no consumer drains the channel — the decouple invariant the directive specified.
+
+---
+
+## 2026-05-18 — V15.9 thumbnail fallback hoisted into outer catch + on-disk LRU
+
+**Context**: NEXT.md V15.6 follow-up flagged that the image-extension fallback at `ThumbnailService.RenderAsync` only fired when `GetThumbnailAsync` returned null/empty, NOT when it threw. The outer `catch` returned null directly, leaving every shell-throwing JPEG as a permanent blank tile. Stats counters (`renderedFailed`) climbed but nothing recovered.
+
+**Decision**: Three changes:
+
+1. **Restructure RenderAsync**. Disk-cache lookup → shell path (try/catch, log on throw but DON'T return) → image-extension fallback (try/catch). The fallback now runs whether the shell returned null OR threw, fixing the V15.6 bug.
+
+2. **Persistent disk cache** (`ThumbnailDiskCache.cs`). SHA256(path|mtime) → `%LOCALAPPDATA%\FileID\thumbs.cache\v1\<2hex>\<rest>.bin`. 500 MB cap, sweep every 30 s on writes, oldest-LRU eviction, 80 % headroom after eviction to avoid thrashing. Skip writes >500 KB so giant originals don't blow the cap. Stored bytes are the raw source (shell thumbnail JPEG or original file bytes); BitmapImage's WIC decoder handles JPEG/PNG/BMP/GIF/WebP transparently. SHA256 over SHA1 because CA5350 analyzer rejects SHA1 even for non-security uses.
+
+3. **Log exception TYPE** at every catch (was just `.Message`). The debug log line names `SharingViolation` vs `COMException 0x88982F8B` vs `FileNotFoundException` so future regressions are diagnosable from the log alone.
+
+**Diagnostics surfaced**: `ThumbnailDiagnostics` record extended with `DiskHits / DiskWrites / DiskSweeps / DiskBytes`. Settings → Diagnostics panel renders them next to the existing `ok / failed / fallback / dropped` counters.
+
+---
+
+## 2026-05-18 — V15.9 adaptive hardware utilization: P/E split, storage type, RAM tier
+
+**Context**: macOS `Hardware.swift` computes worker cap as `P + E + max(1, P/2)` clamped at logical cores. Windows had `physical_cores * 1.7` clamped to [2, 32] — fine for non-hybrid CPUs, but on an i9-13900K (8P+16E) it treated the box as 8 physical cores (= 14 workers) instead of seeing 24 cores and computing 28. Discovery throughput on hybrid CPUs was visibly leaving cycles on the table.
+
+**Decision**:
+
+1. **CPU topology detection** via `GetLogicalProcessorInformationEx(RelationProcessorCore)`. `EfficiencyClass == 0` ⇒ E-core, `> 0` ⇒ P-core. On non-hybrid CPUs every core reports the same class and we collapse into `p_cores`. Formula now matches macOS exactly. Tests cover M1 Pro / i9-13900K / non-hybrid 8C / Threadripper / 1-core minimum (5 test cases in `platform::adaptive_tests`).
+
+2. **Storage-type detection** via `DeviceIoControl(IOCTL_STORAGE_QUERY_PROPERTY, StorageDeviceSeekPenaltyProperty)`. `IncursSeekPenalty == FALSE` ⇒ no seek penalty ⇒ NVMe-class budget (16 threads). Without the descriptor we can't tell NVMe from SATA SSD (would need `STORAGE_ADAPTER_DESCRIPTOR.BusType`); the SSD-SATA branch is reserved for a future detection pass and currently treats all no-seek-penalty fixed drives as NVMe. `GetDriveTypeW` short-circuits removable/network/CD without touching the IOCTL. HDDs cap at 2 threads — deeper queues hurt rotational random I/O.
+
+3. **RAM-tier batch sizing**. Three tiers driven by `GlobalMemoryStatusEx.ullAvailPhys`: Low (<8 GB) / Balanced (8–32 GB) / High (>32 GB). DBWriter batch flush size maps to (64 / 250 / 500). Re-checked every 30 s by the dbwriter loop so a mid-scan pressure shift downshifts before the OS reaper notices.
+
+4. **Diagnostics IPC**. `HardwareInfo` extended with 11 new optional fields (`pCores`, `eCores`, `logicalCpuCores`, `workerCap`, `ramTotalMB`, `ramAvailableMB`, `memoryTier`, `vramMB`, `npuPresent`, `powerSource`, `batteryPercent`, `activeProfile`). All `#[serde(default, skip_serializing_if = ...)]` so an older C# build still deserializes the engine's output. C# DTO record matches with default values for the same forward-compat reason. Settings → Diagnostics card surfaces all of them.
+
+5. **Stubbed-and-documented**:
+   - NPU detection: Qualcomm Hexagon already detected via the existing QNN probe (reused). Intel AI Boost (Meteor Lake+) and AMD XDNA / Ryzen AI deferred — would need OpenVINO NPU plugin probe + VitisAI EP probe respectively. NEXT.md entry tracks.
+   - Battery awareness: detected via `GetSystemPowerStatus`, REPORTED only (Settings → Diagnostics shows source + percent). Throttling on low-battery is a follow-up so the user can see what the engine thinks before behavior shifts.
+   - Performance profile selector ("Eco / Auto / Performance"): ComboBox present in Settings, disabled with "(coming soon)" subtext. Wired to "auto" only for now.
+
+**Justification for "first pass + stubs in one push"**: directive explicitly asked for the foundational layer shipped + the rest stubbed-and-documented. Storage detection + P/E split + RAM tier are the three changes that demonstrably move throughput numbers; NPU routing and battery throttling are GPU/policy work where premature implementation would risk regressions without measurable benefit on the user's NVIDIA RTX 2060 hardware.
+
+---
+
+## 2026-05-18 — jwalk = "0.8" added (MIT)
+
+**Context**: V15.9 Issue 1 needs a parallel directory walker. `walkdir` is sequential.
+
+**Decision**: Added `jwalk = "0.8"` to the engine's Cargo.toml. MIT-licensed (already on `deny.toml`'s allow list). Author byron, mature crate, single-purpose. Transitive deps already pulled by other crates (rayon, crossbeam). Alternatives considered + rejected:
+- `ignore::WalkBuilder` — pulls a gitignore parser we don't need.
+- Hand-rolled `std::fs::read_dir` over a rayon scope — ~1.5× the code for the same throughput; loses `process_read_dir` directory-level pruning.
+
+User explicitly approved before the dep landed.
+
+---
+
 ## 2026-05-17 — WiX 4 wixproj fixes for publish-bundle.ps1 dry run
 
 **Context**: `publish-bundle.ps1` failed at the MSI/bundle steps under WiX 4.0.5. Three distinct issues fixed:

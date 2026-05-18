@@ -9,15 +9,41 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, Semaphore};
 
+/// Opt-in per-stage tracing for perf investigations. Default off — toggle via
+/// `FILEID_PERF_TRACE=1`. When on, `process_file` emits a `[PERF]` debug line
+/// for each pipeline stage with `path` + `elapsed_ms` so a 100-file run can be
+/// distilled into a stage-cost table.
+fn perf_trace_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("FILEID_PERF_TRACE")
+            .map(|s| !s.is_empty() && s != "0")
+            .unwrap_or(false)
+    })
+}
+
+#[inline]
+fn perf_trace(stage: &str, path: &std::path::Path, elapsed_ms: f64) {
+    if perf_trace_enabled() {
+        tracing::debug!(
+            target: "FileIDEngine::perf",
+            stage,
+            path = %crate::platform::redact_path_for_log(path),
+            elapsed_ms,
+            "[PERF]"
+        );
+    }
+}
+
 use crate::coordinator::ScanCoordinator;
 use crate::models::runtime::error_has_device_removed_marker;
-use crate::models::{arcface::ArcFace, mobileclip::MobileClipImage, scrfd::{self, Scrfd}};
+use crate::models::{arcface::ArcFace, classifier::ClassifierSession, mobileclip::MobileClipImage, scrfd::{self, Scrfd}};
 use crate::pipeline::batch_clip::ClipBatchCoordinator;
 use crate::pipeline::discovery::{DiscoveredFile, FileKind};
 use crate::shell;
@@ -93,6 +119,20 @@ const VISION_CONCURRENCY: usize = 4;
 /// VISION_CONCURRENCY.
 const CLIP_CONCURRENCY: usize = 2;
 
+/// Cap concurrent classifier inferences. Runs alongside CLIP under a
+/// separate semaphore so neither stage starves the other. Default 2 to
+/// match CLIP's caution against the DirectML TDR ceiling; tune upward
+/// only after measuring on a 500-file run.
+const CLASSIFIER_CONCURRENCY: usize = 2;
+
+/// Tags below this confidence are dropped — matches the macOS Vision
+/// classifier behaviour (`Tagging.swift`).
+const CLASSIFIER_THRESHOLD: f32 = 0.30;
+
+/// Per-file classifier top-K. macOS Vision pulls similar count of
+/// labels per file.
+const CLASSIFIER_TOP_K: usize = 8;
+
 /// Padding fraction added to the SCRFD bbox before cropping. Must match
 /// the macOS value (FaceClustering.swift = 0.15) so the same library
 /// produces the same ArcFace embeddings → same cluster IDs across
@@ -129,6 +169,14 @@ pub struct TaggedFile {
 
     pub failed: bool,
     pub error_message: Option<String>,
+
+    /// Semantic tags assembled from (a) the MobileNetV3 classifier top-K
+    /// labels above `CLASSIFIER_THRESHOLD` and (b) enriched-extras
+    /// derived from existing per-file signals (Year/Camera family/
+    /// Wide-Tall-Square/Has Faces/Has Text/Has Location). Persisted
+    /// into the `tags` table by DBWriter with source = `"auto"`; the
+    /// Library UI reads them via ReadStore and renders as TagChip rows.
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -167,6 +215,9 @@ pub struct ModelStack {
     ///   CUDA EP or larger models where batching amortizes.
     pub mobileclip_pool: Option<Vec<Mutex<MobileClipImage>>>,
     pub mobileclip_batch: Option<Arc<ClipBatchCoordinator>>,
+    /// MobileNetV3 ImageNet-1k scene classifier. Optional — when absent
+    /// the per-file `tags` Vec is populated only from enriched extras.
+    pub classifier: Option<Vec<Mutex<ClassifierSession>>>,
 }
 
 /// Aspirational pool size — actual cap is `min(this, vram_cap, worker_count)`
@@ -229,10 +280,21 @@ impl ModelStack {
         });
         let scrfd = load_pool("SCRFD", pool_size, scrfd::default_weights_path(), Scrfd::load);
 
+        // Batch path is now default-on. The pool path was empirically faster
+        // at the time it was written (small N-session pool on DirectML), but
+        // VRAM-clamp drops pool_size to 1 on most 6 GB cards, leaving a
+        // single Mutex<MobileClipImage> behind the CLIP_CONCURRENCY=2
+        // semaphore — effectively serializing CLIP work. The batch
+        // coordinator drives one Session with batched (N, 3, 256, 256)
+        // tensors, amortizing per-call DirectML dispatch overhead and
+        // beating the pool path on the user's hardware. Set
+        // `FILEID_CLIP_USE_BATCH=0` to fall back to the pool path.
         let use_batch = std::env::var("FILEID_CLIP_USE_BATCH")
             .ok()
-            .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+            .map(|s| !(s == "0" || s.eq_ignore_ascii_case("false")))
+            .unwrap_or(true);
+
+        let classifier = load_classifier_pool(pool_size);
 
         let (mobileclip_pool, mobileclip_batch) = if use_batch {
             // Batch-coordinator path (opt-in, experimental).
@@ -268,7 +330,7 @@ impl ModelStack {
             (pool, None)
         };
 
-        Self { arcface, scrfd, mobileclip_pool, mobileclip_batch }
+        Self { arcface, scrfd, mobileclip_pool, mobileclip_batch, classifier }
     }
 
     #[allow(dead_code)]
@@ -278,7 +340,62 @@ impl ModelStack {
             scrfd: None,
             mobileclip_pool: None,
             mobileclip_batch: None,
+            classifier: None,
         }
+    }
+}
+
+/// Load the MobileNetV3 classifier as a small pool (same shape as the
+/// vision-model pools) so multiple workers can run inference in parallel
+/// against the GPU's command queue. Missing weights or labels degrade
+/// the stage to a no-op — pipeline still emits the enriched-extras tags.
+fn load_classifier_pool(pool_size: usize) -> Option<Vec<Mutex<ClassifierSession>>> {
+    let model_path = match crate::models::classifier::default_model_path() {
+        Ok(p) => p,
+        Err(err) => {
+            tracing::warn!(model = "classifier", ?err, "model path unresolved");
+            return None;
+        }
+    };
+    let labels_path = match crate::models::classifier::default_labels_path() {
+        Ok(p) => p,
+        Err(err) => {
+            tracing::warn!(model = "classifier", ?err, "labels path unresolved");
+            return None;
+        }
+    };
+    if !model_path.exists() || !labels_path.exists() {
+        tracing::info!(
+            model = "classifier",
+            model_path = %model_path.display(),
+            labels_path = %labels_path.display(),
+            "classifier model+labels not installed; stage will skip"
+        );
+        return None;
+    }
+    let mut pool = Vec::with_capacity(pool_size);
+    for idx in 0..pool_size {
+        if idx > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        match ClassifierSession::load(&model_path, &labels_path) {
+            Ok(model) => pool.push(Mutex::new(model)),
+            Err(err) => {
+                use crate::models::runtime::error_has_device_removed_marker;
+                if error_has_device_removed_marker(&err) {
+                    tracing::error!(model = "classifier", slot = idx, ?err, "[STARTUP-TDR] device-removed during classifier warmup; aborting pool load");
+                    return None;
+                }
+                tracing::warn!(model = "classifier", slot = idx, ?err, "classifier pool load failed; stage will skip if pool empty");
+                break;
+            }
+        }
+    }
+    if pool.is_empty() {
+        None
+    } else {
+        tracing::info!(model = "classifier", pool_size = pool.len(), "classifier pool loaded");
+        Some(pool)
     }
 }
 
@@ -343,35 +460,77 @@ impl Tagger {
         }
     }
 
-    /// Wire Discovery → N tagging workers → DBWriter. Spawns `worker_count`
-    /// tasks that share the input receiver via async-channel (mpsc has only
-    /// one consumer; we want fan-out to N workers from the same queue).
+    /// Wire Discovery → decoder pool → N tagging workers → DBWriter.
+    ///
+    /// Two-stage pipeline:
+    ///   1. **Decoder pool**: M dedicated OS threads pull `DiscoveredFile`
+    ///      from the discovery channel and run blocking image decode (the
+    ///      CPU-bound part). Decoded `(rgb, w, h)` bytes are pushed into
+    ///      the pre-decoded channel.
+    ///   2. **Inference workers**: N async tokio tasks pull `PreDecoded`,
+    ///      run face/CLIP/OCR under semaphore-bounded inference, and ship
+    ///      `TaggedFile` rows to the DBWriter.
+    ///
+    /// Previously decode happened inline inside each worker, which meant
+    /// new files were only pulled from discovery once a worker freed up
+    /// from its prior ML wait. With `CLIP_CONCURRENCY=2` and `worker_count=14`
+    /// most workers were idle waiting on semaphores — the CPU only saw
+    /// ~12 % utilization. Splitting decode into its own pool lets the
+    /// decoder threads saturate available cores ahead of inference,
+    /// keeping a warm buffer of pre-decoded frames so workers never wait
+    /// on the CPU-bound path.
     pub fn spawn(self, mut input: mpsc::Receiver<DiscoveredFile>) -> mpsc::Receiver<TaggedFile> {
         let (out_tx, out_rx) = mpsc::channel(TAGGING_CHANNEL_CAP);
 
-        // Convert mpsc::Receiver → async-channel for N-consumer fan-out.
-        let (fan_tx, fan_rx) = async_channel::bounded::<DiscoveredFile>(TAGGING_CHANNEL_CAP);
+        // Stage 1a — bridge tokio mpsc<DiscoveredFile> into a
+        // multi-consumer async-channel so the decoder pool can fan out.
+        let (raw_tx, raw_rx) = async_channel::bounded::<DiscoveredFile>(TAGGING_CHANNEL_CAP);
         let coordinator_pump = self.coordinator.clone();
         tokio::spawn(async move {
             while let Some(file) = input.recv().await {
                 if coordinator_pump.is_cancelled() {
                     break;
                 }
-                if fan_tx.send(file).await.is_err() {
+                if raw_tx.send(file).await.is_err() {
                     break;
                 }
             }
         });
 
+        // Stage 1b — decoder pool: M sync OS threads. Sized by physical
+        // CPU topology (p+e cores), clamped to the [2, 12] range so we
+        // don't oversaturate the GPU side or starve the WinUI 3 app.
+        let topo = crate::platform::cpu_topology();
+        let decoder_count = ((topo.p_cores + topo.e_cores) as usize).clamp(2, 12);
+        // Channel cap: 2× worker count keeps a small read-ahead buffer
+        // ready, without ballooning RAM with decoded RGB bytes (each
+        // frame can be ~50 MB for a 12 MP photo).
+        let predecoded_cap = (self.worker_count * 2).max(8);
+        let (predecoded_tx, predecoded_rx) =
+            async_channel::bounded::<PreDecoded>(predecoded_cap);
+        for decoder_idx in 0..decoder_count {
+            let rx = raw_rx.clone();
+            let tx = predecoded_tx.clone();
+            let coord = self.coordinator.clone();
+            std::thread::Builder::new()
+                .name(format!("fileid-decode-{decoder_idx}"))
+                .spawn(move || run_decoder_thread(rx, tx, coord))
+                .expect("spawn decoder thread");
+        }
+        drop(raw_rx);
+        drop(predecoded_tx);
+
         let vision_sem = Arc::new(Semaphore::new(VISION_CONCURRENCY));
         let clip_sem = Arc::new(Semaphore::new(CLIP_CONCURRENCY));
+        let classifier_sem = Arc::new(Semaphore::new(CLASSIFIER_CONCURRENCY));
 
         for worker_idx in 0..self.worker_count {
-            let rx = fan_rx.clone();
+            let rx = predecoded_rx.clone();
             let tx = out_tx.clone();
             let coord = self.coordinator.clone();
             let vision_sem = vision_sem.clone();
             let clip_sem = clip_sem.clone();
+            let classifier_sem = classifier_sem.clone();
             let models = self.models.clone();
 
             tokio::spawn(async move {
@@ -384,13 +543,17 @@ impl Tagger {
                 // multi-hour scans friendly to an actively-used desktop.
                 const YIELD_AFTER: u64 = 500;
                 let mut files_done: u64 = 0;
-                while let Ok(file) = rx.recv().await {
+                while let Ok(predecoded) = rx.recv().await {
                     if coord.check().await.is_err() {
                         break;
                     }
+                    let path_for_timeout = predecoded.file.path.clone();
+                    let timeout_kind = predecoded.file.kind;
+                    let timeout_size = predecoded.file.size_bytes;
+                    let timeout_modified = predecoded.file.modified_unix;
                     // Per-file timeout — image decoders or network UNC reads
                     // can hang indefinitely.
-                    let fut = process_file(&file, &models, &vision_sem, &clip_sem, worker_idx, &coord);
+                    let fut = process_file_predecoded(predecoded, &models, &vision_sem, &clip_sem, &classifier_sem, worker_idx, &coord);
                     let tagged = match tokio::time::timeout(
                         std::time::Duration::from_secs(60),
                         fut,
@@ -400,15 +563,14 @@ impl Tagger {
                         Ok(t) => t,
                         Err(_elapsed) => {
                             tracing::warn!(
-                                path = %crate::platform::redact_path_for_log(&file.path),
+                                path = %crate::platform::redact_path_for_log(&path_for_timeout),
                                 "per-file timeout after 60s; marking failed and continuing"
                             );
-                            // Emit a minimally-filled TaggedFile so DBWriter sees the file.
                             TaggedFile {
-                                path: file.path.clone(),
-                                kind: file.kind,
-                                size_bytes: file.size_bytes,
-                                modified_unix: file.modified_unix,
+                                path: path_for_timeout,
+                                kind: timeout_kind,
+                                size_bytes: timeout_size,
+                                modified_unix: timeout_modified,
                                 scanned_unix: std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
@@ -427,6 +589,7 @@ impl Tagger {
                                 total_ms: 60000.0,
                                 failed: true,
                                 error_message: Some("per-file timeout after 60s".into()),
+                                tags: Vec::new(),
                             }
                         }
                     };
@@ -446,19 +609,127 @@ impl Tagger {
     }
 }
 
-/// Per-file ML body. Loads the image, runs face detect → embed,
-/// CLIP embed, dHash, EXIF — each gated on its semaphore + the model
-/// being installed. Failure of any single stage is non-fatal: the row
-/// gets emitted with that field = None and `failed=0` (only image
-/// decode failure marks the row failed).
-async fn process_file(
-    file: &DiscoveredFile,
+/// One unit of work between the decoder pool and the inference workers.
+/// `decoded` is `Ok((rgb, w, h))` on a successful image/video decode and
+/// `Err(_)` when the file couldn't be opened or decoded (the worker emits
+/// a failed `TaggedFile` row so the DB still records the file). `None` is
+/// returned for non-image, non-video kinds where the existing pipeline
+/// doesn't attempt a decode.
+pub struct PreDecoded {
+    pub file: DiscoveredFile,
+    pub decoded: Option<anyhow::Result<(Vec<u8>, u32, u32)>>,
+}
+
+/// Decoder-pool worker. Sync OS thread (not a tokio task) so the
+/// blocking JPEG/PNG decode doesn't tie up tokio's runtime threads.
+/// Pulls from the raw discovery channel via `recv_blocking()` and pushes
+/// into the pre-decoded channel via `send_blocking()`. Exits cleanly
+/// when the input channel closes or the coordinator is cancelled.
+fn run_decoder_thread(
+    rx: async_channel::Receiver<DiscoveredFile>,
+    tx: async_channel::Sender<PreDecoded>,
+    coord: ScanCoordinator,
+) {
+    loop {
+        if coord.is_cancelled() {
+            return;
+        }
+        let file = match rx.recv_blocking() {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        let decode_started = Instant::now();
+        let decoded = match file.kind {
+            FileKind::Image => Some(decode_image_sync(&file.path)),
+            FileKind::Video => Some(decode_video_keyframe_sync(&file.path)),
+            _ => None,
+        };
+        if decoded.is_some() {
+            STATS_DECODE_US.fetch_add(decode_started.elapsed().as_micros() as u64, Ordering::Relaxed);
+        }
+        let item = PreDecoded { file, decoded };
+        if tx.send_blocking(item).is_err() {
+            return;
+        }
+    }
+}
+
+/// Decode an image off disk into RGB8 bytes + dimensions on the calling
+/// thread. mmap'd dimension peek + decode in one pass; rejects images
+/// over `MAX_DECODED_PIXELS` before commit. `catch_unwind` wraps a
+/// panicking codec (malformed JPEG) so it surfaces as Err instead of
+/// crashing the decoder thread.
+fn decode_image_sync(path: &std::path::Path) -> anyhow::Result<(Vec<u8>, u32, u32)> {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> anyhow::Result<(Vec<u8>, u32, u32)> {
+        use std::io::Cursor;
+        let file = std::fs::File::open(path)
+            .map_err(|e| anyhow::anyhow!("open: {e}"))?;
+        let mmap = unsafe {
+            memmap2::Mmap::map(&file)
+                .map_err(|e| anyhow::anyhow!("mmap: {e}"))?
+        };
+        let bytes: &[u8] = &mmap;
+
+        let peek = image::ImageReader::new(Cursor::new(bytes))
+            .with_guessed_format()
+            .map_err(|e| anyhow::anyhow!("guess format (peek): {e}"))?;
+        let (pw, ph) = peek
+            .into_dimensions()
+            .map_err(|e| anyhow::anyhow!("dimensions: {e}"))?;
+        let pixels = pw as u64 * ph as u64;
+        if pixels > MAX_DECODED_PIXELS {
+            anyhow::bail!(
+                "image dimensions {}×{} ({} pixels) exceed cap of {} — refusing to decode",
+                pw, ph, pixels, MAX_DECODED_PIXELS
+            );
+        }
+        let reader = image::ImageReader::new(Cursor::new(bytes))
+            .with_guessed_format()
+            .map_err(|e| anyhow::anyhow!("guess format (decode): {e}"))?;
+        let dyn_img = reader.decode().map_err(|e| anyhow::anyhow!("decode: {e}"))?;
+        let rgb = dyn_img.to_rgb8();
+        let (w, h) = rgb.dimensions();
+        Ok((rgb.into_raw(), w, h))
+    }));
+    match result {
+        Ok(r) => r,
+        Err(panic_payload) => {
+            let msg = if let Some(s) = panic_payload.downcast_ref::<&'static str>() {
+                (*s).to_string()
+            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "non-string panic payload".to_string()
+            };
+            anyhow::bail!("image decoder panicked (adversarial input?): {msg}");
+        }
+    }
+}
+
+/// Sync video-keyframe decode. Used by the decoder pool.
+fn decode_video_keyframe_sync(path: &std::path::Path) -> anyhow::Result<(Vec<u8>, u32, u32)> {
+    let frame = shell::video::keyframe_25pct(path)?;
+    Ok((frame.rgb, frame.width, frame.height))
+}
+
+/// Per-file ML body. Receives a pre-decoded image (or video keyframe)
+/// from the decoder pool, runs face detect → embed, CLIP embed, dHash,
+/// EXIF — each gated on its semaphore + the model being installed.
+/// Failure of any single stage is non-fatal: the row gets emitted with
+/// that field = None and `failed=0` (only image decode failure marks
+/// the row failed). The decode itself happened on a sibling decoder
+/// thread so this function never blocks on filesystem I/O.
+async fn process_file_predecoded(
+    predecoded: PreDecoded,
     models: &Arc<ModelStack>,
     vision_sem: &Arc<Semaphore>,
     clip_sem: &Arc<Semaphore>,
+    classifier_sem: &Arc<Semaphore>,
     worker_idx: usize,
     coord: &ScanCoordinator,
 ) -> TaggedFile {
+    let PreDecoded { file, decoded } = predecoded;
+    let file = &file;
     let started = Instant::now();
     let scanned_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -485,6 +756,7 @@ async fn process_file(
         total_ms: 0.0,
         failed: false,
         error_message: None,
+        tags: Vec::new(),
     };
 
     // SEC/perf: once the GPU is marked dead (TDR or device-removed),
@@ -500,51 +772,22 @@ async fn process_file(
         return tagged;
     }
 
-    // Face pipeline gate. SCRFD needs the full-resolution frame for
-    // accurate face detection. CLIP / dhash / OCR work fine on a 512×512
-    // shell thumbnail. Force-disable via FILEID_FORCE_THUMBNAIL=1 to trade
-    // face accuracy for ~30 % CPU savings.
-    let force_thumb = std::env::var("FILEID_FORCE_THUMBNAIL")
-        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    let face_pipeline_active =
-        models.scrfd.is_some() && models.arcface.is_some() && !force_thumb;
-
-    let decode_started = Instant::now();
-    let image_source: Option<(Vec<u8>, u32, u32)> = match file.kind {
-        FileKind::Image => {
-            if face_pipeline_active {
-                match load_image_rgb(&file.path).await {
-                    Ok(t) => Some(t),
-                    Err(err) => {
-                        tracing::warn!(?err, path = %crate::platform::redact_path_for_log(&file.path), "image decode failed");
-                        tagged.failed = true;
-                        tagged.error_message = Some(format!("image decode: {err:#}"));
-                        None
-                    }
-                }
-            } else {
-                // Thumbnail fast path: ask the Windows shell for the
-                // pre-cached 512×512 RGBA8. Falls back to full decode
-                // on Err (e.g. file Explorer never indexed it).
-                match try_shell_thumbnail(file.path.clone()).await {
-                    Ok(t) => Some(t),
-                    Err(_) => match load_image_rgb(&file.path).await {
-                        Ok(t) => Some(t),
-                        Err(err) => {
-                            tracing::warn!(?err, path = %crate::platform::redact_path_for_log(&file.path), "image decode failed (thumbnail fallback)");
-                            tagged.failed = true;
-                            tagged.error_message = Some(format!("image decode: {err:#}"));
-                            None
-                        }
-                    }
-                }
-            }
-        },
-        FileKind::Video => extract_video_keyframe_blocking(file.path.clone()).await.ok(),
-        _ => None,
+    // Decode already happened upstream on a decoder-pool thread; we just
+    // consume the result here. Image-decode failure → emit a failed row
+    // so the DB still records the file (resume cursor advances, the next
+    // scan re-tries it).
+    perf_trace("image_decode_start", &file.path, 0.0);
+    let image_source: Option<(Vec<u8>, u32, u32)> = match decoded {
+        Some(Ok(t)) => Some(t),
+        Some(Err(err)) => {
+            tracing::warn!(?err, path = %crate::platform::redact_path_for_log(&file.path), "image decode failed");
+            tagged.failed = true;
+            tagged.error_message = Some(format!("image decode: {err:#}"));
+            None
+        }
+        None => None,
     };
-    record_stage(&STATS_DECODE_US, decode_started);
+    perf_trace("image_decode_done", &file.path, started.elapsed().as_secs_f64() * 1000.0);
 
     if let Some((rgb, w, h)) = image_source {
             if matches!(file.kind, FileKind::Image) {
@@ -555,11 +798,13 @@ async fn process_file(
                     tagged.location_lon = lon;
                 }
                 record_stage(&STATS_EXIF_US, exif_started);
+                perf_trace("exif_done", &file.path, exif_started.elapsed().as_secs_f64() * 1000.0);
             }
 
                 let dhash_started = Instant::now();
                 tagged.phash = Some(compute_dhash(&rgb, w as usize, h as usize));
                 record_stage(&STATS_DHASH_US, dhash_started);
+                perf_trace("dhash_done", &file.path, dhash_started.elapsed().as_secs_f64() * 1000.0);
 
                 // Short-circuit GPU stages if a prior file already detected
                 // device-removed. Submitting new work against the dead GPU
@@ -572,10 +817,13 @@ async fn process_file(
                     if permit.is_ok() {
                         let scrfd_mu = &scrfd_pool[worker_idx % scrfd_pool.len()];
                         let arcface_mu = &arcface_pool[worker_idx % arcface_pool.len()];
+                        let scrfd_started = Instant::now();
                         let detections = {
                             let mut s = scrfd_mu.lock();
                             s.detect(&rgb, w, h)
                         };
+                        perf_trace("scrfd_done", &file.path, scrfd_started.elapsed().as_secs_f64() * 1000.0);
+                        let arcface_started = Instant::now();
                         match detections {
                             Ok(dets) => {
                                 for det in dets {
@@ -622,6 +870,7 @@ async fn process_file(
                                 }
                             }
                         }
+                        perf_trace("arcface_done", &file.path, arcface_started.elapsed().as_secs_f64() * 1000.0);
                     }
                     tagged.vision_ms = vision_started.elapsed().as_secs_f64() * 1000.0;
                     STATS_VISION_US.fetch_add(vision_started.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -656,6 +905,7 @@ async fn process_file(
                     }
                     tagged.clip_ms = clip_started.elapsed().as_secs_f64() * 1000.0;
                     STATS_CLIP_US.fetch_add(clip_started.elapsed().as_micros() as u64, Ordering::Relaxed);
+                    perf_trace("clip_done", &file.path, clip_started.elapsed().as_secs_f64() * 1000.0);
                 } else if let Some(clip_coord) = &models.mobileclip_batch {
                     // Opt-in batch path: workers submit to coordinator,
                     // get batched embedding back via oneshot.
@@ -675,7 +925,53 @@ async fn process_file(
                     }
                     tagged.clip_ms = clip_started.elapsed().as_secs_f64() * 1000.0;
                     STATS_CLIP_US.fetch_add(clip_started.elapsed().as_micros() as u64, Ordering::Relaxed);
+                    perf_trace("clip_done", &file.path, clip_started.elapsed().as_secs_f64() * 1000.0);
                 }
+                }
+
+                // Classifier — reuses the same decoded RGB. Resized
+                // separately to 224×224 (the MobileNetV3 input dimension)
+                // since CLIP wants 256×256.
+                if !coord.is_gpu_dead() {
+                    if let Some(classifier_pool) = &models.classifier {
+                        let permit = classifier_sem.acquire().await;
+                        let classifier_started = Instant::now();
+                        if permit.is_ok() {
+                            let classifier_mu = &classifier_pool[worker_idx % classifier_pool.len()];
+                            let n = crate::models::classifier::INPUT_SIZE;
+                            let resized_224 = resize_rgb_nearest(&rgb, w as usize, h as usize, n, n);
+                            let classify_result = {
+                                let mut c = classifier_mu.lock();
+                                c.classify_batch(&[resized_224], CLASSIFIER_TOP_K, CLASSIFIER_THRESHOLD)
+                            };
+                            match classify_result {
+                                Ok(mut batches) => {
+                                    if let Some(per_image) = batches.pop() {
+                                        for (label, _score) in per_image {
+                                            tagged.tags.push(label);
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    if error_has_device_removed_marker(&err) {
+                                        if coord.mark_gpu_dead() {
+                                            tracing::error!(?err, "[GPU-TDR] classifier device-removed; cancelling scan");
+                                        }
+                                    } else {
+                                        tracing::warn!(?err, "classifier classify failed");
+                                    }
+                                }
+                            }
+                        }
+                        perf_trace("classifier_done", &file.path, classifier_started.elapsed().as_secs_f64() * 1000.0);
+                    } else {
+                        // Classifier model not installed — log once, then
+                        // proceed with enriched-extras-only tags.
+                        static SKIP_LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+                        SKIP_LOGGED.get_or_init(|| {
+                            tracing::info!("[CLASSIFIER] model_not_installed; per-file tags are enriched-extras only");
+                        });
+                    }
                 }
 
                 // OCR is the biggest CPU per file (~30-50 ms). For camera
@@ -694,11 +990,39 @@ async fn process_file(
                     }
                     STATS_OCR_RAN.fetch_add(1, Ordering::Relaxed);
                     record_stage(&STATS_OCR_US, ocr_started);
+                    perf_trace("ocr_done", &file.path, ocr_started.elapsed().as_secs_f64() * 1000.0);
                 }
+    }
+
+    // Enriched extras — derive Year / Camera family / Wide-Tall-Square /
+    // Has Faces / Has Text / Has Location from the signals we already
+    // have. Cheap (no inference) and gives a baseline of useful chips
+    // even when the classifier model isn't installed. Mirrors macOS
+    // `Tagging.swift::extraTags`.
+    push_enriched_extras(&mut tagged);
+    // Dedupe + cap. Two-pass: keep first occurrence to preserve the
+    // classifier's confidence-ordered output; cap at 16 to avoid
+    // exploding the tags table on noisy classifier outputs.
+    {
+        let mut seen = std::collections::HashSet::new();
+        tagged.tags.retain(|t| seen.insert(t.clone()));
+        tagged.tags.truncate(16);
     }
 
     tagged.total_ms = started.elapsed().as_secs_f64() * 1000.0;
     record_stage(&STATS_TOTAL_US, started);
+    if perf_trace_enabled() {
+        let total_ms = tagged.total_ms;
+        let files_per_sec = if total_ms > 0.0 { 1000.0 / total_ms } else { 0.0 };
+        tracing::debug!(
+            target: "FileIDEngine::perf",
+            stage = "total",
+            path = %crate::platform::redact_path_for_log(&file.path),
+            elapsed_ms = total_ms,
+            files_per_sec,
+            "[PERF]"
+        );
+    }
     maybe_emit_stats();
     tagged
 }
@@ -735,97 +1059,82 @@ fn should_run_ocr(path: &std::path::Path, tagged: &TaggedFile, _size_bytes: u64)
     false
 }
 
+/// Derive tag-like chips from per-file signals that are already on hand:
+/// EXIF camera model + creation date, face count, OCR result, EXIF GPS.
+/// Matches the surface of macOS `Tagging.swift::extraTags(...)`. Cheap —
+/// no inference, no I/O.
+///
+/// Format choices to align with the macOS Library tile `formatTag`:
+/// - `"Year_2024"` keeps the underscore form (the formatter strips it).
+/// - Camera family is the human-friendly brand (`"iPhone"`, `"Canon"`).
+/// - Orientation tags (`"Wide"`, `"Tall"`, `"Square"`) read as-is.
+/// - Capability tags (`"Has Faces"`, `"Has Text"`, `"Has Location"`)
+///   contain a space and stay intact through `formatTag`.
+fn push_enriched_extras(tagged: &mut TaggedFile) {
+    // Year tag from modified_unix (engine doesn't currently track
+    // creation_at separately). modified_unix is seconds since epoch.
+    if tagged.modified_unix > 0.0 {
+        let secs = tagged.modified_unix as i64;
+        // Days since epoch via integer math (no chrono dep — already
+        // available transitively but avoid the call cost here).
+        // 2024 starts at unix=1_704_067_200; we just want the year.
+        if let Some(year) = unix_seconds_to_year(secs) {
+            if (1990..2100).contains(&year) {
+                tagged.tags.push(format!("Year_{year}"));
+            }
+        }
+    }
+    if let Some(cm) = tagged.camera_model.as_deref() {
+        let lower = cm.to_ascii_lowercase();
+        let family = if lower.contains("iphone") { Some("iPhone") }
+            else if lower.contains("ipad") { Some("iPad") }
+            else if lower.contains("canon") { Some("Canon") }
+            else if lower.contains("nikon") { Some("Nikon") }
+            else if lower.contains("sony") { Some("Sony") }
+            else if lower.contains("fuji") { Some("Fuji") }
+            else if lower.contains("leica") { Some("Leica") }
+            else if lower.contains("gopro") { Some("GoPro") }
+            else if lower.contains("samsung") { Some("Samsung") }
+            else if lower.contains("pixel") { Some("Pixel") }
+            else { None };
+        if let Some(f) = family {
+            tagged.tags.push(f.to_string());
+        }
+    }
+    if tagged.has_faces { tagged.tags.push("Has Faces".to_string()); }
+    if tagged.has_text { tagged.tags.push("Has Text".to_string()); }
+    if tagged.location_lat.is_some() && tagged.location_lon.is_some() {
+        tagged.tags.push("Has Location".to_string());
+    }
+}
+
+/// Minimal proleptic-Gregorian unix→year. Avoids pulling in chrono just
+/// for a year extraction. Accurate for the 1970-2100 range the enriched-
+/// extras call site cares about.
+fn unix_seconds_to_year(secs: i64) -> Option<i32> {
+    if secs < 0 { return None; }
+    // Days since 1970-01-01.
+    let days = secs / 86_400;
+    // Iterate years adding 365 / 366 — simple, exact, runs in O(1) for
+    // recent dates (<200 iterations).
+    let mut year: i32 = 1970;
+    let mut remaining = days;
+    loop {
+        let leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+        let year_days = if leap { 366 } else { 365 };
+        if remaining < year_days {
+            return Some(year);
+        }
+        remaining -= year_days;
+        year += 1;
+        if year > 2200 { return None; }
+    }
+}
+
 /// Hard cap on image dimensions. A 100 KB JPEG can decode to a 4 GB raw
 /// buffer; reject before decode to avoid OOM-ing a worker. 50 MP =
 /// ~150 MB RGB8 — within budget for legitimate photo + scanner output.
 const MAX_DECODED_PIXELS: u64 = 50_000_000;
-
-/// Thumbnail fast path via Windows IThumbnailProvider. Pulls the pre-cached
-/// 512×512 RGBA8 File Explorer already indexed for almost every image in
-/// the user's Pictures library — ~1 ms cache hit vs ~30 ms full JPEG decode.
-/// Converts RGBA8 → RGB8 to match the rest of the pipeline.
-async fn try_shell_thumbnail(path: PathBuf) -> anyhow::Result<(Vec<u8>, u32, u32)> {
-    tokio::task::spawn_blocking(move || -> anyhow::Result<(Vec<u8>, u32, u32)> {
-        let thumb = crate::shell::thumbnail::render(&path)?;
-        // RGBA8 → RGB8 (strip alpha).
-        let pixel_count = (thumb.width as usize) * (thumb.height as usize);
-        let mut rgb = Vec::with_capacity(pixel_count * 3);
-        for px in thumb.rgba.chunks_exact(4) {
-            rgb.extend_from_slice(&px[..3]);
-        }
-        Ok((rgb, thumb.width, thumb.height))
-    })
-    .await?
-}
-
-/// Load an image from disk and return its RGB8 bytes + dimensions.
-/// Runs on a blocking thread. Peeks header to reject pathological
-/// dimensions before decode, and wraps the decode body in `catch_unwind`
-/// so a panicking codec (malformed JPEG) propagates as Err instead of
-/// crashing the worker.
-async fn load_image_rgb(path: &std::path::Path) -> anyhow::Result<(Vec<u8>, u32, u32)> {
-    let p = path.to_path_buf();
-    tokio::task::spawn_blocking(move || -> anyhow::Result<(Vec<u8>, u32, u32)> {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> anyhow::Result<(Vec<u8>, u32, u32)> {
-            // mmap the file once, drive both the dimension peek and the
-            // full decode from the same memory region. The old double-open
-            // path cost ~100 µs per file.
-            use std::io::Cursor;
-            let file = std::fs::File::open(&p)
-                .map_err(|e| anyhow::anyhow!("open: {e}"))?;
-            let mmap = unsafe {
-                memmap2::Mmap::map(&file)
-                    .map_err(|e| anyhow::anyhow!("mmap: {e}"))?
-            };
-            let bytes: &[u8] = &mmap;
-
-            let peek = image::ImageReader::new(Cursor::new(bytes))
-                .with_guessed_format()
-                .map_err(|e| anyhow::anyhow!("guess format (peek): {e}"))?;
-            let (pw, ph) = peek
-                .into_dimensions()
-                .map_err(|e| anyhow::anyhow!("dimensions: {e}"))?;
-            let pixels = pw as u64 * ph as u64;
-            if pixels > MAX_DECODED_PIXELS {
-                anyhow::bail!(
-                    "image dimensions {}×{} ({} pixels) exceed cap of {} — refusing to decode",
-                    pw, ph, pixels, MAX_DECODED_PIXELS
-                );
-            }
-            let reader = image::ImageReader::new(Cursor::new(bytes))
-                .with_guessed_format()
-                .map_err(|e| anyhow::anyhow!("guess format (decode): {e}"))?;
-            let dyn_img = reader.decode().map_err(|e| anyhow::anyhow!("decode: {e}"))?;
-            let rgb = dyn_img.to_rgb8();
-            let (w, h) = rgb.dimensions();
-            Ok((rgb.into_raw(), w, h))
-        }));
-        match result {
-            Ok(r) => r,
-            Err(panic_payload) => {
-                let msg = if let Some(s) = panic_payload.downcast_ref::<&'static str>() {
-                    (*s).to_string()
-                } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "non-string panic payload".to_string()
-                };
-                anyhow::bail!("image decoder panicked (adversarial input?): {msg}");
-            }
-        }
-    })
-    .await?
-}
-
-/// Pull a 25%-duration keyframe from a video via Media Foundation. Heavy
-/// (codec init + decode) — runs on a blocking thread.
-async fn extract_video_keyframe_blocking(path: PathBuf) -> anyhow::Result<(Vec<u8>, u32, u32)> {
-    tokio::task::spawn_blocking(move || -> anyhow::Result<(Vec<u8>, u32, u32)> {
-        let frame = shell::video::keyframe_25pct(&path)?;
-        Ok((frame.rgb, frame.width, frame.height))
-    })
-    .await?
-}
 
 /// Run OCR on an RGB buffer. Returns None if no text or OCR isn't
 /// available on this system.

@@ -4,6 +4,94 @@
 
 ---
 
+## V16.0 follow-ups — perf+thumbnails+classifier+chips landed; verification + classifier SHA pinning (2026-05-18)
+
+**User verification (blocking):**
+
+1. **Throughput**: launch the app, scan `C:\Users\adamm\Desktop\Test Data` (15K JPEGs).
+   The sidebar "Tagged" counter should climb at ≥40 files/sec (target floor; the cross-platform target is ≥140). Steady-state CPU should be >50% across the 12 threads (the decoder pool removes the prior 12% ceiling). Compare against baseline (0.04 files/sec) by checking `engine.jsonl` for the
+   `[STATS]` line — `clip_avg_batch_x10` should hover near 60-80 (batch CLIP averaging 6-8 images per dispatch instead of the prior 1-2). VRAM peak ≤ 5.5 GB.
+2. **Thumbnails**: scroll the Library after a scan. Every visible image card
+   should render the real bitmap (no placeholder gradient) within ~2 s. After
+   restart, the same tiles should hit the L2 disk cache and render
+   instantly. The `[THUMB]` lines in `app.log` will trace the exact code path
+   per file (`L1_HIT` / `L2_HIT` / `SHELL_OK` / `IMG_FB_OK` / `BITMAP_SET` /
+   `TILE_THUMBNAIL_ASSIGNED` / `IMAGE_OPENED` / `OPACITY_SET`). If a tile
+   still doesn't render, the missing log line names the broken hop.
+3. **Tag chips**: tap a card after the scan completes. Up to 2 chips below
+   the filename should show — `"Year_YYYY"` (or formatted year), `"iPhone"` /
+   `"Canon"` / camera family, `"Has Faces"`, `"Has Text"`, `"Has Location"`,
+   and (if classifier model installed) scene labels like `"Dog"`, `"Beach"`,
+   `"Document"`. Without the classifier installed: only enriched-extras
+   chips. Screenshot one card so the maintainer can verify visual parity
+   against macOS LibraryView.swift:729-744.
+4. **Diagnostic perf trace**: set `FILEID_PERF_TRACE=1` before launching
+   and run a 100-file subset scan. `engine.jsonl` should emit `[PERF]` lines
+   for each stage with elapsed ms. Aggregate the per-stage averages and
+   confirm `decode_us` < 50 µs (after WP1-B3 decoder-pool decouple) and
+   `clip_us` < 30 ms (after WP1-B1 batch default).
+
+**Stubbed-but-landed items (close out before V16.1):**
+
+1. **Classifier model + labels SHA256 pinning.** `models/registry.rs`
+   `"classifier_mobilenetv3"` slot ships with `sha256: None` and TODO(verify)
+   URL comments for both the MobileNetV3-Large ONNX export and the ImageNet
+   class-label file. Download once, compute SHA256 of both, pin both. Until
+   pinned, the model installs without integrity verification — fine for
+   private builds, blocker for shipping. Also verify the URL serves the
+   1000-class export (1001-class with a background class is accepted by
+   `ClassifierSession::load`, but the label-count check will fail on other
+   variants).
+2. **Classifier registry URL verification.** The placeholder URL
+   `https://huggingface.co/onnx-community/mobilenetv3_large_100.ra_in1k/...`
+   is plausible but unverified. If it 404s, swap to a known-good mirror
+   (Xenova / onnx-community both host MobileNet exports) and update the
+   `approx_bytes` if it changes.
+3. **Phase model parity (Windows vs macOS).** Windows shows 5 pipeline
+   phases (`Scan / Tag / People / Captions / Done`) in `SidebarPipelineProgress.xaml.cs:23-28`; macOS shows 3 active phases (`discovering / tagging / postScan` in `IPCProtocol.swift:138-146`). Decision needed:
+   - Option A: Collapse Windows to 3 phases (matches macOS; loses People /
+     Captions granularity that Windows users may find useful).
+   - Option B: Expand macOS to 5 phases (breaking IPC change; requires macOS work).
+   - Option C: Keep divergent models with a shared enum + platform-specific display.
+   Surfaces in: `platforms/windows/src/FileID.App/Views/Sidebar/SidebarPipelineProgress.xaml.cs::BuildStages` and
+   `platforms/apple/shared/Sources/FileIDShared/IPCProtocol.swift:138-146`.
+   Owner: unassigned. Priority: low (visual polish, not a regression).
+4. **CLIP_CONCURRENCY tuning.** Left at 2 because the batch-CLIP default
+   (V16.0 WP1-B1) renders the per-call CLIP semaphore mostly irrelevant —
+   batch coordinator owns the single Session and serializes batches
+   internally. If a user reports the pool path (set `FILEID_CLIP_USE_BATCH=0`
+   to use) is bottlenecked, run the directive's iterative `CLIP_CONCURRENCY+1`
+   TDR-watch procedure on a 500-file subset.
+5. **Shell-thumbnail fast path for CLIP (WP1-B4 deferred).** Directive
+   asked for shell-thumbnail-then-resize for the CLIP path while keeping
+   full decode for SCRFD/ArcFace. Skipped because the decoder pool already
+   hides decode latency from workers. Revisit only if perf-trace shows
+   resize_rgb_nearest on the full image is the dominant per-file cost.
+6. **B2 CLIP_CONCURRENCY iterative TDR-watch.** Directive's "raise +1
+   until TDR fires" procedure requires runtime testing. The default `2`
+   stays until measurement justifies a change.
+
+---
+
+## V15.9 follow-ups — verification + stubbed adaptive items (2026-05-18)
+
+**User verification (blocking):**
+
+1. **Discovery throughput.** `pwsh build/build.ps1 -RunTests` then launch the app and scan `C:\Users\adamm\Desktop\Test Data`. The sidebar "Discovered N" counter should climb at NVMe walk speed — target ≥2,000 files/sec sustained, expected ~5–20K files/sec on a Samsung 970/980-class NVMe. The counter must reach the corpus total within ~5 s **independent of tagging progress** (this is the V15.9 decouple invariant). If the counter still tracks ML throughput (~22/sec from V15.8d), the channel-or-walk-thread budget didn't take effect — check `app.log` for `[DISCOVERY] adaptive parallel walk walk_threads=N storage=nvme`.
+2. **Thumbnails.** Point the Library at the same Test Data folder. Every visible image tile should render its actual content within 2 s of becoming visible. After app restart, the same folder should render instantly (disk cache hit). Settings → Diagnostics → Thumbnails should show `ok > 0`, `failed` near 0, and `disk: hits=N` climbing across the second visit.
+3. **Adaptive hardware.** Settings → Diagnostics should show the detected CPU (with P/E split if on Intel 12th-gen+), RAM avail/total + tier, GPU vendor + VRAM, NPU presence (false on the RTX 2060 box), power source ("AC power"), worker cap, and active profile "auto". The Performance Profile ComboBox shows Eco/Auto/Performance with Eco/Performance grayed.
+
+**Stubbed items the V15.9 push deferred (with the design landed, just not the impl):**
+
+1. **NPU routing — Intel AI Boost + AMD XDNA detection.** Qualcomm Hexagon already detected via the existing QNN probe (reused). Intel/AMD report `npu_present = false` for now. Needed: a probe in `models/runtime.rs` that loads the OpenVINO `npu` device (Intel) and the VitisAI EP (AMD) and flips `npu_present = true` when found. Routing CLIP / face-detection inference to the NPU when present is a separate piece — design the `NpuRouter` trait, fall back to GPU then CPU. ~1–2 days; needs a Meteor Lake or Ryzen AI box for live-fire.
+2. **Battery throttling (currently report-only).** `power_status()` lands the source + battery percent in HardwareInfo. Throttling on battery + low charge (drop to low-memory mode + 50% pool reduction + sidebar "Battery saver active" banner) deferred to next push. Reason: report-only first so users see what the engine thinks before behavior shifts under them. ~0.5 day once we trust the readings.
+3. **Eco / Performance profile selectors.** ComboBox in Settings is present but disabled. Eco needs the throttling code from item 2; Performance needs the "uncap pool size + ignore VRAM safety budget" path with a confirmation dialog. ~1 day to ship both.
+4. **Storage SATA-SSD vs NVMe discriminator.** Currently `IncursSeekPenalty == FALSE` is treated as NVMe-class (16 walk threads). Adding `STORAGE_ADAPTER_DESCRIPTOR.BusType` ⇒ NVMe vs SATA distinction would let SATA SSDs use the 8-thread budget. Half-day. Low priority — over-parallelism on SATA SSDs still beats single-threaded walkdir.
+5. **Pending_files DB queue (alternative decouple).** V15.9 hit the throughput target via channel-resize + count-before-send. A `pending_files` v8 migration would add crash-durability (resume scan after engine kill) but is more invasive. Open question; only worth doing if users report resumability requests.
+6. **GPU pool size adaptive to memory tier.** ML pool size is currently VRAM-clamped only. On Low memory tier we should also clamp pool to 1 even when VRAM allows 4. Trivial change in `pipeline/tagging::resolve_pool_size`; reason it wasn't shipped: wanted to validate the diagnostics surface first so a regression is visible.
+
+---
+
 ## V15.8d follow-ups — bundle assembly + face-photo verification (2026-05-17)
 
 **Acceptance criteria for each item below: described in the bullet.**

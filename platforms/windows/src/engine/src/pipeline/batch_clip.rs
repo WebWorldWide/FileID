@@ -25,12 +25,12 @@ use tokio::sync::oneshot;
 
 use crate::models::mobileclip::MobileClipImage;
 
-/// Max images per batched inference. DirectML's per-call dispatch
-/// overhead amortizes well up to ~4; beyond that the linear cost of
-/// the batched run dominates and per-file latency suffers without
-/// further throughput gain. Tunable via `FILEID_CLIP_BATCH_SIZE` for
-/// experimentation.
-const DEFAULT_BATCH_SIZE: usize = 4;
+/// Max images per batched inference. With ~3 GB VRAM headroom on a 6 GB
+/// RTX 2060 (baseline measurement: 2.8/6 GB peak), 8 amortizes the
+/// DirectML per-call dispatch overhead better than 4 without pushing
+/// peak VRAM into the danger zone. Tunable via `FILEID_CLIP_BATCH_SIZE`
+/// — drop to 4 if a smaller GPU OOMs under sustained scan load.
+const DEFAULT_BATCH_SIZE: usize = 8;
 
 /// Hard ceiling on how long the coordinator waits for batch fill once
 /// it has at least one request. Tunable via `FILEID_CLIP_BATCH_TIMEOUT_MS`.

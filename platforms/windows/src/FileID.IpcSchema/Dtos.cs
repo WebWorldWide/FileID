@@ -79,7 +79,21 @@ public sealed record HardwareInfo(
     bool CudaPackPresent,
     bool OpenvinoPackPresent,
     bool QnnPackPresent,
-    string Recommendation);
+    string Recommendation,
+    // V15.9 adaptive-utilization diagnostics. All optional with sensible
+    // defaults so an old engine talking to a new app still deserializes.
+    uint PCores = 0,
+    uint ECores = 0,
+    uint LogicalCpuCores = 0,
+    uint WorkerCap = 0,
+    [property: JsonPropertyName("ramTotalMB")] ulong RamTotalMb = 0,
+    [property: JsonPropertyName("ramAvailableMB")] ulong RamAvailableMb = 0,
+    string MemoryTier = "",
+    [property: JsonPropertyName("vramMB")] ulong VramMb = 0,
+    bool NpuPresent = false,
+    string PowerSource = "",
+    byte? BatteryPercent = null,
+    string ActiveProfile = "");
 
 /// <summary>Payload of the `hardwareReprobed` event. Engine re-runs the
 /// probe in response to `verifyCudaPack` (Settings → Performance "Verify

@@ -419,18 +419,26 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     private void OnTileImageOpened(object sender, RoutedEventArgs e)
     {
         if (sender is not Microsoft.UI.Xaml.Controls.Image img) return;
+        // [THUMB] tracing — confirms the Image control actually decoded its
+        // assigned BitmapImage. If this never fires for a tile whose
+        // BITMAP_SET log line was emitted, the chain breaks between
+        // ThumbnailService and the Image.Source binding.
+        var path = (img.DataContext as ViewModels.FileTile)?.Path
+                  ?? (img.GetValue(FrameworkElement.TagProperty) as string)
+                  ?? "?";
+        Services.DebugLog.Debug($"[THUMB] IMAGE_OPENED file={path}");
+        // XAML default is Opacity 1, but OnRepeaterElementClearing may have
+        // forced the composition visual to 0 to reset for recycle. Snap
+        // back to 1 here so the tile is visible. (Earlier code did a
+        // spring 0→1, which flickered for already-decoded BitmapImages
+        // arriving via the LRU; the parent tile-entry spring in
+        // OnRepeaterElementPrepared carries the visual reveal.)
         try
         {
             var visual = Microsoft.UI.Xaml.Hosting.ElementCompositionPreview.GetElementVisual(img);
             visual.StopAnimation("Opacity");
-            if (FileID.Theme.Motion.ReducedMotion.Instance.IsReduced)
-            {
-                visual.Opacity = 1f;
-                return;
-            }
-            visual.Opacity = 0f;
-            var t = FileID.Theme.Motion.SpringEasing.Tokens.Standard;
-            FileID.Theme.Motion.SpringEasing.AnimateOpacity(img, 1f, t.Response, t.DampingFraction);
+            visual.Opacity = 1f;
+            Services.DebugLog.Debug($"[THUMB] OPACITY_SET file={path} value=1");
         }
         catch (Exception ex)
         {
@@ -480,15 +488,31 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             // the result is published. Using TryEnqueue makes the
             // UI-thread assignment unambiguous.
             var bmp = await _thumbnails.RequestAsync(tile.Path, tile.ModifiedAt, ct).ConfigureAwait(false);
-            if (bmp != null && !ct.IsCancellationRequested && !tile.IsDetached)
+            if (bmp == null)
             {
-                DispatcherQueue.TryEnqueue(() =>
-                {
-                    if (!tile.IsDetached) tile.Thumbnail = bmp;
-                });
+                Services.DebugLog.Debug($"[THUMB] LOAD_NULL file={tile.Path}");
+                return;
+            }
+            if (ct.IsCancellationRequested || tile.IsDetached)
+            {
+                Services.DebugLog.Debug($"[THUMB] LOAD_DROPPED file={tile.Path} cancelled={ct.IsCancellationRequested} detached={tile.IsDetached}");
+                return;
+            }
+            var enqueued = DispatcherQueue.TryEnqueue(() =>
+            {
+                if (tile.IsDetached) return;
+                tile.Thumbnail = bmp;
+                Services.DebugLog.Debug($"[THUMB] TILE_THUMBNAIL_ASSIGNED file={tile.Path}");
+            });
+            if (!enqueued)
+            {
+                Services.DebugLog.Debug($"[THUMB] ASSIGN_ENQUEUE_FAILED file={tile.Path}");
             }
         }
-        catch { /* swallow -- placeholder stays */ }
+        catch (Exception ex)
+        {
+            Services.DebugLog.Debug($"[THUMB] LOAD_EX file={tile.Path} ex={ex.GetType().Name}");
+        }
         finally
         {
             _inflight.TryRemove(tile, out _);

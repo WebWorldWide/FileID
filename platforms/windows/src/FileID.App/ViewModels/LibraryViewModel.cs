@@ -349,6 +349,18 @@ internal sealed class FileTile : INotifyPropertyChanged
     public required long SizeBytes { get; init; }
     public required bool HasFaces { get; init; }
     public required bool HasText { get; init; }
+    /// <summary>Top auto-tags from the scan classifier + enriched extras.
+    /// Library card binds the first 2 via TagChip controls; null/empty
+    /// → chip row collapses. Mirrors macOS LibraryView.swift:729-744
+    /// `topTags.prefix(2)` behaviour.</summary>
+    public System.Collections.Generic.IReadOnlyList<string> Tags { get; init; }
+        = System.Array.Empty<string>();
+    public bool HasTags => Tags is { Count: > 0 };
+    /// <summary>First 2 tags only — Library card shows two chips max,
+    /// matching the macOS prefix(2). Cached as a list so the
+    /// ItemsControl binding doesn't re-take the slice on every render.</summary>
+    public System.Collections.Generic.IReadOnlyList<string> TopTwoTags { get; init; }
+        = System.Array.Empty<string>();
 
     public string SizeDisplay => FormatSize(SizeBytes);
 
@@ -399,17 +411,32 @@ internal sealed class FileTile : INotifyPropertyChanged
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    public static FileTile From(FileRow r) => new()
+    public static FileTile From(FileRow r)
     {
-        Id = r.Id,
-        Path = r.Path,
-        FileName = System.IO.Path.GetFileName(r.Path),
-        Kind = r.Kind,
-        SizeBytes = r.SizeBytes,
-        HasFaces = r.HasFaces,
-        HasText = r.HasText,
-        ModifiedAt = r.ModifiedAt,
-    };
+        var tags = r.Tags ?? (System.Collections.Generic.IReadOnlyList<string>)System.Array.Empty<string>();
+        // Materialise the prefix(2) once so the card binding doesn't
+        // allocate on every layout pass.
+        var topTwo = tags.Count <= 2
+            ? tags
+            : (System.Collections.Generic.IReadOnlyList<string>)new System.Collections.Generic.List<string>
+            {
+                tags[0],
+                tags[1],
+            };
+        return new FileTile
+        {
+            Id = r.Id,
+            Path = r.Path,
+            FileName = System.IO.Path.GetFileName(r.Path),
+            Kind = r.Kind,
+            SizeBytes = r.SizeBytes,
+            HasFaces = r.HasFaces,
+            HasText = r.HasText,
+            ModifiedAt = r.ModifiedAt,
+            Tags = tags,
+            TopTwoTags = topTwo,
+        };
+    }
 
     private static string FormatSize(long bytes)
     {

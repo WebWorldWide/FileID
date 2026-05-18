@@ -134,6 +134,11 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
                 OnPropertyChanged(nameof(ExecutionProviderText));
                 OnPropertyChanged(nameof(RecommendationText));
                 OnPropertyChanged(nameof(RecommendationVisibility));
+                OnPropertyChanged(nameof(CpuTopologyText));
+                OnPropertyChanged(nameof(MemoryDiagnosticsText));
+                OnPropertyChanged(nameof(GpuDiagnosticsText));
+                OnPropertyChanged(nameof(PowerDiagnosticsText));
+                OnPropertyChanged(nameof(ThumbnailDiagnosticsText));
                 DispatcherQueue.TryEnqueue(SyncNvidiaSection);
             }
             else if (e.PropertyName == nameof(EngineClient.LastHardwareReprobe))
@@ -322,6 +327,95 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
 
     public Visibility RecommendationVisibility =>
         string.IsNullOrEmpty(RecommendationText) ? Visibility.Collapsed : Visibility.Visible;
+
+    /// <summary>P/E core split when hybrid, plus logical thread count
+    /// and the worker cap currently in effect. Falls back to physical
+    /// cores when running against an older engine that didn't populate
+    /// the new fields.</summary>
+    public string CpuTopologyText
+    {
+        get
+        {
+            var hw = EngineClient.Instance.Info?.Hardware;
+            if (hw is null) return "Detection pending…";
+            string topo = (hw.PCores > 0 && hw.ECores > 0)
+                ? $"{hw.PCores}P + {hw.ECores}E (hybrid)"
+                : (hw.PCores > 0 ? $"{hw.PCores} cores" : $"{hw.PhysicalCpuCores} cores");
+            string logical = hw.LogicalCpuCores > 0 ? $" · {hw.LogicalCpuCores} logical threads" : string.Empty;
+            string worker = hw.WorkerCap > 0 ? $" · worker cap {hw.WorkerCap}" : string.Empty;
+            return $"{topo}{logical}{worker}";
+        }
+    }
+
+    public string MemoryDiagnosticsText
+    {
+        get
+        {
+            var hw = EngineClient.Instance.Info?.Hardware;
+            if (hw is null) return "Detection pending…";
+            if (hw.RamTotalMb == 0 && hw.RamAvailableMb == 0)
+            {
+                return "(engine older than V15.9 — metrics not populated)";
+            }
+            string tier = string.IsNullOrEmpty(hw.MemoryTier) ? "unknown" : hw.MemoryTier;
+            return $"{hw.RamAvailableMb / 1024.0:0.#} GB available of {hw.RamTotalMb / 1024.0:0.#} GB · tier: {tier}";
+        }
+    }
+
+    public string GpuDiagnosticsText
+    {
+        get
+        {
+            var hw = EngineClient.Instance.Info?.Hardware;
+            if (hw is null) return "Detection pending…";
+            string vramStr = hw.VramMb > 0 ? $" · {hw.VramMb / 1024.0:0.#} GB VRAM" : string.Empty;
+            string npuStr = hw.NpuPresent ? " · NPU present" : string.Empty;
+            return $"{GpuSummaryText}{vramStr}{npuStr}";
+        }
+    }
+
+    public string PowerDiagnosticsText
+    {
+        get
+        {
+            var hw = EngineClient.Instance.Info?.Hardware;
+            if (hw is null) return "Detection pending…";
+            if (string.IsNullOrEmpty(hw.PowerSource))
+            {
+                return "(engine older than V15.9 — metrics not populated)";
+            }
+            string source = hw.PowerSource switch
+            {
+                "ac" => "AC power",
+                "battery" => "Battery",
+                _ => "Unknown",
+            };
+            string battery = hw.BatteryPercent.HasValue ? $" · {hw.BatteryPercent.Value}% charge" : string.Empty;
+            string profile = string.IsNullOrEmpty(hw.ActiveProfile) ? string.Empty : $" · profile: {hw.ActiveProfile}";
+            return $"{source}{battery}{profile}";
+        }
+    }
+
+    public string ThumbnailDiagnosticsText
+    {
+        get
+        {
+            var s = Services.ThumbnailService.Stats;
+            double diskMb = s.DiskBytes / (1024.0 * 1024.0);
+            return $"ok={s.RenderedOk} failed={s.RenderedFailed} fallback={s.FallbackUsed} dropped={s.DroppedDispatcher}\n" +
+                   $"disk: hits={s.DiskHits} writes={s.DiskWrites} sweeps={s.DiskSweeps} cached={diskMb:0.#} MB";
+        }
+    }
+
+    private void OnRefreshDiagnosticsClicked(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnRefreshDiagnosticsClicked), () =>
+        {
+            OnPropertyChanged(nameof(CpuTopologyText));
+            OnPropertyChanged(nameof(MemoryDiagnosticsText));
+            OnPropertyChanged(nameof(GpuDiagnosticsText));
+            OnPropertyChanged(nameof(PowerDiagnosticsText));
+            OnPropertyChanged(nameof(ThumbnailDiagnosticsText));
+        });
 
     public string AppVersionText
     {

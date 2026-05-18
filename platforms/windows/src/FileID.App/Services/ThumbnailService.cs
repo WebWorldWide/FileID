@@ -31,7 +31,11 @@ public readonly record struct ThumbnailDiagnostics(
     long RenderedOk,
     long RenderedFailed,
     long DroppedDispatcher,
-    long FallbackUsed);
+    long FallbackUsed,
+    long DiskHits,
+    long DiskWrites,
+    long DiskSweeps,
+    long DiskBytes);
 
 internal sealed class ThumbnailService : IDisposable
 {
@@ -61,7 +65,11 @@ internal sealed class ThumbnailService : IDisposable
         Interlocked.Read(ref _renderedOk),
         Interlocked.Read(ref _renderedFailed),
         Interlocked.Read(ref _droppedDispatcher),
-        Interlocked.Read(ref _fallbackUsed));
+        Interlocked.Read(ref _fallbackUsed),
+        ThumbnailDiskCache.DiskHits,
+        ThumbnailDiskCache.DiskWrites,
+        ThumbnailDiskCache.DiskSweeps,
+        ThumbnailDiskCache.CachedBytes);
     /// <summary>captured at construction time on the UI thread
     /// so the worker (running on a thread-pool thread) always has a
     /// reliable dispatcher to marshal BitmapImage.SetSourceAsync back to.
@@ -97,16 +105,20 @@ internal sealed class ThumbnailService : IDisposable
 
     public Task<BitmapImage?> RequestAsync(string path, double? modifiedAt, CancellationToken ct)
     {
+        DebugLog.Debug($"[THUMB] REQUEST file={path}");
         var key = CacheKey(path, modifiedAt);
         if (_cache.TryGetValue(key, out BitmapImage? cached) && cached != null)
         {
+            DebugLog.Debug($"[THUMB] L1_HIT file={path}");
             return Task.FromResult<BitmapImage?>(cached);
         }
+        DebugLog.Debug($"[THUMB] L1_MISS file={path}");
         var tcs = new TaskCompletionSource<BitmapImage?>(
             TaskCreationOptions.RunContinuationsAsynchronously);
         var ok = _queue.Writer.TryWrite(new ThumbnailRequest(path, modifiedAt, tcs, ct));
         if (!ok)
         {
+            DebugLog.Debug($"[THUMB] QUEUE_FULL_DROP file={path}");
             tcs.TrySetResult(null);
         }
         return tcs.Task;
@@ -128,7 +140,7 @@ internal sealed class ThumbnailService : IDisposable
                 // post-await continuation here completes the caller's
                 // TCS with that handle, and we want the caller's continuation
                 // to also resume on the UI thread when it sets tile.Thumbnail.
-                var bmp = await RenderAsync(req.Path, _uiDispatcher, ct);
+                var bmp = await RenderAsync(req.Path, req.ModifiedAt, _uiDispatcher, ct);
                 if (bmp != null)
                 {
                     var key = CacheKey(req.Path, req.ModifiedAt);
@@ -169,6 +181,7 @@ internal sealed class ThumbnailService : IDisposable
 
     private static async Task<BitmapImage?> RenderAsync(
         string path,
+        double? modifiedAt,
         Microsoft.UI.Dispatching.DispatcherQueue? uiDispatcher,
         CancellationToken ct)
     {
@@ -177,166 +190,171 @@ internal sealed class ThumbnailService : IDisposable
             Interlocked.Increment(ref _renderedFailed);
             return null;
         }
-        Windows.Storage.FileProperties.StorageItemThumbnail? thumb = null;
+
+        // BitmapImage is a WinUI DispatcherObject — must be constructed on
+        // a UI thread. Caller captures the dispatcher at ctor time; the
+        // window-hosted fallback is a last resort during startup/shutdown.
+        var dispatcher = uiDispatcher ?? FileID.App.HostWindow?.DispatcherQueue;
+        if (dispatcher is null)
+        {
+            Interlocked.Increment(ref _droppedDispatcher);
+            DebugLog.Warn($"ThumbnailService.RenderAsync: no UI dispatcher available; skipping ({path}).");
+            return null;
+        }
+
+        // 0) Disk cache — survives app restart.
+        var diskHit = await ThumbnailDiskCache.TryReadAsync(path, modifiedAt, dispatcher, ct)
+            .ConfigureAwait(false);
+        if (diskHit != null)
+        {
+            DebugLog.Debug($"[THUMB] L2_HIT file={path}");
+            Interlocked.Increment(ref _renderedOk);
+            return diskHit;
+        }
+        DebugLog.Debug($"[THUMB] L2_MISS file={path}");
+
+        // 1) Shell IThumbnailProvider chain — same one Explorer / Photos
+        //    use. Office / RAW / HEIC / etc. all work through this path.
+        var ext = Path.GetExtension(path);
+        var isKnownImage = ImageExtensions.Contains(ext);
         try
         {
-            var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(path).AsTask(ct).ConfigureAwait(false);
-            thumb = await file
+            var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(path)
+                .AsTask(ct).ConfigureAwait(false);
+            using var thumb = await file
                 .GetThumbnailAsync(
                     Windows.Storage.FileProperties.ThumbnailMode.SingleItem,
                     ThumbnailRequestPx,
                     Windows.Storage.FileProperties.ThumbnailOptions.UseCurrentScale)
                 .AsTask(ct)
                 .ConfigureAwait(false);
-            // CRASH FIX: BitmapImage is a WinUI DispatcherObject.
-            // Constructing it on the worker thread that resumed our await
-            // is what RaiseFailFastException's the process from
-            // Composition's next-frame check — bypassing every managed
-            // exception handler. Construct + SetSourceAsync + Dispose all
-            // happen inside the dispatcher lambda below.
-            var dispatcher = uiDispatcher ?? FileID.App.HostWindow?.DispatcherQueue;
-            if (dispatcher is null)
+            if (thumb != null && thumb.Size > 0)
             {
-                Interlocked.Increment(ref _droppedDispatcher);
-                DebugLog.Warn("ThumbnailService.RenderAsync: no UI dispatcher available; skipping.");
-                thumb?.Dispose();
-                return null;
-            }
-            if (thumb == null || thumb.Size == 0)
-            {
-                thumb?.Dispose();
-                thumb = null;
-                // shell provider returned nothing. For known image
-                // formats this is the most common reason the user sees
-                // "blank tiles" — fall back to BitmapImage(Uri), the same
-                // path Explorer's Photos uses. DecodePixelWidth caps memory.
-                var ext = Path.GetExtension(path);
-                if (ImageExtensions.Contains(ext))
+                var bytes = await ReadAllBytesAsync(thumb, ct).ConfigureAwait(false);
+                DebugLog.Debug($"[THUMB] SHELL_OK file={path} bytes={bytes.Length}");
+                var bmp = await RenderFromBytesOnDispatcherAsync(bytes, dispatcher, ct).ConfigureAwait(false);
+                if (bmp != null)
                 {
-                    var fallback = await RenderImageFallbackOnDispatcherAsync(path, dispatcher, ct).ConfigureAwait(false);
-                    if (fallback != null)
-                    {
-                        Interlocked.Increment(ref _fallbackUsed);
-                        Interlocked.Increment(ref _renderedOk);
-                        return fallback;
-                    }
+                    DebugLog.Debug($"[THUMB] BITMAP_SET file={path} src=shell");
+                    _ = ThumbnailDiskCache.TryWriteAsync(path, modifiedAt, bytes);
+                    Interlocked.Increment(ref _renderedOk);
+                    return bmp;
                 }
-                Interlocked.Increment(ref _renderedFailed);
-                return null;
             }
-            var capturedThumb = thumb;
-            thumb = null;
-            var bmp = await RenderShellThumbOnDispatcherAsync(capturedThumb, dispatcher, ct).ConfigureAwait(false);
-            if (bmp != null) { Interlocked.Increment(ref _renderedOk); }
-            else { Interlocked.Increment(ref _renderedFailed); }
-            return bmp;
+            else
+            {
+                DebugLog.Debug($"[THUMB] SHELL_NULL file={path}");
+            }
         }
         catch (Exception ex)
         {
-            Interlocked.Increment(ref _renderedFailed);
-            DebugLog.Warn("ThumbnailService.RenderAsync: " + ex.Message);
-            try { thumb?.Dispose(); } catch { /* swallow */ }
-            return null;
+            // V15.6 fix: previously this `catch` returned null directly,
+            // bypassing the image-extension fallback below. Now we log
+            // the exception TYPE (was just .Message) and fall through to
+            // the fallback path so a JPEG with a broken shell provider
+            // still renders. Don't bump _renderedFailed here — fallback
+            // gets a turn and bumps the right counter on the way out.
+            DebugLog.Debug($"[THUMB] SHELL_EX file={path} ex={ex.GetType().Name}");
+            DebugLog.Warn(
+                $"ThumbnailService shell-path ({path}): {ex.GetType().Name}: {ex.Message}");
         }
+
+        // 2) Image-extension fallback — eager-decode from the original
+        //    file bytes. Reached when (a) shell returned null/empty, OR
+        //    (b) shell threw. The V15.6 bug was that case (b) skipped
+        //    this branch.
+        if (isKnownImage)
+        {
+            try
+            {
+                var fileBytes = await File.ReadAllBytesAsync(path, ct).ConfigureAwait(false);
+                var bmp = await RenderFromBytesOnDispatcherAsync(fileBytes, dispatcher, ct).ConfigureAwait(false);
+                if (bmp != null)
+                {
+                    DebugLog.Debug($"[THUMB] IMG_FB_OK file={path}");
+                    DebugLog.Debug($"[THUMB] BITMAP_SET file={path} src=image-fallback");
+                    _ = ThumbnailDiskCache.TryWriteAsync(path, modifiedAt, fileBytes);
+                    Interlocked.Increment(ref _fallbackUsed);
+                    Interlocked.Increment(ref _renderedOk);
+                    return bmp;
+                }
+                DebugLog.Debug($"[THUMB] IMG_FB_NULL file={path}");
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Debug($"[THUMB] IMG_FB_EX file={path} ex={ex.GetType().Name}");
+                DebugLog.Warn(
+                    $"ThumbnailService image-fallback ({path}): {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        DebugLog.Debug($"[THUMB] RENDER_FAILED file={path}");
+        Interlocked.Increment(ref _renderedFailed);
+        return null;
     }
 
-    private static async Task<BitmapImage?> RenderShellThumbOnDispatcherAsync(
-        Windows.Storage.FileProperties.StorageItemThumbnail capturedThumb,
+    /// <summary>Drain a StorageItemThumbnail's IRandomAccessStream into a
+    /// byte[] so we can both decode it and persist it to the disk cache.
+    /// Shell thumbnails are typically 5–50 KB; allocating ~64 KB worth
+    /// of intermediate buffer is well within budget.</summary>
+    private static async Task<byte[]> ReadAllBytesAsync(
+        Windows.Storage.FileProperties.StorageItemThumbnail thumb,
+        CancellationToken ct)
+    {
+        var size = (uint)thumb.Size;
+        var buffer = new Windows.Storage.Streams.Buffer(size);
+        await thumb.ReadAsync(buffer, size, Windows.Storage.Streams.InputStreamOptions.None)
+            .AsTask(ct).ConfigureAwait(false);
+        using var reader = Windows.Storage.Streams.DataReader.FromBuffer(buffer);
+        var bytes = new byte[buffer.Length];
+        reader.ReadBytes(bytes);
+        return bytes;
+    }
+
+    /// <summary>Decode bytes into a BitmapImage on the UI dispatcher.
+    /// Eager decode (SetSourceAsync from an InMemoryRandomAccessStream)
+    /// avoids the V15.5 lazy-UriSource bug where ImageOpened never fired
+    /// for mid-scan files.</summary>
+    private static async Task<BitmapImage?> RenderFromBytesOnDispatcherAsync(
+        byte[] bytes,
         Microsoft.UI.Dispatching.DispatcherQueue dispatcher,
         CancellationToken ct)
     {
         var tcs = new TaskCompletionSource<BitmapImage?>(
             TaskCreationOptions.RunContinuationsAsynchronously);
-        if (!TryEnqueueWithRetry(dispatcher, () => RunSetSource(capturedThumb, tcs, ct)))
+        var ok = TryEnqueueWithRetry(dispatcher, () => RunBytesSetSource(bytes, tcs, ct));
+        if (!ok)
         {
             Interlocked.Increment(ref _droppedDispatcher);
-            DebugLog.Warn("ThumbnailService: dispatcher.TryEnqueue returned false after retry (shutdown?).");
-            try { capturedThumb.Dispose(); } catch { /* swallow */ }
             return null;
         }
         return await tcs.Task.ConfigureAwait(false);
     }
 
-    private static async void RunSetSource(
-        Windows.Storage.FileProperties.StorageItemThumbnail capturedThumb,
+    private static async void RunBytesSetSource(
+        byte[] bytes,
         TaskCompletionSource<BitmapImage?> tcs,
         CancellationToken ct)
     {
         try
         {
-            var bmp = new BitmapImage();
-            await bmp.SetSourceAsync(capturedThumb).AsTask(ct);
-            tcs.TrySetResult(bmp);
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Warn("ThumbnailService UI render: " + ex.Message);
-            tcs.TrySetResult(null);
-        }
-        finally
-        {
-            try { capturedThumb.Dispose(); } catch { /* swallow */ }
-        }
-    }
-
-    private static async Task<BitmapImage?> RenderImageFallbackOnDispatcherAsync(
-        string path,
-        Microsoft.UI.Dispatching.DispatcherQueue dispatcher,
-        CancellationToken ct)
-    {
-        // open the file as a random-access stream on this worker
-        // thread, then SetSourceAsync on the UI dispatcher. Eager-decode
-        // pattern mirrors the shell path's RunSetSource (known-good).
-        // The UriSource-lazy alternative leaves BitmapImages stuck
-        // un-decoded for mid-scan files; this guarantees the bitmap
-        // either populates or we log + return null + bump _renderedFailed.
-        Windows.Storage.StorageFile file;
-        Windows.Storage.Streams.IRandomAccessStream stream;
-        try
-        {
-            file = await Windows.Storage.StorageFile.GetFileFromPathAsync(path)
-                .AsTask(ct).ConfigureAwait(false);
-            stream = await file.OpenAsync(Windows.Storage.FileAccessMode.Read)
-                .AsTask(ct).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Warn($"ThumbnailService image-fallback open ({path}): {ex.Message}");
-            return null;
-        }
-
-        var tcs = new TaskCompletionSource<BitmapImage?>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var enqueued = TryEnqueueWithRetry(dispatcher, () => RunFallbackSetSource(stream, path, tcs, ct));
-        if (!enqueued)
-        {
-            Interlocked.Increment(ref _droppedDispatcher);
-            try { stream.Dispose(); } catch { /* swallow */ }
-            return null;
-        }
-        return await tcs.Task.ConfigureAwait(false);
-    }
-
-    private static async void RunFallbackSetSource(
-        Windows.Storage.Streams.IRandomAccessStream stream,
-        string path,
-        TaskCompletionSource<BitmapImage?> tcs,
-        CancellationToken ct)
-    {
-        try
-        {
+            using var stream = new Windows.Storage.Streams.InMemoryRandomAccessStream();
+            using (var writer = new Windows.Storage.Streams.DataWriter(stream.GetOutputStreamAt(0)))
+            {
+                writer.WriteBytes(bytes);
+                await writer.StoreAsync().AsTask(ct);
+                await writer.FlushAsync().AsTask(ct);
+                writer.DetachStream();
+            }
+            stream.Seek(0);
             var bmp = new BitmapImage { DecodePixelWidth = (int)ThumbnailRequestPx };
             await bmp.SetSourceAsync(stream).AsTask(ct);
             tcs.TrySetResult(bmp);
         }
         catch (Exception ex)
         {
-            DebugLog.Warn($"ThumbnailService image-fallback decode ({path}): {ex.Message}");
+            DebugLog.Warn($"ThumbnailService bytes-decode: {ex.GetType().Name}: {ex.Message}");
             tcs.TrySetResult(null);
-        }
-        finally
-        {
-            try { stream.Dispose(); } catch { /* swallow */ }
         }
     }
 

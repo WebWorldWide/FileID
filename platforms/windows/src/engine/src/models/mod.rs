@@ -19,6 +19,7 @@
 // pack detection) live in `runtime.rs`.
 
 pub mod arcface;
+pub mod classifier;
 pub mod clip_text;
 pub mod clip_tokenizer;
 pub mod mobileclip;

@@ -75,6 +75,21 @@ impl RuntimeProbe {
             openvino_pack_present,
             qnn_pack_present,
         );
+        // One-time perf hint: an NVIDIA card without the CUDA Performance
+        // Pack falls through to DirectML, which is ~3-5× slower for ML
+        // inference. Surface a single info line so users see the upgrade
+        // path in the engine log. No auto-install, no UI prompt — install
+        // is gated behind Settings → Performance.
+        if vendor == GpuVendor::Nvidia && provider == ExecutionProvider::DirectMl {
+            static EMITTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+            EMITTED.get_or_init(|| {
+                tracing::info!(
+                    "perf: NVIDIA GPU detected but CUDA Performance Pack not installed; \
+                     using DirectML (~3-5x slower for ML inference). \
+                     Install via Settings → Models → CUDA Pack for full throughput."
+                );
+            });
+        }
         Self {
             vendor,
             adapter_name,

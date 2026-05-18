@@ -44,6 +44,16 @@ pub(crate) fn build_hardware_info() -> HardwareInfo {
         _ => String::new(),
     };
 
+    let topo = platform::cpu_topology();
+    let mem_tier = platform::memory_tier();
+    let ram_avail_mb = platform::available_memory_mb();
+    let ram_total_mb = (platform::physical_memory_gb() * 1024.0) as u64;
+    let vram_mb = platform::dedicated_vram_mb().unwrap_or(0);
+    let (power_src, battery_pct) = platform::power_status();
+    // First-pass NPU detection — QNN pack presence is our existing proxy
+    // for "Hexagon NPU usable". Intel AI Boost / AMD XDNA detection is
+    // a NEXT.md follow-up (need OpenVINO NPU plugin / VitisAI EP probes).
+    let npu_present = matches!(probe.vendor, GpuVendor::Qualcomm) && probe.qnn_pack_present;
     HardwareInfo {
         gpu_vendor: vendor_str.into(),
         adapter_name: probe.adapter_name.clone(),
@@ -53,6 +63,21 @@ pub(crate) fn build_hardware_info() -> HardwareInfo {
         openvino_pack_present: probe.openvino_pack_present,
         qnn_pack_present: probe.qnn_pack_present,
         recommendation,
+        p_cores: topo.p_cores,
+        e_cores: topo.e_cores,
+        logical_cpu_cores: topo.logical,
+        worker_cap: topo.worker_cap(),
+        ram_total_mb,
+        ram_available_mb: ram_avail_mb,
+        memory_tier: mem_tier.as_str().into(),
+        vram_mb,
+        npu_present,
+        power_source: power_src.as_str().into(),
+        battery_percent: battery_pct,
+        // Phase-1 ships "auto" only; the Eco/Performance selector in
+        // Settings is shown but grayed pending the throttling/release
+        // valve work tracked in NEXT.md.
+        active_profile: "auto".into(),
     }
 }
 

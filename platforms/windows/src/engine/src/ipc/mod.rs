@@ -502,7 +502,57 @@ pub struct HardwareInfo {
     /// already on the optimal path.
     #[serde(default)]
     pub recommendation: String,
+    // ─── V15.9 adaptive-utilization diagnostics (Issue 3). All optional
+    //     so an older C# build talking to a newer engine still deserializes
+    //     cleanly. ───
+    /// CPU performance-core count (Intel hybrid 12th-gen+, future AMD
+    /// dense-core parts). 0 on non-hybrid CPUs (use physical_cpu_cores).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub p_cores: u32,
+    /// CPU efficiency-core count. 0 on non-hybrid CPUs.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub e_cores: u32,
+    /// Logical processor count (cores × SMT threads).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub logical_cpu_cores: u32,
+    /// Worker thread cap currently in effect (= cpu_topology().worker_cap()).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub worker_cap: u32,
+    /// Total physical RAM in MiB.
+    #[serde(rename = "ramTotalMB", default, skip_serializing_if = "is_zero_u64")]
+    pub ram_total_mb: u64,
+    /// Currently-available RAM in MiB (GlobalMemoryStatusEx ullAvailPhys).
+    #[serde(rename = "ramAvailableMB", default, skip_serializing_if = "is_zero_u64")]
+    pub ram_available_mb: u64,
+    /// Active memory tier: "low" / "balanced" / "high". Drives batch size,
+    /// channel caps, ML pool size.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub memory_tier: String,
+    /// Dedicated GPU VRAM in MiB (DXGI DedicatedVideoMemory). 0 when no
+    /// physical adapter was found.
+    #[serde(rename = "vramMB", default, skip_serializing_if = "is_zero_u64")]
+    pub vram_mb: u64,
+    /// NPU presence (Intel AI Boost, AMD XDNA, Qualcomm Hexagon).
+    /// Detection is first-pass — Qualcomm via the existing QNN probe;
+    /// Intel/AMD report `false` for now (NEXT.md entry tracks).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub npu_present: bool,
+    /// Power source: "ac" / "battery" / "unknown".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub power_source: String,
+    /// Battery percent (0–100) when on battery. None on desktops without
+    /// a battery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub battery_percent: Option<u8>,
+    /// Currently-active performance profile: "eco" / "auto" / "performance".
+    /// Phase-1 ships "auto" only; Eco / Performance are grayed in the UI.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub active_profile: String,
 }
+
+fn is_zero_u32(v: &u32) -> bool { *v == 0 }
+fn is_zero_u64(v: &u64) -> bool { *v == 0 }
+fn is_false(v: &bool) -> bool { !*v }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

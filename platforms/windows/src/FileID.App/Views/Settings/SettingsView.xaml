@@ -421,6 +421,99 @@
                 </StackPanel>
             </Border>
 
+            <!-- V15.9 Diagnostics — adaptive hardware utilization snapshot.
+                 Shows what the engine detected at startup + the active
+                 throughput profile. Gives the user confidence the
+                 adaptive logic is doing something. -->
+            <Border CornerRadius="12"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    Padding="20">
+                <StackPanel Spacing="14">
+                    <TextBlock Text="Diagnostics" Style="{StaticResource SubtitleTextBlockStyle}"/>
+
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="CPU"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   FontWeight="SemiBold"
+                                   CharacterSpacing="40" />
+                        <TextBlock Text="{x:Bind CpuTopologyText, Mode=OneWay}"
+                                   Style="{StaticResource BodyTextBlockStyle}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="Memory"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   FontWeight="SemiBold"
+                                   CharacterSpacing="40" />
+                        <TextBlock Text="{x:Bind MemoryDiagnosticsText, Mode=OneWay}"
+                                   Style="{StaticResource BodyTextBlockStyle}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="GPU / NPU"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   FontWeight="SemiBold"
+                                   CharacterSpacing="40" />
+                        <TextBlock Text="{x:Bind GpuDiagnosticsText, Mode=OneWay}"
+                                   Style="{StaticResource BodyTextBlockStyle}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="Power"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   FontWeight="SemiBold"
+                                   CharacterSpacing="40" />
+                        <TextBlock Text="{x:Bind PowerDiagnosticsText, Mode=OneWay}"
+                                   Style="{StaticResource BodyTextBlockStyle}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="Thumbnails"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   FontWeight="SemiBold"
+                                   CharacterSpacing="40" />
+                        <TextBlock Text="{x:Bind ThumbnailDiagnosticsText, Mode=OneWay}"
+                                   FontFamily="Consolas"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   TextWrapping="Wrap" />
+                        <Button Content="Refresh"
+                                Click="OnRefreshDiagnosticsClicked"
+                                HorizontalAlignment="Left" />
+                    </StackPanel>
+
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="Performance profile"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   FontWeight="SemiBold"
+                                   CharacterSpacing="40" />
+                        <ComboBox x:Name="ProfileCombo"
+                                  Width="280"
+                                  SelectedIndex="1"
+                                  IsEnabled="False">
+                            <ComboBoxItem Content="Eco — force low-memory mode (coming soon)" Tag="eco"/>
+                            <ComboBoxItem Content="Auto — adaptive (recommended)" Tag="auto"/>
+                            <ComboBoxItem Content="Performance — uncap pool (coming soon)" Tag="performance"/>
+                        </ComboBox>
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   TextWrapping="Wrap"
+                                   Text="Auto applies the adaptive rules above (storage-aware walk threads, RAM-aware batch sizing, P/E core split). Eco and Performance ship in a follow-up." />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
             <!-- Behavior toggles. Each binds to a key in app-settings.json
                  and persists across launches. -->
             <Border CornerRadius="12"

@@ -226,7 +226,8 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             var rows = new List<FileRow>(limit);
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = """
-                SELECT id, path_text, kind, size_bytes, modified_at, has_faces, has_text
+                SELECT id, path_text, kind, size_bytes, modified_at, has_faces, has_text,
+                       (SELECT GROUP_CONCAT(tag, '|') FROM tags WHERE file_id = files.id AND source = 'auto') AS auto_tags
                 FROM files
                 ORDER BY modified_at DESC NULLS LAST LIMIT $limit
                 """;
@@ -375,14 +376,31 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
         finally { _gate.Release(); }
     }
 
-    private static FileRow ReadRow(SqliteDataReader reader) => new(
-        Id: reader.GetInt64(0),
-        Path: reader.GetString(1),
-        Kind: reader.GetString(2),
-        SizeBytes: reader.GetInt64(3),
-        ModifiedAt: reader.IsDBNull(4) ? null : reader.GetDouble(4),
-        HasFaces: reader.GetInt32(5) != 0,
-        HasText: reader.GetInt32(6) != 0);
+    private static FileRow ReadRow(SqliteDataReader reader)
+    {
+        // Optional 8th column (auto-tags, pipe-delimited via
+        // GROUP_CONCAT). Queries that don't project tags get
+        // FieldCount=7 and Tags stays null; the Library card binding
+        // hides the chip strip when Tags is null/empty.
+        System.Collections.Generic.IReadOnlyList<string>? tags = null;
+        if (reader.FieldCount > 7 && !reader.IsDBNull(7))
+        {
+            var raw = reader.GetString(7);
+            if (!string.IsNullOrEmpty(raw))
+            {
+                tags = raw.Split('|', StringSplitOptions.RemoveEmptyEntries);
+            }
+        }
+        return new FileRow(
+            Id: reader.GetInt64(0),
+            Path: reader.GetString(1),
+            Kind: reader.GetString(2),
+            SizeBytes: reader.GetInt64(3),
+            ModifiedAt: reader.IsDBNull(4) ? null : reader.GetDouble(4),
+            HasFaces: reader.GetInt32(5) != 0,
+            HasText: reader.GetInt32(6) != 0,
+            Tags: tags);
+    }
 
     private static string BuildMatchExpression(string query)
     {
@@ -465,7 +483,8 @@ internal sealed record FileRow(
     long SizeBytes,
     double? ModifiedAt,
     bool HasFaces,
-    bool HasText);
+    bool HasText,
+    System.Collections.Generic.IReadOnlyList<string>? Tags = null);
 
 internal sealed record FileRowWithScore(FileRow Row, float Score);
 

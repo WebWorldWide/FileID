@@ -60,6 +60,10 @@ public partial class App : Application
             Trace("EnsureDirectories");
             AppPaths.EnsureDirectories();
             Trace($"State dir = {AppPaths.Root}");
+            // Prime the disk thumbnail cache size counter so Settings →
+            // Diagnostics shows a real number without waiting for the
+            // first sweep. Cheap one-shot directory walk.
+            ThumbnailDiskCache.Prime();
             // last-session breadcrumb. Detects whether the
             // previous session died via a native fast-fail (which
             // bypasses every managed crash sink) and writes a

@@ -309,7 +309,8 @@
               "version":          { "type": "string" },
               "pid":              { "type": "integer", "minimum": 0, "description": "Engine process ID (Int32 on macOS; positive on all OSes for our use)." },
               "workerCap":        { "type": "integer", "minimum": 1 },
-              "physicalMemoryGB": { "type": "number", "minimum": 0 }
+              "physicalMemoryGB": { "type": "number", "minimum": 0 },
+              "hardware":         { "type": ["object", "null"], "description": "HardwareInfo snapshot — same shape as the hardwareReprobed event's hardware field. V15.9+ engines additionally populate: pCores, eCores, logicalCpuCores, workerCap, ramTotalMB, ramAvailableMB, memoryTier (low|balanced|high), vramMB, npuPresent, powerSource (ac|battery|unknown), batteryPercent, activeProfile (eco|auto|performance). Older engines omit those fields; consumers must default them." }
             }
           }
         }

@@ -16,10 +16,21 @@ use tokio::sync::mpsc;
 
 use crate::coordinator::ScanCoordinator;
 use crate::pipeline::tagging::TaggedFile;
+use crate::platform::{dbwriter_batch_size_for, memory_tier};
 
-/// Flush trigger thresholds.
-const BATCH_SIZE: usize = 100;
+/// Fallback flush trigger if the adaptive sizing yields nothing.
+/// `current_batch_size()` polls memory tier and picks a tier-appropriate
+/// value (Low=64, Balanced=250, High=500). 250 is the Balanced default;
+/// previous behavior was 100/200ms.
+const BATCH_SIZE_FALLBACK: usize = 250;
 const FLUSH_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Adaptive batch size driven by available RAM. Re-evaluated at the top
+/// of each batch so a memory-pressure shift mid-scan downshifts batch
+/// size before we OOM (rather than tripping the OS-level reaper).
+fn current_batch_size() -> usize {
+    dbwriter_batch_size_for(memory_tier()).max(1)
+}
 
 /// Stats reported per batch — fed into the `batchSummary` IPC event so
 /// the app sidebar can show throughput in real time.
@@ -63,13 +74,31 @@ impl DbWriter {
     where
         F: FnMut(BatchStats),
     {
-        let mut buffer: Vec<TaggedFile> = Vec::with_capacity(BATCH_SIZE);
+        let mut buffer: Vec<TaggedFile> = Vec::with_capacity(BATCH_SIZE_FALLBACK);
         let mut deadline: Option<Instant> = None;
         let mut total: u64 = 0;
         let mut failed: u64 = 0;
         let mut batch_index: u32 = 0;
+        let mut current_target = current_batch_size();
+        // Re-check memory tier every 30s so a pressure shift mid-scan
+        // downshifts batch size before we trip the OOM reaper.
+        let mut next_tier_check = Instant::now() + Duration::from_secs(30);
 
         loop {
+            if Instant::now() >= next_tier_check {
+                let new_target = current_batch_size();
+                if new_target != current_target {
+                    tracing::info!(
+                        old_batch = current_target,
+                        new_batch = new_target,
+                        tier = memory_tier().as_str(),
+                        "[DBWRITER] adaptive batch size refreshed"
+                    );
+                    current_target = new_target;
+                }
+                next_tier_check = Instant::now() + Duration::from_secs(30);
+            }
+
             let timeout = deadline
                 .map(|d| d.saturating_duration_since(Instant::now()))
                 .unwrap_or(FLUSH_INTERVAL);
@@ -81,7 +110,7 @@ impl DbWriter {
                         deadline = Some(Instant::now() + FLUSH_INTERVAL);
                     }
                     buffer.push(file);
-                    if buffer.len() >= BATCH_SIZE {
+                    if buffer.len() >= current_target {
                         let stats = self.flush(&mut buffer, &mut total, &mut failed, batch_index)?;
                         batch_index += 1;
                         deadline = None;
@@ -132,10 +161,16 @@ impl DbWriter {
         let conn = self.conn.lock();
         let tx = conn.unchecked_transaction().context("opening tx")?;
         {
-            let mut file_stmt = tx.prepare_cached(INSERT_FILE_SQL).context("preparing file insert")?;
-            let mut id_stmt = tx
-                .prepare_cached("SELECT id FROM files WHERE path_text = ?1")
-                .context("preparing file id lookup")?;
+            // INSERT ... RETURNING id (SQLite 3.35+, bundled is 3.46+)
+            // eliminates the per-row "SELECT id FROM files WHERE path_text = ?"
+            // round-trip. Previously the dbwriter ran one INSERT + one SELECT
+            // per file = 2N statement executions per batch; this drops to N.
+            // The RETURNING clause yields the row id whether the row was
+            // freshly inserted OR updated via the ON CONFLICT DO UPDATE
+            // branch — same id stability the SELECT provided.
+            let mut file_stmt = tx
+                .prepare_cached(INSERT_FILE_RETURNING_ID_SQL)
+                .context("preparing file insert (RETURNING)")?;
             let mut clip_stmt = tx
                 .prepare_cached(INSERT_CLIP_SQL)
                 .context("preparing clip insert")?;
@@ -145,6 +180,12 @@ impl DbWriter {
             let mut face_stmt = tx
                 .prepare_cached(INSERT_FACE_SQL)
                 .context("preparing face insert")?;
+            let mut tag_delete = tx
+                .prepare_cached("DELETE FROM tags WHERE file_id = ?1 AND source = 'auto'")
+                .context("preparing tag delete")?;
+            let mut tag_insert = tx
+                .prepare_cached("INSERT OR REPLACE INTO tags (file_id, tag, source, score) VALUES (?1, ?2, 'auto', NULL)")
+                .context("preparing tag insert")?;
             let mut ocr_text_stmt = tx
                 .prepare_cached("INSERT OR REPLACE INTO ocr_text (file_id, text) VALUES (?1, ?2)")
                 .context("preparing ocr_text insert")?;
@@ -165,30 +206,30 @@ impl DbWriter {
                     .unwrap_or("")
                     .to_ascii_lowercase();
 
-                file_stmt.execute(params![
-                    path_text,
-                    path_hash,
-                    f.size_bytes as i64,
-                    None::<f64>,
-                    f.modified_unix,
-                    f.scanned_unix,
-                    f.kind.as_str(),
-                    extension,
-                    f.phash,
-                    None::<f64>, // aesthetic
-                    f.has_faces as i64,
-                    f.has_text as i64,
-                    f.camera_model,
-                    f.location_lat,
-                    f.location_lon,
-                    f.failed as i64,
-                    f.error_message,
-                ])
-                .with_context(|| format!("insert {}", path_text))?;
-
-                let file_id: i64 = id_stmt
-                    .query_row(params![path_text], |row| row.get(0))
-                    .with_context(|| format!("lookup id for {}", path_text))?;
+                let file_id: i64 = file_stmt
+                    .query_row(
+                        params![
+                            path_text,
+                            path_hash,
+                            f.size_bytes as i64,
+                            None::<f64>,
+                            f.modified_unix,
+                            f.scanned_unix,
+                            f.kind.as_str(),
+                            extension,
+                            f.phash,
+                            None::<f64>, // aesthetic
+                            f.has_faces as i64,
+                            f.has_text as i64,
+                            f.camera_model,
+                            f.location_lat,
+                            f.location_lon,
+                            f.failed as i64,
+                            f.error_message,
+                        ],
+                        |row| row.get(0),
+                    )
+                    .with_context(|| format!("insert+id for {}", path_text))?;
 
                 if let Some(emb) = &f.clip_embedding {
                     let bytes = floats_to_le_bytes(emb);
@@ -246,13 +287,38 @@ impl DbWriter {
                     }
                 }
 
+                // Auto-tags (classifier output + enriched extras). Delete
+                // any prior `source='auto'` rows first so a rescan
+                // replaces stale tags atomically. User tags
+                // (`source='user'`) are untouched.
+                tag_delete
+                    .execute(params![file_id])
+                    .with_context(|| format!("tag delete for {}", path_text))?;
+                for tag in &f.tags {
+                    let trimmed = tag.trim();
+                    if trimmed.is_empty() { continue; }
+                    tag_insert
+                        .execute(params![file_id, trimmed])
+                        .with_context(|| format!("tag insert for {}", path_text))?;
+                }
+
                 if f.failed {
                     *failed += 1;
                 }
                 *total += 1;
                 vision.push(f.vision_ms);
                 clip.push(f.clip_ms);
-                store.push(insert_started.elapsed().as_secs_f64() * 1000.0);
+                let insert_ms = insert_started.elapsed().as_secs_f64() * 1000.0;
+                store.push(insert_ms);
+                if std::env::var_os("FILEID_PERF_TRACE").is_some() {
+                    tracing::debug!(
+                        target: "FileIDEngine::perf",
+                        stage = "db_write_done",
+                        path = %crate::platform::redact_path_for_log(&f.path),
+                        elapsed_ms = insert_ms,
+                        "[PERF]"
+                    );
+                }
             }
         }
         tx.commit().context("commit batch")?;
@@ -316,6 +382,10 @@ fn percentile(values: &mut [f64], p: f64) -> f64 {
     values[idx]
 }
 
+/// Bare INSERT (no RETURNING) — retained for test fixtures that don't
+/// need the id. The hot-path writer uses `INSERT_FILE_RETURNING_ID_SQL`
+/// below, which is identical plus a `RETURNING id` suffix.
+#[allow(dead_code)]  // used by test fixtures only; bin path uses the RETURNING variant.
 const INSERT_FILE_SQL: &str = r#"
     INSERT INTO files (
         path_text, path_hash, size_bytes,
@@ -342,6 +412,40 @@ const INSERT_FILE_SQL: &str = r#"
         location_lon = excluded.location_lon,
         failed       = excluded.failed,
         error_message= excluded.error_message
+"#;
+
+/// Hot-path INSERT. Returns `id` whether the row was freshly inserted or
+/// updated via the ON CONFLICT DO UPDATE branch — SQLite 3.35+ guarantees
+/// RETURNING fires on both paths. Eliminates the per-row SELECT round
+/// trip the previous implementation paid (2N statement executions per
+/// batch → N).
+const INSERT_FILE_RETURNING_ID_SQL: &str = r#"
+    INSERT INTO files (
+        path_text, path_hash, size_bytes,
+        created_at, modified_at, scanned_at,
+        kind, extension,
+        phash, aesthetic,
+        has_faces, has_text,
+        camera_model, location_lat, location_lon,
+        failed, error_message
+    )
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+    ON CONFLICT(path_text) DO UPDATE SET
+        path_hash    = excluded.path_hash,
+        size_bytes   = excluded.size_bytes,
+        modified_at  = excluded.modified_at,
+        scanned_at   = excluded.scanned_at,
+        kind         = excluded.kind,
+        extension    = excluded.extension,
+        phash        = excluded.phash,
+        has_faces    = excluded.has_faces,
+        has_text     = excluded.has_text,
+        camera_model = excluded.camera_model,
+        location_lat = excluded.location_lat,
+        location_lon = excluded.location_lon,
+        failed       = excluded.failed,
+        error_message= excluded.error_message
+    RETURNING id
 "#;
 
 const INSERT_CLIP_SQL: &str = r#"
@@ -455,6 +559,7 @@ mod tests {
             total_ms: 0.0,
             failed: false,
             error_message: None,
+            tags: vec![],
         }
     }
 
@@ -475,6 +580,45 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
             .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    /// `INSERT_FILE_RETURNING_ID_SQL` must yield the row id on BOTH the
+    /// freshly-inserted and ON CONFLICT DO UPDATE branches. The hot-path
+    /// flush relies on this — if RETURNING only fired on insert, every
+    /// repeat-scan row would error with QueryReturnedNoRows. Guards the
+    /// V15.9 redundant-SELECT elimination.
+    #[test]
+    fn insert_returning_id_yields_same_id_on_conflict() {
+        let conn = in_memory_db();
+        let f = fixture(r"C:\Users\adam\Pictures\IMG_RETURNING.jpg");
+        let path_text = f.path.to_string_lossy();
+        let path_hash = crate::util::path_safety::stable_path_hash(&path_text);
+        let extension = f.path.extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
+        let bind = |f: &TaggedFile| {
+            let path_text = f.path.to_string_lossy().to_string();
+            (path_text, path_hash, f.size_bytes as i64, None::<f64>,
+             f.modified_unix, f.scanned_unix, f.kind.as_str().to_string(),
+             extension.clone(), f.phash, None::<f64>,
+             f.has_faces as i64, f.has_text as i64,
+             f.camera_model.clone(), f.location_lat, f.location_lon,
+             f.failed as i64, f.error_message.clone())
+        };
+        let row = bind(&f);
+        let id1: i64 = conn.query_row(
+            INSERT_FILE_RETURNING_ID_SQL,
+            params![row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7,
+                    row.8, row.9, row.10, row.11, row.12, row.13, row.14, row.15, row.16],
+            |r| r.get(0),
+        ).expect("first insert returns id");
+        let id2: i64 = conn.query_row(
+            INSERT_FILE_RETURNING_ID_SQL,
+            params![row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7,
+                    row.8, row.9, row.10, row.11, row.12, row.13, row.14, row.15, row.16],
+            |r| r.get(0),
+        ).expect("ON CONFLICT branch must also return id");
+        assert_eq!(id1, id2, "RETURNING must yield stable id across insert + update");
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 1);
     }
 

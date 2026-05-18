@@ -49,6 +49,10 @@ thiserror = "1"
 
 # Filesystem walk + path utilities. Faster than std::fs::read_dir at scale.
 walkdir   = "2"
+# Parallel directory walk — rayon-backed, dramatically faster than walkdir
+# on NVMe (single-thread walkdir tops out ~50K stat/s; jwalk scales to
+# millions on 8+ cores with stat parallelism). MIT-licensed (deny.toml).
+jwalk     = "0.8"
 
 # CPU/system info for worker count + memory probes.
 num_cpus  = "1"
@@ -129,6 +133,8 @@ windows = { version = "0.58", features = [
     "Win32_System_Threading",
     "Win32_System_Power",
     "Win32_System_SystemInformation",
+    "Win32_System_Ioctl",
+    "Win32_System_IO",
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
     "Win32_UI_Shell_PropertiesSystem",
@@ -278,7 +284,7 @@ cast_possible_wrap      = "allow"  # u32→i32 conversions for SQLite parameter 
 map_unwrap_or           = "allow"  # `map().unwrap_or()` is at least as readable as `map_or()`
 manual_midpoint         = "allow"  # `(a + b) / 2` is fine where overflow is impossible
 manual_is_multiple_of   = "allow"  # `x % n == 0` is idiomatic Rust
-unchecked_time_subtraction = "allow"  # call sites are within elapsed-time logic where subtrahend < minuend by construction
+unchecked_duration_subtraction = "allow"  # call sites are within elapsed-time logic where subtrahend < minuend by construction (lint was renamed from unchecked_time_subtraction)
 redundant_closure       = "allow"  # readability sometimes wins over conciseness
 needless_continue       = "allow"  # explicit continue in long loops aids readability
 needless_range_loop     = "allow"  # range-loop with index is sometimes clearer than iter

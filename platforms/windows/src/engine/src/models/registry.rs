@@ -255,6 +255,57 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
             })
         }
 
+        // ── Scene classifier (MobileNetV3-Large, ImageNet-1k).
+        // Powers the per-file semantic tags shown as chips on Library
+        // cards ("Dog", "Beach", "Kitchen", etc.) alongside CLIP
+        // embeddings + face/OCR signals. Optional install — the scan
+        // pipeline falls back to enriched-extras-only tags (Year /
+        // Camera family / Wide/Tall/Square / Has Faces / Has Text /
+        // Has Location) when the model isn't present.
+        //
+        // The URL + SHA256 below are placeholders pending validation
+        // against a public HuggingFace mirror (Xenova / onnx-community
+        // both host MobileNetV3 exports). Until pinned, users who
+        // install this slot get whatever bytes the URL returns — the
+        // `ClassifierSession::load` will fail if the file isn't a
+        // valid ONNX model and the pipeline degrades to no-classifier
+        // mode. **Do not enable in production builds until the URL
+        // + SHA256 are verified.**
+        "classifier_mobilenetv3" | "classifier" | "scene_classifier" => {
+            let dir = models_root.join("classifier");
+            LookupResult::Found(Model {
+                id: "classifier_mobilenetv3",
+                display_name: "Scene classifier (MobileNetV3)",
+                files: vec![
+                    FileEntry {
+                        // TODO(verify): confirm this Xenova mirror URL
+                        // serves a 1000-class MobileNetV3-Large ImageNet-1k
+                        // ONNX export with NCHW float32 input and 1000-d
+                        // softmax-ready logits.
+                        url: "https://huggingface.co/onnx-community/mobilenetv3_large_100.ra_in1k/resolve/main/onnx/model.onnx"
+                            .to_string(),
+                        dest: dir.join("mobilenetv3_large.onnx"),
+                        // TODO(sha256): pin after first verified download.
+                        sha256: None,
+                        approx_bytes: 22_000_000,
+                    },
+                    FileEntry {
+                        // ImageNet-1k class labels in synset format
+                        // ("n01440764 tench, Tinca tinca"). Parser strips
+                        // the wnid and takes the first comma-delimited
+                        // synonym, so the chips read naturally.
+                        // TODO(verify): confirm this is the standard
+                        // 1000-line synset file.
+                        url: "https://huggingface.co/datasets/imagenet-1k/raw/main/classes.txt"
+                            .to_string(),
+                        dest: dir.join("imagenet_classes.txt"),
+                        sha256: None,
+                        approx_bytes: 30_000,
+                    },
+                ],
+            })
+        }
+
         // ── llama.cpp Windows runtime ZIP. Extracted in-place by
         // `handle_prewarm_model`; the .zip suffix triggers extraction.
         "llama_runtime_x64" => {

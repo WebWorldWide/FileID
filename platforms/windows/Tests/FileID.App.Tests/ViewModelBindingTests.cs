@@ -325,3 +325,40 @@ public class LibrarySemanticSearchDebounceTests
         Assert.Equal(new List<string>(), observedProperties);
     }
 }
+
+/// <summary>
+/// Unit tests for `TagChip.FormatTag` — the pure-string display
+/// formatter the Library card chips call on each bound tag value.
+/// Pure helper, no DispatcherObject, exercises the macOS-parity
+/// formatting rules (LibraryView.swift formatTag).
+/// </summary>
+public class TagChipFormatTests
+{
+    [Theory]
+    [InlineData("animal_dog", "Dog")]
+    [InlineData("outdoor_urban", "Urban")]
+    [InlineData("Has Faces", "Has Faces")]
+    // "iPhone-14" → "IPhone 14": the formatter only title-cases the first
+    // character of the post-dash-replacement segment per the macOS spec
+    // (char.ToUpperInvariant(segment[0]) + segment[1..]). Subsequent
+    // characters are left as-is — no lowercasing.
+    [InlineData("iPhone-14", "IPhone 14")]
+    [InlineData("Year_2024", "2024")]
+    [InlineData("", "")]
+    public void FormatTag_MatchesMacParitySpec(string input, string expected)
+    {
+        Assert.Equal(expected, FileID.Theme.Controls.TagChip.FormatTag(input));
+    }
+
+    [Fact]
+    public void FormatTag_TitleCasesFirstLetterOfSegment()
+    {
+        Assert.Equal("Cat", FileID.Theme.Controls.TagChip.FormatTag("cat"));
+    }
+
+    [Fact]
+    public void FormatTag_KeepsMultiwordSpaceSeparatedTagsIntact()
+    {
+        Assert.Equal("Has Text", FileID.Theme.Controls.TagChip.FormatTag("Has Text"));
+    }
+}

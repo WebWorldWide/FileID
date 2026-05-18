@@ -14,6 +14,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:vm="using:FileID.ViewModels"
     xmlns:motion="using:FileID.Theme.Motion"
+    xmlns:theme="using:FileID.Theme.Controls"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
@@ -232,15 +233,18 @@
                                          Thumbnail null-ness via converter. -->
                                     <motion:ShimmerView
                                         Visibility="{x:Bind Thumbnail, Mode=OneWay, Converter={StaticResource NullToVisibility}}"/>
-                                    <!-- Opacity starts at 0; OnTileImageOpened springs
-                                         it to 1 after the BitmapImage decodes. Matches macOS
-                                         `.transition(.opacity).animation(.easeOut(duration:0.40),
-                                         value: thumb != nil)` (LibraryView.swift:809/683). -->
+                                    <!-- Initial Opacity is 1 to guarantee the tile is
+                                         visible as soon as the BitmapImage is bound. The
+                                         shimmer overlay's NullToVisibility converter is
+                                         the load indicator. OnTileImageOpened still fires
+                                         the spring fade for the macOS-parity visual when
+                                         the bitmap arrives (start at 0 inside the handler,
+                                         spring to 1) — if for any reason it doesn't fire,
+                                         the user still sees the rendered tile. -->
                                     <Image Source="{x:Bind Thumbnail, Mode=OneWay}"
                                            Stretch="UniformToFill"
                                            HorizontalAlignment="Stretch"
                                            VerticalAlignment="Stretch"
-                                           Opacity="0"
                                            ImageOpened="OnTileImageOpened" />
                                 </Grid>
                             </Border>
@@ -281,6 +285,24 @@
                                 <TextBlock Text="{x:Bind FileName}"
                                            Style="{StaticResource BodyStrongTextBlockStyle}"
                                            TextTrimming="CharacterEllipsis"/>
+                                <!-- Auto-tag chips. Bound to FileTile.TopTwoTags
+                                     (already prefix(2)-sliced server-side so we
+                                     don't allocate per layout pass). Visibility
+                                     collapses cleanly when Tags is empty so the
+                                     card height stays the same as before. -->
+                                <ItemsControl ItemsSource="{x:Bind TopTwoTags, Mode=OneWay}"
+                                              Visibility="{x:Bind HasTags, Mode=OneWay, Converter={StaticResource BoolToVisibility}}">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <StackPanel Orientation="Horizontal" Spacing="4" />
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <theme:TagChip TagText="{Binding}" />
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
                                 <TextBlock Text="{x:Bind SizeDisplay}"
                                            Style="{StaticResource CaptionTextBlockStyle}"
                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>

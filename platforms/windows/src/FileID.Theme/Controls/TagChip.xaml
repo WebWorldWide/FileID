@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    TagChip — small auto-tag chip rendered below Library card filenames.
+    Mirror of macOS LibraryView.swift:729-744 styling:
+      - .caption2.weight(.medium) ≈ 11px Segoe UI Medium
+      - .foregroundStyle(.secondary)
+      - RoundedRectangle cornerRadius 4 fill .secondary.opacity(0.10)
+      - .padding(.horizontal, 5).padding(.vertical, 2)
+      - .lineLimit(1)
+
+    Usage:
+        <theme:TagChip Tag="{Binding}" />
+
+    The control runs `FormatTag` on the bound value internally so callers
+    bind raw classifier output ("animal_dog") and get the display form
+    ("Dog").
+-->
+<UserControl
+    x:Class="FileID.Theme.Controls.TagChip"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Border x:Name="ChipRoot"
+            CornerRadius="4"
+            Padding="5,2,5,2"
+            HorizontalAlignment="Left"
+            VerticalAlignment="Center">
+        <TextBlock x:Name="LabelText"
+                   FontFamily="Segoe UI"
+                   FontSize="11"
+                   FontWeight="Medium"
+                   TextTrimming="CharacterEllipsis"
+                   TextWrapping="NoWrap" />
+    </Border>
+</UserControl>
