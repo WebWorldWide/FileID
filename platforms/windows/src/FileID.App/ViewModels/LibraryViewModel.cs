@@ -396,9 +396,9 @@ internal sealed class FileTile : INotifyPropertyChanged
         "image" => "", // Picture
         "video" => "", // Video
         "audio" => "", // MusicNote
-        "pdf"   => "", // PDF
-        "doc"   => "", // Document
-        _        => "", // File
+        "pdf" => "", // PDF
+        "doc" => "", // Document
+        _ => "", // File
     };
 
     /// <summary>Human-readable kind label used in the file preview sheet
@@ -408,9 +408,9 @@ internal sealed class FileTile : INotifyPropertyChanged
         "image" => "Image",
         "video" => "Video",
         "audio" => "Audio",
-        "pdf"   => "PDF",
-        "doc"   => "Document",
-        _        => "File",
+        "pdf" => "PDF",
+        "doc" => "Document",
+        _ => "File",
     };
 
     private bool _isSelected;
