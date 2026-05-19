@@ -219,7 +219,7 @@ impl Scrfd {
 // NUM_LANDMARKS are all baked into the SCRFD-10g export. Changing them
 // would also require a new ONNX export trained with the new config.
 
-const SCORE_THRESHOLD: f32 = 0.5;
+const SCORE_THRESHOLD: f32 = 0.65;
 const NMS_IOU_THRESHOLD: f32 = 0.4;
 const STRIDES: [u32; 3] = [8, 16, 32];
 const ANCHORS_PER_LOCATION: usize = 2;
@@ -402,6 +402,74 @@ pub fn estimate_pose(landmarks: &[[f32; 2]; 5]) -> Pose {
     Pose { roll, yaw, pitch }
 }
 
+/// Post-detection geometric validation using the 5 facial landmarks
+/// (left_eye, right_eye, nose, mouth_left, mouth_right) to reject
+/// false positives like signs, posters, and logos. Returns a composite
+/// quality score weighted by geometry confidence, or None if rejected.
+pub fn validate_face_geometry(det: &Detection, img_w: u32, img_h: u32) -> Option<f32> {
+    let [x1, y1, x2, y2] = det.bbox;
+    let bw = (x2 - x1).max(1e-3);
+    let bh = (y2 - y1).max(1e-3);
+    let bbox_area = bw * bh;
+    let img_area = (img_w as f32) * (img_h as f32);
+
+    // Reject tiny detections (< 0.1% of image area).
+    if bbox_area < img_area * 0.001 {
+        return None;
+    }
+
+    // Reject extreme aspect ratios — faces are roughly square.
+    let aspect = bh / bw;
+    if aspect < 0.6 || aspect > 2.0 {
+        return None;
+    }
+
+    let left_eye = det.landmarks[0];
+    let right_eye = det.landmarks[1];
+    let nose = det.landmarks[2];
+    let mouth_left = det.landmarks[3];
+    let mouth_right = det.landmarks[4];
+
+    // All landmarks should be inside the bbox (with 10% margin for
+    // floating-point drift from the letterbox remap).
+    let margin_x = bw * 0.10;
+    let margin_y = bh * 0.10;
+    for lm in &det.landmarks {
+        if lm[0] < x1 - margin_x || lm[0] > x2 + margin_x
+            || lm[1] < y1 - margin_y || lm[1] > y2 + margin_y
+        {
+            return None;
+        }
+    }
+
+    // Inter-eye distance must be ≥ 15% of bbox width.
+    let eye_dx = right_eye[0] - left_eye[0];
+    let eye_dy = right_eye[1] - left_eye[1];
+    let inter_eye = (eye_dx * eye_dx + eye_dy * eye_dy).sqrt();
+    if inter_eye < bw * 0.15 {
+        return None;
+    }
+
+    // Vertical ordering: average eye Y < nose Y < average mouth Y.
+    // Allows some slack for tilted faces (±10% of bbox height).
+    let eye_avg_y = (left_eye[1] + right_eye[1]) / 2.0;
+    let mouth_avg_y = (mouth_left[1] + mouth_right[1]) / 2.0;
+    let slack = bh * 0.10;
+    if eye_avg_y > nose[1] + slack || nose[1] > mouth_avg_y + slack {
+        return None;
+    }
+
+    // Composite quality: raw score weighted by geometry confidence.
+    // Geometry confidence penalises detections where landmarks are
+    // bunched together (low inter-eye / bbox ratio) or the vertical
+    // span is unnaturally compressed.
+    let eye_ratio = (inter_eye / bw).min(1.0);
+    let vert_span = (mouth_avg_y - eye_avg_y).max(0.0);
+    let vert_ratio = (vert_span / bh).min(1.0);
+    let geom_conf = (eye_ratio * 0.5 + vert_ratio * 0.5).clamp(0.0, 1.0);
+    Some(det.score * geom_conf)
+}
+
 pub fn default_weights_path() -> Result<PathBuf> {
     Ok(crate::paths::models_dir()?
         .join("scrfd")
@@ -507,9 +575,9 @@ mod tests {
     #[test]
     fn scrfd_decode_score_below_threshold_skipped() {
         let dets = decode_scrfd_single_anchor(
-            8, 2, 2, 640, 640, 0.4, 0.5, 0.5, 1.0, 1.0,
+            8, 2, 2, 640, 640, 0.6, 0.5, 0.5, 1.0, 1.0,
         );
-        assert!(dets.is_empty(), "score < 0.5 should be skipped");
+        assert!(dets.is_empty(), "score < 0.65 should be skipped");
     }
 
     #[test]
@@ -548,6 +616,108 @@ mod tests {
         assert!(pose.roll.abs() < 1e-3, "roll should be ~0 for level eyes, got {}", pose.roll);
     }
 
+    fn face_det(x1: f32, y1: f32, x2: f32, y2: f32, score: f32, landmarks: [[f32; 2]; 5]) -> Detection {
+        Detection { bbox: [x1, y1, x2, y2], landmarks, score }
+    }
+
+    fn normal_face_landmarks(x1: f32, y1: f32, x2: f32, y2: f32) -> [[f32; 2]; 5] {
+        let cx = (x1 + x2) / 2.0;
+        let cy = (y1 + y2) / 2.0;
+        let bw = x2 - x1;
+        let bh = y2 - y1;
+        [
+            [cx - bw * 0.15, cy - bh * 0.15],  // left eye
+            [cx + bw * 0.15, cy - bh * 0.15],  // right eye
+            [cx, cy],                            // nose
+            [cx - bw * 0.10, cy + bh * 0.20],  // mouth left
+            [cx + bw * 0.10, cy + bh * 0.20],  // mouth right
+        ]
+    }
+
+    #[test]
+    fn validate_rejects_wide_banner() {
+        let lm = normal_face_landmarks(100.0, 100.0, 500.0, 140.0);
+        let d = face_det(100.0, 100.0, 500.0, 140.0, 0.9, lm);
+        assert!(validate_face_geometry(&d, 640, 480).is_none(),
+            "10:1 banner should be rejected");
+    }
+
+    #[test]
+    fn validate_rejects_tiny_detection() {
+        let lm = normal_face_landmarks(300.0, 300.0, 305.0, 305.0);
+        let d = face_det(300.0, 300.0, 305.0, 305.0, 0.9, lm);
+        assert!(validate_face_geometry(&d, 1920, 1080).is_none(),
+            "tiny bbox should be rejected");
+    }
+
+    #[test]
+    fn validate_rejects_bad_landmark_order() {
+        // Mouth above eyes — impossible for a real face.
+        let lm = [
+            [150.0, 250.0],  // left eye (below mouth)
+            [250.0, 250.0],  // right eye
+            [200.0, 200.0],  // nose
+            [170.0, 150.0],  // mouth left (above eyes)
+            [230.0, 150.0],  // mouth right
+        ];
+        let d = face_det(100.0, 100.0, 300.0, 300.0, 0.9, lm);
+        assert!(validate_face_geometry(&d, 640, 480).is_none(),
+            "inverted vertical ordering should be rejected");
+    }
+
+    #[test]
+    fn validate_accepts_normal_face() {
+        let lm = normal_face_landmarks(100.0, 100.0, 250.0, 300.0);
+        let d = face_det(100.0, 100.0, 250.0, 300.0, 0.85, lm);
+        let q = validate_face_geometry(&d, 640, 480);
+        assert!(q.is_some(), "normal face should pass validation");
+        assert!(q.unwrap() > 0.0 && q.unwrap() <= 0.85);
+    }
+
+    #[test]
+    fn validate_accepts_side_profile() {
+        // Moderate yaw — nose shifted, but eyes still above mouth.
+        let lm = [
+            [130.0, 140.0],  // left eye
+            [200.0, 145.0],  // right eye
+            [180.0, 180.0],  // nose (shifted right)
+            [140.0, 230.0],  // mouth left
+            [190.0, 235.0],  // mouth right
+        ];
+        let d = face_det(100.0, 100.0, 250.0, 300.0, 0.80, lm);
+        let q = validate_face_geometry(&d, 640, 480);
+        assert!(q.is_some(), "side profile with valid geometry should pass");
+    }
+
+    #[test]
+    fn validate_rejects_landmarks_outside_bbox() {
+        let lm = [
+            [50.0, 50.0],    // left eye — way outside bbox
+            [250.0, 150.0],
+            [200.0, 180.0],
+            [170.0, 230.0],
+            [230.0, 230.0],
+        ];
+        let d = face_det(100.0, 100.0, 300.0, 300.0, 0.9, lm);
+        assert!(validate_face_geometry(&d, 640, 480).is_none(),
+            "landmark outside bbox should be rejected");
+    }
+
+    #[test]
+    fn validate_rejects_clustered_landmarks() {
+        // All landmarks bunched in a tiny spot — typical of text/sign FP.
+        let lm = [
+            [200.0, 200.0],
+            [202.0, 200.0],  // inter-eye ~2px on a 200px bbox
+            [201.0, 201.0],
+            [200.0, 202.0],
+            [202.0, 202.0],
+        ];
+        let d = face_det(100.0, 100.0, 300.0, 300.0, 0.9, lm);
+        assert!(validate_face_geometry(&d, 640, 480).is_none(),
+            "clustered landmarks (inter-eye < 15% bw) should be rejected");
+    }
+
     proptest::proptest! {
         // Invariant: decoded bbox coords sit inside (or within 10% of)
         // the input image bounds. The downstream detect() clamp
@@ -561,7 +731,7 @@ mod tests {
             grid_y in 0u32..=20,
             input_w in 128u32..=640,
             input_h in 128u32..=640,
-            score in 0.51f32..=1.0,
+            score in 0.66f32..=1.0,
             dw in 0.1f32..=2.0,
             dh in 0.1f32..=2.0,
         ) {

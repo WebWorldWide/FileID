@@ -218,6 +218,35 @@ public sealed partial class SidebarFolderHeader : UserControl
             DebugLog.Warn("[WIPE] stage 3 (delete) threw: " + ex);
         }
 
+        // stage 3b: face_crops/ and thumbs.cache/. Earlier wipes
+        // only deleted the SQLite trio, leaving stale face crops and
+        // thumbnails on disk that the fresh DB would re-reference (face
+        // crops live alongside face_print rows; thumbnails are content-
+        // hashed but a wipe shouldn't accumulate orphaned files). Best-
+        // effort + non-fatal — a partial dir delete is degraded but
+        // recoverable, and gating the engine restart on it would strand
+        // the user the same way pre-3b DB-only failures did.
+        try
+        {
+            foreach (var dir in new[] { AppPaths.FacesDir, AppPaths.ThumbsDir })
+            {
+                if (System.IO.Directory.Exists(dir))
+                {
+                    DebugLog.Info($"[WIPE] deleting dir {PathRedactor.Redact(dir)}");
+                    await TryDeleteDirWithRetryAsync(dir);
+                }
+            }
+            DebugLog.Info("[WIPE] stage 3b complete (face_crops + thumbs.cache cleared)");
+        }
+        catch (Exception ex)
+        {
+            // Don't promote to deleteError — face crops and thumbnails
+            // surviving a wipe is degraded but not user-visible until
+            // they re-appear in People / Library, by which point the
+            // new scan will have regenerated them anyway.
+            DebugLog.Warn("[WIPE] stage 3b (face_crops/thumbs) threw (non-fatal): " + ex.Message);
+        }
+
         // ALWAYS attempt restart, even when the delete failed.
         // Without this, a single locked WAL leaves the user with a dead
         // engine and no recovery path short of relaunching the app.
@@ -257,6 +286,35 @@ public sealed partial class SidebarFolderHeader : UserControl
                 return;
             }
             catch (System.IO.IOException) when (attempt < 2)
+            {
+                await Task.Delay(200);
+            }
+        }
+    }
+
+    /// <summary>Recursive directory delete with the same FILE_OBJECT
+    /// retry profile as the per-file delete above. The thumbs cache
+    /// can hold thousands of small files — recreating the empty
+    /// directory after delete keeps the next scan's first thumbnail
+    /// write from racing against EnsureDirectories on engine startup.</summary>
+    private static async Task TryDeleteDirWithRetryAsync(string dir)
+    {
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            try
+            {
+                if (System.IO.Directory.Exists(dir))
+                {
+                    System.IO.Directory.Delete(dir, recursive: true);
+                }
+                System.IO.Directory.CreateDirectory(dir);
+                return;
+            }
+            catch (System.IO.IOException) when (attempt < 2)
+            {
+                await Task.Delay(200);
+            }
+            catch (UnauthorizedAccessException) when (attempt < 2)
             {
                 await Task.Delay(200);
             }

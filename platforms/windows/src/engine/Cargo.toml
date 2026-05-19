@@ -149,7 +149,9 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Media_Ocr",
+    "Storage",
     "Storage_Streams",
+    "Storage_FileProperties",
     "Graphics_Imaging",
     "Foundation",
     "Foundation_Collections",
@@ -169,14 +171,19 @@ ort = { version = "=2.0.0-rc.10", default-features = false, features = [
 libc = "0.2"
 
 [features]
-default = []
+# `pdf-analyze` is on by default so Deep Analyze handles PDFs out of the
+# box (pdfium-render bundles its own pre-built libpdfium for Windows x64
+# / arm64, no system dependency). The non-feature stub in
+# pipeline/deep_analyze.rs remains as a build-without-pdfium escape hatch
+# (e.g. for size-conscious CI smoke builds) — opt out with
+# `cargo build --no-default-features`.
+default = ["pdf-analyze"]
 # Native (in-process) llama.cpp VLM inference. Off by default to keep CI
 # build time low — adds ~150 MB build artifacts + needs cmake. Toggle via
 # `cargo build --features vlm-native --release`.
 vlm-native = ["dep:llama-cpp-2"]
-# Engine-side PDF rasterization via pdfium-render. Off by default; bundles
-# a pre-built pdfium DLL when enabled (~15 MB binary cost). Required for
-# Deep Analyze on PDF files.
+# Engine-side PDF rasterization via pdfium-render. Bundles a pre-built
+# pdfium DLL (~15 MB binary cost). Enabled in `default` above.
 pdf-analyze = ["dep:pdfium-render"]
 
 [dev-dependencies]

@@ -177,6 +177,7 @@ internal sealed class ThumbnailService : IDisposable
     private static readonly HashSet<string> ImageExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
         ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp",
+        ".tif", ".tiff", ".heic", ".heif", ".avif", ".ico", ".jfif",
     };
 
     private static async Task<BitmapImage?> RenderAsync(
@@ -194,7 +195,9 @@ internal sealed class ThumbnailService : IDisposable
         // BitmapImage is a WinUI DispatcherObject — must be constructed on
         // a UI thread. Caller captures the dispatcher at ctor time; the
         // window-hosted fallback is a last resort during startup/shutdown.
-        var dispatcher = uiDispatcher ?? FileID.App.HostWindow?.DispatcherQueue;
+        var dispatcher = uiDispatcher
+            ?? FileID.App.HostWindow?.DispatcherQueue
+            ?? Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
         if (dispatcher is null)
         {
             Interlocked.Increment(ref _droppedDispatcher);
@@ -285,7 +288,13 @@ internal sealed class ThumbnailService : IDisposable
                 DebugLog.Debug($"[THUMB] IMG_FB_EX file={path} ex={ex.GetType().Name}");
                 DebugLog.Warn(
                     $"ThumbnailService image-fallback ({path}): {ex.GetType().Name}: {ex.Message}");
+                Interlocked.Increment(ref _renderedFailed);
+                return null;
             }
+        }
+        else
+        {
+            DebugLog.Debug($"[THUMB] NO_PROVIDER file={path} ext={ext}");
         }
 
         DebugLog.Debug($"[THUMB] RENDER_FAILED file={path}");

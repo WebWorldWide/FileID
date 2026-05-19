@@ -218,7 +218,7 @@ impl DbWriter {
                             f.kind.as_str(),
                             extension,
                             f.phash,
-                            None::<f64>, // aesthetic
+                            f.aesthetic,
                             f.has_faces as i64,
                             f.has_text as i64,
                             f.camera_model,
@@ -550,6 +550,9 @@ mod tests {
             has_text: false,
             ocr_text: None,
             phash: None,
+            aesthetic: None,
+            image_width: 0,
+            image_height: 0,
             clip_embedding: None,
             camera_model: None,
             location_lat: None,

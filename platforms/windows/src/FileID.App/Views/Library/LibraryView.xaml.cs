@@ -30,6 +30,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     private long _lastSeenBatchIndex = -1;
     private DateTime _lastReloadAt = DateTime.MinValue;
     private static readonly TimeSpan LibraryReloadThrottle = TimeSpan.FromSeconds(1);
+    private bool _unloaded;
     // BUG-12: ElementPrepared/ElementClearing fire on the UI thread, but
     // LoadThumbAsync's finally-block .Remove can resume on a worker thread
     // after ConfigureAwait(true) without a SyncContext. ConcurrentDictionary
@@ -81,6 +82,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
         => Services.DebugLog.SafeRun("LibraryView.OnEngineChanged", () =>
         {
+            if (_unloaded) return;
             switch (e.PropertyName)
             {
                 case nameof(EngineClient.Phase):
@@ -105,9 +107,11 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 
     private void RequestLibraryRefresh(bool force)
     {
+        if (_unloaded) return;
         _lastReloadAt = DateTime.UtcNow;
         DispatcherQueue.TryEnqueue(async () =>
         {
+            if (_unloaded) return;
             try { await ViewModel.RefreshAsync(CancellationToken.None); }
             catch (Exception ex) { Services.DebugLog.Warn($"Library refresh failed (force={force}): {ex.Message}"); }
         });
@@ -187,6 +191,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     /// </summary>
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
+        _unloaded = true;
         Unloaded -= OnUnloaded;
         // Detach VM subscriptions so the VM/View graph can be GC'd.
         try { ViewModel.PropertyChanged -= OnViewModelPropertyChanged; } catch { /* swallow */ }

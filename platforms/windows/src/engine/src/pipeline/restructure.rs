@@ -105,46 +105,54 @@ pub fn classify_folders(moves: &[ProposedMove]) -> Vec<ClassifiedFolder> {
     out
 }
 
-/// Heuristic root-level layout. Mirrors macOS:
-///   - Photos/{Year}/{Month}/         for image kind
-///   - Videos/{Year}/                 for video kind
-///   - Documents/                     for doc/pdf kind
-///   - Audio/                         for audio kind
-///   - Misc/                          for everything else
-///
-/// Year + month derived from EXIF DateTimeOriginal (image), Media
-/// Foundation creation date (video), or modified_at as the fallback.
+/// Priority-based restructure matching macOS Restructure.swift. First
+/// match wins:
+///   1. Named person  → People/<Name>/<Year>/
+///   2. GPS location  → Places/<lat,lon-bucketed>/<Year>/
+///   3. Document       → Documents/<Year>/
+///   4. Image          → Photos/<Year>/<MonthName>/
+///   5. Video          → Videos/<Year>/
+///   6. Audio          → Audio/
+///   7. Fallback       → Misc/
 pub fn classify(
     files: &[FileForClassify],
     library_root: &Path,
 ) -> Vec<ProposedMove> {
     let mut out = Vec::with_capacity(files.len());
     for f in files {
-        let dest = match f.kind {
-            FileKind::Image => {
-                let (y, m) = year_month(f.modified_unix);
-                library_root.join("Photos").join(format!("{y}")).join(format!("{m:02}"))
-            }
-            FileKind::Video => {
-                let (y, _) = year_month(f.modified_unix);
-                library_root.join("Videos").join(format!("{y}"))
-            }
-            FileKind::Pdf | FileKind::Doc => library_root.join("Documents"),
-            FileKind::Audio => library_root.join("Audio"),
-            FileKind::Other => library_root.join("Misc"),
+        let ts = f.created_unix.unwrap_or(f.modified_unix);
+        let (y, m) = year_month(ts);
+        let mname = month_name(m);
+
+        let (dest, category) = if let Some(ref name) = f.person_name {
+            let safe = sanitize_path_component(name);
+            (library_root.join("People").join(&safe).join(format!("{y}")),
+             format!("People/{safe}"))
+        } else if let (Some(lat), Some(lon)) = (f.location_lat, f.location_lon) {
+            let lat_b = (lat * 2.0).round() / 2.0;
+            let lon_b = (lon * 2.0).round() / 2.0;
+            let bucket = format!("{lat_b:.1}_{lon_b:.1}");
+            (library_root.join("Places").join(&bucket).join(format!("{y}")),
+             format!("Places/{bucket}"))
+        } else if f.has_text || matches!(f.kind, FileKind::Pdf | FileKind::Doc) {
+            (library_root.join("Documents").join(format!("{y}")),
+             "document".to_string())
+        } else if matches!(f.kind, FileKind::Image) {
+            (library_root.join("Photos").join(format!("{y}")).join(&mname),
+             "photo".to_string())
+        } else if matches!(f.kind, FileKind::Video) {
+            (library_root.join("Videos").join(format!("{y}")),
+             "video".to_string())
+        } else if matches!(f.kind, FileKind::Audio) {
+            (library_root.join("Audio"), "audio".to_string())
+        } else {
+            (library_root.join("Misc"), "misc".to_string())
         };
-        let category = match f.kind {
-            FileKind::Image => "photo".to_string(),
-            FileKind::Video => "video".to_string(),
-            FileKind::Pdf | FileKind::Doc => "document".to_string(),
-            FileKind::Audio => "audio".to_string(),
-            FileKind::Other => "misc".to_string(),
-        };
-        let dest_with_name = dest.join(f.source.file_name().unwrap_or_default());
+
         out.push(ProposedMove {
             file_id: f.file_id,
             source: f.source.clone(),
-            destination: dest_with_name,
+            destination: dest.join(f.source.file_name().unwrap_or_default()),
             category,
         });
     }
@@ -157,6 +165,28 @@ pub struct FileForClassify {
     pub source: PathBuf,
     pub kind: FileKind,
     pub modified_unix: f64,
+    pub created_unix: Option<f64>,
+    pub person_name: Option<String>,
+    pub location_lat: Option<f64>,
+    pub location_lon: Option<f64>,
+    pub has_text: bool,
+}
+
+fn sanitize_path_component(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'))
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn month_name(m: u32) -> String {
+    match m {
+        1 => "January", 2 => "February", 3 => "March", 4 => "April",
+        5 => "May", 6 => "June", 7 => "July", 8 => "August",
+        9 => "September", 10 => "October", 11 => "November", 12 => "December",
+        _ => "Unknown",
+    }.to_string()
 }
 
 #[derive(Debug, Clone)]
@@ -203,20 +233,96 @@ mod tests {
             source: PathBuf::from(path),
             kind: FileKind::Image,
             modified_unix: ts,
+            created_unix: None,
+            person_name: None,
+            location_lat: None,
+            location_lon: None,
+            has_text: false,
         }
     }
 
     #[test]
     fn images_routed_to_photos_year_month() {
-        // 2024-03-15 12:00 UTC ≈ 1710504000
         let f = img(1, "C:/scan/foo.jpg", 1_710_504_000.0);
         let m = classify(&[f], Path::new("D:/Library"));
         assert_eq!(m.len(), 1);
         let dest = m[0].destination.to_string_lossy();
-        assert!(dest.contains("Photos"));
-        assert!(dest.contains("2024"));
-        assert!(dest.contains("03"));
+        assert!(dest.contains("Photos"), "dest={dest}");
+        assert!(dest.contains("2024"), "dest={dest}");
+        assert!(dest.contains("March"), "dest={dest}");
         assert_eq!(m[0].category, "photo");
+    }
+
+    #[test]
+    fn person_priority_over_date() {
+        let mut f = img(1, "C:/scan/face.jpg", 1_710_504_000.0);
+        f.person_name = Some("Alice".to_string());
+        let m = classify(&[f], Path::new("D:/Library"));
+        let dest = m[0].destination.to_string_lossy();
+        assert!(dest.contains("People"), "dest={dest}");
+        assert!(dest.contains("Alice"), "dest={dest}");
+        assert!(m[0].category.starts_with("People/"));
+    }
+
+    #[test]
+    fn gps_priority_over_kind() {
+        let mut f = img(1, "C:/scan/geo.jpg", 1_710_504_000.0);
+        f.location_lat = Some(37.7749);
+        f.location_lon = Some(-122.4194);
+        let m = classify(&[f], Path::new("D:/Library"));
+        let dest = m[0].destination.to_string_lossy();
+        assert!(dest.contains("Places"), "dest={dest}");
+        assert!(m[0].category.starts_with("Places/"));
+    }
+
+    #[test]
+    fn document_priority_over_year_month() {
+        let f = FileForClassify {
+            file_id: 1,
+            source: PathBuf::from("C:/scan/report.pdf"),
+            kind: FileKind::Pdf,
+            modified_unix: 1_710_504_000.0,
+            created_unix: None,
+            person_name: None,
+            location_lat: None,
+            location_lon: None,
+            has_text: false,
+        };
+        let m = classify(&[f], Path::new("D:/Library"));
+        let dest = m[0].destination.to_string_lossy();
+        assert!(dest.contains("Documents"), "dest={dest}");
+        assert!(dest.contains("2024"), "dest={dest}");
+        assert_eq!(m[0].category, "document");
+    }
+
+    #[test]
+    fn video_year_only() {
+        let f = FileForClassify {
+            file_id: 1,
+            source: PathBuf::from("C:/scan/clip.mp4"),
+            kind: FileKind::Video,
+            modified_unix: 1_710_504_000.0,
+            created_unix: None,
+            person_name: None,
+            location_lat: None,
+            location_lon: None,
+            has_text: false,
+        };
+        let m = classify(&[f], Path::new("D:/Library"));
+        let dest = m[0].destination.to_string_lossy();
+        assert!(dest.contains("Videos"), "dest={dest}");
+        assert!(dest.contains("2024"), "dest={dest}");
+        assert!(!dest.contains("March"), "videos should not have month: dest={dest}");
+    }
+
+    #[test]
+    fn has_text_routes_to_documents() {
+        let mut f = img(1, "C:/scan/screenshot.png", 1_710_504_000.0);
+        f.has_text = true;
+        let m = classify(&[f], Path::new("D:/Library"));
+        let dest = m[0].destination.to_string_lossy();
+        assert!(dest.contains("Documents"), "dest={dest}");
+        assert_eq!(m[0].category, "document");
     }
 
     #[test]

@@ -24,7 +24,7 @@ use fileid_engine::coordinator::ScanCoordinator;
 use fileid_engine::pipeline::discovery::Discovery;
 
 #[test]
-#[ignore]
+#[ignore = "throughput benchmark; gated behind --ignored to keep CI fast"]
 fn walk_10k_files_in_under_5_seconds() {
     let tmp = tempdir();
     let root = tmp.path().to_path_buf();
@@ -87,7 +87,7 @@ fn walk_10k_files_in_under_5_seconds() {
 /// hits the full file count within a few seconds — proving the V15.9
 /// decoupling actually decouples.
 #[test]
-#[ignore]
+#[ignore = "throughput benchmark; gated behind --ignored to keep CI fast"]
 fn count_advances_independently_of_consumer_drain() {
     let tmp = tempdir();
     let root = tmp.path().to_path_buf();

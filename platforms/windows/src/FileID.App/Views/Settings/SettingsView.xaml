@@ -541,6 +541,12 @@
                                   OffContent="Show per-category cards (default)"
                                   OnContent="Show side-by-side tree diff"
                                   Toggled="OnRestructureTreeModeToggled" />
+
+                    <ToggleSwitch x:Name="AutoChainDeepAnalyzeToggle"
+                                  Header="Automatically caption files after face clustering"
+                                  OffContent="Stay manual — kick off Deep Analyze yourself"
+                                  OnContent="Auto-run Deep Analyze once face clustering finishes"
+                                  Toggled="OnAutoChainDeepAnalyzeToggled" />
                 </StackPanel>
             </Border>
 

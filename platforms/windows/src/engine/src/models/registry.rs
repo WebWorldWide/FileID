@@ -262,15 +262,6 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
         // pipeline falls back to enriched-extras-only tags (Year /
         // Camera family / Wide/Tall/Square / Has Faces / Has Text /
         // Has Location) when the model isn't present.
-        //
-        // The URL + SHA256 below are placeholders pending validation
-        // against a public HuggingFace mirror (Xenova / onnx-community
-        // both host MobileNetV3 exports). Until pinned, users who
-        // install this slot get whatever bytes the URL returns — the
-        // `ClassifierSession::load` will fail if the file isn't a
-        // valid ONNX model and the pipeline degrades to no-classifier
-        // mode. **Do not enable in production builds until the URL
-        // + SHA256 are verified.**
         "classifier_mobilenetv3" | "classifier" | "scene_classifier" => {
             let dir = models_root.join("classifier");
             LookupResult::Found(Model {
@@ -278,29 +269,30 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                 display_name: "Scene classifier (MobileNetV3)",
                 files: vec![
                     FileEntry {
-                        // TODO(verify): confirm this Xenova mirror URL
-                        // serves a 1000-class MobileNetV3-Large ImageNet-1k
-                        // ONNX export with NCHW float32 input and 1000-d
-                        // softmax-ready logits.
                         url: "https://huggingface.co/onnx-community/mobilenetv3_large_100.ra_in1k/resolve/main/onnx/model.onnx"
                             .to_string(),
                         dest: dir.join("mobilenetv3_large.onnx"),
-                        // TODO(sha256): pin after first verified download.
-                        sha256: None,
-                        approx_bytes: 22_000_000,
+                        sha256: Some(
+                            "a88a7545cb3fbafffeb6f09140d56c88f73cebf6a892cd80cf8c5ce4f2a0293d"
+                                .to_string(),
+                        ),
+                        approx_bytes: 21_949_218,
                     },
                     FileEntry {
-                        // ImageNet-1k class labels in synset format
-                        // ("n01440764 tench, Tinca tinca"). Parser strips
-                        // the wnid and takes the first comma-delimited
-                        // synonym, so the chips read naturally.
-                        // TODO(verify): confirm this is the standard
-                        // 1000-line synset file.
-                        url: "https://huggingface.co/datasets/imagenet-1k/raw/main/classes.txt"
+                        // ImageNet-1k labels, plain one-per-line. The
+                        // canonical dataset (imagenet-1k) is gated; this
+                        // public mirror inside the clip-benchmark dataset
+                        // ships the same 1000 class names without auth.
+                        // The classifier's `parse_labels` handles both
+                        // synset and plain formats, so either shape works.
+                        url: "https://huggingface.co/datasets/clip-benchmark/wds_imagenet1k/resolve/main/classnames.txt"
                             .to_string(),
                         dest: dir.join("imagenet_classes.txt"),
-                        sha256: None,
-                        approx_bytes: 30_000,
+                        sha256: Some(
+                            "8800e39242cbed4c6889376e20a49cfdaf4f84a773a6686d15c3b39972ef94c4"
+                                .to_string(),
+                        ),
+                        approx_bytes: 11_814,
                     },
                 ],
             })

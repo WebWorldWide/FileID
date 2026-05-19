@@ -380,6 +380,7 @@ mod tests {
     ///   1. Visit every supported file.
     ///   2. Prune noise directories (no recursion into node_modules / .git).
     ///   3. Skip zero-byte files.
+    ///
     /// This is the smoke test guarding the V15.9 rewrite. The full
     /// throughput benchmark lives in tests/discovery_throughput.rs and
     /// runs under `cargo test --release --test discovery_throughput

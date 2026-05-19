@@ -143,7 +143,8 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             var seen = new HashSet<long>();
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = """
-            SELECT f.id, f.path_text, f.kind, f.size_bytes, f.modified_at, f.has_faces, f.has_text
+            SELECT f.id, f.path_text, f.kind, f.size_bytes, f.modified_at, f.has_faces, f.has_text,
+                   (SELECT GROUP_CONCAT(tag, '|') FROM tags WHERE file_id = f.id AND source = 'auto') AS auto_tags
             FROM ocr_fts
             JOIN files f ON f.id = ocr_fts.rowid
             WHERE ocr_fts MATCH $match
@@ -186,7 +187,8 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             }
             using var cmd2 = _connection.CreateCommand();
             cmd2.CommandText = $"""
-            SELECT id, path_text, kind, size_bytes, modified_at, has_faces, has_text
+            SELECT id, path_text, kind, size_bytes, modified_at, has_faces, has_text,
+                   (SELECT GROUP_CONCAT(tag, '|') FROM tags WHERE file_id = files.id AND source = 'auto') AS auto_tags
             FROM files
             WHERE {string.Join(" AND ", likePieces)}
             ORDER BY modified_at DESC NULLS LAST
@@ -264,14 +266,16 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = """
             SELECT f.id, f.path_text, f.kind, f.size_bytes, f.modified_at,
-                   f.has_faces, f.has_text, e.embedding
+                   f.has_faces, f.has_text,
+                   (SELECT GROUP_CONCAT(tag, '|') FROM tags WHERE file_id = f.id AND source = 'auto') AS auto_tags,
+                   e.embedding
             FROM clip_embeddings e
             JOIN files f ON f.id = e.file_id
             """;
             using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
             {
-                var blob = (byte[])reader.GetValue(7);
+                var blob = (byte[])reader.GetValue(8);
                 float score = DotProduct(queryEmbedding, blob);
                 var row = ReadRow(reader);
                 if (heap.Count < limit)

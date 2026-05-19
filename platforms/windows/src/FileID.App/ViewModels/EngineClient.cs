@@ -892,6 +892,10 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         break;
                     case FaceClusteringCompleteEvent fc:
                         LastFaceClustering = fc.Result;
+                        // face-clustering → deep-analyze auto-chain.
+                        // Mirrors macOS's autoPilotStage advance from grouping
+                        // → captioning. Gate on AppSettings + installed VLM.
+                        _ = AutoTriggerDeepAnalyzeAsync();
                         break;
                     case DeepAnalyzeStartingEvent das:
                         DeepAnalyzeStarting = das.Starting;
@@ -1015,6 +1019,42 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         catch (Exception ex)
         {
             DebugLog.Warn("[AUTO-ADVANCE] face clustering trigger threw: " + ex.Message);
+        }
+    }
+
+    /// <summary>face-clustering-complete → deep-analyze auto-chain.
+    /// Mirrors macOS's autoPilotStage advance from `grouping` to
+    /// `captioning`. Skipped silently when:
+    ///   • User has disabled AutoChainDeepAnalyze in Settings.
+    ///   • No VLM model is installed (ModelInstallerService.Vlm.Status
+    ///     != Installed) — there's nothing to caption with.
+    /// Otherwise fires deepAnalyzeAll(skipExisting: true) with the
+    /// user's persisted VLM choice from AppSettings.SelectedVlmModelKind.
+    /// </summary>
+    private async Task AutoTriggerDeepAnalyzeAsync()
+    {
+        try
+        {
+            await Task.Yield(); // let the rest of Apply complete first
+            var settings = Services.AppSettings.Load();
+            if (!settings.AutoChainDeepAnalyze)
+            {
+                Services.DebugLog.Info("[AUTO-ADVANCE] deep-analyze chain disabled in Settings; skipping.");
+                return;
+            }
+            if (Services.ModelInstallerService.Instance.Vlm.Status
+                != Services.ModelInstallStatus.Installed)
+            {
+                Services.DebugLog.Info("[AUTO-ADVANCE] no VLM installed; skipping deep-analyze auto-chain.");
+                return;
+            }
+            var modelKind = settings.SelectedVlmModelKind;
+            Services.DebugLog.Info($"Auto-chaining Deep Analyze after face clustering complete. model={modelKind}");
+            await DeepAnalyzeAllAsync(modelKind, skipExisting: true).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Services.DebugLog.Warn("[AUTO-ADVANCE] deep-analyze trigger threw: " + ex.Message);
         }
     }
 

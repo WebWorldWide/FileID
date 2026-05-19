@@ -12,10 +12,7 @@ namespace FileID.Views.Settings;
 
 public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
 {
-    /// <summary>
-    /// Set true while we hydrate the toggles from AppSettings on Loaded.
-    /// Prevents the Toggled handlers from re-saving the value we just read.
-    /// </summary>
+    private bool _unloaded;
     private bool _initializingToggles;
 
     /// <summary> expose the singleton ModelInstallerService so
@@ -39,6 +36,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         Svc.Vlm.PropertyChanged += OnSlotChanged;
         Unloaded += (_, _) =>
         {
+            _unloaded = true;
             EngineClient.Instance.PropertyChanged -= OnEngineChanged;
             Svc.PropertyChanged -= OnInstallerChanged;
             Svc.Clip.PropertyChanged -= OnSlotChanged;
@@ -49,7 +47,13 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         {
             HydrateToggles();
             // Re-seed from on-disk sentinels in case Welcome / DeepAnalyze
-            // installed a model while a different tab was active.
+            // installed a model while a different tab was active. The call
+            // happens on the UI thread (Loaded handler), so any
+            // PropertyChanged events from slot.Status flips land on the
+            // dispatcher the bindings live on. Belt-and-suspenders: a
+            // direct Bindings.Update() below forces re-evaluation even
+            // if a PropertyChanged event was dropped (singleton first-
+            // touched off the UI thread, etc.).
             try { Svc.Refresh(); } catch { }
             // sync the CUDA llama.cpp + cuDNN install buttons to
             // reflect already-installed state at page load. Before this
@@ -57,6 +61,14 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             // click them just to see the state flip (matching engine's
             // immediate sentinel-check short-circuit).
             try { SyncInstallButtonStates(); } catch { }
+            // Force a bindings refresh after sentinel re-seed. Without
+            // this, the ArcFace / MobileCLIP install buttons can stay on
+            // "Install" at page load even when the sentinels exist on
+            // disk — Set()'s equality short-circuit suppresses the
+            // PropertyChanged event when Refresh()'s SeedSlot writes a
+            // status equal to the cached field. NEXT.md tracked this
+            // as the "install-state detection at page load" bug.
+            try { DispatcherQueue.TryEnqueue(() => Bindings.Update()); } catch { }
         };
     }
 
@@ -65,7 +77,15 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     /// runtime is already present on disk. Same sentinel path the engine
     /// writes after a successful prewarm (atomic temp+rename) — file
     /// existence is sufficient. Matches <see cref="Services.ModelInstallerService"/>'s
-    /// SentinelInstalled probe.</summary>
+    /// SentinelInstalled probe.
+    ///
+    /// Also covers the ArcFace + MobileCLIP slots that the model-card x:Binds
+    /// observe via Svc.Arcface.Status / Svc.Clip.Status. SeedFromSentinels
+    /// already keeps those slots in sync, but if the singleton was first
+    /// touched off the UI thread or PropertyChanged was suppressed by Set()'s
+    /// equality short-circuit, the bindings stay stale. Directly forcing
+    /// the slot Status here (on the UI dispatcher) wakes those bindings up.
+    /// </summary>
     private void SyncInstallButtonStates()
     {
         if (SentinelExists("llama_runtime_cuda_x64"))
@@ -82,6 +102,37 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             // already reflects whether the CUDA EP is actually active in
             // the current engine session (which depends on engine restart,
             // not just sentinel presence).
+        }
+        // ArcFace requires the "arcface" sentinel (the engine bundles
+        // SCRFD + ArcFace as one install in registry.rs).
+        if (SentinelExists("arcface") && Svc.Arcface.Status != Services.ModelInstallStatus.Installed)
+        {
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                Svc.Arcface.Status = Services.ModelInstallStatus.Installed;
+                Svc.Arcface.Fraction = 1.0;
+            });
+        }
+        // CLIP requires BOTH halves on disk (image encoder + text encoder).
+        if (SentinelExists("mobileclip_s2") && SentinelExists("clip_text")
+            && Svc.Clip.Status != Services.ModelInstallStatus.Installed)
+        {
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                Svc.Clip.Status = Services.ModelInstallStatus.Installed;
+                Svc.Clip.Fraction = 1.0;
+            });
+        }
+        // VLM has 4 alternative weights — any one sentinel marks it installed.
+        if ((SentinelExists("qwen2_5_vl_3b") || SentinelExists("qwen2_5_vl_7b")
+             || SentinelExists("smolvlm") || SentinelExists("gemma_3_4b"))
+            && Svc.Vlm.Status != Services.ModelInstallStatus.Installed)
+        {
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                Svc.Vlm.Status = Services.ModelInstallStatus.Installed;
+                Svc.Vlm.Fraction = 1.0;
+            });
         }
     }
 
@@ -100,30 +151,24 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
 
     private void OnInstallerChanged(object? sender, PropertyChangedEventArgs e)
     {
-        // Force a Bindings.Update() pass on x:Bind paths that depend on Svc
-        // aggregates (AllInstalled / IsBusy). x:Bind already observes per-slot
-        // PropertyChanged on its own; the service-level handler only fires
-        // when AllInstalled or IsBusy flip.
+        if (_unloaded) return;
         if (e.PropertyName is nameof(Services.ModelInstallerService.AllInstalled)
                            or nameof(Services.ModelInstallerService.IsBusy))
         {
-            DispatcherQueue.TryEnqueue(() => Bindings.Update());
+            DispatcherQueue.TryEnqueue(() => { if (!_unloaded) Bindings.Update(); });
         }
     }
 
     private void OnSlotChanged(object? sender, PropertyChangedEventArgs e)
     {
-        // x:Bind subscribes to ModelSlot's PropertyChanged automatically for
-        // bound properties. This handler is a safety net for the visibility-
-        // helper functions (which take Status as a value and don't trigger
-        // re-evaluation if Status went via a different route, e.g. Refresh()
-        // calling SeedSlot which mutates without an "x:Bind-traced" assignment).
-        DispatcherQueue.TryEnqueue(() => Bindings.Update());
+        if (_unloaded) return;
+        DispatcherQueue.TryEnqueue(() => { if (!_unloaded) Bindings.Update(); });
     }
 
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
         => Services.DebugLog.SafeRun("SettingsView.OnEngineChanged", () =>
         {
+            if (_unloaded) return;
             if (e.PropertyName is nameof(EngineClient.Info)
                 or nameof(EngineClient.State))
             {
@@ -139,13 +184,12 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
                 OnPropertyChanged(nameof(GpuDiagnosticsText));
                 OnPropertyChanged(nameof(PowerDiagnosticsText));
                 OnPropertyChanged(nameof(ThumbnailDiagnosticsText));
-                DispatcherQueue.TryEnqueue(SyncNvidiaSection);
+                DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncNvidiaSection(); });
             }
             else if (e.PropertyName == nameof(EngineClient.LastHardwareReprobe))
             {
-                // post-Verify-install update.
                 Services.DebugLog.Debug($"[ENGINE-SUB:SettingsView] {e.PropertyName}");
-                DispatcherQueue.TryEnqueue(SyncReprobeUi);
+                DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncReprobeUi(); });
             }
         });
 
@@ -177,6 +221,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             HideUnknownToggle.IsOn = s.PeopleHideUnknown;
             CleanupAutoTagToggle.IsOn = s.CleanupAutoTagKept;
             RestructureTreeModeToggle.IsOn = s.RestructureTreeMode;
+            AutoChainDeepAnalyzeToggle.IsOn = s.AutoChainDeepAnalyze;
             // Inverted: AppSettings stores "Disable…" but the UI shows
             // "Auto-install on" (truthy = enabled).
             AutoInstallCudaToggle.IsOn = !s.DisableAutoInstallCuda;
@@ -223,6 +268,15 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             if (_initializingToggles) return;
             var s = AppViewModel.Instance.Settings;
             s.RestructureTreeMode = RestructureTreeModeToggle.IsOn;
+            s.Save();
+        });
+
+    private void OnAutoChainDeepAnalyzeToggled(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnAutoChainDeepAnalyzeToggled), () =>
+        {
+            if (_initializingToggles) return;
+            var s = AppViewModel.Instance.Settings;
+            s.AutoChainDeepAnalyze = AutoChainDeepAnalyzeToggle.IsOn;
             s.Save();
         });
 

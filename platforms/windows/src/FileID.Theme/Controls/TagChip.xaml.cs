@@ -32,16 +32,29 @@ public sealed partial class TagChip : UserControl
             typeof(TagChip),
             new PropertyMetadata(string.Empty, OnTagTextChanged));
 
-    private static readonly SolidColorBrush ForegroundBrush =
+    private static readonly SolidColorBrush FallbackForeground =
         new(Color.FromArgb(0xCC, 0xFF, 0xFF, 0xFF));
-    private static readonly SolidColorBrush BackgroundBrush =
+    private static readonly SolidColorBrush FallbackBackground =
         new(Color.FromArgb(0x1A, 0xFF, 0xFF, 0xFF));
+
+    private static SolidColorBrush? _cachedFg;
+    private static SolidColorBrush? _cachedBg;
 
     public TagChip()
     {
         InitializeComponent();
-        LabelText.Foreground = ForegroundBrush;
-        ChipRoot.Background = BackgroundBrush;
+        _cachedFg ??= ResolveBrush("TagChipForegroundBrush", FallbackForeground);
+        _cachedBg ??= ResolveBrush("TagChipBackgroundBrush", FallbackBackground);
+        LabelText.Foreground = _cachedFg;
+        ChipRoot.Background = _cachedBg;
+    }
+
+    private static SolidColorBrush ResolveBrush(string key, SolidColorBrush fallback)
+    {
+        if (Application.Current?.Resources?.TryGetValue(key, out var obj) == true
+            && obj is SolidColorBrush b)
+            return b;
+        return fallback;
     }
 
     public string TagText

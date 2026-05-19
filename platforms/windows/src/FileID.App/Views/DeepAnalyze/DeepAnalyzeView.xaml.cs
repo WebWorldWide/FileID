@@ -22,19 +22,23 @@ public sealed partial class DeepAnalyzeView : UserControl
 {
     private string _activeModel = "qwen2_5_vl_3b";
     private string _captionAccumulator = string.Empty;
+    private bool _unloaded;
 
     public DeepAnalyzeView()
     {
         InitializeComponent();
+        // Restore the user's last VLM choice so the auto-chain after
+        // face clustering and a manual Analyze All both use the same
+        // weights the user last picked. Falls back to qwen2_5_vl_3b.
+        try { _activeModel = AppSettings.Load().SelectedVlmModelKind; }
+        catch { /* keep default */ }
         Loaded += OnLoadedHandler;
         Unloaded += OnUnloadedHandler;
     }
 
     private void OnUnloadedHandler(object sender, RoutedEventArgs e)
     {
-        // Use named handlers (not lambdas) so -= actually unregisters.
-        // Lambdas create a fresh delegate object each time, so -= silently
-        // misses the original subscription → leaked event listeners.
+        _unloaded = true;
         ModelInstallerService.Instance.Vlm.PropertyChanged -= OnInstallerChanged;
         EngineClient.Instance.PropertyChanged -= OnEngineChanged;
         Loaded -= OnLoadedHandler;
@@ -90,9 +94,10 @@ public sealed partial class DeepAnalyzeView : UserControl
             DebugLog.Warn("RefreshNamePeopleGateAsync failed: " + ex.Message);
             unnamed = 0;
         }
-        // Marshal UI updates back.
+        if (_unloaded) return;
         DispatcherQueue.TryEnqueue(() =>
         {
+            if (_unloaded) return;
             if (unnamed > 0)
             {
                 NamePeopleGateBanner.Visibility = Visibility.Visible;
@@ -118,11 +123,15 @@ public sealed partial class DeepAnalyzeView : UserControl
     }
 
     private void OnInstallerChanged(object? sender, PropertyChangedEventArgs e)
-        => DispatcherQueue.TryEnqueue(SyncCards);
+    {
+        if (_unloaded) return;
+        DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncCards(); });
+    }
 
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
         => DebugLog.SafeRun("DeepAnalyzeView.OnEngineChanged", () =>
         {
+            if (_unloaded) return;
             switch (e.PropertyName)
             {
                 case nameof(EngineClient.DeepAnalyzeStarting):
@@ -130,12 +139,8 @@ public sealed partial class DeepAnalyzeView : UserControl
                 case nameof(EngineClient.DeepAnalyzeLast):
                 case nameof(EngineClient.DeepAnalyzeComplete):
                     DebugLog.Debug($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
-                    DispatcherQueue.TryEnqueue(SyncStream);
+                    DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncStream(); });
                     break;
-                // re-evaluate the "Name people first" gate every
-                // time face clustering re-runs (new clusters → new unnamed)
-                // or a scan completes (new files → maybe new clusters next
-                // run).
                 case nameof(EngineClient.Phase):
                 case nameof(EngineClient.LastFaceClustering):
                     DebugLog.Debug($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
@@ -392,14 +397,17 @@ public sealed partial class DeepAnalyzeView : UserControl
         // AND the StreamImage.Source assignment inside one TryEnqueue
         // lambda. On any failure we explicitly null the source so the
         // placeholder glyph shows instead of a stale frame.
+        if (_unloaded) return;
         var dispatcher = DispatcherQueue;
         Windows.Storage.FileProperties.StorageItemThumbnail? thumb = null;
         try
         {
             var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(path);
+            if (_unloaded) return;
             thumb = await file.GetThumbnailAsync(
                 Windows.Storage.FileProperties.ThumbnailMode.SingleItem, 320,
                 Windows.Storage.FileProperties.ThumbnailOptions.UseCurrentScale);
+            if (_unloaded) { try { thumb?.Dispose(); } catch { } return; }
             if (thumb != null && thumb.Size > 0 && dispatcher != null)
             {
                 var captured = thumb;
@@ -444,8 +452,8 @@ public sealed partial class DeepAnalyzeView : UserControl
 
     private void ClearStreamImageOnDispatcher(Microsoft.UI.Dispatching.DispatcherQueue? dispatcher)
     {
-        if (dispatcher is null) return;
-        dispatcher.TryEnqueue(() => { try { StreamImage.Source = null; } catch { } });
+        if (dispatcher is null || _unloaded) return;
+        dispatcher.TryEnqueue(() => { if (!_unloaded) try { StreamImage.Source = null; } catch { } });
     }
 
     private void OnModelCardTapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e)
@@ -455,6 +463,15 @@ public sealed partial class DeepAnalyzeView : UserControl
             _activeModel = id;
             HighlightActiveCard();
             UpdateActiveModelLabel();
+            // Persist so the next launch (and the post-clustering auto-
+            // chain) caption with the same model the user just picked.
+            try
+            {
+                var s = AppSettings.Load();
+                s.SelectedVlmModelKind = id;
+                s.Save();
+            }
+            catch (Exception ex) { DebugLog.Warn("Persist VLM choice failed: " + ex.Message); }
         }
     }
 

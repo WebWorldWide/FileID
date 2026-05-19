@@ -66,6 +66,11 @@
     <SolidColorBrush x:Key="DestructiveBackgroundBrush"  Color="#FF2B0000" Opacity="0.13" />
     <SolidColorBrush x:Key="DestructiveBorderBrush"      Color="#FF2B0000" Opacity="0.33" />
 
+    <!-- Tag chips — gold-tinted to match macOS QLPreviewProvider.swift chip
+         styling (rgba(255,205,60,0.12) background, #FFCD3C foreground). -->
+    <SolidColorBrush x:Key="TagChipForegroundBrush" Color="#FFCD3C" Opacity="0.85" />
+    <SolidColorBrush x:Key="TagChipBackgroundBrush" Color="#FFCD3C" Opacity="0.10" />
+
     <!-- Scrim — for badge pills atop tile thumbnails. ~60% black. -->
     <SolidColorBrush x:Key="TileScrimBrush"              Color="#000000" Opacity="0.60" />
 

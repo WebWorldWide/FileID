@@ -157,6 +157,9 @@ pub struct TaggedFile {
     pub ocr_text: Option<String>,
 
     pub phash: Option<i64>,
+    pub aesthetic: Option<f64>,
+    pub image_width: u32,
+    pub image_height: u32,
     pub clip_embedding: Option<Vec<f32>>,
 
     pub camera_model: Option<String>,
@@ -580,6 +583,9 @@ impl Tagger {
                                 has_text: false,
                                 ocr_text: None,
                                 phash: None,
+                                aesthetic: None,
+                                image_width: 0,
+                                image_height: 0,
                                 clip_embedding: None,
                                 camera_model: None,
                                 location_lat: None,
@@ -659,7 +665,42 @@ fn run_decoder_thread(
 /// over `MAX_DECODED_PIXELS` before commit. `catch_unwind` wraps a
 /// panicking codec (malformed JPEG) so it surfaces as Err instead of
 /// crashing the decoder thread.
+///
+/// On Windows, falls back to the WinRT BitmapDecoder (HEIF Image
+/// Extensions) when image-rs fails on a .heic / .heif file. The
+/// fallback is silent on other extensions.
 fn decode_image_sync(path: &std::path::Path) -> anyhow::Result<(Vec<u8>, u32, u32)> {
+    let primary = decode_image_sync_imagecrate(path);
+    if primary.is_ok() {
+        return primary;
+    }
+    // Extension probe — only try the WinRT fallback for HEIC/HEIF.
+    #[cfg(windows)]
+    {
+        let ext = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
+        if ext == "heic" || ext == "heif" {
+            match shell::heic::decode(path) {
+                Ok(out) => return Ok(out),
+                Err(heic_err) => {
+                    // Bubble up a user-facing instruction. The string is
+                    // matched by the pipeline so the row's `error` field
+                    // surfaces a clean install hint instead of the raw
+                    // WinRT HRESULT.
+                    return Err(anyhow::anyhow!(
+                        "HEIC codec not installed — install HEIF Image Extensions from the Microsoft Store ({heic_err})"
+                    ));
+                }
+            }
+        }
+    }
+    primary
+}
+
+fn decode_image_sync_imagecrate(path: &std::path::Path) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> anyhow::Result<(Vec<u8>, u32, u32)> {
         use std::io::Cursor;
         let file = std::fs::File::open(path)
@@ -747,6 +788,9 @@ async fn process_file_predecoded(
         has_text: false,
         ocr_text: None,
         phash: None,
+        aesthetic: None,
+        image_width: 0,
+        image_height: 0,
         clip_embedding: None,
         camera_model: None,
         location_lat: None,
@@ -790,6 +834,14 @@ async fn process_file_predecoded(
     perf_trace("image_decode_done", &file.path, started.elapsed().as_secs_f64() * 1000.0);
 
     if let Some((rgb, w, h)) = image_source {
+        tagged.image_width = w;
+        tagged.image_height = h;
+        {
+            let megapixels = (w as f64 * h as f64) / 1_000_000.0;
+            let res_score = (megapixels / 50.0).min(1.0);
+            let size_score = (file.size_bytes as f64 / (100.0 * 1024.0 * 1024.0)).min(1.0);
+            tagged.aesthetic = Some(size_score * 0.5 + res_score * 0.5);
+        }
             if matches!(file.kind, FileKind::Image) {
                 let exif_started = Instant::now();
                 if let Some((cam, lat, lon)) = parse_exif_blocking(file.path.clone()).await {
@@ -828,6 +880,10 @@ async fn process_file_predecoded(
                             Ok(dets) => {
                                 for det in dets {
                                     if coord.is_gpu_dead() { break; }
+                                    let quality = match scrfd::validate_face_geometry(&det, w, h) {
+                                        Some(q) => q,
+                                        None => continue,
+                                    };
                                     if let Some(crop) = crop_and_resize_face(&rgb, w, h, &det.bbox) {
                                         let embed_result = {
                                             let mut a = arcface_mu.lock();
@@ -843,7 +899,7 @@ async fn process_file_predecoded(
                                                     roll: pose.roll,
                                                     yaw: pose.yaw,
                                                     pitch: pose.pitch,
-                                                    quality: det.score,
+                                                    quality,
                                                     crop_rgb_112: Some(crop),
                                                 });
                                             }
@@ -1099,6 +1155,16 @@ fn push_enriched_extras(tagged: &mut TaggedFile) {
             else { None };
         if let Some(f) = family {
             tagged.tags.push(f.to_string());
+        }
+    }
+    if tagged.image_width > 0 && tagged.image_height > 0 {
+        let ratio = tagged.image_width as f64 / tagged.image_height as f64;
+        if ratio > 1.30 {
+            tagged.tags.push("Wide".to_string());
+        } else if ratio < 0.77 {
+            tagged.tags.push("Tall".to_string());
+        } else {
+            tagged.tags.push("Square".to_string());
         }
     }
     if tagged.has_faces { tagged.tags.push("Has Faces".to_string()); }
@@ -1405,5 +1471,72 @@ mod tests {
         let rgb = vec![100u8; 200 * 200 * 3];
         let bbox = [50.0, 50.0, 4.0, 4.0];
         assert!(crop_and_resize_face(&rgb, 200, 200, &bbox).is_none());
+    }
+
+    fn stub_tagged(w: u32, h: u32, size_bytes: u64) -> TaggedFile {
+        TaggedFile {
+            path: PathBuf::from("test.jpg"),
+            kind: FileKind::Image,
+            size_bytes,
+            modified_unix: 1_710_504_000.0,
+            scanned_unix: 1_710_504_001.0,
+            has_faces: false,
+            faces: Vec::new(),
+            has_text: false,
+            ocr_text: None,
+            phash: None,
+            aesthetic: None,
+            image_width: w,
+            image_height: h,
+            clip_embedding: None,
+            camera_model: None,
+            location_lat: None,
+            location_lon: None,
+            vision_ms: 0.0,
+            clip_ms: 0.0,
+            total_ms: 0.0,
+            failed: false,
+            error_message: None,
+            tags: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn enriched_wide() {
+        let mut t = stub_tagged(1920, 1080, 5_000_000);
+        push_enriched_extras(&mut t);
+        assert!(t.tags.contains(&"Wide".to_string()), "1920/1080 = 1.78 > 1.30");
+    }
+
+    #[test]
+    fn enriched_tall() {
+        let mut t = stub_tagged(1080, 1920, 5_000_000);
+        push_enriched_extras(&mut t);
+        assert!(t.tags.contains(&"Tall".to_string()), "1080/1920 = 0.56 < 0.77");
+    }
+
+    #[test]
+    fn enriched_square() {
+        let mut t = stub_tagged(1080, 1080, 5_000_000);
+        push_enriched_extras(&mut t);
+        assert!(t.tags.contains(&"Square".to_string()), "1:1 ratio");
+    }
+
+    #[test]
+    fn enriched_borderline_not_wide() {
+        let mut t = stub_tagged(1300, 1000, 5_000_000);
+        push_enriched_extras(&mut t);
+        assert!(t.tags.contains(&"Square".to_string()),
+            "1300/1000 = 1.30 exactly — not > 1.30, so Square");
+        assert!(!t.tags.contains(&"Wide".to_string()));
+    }
+
+    #[test]
+    fn aesthetic_score_computed() {
+        let megapixels: f64 = (1920.0 * 1080.0) / 1_000_000.0;
+        let res_score: f64 = (megapixels / 50.0).min(1.0);
+        let size_score: f64 = (5_000_000.0_f64 / (100.0 * 1024.0 * 1024.0)).min(1.0);
+        let expected = size_score * 0.5 + res_score * 0.5;
+        assert!(expected > 0.0 && expected < 1.0, "score should be in (0, 1)");
     }
 }

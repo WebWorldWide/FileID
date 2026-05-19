@@ -27,8 +27,17 @@ pub(crate) async fn handle_plan_restructure(
     let files: Vec<FileForClassify> =
         match tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<FileForClassify>> {
             let conn = db.lock();
-            let mut stmt = conn
-                .prepare("SELECT id, path_text, kind, modified_at FROM files WHERE failed = 0")?;
+            let mut stmt = conn.prepare(
+                "SELECT
+                   f.id, f.path_text, f.kind, f.modified_at, f.created_at,
+                   f.location_lat, f.location_lon, f.has_text,
+                   GROUP_CONCAT(DISTINCT p.name, char(31)) AS names
+                 FROM files f
+                 LEFT JOIN face_prints fp ON fp.file_id = f.id
+                 LEFT JOIN persons p ON p.id = fp.person_id AND p.name IS NOT NULL AND p.name != ''
+                 WHERE f.failed = 0
+                 GROUP BY f.id"
+            )?;
             let rows = stmt.query_map([], |row| {
                 let kind_str: String = row.get(2)?;
                 let kind = match kind_str.as_str() {
@@ -40,11 +49,23 @@ pub(crate) async fn handle_plan_restructure(
                     _ => FileKind::Other,
                 };
                 let modified: Option<f64> = row.get(3)?;
+                let created: Option<f64> = row.get(4)?;
+                let names: Option<String> = row.get(8)?;
+                let person_name = names
+                    .as_deref()
+                    .and_then(|s| s.split('\x1F').next())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
                 Ok(FileForClassify {
                     file_id: row.get(0)?,
                     source: PathBuf::from(row.get::<_, String>(1)?),
                     kind,
                     modified_unix: modified.unwrap_or(0.0),
+                    created_unix: created,
+                    person_name,
+                    location_lat: row.get(5)?,
+                    location_lon: row.get(6)?,
+                    has_text: row.get::<_, Option<i64>>(7)?.unwrap_or(0) != 0,
                 })
             })?;
             let mut out = Vec::new();

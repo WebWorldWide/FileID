@@ -16,6 +16,7 @@ namespace FileID.Views.Restructure;
 public sealed partial class RestructureView : UserControl
 {
     private readonly ObservableCollection<RestructureCategoryRow> _categoryRows = new();
+    private bool _unloaded;
 
     public RestructureView()
     {
@@ -25,6 +26,7 @@ public sealed partial class RestructureView : UserControl
         Sankey.RibbonInvoked += OnSankeyRibbonInvoked;
         Unloaded += (_, _) =>
         {
+            _unloaded = true;
             EngineClient.Instance.PropertyChanged -= OnEngineChanged;
             Sankey.RibbonInvoked -= OnSankeyRibbonInvoked;
         };
@@ -50,15 +52,16 @@ public sealed partial class RestructureView : UserControl
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
         => Services.DebugLog.SafeRun("RestructureView.OnEngineChanged", () =>
         {
+            if (_unloaded) return;
             if (e.PropertyName == nameof(EngineClient.LastRestructurePlan))
             {
                 Services.DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
-                DispatcherQueue.TryEnqueue(SyncPlan);
+                DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncPlan(); });
             }
             else if (e.PropertyName == nameof(EngineClient.LastRestructureApplyResult))
             {
                 Services.DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
-                DispatcherQueue.TryEnqueue(SyncApplyResult);
+                DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncApplyResult(); });
             }
         });
 

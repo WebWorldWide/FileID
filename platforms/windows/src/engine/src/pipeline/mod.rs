@@ -15,3 +15,4 @@ pub mod identity_clustering;
 pub mod deep_analyze;
 pub mod restructure;
 pub mod restructure_apply;
+pub mod cluster_suggestions;

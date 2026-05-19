@@ -23,6 +23,7 @@
 #[cfg(windows)] pub mod trash;
 #[cfg(windows)] pub mod ocr;
 #[cfg(windows)] pub mod video;
+#[cfg(windows)] pub mod heic;
 
 #[cfg(not(windows))]
 pub mod reveal {
@@ -117,5 +118,14 @@ pub mod video {
     }
     pub fn keyframe_25pct(_path: &Path) -> Result<VideoFrame> {
         anyhow::bail!("shell::video::keyframe_25pct not implemented on this platform")
+    }
+}
+
+#[cfg(not(windows))]
+pub mod heic {
+    use anyhow::Result;
+    use std::path::Path;
+    pub fn decode(_path: &Path) -> Result<(Vec<u8>, u32, u32)> {
+        anyhow::bail!("shell::heic::decode not implemented on this platform")
     }
 }

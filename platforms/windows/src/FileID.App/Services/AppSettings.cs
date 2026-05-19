@@ -94,6 +94,23 @@ internal sealed class AppSettings
     /// + cuDNN if they prefer the BYO path.</summary>
     public bool DisableAutoInstallCudnn { get; set; } = false;
 
+    /// <summary>When true (the default), Deep Analyze is automatically
+    /// chained after face clustering completes. Mirrors macOS's
+    /// `autoPilotStage` advance from grouping → captioning. The chain
+    /// is silently skipped if no VLM model is installed (the slot's
+    /// status is checked at fire time, not at toggle time). Users can
+    /// opt out via Settings → "Automatically caption files after face
+    /// clustering".</summary>
+    public bool AutoChainDeepAnalyze { get; set; } = true;
+
+    /// <summary>Persisted VLM model selection. Used by the auto-chain
+    /// after face clustering to pick which weights to caption with, and
+    /// by DeepAnalyzeView to remember the last manual choice across
+    /// launches. Accepted values mirror the engine's registry.rs ids
+    /// (qwen2_5_vl_3b, qwen2_5_vl_7b, gemma_3_4b, smolvlm); Sanitize()
+    /// coerces anything else to the safe default.</summary>
+    public string SelectedVlmModelKind { get; set; } = "qwen2_5_vl_3b";
+
     /// <summary>Schema version of this settings.json. Bumped only on incompatible field renames.</summary>
     public int SchemaVersion { get; set; } = 1;
 
@@ -104,6 +121,14 @@ internal sealed class AppSettings
     private static readonly HashSet<string> AllowedEpOverrides =
         new(StringComparer.OrdinalIgnoreCase)
         { "auto", "cuda", "tensorrt", "directml", "openvino", "qnn", "cpu" };
+
+    /// <summary>VLM model ids the engine's registry.rs knows how to
+    /// install. Sanitize() coerces any other value to the safe default
+    /// so a tampered settings.json can't smuggle an arbitrary
+    /// model_kind into the auto-chain deepAnalyzeAll call.</summary>
+    private static readonly HashSet<string> AllowedVlmKinds =
+        new(StringComparer.OrdinalIgnoreCase)
+        { "qwen2_5_vl_3b", "qwen2_5_vl_7b", "gemma_3_4b", "smolvlm" };
 
     public static AppSettings Load()
     {
@@ -155,6 +180,11 @@ internal sealed class AppSettings
         // Bound other ranges defensively.
         if (string.IsNullOrWhiteSpace(s.ActiveTab)) s.ActiveTab = "library";
         if (string.IsNullOrWhiteSpace(s.LibraryKindFilter)) s.LibraryKindFilter = "all";
+        if (string.IsNullOrWhiteSpace(s.SelectedVlmModelKind)
+            || !AllowedVlmKinds.Contains(s.SelectedVlmModelKind))
+        {
+            s.SelectedVlmModelKind = "qwen2_5_vl_3b";
+        }
     }
 
     // debounce + offload. The previous implementation ran every
