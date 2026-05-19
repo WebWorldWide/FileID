@@ -19,6 +19,7 @@
 
             <conv:BoolToVisibilityConverter x:Key="BoolToVisibility" />
             <conv:NullToVisibilityConverter x:Key="NullToVisibility" />
+            <conv:IdentityDoubleConverter x:Key="IdentityDouble" />
         </ResourceDictionary>
     </Application.Resources>
 </Application>

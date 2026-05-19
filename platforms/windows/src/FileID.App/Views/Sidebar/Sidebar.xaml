@@ -36,7 +36,7 @@
                       VerticalScrollBarVisibility="Auto"
                       HorizontalScrollBarVisibility="Disabled"
                       ZoomMode="Disabled">
-            <StackPanel Spacing="16">
+            <StackPanel Spacing="22">
                 <local:SidebarFolderHeader />
                 <local:SidebarTabList />
                 <local:SidebarProcessingControl />

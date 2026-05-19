@@ -163,10 +163,19 @@ internal sealed class ThumbnailService : IDisposable
     /// <summary>
     /// Render a thumbnail via the Windows.Storage shell-thumbnail API
     /// (which uses the same IThumbnailProvider chain Explorer does — Office,
-    /// raw, .heic, .pages all work). 192-px request, scaled by the system.
+    /// raw, .heic, .pages all work). 192-px request, scaled internally by
+    /// the shell with `UseCurrentScale`.
     /// dropped from 256 → 192 px to match macOS
-    /// `ThumbnailService.swift:27` (size: 192). Same display target, ~44%
+    /// `ThumbnailService.swift:27` (size: 192). Same visual target, ~44%
     /// less memory per cached tile.
+    ///
+    /// V16.1 reverted an attempt to add per-window DPI scaling. The
+    /// scaling helper called WinRT interop (`WindowNative.GetWindowHandle`)
+    /// from the worker-thread `DrainAsync` task, which has thread-affinity
+    /// constraints on WinUI 3 — the silent catch fell back to 192 anyway,
+    /// but it also appeared to poison subsequent `SetSourceAsync` calls
+    /// for some users (every tile showed the broken-image placeholder).
+    /// Holding at hardcoded 192 px keeps the known-good V16.0 behavior.
     /// </summary>
     private const uint ThumbnailRequestPx = 192;
 
@@ -345,9 +354,14 @@ internal sealed class ThumbnailService : IDisposable
         TaskCompletionSource<BitmapImage?> tcs,
         CancellationToken ct)
     {
+        // Stream lifetime: must outlive SetSourceAsync. The prior `using var
+        // stream` form disposed the stream as soon as RunBytesSetSource
+        // returned, even if SetSourceAsync was still walking the bytes. Pull
+        // out of `using` and Dispose explicitly in finally AFTER the await.
+        Windows.Storage.Streams.InMemoryRandomAccessStream? stream = null;
         try
         {
-            using var stream = new Windows.Storage.Streams.InMemoryRandomAccessStream();
+            stream = new Windows.Storage.Streams.InMemoryRandomAccessStream();
             using (var writer = new Windows.Storage.Streams.DataWriter(stream.GetOutputStreamAt(0)))
             {
                 writer.WriteBytes(bytes);
@@ -358,12 +372,17 @@ internal sealed class ThumbnailService : IDisposable
             stream.Seek(0);
             var bmp = new BitmapImage { DecodePixelWidth = (int)ThumbnailRequestPx };
             await bmp.SetSourceAsync(stream).AsTask(ct);
+            DebugLog.Debug($"[THUMB] DECODE_OK bytes={bytes.Length} px={ThumbnailRequestPx}");
             tcs.TrySetResult(bmp);
         }
         catch (Exception ex)
         {
-            DebugLog.Warn($"ThumbnailService bytes-decode: {ex.GetType().Name}: {ex.Message}");
+            DebugLog.Warn($"[THUMB] DECODE_FAIL ex={ex.GetType().Name} msg={ex.Message} bytes={bytes.Length} px={ThumbnailRequestPx}");
             tcs.TrySetResult(null);
+        }
+        finally
+        {
+            try { stream?.Dispose(); } catch { /* swallow */ }
         }
     }
 

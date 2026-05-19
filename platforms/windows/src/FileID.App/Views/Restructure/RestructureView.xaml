@@ -4,9 +4,10 @@
 
     Plan: button → engine planRestructure IPC → category-summary list.
     Apply: floating bar → engine applyRestructure IPC → result count.
-    Win2D Sankey + tree-diff drill-down is in progress; today the plan
-    summary is a per-category card list which is fully functional and
-    renders in any device-agnostic environment.
+    Sankey (pure-XAML via Path/BezierSegment, no Win2D) renders source-
+    folder → category ribbons; TreeDiff renders side-by-side current vs.
+    proposed trees. Both feed off the same engine plan; the
+    VisualizationModeCombo flips between them.
 -->
 <UserControl
     x:Class="FileID.Views.Restructure.RestructureView"
@@ -75,12 +76,40 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <StackPanel Grid.Row="0" Spacing="4">
+        <StackPanel Grid.Row="0" Spacing="6">
             <TextBlock Text="Restructure" Style="{StaticResource TitleTextBlockStyle}"/>
             <TextBlock TextWrapping="Wrap"
                        Style="{StaticResource BodyTextBlockStyle}"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                        Text="Plan a folder reorganization. Photos by year/month, videos by year, documents flat. Preview as symlinks first; commit as moves when you're happy."/>
+            <!-- Deep Analyze hint banner. macOS RestructureView surfaces
+                 this whenever Deep Analyze has produced captions but the
+                 user hasn't named people yet — the restructure layout's
+                 People/ bucket reads "Person N" instead of "Alice" without
+                 names. Tap-through routes to People. -->
+            <Border x:Name="DeepAnalyzeHintBanner"
+                    Visibility="Collapsed"
+                    CornerRadius="10"
+                    Padding="12,10"
+                    Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                    BorderBrush="{ThemeResource AiBrush}"
+                    BorderThickness="1">
+                <Grid ColumnSpacing="10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <FontIcon Grid.Column="0" Glyph="&#xE77B;" FontSize="14"
+                              Foreground="{ThemeResource AiBrush}"
+                              VerticalAlignment="Top" Margin="0,1,0,0" />
+                    <TextBlock Grid.Column="1" TextWrapping="Wrap"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Text="Name your people first so the People/ folders are organized by real names instead of 'Person 1'." />
+                    <Button Grid.Column="2" Content="Open People"
+                            Click="OnOpenPeopleHintClicked" VerticalAlignment="Center" />
+                </Grid>
+            </Border>
         </StackPanel>
 
         <ScrollViewer Grid.Row="1"

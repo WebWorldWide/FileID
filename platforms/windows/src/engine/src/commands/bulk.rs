@@ -57,18 +57,25 @@ pub(crate) async fn handle_apply_tags(
                 if trimmed.is_empty() {
                     continue;
                 }
-                let exec_res = tx
-                    .prepare_cached(
-                        "INSERT OR REPLACE INTO tags (file_id, tag, source, score) VALUES (?1, ?2, 'user', NULL)",
-                    )?
-                    .execute(rusqlite::params![fid, trimmed]);
+                let exec_res = match payload.mode {
+                    TagMode::Remove => tx
+                        .prepare_cached(
+                            "DELETE FROM tags WHERE file_id = ?1 AND tag = ?2 AND source = 'user'",
+                        )?
+                        .execute(rusqlite::params![fid, trimmed]),
+                    _ => tx
+                        .prepare_cached(
+                            "INSERT OR REPLACE INTO tags (file_id, tag, source, score) VALUES (?1, ?2, 'user', NULL)",
+                        )?
+                        .execute(rusqlite::params![fid, trimmed]),
+                };
                 if let Err(err) = exec_res {
                     failed += 1;
                     row_ok = false;
                     messages.push(BulkActionItem {
                         file_id: Some(*fid),
                         ok: false,
-                        message: Some(format!("tag insert failed: {err}")),
+                        message: Some(format!("tag write failed: {err}")),
                     });
                     break;
                 }

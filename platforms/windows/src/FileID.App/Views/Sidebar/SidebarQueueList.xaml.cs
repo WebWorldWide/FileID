@@ -24,6 +24,17 @@ public sealed partial class SidebarQueueList : UserControl
     // swap its children content; layout passes see a steady reference.
     private StackPanel? _rowsContainer;
 
+    // Two brushes per BuildRow (running vs idle background) used to be
+    // allocated fresh on every QueueState event — 10 Hz × 50 rows = 500
+    // SolidColorBrush allocations/sec, each a DispatcherObject. Cache them
+    // once on the UI thread at first use and reuse.
+    private static readonly SolidColorBrush RunningBackground =
+        new(Color.FromArgb(0x14, 0xFF, 0xFF, 0xFF));
+    private static readonly SolidColorBrush TransparentBackground =
+        new(Colors.Transparent);
+    private static readonly FontFamily FluentIconsFont =
+        new("Segoe Fluent Icons");
+
     public SidebarQueueList()
     {
         InitializeComponent();
@@ -95,7 +106,7 @@ public sealed partial class SidebarQueueList : UserControl
     {
         var icon = new FontIcon
         {
-            FontFamily = new FontFamily("Segoe Fluent Icons"),
+            FontFamily = FluentIconsFont,
             Glyph = job.Category switch
             {
                 JobCategory.Scan => "",
@@ -126,9 +137,7 @@ public sealed partial class SidebarQueueList : UserControl
         {
             Padding = new Thickness(8, 6, 8, 6),
             CornerRadius = new CornerRadius(8),
-            Background = isRunning
-                ? new SolidColorBrush(Color.FromArgb(0x14, 0xFF, 0xFF, 0xFF))
-                : new SolidColorBrush(Colors.Transparent),
+            Background = isRunning ? RunningBackground : TransparentBackground,
         };
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });

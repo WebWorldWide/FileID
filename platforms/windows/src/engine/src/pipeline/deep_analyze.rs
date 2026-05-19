@@ -8,8 +8,10 @@
 //   4. Persist to `deep_analyze_results` (migration v3).
 //   5. Emit `deepAnalyzeProgress` IPC events on every N files.
 
-use std::path::PathBuf;
-
+/// Enumerates the VLM model kinds the Deep Analyze pipeline can run.
+/// Kept around (even though the registry is the source of truth for
+/// download metadata) so unit tests can sanity-check id uniqueness +
+/// size-tier ordering without exercising the full registry surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum VlmModelKind {
@@ -58,32 +60,6 @@ impl VlmModelKind {
             VlmModelKind::Gemma3_4B => 4500,
             VlmModelKind::SmolVlm => 900,
         }
-    }
-}
-
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct VlmModelFiles {
-    pub kind: VlmModelKind,
-    /// Main GGUF weights file.
-    pub gguf_path: PathBuf,
-    /// Vision projection file (vision adapter for the multi-modal head).
-    pub mmproj_path: PathBuf,
-}
-
-#[allow(dead_code)]
-impl VlmModelFiles {
-    pub fn default_paths(kind: VlmModelKind) -> anyhow::Result<Self> {
-        let dir = crate::paths::models_dir()?.join("VLM").join(kind.id());
-        Ok(Self {
-            kind,
-            gguf_path: dir.join("model-q4_k_m.gguf"),
-            mmproj_path: dir.join("mmproj.gguf"),
-        })
-    }
-
-    pub fn ready(&self) -> bool {
-        self.gguf_path.exists() && self.mmproj_path.exists()
     }
 }
 

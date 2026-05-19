@@ -132,7 +132,21 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         {
             OnPropertyChanged(nameof(SelectedCount));
             OnPropertyChanged(nameof(SelectedItems));
+            // Publish to the cross-view registry so other tabs (Deep
+            // Analyze, Restructure) can act on the current selection.
+            PublishSelectionToRegistry();
         }
+    }
+
+    private void PublishSelectionToRegistry()
+    {
+        // Snapshot ids once on the UI thread; SelectionRegistry consumers
+        // (e.g. DeepAnalyzeView's "Analyze selected" button) read from
+        // any thread without re-allocating per read.
+        var ids = new long[_selected.Count];
+        int i = 0;
+        foreach (var t in _selected) ids[i++] = t.Id;
+        FileID.Services.SelectionRegistry.Instance.LibrarySelection = ids;
     }
 
     public IReadOnlyList<FileTile> SelectedItems => _selected.ToList();
@@ -151,6 +165,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         // notify (defensive — shouldn't happen).
         OnPropertyChanged(nameof(SelectedCount));
         OnPropertyChanged(nameof(SelectedItems));
+        PublishSelectionToRegistry();
     }
 
     public string Query
@@ -362,7 +377,41 @@ internal sealed class FileTile : INotifyPropertyChanged
     public System.Collections.Generic.IReadOnlyList<string> TopTwoTags { get; init; }
         = System.Array.Empty<string>();
 
+    /// <summary>Deep Analyze's smart-rename proposal. Shown in gold under
+    /// the filename when present, matching macOS LibraryView.swift's
+    /// proposedName affordance. Null when Deep Analyze hasn't run on
+    /// this file (or didn't propose a rename).</summary>
+    public string? ProposedName { get; init; }
+    public bool HasProposedName => !string.IsNullOrWhiteSpace(ProposedName);
+
     public string SizeDisplay => FormatSize(SizeBytes);
+
+    /// <summary>Segoe Fluent Icons glyph that summarizes the file's kind
+    /// for the top-left badge stack. Mirrors macOS's SF Symbol per-kind
+    /// glyph (photo / video / music / doc.text / doc / file). Returns a
+    /// neutral file glyph for unknown kinds so the badge never renders
+    /// blank space.</summary>
+    public string KindBadgeGlyph => Kind switch
+    {
+        "image" => "", // Picture
+        "video" => "", // Video
+        "audio" => "", // MusicNote
+        "pdf"   => "", // PDF
+        "doc"   => "", // Document
+        _        => "", // File
+    };
+
+    /// <summary>Human-readable kind label used in the file preview sheet
+    /// metadata. Mirrors macOS's kind.capitalized.</summary>
+    public string KindDisplay => Kind switch
+    {
+        "image" => "Image",
+        "video" => "Video",
+        "audio" => "Audio",
+        "pdf"   => "PDF",
+        "doc"   => "Document",
+        _        => "File",
+    };
 
     private bool _isSelected;
     public bool IsSelected
@@ -435,6 +484,7 @@ internal sealed class FileTile : INotifyPropertyChanged
             ModifiedAt = r.ModifiedAt,
             Tags = tags,
             TopTwoTags = topTwo,
+            ProposedName = r.ProposedName,
         };
     }
 

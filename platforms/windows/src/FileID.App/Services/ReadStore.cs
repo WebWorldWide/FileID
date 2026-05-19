@@ -144,7 +144,8 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = """
             SELECT f.id, f.path_text, f.kind, f.size_bytes, f.modified_at, f.has_faces, f.has_text,
-                   (SELECT GROUP_CONCAT(tag, '|') FROM tags WHERE file_id = f.id AND source = 'auto') AS auto_tags
+                   (SELECT GROUP_CONCAT(tag, '|') FROM tags WHERE file_id = f.id AND source IN ('auto','user')) AS auto_tags,
+                   f.vlm_proposed_name
             FROM ocr_fts
             JOIN files f ON f.id = ocr_fts.rowid
             WHERE ocr_fts MATCH $match
@@ -188,7 +189,8 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             using var cmd2 = _connection.CreateCommand();
             cmd2.CommandText = $"""
             SELECT id, path_text, kind, size_bytes, modified_at, has_faces, has_text,
-                   (SELECT GROUP_CONCAT(tag, '|') FROM tags WHERE file_id = files.id AND source = 'auto') AS auto_tags
+                   (SELECT GROUP_CONCAT(tag, '|') FROM tags WHERE file_id = files.id AND source IN ('auto','user')) AS auto_tags,
+                   vlm_proposed_name
             FROM files
             WHERE {string.Join(" AND ", likePieces)}
             ORDER BY modified_at DESC NULLS LAST
@@ -229,7 +231,8 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = """
                 SELECT id, path_text, kind, size_bytes, modified_at, has_faces, has_text,
-                       (SELECT GROUP_CONCAT(tag, '|') FROM tags WHERE file_id = files.id AND source = 'auto') AS auto_tags
+                       (SELECT GROUP_CONCAT(tag, '|') FROM tags WHERE file_id = files.id AND source IN ('auto','user')) AS auto_tags,
+                       vlm_proposed_name
                 FROM files
                 ORDER BY modified_at DESC NULLS LAST LIMIT $limit
                 """;
@@ -267,7 +270,8 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             cmd.CommandText = """
             SELECT f.id, f.path_text, f.kind, f.size_bytes, f.modified_at,
                    f.has_faces, f.has_text,
-                   (SELECT GROUP_CONCAT(tag, '|') FROM tags WHERE file_id = f.id AND source = 'auto') AS auto_tags,
+                   (SELECT GROUP_CONCAT(tag, '|') FROM tags WHERE file_id = f.id AND source IN ('auto','user')) AS auto_tags,
+                   f.vlm_proposed_name,
                    e.embedding
             FROM clip_embeddings e
             JOIN files f ON f.id = e.file_id
@@ -395,6 +399,16 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
                 tags = raw.Split('|', StringSplitOptions.RemoveEmptyEntries);
             }
         }
+        // Optional 9th column: vlm_proposed_name (smart-rename
+        // proposal from Deep Analyze). When present the Library card
+        // shows it in gold below the filename, matching macOS
+        // LibraryView.swift's golden smartName affordance.
+        string? proposedName = null;
+        if (reader.FieldCount > 8 && !reader.IsDBNull(8))
+        {
+            var raw = reader.GetString(8);
+            if (!string.IsNullOrWhiteSpace(raw)) proposedName = raw;
+        }
         return new FileRow(
             Id: reader.GetInt64(0),
             Path: reader.GetString(1),
@@ -403,7 +417,8 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             ModifiedAt: reader.IsDBNull(4) ? null : reader.GetDouble(4),
             HasFaces: reader.GetInt32(5) != 0,
             HasText: reader.GetInt32(6) != 0,
-            Tags: tags);
+            Tags: tags,
+            ProposedName: proposedName);
     }
 
     private static string BuildMatchExpression(string query)
@@ -488,7 +503,8 @@ internal sealed record FileRow(
     double? ModifiedAt,
     bool HasFaces,
     bool HasText,
-    System.Collections.Generic.IReadOnlyList<string>? Tags = null);
+    System.Collections.Generic.IReadOnlyList<string>? Tags = null,
+    string? ProposedName = null);
 
 internal sealed record FileRowWithScore(FileRow Row, float Score);
 

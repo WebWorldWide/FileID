@@ -30,6 +30,14 @@
                            Style="{StaticResource BodyTextBlockStyle}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                            TextWrapping="Wrap" />
+                <!-- Live stats — "N groups • M files non-keepers • S reclaimable".
+                     Mirrors macOS CleanupView's header counter so the user
+                     can see what Trash non-keepers is about to do before
+                     they click. Updates whenever a keeper radio flips. -->
+                <TextBlock x:Name="HeaderStatsText"
+                           Text="{x:Bind HeaderStats, Mode=OneWay}"
+                           FontSize="12"
+                           Foreground="{ThemeResource GoldBrush}" />
             </StackPanel>
             <ScrollViewer Grid.Column="1"
                           HorizontalScrollMode="Auto"
@@ -37,6 +45,13 @@
                           VerticalScrollMode="Disabled"
                           VerticalScrollBarVisibility="Disabled">
                 <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <Button Click="OnResetKeepersClicked"
+                            ToolTipService.ToolTip="Re-mark the first member of every group as keeper, clearing any user overrides.">
+                        <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                            <FontIcon FontSize="13" Glyph="&#xE7A7;" />
+                            <TextBlock Text="Reset" />
+                        </StackPanel>
+                    </Button>
                     <Button Click="OnTrashNonKeepersClicked"
                             ToolTipService.ToolTip="Move every non-keeper duplicate to the Recycle Bin.">
                         <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">

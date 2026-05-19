@@ -229,9 +229,14 @@ internal static class ThumbnailDiskCache
             TaskCreationOptions.RunContinuationsAsynchronously);
         var ok = dispatcher.TryEnqueue(async () =>
         {
+            // Stream lifetime — see ThumbnailService.RunBytesSetSource:
+            // the `using var stream` form disposes too early under some
+            // SetSourceAsync timings. Pull out, dispose in finally AFTER
+            // the await completes.
+            InMemoryRandomAccessStream? stream = null;
             try
             {
-                using var stream = new InMemoryRandomAccessStream();
+                stream = new InMemoryRandomAccessStream();
                 using (var writer = new DataWriter(stream.GetOutputStreamAt(0)))
                 {
                     writer.WriteBytes(bytes);
@@ -240,14 +245,22 @@ internal static class ThumbnailDiskCache
                     writer.DetachStream();
                 }
                 stream.Seek(0);
+                // Match ThumbnailService.ThumbnailRequestPx (192). DPI-aware
+                // sampling was reverted in V16.1 — see the comment in
+                // ThumbnailService.cs for the rationale.
                 var bmp = new BitmapImage { DecodePixelWidth = 192 };
                 await bmp.SetSourceAsync(stream).AsTask(ct);
+                DebugLog.Debug($"[THUMB] DECODE_OK bytes={bytes.Length} src=disk");
                 tcs.TrySetResult(bmp);
             }
             catch (Exception ex)
             {
-                DebugLog.Warn($"ThumbnailDiskCache decode: {ex.GetType().Name}: {ex.Message}");
+                DebugLog.Warn($"[THUMB] DECODE_FAIL ex={ex.GetType().Name} msg={ex.Message} bytes={bytes.Length} src=disk");
                 tcs.TrySetResult(null);
+            }
+            finally
+            {
+                try { stream?.Dispose(); } catch { /* swallow */ }
             }
         });
         if (!ok)

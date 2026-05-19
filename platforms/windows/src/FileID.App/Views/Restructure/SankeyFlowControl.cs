@@ -47,9 +47,44 @@ public sealed class SankeyFlowControl : Control
     private readonly Dictionary<Rectangle, Brush> _rectIdleFill = new();
     private TextBlock? _hoverTooltip;
 
+    // Pre-cached brushes. Render() used to allocate ~2 brushes per ribbon
+    // (idle/hover) plus 1 per category rect plus 2 more on every hover
+    // (white highlight). With 12 sources × 12 categories that's up to
+    // 288 SolidColorBrush allocations per Render call, and Render fires on
+    // Loaded + SizeChanged — including during tab-swap mid-scan when the
+    // dispatcher is under burst load from EngineClient. Per CLAUDE.md's
+    // V15.2/V15.4 history, naked DispatcherObject construction on a
+    // mid-transition XAML tree is a fast-fail shape. Cache once at ctor
+    // (UI thread, dispatcher healthy) and reuse.
+    private readonly Brush[] _ribbonIdleBrushes;
+    private readonly Brush[] _ribbonHoverBrushes;
+    private readonly Brush[] _categoryRectBrushes;
+    private readonly SolidColorBrush _whiteHighlight;
+    private readonly Brush _sourceBrush;
+
     public SankeyFlowControl()
     {
         DefaultStyleKey = typeof(SankeyFlowControl);
+
+        _sourceBrush = ResolveBrush("GoldBrush", Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00));
+        var categoryColors = new[]
+        {
+            ResolveColor("AiBrush",      Color.FromArgb(0xFF, 0xB1, 0x9B, 0xCE)),
+            ResolveColor("InfoBrush",    Color.FromArgb(0xFF, 0xA0, 0xE2, 0xEA)),
+            ResolveColor("DelightBrush", Color.FromArgb(0xFF, 0xF2, 0xA6, 0xC0)),
+        };
+        _ribbonIdleBrushes = new Brush[categoryColors.Length];
+        _ribbonHoverBrushes = new Brush[categoryColors.Length];
+        _categoryRectBrushes = new Brush[categoryColors.Length];
+        for (int i = 0; i < categoryColors.Length; i++)
+        {
+            var c = categoryColors[i];
+            _ribbonIdleBrushes[i] = new SolidColorBrush(Color.FromArgb(0x66, c.R, c.G, c.B));
+            _ribbonHoverBrushes[i] = new SolidColorBrush(Color.FromArgb(0xCC, c.R, c.G, c.B));
+            _categoryRectBrushes[i] = new SolidColorBrush(c);
+        }
+        _whiteHighlight = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
+
         Loaded += (_, _) => Render();
         SizeChanged += (_, _) => Render();
         PointerMoved += OnPointerMoved;
@@ -145,14 +180,9 @@ public sealed class SankeyFlowControl : Control
             cursor += height + gap;
         }
 
-        // Brushes: gold for sources, lavender/cyan/pink rotation for categories.
-        var sourceBrush = ResolveBrush("GoldBrush", Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00));
-        var categoryColors = new[]
-        {
-            ResolveColor("AiBrush",      Color.FromArgb(0xFF, 0xB1, 0x9B, 0xCE)),
-            ResolveColor("InfoBrush",    Color.FromArgb(0xFF, 0xA0, 0xE2, 0xEA)),
-            ResolveColor("DelightBrush", Color.FromArgb(0xFF, 0xF2, 0xA6, 0xC0)),
-        };
+        // Brushes are pre-allocated at ctor (see field declarations).
+        // Aliases here keep the rest of Render() readable.
+        var sourceBrush = _sourceBrush;
 
         // Draw ribbons first (so labels + boxes overlay them).
         // Each pair (source, category) → one bezier path.
@@ -179,9 +209,9 @@ public sealed class SankeyFlowControl : Control
                 srcOffsets[src.Key] += srcRibbonH;
                 catOffsets[cat.Key] += catRibbonH;
 
-                var ribbonColor = categoryColors[c % categoryColors.Length];
-                var idleFill = new SolidColorBrush(Color.FromArgb(0x66, ribbonColor.R, ribbonColor.G, ribbonColor.B));
-                var hoverFill = new SolidColorBrush(Color.FromArgb(0xCC, ribbonColor.R, ribbonColor.G, ribbonColor.B));
+                var brushIdx = c % _ribbonIdleBrushes.Length;
+                var idleFill = _ribbonIdleBrushes[brushIdx];
+                var hoverFill = _ribbonHoverBrushes[brushIdx];
                 var (path, samples) = AddRibbon(_canvas,
                     margin + boxWidth, srcStart, srcRibbonH,
                     w - margin - boxWidth, catStart, catRibbonH,
@@ -233,12 +263,12 @@ public sealed class SankeyFlowControl : Control
         {
             var g = byCategory[i];
             var pos = catYs[g.Key];
-            var color = categoryColors[i % categoryColors.Length];
+            var brushIdx = i % _categoryRectBrushes.Length;
             var rect = new Rectangle
             {
                 Width = boxWidth,
                 Height = pos.height,
-                Fill = new SolidColorBrush(color),
+                Fill = _categoryRectBrushes[brushIdx],
                 RadiusX = 3,
                 RadiusY = 3,
             };
@@ -369,14 +399,16 @@ public sealed class SankeyFlowControl : Control
         if (hovered is null) return;
 
         // Highlight the hovered ribbon + its source/destination rects.
+        // White-highlight brush is pre-allocated to avoid per-hover
+        // DispatcherObject construction during pointer moves.
         hovered.Path.Fill = hovered.HoverFill;
         if (_sourceRects.TryGetValue(hovered.Source, out var srcRect))
         {
-            srcRect.Fill = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
+            srcRect.Fill = _whiteHighlight;
         }
         if (_categoryRects.TryGetValue(hovered.Category, out var catRect))
         {
-            catRect.Fill = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
+            catRect.Fill = _whiteHighlight;
         }
         // Tooltip — first sample point as anchor.
         var anchor = hovered.Samples[hovered.Samples.Length / 2];

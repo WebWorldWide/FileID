@@ -53,7 +53,9 @@ public sealed partial class TagChip : UserControl
     {
         if (Application.Current?.Resources?.TryGetValue(key, out var obj) == true
             && obj is SolidColorBrush b)
+        {
             return b;
+        }
         return fallback;
     }
 

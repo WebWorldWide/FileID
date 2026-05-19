@@ -247,12 +247,16 @@ pub struct ApplyTagsPayload {
     pub mode: TagMode,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum TagMode {
     #[default]
     Add,
     Replace,
+    /// Delete each named tag from the selection's `source='user'` rows.
+    /// Tags not present on a given file are a no-op for that file (the
+    /// per-file row count goes to `succeeded` either way).
+    Remove,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

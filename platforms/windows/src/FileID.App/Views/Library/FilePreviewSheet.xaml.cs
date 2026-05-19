@@ -44,7 +44,14 @@ public sealed partial class FilePreviewSheet : UserControl
         // MediaPlayerElement holds an IMediaPlaybackSource that pins the
         // file handle — without an explicit pause the audio keeps playing
         // after the dialog dismisses.
-        Unloaded += (_, _) => StopAndClearMedia();
+        Unloaded += (_, _) =>
+        {
+            StopAndClearMedia();
+            // Clear the cross-tab "currently previewed" hint so the Deep
+            // Analyze tab's "Analyze current" button disables when the
+            // user closes the sheet.
+            FileID.Services.SelectionRegistry.Instance.PreviewedFileId = null;
+        };
         IsTabStop = true;
     }
 
@@ -116,11 +123,21 @@ public sealed partial class FilePreviewSheet : UserControl
                                bool hasFaces = false, bool hasText = false)
     {
         FileId = fileId;
+        // Publish the active file so the Deep Analyze tab's "Analyze
+        // current" button can target it without LibraryView wiring.
+        FileID.Services.SelectionRegistry.Instance.PreviewedFileId =
+            fileId > 0 ? fileId : null;
         FacesBadge.Visibility = hasFaces ? Visibility.Visible : Visibility.Collapsed;
         TextBadge.Visibility = hasText ? Visibility.Visible : Visibility.Collapsed;
 
         TagInput.Text = string.Empty;
         TagStatusText.Visibility = Visibility.Collapsed;
+        // Refresh the proposed-rename card from the DB (separate query
+        // because the sheet may be opened for a file the LibraryView
+        // hasn't loaded yet).
+        _ = LoadProposedNameAsync(fileId);
+        // Refresh the Vision Tags card (auto + user tags for this file).
+        _ = LoadVisionTagsAsync(fileId);
 
         // Hide every preview surface up front; the kind dispatcher below
         // re-shows exactly one. Without this a navigation from video →
@@ -407,6 +424,167 @@ public sealed partial class FilePreviewSheet : UserControl
         "audio" => "Audio",
         _ => kind,
     };
+
+    // ─── Proposed rename card ─────────────────────────────────────────
+    private string? _pendingProposedName;
+
+    private async System.Threading.Tasks.Task LoadProposedNameAsync(long fileId)
+    {
+        ProposedRenameCard.Visibility = Visibility.Collapsed;
+        _pendingProposedName = null;
+        if (fileId <= 0) return;
+        string? name = null;
+        try
+        {
+            name = await System.Threading.Tasks.Task.Run(() =>
+            {
+                try
+                {
+                    if (!System.IO.File.Exists(Services.AppPaths.DbPath)) return null;
+                    var conn = new Microsoft.Data.Sqlite.SqliteConnection(
+                        new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+                        {
+                            DataSource = Services.AppPaths.DbPath,
+                            Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
+                        }.ToString());
+                    conn.Open();
+                    using var cmd = conn.CreateCommand();
+                    cmd.CommandText = "SELECT vlm_proposed_name FROM files WHERE id = $id";
+                    cmd.Parameters.AddWithValue("$id", fileId);
+                    var v = cmd.ExecuteScalar();
+                    var s = v as string;
+                    return string.IsNullOrWhiteSpace(s) ? null : s;
+                }
+                catch { return null; }
+            }).ConfigureAwait(true);
+        }
+        catch { name = null; }
+
+        if (string.IsNullOrWhiteSpace(name)) return;
+        _pendingProposedName = name;
+        // Defensive: sheet may have closed during the async query. Wrap
+        // the UI mutation so a torn-down dialog content tree doesn't
+        // fast-fail the dispatcher.
+        try
+        {
+            ProposedRenameText.Text = name;
+            ProposedRenameCard.Visibility = Visibility.Visible;
+        }
+        catch (Exception ex)
+        {
+            Services.DebugLog.Warn("LoadProposedName UI update threw (sheet closed?): " + ex.Message);
+        }
+    }
+
+    private async void OnApplyRenameClicked(object sender, RoutedEventArgs e)
+        => await Services.DebugLog.SafeRunAsync(nameof(OnApplyRenameClicked), async () =>
+        {
+            var name = _pendingProposedName;
+            if (FileId <= 0 || string.IsNullOrWhiteSpace(name)) return;
+            try
+            {
+                await ViewModels.EngineClient.Instance.RenameFilesAsync(new[]
+                {
+                    new IpcSchema.RenameEntry(FileId, name!),
+                });
+                ProposedRenameCard.Visibility = Visibility.Collapsed;
+                _pendingProposedName = null;
+            }
+            catch (Exception ex)
+            {
+                Services.DebugLog.Warn("Apply rename failed: " + ex.Message);
+            }
+        });
+
+    private void OnDismissRenameClicked(object sender, RoutedEventArgs e)
+        => Services.DebugLog.SafeRun(nameof(OnDismissRenameClicked), () =>
+        {
+            ProposedRenameCard.Visibility = Visibility.Collapsed;
+            _pendingProposedName = null;
+        });
+
+    // ─── Vision Tags card ─────────────────────────────────────────────
+    // Reads every auto + user tag for this file from the DB and renders
+    // them as TagChip controls inside VisionTagsHost. Mirrors the Library
+    // card chip strip — same control, same formatting, same visual weight.
+    private async System.Threading.Tasks.Task LoadVisionTagsAsync(long fileId)
+    {
+        VisionTagsCard.Visibility = Visibility.Collapsed;
+        VisionTagsHost.Children.Clear();
+        if (fileId <= 0) return;
+
+        System.Collections.Generic.List<string> tags;
+        try
+        {
+            tags = await System.Threading.Tasks.Task.Run(() =>
+            {
+                var list = new System.Collections.Generic.List<string>();
+                try
+                {
+                    if (!System.IO.File.Exists(Services.AppPaths.DbPath)) return list;
+                    var conn = new Microsoft.Data.Sqlite.SqliteConnection(
+                        new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+                        {
+                            DataSource = Services.AppPaths.DbPath,
+                            Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
+                        }.ToString());
+                    conn.Open();
+                    using var cmd = conn.CreateCommand();
+                    cmd.CommandText = """
+                        SELECT tag FROM tags
+                        WHERE file_id = $id AND source IN ('auto','user')
+                        ORDER BY source DESC, rowid
+                        """;
+                    cmd.Parameters.AddWithValue("$id", fileId);
+                    using var rdr = cmd.ExecuteReader();
+                    while (rdr.Read())
+                    {
+                        list.Add(rdr.GetString(0));
+                    }
+                }
+                catch { /* DB unavailable; return empty list */ }
+                return list;
+            }).ConfigureAwait(true);
+        }
+        catch { return; }
+
+        if (tags.Count == 0) return;
+        // UI mutation in a try/catch — sheet may have closed during the
+        // async DB read; the XAML element references could be disposed.
+        try
+        {
+            // Build a wrapping chip layout via runtime row construction:
+            // each new chip is appended to the last row; if the row exceeds
+            // 320 DIP we start a new row. Cheaper than a custom panel and
+            // good enough for ≤16 tag chips.
+            const double maxRowDip = 320;
+            var outer = new StackPanel { Orientation = Microsoft.UI.Xaml.Controls.Orientation.Vertical, Spacing = 4 };
+            StackPanel row = new() { Orientation = Microsoft.UI.Xaml.Controls.Orientation.Horizontal, Spacing = 4 };
+            double rowDip = 0;
+            foreach (var t in tags)
+            {
+                var chip = new FileID.Theme.Controls.TagChip { TagText = t };
+                // Estimate chip width — TagChip is 11pt font; rough heuristic
+                // is "~7 DIP per char + 10 DIP padding", capped at 120.
+                double estDip = System.Math.Min(120, 7.0 * System.Math.Max(2, t.Length) + 10.0);
+                if (rowDip + estDip > maxRowDip && row.Children.Count > 0)
+                {
+                    outer.Children.Add(row);
+                    row = new StackPanel { Orientation = Microsoft.UI.Xaml.Controls.Orientation.Horizontal, Spacing = 4 };
+                    rowDip = 0;
+                }
+                row.Children.Add(chip);
+                rowDip += estDip + 4;
+            }
+            if (row.Children.Count > 0) outer.Children.Add(row);
+            VisionTagsHost.Children.Add(outer);
+            VisionTagsCard.Visibility = Visibility.Visible;
+        }
+        catch (Exception ex)
+        {
+            Services.DebugLog.Warn("LoadVisionTags UI update threw (sheet closed?): " + ex.Message);
+        }
+    }
 
     private static string GlyphFor(string kind) => kind switch
     {

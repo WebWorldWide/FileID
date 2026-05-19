@@ -216,6 +216,8 @@
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="Auto"/>
@@ -229,17 +231,40 @@
                                 <TextBlock Text="Whole library" />
                             </StackPanel>
                         </Button>
-                        <ToggleSwitch Grid.Column="1"
+                        <!-- Mirrors macOS DeepAnalyzeView's two extra actions:
+                             "Selected" (from a Library multi-select) + "Current"
+                             (from the focused FilePreviewSheet). Both pull their
+                             targets from SelectionRegistry; disabled when nothing
+                             matches. -->
+                        <Button Grid.Column="1"
+                                x:Name="AnalyzeSelectedButton"
+                                Click="OnAnalyzeSelectedClicked"
+                                ToolTipService.ToolTip="Analyze only files currently selected in the Library">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <FontIcon Glyph="&#xE762;" FontSize="13" />
+                                <TextBlock x:Name="AnalyzeSelectedText" Text="Selected" />
+                            </StackPanel>
+                        </Button>
+                        <Button Grid.Column="2"
+                                x:Name="AnalyzeCurrentButton"
+                                Click="OnAnalyzeCurrentClicked"
+                                ToolTipService.ToolTip="Analyze only the file open in the preview sheet">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <FontIcon Glyph="&#xE890;" FontSize="13" />
+                                <TextBlock Text="Current" />
+                            </StackPanel>
+                        </Button>
+                        <ToggleSwitch Grid.Column="3"
                                       x:Name="SkipExistingToggle"
                                       IsOn="True"
                                       OffContent="Re-analyze all"
                                       OnContent="Skip already-analyzed"
                                       Margin="14,0,0,0" />
-                        <CheckBox Grid.Column="3"
+                        <CheckBox Grid.Column="5"
                                   x:Name="ProposeRenamesCheck"
                                   Content="Propose renames"
                                   IsChecked="True" />
-                        <Button Grid.Column="4"
+                        <Button Grid.Column="6"
                                 x:Name="CancelButton"
                                 Content="Cancel"
                                 Click="OnCancelClicked"

@@ -68,6 +68,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                 // refresh — initial open before scan is allowed to no-op.
             }
             SyncUndoPill();
+            SyncBanners();
         };
     }
 
@@ -102,7 +103,109 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                     Services.DebugLog.Debug($"[ENGINE-SUB:LibraryView] {e.PropertyName} batch={batchIndex}");
                     RequestLibraryRefresh(force: false);
                     break;
+                case nameof(EngineClient.DeepAnalyzeProgress):
+                case nameof(EngineClient.DeepAnalyzeStarting):
+                    DispatcherQueue.TryEnqueue(SyncBanners);
+                    break;
+                case nameof(EngineClient.LastFaceClustering):
+                    DispatcherQueue.TryEnqueue(SyncBanners);
+                    break;
             }
+        });
+
+    // Refreshes the inline banner visibility based on EngineClient
+    // observables + the user's current search query. Cheap; called
+    // whenever a relevant property fires.
+    private void SyncBanners()
+    {
+        if (_unloaded) return;
+        // CLIP-missing hint: only when the user has typed ≥3 chars
+        // (semantic search threshold matches macOS) and the MobileCLIP
+        // slot isn't installed.
+        bool clipMissingShow = false;
+        try
+        {
+            var q = SearchBox?.Text ?? string.Empty;
+            if (q.Trim().Length >= 3 &&
+                ModelInstallerService.Instance.Clip.Status != ModelInstallStatus.Installed)
+            {
+                clipMissingShow = true;
+            }
+        }
+        catch { /* defensive */ }
+        ClipMissingBanner.Visibility = clipMissingShow ? Visibility.Visible : Visibility.Collapsed;
+
+        // Classifier-missing banner: shown when the scene classifier slot
+        // isn't installed AND the Library has at least one image-kind row
+        // (no point pestering a user whose library is all documents).
+        bool classifierMissingShow = false;
+        try
+        {
+            if (ModelInstallerService.Instance.Classifier.Status != ModelInstallStatus.Installed)
+            {
+                foreach (var t in ViewModel.Items)
+                {
+                    if (t.Kind == "image") { classifierMissingShow = true; break; }
+                }
+            }
+        }
+        catch { /* defensive */ }
+        ClassifierMissingBanner.Visibility = classifierMissingShow ? Visibility.Visible : Visibility.Collapsed;
+
+        // Deep Analyze banner: visible whenever the engine is mid-caption.
+        // Engine throttles Progress events to 4 Hz; once Processed == Total
+        // (or DeepAnalyzeComplete arrives, clearing DeepAnalyzeProgress in
+        // EngineClient.Apply), the banner collapses.
+        var dap = EngineClient.Instance.DeepAnalyzeProgress;
+        if (dap is not null && dap.Processed < dap.Total)
+        {
+            DeepAnalyzeBanner.Visibility = Visibility.Visible;
+            var current = string.IsNullOrEmpty(dap.CurrentPath)
+                ? string.Empty
+                : System.IO.Path.GetFileName(dap.CurrentPath!);
+            DeepAnalyzeBannerText.Text = string.IsNullOrEmpty(current)
+                ? $"Deep Analyze running… ({dap.Processed}/{dap.Total})"
+                : $"Deep Analyze: {current} ({dap.Processed}/{dap.Total})";
+        }
+        else
+        {
+            DeepAnalyzeBanner.Visibility = Visibility.Collapsed;
+        }
+
+        // Face clustering banner: simple — currently we don't get a
+        // progress event during clustering, so just show it briefly when
+        // the engine kicks off and clear it when LastFaceClustering lands.
+        // The auto-trigger after a scan completes runs in <2s on typical
+        // libraries so a short banner is enough.
+        FaceClusteringBanner.Visibility = Visibility.Collapsed;
+    }
+
+    private async void OnInstallClipFromBannerClicked(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnInstallClipFromBannerClicked), async () =>
+        {
+            try
+            {
+                await ModelInstallerService.Instance.Clip.InstallAsync().ConfigureAwait(true);
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn("CLIP install from banner failed: " + ex.Message);
+            }
+            SyncBanners();
+        });
+
+    private async void OnInstallClassifierFromBannerClicked(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnInstallClassifierFromBannerClicked), async () =>
+        {
+            try
+            {
+                await ModelInstallerService.Instance.Classifier.InstallAsync().ConfigureAwait(true);
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn("Classifier install from banner failed: " + ex.Message);
+            }
+            SyncBanners();
         });
 
     private void RequestLibraryRefresh(bool force)
@@ -258,7 +361,59 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             ? Visibility.Visible : Visibility.Collapsed;
 
     private void OnSearchChanged(object sender, TextChangedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnSearchChanged), () => ViewModel.Query = SearchBox.Text);
+        => DebugLog.SafeRun(nameof(OnSearchChanged), () =>
+        {
+            ViewModel.Query = SearchBox.Text;
+            SyncBanners();
+        });
+
+    // Ctrl+F → focus the search box. Mirrors macOS Cmd+F on LibraryView.swift.
+    private void OnFocusSearchAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+        => DebugLog.SafeRun(nameof(OnFocusSearchAccelerator), () =>
+        {
+            SearchBox.Focus(FocusState.Keyboard);
+            SearchBox.SelectAll();
+            args.Handled = true;
+        });
+
+    // Esc → if a selection is active, clear it; else if the search box has
+    // text, clear it and refocus the grid. Matches macOS Library's chained
+    // .keyboardShortcut(.escape).
+    private void OnEscapeAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+        => DebugLog.SafeRun(nameof(OnEscapeAccelerator), () =>
+        {
+            if (ViewModel.SelectedCount > 0)
+            {
+                ViewModel.ClearSelection();
+                UpdateSelectionBar();
+                args.Handled = true;
+                return;
+            }
+            if (!string.IsNullOrEmpty(SearchBox.Text))
+            {
+                SearchBox.Text = string.Empty;
+                args.Handled = true;
+            }
+        });
+
+    // Ctrl+A → select-all-visible. Identical to the toolbar "Select" button
+    // so users who default to keyboard shortcuts get the same behavior.
+    private void OnSelectAllAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+        => DebugLog.SafeRun(nameof(OnSelectAllAccelerator), () =>
+        {
+            OnSelectAllClicked(this, new RoutedEventArgs());
+            args.Handled = true;
+        });
+
+    // Ctrl+Z → undo the last destructive op (rename / trash / tag apply /
+    // restructure apply). No-op when the UndoStack is empty.
+    private void OnUndoAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+        => DebugLog.SafeRun(nameof(OnUndoAccelerator), () =>
+        {
+            if (!UndoStack.Instance.CanUndo) return;
+            OnUndoLastClicked(this, new RoutedEventArgs());
+            args.Handled = true;
+        });
 
     private void OnKindChanged(object sender, SelectionChangedEventArgs e)
         => DebugLog.SafeRun(nameof(OnKindChanged), () =>
@@ -508,6 +663,19 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                 if (tile.IsDetached) return;
                 tile.Thumbnail = bmp;
                 Services.DebugLog.Debug($"[THUMB] TILE_THUMBNAIL_ASSIGNED file={tile.Path}");
+                // Defensive: if ImageOpened doesn't fire for some reason
+                // (already-decoded BitmapImage from L1 cache rebind, or
+                // a decoded BitmapImage whose Image.ImageOpened handler
+                // misses the event), the tile's image composition opacity
+                // stays at the 0f set by OnRepeaterElementClearing → user
+                // sees the placeholder gradient forever even though
+                // tile.Thumbnail is set. Locate the Image element by walking
+                // the visual tree from the tile root + snap its visual.Opacity
+                // back to 1. EnsureThumbnailVisible already does this; reuse it.
+                if (Repeater.TryGetElement(ViewModel.Items.IndexOf(tile)) is FrameworkElement el)
+                {
+                    EnsureThumbnailVisible(el);
+                }
             });
             if (!enqueued)
             {
@@ -550,8 +718,10 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         var visual = Microsoft.UI.Xaml.Hosting.ElementCompositionPreview.GetElementVisual(el);
         visual.CenterPoint = new System.Numerics.Vector3(
             (float)(el.ActualWidth / 2), (float)(el.ActualHeight / 2), 0);
-        FileID.Theme.Motion.SpringEasing.AnimateScalar(el, "Scale.X", scale, 0.18, 0.8);
-        FileID.Theme.Motion.SpringEasing.AnimateScalar(el, "Scale.Y", scale, 0.18, 0.8);
+        // macOS hover uses .easeOut(0.18) — no spring overshoot.
+        // SwiftUI LibraryView.swift:681-682.
+        FileID.Theme.Motion.SpringEasing.AnimateScalarEaseOut(el, "Scale.X", scale, 0.18);
+        FileID.Theme.Motion.SpringEasing.AnimateScalarEaseOut(el, "Scale.Y", scale, 0.18);
     }
 
     private void OnTileTapped(object sender, TappedRoutedEventArgs e)

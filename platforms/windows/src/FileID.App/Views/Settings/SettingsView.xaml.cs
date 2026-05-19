@@ -69,7 +69,92 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             // status equal to the cached field. NEXT.md tracked this
             // as the "install-state detection at page load" bug.
             try { DispatcherQueue.TryEnqueue(() => Bindings.Update()); } catch { }
+            // Populate the Recent Scans card. Query is cheap (≤5 rows)
+            // so we do it inline on the dispatcher.
+            try { _ = PopulateRecentScansAsync(); } catch { }
         };
+    }
+
+    // Reads up to the 5 most-recent scan_sessions rows and renders one
+    // line per row in the Recent Scans card.
+    private async System.Threading.Tasks.Task PopulateRecentScansAsync()
+    {
+        var rows = await System.Threading.Tasks.Task.Run(() =>
+        {
+            var list = new System.Collections.Generic.List<(double started, double? completed, long total, string root, string? status)>();
+            try
+            {
+                if (!System.IO.File.Exists(AppPaths.DbPath)) return list;
+                var conn = new Microsoft.Data.Sqlite.SqliteConnection(
+                    new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+                    {
+                        DataSource = AppPaths.DbPath,
+                        Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
+                    }.ToString());
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = """
+                    SELECT started_at, completed_at, COALESCE(total_files, 0), COALESCE(root_path, ''), COALESCE(status, '')
+                    FROM scan_sessions
+                    ORDER BY started_at DESC
+                    LIMIT 5
+                    """;
+                using var rdr = cmd.ExecuteReader();
+                while (rdr.Read())
+                {
+                    list.Add((
+                        rdr.IsDBNull(0) ? 0 : rdr.GetDouble(0),
+                        rdr.IsDBNull(1) ? (double?)null : rdr.GetDouble(1),
+                        rdr.IsDBNull(2) ? 0L : rdr.GetInt64(2),
+                        rdr.IsDBNull(3) ? string.Empty : rdr.GetString(3),
+                        rdr.IsDBNull(4) ? null : rdr.GetString(4)));
+                }
+            }
+            catch { /* DB unavailable — leave list empty */ }
+            return list;
+        }).ConfigureAwait(true);
+
+        if (_unloaded) return;
+        // Defensive: view may have unloaded during the async DB read; the
+        // XAML element references could be disposed. Wrap in try/catch
+        // to keep an in-flight continuation from fast-failing the dispatcher.
+        try
+        {
+            if (rows.Count == 0)
+            {
+                RecentScansEmptyText.Visibility = Visibility.Visible;
+                RecentScansList.ItemsSource = null;
+                return;
+            }
+            RecentScansEmptyText.Visibility = Visibility.Collapsed;
+            var items = new System.Collections.Generic.List<string>();
+            foreach (var (started, completed, total, root, status) in rows)
+            {
+                var startedDt = DateTimeOffset.FromUnixTimeSeconds((long)started).LocalDateTime;
+                var when = startedDt.ToString("yyyy-MM-dd HH:mm");
+                var dur = completed.HasValue && completed.Value > started
+                    ? FormatDuration(completed.Value - started)
+                    : (status == "running" ? "running…" : "—");
+                var rootShort = string.IsNullOrEmpty(root)
+                    ? "(unknown root)"
+                    : System.IO.Path.GetFileName(root.TrimEnd('\\', '/'));
+                items.Add($"• {when}  ·  {total:N0} files  ·  {dur}  ·  {rootShort}");
+            }
+            RecentScansList.ItemsSource = items;
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("PopulateRecentScans UI update threw (view unloaded?): " + ex.Message);
+        }
+    }
+
+    private static string FormatDuration(double seconds)
+    {
+        if (seconds < 1) return "<1s";
+        if (seconds < 60) return $"{seconds:F0}s";
+        var ts = TimeSpan.FromSeconds(seconds);
+        if (ts.TotalHours >= 1) return $"{(int)ts.TotalHours}h{ts.Minutes:00}m";
+        return $"{ts.Minutes}m{ts.Seconds:00}s";
     }
 
     /// <summary>probe the engine's install sentinels and flip the
@@ -480,21 +565,70 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
-    private void OnOpenLogsClicked(object sender, RoutedEventArgs e)
+    // ─── Storage card paths ───────────────────────────────────────────
+    public string DbPathText => AppPaths.DbPath;
+    public string ThumbCachePathText => AppPaths.ThumbsDir;
+    public string ModelsPathText => AppPaths.ModelsDir;
+
+    private void OnOpenLogsClicked(object sender, RoutedEventArgs e) => RevealInExplorer(AppPaths.LogsDir);
+    private void OnShowDbFolderClicked(object sender, RoutedEventArgs e)
+        => RevealInExplorer(System.IO.Path.GetDirectoryName(DbPathText) ?? AppPaths.LogsDir);
+    private void OnShowThumbCacheClicked(object sender, RoutedEventArgs e) => RevealInExplorer(ThumbCachePathText);
+    private void OnShowModelsFolderClicked(object sender, RoutedEventArgs e) => RevealInExplorer(ModelsPathText);
+
+    private void OnOpenPrivacyDocClicked(object sender, RoutedEventArgs e)
     {
+        // Try the shipped docs path first, fall back to the repo source
+        // path if the user is running from a dev tree, then surface the
+        // hosted GitHub URL via the system browser as a last resort.
+        var candidates = new[]
+        {
+            System.IO.Path.Combine(AppContext.BaseDirectory, "Docs", "PRIVACY.md"),
+            System.IO.Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "..", "shared", "docs", "PRIVACY.md"),
+        };
+        foreach (var c in candidates)
+        {
+            try
+            {
+                var full = System.IO.Path.GetFullPath(c);
+                if (System.IO.File.Exists(full))
+                {
+                    Process.Start(new ProcessStartInfo { FileName = full, UseShellExecute = true });
+                    return;
+                }
+            }
+            catch { /* try next */ }
+        }
         try
         {
             Process.Start(new ProcessStartInfo
             {
+                FileName = "https://github.com/anolle/FileID/blob/main/shared/docs/PRIVACY.md",
+                UseShellExecute = true,
+            });
+        }
+        catch { /* nothing else to try */ }
+    }
+
+    private static void RevealInExplorer(string path)
+    {
+        try
+        {
+            if (!System.IO.Directory.Exists(path))
+            {
+                try { System.IO.Directory.CreateDirectory(path); } catch { /* fall through */ }
+            }
+            Process.Start(new ProcessStartInfo
+            {
                 FileName = "explorer.exe",
-                Arguments = $"\"{AppPaths.LogsDir}\"",
+                Arguments = $"\"{path}\"",
                 UseShellExecute = true,
             });
         }
         catch
         {
-            // Ignore — Settings tab is a low-stakes UI; failure to open
-            // Explorer doesn't warrant an error toast.
+            // Settings is low-stakes — silently ignore. The path is already
+            // shown next to the button so the user can copy it manually.
         }
     }
 

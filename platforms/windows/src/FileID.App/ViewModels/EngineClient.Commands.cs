@@ -164,7 +164,18 @@ internal sealed partial class EngineClient
     }
     public Task CancelScanAsync()
     {
+        // Optimistic UI flip: clear the "in-flight" indicators immediately
+        // so the sidebar drops back to Idle within microseconds. The engine
+        // will follow up with PhaseChanged(Cancelled) + a possible final
+        // Progress event; both are no-ops on the already-cleared state.
+        // Without this, _scanStartedAt + LastProgress + LastBatch + IsPaused
+        // retained their prior-scan values until the next scan started, so
+        // the sidebar's "Scan complete — N files in MM:SS" panel showed the
+        // STALE values from before the cancel.
         IsPaused = false;
+        _scanStartedAt = null;
+        LastProgress = null;
+        LastBatch = null;
         return SendCommandAsync(new CancelScanCommand());
     }
     public Task RequestStatusAsync() => SendCommandAsync(new RequestStatusCommand());

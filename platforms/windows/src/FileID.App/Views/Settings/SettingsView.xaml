@@ -565,6 +565,94 @@
                 </StackPanel>
             </Border>
 
+            <!-- Storage. Shows where every on-disk artifact lives — DB,
+                 thumbnail cache, model cache — so users know exactly what
+                 to back up + can clear caches when needed. Mirrors macOS
+                 SettingsView's storage subsection. -->
+            <Border CornerRadius="12"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    Padding="20">
+                <StackPanel Spacing="10">
+                    <TextBlock Text="Storage" Style="{StaticResource SubtitleTextBlockStyle}"/>
+                    <Grid ColumnSpacing="12" RowSpacing="6">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="180"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Database"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   VerticalAlignment="Center" />
+                        <TextBlock Grid.Row="0" Grid.Column="1"
+                                   Text="{x:Bind DbPathText, Mode=OneWay}"
+                                   FontFamily="Consolas" FontSize="11"
+                                   TextTrimming="CharacterEllipsis"
+                                   ToolTipService.ToolTip="{x:Bind DbPathText, Mode=OneWay}"
+                                   VerticalAlignment="Center" />
+                        <Button Grid.Row="0" Grid.Column="2"
+                                Content="Show"
+                                Click="OnShowDbFolderClicked" />
+
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="Thumbnail cache"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   VerticalAlignment="Center" />
+                        <TextBlock Grid.Row="1" Grid.Column="1"
+                                   Text="{x:Bind ThumbCachePathText, Mode=OneWay}"
+                                   FontFamily="Consolas" FontSize="11"
+                                   TextTrimming="CharacterEllipsis"
+                                   ToolTipService.ToolTip="{x:Bind ThumbCachePathText, Mode=OneWay}"
+                                   VerticalAlignment="Center" />
+                        <Button Grid.Row="1" Grid.Column="2"
+                                Content="Show"
+                                Click="OnShowThumbCacheClicked" />
+
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="Models"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   VerticalAlignment="Center" />
+                        <TextBlock Grid.Row="2" Grid.Column="1"
+                                   Text="{x:Bind ModelsPathText, Mode=OneWay}"
+                                   FontFamily="Consolas" FontSize="11"
+                                   TextTrimming="CharacterEllipsis"
+                                   ToolTipService.ToolTip="{x:Bind ModelsPathText, Mode=OneWay}"
+                                   VerticalAlignment="Center" />
+                        <Button Grid.Row="2" Grid.Column="2"
+                                Content="Show"
+                                Click="OnShowModelsFolderClicked" />
+                    </Grid>
+                    <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                               TextWrapping="Wrap"
+                               Text="To uninstall FileID completely, delete the parent FileID folder under %LOCALAPPDATA% after quitting the app." />
+                </StackPanel>
+            </Border>
+
+            <!-- Recent scans. Most-recent 5 scan_sessions rows: started_at,
+                 file count, duration, root path. Refreshes whenever the
+                 Settings tab is opened (cheap query against a small table). -->
+            <Border CornerRadius="12"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    Padding="20">
+                <StackPanel Spacing="10">
+                    <TextBlock Text="Recent scans" Style="{StaticResource SubtitleTextBlockStyle}"/>
+                    <TextBlock x:Name="RecentScansEmptyText"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                               Text="No scans yet — pick a folder and click Start Scan in the sidebar."
+                               Visibility="Visible" />
+                    <ItemsControl x:Name="RecentScansList" />
+                </StackPanel>
+            </Border>
+
             <!-- About. -->
             <Border CornerRadius="12"
                     Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
@@ -578,7 +666,10 @@
                     <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                TextWrapping="Wrap"
-                               Text="On-device AI file organizer."/>
+                               Text="On-device AI file organizer. No telemetry, no cloud, your files never leave your Mac, PC, or Linux box."/>
+                    <HyperlinkButton Content="View privacy notice"
+                                     Click="OnOpenPrivacyDocClicked"
+                                     Margin="0,4,0,0" />
                 </StackPanel>
             </Border>
 

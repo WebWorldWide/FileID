@@ -24,6 +24,7 @@ public sealed partial class RestructureView : UserControl
         CategoryRepeater.ItemsSource = _categoryRows;
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         Sankey.RibbonInvoked += OnSankeyRibbonInvoked;
+        Loaded += (_, _) => _ = RefreshDeepAnalyzeHintAsync();
         Unloaded += (_, _) =>
         {
             _unloaded = true;
@@ -31,6 +32,60 @@ public sealed partial class RestructureView : UserControl
             Sankey.RibbonInvoked -= OnSankeyRibbonInvoked;
         };
     }
+
+    // Shows the Deep Analyze hint banner when there are unnamed person
+    // clusters in the DB. Mirrors macOS RestructureView's "Name people
+    // first" affordance — restructure puts photos into People/<name>/
+    // folders, and unnamed clusters become "Person N", which the user
+    // usually wants to fix before applying.
+    private async System.Threading.Tasks.Task RefreshDeepAnalyzeHintAsync()
+    {
+        int unnamed = 0;
+        try
+        {
+            unnamed = await System.Threading.Tasks.Task.Run(() =>
+            {
+                try
+                {
+                    if (!System.IO.File.Exists(AppPaths.DbPath)) return 0;
+                    var conn = new Microsoft.Data.Sqlite.SqliteConnection(
+                        new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+                        {
+                            DataSource = AppPaths.DbPath,
+                            Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
+                        }.ToString());
+                    conn.Open();
+                    using var cmd = conn.CreateCommand();
+                    cmd.CommandText = "SELECT COUNT(*) FROM persons WHERE name IS NULL AND first_name IS NULL AND COALESCE(is_unknown, 0) = 0";
+                    var v = cmd.ExecuteScalar();
+                    return v is null ? 0 : System.Convert.ToInt32(v);
+                }
+                catch { return 0; }
+            }).ConfigureAwait(true);
+        }
+        catch { unnamed = 0; }
+
+        if (_unloaded) return;
+        // Defensive: the view may have unloaded between the await and this
+        // continuation, in which case the XAML element is already disposed.
+        // Wrap in try/catch so the async-void plumbing doesn't propagate the
+        // exception into the dispatcher loop (which would be a native fast-fail).
+        try
+        {
+            DeepAnalyzeHintBanner.Visibility = unnamed > 0 ? Visibility.Visible : Visibility.Collapsed;
+        }
+        catch (System.Exception ex)
+        {
+            DebugLog.Warn("RefreshDeepAnalyzeHint UI update threw (view unloaded?): " + ex.Message);
+        }
+    }
+
+    private void OnOpenPeopleHintClicked(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnOpenPeopleHintClicked), () =>
+        {
+            try { AppViewModel.Instance.ActiveTab = SidebarTab.People; }
+            catch (System.Exception ex) { DebugLog.Warn("Open People (hint) failed: " + ex.Message); }
+        });
 
     private async void OnSankeyRibbonInvoked(object? sender, (string Source, string Category) ribbon)
     {

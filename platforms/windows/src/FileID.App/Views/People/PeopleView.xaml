@@ -204,15 +204,43 @@
             </ItemsRepeater>
         </ScrollViewer>
 
-        <StackPanel Grid.Row="3"
-                    Orientation="Horizontal"
-                    Spacing="12"
-                    Visibility="{x:Bind FooterVisibility, Mode=OneWay}">
-            <ProgressRing IsActive="{x:Bind ViewModel.IsLoading, Mode=OneWay}"
-                          Width="16" Height="16"/>
-            <TextBlock Text="{x:Bind StatusText, Mode=OneWay}"
-                       Style="{StaticResource CaptionTextBlockStyle}"
-                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+        <StackPanel Grid.Row="3" Spacing="6">
+            <!-- "N hidden unknowns" footer with show/hide toggle. Mirrors
+                 macOS PeopleView's bottom strip: when the global Hide-
+                 unknowns toggle is on, an unobtrusive count + one-tap
+                 reveal lives here so the user remembers what's filtered
+                 out. Collapses cleanly when count==0. -->
+            <Grid x:Name="HiddenUnknownsFooter"
+                  Visibility="Collapsed"
+                  ColumnSpacing="10"
+                  Padding="12,8"
+                  CornerRadius="10"
+                  Background="{ThemeResource SubtleFillColorTertiaryBrush}">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0"
+                           x:Name="HiddenUnknownsText"
+                           VerticalAlignment="Center"
+                           Style="{StaticResource CaptionTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <Button Grid.Column="1"
+                        x:Name="HiddenUnknownsToggleButton"
+                        Click="OnToggleHiddenUnknowns"
+                        ToolTipService.ToolTip="Show or hide clusters you've marked as unknown.">
+                    <TextBlock x:Name="HiddenUnknownsButtonText" Text="Show" />
+                </Button>
+            </Grid>
+            <StackPanel Orientation="Horizontal"
+                        Spacing="12"
+                        Visibility="{x:Bind FooterVisibility, Mode=OneWay}">
+                <ProgressRing IsActive="{x:Bind ViewModel.IsLoading, Mode=OneWay}"
+                              Width="16" Height="16"/>
+                <TextBlock Text="{x:Bind StatusText, Mode=OneWay}"
+                           Style="{StaticResource CaptionTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+            </StackPanel>
         </StackPanel>
     </Grid>
 </UserControl>

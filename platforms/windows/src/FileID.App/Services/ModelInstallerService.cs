@@ -44,6 +44,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     private static readonly string[] ClipSentinelIds = { "mobileclip_s2", "clip_text" };
     private static readonly string[] ArcfaceSentinelIds = { "arcface" };
     private static readonly string[] VlmSentinelIds = { "qwen2_5_vl_3b", "qwen2_5_vl_7b", "smolvlm", "gemma_3_4b" };
+    private static readonly string[] ClassifierSentinelIds = { "classifier_mobilenetv3" };
     // one-button GPU acceleration pack on the welcome sheet.
     // The engine's `cudnn_runtime_x64` registry arm covers NVIDIA. Other
     // vendors stay no-op (DirectML is bundled with ORT and is the
@@ -64,6 +65,12 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     public ModelSlot Clip { get; }
     public ModelSlot Arcface { get; }
     public ModelSlot Vlm { get; }
+    /// <summary>Scene classifier (MobileNetV3-Large, ImageNet-1k). Drives
+    /// the semantic tags shown as chips on Library cards. When this slot
+    /// is NotInstalled, tagging falls back to enriched-extras only
+    /// (Year / Camera / Has Faces / Has Text / Has Location). 22 MB ONNX
+    /// + 21 KB labels — small enough to auto-install at first launch.</summary>
+    public ModelSlot Classifier { get; }
     /// <summary> one-button GPU acceleration pack. On NVIDIA the
     /// Install action downloads cuDNN; on AMD/Intel/Qualcomm/CPU the slot
     /// is pre-marked Installed with an explanatory Message (DirectML is
@@ -115,6 +122,10 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             displayLabel: "Qwen 2.5-VL 3B",
             approxBytes: 1_650UL * 1024 * 1024,
             installAction: () => PrewarmAsync(_vlmModelKind));
+        Classifier = new ModelSlot(
+            displayLabel: "Scene Classifier (MobileNetV3)",
+            approxBytes: 22UL * 1024 * 1024,
+            installAction: () => PrewarmAsync("classifier_mobilenetv3"));
         // GPU Acceleration Pack. Display label + Message are
         // adaptive — UpdateAcceleratorForVendor() refreshes them as soon
         // as the engine reports detected hardware. Until then, the row
@@ -128,6 +139,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         Clip.PropertyChanged += OnSlotPropertyChanged;
         Arcface.PropertyChanged += OnSlotPropertyChanged;
         Vlm.PropertyChanged += OnSlotPropertyChanged;
+        Classifier.PropertyChanged += OnSlotPropertyChanged;
         Accelerator.PropertyChanged += OnSlotPropertyChanged;
 
         SeedFromSentinels();
@@ -217,6 +229,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         FailIfDownloading(Clip, "Engine restarted — please retry.");
         FailIfDownloading(Arcface, "Engine restarted — please retry.");
         FailIfDownloading(Vlm, "Engine restarted — please retry.");
+        FailIfDownloading(Classifier, "Engine restarted — please retry.");
 
         SeedFromSentinels();
     }
@@ -408,6 +421,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         SeedSlot(Clip, ClipSentinelIds, requireAll: true);
         SeedSlot(Arcface, ArcfaceSentinelIds);
         SeedSlot(Vlm, VlmSentinelIds);
+        SeedSlot(Classifier, ClassifierSentinelIds);
         // Accelerator slot — only flip to Installed if the
         // sentinel exists. Otherwise leave it as
         // UpdateAcceleratorForVendor decided (NotInstalled for NVIDIA,
@@ -589,6 +603,10 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             case "gemma_3_4b":
             case "smolvlm":
                 return Vlm;
+            case "classifier_mobilenetv3":
+            case "classifier":
+            case "scene_classifier":
+                return Classifier;
             // cuDNN routes to the welcome-sheet Accelerator slot.
             case "cudnn_runtime_x64":
                 return Accelerator;

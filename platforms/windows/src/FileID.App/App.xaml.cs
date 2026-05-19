@@ -153,6 +153,10 @@ public partial class App : Application
             try { LlamaRuntimeAutoInstaller.Hook(); }
             catch (System.Exception ex) { Trace($"LlamaRuntimeAutoInstaller.Hook failed (non-fatal): {ex.Message}"); }
 
+            Trace("ClassifierAutoInstaller.Hook");
+            try { ClassifierAutoInstaller.Hook(); }
+            catch (System.Exception ex) { Trace($"ClassifierAutoInstaller.Hook failed (non-fatal): {ex.Message}"); }
+
             // CudnnAutoInstaller silent fetch removed. The ~430 MB
             // background download surprised users and added startup-time
             // GPU pressure during what was already a hang-prone period.

@@ -1056,12 +1056,14 @@ async fn process_file_predecoded(
     // even when the classifier model isn't installed. Mirrors macOS
     // `Tagging.swift::extraTags`.
     push_enriched_extras(&mut tagged);
-    // Dedupe + cap. Two-pass: keep first occurrence to preserve the
-    // classifier's confidence-ordered output; cap at 16 to avoid
-    // exploding the tags table on noisy classifier outputs.
+    // Dedupe (case-insensitive) + cap. Keep first occurrence to preserve
+    // the classifier's confidence-ordered output; cap at 16 to avoid
+    // exploding the tags table on noisy classifier outputs. Case-insensitive
+    // matters because the classifier may emit "Dog" and a hypothetical
+    // synonym path may push "dog"; we want the first to win.
     {
-        let mut seen = std::collections::HashSet::new();
-        tagged.tags.retain(|t| seen.insert(t.clone()));
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        tagged.tags.retain(|t| seen.insert(t.to_ascii_lowercase()));
         tagged.tags.truncate(16);
     }
 
@@ -1127,13 +1129,28 @@ fn should_run_ocr(path: &std::path::Path, tagged: &TaggedFile, _size_bytes: u64)
 /// - Capability tags (`"Has Faces"`, `"Has Text"`, `"Has Location"`)
 ///   contain a space and stay intact through `formatTag`.
 fn push_enriched_extras(tagged: &mut TaggedFile) {
-    // Year tag from modified_unix (engine doesn't currently track
-    // creation_at separately). modified_unix is seconds since epoch.
+    // Order matters: the Library card's `TopTwoTags` slice takes the first
+    // two tags it sees. Classifier output (when installed) appears first
+    // in the vec; enriched-extras fill the remainder. We deliberately
+    // emit the most-informative signals first so that when the classifier
+    // is absent the user still sees something useful.
+    //
+    // Priority (highest first):
+    //   1. Year (from modified_unix; the single most useful low-cost tag)
+    //   2. Camera family (iPhone / Canon / etc. — useful for filtering)
+    //   3. Has Faces / Has Text (capability signals tied to real content)
+    //   4. Has Location (GPS-tagged; useful but very common)
+    //
+    // Aspect tags (Wide/Tall/Square) were previously emitted here and
+    // ended up dominating `TopTwoTags` on files without EXIF year/camera
+    // (e.g. screenshots, Windows Phone WP_*.jpg). Dropped because aspect
+    // is a UI concern — the tile's own rendering already conveys it —
+    // not a useful tag for search/filtering. Mirrors a macOS Tagging.swift
+    // refinement.
     if tagged.modified_unix > 0.0 {
         let secs = tagged.modified_unix as i64;
         // Days since epoch via integer math (no chrono dep — already
         // available transitively but avoid the call cost here).
-        // 2024 starts at unix=1_704_067_200; we just want the year.
         if let Some(year) = unix_seconds_to_year(secs) {
             if (1990..2100).contains(&year) {
                 tagged.tags.push(format!("Year_{year}"));
@@ -1155,16 +1172,6 @@ fn push_enriched_extras(tagged: &mut TaggedFile) {
             else { None };
         if let Some(f) = family {
             tagged.tags.push(f.to_string());
-        }
-    }
-    if tagged.image_width > 0 && tagged.image_height > 0 {
-        let ratio = tagged.image_width as f64 / tagged.image_height as f64;
-        if ratio > 1.30 {
-            tagged.tags.push("Wide".to_string());
-        } else if ratio < 0.77 {
-            tagged.tags.push("Tall".to_string());
-        } else {
-            tagged.tags.push("Square".to_string());
         }
     }
     if tagged.has_faces { tagged.tags.push("Has Faces".to_string()); }
@@ -1501,34 +1508,46 @@ mod tests {
         }
     }
 
+    // Aspect tags (Wide/Tall/Square) were intentionally dropped from
+    // enriched-extras in V16.2 — they dominated `TopTwoTags` on files
+    // without classifier output (every photo got Wide/Tall as a top chip,
+    // pushing the more useful Year/Camera/HasFaces tags out of the
+    // 2-chip slot). These four tests now assert the absence of those
+    // tags so a future re-add doesn't silently regress the change.
     #[test]
-    fn enriched_wide() {
+    fn enriched_does_not_emit_wide() {
         let mut t = stub_tagged(1920, 1080, 5_000_000);
         push_enriched_extras(&mut t);
-        assert!(t.tags.contains(&"Wide".to_string()), "1920/1080 = 1.78 > 1.30");
+        assert!(!t.tags.contains(&"Wide".to_string()),
+            "Wide tag was dropped — too noisy, hid semantic tags");
     }
 
     #[test]
-    fn enriched_tall() {
+    fn enriched_does_not_emit_tall() {
         let mut t = stub_tagged(1080, 1920, 5_000_000);
         push_enriched_extras(&mut t);
-        assert!(t.tags.contains(&"Tall".to_string()), "1080/1920 = 0.56 < 0.77");
+        assert!(!t.tags.contains(&"Tall".to_string()),
+            "Tall tag was dropped — too noisy, hid semantic tags");
     }
 
     #[test]
-    fn enriched_square() {
+    fn enriched_does_not_emit_square() {
         let mut t = stub_tagged(1080, 1080, 5_000_000);
         push_enriched_extras(&mut t);
-        assert!(t.tags.contains(&"Square".to_string()), "1:1 ratio");
+        assert!(!t.tags.contains(&"Square".to_string()),
+            "Square tag was dropped — too noisy, hid semantic tags");
     }
 
     #[test]
-    fn enriched_borderline_not_wide() {
+    fn enriched_does_not_emit_aspect_at_boundary() {
+        // The borderline case used to emit "Square" for 1.30 ratio
+        // (boundary not >1.30). After the V16.2 drop, no aspect tag
+        // is emitted at any ratio.
         let mut t = stub_tagged(1300, 1000, 5_000_000);
         push_enriched_extras(&mut t);
-        assert!(t.tags.contains(&"Square".to_string()),
-            "1300/1000 = 1.30 exactly — not > 1.30, so Square");
+        assert!(!t.tags.contains(&"Square".to_string()));
         assert!(!t.tags.contains(&"Wide".to_string()));
+        assert!(!t.tags.contains(&"Tall".to_string()));
     }
 
     #[test]

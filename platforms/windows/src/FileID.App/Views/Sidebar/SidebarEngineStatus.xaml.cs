@@ -14,9 +14,25 @@ namespace FileID.Views.Sidebar;
 
 public sealed partial class SidebarEngineStatus : UserControl
 {
+    // Pre-cached brush pairs. The prior code did `new SolidColorBrush(...)`
+    // inside ApplyStatus per call. `SolidColorBrush` is a `DispatcherObject`;
+    // naked construction on a teardown-race path (Unloaded firing while a
+    // PropertyChanged was already in-flight on the UI dispatcher) is a known
+    // native fast-fail shape — see V15.2 / V15.2.1 / V15.4 in CLAUDE.md.
+    // Allocating once at ctor time guarantees the brushes were constructed
+    // on the dispatcher this control owns.
+    private readonly SolidColorBrush _goldDot;
+    private readonly SolidColorBrush _goldGlow;
+    private readonly SolidColorBrush _redDot;
+    private readonly SolidColorBrush _redGlow;
+
     public SidebarEngineStatus()
     {
         InitializeComponent();
+        _goldDot = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00));
+        _goldGlow = new SolidColorBrush(Color.FromArgb(0x38, 0xFF, 0xCC, 0x00));
+        _redDot = new SolidColorBrush(Color.FromArgb(0xFF, 0xE5, 0x55, 0x55));
+        _redGlow = new SolidColorBrush(Color.FromArgb(0x38, 0xE5, 0x55, 0x55));
         Loaded += (_, _) => Sync();
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         Unloaded += (_, _) => EngineClient.Instance.PropertyChanged -= OnEngineChanged;
@@ -48,31 +64,35 @@ public sealed partial class SidebarEngineStatus : UserControl
         switch (ec.State)
         {
             case EngineClient.LifecycleState.Starting:
-                ApplyStatus(0xFF, 0xCC, 0x00, "Engine starting…", "Engine is launching.");
+                ApplyStatus(StatusAccent.Gold, "Engine starting…", "Engine is launching.");
                 break;
             case EngineClient.LifecycleState.Ready:
                 // Ready but with a recent error — show red so the user notices.
-                ApplyStatus(0xE5, 0x55, 0x55,
+                ApplyStatus(StatusAccent.Red,
                     ec.LastError?.Message ?? "Engine reported an error",
                     ec.LastError?.Message ?? "See app.log for details.");
                 break;
             case EngineClient.LifecycleState.Crashed:
-                ApplyStatus(0xE5, 0x55, 0x55,
+                ApplyStatus(StatusAccent.Red,
                     ec.CrashReason ?? "Engine crashed",
                     ec.CrashReason ?? "Engine crashed. Check %LOCALAPPDATA%\\FileID\\logs\\app.log.");
                 break;
         }
     }
 
+    private enum StatusAccent { Gold, Red }
+
     /// <summary>
     /// Sets the dot, glow ring, label, and tooltip in one shot. Glow ring
     /// is the same RGB as the dot but at 22% alpha — gives a soft Fluent
-    /// "reveal-style" halo without using a real shadow primitive.
+    /// "reveal-style" halo without using a real shadow primitive. Brushes
+    /// are pre-cached at ctor (see field declarations above) to avoid the
+    /// V15.2-class DispatcherObject construction race on view teardown.
     /// </summary>
-    private void ApplyStatus(byte r, byte g, byte b, string text, string tip)
+    private void ApplyStatus(StatusAccent accent, string text, string tip)
     {
-        StatusDot.Fill = new SolidColorBrush(Color.FromArgb(0xFF, r, g, b));
-        StatusGlow.Fill = new SolidColorBrush(Color.FromArgb(0x38, r, g, b));
+        StatusDot.Fill = accent == StatusAccent.Gold ? _goldDot : _redDot;
+        StatusGlow.Fill = accent == StatusAccent.Gold ? _goldGlow : _redGlow;
         StatusText.Text = text;
         ToolTipService.SetToolTip(this, tip);
     }

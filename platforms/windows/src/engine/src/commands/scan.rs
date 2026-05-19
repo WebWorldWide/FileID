@@ -26,7 +26,21 @@ pub(crate) async fn handle_start_scan(
 ) {
     tracing::info!(root_path = %platform::redact_path_for_log(&payload.root_path), "[SCAN] handle_start_scan entered");
 
-    let already_running = scan_state.lock().is_some();
+    // Atomic check-and-reserve under one lock: gate + slot reservation must
+    // be a single critical section, or two StartScan commands queued back-to-
+    // back can both pass the gate before either reserves the slot. We park a
+    // placeholder coordinator now; it gets replaced after model load with the
+    // real one. If anyone else reaches here while we hold the slot, they
+    // bounce with `scan_already_running`.
+    let already_running = {
+        let mut guard = scan_state.lock();
+        if guard.is_some() {
+            true
+        } else {
+            *guard = Some(ScanCoordinator::new());
+            false
+        }
+    };
     if already_running {
         sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
             kind: "scan_already_running".into(),
@@ -71,6 +85,7 @@ pub(crate) async fn handle_start_scan(
             model_kind: None,
         }))))
         .await;
+        *scan_state.lock() = None;
         tracing::warn!("[SCAN] handle_start_scan exiting: models_not_installed");
         return;
     }
@@ -103,6 +118,8 @@ pub(crate) async fn handle_start_scan(
     }))))
     .await;
 
+    // Swap the placeholder for the real coordinator that the worker pool
+    // and the IPC pause/resume/cancel handlers will hold a clone of.
     let coord = ScanCoordinator::new();
     *scan_state.lock() = Some(coord.clone());
 

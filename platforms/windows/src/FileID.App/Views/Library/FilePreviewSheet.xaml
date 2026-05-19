@@ -34,6 +34,8 @@
     x:Class="FileID.Views.Library.FilePreviewSheet"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:theme="using:FileID.Theme.Controls"
+    xmlns:sys="using:System"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
@@ -277,6 +279,65 @@
                                          missing field (no date / no camera) doesn't
                                          leave an empty row. -->
                                 </Grid>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Vision Tags card. Shows every auto + user tag
+                             on this file. Mirrors macOS preview sheet's
+                             tag strip. Visible whenever the file has at
+                             least one tag (the engine emits enriched-extras
+                             for every image so this is almost always non-
+                             empty for image kinds). Same TagChip control
+                             as the Library cards for visual parity. -->
+                        <Border x:Name="VisionTagsCard"
+                                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8"
+                                Padding="14"
+                                Visibility="Collapsed">
+                            <StackPanel Spacing="8">
+                                <TextBlock Text="Tags"
+                                           Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                <!-- Chips are added in code-behind from
+                                     LoadVisionTagsAsync because WinUI 3's
+                                     built-in layouts don't wrap (StackPanel
+                                     overflows; UniformGridLayout's cell
+                                     widths must be uniform). The host
+                                     panel is a plain Grid whose Children
+                                     we populate dynamically. -->
+                                <Grid x:Name="VisionTagsHost" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Proposed rename card. Visible only when Deep
+                             Analyze has written a vlm_proposed_name for
+                             this file. Mirrors macOS FilePreviewSheet
+                             which shows the proposed name in gold +
+                             "Apply rename" button. -->
+                        <Border x:Name="ProposedRenameCard"
+                                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource GoldBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8"
+                                Padding="14"
+                                Visibility="Collapsed">
+                            <StackPanel Spacing="8">
+                                <TextBlock Text="Proposed rename"
+                                           Style="{StaticResource BodyStrongTextBlockStyle}"
+                                           Foreground="{ThemeResource GoldBrush}" />
+                                <TextBlock x:Name="ProposedRenameText"
+                                           TextWrapping="Wrap"
+                                           FontFamily="Consolas"
+                                           FontSize="12" />
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <Button x:Name="ApplyRenameButton"
+                                            Content="Apply rename"
+                                            Click="OnApplyRenameClicked"
+                                            Style="{StaticResource AccentButtonStyle}" />
+                                    <Button Content="Dismiss"
+                                            Click="OnDismissRenameClicked" />
+                                </StackPanel>
                             </StackPanel>
                         </Border>
 

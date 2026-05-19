@@ -112,6 +112,48 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         if (_unloaded) return;
         OnPropertyChanged(nameof(StatusText));
         OnPropertyChanged(nameof(FooterVisibility));
+        OnPropertyChanged(nameof(HeaderStats));
+        // Wire HeaderStats live updates to every keeper-radio toggle.
+        // The DataTemplate's RadioButton TwoWay-binds IsKeeper which
+        // fires DuplicateMember.PropertyChanged; we listen once per
+        // member added to keep the header counter in sync.
+        if (e.NewItems != null)
+        {
+            foreach (var added in e.NewItems)
+            {
+                if (added is DuplicateGroup g)
+                {
+                    g.PropertyChanged += OnGroupOrMemberChanged;
+                    foreach (var m in g.Members)
+                    {
+                        m.PropertyChanged += OnGroupOrMemberChanged;
+                    }
+                }
+            }
+        }
+        if (e.OldItems != null)
+        {
+            foreach (var removed in e.OldItems)
+            {
+                if (removed is DuplicateGroup g)
+                {
+                    g.PropertyChanged -= OnGroupOrMemberChanged;
+                    foreach (var m in g.Members)
+                    {
+                        m.PropertyChanged -= OnGroupOrMemberChanged;
+                    }
+                }
+            }
+        }
+    }
+
+    private void OnGroupOrMemberChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (_unloaded) return;
+        if (e.PropertyName is nameof(DuplicateMember.IsKeeper) or nameof(DuplicateGroup.IsSkipped))
+        {
+            DispatcherQueue.TryEnqueue(() => OnPropertyChanged(nameof(HeaderStats)));
+        }
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
@@ -142,8 +184,47 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         || ViewModel.Groups.Count == 0
             ? Visibility.Visible : Visibility.Collapsed;
 
+    public string HeaderStats
+    {
+        get
+        {
+            if (ViewModel.Groups.Count == 0) return string.Empty;
+            long files = 0;
+            long bytes = 0;
+            int eligibleGroups = 0;
+            foreach (var g in ViewModel.Groups)
+            {
+                if (g.IsSkipped) continue;
+                eligibleGroups++;
+                foreach (var m in g.Members)
+                {
+                    if (!m.IsKeeper) { files++; bytes += m.SizeBytes; }
+                }
+            }
+            if (files == 0) return $"{eligibleGroups} group{(eligibleGroups == 1 ? "" : "s")} • no non-keepers selected";
+            return $"{eligibleGroups} group{(eligibleGroups == 1 ? "" : "s")} • {files} non-keeper file{(files == 1 ? "" : "s")} • {FormatSize(bytes)} reclaimable";
+        }
+    }
+
     private async void OnRefreshClicked(object sender, RoutedEventArgs e)
         => await ViewModel.RefreshAsync(CancellationToken.None);
+
+    // Resets every group's keeper back to the first member. Useful after
+    // the user has been clicking around and wants to start over without
+    // re-scanning. Matches macOS CleanupView "Reset" affordance.
+    private void OnResetKeepersClicked(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnResetKeepersClicked), () =>
+        {
+            foreach (var g in ViewModel.Groups)
+            {
+                g.IsSkipped = false;
+                for (int i = 0; i < g.Members.Count; i++)
+                {
+                    g.Members[i].IsKeeper = (i == 0);
+                }
+            }
+            OnPropertyChanged(nameof(HeaderStats));
+        });
 
     private async void OnTrashNonKeepersClicked(object sender, RoutedEventArgs e)
     {

@@ -64,7 +64,86 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         if (_unloaded) return;
         try { await ViewModel.RefreshAsync(CancellationToken.None); }
         catch (Exception ex) { DebugLog.Warn("PeopleView.OnLoaded refresh threw: " + ex.Message); }
+        UpdateHiddenUnknownsFooter();
     }
+
+    // ───── Hidden-unknowns footer ─────────────────────────────────────
+    // Tracks how many is_unknown=1 clusters are currently filtered out
+    // by the global HideUnknown setting; surfaces a one-tap reveal so
+    // the user can flip the visibility without diving into Settings.
+    // Matches macOS PeopleView's bottom-strip behavior.
+
+    private async void UpdateHiddenUnknownsFooter()
+    {
+        if (_unloaded) return;
+        int hiddenCount = 0;
+        try
+        {
+            hiddenCount = await Task.Run(() =>
+            {
+                try
+                {
+                    if (!System.IO.File.Exists(AppPaths.DbPath)) return 0;
+                    var conn = new Microsoft.Data.Sqlite.SqliteConnection(
+                        new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+                        {
+                            DataSource = AppPaths.DbPath,
+                            Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
+                        }.ToString());
+                    conn.Open();
+                    using var cmd = conn.CreateCommand();
+                    cmd.CommandText = "SELECT COUNT(*) FROM persons WHERE is_unknown = 1";
+                    var v = cmd.ExecuteScalar();
+                    return v is null ? 0 : Convert.ToInt32(v);
+                }
+                catch { return 0; }
+            }).ConfigureAwait(true);
+        }
+        catch { hiddenCount = 0; }
+
+        if (_unloaded) return;
+        bool hideUnknown = false;
+        try { hideUnknown = AppSettings.Load().PeopleHideUnknown; } catch { /* default false */ }
+        // Defensive: view may have unloaded during the DB-read await.
+        // Wrap UI mutations in try/catch so a disposed-XAML race doesn't
+        // surface as a dispatcher fast-fail.
+        try
+        {
+            if (hiddenCount == 0 || !hideUnknown)
+            {
+                HiddenUnknownsFooter.Visibility = Visibility.Collapsed;
+                return;
+            }
+            HiddenUnknownsFooter.Visibility = Visibility.Visible;
+            HiddenUnknownsText.Text = hiddenCount == 1
+                ? "1 unknown person is hidden"
+                : $"{hiddenCount} unknown people are hidden";
+            HiddenUnknownsButtonText.Text = "Show";
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("UpdateHiddenUnknownsFooter UI update threw (view unloaded?): " + ex.Message);
+        }
+    }
+
+    // One-tap reveal: flips the global PeopleHideUnknown setting off and
+    // refreshes. The Settings tab's toggle re-syncs to the new value next
+    // time the user opens Settings. Mirrors macOS's "Show hidden" link in
+    // the bottom strip.
+    private async void OnToggleHiddenUnknowns(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnToggleHiddenUnknowns), async () =>
+        {
+            try
+            {
+                var s = AppSettings.Load();
+                s.PeopleHideUnknown = false;
+                s.Save();
+            }
+            catch (Exception ex) { DebugLog.Warn("Toggle unknowns save threw: " + ex.Message); }
+            try { await ViewModel.RefreshAsync(CancellationToken.None); }
+            catch (Exception ex) { DebugLog.Warn("Toggle unknowns refresh threw: " + ex.Message); }
+            UpdateHiddenUnknownsFooter();
+        });
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {

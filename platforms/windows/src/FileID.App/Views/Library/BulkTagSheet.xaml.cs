@@ -32,7 +32,10 @@ public sealed partial class BulkTagSheet : UserControl
             : $"Will tag {fileIds.Count} files.";
     }
 
-    public string Mode => ReplaceRadio.IsChecked == true ? "replace" : "add";
+    public string Mode =>
+        RemoveRadio.IsChecked == true ? "remove" :
+        ReplaceRadio.IsChecked == true ? "replace" :
+        "add";
 
     public IReadOnlyList<string> Tags
     {

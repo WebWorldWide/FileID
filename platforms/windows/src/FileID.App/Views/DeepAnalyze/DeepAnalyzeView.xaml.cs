@@ -41,6 +41,7 @@ public sealed partial class DeepAnalyzeView : UserControl
         _unloaded = true;
         ModelInstallerService.Instance.Vlm.PropertyChanged -= OnInstallerChanged;
         EngineClient.Instance.PropertyChanged -= OnEngineChanged;
+        SelectionRegistry.Instance.PropertyChanged -= OnSelectionRegistryChanged;
         Loaded -= OnLoadedHandler;
         Unloaded -= OnUnloadedHandler;
     }
@@ -49,12 +50,31 @@ public sealed partial class DeepAnalyzeView : UserControl
     {
         ModelInstallerService.Instance.Vlm.PropertyChanged += OnInstallerChanged;
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
+        SelectionRegistry.Instance.PropertyChanged += OnSelectionRegistryChanged;
         SyncCards();
         UpdateActiveModelLabel();
+        SyncSelectionButtons();
         // refresh the "Name people first" gate every time the
         // view loads; also refreshed in OnEngineChanged when face
         // clustering finishes.
         _ = RefreshNamePeopleGateAsync();
+    }
+
+    private void OnSelectionRegistryChanged(object? sender, PropertyChangedEventArgs e)
+        => DispatcherQueue.TryEnqueue(SyncSelectionButtons);
+
+    private void SyncSelectionButtons()
+    {
+        if (_unloaded) return;
+        var sel = SelectionRegistry.Instance.LibrarySelection;
+        AnalyzeSelectedButton.IsEnabled = sel.Count > 0;
+        AnalyzeSelectedText.Text = sel.Count switch
+        {
+            0 => "Selected",
+            1 => "Selected (1)",
+            _ => $"Selected ({sel.Count})",
+        };
+        AnalyzeCurrentButton.IsEnabled = SelectionRegistry.Instance.HasPreviewedFile;
     }
 
     /// <summary>query the DB for any person row with NULL
@@ -508,6 +528,37 @@ public sealed partial class DeepAnalyzeView : UserControl
             DebugLog.Warn("DeepAnalyzeAll failed: " + ex);
         }
     }
+
+    // Analyzes every file currently selected in the Library view. We send
+    // one DeepAnalyzeFile per file. Engine throttles parallelism via its
+    // model pool; sending N requests just queues them up.
+    private async void OnAnalyzeSelectedClicked(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnAnalyzeSelectedClicked), async () =>
+        {
+            var sel = SelectionRegistry.Instance.LibrarySelection;
+            if (sel.Count == 0) return;
+            StreamCard.Visibility = Visibility.Visible;
+            CancelButton.IsEnabled = true;
+            foreach (var id in sel)
+            {
+                try { await EngineClient.Instance.DeepAnalyzeFileAsync(id, _activeModel); }
+                catch (Exception ex) { DebugLog.Warn($"DeepAnalyzeFile({id}) failed: {ex.Message}"); }
+            }
+        });
+
+    // Analyzes the file currently open in FilePreviewSheet. The preview
+    // sheet publishes its file id to SelectionRegistry on open + clears
+    // it on close, so this button is only enabled while a sheet is up.
+    private async void OnAnalyzeCurrentClicked(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnAnalyzeCurrentClicked), async () =>
+        {
+            var id = SelectionRegistry.Instance.PreviewedFileId;
+            if (id is null) return;
+            StreamCard.Visibility = Visibility.Visible;
+            CancelButton.IsEnabled = true;
+            try { await EngineClient.Instance.DeepAnalyzeFileAsync(id.Value, _activeModel); }
+            catch (Exception ex) { DebugLog.Warn($"DeepAnalyzeFile (current) failed: {ex.Message}"); }
+        });
 
     private async void OnCancelClicked(object sender, RoutedEventArgs e)
     {

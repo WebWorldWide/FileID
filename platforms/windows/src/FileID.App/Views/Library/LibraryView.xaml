@@ -19,8 +19,21 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
+    <!-- macOS Library binds Cmd+F to search-box focus, Esc to "clear
+         selection / clear search", Cmd+A to select-all, Cmd+Z to undo
+         the last destructive op. Mirror with Ctrl on Windows. The
+         accelerators are scoped to the UserControl so they fire from
+         anywhere on the page, not only from the search box. -->
+    <UserControl.KeyboardAccelerators>
+        <KeyboardAccelerator Modifiers="Control" Key="F" Invoked="OnFocusSearchAccelerator" />
+        <KeyboardAccelerator Modifiers="Control" Key="A" Invoked="OnSelectAllAccelerator" />
+        <KeyboardAccelerator Modifiers="Control" Key="Z" Invoked="OnUndoAccelerator" />
+        <KeyboardAccelerator Key="Escape" Invoked="OnEscapeAccelerator" />
+    </UserControl.KeyboardAccelerators>
+
     <Grid Padding="32,32,32,24" RowSpacing="20">
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
@@ -94,8 +107,110 @@
             </Button>
         </Grid>
 
+        <!-- Inline banners: CLIP-not-installed hint when the user types
+             a semantic query, Deep Analyze active banner when the engine
+             is captioning, face clustering banner when clustering is
+             running. Mirrors macOS LibraryView's banner stack. Collapses
+             cleanly when no banner applies. -->
+        <StackPanel Grid.Row="2" Spacing="6">
+            <Border x:Name="ClipMissingBanner"
+                    Visibility="Collapsed"
+                    CornerRadius="10"
+                    Padding="12,10"
+                    Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                    BorderBrush="{ThemeResource AiBrush}"
+                    BorderThickness="1">
+                <Grid ColumnSpacing="10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <FontIcon Grid.Column="0" Glyph="&#xE721;" FontSize="14"
+                              Foreground="{ThemeResource AiBrush}"
+                              VerticalAlignment="Top" Margin="0,1,0,0" />
+                    <TextBlock Grid.Column="1" TextWrapping="Wrap"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Text="Install MobileCLIP for semantic image search — your typed words can match what's in each photo, not just the filename." />
+                    <Button Grid.Column="2" Content="Install" Click="OnInstallClipFromBannerClicked" VerticalAlignment="Center" />
+                </Grid>
+            </Border>
+            <!-- Scene Classifier missing banner. Shown when the
+                 ImageNet-1k classifier model isn't installed AND there are
+                 image files in the Library. Without the classifier, tagging
+                 falls back to enriched-extras only — users see "Has Location"
+                 / "iPhone" / "Year_2024" instead of "Dog" / "Beach" / "Food".
+                 ~22 MB download; small enough that we also auto-install on
+                 first launch via ClassifierAutoInstaller, but the banner
+                 covers users who launch before auto-install completes or
+                 who opted out of the auto path. -->
+            <Border x:Name="ClassifierMissingBanner"
+                    Visibility="Collapsed"
+                    CornerRadius="10"
+                    Padding="12,10"
+                    Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                    BorderBrush="{ThemeResource GoldBrush}"
+                    BorderThickness="1">
+                <Grid ColumnSpacing="10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <FontIcon Grid.Column="0" Glyph="&#xE8C1;" FontSize="14"
+                              Foreground="{ThemeResource GoldBrush}"
+                              VerticalAlignment="Top" Margin="0,1,0,0" />
+                    <TextBlock Grid.Column="1" TextWrapping="Wrap"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Text="Install the Scene Classifier for AI tags — automatically labels photos with 1000 categories like 'Dog', 'Beach', 'Document'. ~22 MB." />
+                    <Button Grid.Column="2" Content="Install" Click="OnInstallClassifierFromBannerClicked" VerticalAlignment="Center" />
+                </Grid>
+            </Border>
+            <Border x:Name="DeepAnalyzeBanner"
+                    Visibility="Collapsed"
+                    CornerRadius="10"
+                    Padding="12,10"
+                    Background="{ThemeResource GoldSelectedBackgroundBrush}"
+                    BorderBrush="{ThemeResource GoldBrush}"
+                    BorderThickness="1">
+                <Grid ColumnSpacing="10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <ProgressRing Grid.Column="0" IsActive="True" Width="16" Height="16"
+                                  Foreground="{ThemeResource GoldBrush}" VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="1"
+                               x:Name="DeepAnalyzeBannerText"
+                               VerticalAlignment="Center"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               TextTrimming="CharacterEllipsis"
+                               Text="Deep Analyze running…" />
+                </Grid>
+            </Border>
+            <Border x:Name="FaceClusteringBanner"
+                    Visibility="Collapsed"
+                    CornerRadius="10"
+                    Padding="12,10"
+                    Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                    BorderBrush="{ThemeResource AiBrush}"
+                    BorderThickness="1">
+                <Grid ColumnSpacing="10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <ProgressRing Grid.Column="0" IsActive="True" Width="16" Height="16"
+                                  Foreground="{ThemeResource AiBrush}" VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="1" VerticalAlignment="Center"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Text="Grouping faces into people clusters…" />
+                </Grid>
+            </Border>
+        </StackPanel>
+
         <!-- Selection toolbar — visible when at least one tile is selected. -->
-        <Grid Grid.Row="2"
+        <Grid Grid.Row="3"
               x:Name="SelectionBar"
               Visibility="Collapsed"
               ColumnSpacing="10"
@@ -146,7 +261,7 @@
         </Grid>
 
         <!-- Grid of tiles. -->
-        <ScrollViewer Grid.Row="3"
+        <ScrollViewer Grid.Row="4"
                       VerticalScrollBarVisibility="Auto"
                       HorizontalScrollBarVisibility="Disabled"
                       ZoomMode="Disabled">
@@ -154,14 +269,15 @@
                            ItemsSource="{x:Bind ViewModel.Items, Mode=OneWay}"
                            ElementPrepared="OnRepeaterElementPrepared"
                            ElementClearing="OnRepeaterElementClearing">
-                <!-- matches macOS LibraryView.swift:49
-                     .adaptive(minimum: 160, maximum: 220).
-                     UniformGridLayout's MinItemWidth + ItemsStretch="Fill"
-                     produces the same behavior: tiles start at 160 px,
-                     stretch to fill until a new column fits, then snap. -->
+                <!-- Square tiles. UniformGridLayout cells are 180 wide minimum;
+                     each tile binds its own Height = ActualWidth + 68 (caption row)
+                     via IdentityDouble, so the image area is always 1:1. macOS
+                     uses .aspectRatio(1, contentMode: .fit) for the same effect.
+                     ItemsStretch="Fill" keeps the cells filling the grid width;
+                     MinItemHeight=248 (180+68) reserves a square-friendly cell. -->
                 <ItemsRepeater.Layout>
-                    <UniformGridLayout MinItemWidth="160"
-                                       MinItemHeight="160"
+                    <UniformGridLayout MinItemWidth="180"
+                                       MinItemHeight="248"
                                        MinRowSpacing="12"
                                        MinColumnSpacing="12"
                                        ItemsStretch="Fill"/>
@@ -171,12 +287,18 @@
                     <DataTemplate x:DataType="vm:FileTile">
                         <!-- PointerEntered/Exited drive a spring
                              scale (1.012, response 0.18s) matching macOS
-                             LibraryView.swift:681-682 hover affordance. -->
-                        <Grid CornerRadius="12"
+                             LibraryView.swift:681-682 hover affordance.
+                             Height = ActualWidth + 68 (caption row) so the
+                             image area is exactly square regardless of how
+                             long the caption is. Mirrors macOS's
+                             .aspectRatio(1, contentMode: .fit) pattern. -->
+                        <Grid x:Name="TileRoot"
+                              CornerRadius="12"
                               Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                               BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                               BorderThickness="1"
                               Padding="12"
+                              Height="{Binding ActualWidth, RelativeSource={RelativeSource Self}, Converter={StaticResource IdentityDouble}, ConverterParameter=68}"
                               Tag="{x:Bind Path}"
                               Tapped="OnTileTapped"
                               RightTapped="OnTileRightTapped"
@@ -220,9 +342,14 @@
                                     </MenuFlyoutItem>
                                 </MenuFlyout>
                             </Grid.ContextFlyout>
+                            <!-- Row 0 = image (square; takes remaining height
+                                 = TileRoot.ActualWidth). Row 1 = caption,
+                                 pinned at exactly 68 DIP so a long filename
+                                 or extra tag chip can't push the image
+                                 area taller than its neighbours. -->
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="*"/>
-                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="68"/>
                             </Grid.RowDefinitions>
                             <Border Grid.Row="0"
                                     Background="{ThemeResource SubtleFillColorTertiaryBrush}"
@@ -261,13 +388,21 @@
                                       Margin="0,4,4,0"
                                       Foreground="{ThemeResource AccentFillColorDefaultBrush}"
                                       Visibility="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource BoolToVisibility}}" />
-                            <!-- Hover badges: face cluster + OCR text indicators top-left. -->
+                            <!-- Hover badges: kind + face cluster + OCR text indicators top-left.
+                                 Kind badge first so the "what is this file" answer reads
+                                 left-to-right even when face/OCR badges are absent. -->
                             <StackPanel Grid.Row="0"
                                         Orientation="Horizontal"
                                         Spacing="4"
                                         HorizontalAlignment="Left"
                                         VerticalAlignment="Top"
                                         Margin="4,4,0,0">
+                                <Border Padding="4,2"
+                                        CornerRadius="4"
+                                        Background="{ThemeResource TileScrimBrush}"
+                                        ToolTipService.ToolTip="{x:Bind KindDisplay}">
+                                    <FontIcon Glyph="{x:Bind KindBadgeGlyph}" FontSize="12" Foreground="White" />
+                                </Border>
                                 <Border Padding="4,2"
                                         CornerRadius="4"
                                         Background="{ThemeResource TileScrimBrush}"
@@ -281,10 +416,24 @@
                                     <FontIcon Glyph="&#xE8C1;" FontSize="12" Foreground="{ThemeResource AiBrush}" />
                                 </Border>
                             </StackPanel>
-                            <StackPanel Grid.Row="1" Spacing="2" Margin="0,8,0,0">
+                            <!-- Caption stack pinned at fixed 68 DIP. Overflow
+                                 is clipped by the Grid's row constraint; long
+                                 filenames + chip rows + size still fit. -->
+                            <StackPanel Grid.Row="1" Spacing="2" Margin="0,8,0,0"
+                                        VerticalAlignment="Top">
                                 <TextBlock Text="{x:Bind FileName}"
                                            Style="{StaticResource BodyStrongTextBlockStyle}"
                                            TextTrimming="CharacterEllipsis"/>
+                                <!-- Deep Analyze smart-rename proposal. Gold text per
+                                     macOS visual language; collapses when the engine
+                                     hasn't proposed a rename. ToolTip echoes the
+                                     proposal so truncated text remains discoverable. -->
+                                <TextBlock Text="{x:Bind ProposedName, Mode=OneWay}"
+                                           FontSize="11"
+                                           Foreground="{ThemeResource GoldBrush}"
+                                           TextTrimming="CharacterEllipsis"
+                                           Visibility="{x:Bind HasProposedName, Mode=OneWay, Converter={StaticResource BoolToVisibility}}"
+                                           ToolTipService.ToolTip="{x:Bind ProposedName, Mode=OneWay}" />
                                 <!-- Auto-tag chips. Bound to FileTile.TopTwoTags
                                      (already prefix(2)-sliced server-side so we
                                      don't allocate per layout pass). Visibility
@@ -314,7 +463,7 @@
         </ScrollViewer>
 
         <!-- Status footer: loading + error. -->
-        <StackPanel Grid.Row="4"
+        <StackPanel Grid.Row="5"
                     Orientation="Horizontal"
                     Spacing="12"
                     Visibility="{x:Bind FooterVisibility, Mode=OneWay}">

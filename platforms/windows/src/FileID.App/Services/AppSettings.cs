@@ -94,6 +94,14 @@ internal sealed class AppSettings
     /// + cuDNN if they prefer the BYO path.</summary>
     public bool DisableAutoInstallCudnn { get; set; } = false;
 
+    /// <summary>Default false (auto-install enabled). On engine-ready,
+    /// the MobileNetV3 scene classifier (~22 MB) is fetched silently so
+    /// Library tags include semantic labels ("Dog", "Beach", "Document")
+    /// on the first scan. Without this, tagging falls back to enriched-
+    /// extras only. True disables the auto-install; users can fall back
+    /// to the Library's manual "Install Scene Classifier" banner.</summary>
+    public bool DisableAutoInstallClassifier { get; set; } = false;
+
     /// <summary>When true (the default), Deep Analyze is automatically
     /// chained after face clustering completes. Mirrors macOS's
     /// `autoPilotStage` advance from grouping → captioning. The chain

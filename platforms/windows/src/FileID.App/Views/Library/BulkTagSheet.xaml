@@ -52,6 +52,10 @@
                          GroupName="TagMode"
                          Content="Replace existing"
                          ToolTipService.ToolTip="Removes any existing user tags first" />
+            <RadioButton x:Name="RemoveRadio"
+                         GroupName="TagMode"
+                         Content="Remove these tags"
+                         ToolTipService.ToolTip="Deletes only the tags listed above from each file" />
         </StackPanel>
 
         <TextBlock Grid.Row="4"

@@ -840,6 +840,17 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         break;
                     case PhaseChangedEvent pc:
                         Phase = pc.Phase;
+                        // On cancel, also clear the in-flight tracking state.
+                        // The sidebar's CompletedPanel binds to LastScanDuration
+                        // + LastProgress; without this clear the prior-scan
+                        // numbers linger after the user hits Cancel mid-scan.
+                        if (pc.Phase == ScanPhase.Cancelled)
+                        {
+                            IsPaused = false;
+                            _scanStartedAt = null;
+                            LastProgress = null;
+                            LastBatch = null;
+                        }
                         break;
                     case DiscoveryCompleteEvent:
                         // No dedicated property — UI consumes via LastProgress.Total,

@@ -94,6 +94,33 @@ public static class SpringEasing
     }
 
     /// <summary>
+    /// Animate a scalar Composition property toward <paramref name="final"/>
+    /// with an ease-out (no overshoot) over the given duration. Mirrors
+    /// SwiftUI's `.animation(.easeOut(duration: d), value: x)`. The cubic-
+    /// bezier (0, 0, 0.58, 1.0) is Material/Web's standard ease-out, which
+    /// matches CoreAnimation's `kCAMediaTimingFunctionEaseOut` curve close
+    /// enough that side-by-side hover animations read as identical.
+    /// </summary>
+    public static void AnimateScalarEaseOut(
+        UIElement element,
+        string propertyName,
+        float final,
+        double durationSeconds)
+    {
+        var visual = ElementCompositionPreview.GetElementVisual(element);
+        var compositor = visual.Compositor;
+
+        var anim = compositor.CreateScalarKeyFrameAnimation();
+        var easing = compositor.CreateCubicBezierEasingFunction(
+            new System.Numerics.Vector2(0.0f, 0.0f),
+            new System.Numerics.Vector2(0.58f, 1.0f));
+        anim.InsertKeyFrame(1f, final, easing);
+        anim.Duration = TimeSpan.FromSeconds(durationSeconds);
+
+        visual.StartAnimation(propertyName, anim);
+    }
+
+    /// <summary>
     /// Animate opacity from current to <paramref name="final"/>.
     /// </summary>
     public static void AnimateOpacity(
