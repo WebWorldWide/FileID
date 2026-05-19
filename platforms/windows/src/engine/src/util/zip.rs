@@ -157,8 +157,28 @@ mod tests {
                 uuid::Uuid::new_v4()
             ));
             std::fs::create_dir_all(&temp).expect("temp dir");
+            // Dedupe input names — the zip crate rejects duplicate
+            // filenames at write time with `InvalidArchive("Duplicate
+            // filename")`. The proptest generator occasionally produces
+            // colliding strings (especially short 1-3 char names); when
+            // it does, `make_zip_with_entries` panics on `start_file`
+            // and the test reports as "failed" even though the safety
+            // invariant we're testing has nothing to do with dedup.
+            // Filter to a unique-by-name set BEFORE constructing the zip
+            // so we test the actual property: that extract_into_parent
+            // never lets a file escape its parent dir, for any valid zip.
+            let mut seen = std::collections::HashSet::new();
+            let unique_names: Vec<&str> = names
+                .iter()
+                .filter(|n| seen.insert(n.as_str()))
+                .map(|s| s.as_str())
+                .collect();
+            if unique_names.is_empty() {
+                std::fs::remove_dir_all(&temp).ok();
+                return Ok(());
+            }
             let entries: Vec<(&str, &[u8])> =
-                names.iter().map(|n| (n.as_str(), b"x" as &[u8])).collect();
+                unique_names.iter().map(|n| (*n, b"x" as &[u8])).collect();
             let zip = make_zip_with_entries(&temp, &entries);
             let parent_canon = std::fs::canonicalize(&temp).unwrap_or(temp.clone());
             // The result is either Ok (every file written under parent)
