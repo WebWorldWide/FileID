@@ -1,4 +1,4 @@
-// Double passthrough with optional additive offset (via ConverterParameter
+﻿// Double passthrough with optional additive offset (via ConverterParameter
 // as an invariant-culture double string). Lets the Library tile force its
 // own Height = ActualWidth + caption-row-height so the image area is a
 // perfect square and the tile is taller than wide by exactly the caption

@@ -1,4 +1,4 @@
-// ClassifierAutoInstaller — silent install of the MobileNetV3 scene
+﻿// ClassifierAutoInstaller — silent install of the MobileNetV3 scene
 // classifier at engine-ready time so Library auto-tags include semantic
 // labels ("Dog", "Beach", "Document") on the first scan a user runs.
 //

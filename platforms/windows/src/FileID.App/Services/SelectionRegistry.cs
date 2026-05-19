@@ -1,4 +1,4 @@
-// Cross-view selection registry.
+﻿// Cross-view selection registry.
 //
 // macOS Library selects files in LibraryView and the DeepAnalyzeView reads
 // those same selected file IDs to expose "Analyze selected". The Windows
