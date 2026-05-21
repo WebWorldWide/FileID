@@ -275,8 +275,30 @@ async fn run_deep_analyze_batch(
         Some((gguf, mmproj)) => {
             match crate::models::vlm_server::VlmServer::start(&gguf, &mmproj).await {
                 Ok(s) => {
-                    tracing::info!(model_kind, "[VLM-SERVER] persistent server up; using it for the batch");
-                    Some(s)
+                    // A2: verify the server accepts our multimodal payload shape
+                    // BEFORE committing the whole batch to it. If it rejects the
+                    // request (e.g. 400 on the image_url data-URI — a format that
+                    // was never hardware-verified), fall back to the per-file CLI
+                    // instead of failing every file silently.
+                    match crate::pipeline::deep_analyze::vlm_server_payload_ok(&s).await {
+                        Ok(()) => {
+                            tracing::info!(model_kind, "[VLM-SERVER] persistent server up; payload self-test OK; using it for the batch");
+                            Some(s)
+                        }
+                        Err(probe_err) => {
+                            tracing::warn!(?probe_err, "[VLM-SERVER] payload self-test failed; falling back to per-file CLI");
+                            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                                kind: "vlm_server_payload_rejected".into(),
+                                message: format!(
+                                    "The VLM server rejected the image request format; using the slower per-file path instead. ({probe_err:#})"
+                                ),
+                                path: None,
+                                model_kind: None,
+                            }))))
+                            .await;
+                            None
+                        }
+                    }
                 }
                 Err(err) => {
                     tracing::warn!(?err, "[VLM-SERVER] unavailable; falling back to per-file CLI");

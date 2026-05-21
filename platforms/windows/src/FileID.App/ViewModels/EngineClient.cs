@@ -77,6 +77,18 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     private DateTime _lastDeepAnalyzeFileDone = DateTime.MinValue;
     private static readonly TimeSpan DeepAnalyzeFileDoneThrottle = TimeSpan.FromMilliseconds(500); // 2 Hz
 
+    // A1: the post-scan SmolVLM tags-only auto-pass must be able to fire as
+    // soon as the VLM finishes downloading — not only via the scan → face-
+    // clustering → deep-analyze chain. On a first run the model is still
+    // downloading when that chain completes, so AutoTriggerDeepAnalyzeAsync's
+    // "no VLM installed" gate skips and the first scan never gets VLM tags
+    // (the user's "Windows doesn't have what macOS has" complaint). We watch
+    // the Vlm slot's Status and fire the pass once it flips to Installed AND a
+    // scan has completed this session.
+    private volatile bool _scanCompletedThisSession;
+    private int _vlmInstallWatchWired;    // 0 = not subscribed, 1 = subscribed
+    private int _autoDeepAnalyzeInFlight;  // 0 = idle, 1 = an auto-pass dispatched, not yet complete
+
     // Throttle for scan FileDone events. A fast scan can emit hundreds per
     // second; publishing each through the Rx Subject inflates UI work for
     // every subscriber (LibraryView, transcript, etc.). Sample every Nth
@@ -806,6 +818,19 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 {
                     case ReadyEvent r:
                         Info = r.Info;
+                        // C1: re-arm the background auto-installers BEFORE
+                        // flipping State to Ready. Their one-shot attempt gate
+                        // latches after the first fire; a crash that interrupted
+                        // a mid-flight model download would otherwise abandon the
+                        // model for the rest of the session (no VLM tags until a
+                        // full app restart). Re-arming here lets the State=Ready
+                        // PropertyChanged below re-trigger them; each re-checks
+                        // its sentinel/weights and only re-downloads if still
+                        // missing. Harmless on the first Ready (nothing attempted
+                        // yet → the gate is already 0).
+                        Services.SmolVlmAutoInstaller.ResetAttempt();
+                        Services.LlamaRuntimeAutoInstaller.ResetAttempt();
+                        Services.CudaAutoInstaller.ResetAttempt();
                         State = LifecycleState.Ready;
                         CrashReason = null;
                         // A successful Ready is the canonical signal that the
@@ -867,6 +892,12 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                     case ScanCompleteEvent:
                         Phase = ScanPhase.Completed;
                         IsPaused = false;
+                        _scanCompletedThisSession = true;
+                        // A1: start watching for SmolVLM finishing its download
+                        // so the FIRST scan still gets VLM tags once the model
+                        // lands (the scan→cluster→analyze chain below no-ops
+                        // while the model is still downloading).
+                        WireVlmInstallWatch();
                         if (_scanStartedAt.HasValue)
                         {
                             LastScanDuration = DateTime.UtcNow - _scanStartedAt.Value;
@@ -927,6 +958,9 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         DeepAnalyzeComplete = dac.Result;
                         DeepAnalyzeProgress = null;
                         DeepAnalyzeStarting = null;
+                        // A1: a finished/cancelled auto-pass re-arms the gate so
+                        // the next scan (or a later VLM-install) can trigger again.
+                        Interlocked.Exchange(ref _autoDeepAnalyzeInFlight, 0);
                         break;
                     case ModelDownloadProgressEvent mdp:
                         // Throttled to one log line per 1% (~100 events / model) so
@@ -1053,23 +1087,98 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 Services.DebugLog.Info("[AUTO-ADVANCE] deep-analyze chain disabled in Settings; skipping.");
                 return;
             }
-            if (Services.ModelInstallerService.Instance.Vlm.Status
-                != Services.ModelInstallStatus.Installed)
+            // Tagging is ALWAYS SmolVLM (the small/fast tagger) — NOT
+            // settings.SelectedVlmModelKind, which is the Deep Analyze (manual)
+            // model (Qwen by default). Gate on SmolVLM weights actually being on
+            // disk so we never fire a tags-only pass the engine can't run; the
+            // SmolVlmAutoInstaller installs them and the Vlm-install watch
+            // (WireVlmInstallWatch) re-fires this once they land.
+            if (!SmolVlmWeightsPresent())
             {
-                Services.DebugLog.Info("[AUTO-ADVANCE] no VLM installed; skipping deep-analyze auto-chain.");
+                Services.DebugLog.Info("[AUTO-ADVANCE] SmolVLM not installed yet; skipping auto-tag (will re-fire on install-complete).");
                 return;
             }
-            var modelKind = settings.SelectedVlmModelKind;
-            Services.DebugLog.Info($"Auto-chaining Deep Analyze after face clustering complete. model={modelKind} (tags-only)");
+            const string modelKind = "smolvlm";
+            // A1: re-entrancy guard. The auto-pass can now be triggered from two
+            // places — face-clustering-complete AND vlm-install-complete — which
+            // can race on a first scan where the model finishes downloading at
+            // about the same time clustering ends. Allow only one auto-pass at a
+            // time; the gate is released in the DeepAnalyzeCompleteEvent arm.
+            if (Interlocked.CompareExchange(ref _autoDeepAnalyzeInFlight, 1, 0) != 0)
+            {
+                Services.DebugLog.Info("[AUTO-ADVANCE] deep-analyze auto-pass already in flight; skipping duplicate trigger.");
+                return;
+            }
+            Services.DebugLog.Info($"Auto-chaining Deep Analyze (tags-only). model={modelKind}");
             // tagsOnly: the background auto-pass only needs the chip tags (one
             // VLM call/file → ~3× faster than caption+rename+tags). The user can
             // still run a full manual pass from the Deep Analyze tab.
-            await DeepAnalyzeAllAsync(modelKind, skipExisting: true, tagsOnly: true).ConfigureAwait(false);
+            try
+            {
+                await DeepAnalyzeAllAsync(modelKind, skipExisting: true, tagsOnly: true).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Release the gate so a later trigger can retry; rethrow to the
+                // outer handler for logging.
+                Interlocked.Exchange(ref _autoDeepAnalyzeInFlight, 0);
+                throw;
+            }
         }
         catch (Exception ex)
         {
             Services.DebugLog.Warn("[AUTO-ADVANCE] deep-analyze trigger threw: " + ex.Message);
         }
+    }
+
+    /// <summary>A1: subscribe (once) to the SmolVLM slot's Status so the
+    /// tags-only auto-pass fires as soon as the model finishes downloading,
+    /// even on the very first scan (where the scan→cluster→analyze chain
+    /// no-ops because the model isn't installed yet). Idempotent — only the
+    /// first call wires the subscription.</summary>
+    private void WireVlmInstallWatch()
+    {
+        if (Interlocked.CompareExchange(ref _vlmInstallWatchWired, 1, 0) != 0)
+        {
+            return;
+        }
+        try
+        {
+            // If it was already installed when the scan finished, the
+            // face-clustering chain already handled it; we only need to react
+            // to a LATER install completion, so no immediate fire here.
+            Services.ModelInstallerService.Instance.Vlm.PropertyChanged += OnVlmSlotStatusChanged;
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("[AUTO-ADVANCE] WireVlmInstallWatch threw: " + ex.Message);
+        }
+    }
+
+    private void OnVlmSlotStatusChanged(object? sender, PropertyChangedEventArgs e)
+        => DebugLog.SafeRun("EngineClient.OnVlmSlotStatusChanged", () =>
+        {
+            if (e.PropertyName != nameof(Services.ModelSlot.Status)) return;
+            if (!_scanCompletedThisSession) return;
+            if (Services.ModelInstallerService.Instance.Vlm.Status
+                != Services.ModelInstallStatus.Installed) return;
+            DebugLog.Info("[AUTO-ADVANCE] SmolVLM finished installing after a scan — triggering tags-only auto-pass.");
+            _ = AutoTriggerDeepAnalyzeAsync();
+        });
+
+    /// <summary>True when SmolVLM's gguf weights are on disk. The background
+    /// auto-tag pass is hardwired to SmolVLM, so it gates on the tagger being
+    /// present — not the "any VLM installed" slot, which could be a Qwen the
+    /// user installed for Deep Analyze. Mirrors the engine's vlm::find_weights.</summary>
+    private static bool SmolVlmWeightsPresent()
+    {
+        try
+        {
+            var dir = System.IO.Path.Combine(Services.AppPaths.ModelsDir, "vlm", "smolvlm");
+            return System.IO.File.Exists(System.IO.Path.Combine(dir, "model.gguf"))
+                && System.IO.File.Exists(System.IO.Path.Combine(dir, "mmproj.gguf"));
+        }
+        catch { return false; }
     }
 
     // ─── INotifyPropertyChanged plumbing ───────────────────────────────

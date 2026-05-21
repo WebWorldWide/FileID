@@ -113,6 +113,13 @@ $Solution    = Join-Path $PlatformDir "FileID.sln"
 $DistDir     = Join-Path $PlatformDir "dist/$ArchLabel"
 $StagingDir  = Join-Path $DistDir "FileID"
 
+# Run dotnet from the platform dir so platforms/windows/global.json pins the
+# SDK (8.x) regardless of where this script was launched from. Without this,
+# invoking from the repo root resolves the machine-default SDK (e.g. 10.x) and
+# the "need 8.x/9.x" guard below trips even though SDK 8 is installed. (`pwsh
+# -File` runs in a child process, so this cwd change does not leak to your shell.)
+Set-Location $PlatformDir
+
 # Fixed target framework -- the .csproj pins net8.0-windows10.0.19041.0.
 $AppTfm      = "net8.0-windows10.0.19041.0"
 $AppRid      = $DotnetRid
@@ -155,7 +162,17 @@ if (-not $SkipEngine) {
 
 if (-not $SkipApp) {
     Require-Command "dotnet" "Install .NET 8 SDK: winget install Microsoft.DotNet.SDK.8"
-    $dotnetVer = (& dotnet --version 2>$null)
+    # `dotnet` the host shim can be on PATH with NO SDK installed (runtime-only,
+    # or a fresh box). In that case `dotnet --version` exits non-zero, which
+    # $PSNativeCommandUseErrorActionPreference would turn into a raw
+    # NativeCommandExitException. Capture the exit code ourselves and emit the
+    # actionable install hint instead of leaking a stack trace.
+    $dotnetVer = & dotnet --version 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($dotnetVer)) {
+        Write-Host "ERROR: 'dotnet' is on PATH but no .NET SDK is installed (host shim only)." -ForegroundColor Red
+        Write-Host "       Install the .NET 8 SDK: winget install Microsoft.DotNet.SDK.8" -ForegroundColor Yellow
+        exit 1
+    }
     if (-not ($dotnetVer -match "^(8|9)\.")) {
         Write-Host "ERROR: dotnet SDK $dotnetVer found; need 8.x or 9.x." -ForegroundColor Red
         Write-Host "       winget install Microsoft.DotNet.SDK.8" -ForegroundColor Yellow
@@ -254,9 +271,11 @@ $restoreJob = $null
 if (-not $SkipApp) {
     Write-Host "Restoring NuGet packages (background)..." -ForegroundColor Cyan
     $restoreJob = Start-Job -ScriptBlock {
-        param($solution)
+        param($solution, $platformDir)
+        # Honor platforms/windows/global.json (the SDK pin) inside the job runspace.
+        Set-Location $platformDir
         & dotnet restore $solution --nologo *>&1
-    } -ArgumentList $Solution
+    } -ArgumentList $Solution, $PlatformDir
 }
 
 if (-not $SkipEngine) {

@@ -123,7 +123,7 @@
               Background="#CC0D0D14"
               Visibility="Collapsed">
             <Border MaxWidth="720"
-                    MinWidth="660"
+                    MinWidth="580"
                     HorizontalAlignment="Center"
                     VerticalAlignment="Center"
                     CornerRadius="12"

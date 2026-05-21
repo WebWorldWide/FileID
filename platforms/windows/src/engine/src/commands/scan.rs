@@ -128,9 +128,16 @@ pub(crate) async fn handle_start_scan(
     // Each model is a pool of N Sessions (one per worker slot) so ML
     // inference parallelizes across the GPU command queue instead of
     // serializing on a single Mutex.
+    //
+    // Timeout is 120 s (not 30 s): on the FIRST launch the CLIP scene-label
+    // matrix is text-encoded inside load_default, which on a slow EP (DirectML
+    // / CPU) takes 20+ s on its own — a 30 s budget tripped a false "model file
+    // corrupted" on real 4 GB-VRAM hardware. The matrix is disk-cached after the
+    // first build (scene_vocab.rs), so later launches load in a few seconds;
+    // 120 s still catches a genuinely hung or corrupt model file.
     let models_worker_count = platform::default_worker_cap() as usize;
     let models = match tokio::time::timeout(
-        Duration::from_secs(30),
+        Duration::from_secs(120),
         tokio::task::spawn_blocking(move || ModelStack::load_default(models_worker_count)),
     )
     .await
@@ -157,7 +164,7 @@ pub(crate) async fn handle_start_scan(
             return;
         }
         Err(_elapsed) => {
-            tracing::error!("model stack load timed out after 30s");
+            tracing::error!("model stack load timed out after 120s");
             sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
                 ScanPhase::Failed,
             ))))
@@ -165,7 +172,7 @@ pub(crate) async fn handle_start_scan(
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                 kind: "model_load_timeout".into(),
                 message:
-                    "Loading inference models took longer than 30 seconds — \
+                    "Loading inference models took longer than 120 seconds — \
                      a model file may be corrupted. Reinstall from Settings \
                      → Local AI."
                         .into(),

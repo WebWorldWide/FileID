@@ -212,6 +212,14 @@
                                Style="{StaticResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                Text="Active model: Qwen 2.5-VL 3B" />
+                    <!-- Horizontal scroll so this action row never clips its
+                         right-hand controls (Propose renames / Cancel) on a
+                         narrow / laptop window. Mirrors the PeopleView +
+                         CleanupView header pattern. -->
+                    <ScrollViewer HorizontalScrollMode="Auto"
+                                  HorizontalScrollBarVisibility="Auto"
+                                  VerticalScrollMode="Disabled"
+                                  VerticalScrollBarVisibility="Disabled">
                     <Grid ColumnSpacing="8">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/>
@@ -270,6 +278,7 @@
                                 Click="OnCancelClicked"
                                 IsEnabled="False" />
                     </Grid>
+                    </ScrollViewer>
                 </StackPanel>
             </Border>
 

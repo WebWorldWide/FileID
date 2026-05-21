@@ -110,16 +110,17 @@ internal sealed class AppSettings
     /// opt out via Settings → "Tag automatically with AI after scans".</summary>
     public bool AutoChainDeepAnalyze { get; set; } = true;
 
-    /// <summary>Persisted VLM model selection. Used by the auto-chain
-    /// after face clustering to pick which weights to tag with, and by
-    /// DeepAnalyzeView to remember the last manual choice across launches.
-    /// Accepted values mirror the engine's registry.rs ids (qwen2_5_vl_3b,
-    /// qwen2_5_vl_7b, gemma_3_4b, smolvlm); Sanitize() coerces anything else
-    /// to the safe default. Default is smolvlm — the smallest/fastest model,
-    /// auto-installed and used for the background auto-tag pass. The v1→v2
-    /// Sanitize migration flips existing users still on the OLD qwen2_5_vl_3b
-    /// default to smolvlm too.</summary>
-    public string SelectedVlmModelKind { get; set; } = "smolvlm";
+    /// <summary>Persisted Deep Analyze (manual) VLM model — the model the Deep
+    /// Analyze tab uses for full caption + smart-rename + tags. This is NOT the
+    /// background auto-tagger: tagging is always SmolVLM, hardwired in
+    /// EngineClient.AutoTriggerDeepAnalyzeAsync (the "tagging = SmolVLM, Deep
+    /// Analyze = Qwen" split). Accepted values mirror registry.rs ids
+    /// (qwen2_5_vl_3b, qwen2_5_vl_7b, gemma_3_4b, smolvlm); Sanitize() coerces
+    /// anything else to the default. Default qwen2_5_vl_3b — the balanced,
+    /// higher-quality model for manual Deep Analyze. The v2→v3 migration flips
+    /// the smolvlm value V16.11's v1→v2 step set (when this field also drove
+    /// tagging) back to qwen2_5_vl_3b for the Deep Analyze role.</summary>
+    public string SelectedVlmModelKind { get; set; } = "qwen2_5_vl_3b";
 
     /// <summary>Schema version of this settings.json. Fresh installs start at
     /// the current version so one-time Sanitize migrations only ever touch
@@ -167,8 +168,10 @@ internal sealed class AppSettings
 
     /// <summary>Current schema version this build understands. Bumped only on
     /// incompatible field renames or one-time value migrations. Sanitize()
-    /// clamps loaded values to this. v2: SmolVLM became the default tagger.</summary>
-    private const int CurrentSchemaVersion = 2;
+    /// clamps loaded values to this. v2: SmolVLM became the default tagger.
+    /// v3: tagging/Deep-Analyze split — SelectedVlmModelKind is now the Deep
+    /// Analyze model (default qwen2_5_vl_3b); tagging is hardwired to SmolVLM.</summary>
+    private const int CurrentSchemaVersion = 3;
 
     /// <summary>Defensive cleanup of fields a malicious settings.json
     /// could otherwise smuggle through. Currently scrubs the EP override
@@ -194,6 +197,17 @@ internal sealed class AppSettings
             DebugLog.Info("AppSettings: migrating default VLM tagger qwen2_5_vl_3b → smolvlm (schema v2).");
             s.SelectedVlmModelKind = "smolvlm";
         }
+        // v2 → v3: tagging is now hardwired to SmolVLM, and SelectedVlmModelKind
+        // is the Deep Analyze (manual) model — default Qwen. Flip the smolvlm
+        // value the v1→v2 step set (back when this field also drove tagging) to
+        // qwen2_5_vl_3b so Deep Analyze defaults to Qwen. (A v1 user's qwen→smolvlm
+        // above is undone here → net qwen; a v2 user on smolvlm gets qwen.)
+        if (s.SchemaVersion < 3
+            && string.Equals(s.SelectedVlmModelKind, "smolvlm", StringComparison.OrdinalIgnoreCase))
+        {
+            DebugLog.Info("AppSettings: migrating Deep Analyze model smolvlm → qwen2_5_vl_3b (schema v3; tagging stays SmolVLM).");
+            s.SelectedVlmModelKind = "qwen2_5_vl_3b";
+        }
 
         // clamp SchemaVersion to a known range. A corrupt or
         // malicious settings.json could otherwise set 999, and a future
@@ -216,7 +230,7 @@ internal sealed class AppSettings
         if (string.IsNullOrWhiteSpace(s.SelectedVlmModelKind)
             || !AllowedVlmKinds.Contains(s.SelectedVlmModelKind))
         {
-            s.SelectedVlmModelKind = "smolvlm";
+            s.SelectedVlmModelKind = "qwen2_5_vl_3b";
         }
     }
 

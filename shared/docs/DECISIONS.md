@@ -7,6 +7,168 @@
 
 ---
 
+## 2026-05-21 — Face crops: convert SCRFD [x1,y1,x2,y2] → [x,y,w,h] at the consumer
+
+**Context**: People-tab faces were blank or "not a face", and clustering was unreliable.
+Root cause: `scrfd.rs decode_scrfd_stride` emits `Detection.bbox = [x1,y1,x2,y2]` (corners),
+and `detect()` rescales them to original-image pixels — but `pipeline/tagging.rs` passed
+`det.bbox` straight to `crop_and_resize_face` (which expects `[x,y,w,h]` and computes
+`x2 = bbox[0]+bbox[2]+pad`) and stored it into `DetectedFace.bbox` (persisted as `{x,y,w,h}`
+by dbwriter). With corner coords, the crop spanned from the face's top-left to the image's
+bottom-right → garbage thumbnail, and ArcFace embedded that smear → bad clusters too.
+
+**Decision**: convert corners→xywh ONCE at the detect→DetectedFace site (keep `det`
+corners for `validate_face_geometry`, which correctly destructures `[x1,y1,x2,y2]`).
+Least-ripple fix: `crop_and_resize_face` keeps its `[x,y,w,h]` contract, the persisted
+bbox becomes correct, and the embedding is computed on a real face. Rejected: changing
+`Detection.bbox` to xywh at the SCRFD source (ripples into NMS IoU, the clamp, and
+`validate_face_geometry`, all of which assume corners). The crop is still an unaligned
+bbox resize, not a 5-landmark-aligned ArcFace chip like macOS — a quality follow-up if
+merges are noisy.
+
+## 2026-05-21 — Deep Analyze stays Qwen2.5-VL-3B; "Qwen3-VL-4B" has no GGUF; tags are 1-2 words
+
+**Context**: The user wants Deep Analyze on a heavy/accurate model ("Qwen 3 4B or
+something"), tagging on SmolVLM. Two hard constraints verified: (1) **Qwen3-VL-4B has no
+GGUF** — ggml-org publishes only Qwen3-VL-2B and Qwen3-VL-30B; macOS uses an MLX-only build
+the llama.cpp runtime can't load. (2) **Qwen2.5-VL-7B (~4.7 GB) OOMs** on the user's 4 GB
+VRAM at `-ngl 99`.
+
+**Decision**: Deep Analyze default stays **Qwen2.5-VL-3B** — the strongest Qwen-family VLM
+that exists as a GGUF, fits 4 GB, is already a picker card, and produces full descriptive
+captions. The tag pass is SmolVLM with tags constrained to 1-2 words (`parse_vlm_tags` now
+drops 3+-word fragments, was >3). Deferred follow-ups: add a Gemma-3-4B card (the only 4B
+that fits — would swap out the redundant SmolVLM-in-DeepAnalyze card, an x:Name rename not
+compile-verifiable here) and make 7B usable on small VRAM via a VRAM-aware `-ngl` in
+`vlm_server`.
+
+## 2026-05-21 — Disk-cache the CLIP scene-label matrix; raise the model-load timeout 30→120 s
+
+**Context**: On real 4 GB-VRAM NVIDIA/DirectML hardware, "Start Scan" failed with
+"Loading inference models took longer than 30 seconds — a model file may be corrupted."
+The logs showed it wasn't corruption: building the CLIP scene-label matrix (164 labels ×
+5 prompt templates, text-encoded through the CLIP-text ONNX session) took **21.5 s** on
+DirectML, synchronously inside `ModelStack::load_default`, which `commands/scan.rs` wraps
+in a 30 s timeout. ArcFace + SCRFD + the 21.5 s build + MobileCLIP > 30 s → false timeout.
+The matrix also rebuilt every launch (process-static `OnceLock`, no persistence).
+
+**Decision**: (1) Disk-cache the matrix (`scene_vocab.rs`) — it's deterministic given
+SCENE_LABELS + PROMPT_TEMPLATES + the CLIP-text weights, so serialize it (raw LE f32 + a
+header carrying a content-hash key) under `Models/clip_scene_cache/` and reload it
+(~instant, and skips loading the 253 MB text session) when the key matches; rebuild +
+rewrite only when the vocabulary or model changes. (2) Raise the load timeout 30 → 120 s
+so the one-time first build can't false-fail; it still guards a genuinely hung/corrupt
+model. Net: first launch slow once, every later launch <10 s. Alternatives rejected:
+async/lazy matrix build (more pipeline restructuring + risk); fewer prompt templates
+(cuts accuracy — and the cache makes the build a one-time cost anyway).
+
+## 2026-05-21 — Tagging is always SmolVLM; Deep Analyze defaults to Qwen (model role split)
+
+**Context**: A single `AppSettings.SelectedVlmModelKind` drove BOTH the background
+auto-tag pass AND the manual Deep Analyze tab; V16.11 migrated it to `smolvlm`, so *both*
+used SmolVLM. The intended product split is fast scan-time tagging with the tiny model +
+high-quality manual captions with a bigger one. User confirmed: "tagging should be SmolVLM
+and Deep Analyze is a Qwen or equivalent."
+
+**Decision**: split the roles. The background auto-tag pass
+(`EngineClient.AutoTriggerDeepAnalyzeAsync`) is **hardwired to `smolvlm`** (not the
+setting) and gated on SmolVLM weights being on disk. `SelectedVlmModelKind` becomes the
+**Deep Analyze (manual)** model, default `qwen2_5_vl_3b`, with a settings v2→v3 migration
+flipping the leaked `smolvlm` value back to Qwen. SmolVLM stays auto-installed (it's the
+tagger); Qwen installs on-demand from the Deep Analyze card (now honest about per-model
+install state — see below). Note: on ≤4 GB VRAM Qwen 3B (~3.5 GB) is tight and may spill
+to system RAM; SmolVLM remains selectable in Deep Analyze for speed. Alternatives
+rejected: a separate `TaggingModelKind` setting (unnecessary — the tagger is
+definitionally SmolVLM; hardcoding is unambiguous).
+
+## 2026-05-21 — Deep Analyze model cards show per-model on-disk state, not the shared slot
+
+**Context**: `DeepAnalyzeView.SyncCards` fed the single, "any-VLM-installed"
+`ModelInstallerService.Vlm` slot status to all three model cards. Once SmolVLM
+auto-installed, the Qwen 3B/7B cards also showed "Installed" — but their weights weren't
+downloaded, so selecting Qwen + "Whole library" made the engine's `find_weights` return
+None and fail every file. The card lied.
+
+**Decision**: each card checks whether *its* model's gguf pair exists under
+`Models/vlm/<kind>/` (mirrors engine `vlm::find_weights`); the shared slot's
+Downloading/Failed state is attributed to a card only when `CurrentModelKind` matches.
+`OnInstallModelClicked` sets `CurrentModelKind` so the clicked card animates its progress.
+Result: with only SmolVLM installed, Qwen shows "Install" (honest) and downloads on click.
+
+## 2026-05-21 — SmolVLM tags land on the FIRST scan: trigger on VLM-install-complete, not only the scan→cluster chain
+
+**Context**: The user reported "Windows doesn't have what macOS has" for tagging.
+Root cause: the post-scan SmolVLM tags-only auto-pass was reachable ONLY via
+`ScanComplete → FaceClusteringComplete → AutoTriggerDeepAnalyzeAsync`, which
+hard-gates on `Vlm.Status == Installed`. On a first run SmolVLM (~700 MB) is
+still downloading when that chain completes, so the gate logged "no VLM
+installed; skipping" and the first scan produced only the sparse CLIP
+placeholders — never the good VLM tags. (Was documented as a known limitation
+in NEXT.md.)
+
+**Decision**: `EngineClient` now also watches the `Vlm` slot's `Status` (wired
+once, on the first `ScanComplete`) and fires the tags-only pass when it flips to
+`Installed` AND a scan has completed this session. `HandleProgress` already
+routes the background auto-install's progress to the `Vlm` slot
+(`SlotFor("smolvlm") → Vlm`), so the slot reliably transitions to `Installed`
+mid-session. A re-entrancy gate (`_autoDeepAnalyzeInFlight`, released in the
+`DeepAnalyzeCompleteEvent` arm) prevents the install-complete path and the
+cluster-complete path from double-firing on the race where the model finishes
+downloading just as clustering ends. Alternatives rejected: a fixed timer
+(fragile); making the engine watch installs (the install lifecycle lives in the
+C# app, not the engine).
+
+## 2026-05-21 — Defer the CUDA llama runtime auto-install until a VLM is installed
+
+**Context**: First-run was "very slow." On an NVIDIA box, engine-ready fired
+THREE background downloads at once — `CudaAutoInstaller` (~650 MB),
+`SmolVlmAutoInstaller` (~700 MB), and the Vulkan `LlamaRuntimeAutoInstaller` —
+sharing one HTTP semaphore and contending with the first scan's GPU work.
+App.xaml.cs already records that two *other* auto-downloaders were removed
+earlier for "startup-time GPU pressure during what was already a hang-prone
+period"; three remained.
+
+**Decision**: `CudaAutoInstaller` now defers until a VLM is actually installed
+(`ModelInstallerService.Vlm.Status == Installed`), re-armed + re-triggered via a
+`Vlm.PropertyChanged` subscription. The CUDA llama runtime ONLY accelerates VLM
+inference by ~15-25%; until a VLM exists there is nothing to accelerate, so
+deferring costs nothing and lets the functional models (SmolVLM + the small
+Vulkan runtime) land first without contention. The gate keys on the dominant
+SmolVLM download (the ~33 MB Vulkan runtime isn't a real contention source).
+Alternatives rejected: fully on-demand CUDA (only on opening Deep Analyze) —
+would never fire for users who rely on background auto-tagging.
+
+## 2026-05-21 — Keep SmolVLM at Q8_0 (reject Q4_K_M) — tag quality over a ~200 MB saving
+
+**Context**: Considered shrinking the default tagger (SmolVLM-500M) from Q8_0 to
+Q4_K_M to cut download size + speed inference, as a "very slow" mitigation.
+
+**Decision**: Keep Q8_0. For a 500M-parameter model the quant drop costs more
+relative quality than on a 3B+ model, and tag quality is the user's #1 complaint
+— trading it for ~200 MB (model 540→~300 MB; the f16 mmproj stays ~200 MB
+regardless) is the wrong trade. The slow first-run is fixed by stopping the
+concurrent CUDA download (above), not by degrading the tagger. Revisit only if a
+measured quality A/B shows Q4_K_M is acceptable for short tag lists.
+
+## 2026-05-21 — VLM server payload self-test → CLI fallback; transcode non-JPEG/PNG before the VLM
+
+**Context**: Two latent ways the VLM tag pass could silently produce nothing,
+neither hardware-verified before now. (1) The persistent `llama-server`
+`/v1/chat/completions` `image_url` data-URI payload shape was never confirmed
+against the shipped b9254 build; if it 400s, EVERY file fails identically.
+(2) `rasterize_for_vlm` passed library images through untouched — but llama.cpp's
+loader is stb_image, which has no WebP support, so a `.webp` reached it and
+failed per-file.
+
+**Decision**: (1) After `VlmServer::start`, run a one-shot self-test
+(`vlm_server_payload_ok`) that sends a tiny throwaway JPEG; on rejection, emit a
+single non-fatal `vlm_server_payload_rejected` warning and fall back to the
+per-file CLI path (a different, known-good code path) for the whole batch instead
+of failing every file. (2) Transcode anything that isn't JPEG/PNG
+(webp/bmp/tiff/gif/…) to a temp JPEG via image-rs before the VLM; JPEG/PNG pass
+through untouched (the common case). HEIC stays unsupported (image-rs can't
+decode it) and fails as before — no regression.
+
 ## 2026-05-21 — Tile height via SizeChanged, not an ActualWidth self-binding
 
 **Context**: Library thumbnails decoded + were assigned to tiles (logs proved it)

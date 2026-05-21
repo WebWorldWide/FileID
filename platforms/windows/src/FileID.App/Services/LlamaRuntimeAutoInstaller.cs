@@ -29,6 +29,12 @@ internal static class LlamaRuntimeAutoInstaller
     /// don't re-fire. Matches the CudaAutoInstaller pattern.</summary>
     private static int s_attempted; // 0 = not yet, 1 = done
 
+    /// <summary>C1: re-arm the one-shot gate so a later engine-Ready (e.g.
+    /// after a crash + respawn that interrupted a mid-flight download)
+    /// re-evaluates the sentinel/binary and re-fires if still missing.
+    /// Called from EngineClient's ReadyEvent arm.</summary>
+    public static void ResetAttempt() => Interlocked.Exchange(ref s_attempted, 0);
+
     public static void Hook()
     {
         TryStart();

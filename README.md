@@ -57,6 +57,15 @@ Point FileID at a folder. It reads every file inside — images, video, PDFs, do
 
 That's the only command you need to remember. Defaults pick a sensible "I want to see this run" path: it wipes any prior install, builds Release, drops a runnable copy at `~/Desktop/FileID/`, and launches the app.
 
+**On Windows without a bash shell?** `build.sh` is just a dispatcher — it shells out to a PowerShell script. Call that script directly from PowerShell (works in the built-in Windows PowerShell 5.1 *and* PowerShell 7):
+
+```powershell
+# From the repo root. Equivalent to ./build.sh -windows
+.\platforms\windows\build\build-all.ps1 -Wipe -Release -Desktop -Run
+```
+
+> ℹ️ Use `.\platforms\windows\build\build-all.ps1`, **not** `pwsh ...`. If you copied a `pwsh` command and got `'pwsh' is not recognized`, you have Windows PowerShell 5.1 (no `pwsh` on PATH) — just drop the `pwsh` prefix and run the `.ps1` directly as shown above, or `winget install Microsoft.PowerShell` to get PowerShell 7.
+
 > ⚠️ **`./build.sh -windows` defaults to wiping your local install.** It deletes `%LOCALAPPDATA%\FileID\` — including any downloaded model weights (multi-GB) and your scan database. Pass `--no-wipe` to iterate without re-downloading.
 
 If `./build.sh -windows` is too aggressive (it wipes downloaded models — re-downloading is multi-GB), use `--no-wipe`:

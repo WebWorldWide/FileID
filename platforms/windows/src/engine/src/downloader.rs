@@ -31,7 +31,7 @@ use sha2::{Digest, Sha256};
 pub const PARALLEL_PARTS: usize = 12;
 const PROGRESS_REPORT_INTERVAL_BYTES: u64 = 1024 * 1024; // 1 MB
 const MIN_BYTES_FOR_PARALLEL: u64 = 5 * 1024 * 1024;     // 5 MB
-const PROGRESS_THROTTLE_MS: u64 = 100;                   // 10 Hz max
+const PROGRESS_THROTTLE_MS: u64 = 50;                    // 20 Hz — smoother bar + finer EMA
 
 /// Total concurrent in-flight HTTP requests across ALL prewarm tasks.
 /// HuggingFace's CDN starts returning 429s when one IP issues too many
@@ -412,7 +412,7 @@ where
     // the queue without bound — overflow is fine to drop because
     // bytes_done is monotonic + the drainer recomputes from the
     // AtomicU64 each tick.
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<usize>(256);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<usize>(512);
 
     // Spawn drainer FIRST so the chunk tasks have something to send to.
     let total_for_drain = total;

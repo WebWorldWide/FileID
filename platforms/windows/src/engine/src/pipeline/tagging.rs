@@ -197,12 +197,16 @@ pub struct DetectedFace {
 pub struct ModelStack {
     pub arcface: Option<Vec<Mutex<ArcFace>>>,
     pub scrfd: Option<Vec<Mutex<Scrfd>>>,
-    /// MobileCLIP has two paths:
-    /// - `mobileclip_pool` (default) — N-Session pool, VRAM-clamped via
-    ///   `resolve_pool_size`. Throughput winner for MobileCLIP-S2 on DirectML.
-    /// - `mobileclip_batch` — single Session behind `ClipBatchCoordinator`,
-    ///   opt-in via `FILEID_CLIP_USE_BATCH=1`. Kept for experiments with
-    ///   CUDA EP or larger models where batching amortizes.
+    /// MobileCLIP has two paths (the default is chosen in `load_default`):
+    /// - `mobileclip_batch` (DEFAULT) — single Session behind
+    ///   `ClipBatchCoordinator`, fed batched (N,3,256,256) tensors. On a 6 GB
+    ///   card the VRAM clamp drops the pool to ~1-3 sessions behind the
+    ///   `CLIP_CONCURRENCY=2` semaphore, so batching amortizes DirectML
+    ///   dispatch better. Opt OUT with `FILEID_CLIP_USE_BATCH=0`.
+    /// - `mobileclip_pool` — N-Session pool, VRAM-clamped via
+    ///   `resolve_pool_size`; the fallback (`FILEID_CLIP_USE_BATCH=0`), kept
+    ///   for CUDA-EP experiments. NOTE: the batch-vs-pool default is PENDING
+    ///   hardware confirmation (run the A/B and compare clip_p95_ms).
     pub mobileclip_pool: Option<Vec<Mutex<MobileClipImage>>>,
     pub mobileclip_batch: Option<Arc<ClipBatchCoordinator>>,
     /// CLIP zero-shot scene labeler — a label-embedding matrix built once
@@ -235,10 +239,10 @@ const VRAM_PER_POOL_INSTANCE_MB: u64 = 1500;
 
 /// Always-reserved VRAM headroom (Windows desktop compositor + other
 /// apps). Subtracted from the dedicated total before dividing by
-/// VRAM_PER_POOL_INSTANCE_MB. On a 6 GB card this leaves ~4.5 GB
-/// available for our pool, capping it at 3 — but combined with the
-/// MODEL_POOL_SIZE default of 1, the gate just makes pool=1 the
-/// near-universal result.
+/// VRAM_PER_POOL_INSTANCE_MB. On a 6 GB card this leaves ~4.5 GB usable, so
+/// `(4644 / 1500).max(1) = 3`; with `MODEL_POOL_SIZE = 4` the gate clamps the
+/// ArcFace/SCRFD pools to 3 sessions. (MobileCLIP defaults to the
+/// single-Session batch path, so this clamp mainly bounds the face models.)
 const VRAM_RESERVED_MB: u64 = 1500;
 
 fn resolve_pool_size(worker_count: usize) -> usize {
@@ -273,15 +277,15 @@ impl ModelStack {
         });
         let scrfd = load_pool("SCRFD", pool_size, scrfd::default_weights_path(), Scrfd::load);
 
-        // Batch path is now default-on. The pool path was empirically faster
-        // at the time it was written (small N-session pool on DirectML), but
-        // VRAM-clamp drops pool_size to 1 on most 6 GB cards, leaving a
-        // single Mutex<MobileClipImage> behind the CLIP_CONCURRENCY=2
-        // semaphore — effectively serializing CLIP work. The batch
-        // coordinator drives one Session with batched (N, 3, 256, 256)
-        // tensors, amortizing per-call DirectML dispatch overhead and
-        // beating the pool path on the user's hardware. Set
-        // `FILEID_CLIP_USE_BATCH=0` to fall back to the pool path.
+        // Batch path is the default. Rationale: the VRAM clamp drops the pool
+        // to ~1-3 Sessions on a 6 GB card, and the separate CLIP_CONCURRENCY=2
+        // semaphore caps concurrent CLIP inferences regardless, so a pool
+        // larger than 2 is partly wasted. The batch coordinator drives ONE
+        // Session with batched (N, 3, 256, 256) tensors, amortizing per-call
+        // DirectML dispatch overhead. This default is PENDING hardware
+        // confirmation — run the A/B (default vs `FILEID_CLIP_USE_BATCH=0`) and
+        // compare clip_p95_ms + files_per_second. Set `FILEID_CLIP_USE_BATCH=0`
+        // to fall back to the pool path.
         let use_batch = std::env::var("FILEID_CLIP_USE_BATCH")
             .ok()
             .map(|s| !(s == "0" || s.eq_ignore_ascii_case("false")))
@@ -294,7 +298,7 @@ impl ModelStack {
         let scene_labeler = crate::models::scene_vocab::shared_scene_labeler();
 
         let (mobileclip_pool, mobileclip_batch) = if use_batch {
-            // Batch-coordinator path (opt-in, experimental).
+            // Batch-coordinator path (DEFAULT; opt out with FILEID_CLIP_USE_BATCH=0).
             let coord = match crate::models::mobileclip::default_weights_path() {
                 Ok(p) if p.exists() => match MobileClipImage::load(p.clone()) {
                     Ok(model) => {
@@ -821,7 +825,19 @@ async fn process_file_predecoded(
                                         Some(q) => q,
                                         None => continue,
                                     };
-                                    if let Some(crop) = crop_and_resize_face(&rgb, w, h, &det.bbox) {
+                                    // SCRFD emits corner coords [x1,y1,x2,y2]; the crop +
+                                    // DetectedFace.bbox + the persisted bbox all expect
+                                    // [x,y,w,h]. Convert once: without this the crop ran
+                                    // from the face's top-left to the image's bottom-right
+                                    // (blank / not-a-face thumbnails) and ArcFace embedded
+                                    // that smear, corrupting clustering.
+                                    let bbox_xywh = [
+                                        det.bbox[0],
+                                        det.bbox[1],
+                                        (det.bbox[2] - det.bbox[0]).max(0.0),
+                                        (det.bbox[3] - det.bbox[1]).max(0.0),
+                                    ];
+                                    if let Some(crop) = crop_and_resize_face(&rgb, w, h, &bbox_xywh) {
                                         let embed_result = {
                                             let mut a = arcface_mu.lock();
                                             a.embed(&crop)
@@ -830,7 +846,7 @@ async fn process_file_predecoded(
                                             Ok(emb) => {
                                                 let pose = scrfd::estimate_pose(&det.landmarks);
                                                 tagged.faces.push(DetectedFace {
-                                                    bbox: det.bbox,
+                                                    bbox: bbox_xywh,
                                                     landmarks: det.landmarks,
                                                     embedding: emb,
                                                     roll: pose.roll,
@@ -1140,23 +1156,6 @@ const MAX_DECODED_PIXELS: u64 = 50_000_000;
 
 /// Run OCR on an RGB buffer. Returns None if no text or OCR isn't
 /// available on this system.
-/// Arc-shared OCR variant — avoids cloning a multi-MB RGB buffer when
-/// the caller still holds the original. The shared Arc is dropped on
-/// the worker thread when OCR returns; the original Vec stays untouched.
-#[allow(dead_code)]
-async fn run_ocr_blocking_arc(rgb: std::sync::Arc<Vec<u8>>, w: u32, h: u32) -> anyhow::Result<Option<shell::ocr::OcrResult>> {
-    tokio::task::spawn_blocking(move || -> anyhow::Result<Option<shell::ocr::OcrResult>> {
-        match shell::ocr::recognize(&rgb, w, h) {
-            Ok(r) => Ok(Some(r)),
-            Err(err) => {
-                tracing::debug!(?err, "OCR skipped");
-                Ok(None)
-            }
-        }
-    })
-    .await?
-}
-
 async fn run_ocr_blocking(rgb: Vec<u8>, w: u32, h: u32) -> anyhow::Result<Option<shell::ocr::OcrResult>> {
     tokio::task::spawn_blocking(move || -> anyhow::Result<Option<shell::ocr::OcrResult>> {
         match shell::ocr::recognize(&rgb, w, h) {

@@ -6,6 +6,160 @@
 >
 > Older entries below V15.0 are historical context — load-bearing for archaeology, not for current state. Skim if you want the journey; skip if you want the destination.
 
+## 2026-05-21 — V16.15 face crops fixed + 1-2 word tags + download jitter + dead code
+
+- **Faces (root-caused + fixed).** SCRFD emits bbox as `[x1,y1,x2,y2]` corners
+  (`scrfd.rs`, rescaled to original-image px by `detect()`), but `tagging.rs` fed it to
+  `crop_and_resize_face` + stored it as `[x,y,w,h]` — so the crop ran from the face's
+  top-left to the image's bottom-right ("not a face"/blank), and that smear was also fed
+  to ArcFace (corrupting clustering). Now converted corners→xywh once at the
+  detect→`DetectedFace` site → real face crops, meaningful embeddings, correct persisted
+  bbox. (`validate_face_geometry` was already correct.) Follow-up: landmark-aligned
+  ArcFace chips for better cluster accuracy.
+- **Tags are 1-2 words.** `parse_vlm_tags` drops 3+-word fragments (was >3); the SmolVLM
+  TAG_PROMPT already asks for 1-2 words.
+- **Deep Analyze model reality (verified).** Qwen3-VL-4B has **no GGUF** (ggml-org has
+  only Qwen3-VL 2B/30B; macOS uses MLX), and Qwen2.5-VL-7B (~4.7 GB) OOMs on the 4 GB
+  card at `-ngl 99`. So Deep Analyze stays **Qwen2.5-VL-3B** (strongest Qwen that fits +
+  already a card + full descriptive captions). Gemma-3-4B card swap + 7B-with-VRAM-aware
+  `-ngl` flagged as follow-ups (need blind-unverifiable C# x:Name work / an engine change).
+  See DECISIONS.
+- **Download "freaking out" fixed.** `ModelSlot.UpdateRate` no longer zeroes rate/ETA at
+  every per-file fraction reset in a multi-file bundle (carries the prior rate) — that was
+  the 0-blip / "Stalled" flicker; sample interval 500→250 ms. `downloader.rs` progress
+  throttle 100→50 ms + progress channel 256→512. (Already 12-way parallel range-GET; true
+  throughput is near-capped.)
+- **Dead code.** Removed the unused `run_ocr_blocking_arc` (live path is
+  `run_ocr_blocking`). Remaining engine `#[allow(dead_code)]` are deliberate (test helper
+  `ModelStack::empty`, non-Windows cfg-stubs, the pool-path CLIP `embed`). A broad
+  slop-comment purge is **deferred** — much of the codebase's verbosity is the
+  load-bearing institutional memory the CLAUDE.md says not to strip; touched code is
+  WHY-focused.
+
+### Build/test
+- Engine `cargo clippy --all-targets -D warnings` clean + `cargo test --lib` **158/0**
+  (toolchain 1.90). C# (`ModelSlot`) `dotnet format` clean + BOM intact. WinUI compile is
+  the user's VS build. Verify faces/tags/downloads on hardware per NEXT.md V16.15.
+
+## 2026-05-21 — V16.14 small-screen / anti-clipping UI pass
+
+User reported laptop UI content getting cut off. XAML audit (read-only — can't render
+here) + conservative responsive fixes to the clear overflow patterns:
+- **Deep Analyze action row** (7 controls: Whole library / Selected / Current / Skip
+  toggle / Propose renames / Cancel) wrapped in a horizontal ScrollViewer (the
+  PeopleView/CleanupView header pattern), so its right-hand controls can't clip on a
+  narrow window — the most likely "cut off" culprit.
+- **Oversized modal sheets shrunk to fit a laptop** (each already has an inner
+  ScrollViewer for overflow): `FilePreviewSheet` 1080×720 → **880×520** (the worst —
+  720-tall didn't fit a 768-px screen once title bar + taskbar are subtracted);
+  `PersonDetailSheet` 480→440 H; `SuggestedMergesSheet` 520→440 H; `DrillDownSheet`
+  700×520 → 640×440; `MainWindow` WelcomeOverlay MinWidth 660 → 580.
+- Left as-is (degrades gracefully, doesn't hard-clip): Settings storage path
+  (TextTrimming + tooltip), PersonDetail name fields (tight but fit), FilePreview
+  toolbar (the `*` filename column absorbs the squeeze before buttons clip), sidebar
+  (260 px with a Ctrl+Shift+S toggle).
+
+All 6 edited `.xaml` parse as well-formed XML + BOM intact. **Not render-verified**
+(no WinUI build/display here) — the user must eyeball on the laptop and report any
+remaining clipping (which view + element).
+
+## 2026-05-21 — V16.13 model-load timeout fix + tagging/Deep-Analyze split (first on-hardware run)
+
+The build finally ran on the user's box (NVIDIA **~4 GB VRAM / DirectML**) after they
+installed the VS WinUI PRI component (the CLI can't build WinUI here). First scan failed
+with a false "models took >30 s / corrupted" — root-caused from the engine log to the
+**21.5 s CLIP scene-matrix build** blowing the 30 s `load_default` timeout. Fixed, plus
+the user's model-role ask.
+
+- **Scene-label matrix is disk-cached** (`scene_vocab.rs`): build once (~21 s, first
+  launch), reload ~instantly after (raw LE f32 + content-hash-keyed header under
+  `Models/clip_scene_cache/`; the hit path also skips loading the 253 MB text session).
+  **Model-load timeout 30 → 120 s** (`scan.rs`) so the one-time build can't false-fail.
+  → first launch slow once, later launches <10 s. Immediate workaround for the user: a
+  second "Start Scan" in the same session already worked (matrix cached process-static).
+- **Tagging vs Deep Analyze split.** Auto-tag hardwired to **SmolVLM**
+  (`EngineClient.AutoTriggerDeepAnalyzeAsync`, gated on SmolVLM weights present); **Deep
+  Analyze defaults to Qwen 2.5-VL 3B** (`AppSettings.SelectedVlmModelKind` default → qwen
+  + v2→v3 migration off the leaked smolvlm). SmolVLM auto-installs; Qwen installs
+  on-demand from the Deep Analyze card.
+- **Deep Analyze cards now honest** (V16.12.1): `DeepAnalyzeView.SyncCards` checks each
+  model's gguf on disk instead of mirroring the shared "any VLM" slot — Qwen no longer
+  falsely shows "Installed".
+- **Hardware tailoring confirmed from logs:** DXGI vendor probe (NVIDIA), VRAM probe
+  (3935 MB), EP chain cuda→tensorrt→directml→cpu, pool clamped to 1 to fit 4 GB, per-vendor
+  runtime auto-install (Vulkan + SmolVLM + CUDA llama runtime + cuDNN all present). Open
+  gap: ONNX runs on **DirectML** (the `cuda` ORT pack is `not_yet_available` → ~3-5×
+  slower); the VLM path already uses CUDA. Sourcing the ORT CUDA EP DLLs is a follow-up.
+
+### Build/test
+- Engine `cargo clippy --all-targets -D warnings` clean (toolchain 1.90, the CI pin).
+- C# (`AppSettings`, `EngineClient`, `DeepAnalyzeView`, build-all.ps1 SDK fix) —
+  `dotnet format` clean + UTF-8 BOM intact; full WinUI compile is the user's VS build (the
+  dotnet CLI here lacks `Microsoft.Build.Packaging.Pri.Tasks.dll`).
+- Verify on hardware per NEXT.md V16.13.
+
+## 2026-05-21 — V16.12 first-scan tagging + first-run download contention + VLM payload fallback
+
+Targeted pass on the user's three complaints ("tagging doesn't have what macOS
+has", "very slow", "very buggy"), grounded in a full re-read. The app was found
+to be feature-complete in code but never runtime-verified (V16.7–V16.11 all
+"compiles + tests, NOT verified on hardware") — so the work was making the
+already-written paths actually fire correctly + fast.
+
+- **Tagging (the #1 fix). SmolVLM tags now land on the FIRST scan.** The
+  tags-only auto-pass was reachable only via `ScanComplete → FaceClustering →
+  AutoTriggerDeepAnalyze`, gated on `Vlm.Status==Installed` — but on a first run
+  SmolVLM is still downloading then, so it skipped and the user saw only sparse
+  CLIP placeholders. `EngineClient` now also fires the pass when the `Vlm` slot
+  flips to `Installed` after a scan completed this session (re-entrancy-gated so
+  it can't double-fire with the cluster path). See DECISIONS.md.
+- **VLM reliability. Server payload self-test + CLI fallback.** After
+  `VlmServer::start`, a one-shot tiny-image probe (`vlm_server_payload_ok`)
+  confirms the server accepts our `image_url` payload (never HW-verified); on
+  rejection it emits a non-fatal `vlm_server_payload_rejected` warning and falls
+  back to the per-file CLI for the whole batch instead of failing every file.
+- **VLM input. Transcode non-JPEG/PNG → JPEG** in `rasterize_for_vlm` (webp/bmp/
+  tiff/gif) so llama.cpp's stb_image loader (no WebP) doesn't silently reject a
+  file. JPEG/PNG pass through.
+- **Slow first-run. CUDA llama runtime now defers** until a VLM is installed
+  (re-triggered via `Vlm.PropertyChanged`), so engine-ready no longer fires
+  three big concurrent downloads (~650 MB CUDA + ~700 MB SmolVLM + Vulkan) into
+  the first scan. CUDA is a 15-25% speed upgrade with nothing to accelerate
+  until a VLM exists.
+- **Install robustness.** No-progress watchdog raised 30→60 s and now treats
+  ANY model's progress as engine-liveness (`_lastAnyProgressAt`), so
+  multi-download contention can't false-fail an install. Auto-installers expose
+  `ResetAttempt()`, called from the `ReadyEvent` arm, so a mid-download engine
+  crash + respawn re-evaluates sentinels instead of abandoning the model for the
+  session.
+- **CLIP batch/pool default documented.** Fixed the contradictory `tagging.rs`
+  comments (struct doc said batch was "opt-in via =1"; `load_default` had it
+  default-ON; a VRAM comment claimed "MODEL_POOL_SIZE default of 1" while it's
+  4). Kept batch as the default + flagged it PENDING a hardware A/B
+  (`FILEID_CLIP_USE_BATCH=0` is the escape hatch).
+- **Kept SmolVLM at Q8_0** — rejected Q4_K_M; the ~200 MB saving isn't worth tag
+  quality on a 500M model (see DECISIONS.md).
+- **Verified-no-change (investigated, already correct):** thumbnail decode is
+  already serialized (single-reader channel) + cancels on recycle; `utilization`
+  is plumbed but never surfaced (the hardcoded 0.0 misleads nobody); the
+  NVIDIA→DirectML "install CUDA pack (~3-5× slower)" perf hint already logs
+  (`runtime.rs`); the "click sidebar mid-scan crashes" class is comprehensively
+  defended (every view unsubscribes on Unload; `DetailHostView` lazy-builds +
+  disposes prior child; `LibraryView` documents its disposal order) — and the
+  CUDA-defer change shrinks the hang-prone first-run window further.
+
+### Build/test
+- Engine `cargo check` 0 + `cargo clippy --all-targets -D warnings` clean
+  (toolchain 1.90, the CI pin).
+- **C# (FileID.App) NOT compile-verified in this environment:** building WinUI 3
+  via the dotnet CLI here fails at `MrtCore.PriGen` — `Microsoft.Build.Packaging.Pri.Tasks.dll`
+  ships only with VS's MSBuild (`v17.0\AppxPackage`), absent from both the
+  SDK 8 and SDK 10 installs on this box. The C# edits (A1 install-trigger, C1
+  reset, B1 CUDA defer, B2 watchdog) are mechanical + self-reviewed against
+  types/namespaces; **they must be built + verified in the user's VS
+  environment** (`pwsh build/build-all.ps1 -Run` from a VS Developer shell).
+- **Not yet runtime-verified on hardware** (see NEXT.md acceptance criteria).
+
 ## 2026-05-21 — V16.11 thumbnails (real root cause) + Deep Analyze runtime + SmolVLM auto-tagging
 
 Three persistent bugs, root-caused from log + disk forensics, fixed in one pass.

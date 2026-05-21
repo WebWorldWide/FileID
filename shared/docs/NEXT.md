@@ -4,6 +4,83 @@
 
 ---
 
+## V16.15 — verify on hardware: face crops + 1-2 word tags + smooth downloads (2026-05-21)
+
+**Landed (engine clippy + 158 tests; C# format+BOM; build in VS).** Rebuild:
+`pwsh -File platforms\windows\build\build-all.ps1 -Run`.
+1. **Faces:** re-scan a folder with people → the People tab shows real cropped faces (not
+   blank, not whole-image smears); same-person faces group; merge works. Existing DBs hold
+   the OLD bad crops — use `-WipeDbOnly` (or re-scan) to regenerate. `SELECT COUNT(*) FROM
+   face_prints` > 0; the `face_crops/*.jpg` look like faces.
+2. **Tags:** `SELECT tag FROM tags WHERE source='vlm'` → all 1-2 words (no 3+-word phrases).
+3. **Deep Analyze:** tab defaults to Qwen2.5-VL-3B; "Whole library" → full-sentence captions
+   + smart names. (Qwen3-VL-4B unavailable as GGUF; 7B OOMs on 4 GB — see DECISIONS.)
+4. **Downloads:** the rate/ETA rise smoothly and do NOT blink to 0 / "Stalled" at file
+   boundaries in multi-file model bundles.
+
+## V16.13 — verify on hardware: scan starts (no timeout) + SmolVLM tags / Qwen Deep Analyze (2026-05-21)
+
+**Landed (engine clippy `-D warnings` clean; C# `dotnet format` + BOM clean — build in VS).**
+Rebuild from the repo root: `pwsh -File platforms\windows\build\build-all.ps1 -Run`
+(`-WipeDbOnly` for a fresh DB). Fixes the 4 GB-VRAM/DirectML model-load timeout + the
+tagging/Deep-Analyze model split:
+
+1. **Scan starts — no 30 s timeout.** First launch: scene matrix builds once
+   (`engine.jsonl`: `[TAGGING] scene-label embeddings built elapsed_ms≈21000`) and the scan
+   runs (no `model_load_timeout`). EVERY later launch logs `scene-label matrix loaded from
+   cache` (no 21 s build) and starts <10 s. A `Models\clip_scene_cache\scene_matrix.bin`
+   appears.
+2. **Tagging = SmolVLM.** After a scan: `app.log` `Auto-chaining Deep Analyze (tags-only).
+   model=smolvlm`; `SELECT COUNT(*) FROM tags WHERE source='vlm'` climbs.
+3. **Deep Analyze = Qwen.** The Deep Analyze tab shows **Qwen 2.5-VL 3B active** by default
+   (existing settings migrated off smolvlm); SmolVLM still selectable. Qwen cards show
+   **Install** (not a false "Installed") until downloaded; after Install + "Whole library",
+   `SELECT DISTINCT vlm_model FROM files` shows `qwen…` with captions. (On 4 GB VRAM Qwen 3B
+   may be slow / spill to RAM — SmolVLM is the fast option.)
+4. **(Follow-up, not this pass) faster ONNX:** ONNX runs on DirectML (perf-hint logs it).
+   The CUDA ORT pack that would make ArcFace/SCRFD/CLIP ~3-5× faster is `not_yet_available`
+   — needs the ORT 2.0.0-rc.10 CUDA provider DLLs sourced + hosted.
+
+## V16.12 — verify on hardware: first-scan tagging + first-run speed + VLM fallback (2026-05-21)
+
+**Landed (engine cargo check + clippy -D warnings clean; C# self-reviewed but
+NOT compile-verified — WinUI CLI build is blocked on the dev box, build in VS).**
+Rebuild from a VS Developer shell: `pwsh build/build-all.ps1 -Run` (add
+`-WipeDbOnly` for a fresh DB, or `-Wipe -PreserveModels` to re-test first-run
+install ordering without re-downloading multi-GB weights).
+
+1. **First-scan tags (THE fix).** On a clean profile (`-Wipe -PreserveModels`
+   keeps SmolVLM so this exercises the *installed* path; for the genuine
+   first-run, use `-Wipe`): scan a folder. CLIP placeholder chips appear during
+   the scan. When SmolVLM finishes installing after the scan, `app.log` shows
+   `[AUTO-ADVANCE] SmolVLM finished installing after a scan — triggering
+   tags-only auto-pass.` (this is the NEW path) — not just "no VLM installed;
+   skipping." `SELECT COUNT(*) FROM tags WHERE source='vlm'` climbs from 0 on
+   the FIRST scan's lifetime, and chips switch placeholder → VLM tags. No
+   double-pass (only one `Auto-chaining Deep Analyze (tags-only)` per cycle).
+2. **VLM server payload.** `engine.jsonl` shows `[VLM-SERVER] persistent server
+   up; payload self-test OK`. If instead `payload self-test failed; falling back
+   to per-file CLI` + a `vlm_server_payload_rejected` warning — tags still land
+   (slower), and the logged probe error tells us the server's expected payload
+   shape to fix. Either way the batch must produce `source='vlm'` rows.
+3. **Odd formats.** A `.webp`/`.bmp` in the library gets VLM tags (transcoded),
+   not a per-file failure.
+4. **First-run speed.** With `-Wipe` (true first run, NVIDIA): `app.log` shows
+   `[CUDA-AUTO] deferring CUDA runtime until a VLM is installed`; the CUDA
+   ~650 MB pack does NOT download until after SmolVLM's sentinel lands. First
+   scan `files_per_second` is materially higher than before (no triple-download
+   contention). No false "No response from engine — try again" install failures.
+5. **Crash-during-scan.** Click around the sidebar / switch tabs rapidly during
+   a live scan — no crash (this class is already defended; the CUDA-defer
+   shrinks the hang-prone window). If it still dies, grab the crash dump under
+   `%LOCALAPPDATA%\FileID\logs\` — it now pinpoints the offending event.
+6. **CLIP batch/pool A/B (perf tuning, optional).** Scan the same folder twice:
+   once default, once with `FILEID_CLIP_USE_BATCH=0`. Compare `clip_p95_ms` +
+   `files_per_second` from the sidebar/batch stats; lock in the winner (the
+   default is currently batch-ON, flagged pending this measurement). Watch for
+   `[FILEID_GPU_DEVICE_REMOVED]` — if it appears, the setting exceeded the TDR
+   ceiling and must be lowered.
+
 ## V16.11 — verify on hardware: thumbnails + Deep Analyze runtime + SmolVLM auto-tag (2026-05-21)
 
 **Landed (compiles + clippy -D warnings + all tests + format + BOM; see STATE V16.11).**

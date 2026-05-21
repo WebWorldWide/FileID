@@ -128,6 +128,10 @@ internal sealed partial class EngineClient
         "discovery_partial" => true,
         "checkpoint_failed_at_shutdown" => true,
         "cuda_dll_registration_failed" => true,
+        // A2: the VLM server rejected our image payload but the batch fell back
+        // to the per-file CLI path — tags still land, just slower. Surface as a
+        // warning, not a scary error.
+        "vlm_server_payload_rejected" => true,
         _ => false,
     };
 

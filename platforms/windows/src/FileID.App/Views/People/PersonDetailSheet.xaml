@@ -13,7 +13,7 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
     MinWidth="640"
-    MinHeight="480">
+    MinHeight="440">
 
     <Grid RowSpacing="14" Padding="4">
         <Grid.RowDefinitions>

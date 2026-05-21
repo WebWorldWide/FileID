@@ -207,21 +207,22 @@ internal sealed class ModelSlot : INotifyPropertyChanged
         var bytesNow = total * p.Fraction;
         if (_rateSampleAt == default || p.Fraction < _lastFraction)
         {
-            // First sample, or fraction reset (new file in a multi-file
-            // bundle). Restart EMA.
+            // First sample, or a multi-file-bundle fraction reset (file 2 starts
+            // at fraction ~0). Re-baseline the EMA window but CARRY the prior
+            // rate/ETA — zeroing them here made the rate blink to 0 / "Stalled"
+            // at every file boundary (the "freaking out at first" jitter). On the
+            // genuine first sample BytesPerSecond is already 0 from init.
             _rateSampleAt = now;
             _rateSampleFrac = p.Fraction;
-            BytesPerSecond = 0;
-            EtaSeconds = 0;
             _stallSampleCount = 0;
             _lastFraction = p.Fraction;
             return;
         }
         var dt = (now - _rateSampleAt).TotalSeconds;
-        if (dt < 0.5)
+        if (dt < 0.25)
         {
             _lastFraction = p.Fraction;
-            return; // Sample at most every 500 ms — TCP slow-start would skew earlier samples.
+            return; // Sample at most every 250 ms so the EMA tracks the TCP ramp.
         }
         var bytesPrev = total * _rateSampleFrac;
         var instant = (bytesNow - bytesPrev) / dt;

@@ -127,6 +127,18 @@ pub const ENABLE_CLIP_SCENE_TAGS: bool = true;
 /// Prompts text-encoded per ONNX batch when building the label matrix.
 const BUILD_BATCH: usize = 64;
 
+/// On-disk cache of the prompt-ensembled label matrix. Building it text-encodes
+/// every label×template through the CLIP text ONNX session, which on a slow EP
+/// (DirectML / CPU) takes 20+ s — long enough to blow the scan's 30 s model-load
+/// budget on its FIRST run, and wasteful to repeat every launch. The matrix is
+/// deterministic given (SCENE_LABELS, PROMPT_TEMPLATES, the CLIP-text weights),
+/// so we serialize it once and reload it (~instant, and skips loading the
+/// 253 MB text session entirely) on every subsequent launch.
+const SCENE_CACHE_MAGIC: u32 = 0x53_43_4E_31; // "SCN1"
+const SCENE_CACHE_VERSION: u32 = 1;
+/// Fixed header size: magic(4) + version(4) + key(8) + n_labels(4) + dim(4).
+const SCENE_CACHE_HEADER: usize = 24;
+
 /// The label-embedding matrix used for zero-shot scoring. Holds one
 /// L2-normalized, prompt-ensembled embedding per `SCENE_LABELS` entry.
 pub struct SceneLabeler {
@@ -215,13 +227,24 @@ impl SceneLabeler {
         Ok(Self { matrix })
     }
 
-    /// Build from the installed CLIP text model on disk. Loads the encoder +
-    /// tokenizer, builds the matrix, then drops the encoder — only the matrix
-    /// is retained, so the 253 MB text session isn't held for the whole scan.
+    /// Build from the installed CLIP text model on disk — or load the prebuilt
+    /// matrix from the on-disk cache when it's current (the fast path that skips
+    /// loading the 253 MB text session AND the 20+ s text-encode entirely). On a
+    /// cache miss it loads the encoder + tokenizer, builds the matrix, drops the
+    /// encoder, and writes the cache for next launch.
     pub fn build_from_default_model() -> Result<Self> {
         let weights = super::clip_text::default_weights_path()?;
         if !weights.exists() {
             anyhow::bail!("CLIP text weights not installed at {}", weights.display());
+        }
+        let weights_len = std::fs::metadata(&weights).map(|m| m.len()).unwrap_or(0);
+        let key = scene_cache_key(weights_len);
+        if let Some(cached) = try_load_scene_cache(key) {
+            tracing::info!(
+                n_labels = cached.matrix.len(),
+                "[TAGGING] scene-label matrix loaded from cache (skipped text-session load + build)"
+            );
+            return Ok(cached);
         }
         let dir = weights
             .parent()
@@ -230,7 +253,9 @@ impl SceneLabeler {
         let merges = std::fs::read_to_string(dir.join("merges.txt")).context("read merges.txt")?;
         let tokenizer = ClipTokenizer::new(&vocab, &merges)?;
         let mut model = ClipText::load(weights, tokenizer)?;
-        Self::build(&mut model)
+        let labeler = Self::build(&mut model)?;
+        write_scene_cache(key, &labeler.matrix);
+        Ok(labeler)
     }
 
     /// Score an image embedding against the vocabulary. Returns up to
@@ -239,6 +264,102 @@ impl SceneLabeler {
     pub fn score(&self, image_emb: &[f32], threshold: f32, top_k: usize) -> Vec<(usize, f32)> {
         score_labels(image_emb, &self.matrix, threshold, top_k)
     }
+}
+
+/// Stable cache key over the inputs that determine the matrix: the label set,
+/// the prompt templates, and (as a proxy for "same text model") the CLIP-text
+/// weights file length. Editing the vocabulary or swapping the model changes the
+/// key, so a stale cache is ignored and rebuilt.
+fn scene_cache_key(weights_len: u64) -> u64 {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for label in SCENE_LABELS {
+        h.update(label.as_bytes());
+        h.update(b"\n");
+    }
+    h.update(b"\0");
+    for tmpl in PROMPT_TEMPLATES {
+        h.update(tmpl.as_bytes());
+        h.update(b"\n");
+    }
+    h.update(b"\0");
+    h.update(weights_len.to_le_bytes());
+    let digest = h.finalize();
+    let mut k = [0u8; 8];
+    k.copy_from_slice(&digest[..8]);
+    u64::from_le_bytes(k)
+}
+
+fn scene_cache_path() -> Result<std::path::PathBuf> {
+    Ok(crate::paths::models_dir()?
+        .join("clip_scene_cache")
+        .join("scene_matrix.bin"))
+}
+
+/// Load the cached matrix iff the file is present, well-formed, and current
+/// (magic + version + key + vocabulary length all match). Any mismatch or read
+/// error returns None → the caller rebuilds.
+fn try_load_scene_cache(key: u64) -> Option<SceneLabeler> {
+    let path = scene_cache_path().ok()?;
+    let bytes = std::fs::read(&path).ok()?;
+    if bytes.len() < SCENE_CACHE_HEADER {
+        return None;
+    }
+    let magic = u32::from_le_bytes(bytes[0..4].try_into().ok()?);
+    let version = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
+    let stored_key = u64::from_le_bytes(bytes[8..16].try_into().ok()?);
+    let n_labels = u32::from_le_bytes(bytes[16..20].try_into().ok()?) as usize;
+    let dim = u32::from_le_bytes(bytes[20..24].try_into().ok()?) as usize;
+    if magic != SCENE_CACHE_MAGIC
+        || version != SCENE_CACHE_VERSION
+        || stored_key != key
+        || n_labels != SCENE_LABELS.len()
+        || dim == 0
+    {
+        return None;
+    }
+    let body = &bytes[SCENE_CACHE_HEADER..];
+    if body.len() != n_labels * dim * 4 {
+        return None;
+    }
+    let floats: Vec<f32> = body
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    let matrix: Vec<Vec<f32>> = floats.chunks_exact(dim).map(|r| r.to_vec()).collect();
+    Some(SceneLabeler { matrix })
+}
+
+/// Best-effort cache write (temp + rename). A failure just means we rebuild next
+/// launch — never fatal, so log + swallow.
+fn write_scene_cache(key: u64, matrix: &[Vec<f32>]) {
+    if let Err(err) = write_scene_cache_inner(key, matrix) {
+        tracing::warn!(?err, "[TAGGING] failed to persist scene-label cache (will rebuild next launch)");
+    }
+}
+
+fn write_scene_cache_inner(key: u64, matrix: &[Vec<f32>]) -> Result<()> {
+    let path = scene_cache_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).context("create scene-cache dir")?;
+    }
+    let n_labels = matrix.len() as u32;
+    let dim = matrix.first().map_or(0, Vec::len) as u32;
+    let mut buf = Vec::with_capacity(SCENE_CACHE_HEADER + matrix.len() * dim as usize * 4);
+    buf.extend_from_slice(&SCENE_CACHE_MAGIC.to_le_bytes());
+    buf.extend_from_slice(&SCENE_CACHE_VERSION.to_le_bytes());
+    buf.extend_from_slice(&key.to_le_bytes());
+    buf.extend_from_slice(&n_labels.to_le_bytes());
+    buf.extend_from_slice(&dim.to_le_bytes());
+    for row in matrix {
+        for v in row {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, &buf).context("write scene-cache temp")?;
+    std::fs::rename(&tmp, &path).context("rename scene-cache into place")?;
+    Ok(())
 }
 
 /// Process-static labeler, built once per engine launch on first use.

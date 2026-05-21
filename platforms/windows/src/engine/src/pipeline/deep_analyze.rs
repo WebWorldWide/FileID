@@ -215,7 +215,28 @@ pub(crate) async fn rasterize_for_vlm(
         anyhow::bail!("source file missing: {}", source_path.display());
     }
     match kind.as_str() {
-        "image" => Ok((source_path, None)),
+        "image" => {
+            // C3: llama.cpp's image loader (stb_image) reads JPEG/PNG natively
+            // — pass those through untouched (the overwhelming common case).
+            // Everything else (webp, bmp, tiff, gif, …) gets transcoded to a
+            // temp JPEG so the VLM's mmproj doesn't silently reject it: the
+            // server declares the real MIME, but the loader is stb_image, which
+            // has NO webp support, so a .webp reaches it and fails per-file with
+            // no tags. image-rs decodes webp/bmp/tiff/gif (Cargo features);
+            // HEIC isn't supported and falls through to a decode error — no
+            // worse than today, where it would fail at the VLM instead.
+            let ext = source_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if matches!(ext.as_str(), "jpg" | "jpeg" | "png") {
+                Ok((source_path, None))
+            } else {
+                let transcoded = transcode_image_to_jpeg(&source_path).await?;
+                Ok((transcoded.clone(), Some(transcoded)))
+            }
+        }
         "video" => {
             let r = rasterize_video_keyframe(&source_path).await?;
             Ok((r.clone(), Some(r)))
@@ -226,6 +247,26 @@ pub(crate) async fn rasterize_for_vlm(
         }
         _ => anyhow::bail!("kind '{}' isn't VLM-analyzable yet", kind),
     }
+}
+
+/// C3: decode an arbitrary image (webp/bmp/tiff/gif/…) and re-encode it as a
+/// temp JPEG the VLM's stb_image-based loader can read. Caller cleans up the
+/// temp file. Runs on a blocking thread (image-rs decode/encode is CPU-bound).
+async fn transcode_image_to_jpeg(
+    path: &std::path::Path,
+) -> anyhow::Result<std::path::PathBuf> {
+    let p = path.to_path_buf();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<std::path::PathBuf> {
+        let img = image::open(&p)
+            .map_err(|e| anyhow::anyhow!("decode {}: {e}", p.display()))?;
+        let dest = std::env::temp_dir().join(format!("fileid-vlm-{}.jpg", uuid::Uuid::new_v4()));
+        // Flatten to RGB8 — JPEG has no alpha channel.
+        image::DynamicImage::ImageRgb8(img.to_rgb8())
+            .save_with_format(&dest, image::ImageFormat::Jpeg)
+            .map_err(|e| anyhow::anyhow!("encode jpeg {}: {e}", dest.display()))?;
+        Ok(dest)
+    })
+    .await?
 }
 
 /// Persist VLM enrichment for one file: caption + proposed name into the v3
@@ -262,6 +303,34 @@ fn persist_vlm_results(
         }
     }
     Ok(())
+}
+
+/// A2: one-shot probe that the persistent llama-server actually accepts our
+/// multimodal `image_url` data-URI payload shape. This payload format was never
+/// hardware-verified (see NEXT.md V16.8); if the server build rejects it (e.g.
+/// 400 on the request), EVERY file in the batch would fail identically and
+/// silently. Sending one tiny throwaway JPEG up front lets the batch detect the
+/// incompatibility and fall back to the per-file CLI path (a different,
+/// known-good code path) instead of producing zero tags.
+pub(crate) async fn vlm_server_payload_ok(
+    server: &crate::models::vlm_server::VlmServer,
+) -> anyhow::Result<()> {
+    let test_img = std::env::temp_dir().join(format!(
+        "fileid-vlm-selftest-{}.jpg",
+        uuid::Uuid::new_v4()
+    ));
+    // 32×32 mid-gray JPEG — smallest input that still exercises the mmproj +
+    // chat-completions payload path.
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+        32,
+        32,
+        image::Rgb([128u8, 128, 128]),
+    ))
+    .save_with_format(&test_img, image::ImageFormat::Jpeg)
+    .map_err(|e| anyhow::anyhow!("write VLM self-test image: {e}"))?;
+    let result = server.complete(&test_img, "Reply with: ok", 1).await;
+    let _ = std::fs::remove_file(&test_img);
+    result.map(|_| ())
 }
 
 /// Analyze one file through the PERSISTENT llama-server (model already loaded),
@@ -485,8 +554,9 @@ pub(crate) fn parse_vlm_tags(raw: &str) -> Vec<String> {
         if stripped.is_empty() || stripped.len() > 40 {
             continue;
         }
-        // Drop sentence fragments masquerading as a tag.
-        if stripped.split_whitespace().count() > 3 {
+        // Tags are 1-2 words (the prompt asks for it); drop anything longer so
+        // chips stay short and scannable.
+        if stripped.split_whitespace().count() > 2 {
             continue;
         }
         let t = stripped.to_string();

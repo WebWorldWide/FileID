@@ -28,6 +28,11 @@ internal static class CudaAutoInstaller
     /// IN_FLIGHT hashset anyway, but cheaper to short-circuit here.</summary>
     private static int s_attempted; // 0 = not yet, 1 = done
 
+    /// <summary>C1: re-arm the one-shot gate so a later engine-Ready (e.g.
+    /// after a crash + respawn) re-evaluates the sentinel/binary and re-fires
+    /// if still missing. Called from EngineClient's ReadyEvent arm.</summary>
+    public static void ResetAttempt() => System.Threading.Interlocked.Exchange(ref s_attempted, 0);
+
     public static void Hook()
     {
         // Run any check that fits the current EngineClient state (e.g. if
@@ -35,6 +40,13 @@ internal static class CudaAutoInstaller
         // listen for future state changes.
         TryStart();
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
+        // B1: also re-evaluate when the VLM slot changes. We defer the
+        // ~650 MB CUDA speed pack until a VLM is actually installed (see
+        // TryStart), so the first launch's bandwidth + disk go to the
+        // functional models the app needs to scan + tag rather than a
+        // speed upgrade contending with them. This is the re-trigger that
+        // fires CUDA once SmolVLM finishes downloading.
+        ModelInstallerService.Instance.Vlm.PropertyChanged += OnVlmChanged;
     }
 
     private static void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
@@ -44,6 +56,15 @@ internal static class CudaAutoInstaller
                                or nameof(EngineClient.Info))
             {
                 DebugLog.Debug($"[ENGINE-SUB:CudaAutoInstaller] {e.PropertyName}");
+                TryStart();
+            }
+        });
+
+    private static void OnVlmChanged(object? sender, PropertyChangedEventArgs e)
+        => DebugLog.SafeRun("CudaAutoInstaller.OnVlmChanged", () =>
+        {
+            if (e.PropertyName == nameof(ModelSlot.Status))
+            {
                 TryStart();
             }
         });
@@ -83,6 +104,22 @@ internal static class CudaAutoInstaller
                 if (settings.DisableAutoInstallCuda) return;
             }
             catch { /* fall through and try anyway */ }
+
+            // B1: defer until a VLM is actually installed. The CUDA llama
+            // runtime ONLY accelerates VLM inference (Deep Analyze + the
+            // background auto-tag pass). Pulling its ~650 MB at engine-ready
+            // — concurrently with the SmolVLM (~700 MB) + Vulkan-runtime
+            // downloads the app needs first — was a primary cause of the
+            // "very slow" first-run (three big downloads contending with the
+            // first scan's GPU work). Re-arm so the Vlm-slot PropertyChanged
+            // (OnVlmChanged) re-fires this once a VLM lands. Until then there's
+            // nothing for CUDA to accelerate anyway, so deferring costs nothing.
+            if (ModelInstallerService.Instance.Vlm.Status != ModelInstallStatus.Installed)
+            {
+                DebugLog.Info("[CUDA-AUTO] deferring CUDA runtime until a VLM is installed (avoids starving the SmolVLM/Vulkan downloads on first run).");
+                System.Threading.Interlocked.Exchange(ref s_attempted, 0);
+                return;
+            }
 
             // Sentinel check — avoid re-firing the prewarm IPC when the
             // engine already dropped its install marker. Canonical path

@@ -12,8 +12,8 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
-    MinWidth="700"
-    MinHeight="520">
+    MinWidth="640"
+    MinHeight="440">
 
     <Grid RowSpacing="12" Padding="4">
         <Grid.RowDefinitions>

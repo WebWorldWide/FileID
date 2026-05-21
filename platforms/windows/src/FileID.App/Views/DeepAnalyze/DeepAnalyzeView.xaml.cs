@@ -172,38 +172,64 @@ public sealed partial class DeepAnalyzeView : UserControl
     private void SyncCards()
     {
         var slot = ModelInstallerService.Instance.Vlm;
-        ApplyCard(QwenSmallStatus, QwenSmallProgress, QwenSmallInstallButton, slot.Status, slot.Fraction);
-        ApplyCard(QwenLargeStatus, QwenLargeProgress, QwenLargeInstallButton, slot.Status, slot.Fraction);
-        ApplyCard(SmolVlmStatus, SmolVlmProgress, SmolVlmInstallButton, slot.Status, slot.Fraction);
+        // Each card reflects whether ITS model's weights are actually on disk —
+        // NOT the shared "any VLM installed" slot. Before this, once SmolVLM
+        // auto-installed all three cards showed "Installed", and picking Qwen
+        // (whose weights aren't downloaded) failed every file in the engine with
+        // "VLM weights not installed". Per-model disk state keeps the picker honest.
+        ApplyVlmCard(QwenSmallStatus, QwenSmallProgress, QwenSmallInstallButton, "qwen2_5_vl_3b", slot);
+        ApplyVlmCard(QwenLargeStatus, QwenLargeProgress, QwenLargeInstallButton, "qwen2_5_vl_7b", slot);
+        ApplyVlmCard(SmolVlmStatus, SmolVlmProgress, SmolVlmInstallButton, "smolvlm", slot);
         HighlightActiveCard();
     }
 
-    private static void ApplyCard(TextBlock status, ProgressBar bar, Button installButton, ModelInstallStatus s, double progress)
+    /// <summary>True when both gguf halves for this model_kind are on disk under
+    /// %LOCALAPPDATA%\FileID\Models\vlm\&lt;kind&gt;\. Mirrors the engine's
+    /// vlm::find_weights so a card's "Installed" badge matches what Deep Analyze
+    /// can actually run.</summary>
+    private static bool VlmWeightsPresent(string kind)
     {
-        switch (s)
+        try
         {
-            case ModelInstallStatus.Installed:
-                status.Text = "Installed";
-                bar.Visibility = Visibility.Collapsed;
-                installButton.Content = "Reinstall";
-                installButton.IsEnabled = true;
-                break;
-            case ModelInstallStatus.Downloading:
-                status.Text = $"Downloading… {Math.Round(progress * 100)}%";
-                bar.Visibility = Visibility.Visible;
-                bar.Value = progress;
-                installButton.IsEnabled = false;
-                break;
-            case ModelInstallStatus.Failed:
-                status.Text = "Install failed — retry?";
-                bar.Visibility = Visibility.Collapsed;
-                installButton.IsEnabled = true;
-                break;
-            default:
-                status.Text = string.Empty;
-                bar.Visibility = Visibility.Collapsed;
-                installButton.IsEnabled = true;
-                break;
+            var dir = System.IO.Path.Combine(AppPaths.ModelsDir, "vlm", kind);
+            return System.IO.File.Exists(System.IO.Path.Combine(dir, "model.gguf"))
+                && System.IO.File.Exists(System.IO.Path.Combine(dir, "mmproj.gguf"));
+        }
+        catch { return false; }
+    }
+
+    private static void ApplyVlmCard(TextBlock status, ProgressBar bar, Button installButton, string kind, ModelSlot slot)
+    {
+        // The shared Vlm slot tracks at most one in-flight download; attribute its
+        // Downloading/Failed state to a card only when CurrentModelKind matches.
+        bool isThisModel = string.Equals(slot.CurrentModelKind, kind, StringComparison.OrdinalIgnoreCase);
+        if (slot.Status == ModelInstallStatus.Downloading && isThisModel)
+        {
+            status.Text = $"Downloading… {Math.Round(slot.Fraction * 100)}%";
+            bar.Visibility = Visibility.Visible;
+            bar.Value = slot.Fraction;
+            installButton.IsEnabled = false;
+        }
+        else if (VlmWeightsPresent(kind))
+        {
+            status.Text = "Installed";
+            bar.Visibility = Visibility.Collapsed;
+            installButton.Content = "Reinstall";
+            installButton.IsEnabled = true;
+        }
+        else if (slot.Status == ModelInstallStatus.Failed && isThisModel)
+        {
+            status.Text = "Install failed — retry?";
+            bar.Visibility = Visibility.Collapsed;
+            installButton.Content = "Install";
+            installButton.IsEnabled = true;
+        }
+        else
+        {
+            status.Text = string.Empty;
+            bar.Visibility = Visibility.Collapsed;
+            installButton.Content = "Install";
+            installButton.IsEnabled = true;
         }
     }
 
@@ -507,6 +533,12 @@ public sealed partial class DeepAnalyzeView : UserControl
             // qwen2_5_vl_3b. Now uses the per-card model id from Tag so each
             // model card actually installs its own model.
             if (sender is not Button b || b.Tag is not string modelId || string.IsNullOrWhiteSpace(modelId)) return;
+            // Tell the picker which model is downloading so SyncCards animates
+            // THIS card. The engine's progress events carry only model_kind, and
+            // this direct-prewarm path doesn't go through ModelInstallerService
+            // (which is where CurrentModelKind would otherwise be set).
+            ModelInstallerService.Instance.Vlm.CurrentModelKind = modelId;
+            SyncCards();
             await EngineClient.Instance.PrewarmModelAsync(modelId);
         }
         catch (Exception ex)

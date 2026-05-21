@@ -56,8 +56,13 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
 
     /// <summary>Time after which a Downloading slot with no progress
     /// events gets flipped to Failed. Mirrors macOS WelcomeSheet's
-    /// "stuck install" guard.</summary>
-    private static readonly TimeSpan NoProgressTimeout = TimeSpan.FromSeconds(30);
+    /// "stuck install" guard. B2: raised 30 → 60 s because under
+    /// multi-download contention (welcome "Install all" + the background
+    /// auto-installers) one model's bytes can legitimately stall &gt;30 s
+    /// while another saturates the link — and the watchdog now also
+    /// consults <see cref="_lastAnyProgressAt"/> so any active download
+    /// keeps every slot's watchdog alive.</summary>
+    private static readonly TimeSpan NoProgressTimeout = TimeSpan.FromSeconds(60);
 
     public static ModelInstallerService Instance { get; } = new();
 
@@ -533,7 +538,9 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
                 // Read-only check off-thread is fine (status/timestamp are
                 // primitives + DateTime; no torn-read risk on x64/ARM64).
                 if (slot.Status != ModelInstallStatus.Downloading) return;
-                if (slot.LastProgressAt > sentAt) return; // got progress, all good
+                // B2: this slot OR any other download progressed after we
+                // scheduled → the engine is alive; don't false-fail.
+                if (slot.LastProgressAt > sentAt || _lastAnyProgressAt > sentAt) return;
                 DebugLog.Warn($"[INSTALL] {modelKind} no-progress watchdog firing (no events in {NoProgressTimeout.TotalSeconds:0}s)");
                 if (ui is not null)
                 {
@@ -625,6 +632,12 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
 
     private int _progressEventCount;
 
+    /// <summary>B2: wall-clock UTC of the most recent progress event for ANY
+    /// model. The no-progress watchdog (static) reads this so an active
+    /// download on one slot keeps every slot's watchdog from false-failing
+    /// under multi-download contention.</summary>
+    private static DateTime _lastAnyProgressAt = DateTime.MinValue;
+
     private void OnEngineClientChanged(object? sender, PropertyChangedEventArgs e)
         => DebugLog.SafeRun("ModelInstallerService.OnEngineClientChanged", () =>
         {
@@ -659,6 +672,12 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     private void HandleProgress(ModelDownloadProgress? p)
     {
         if (p is null) return;
+        // B2: any download making progress means the engine is alive. The
+        // no-progress watchdog consults this so one model going briefly
+        // silent under multi-download contention isn't false-failed while
+        // another model is actively streaming bytes. Set for EVERY progress
+        // event, including the slot-less auto-installer runtime packs.
+        _lastAnyProgressAt = DateTime.UtcNow;
         var n = Interlocked.Increment(ref _progressEventCount);
         if (n <= 5 || n % 50 == 0 || p.Fraction >= 0.999)
         {
