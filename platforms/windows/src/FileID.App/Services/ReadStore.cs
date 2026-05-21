@@ -144,7 +144,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = """
             SELECT f.id, f.path_text, f.kind, f.size_bytes, f.modified_at, f.has_faces, f.has_text,
-                   (SELECT GROUP_CONCAT(tag, '|') FROM tags WHERE file_id = f.id AND source IN ('auto','user')) AS auto_tags,
+                   (SELECT GROUP_CONCAT(tag, '|') FROM (SELECT tag FROM tags WHERE file_id = f.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, score DESC, rowid)) AS auto_tags,
                    f.vlm_proposed_name
             FROM ocr_fts
             JOIN files f ON f.id = ocr_fts.rowid
@@ -189,7 +189,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             using var cmd2 = _connection.CreateCommand();
             cmd2.CommandText = $"""
             SELECT id, path_text, kind, size_bytes, modified_at, has_faces, has_text,
-                   (SELECT GROUP_CONCAT(tag, '|') FROM tags WHERE file_id = files.id AND source IN ('auto','user')) AS auto_tags,
+                   (SELECT GROUP_CONCAT(tag, '|') FROM (SELECT tag FROM tags WHERE file_id = files.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, score DESC, rowid)) AS auto_tags,
                    vlm_proposed_name
             FROM files
             WHERE {string.Join(" AND ", likePieces)}
@@ -231,7 +231,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = """
                 SELECT id, path_text, kind, size_bytes, modified_at, has_faces, has_text,
-                       (SELECT GROUP_CONCAT(tag, '|') FROM tags WHERE file_id = files.id AND source IN ('auto','user')) AS auto_tags,
+                       (SELECT GROUP_CONCAT(tag, '|') FROM (SELECT tag FROM tags WHERE file_id = files.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, score DESC, rowid)) AS auto_tags,
                        vlm_proposed_name
                 FROM files
                 ORDER BY modified_at DESC NULLS LAST LIMIT $limit
@@ -270,7 +270,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             cmd.CommandText = """
             SELECT f.id, f.path_text, f.kind, f.size_bytes, f.modified_at,
                    f.has_faces, f.has_text,
-                   (SELECT GROUP_CONCAT(tag, '|') FROM tags WHERE file_id = f.id AND source IN ('auto','user')) AS auto_tags,
+                   (SELECT GROUP_CONCAT(tag, '|') FROM (SELECT tag FROM tags WHERE file_id = f.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, score DESC, rowid)) AS auto_tags,
                    f.vlm_proposed_name,
                    e.embedding
             FROM clip_embeddings e

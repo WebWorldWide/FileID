@@ -15,7 +15,8 @@
 param(
     [switch]$Clean,
     [switch]$Release = $true,
-    [switch]$RunTests
+    [switch]$RunTests,
+    [switch]$WipeDb
 )
 
 $ErrorActionPreference = 'Stop'
@@ -44,6 +45,33 @@ if ($Clean) {
     cargo clean
     Pop-Location
     if (Test-Path $DistDir) { Remove-Item -Recurse -Force $DistDir }
+}
+
+# ─── 2b. Wipe library database (keep downloaded models) ──────────────────────
+# Deletes %LOCALAPPDATA%\FileID\fileid.sqlite{,-wal,-shm} so the next launch
+# does a full re-scan + re-tag from scratch. Leaves Models\ (CLIP / ArcFace /
+# VLM — hundreds of MB) and thumbs.cache\ untouched, so nothing re-downloads
+# and thumbnails stay warm. Use after a tagging change when an incremental
+# rescan would skip files already in the DB. Close the app first — a running
+# engine holds the SQLite file open.
+if ($WipeDb) {
+    $FileIdData = Join-Path $env:LOCALAPPDATA "FileID"
+    $dbFiles = Get-ChildItem -Path $FileIdData -Filter "fileid.sqlite*" -File -ErrorAction SilentlyContinue
+    if (-not $dbFiles) {
+        Write-Host "WipeDb: no database at $FileIdData (already clean)." -ForegroundColor Yellow
+    }
+    else {
+        foreach ($f in $dbFiles) {
+            try {
+                Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop
+                Write-Host "WipeDb: removed $($f.Name)" -ForegroundColor Yellow
+            }
+            catch {
+                Write-Warning "WipeDb: could not delete $($f.Name) — is FileID still running? Close it and re-run. ($($_.Exception.Message))"
+            }
+        }
+        Write-Host "WipeDb: database cleared; Models\ and thumbs.cache\ preserved." -ForegroundColor Green
+    }
 }
 
 # ─── 3. Build engine ────────────────────────────────────────────────────────

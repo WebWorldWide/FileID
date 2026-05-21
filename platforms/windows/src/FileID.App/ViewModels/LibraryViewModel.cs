@@ -86,17 +86,19 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     private void OnItemsCollectionChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
     {
         // Attach/detach per-tile listeners so we keep _selected in sync.
+        // selectionChanged tracks whether _selected membership actually moved,
+        // so we re-publish to SelectionRegistry on real changes — the
+        // identity-stable merge emits granular Remove/Add (a reorder of a
+        // selected tile is Remove then Add of the same instance), and each
+        // event arrives here separately; the final event leaves the registry
+        // correct.
+        bool selectionChanged = false;
         if (e.OldItems is not null)
         {
             foreach (FileTile t in e.OldItems)
             {
                 t.PropertyChanged -= OnTilePropertyChanged;
-                if (_selected.Remove(t))
-                {
-                    // implicit deselect on removal; defer the notify until
-                    // after the full collection change so a Reset doesn't
-                    // raise N events.
-                }
+                if (_selected.Remove(t)) selectionChanged = true;
             }
         }
         if (e.NewItems is not null)
@@ -104,7 +106,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             foreach (FileTile t in e.NewItems)
             {
                 t.PropertyChanged += OnTilePropertyChanged;
-                if (t.IsSelected) _selected.Add(t);
+                if (t.IsSelected && _selected.Add(t)) selectionChanged = true;
             }
         }
         if (e.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Reset)
@@ -118,9 +120,11 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
                 t.PropertyChanged += OnTilePropertyChanged;
                 if (t.IsSelected) _selected.Add(t);
             }
+            selectionChanged = true;
         }
         OnPropertyChanged(nameof(SelectedCount));
         OnPropertyChanged(nameof(SelectedItems));
+        if (selectionChanged) PublishSelectionToRegistry();
     }
 
     private void OnTilePropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -312,19 +316,118 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
 
     private void ReplaceItems(IReadOnlyList<FileTile> next)
     {
-        // a Clear+N Add pattern fires N+1 CollectionChanged events;
-        // each event re-enters OnItemsCollectionChanged to rebind per-tile
-        // listeners and re-triggers XAML grid layout. With 200-item refreshes
-        // during a fast scan that's the dominant UI-thread cost. ReplaceAll
-        // suppresses intermediate notifications and raises a single Reset
-        // at the end so the grid recomputes layout once.
+        // Identity-stable merge (macOS parity). The old Clear+ReplaceAll(Reset)
+        // recreated every FileTile and made ItemsRepeater re-realize every
+        // visible element ~1 Hz during a scan — nulling each tile's Thumbnail
+        // and racing the async reload, so thumbnails never persisted (the
+        // "blank tiles during scan" report). Merging by Id keeps surviving
+        // instances (and their loaded Thumbnail) and emits only granular
+        // Add/Remove for genuine deltas.
         //
-        // Explicitly detach old-tile listeners first — the Reset path in
-        // OnItemsCollectionChanged can only iterate the NEW items, so old
-        // subscriptions would otherwise leak.
-        foreach (var t in Items) t.PropertyChanged -= OnTilePropertyChanged;
-        Items.ReplaceAll(next);
+        // Fast path: a fully-disjoint result (e.g. a brand-new search query)
+        // has no instances worth preserving, so a single Reset beats
+        // remove-all + insert-all granular events. The Reset branch in
+        // OnItemsCollectionChanged rebuilds _selected from the new items, so
+        // detach old listeners first (Reset doesn't surface OldItems).
+        if (Items.Count > 0 && next.Count > 0 && NoOverlapById(Items, next))
+        {
+            foreach (var t in Items) t.PropertyChanged -= OnTilePropertyChanged;
+            Items.ReplaceAll(next);
+            return;
+        }
+        MergeById(Items, next);
     }
+
+    /// <summary>True when no Id in <paramref name="next"/> is already in
+    /// <paramref name="items"/> — i.e. the merge would preserve nothing.</summary>
+    private static bool NoOverlapById(
+        System.Collections.ObjectModel.ObservableCollection<FileTile> items,
+        IReadOnlyList<FileTile> next)
+    {
+        var ids = new HashSet<long>(next.Count);
+        foreach (var t in next) ids.Add(t.Id);
+        foreach (var t in items) if (ids.Contains(t.Id)) return false;
+        return true;
+    }
+
+    /// <summary>Reconcile <paramref name="items"/> to match <paramref name="next"/>
+    /// by FileTile.Id, in place. Surviving Ids keep their existing instance
+    /// (so a loaded Thumbnail survives) and absorb mutable fields via
+    /// <see cref="FileTile.MergeMutableFrom"/>; gone Ids are removed; new Ids
+    /// inserted at their target index. Reorders use Remove+Insert (never a Move
+    /// event — ItemsRepeater handles Move poorly). Static + collection-only so
+    /// it's unit-testable without a UI thread.</summary>
+    internal static void MergeById(
+        System.Collections.ObjectModel.ObservableCollection<FileTile> items,
+        IReadOnlyList<FileTile> next)
+    {
+        if (items.Count == 0)
+        {
+            foreach (var t in next) items.Add(t);
+            return;
+        }
+
+        var existingById = new Dictionary<long, FileTile>(items.Count);
+        foreach (var t in items) existingById[t.Id] = t;
+
+        // Target sequence: reuse surviving instances (merged), keep new ones.
+        var desired = new List<FileTile>(next.Count);
+        var nextIds = new HashSet<long>(next.Count);
+        foreach (var fresh in next)
+        {
+            // Defensive: skip a duplicate Id so the same instance can't be
+            // inserted twice (a tile bound to two realized elements is a
+            // recycle hazard). All current queries return distinct Ids.
+            if (!nextIds.Add(fresh.Id)) continue;
+            if (existingById.TryGetValue(fresh.Id, out var keep))
+            {
+                // A different modified-time means a different thumbnail cache
+                // key — drop the stale bitmap so it reloads.
+                if (!NullableDoubleEquals(keep.ModifiedAt, fresh.ModifiedAt))
+                {
+                    keep.ClearThumbnailForRecycle();
+                }
+                keep.MergeMutableFrom(fresh);
+                desired.Add(keep);
+            }
+            else
+            {
+                desired.Add(fresh);
+            }
+        }
+
+        // 1) Remove gone rows (backwards so indices stay valid) → Remove events.
+        for (int i = items.Count - 1; i >= 0; i--)
+        {
+            if (!nextIds.Contains(items[i].Id)) items.RemoveAt(i);
+        }
+
+        // 2) Align order to `desired` via Remove+Insert of the instance.
+        //    items[0..j-1] already equals desired[0..j-1] each iteration.
+        for (int j = 0; j < desired.Count; j++)
+        {
+            var want = desired[j];
+            if (j < items.Count && ReferenceEquals(items[j], want)) continue;
+            int cur = IndexOfInstance(items, want, j);
+            if (cur >= 0) items.RemoveAt(cur);
+            items.Insert(j, want);
+        }
+    }
+
+    private static int IndexOfInstance(
+        System.Collections.ObjectModel.ObservableCollection<FileTile> items,
+        FileTile want,
+        int startAt)
+    {
+        for (int i = startAt; i < items.Count; i++)
+        {
+            if (ReferenceEquals(items[i], want)) return i;
+        }
+        return -1;
+    }
+
+    private static bool NullableDoubleEquals(double? a, double? b)
+        => a.HasValue == b.HasValue && (!a.HasValue || a.Value.Equals(b!.Value));
 
     private void ScheduleRefresh()
     {
@@ -362,27 +465,93 @@ internal sealed class FileTile : INotifyPropertyChanged
     public required string FileName { get; init; }
     public required string Kind { get; init; }
     public required long SizeBytes { get; init; }
-    public required bool HasFaces { get; init; }
-    public required bool HasText { get; init; }
-    /// <summary>Top auto-tags from the scan classifier + enriched extras.
+
+    // Fields below are MUTABLE: the engine rewrites them between scan batches
+    // (tagging adds tags, Deep Analyze sets ProposedName, OCR/face stages flip
+    // HasText/HasFaces). They are change-guarded settable so the identity-stable
+    // merge in LibraryViewModel can refresh a SURVIVING tile in place — keeping
+    // its already-loaded Thumbnail — instead of replacing the instance and
+    // forcing a thumbnail reload. Immutable-per-Id fields (Path/Kind/Size/…)
+    // stay init-only above.
+
+    private bool _hasFaces;
+    public bool HasFaces
+    {
+        get => _hasFaces;
+        set { if (_hasFaces == value) return; _hasFaces = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(HasFaces))); }
+    }
+
+    private bool _hasText;
+    public bool HasText
+    {
+        get => _hasText;
+        set { if (_hasText == value) return; _hasText = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(HasText))); }
+    }
+
+    /// <summary>Top auto-tags from CLIP zero-shot scene tagging + enriched extras.
     /// Library card binds the first 2 via TagChip controls; null/empty
     /// → chip row collapses. Mirrors macOS LibraryView.swift:729-744
     /// `topTags.prefix(2)` behaviour.</summary>
-    public System.Collections.Generic.IReadOnlyList<string> Tags { get; init; }
-        = System.Array.Empty<string>();
+    private System.Collections.Generic.IReadOnlyList<string> _tags = System.Array.Empty<string>();
+    public System.Collections.Generic.IReadOnlyList<string> Tags
+    {
+        get => _tags;
+        set
+        {
+            if (ReferenceEquals(_tags, value) || _tags.SequenceEqual(value)) return;
+            _tags = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Tags)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(HasTags)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(HasChips)));
+        }
+    }
     public bool HasTags => Tags is { Count: > 0 };
     /// <summary>First 2 tags only — Library card shows two chips max,
     /// matching the macOS prefix(2). Cached as a list so the
     /// ItemsControl binding doesn't re-take the slice on every render.</summary>
-    public System.Collections.Generic.IReadOnlyList<string> TopTwoTags { get; init; }
-        = System.Array.Empty<string>();
+    private System.Collections.Generic.IReadOnlyList<string> _topTwoTags = System.Array.Empty<string>();
+    public System.Collections.Generic.IReadOnlyList<string> TopTwoTags
+    {
+        get => _topTwoTags;
+        set
+        {
+            if (ReferenceEquals(_topTwoTags, value) || _topTwoTags.SequenceEqual(value)) return;
+            _topTwoTags = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(TopTwoTags)));
+        }
+    }
 
     /// <summary>Deep Analyze's smart-rename proposal. Shown in gold under
     /// the filename when present, matching macOS LibraryView.swift's
     /// proposedName affordance. Null when Deep Analyze hasn't run on
     /// this file (or didn't propose a rename).</summary>
-    public string? ProposedName { get; init; }
+    private string? _proposedName;
+    public string? ProposedName
+    {
+        get => _proposedName;
+        set
+        {
+            if (_proposedName == value) return;
+            _proposedName = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ProposedName)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(HasProposedName)));
+        }
+    }
     public bool HasProposedName => !string.IsNullOrWhiteSpace(ProposedName);
+
+    /// <summary>Copy the engine-mutable display fields from a freshly-queried
+    /// row onto this surviving instance during the identity-stable merge.
+    /// Deliberately does NOT touch IsSelected (selection survives a refresh,
+    /// matching macOS) or Thumbnail (the whole point — keep the loaded bitmap).
+    /// Each setter is change-guarded, so an unchanged field raises nothing.</summary>
+    public void MergeMutableFrom(FileTile fresh)
+    {
+        Tags = fresh.Tags;
+        TopTwoTags = fresh.TopTwoTags;
+        ProposedName = fresh.ProposedName;
+        HasFaces = fresh.HasFaces;
+        HasText = fresh.HasText;
+    }
 
     public string SizeDisplay => FormatSize(SizeBytes);
 
@@ -413,6 +582,17 @@ internal sealed class FileTile : INotifyPropertyChanged
         _ => "File",
     };
 
+    /// <summary>True when the Library card should render a structured kind
+    /// chip as the first chip in its row. Suppressed for `other` so files
+    /// of unknown kind don't get a meaningless "File" chip.</summary>
+    public bool ShowKindChip => Kind != "other";
+
+    /// <summary>True when the card's chip row should be visible at all —
+    /// either the kind chip is present or at least one auto-tag landed.
+    /// Lets the StackPanel containing both collapse cleanly on bare files
+    /// so the caption row keeps its fixed 68 DIP height.</summary>
+    public bool HasChips => ShowKindChip || HasTags;
+
     private bool _isSelected;
     public bool IsSelected
     {
@@ -441,12 +621,66 @@ internal sealed class FileTile : INotifyPropertyChanged
             if (IsDetached) return;
             if (ReferenceEquals(_thumbnail, value)) return;
             _thumbnail = value;
+            // A real bitmap landing clears any prior failed-state so the
+            // placeholder doesn't linger over a successful retry.
+            if (value != null && _thumbnailFailed)
+            {
+                _thumbnailFailed = false;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ThumbnailFailed)));
+            }
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Thumbnail)));
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(HasThumbnail)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ShowShimmer)));
         }
     }
 
     public bool HasThumbnail => _thumbnail != null;
+
+    /// <summary>Release the thumbnail bitmap when the tile is recycled out
+    /// of the ItemsRepeater virtualization window. Deliberately bypasses the
+    /// <see cref="IsDetached"/> guard on the <see cref="Thumbnail"/> setter:
+    /// the Image is <c>Source="{x:Bind Thumbnail}"</c>, so without an explicit
+    /// null the recycled element keeps the previous file's bitmap bound to
+    /// Source and flashes it before the next bind catches up ("rendering from
+    /// anything"). Nulling here also lets the BitmapImage be GC'd, bounding
+    /// memory on large libraries (off-screen tiles otherwise retain every
+    /// bitmap they ever loaded). Mirrors macOS's cancel-and-release on cell
+    /// recycle; the ThumbnailService L1 cache makes the reload on re-prepare a
+    /// dictionary hit. Must be called BEFORE <see cref="IsDetached"/> flips,
+    /// and on the UI thread (raises PropertyChanged for the x:Bind).</summary>
+    public void ClearThumbnailForRecycle()
+    {
+        if (_thumbnail == null) return;
+        _thumbnail = null;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Thumbnail)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(HasThumbnail)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ShowShimmer)));
+    }
+
+    private bool _thumbnailFailed;
+    /// <summary>Set by <see cref="Views.Library.LibraryView"/> when the
+    /// thumbnail service exhausts its fallback chain and returns null.
+    /// Distinguishes "render failed" from "still loading" so the shimmer
+    /// can hand off to a broken-image placeholder instead of looping
+    /// indefinitely.</summary>
+    public bool ThumbnailFailed
+    {
+        get => _thumbnailFailed;
+        set
+        {
+            if (IsDetached) return;
+            if (_thumbnailFailed == value) return;
+            _thumbnailFailed = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ThumbnailFailed)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ShowShimmer)));
+        }
+    }
+
+    /// <summary>Drives the shimmer overlay's visibility on Library cards.
+    /// Visible only while we're still trying to load — collapses both
+    /// when a bitmap lands and when the load fails (the placeholder
+    /// takes over for the latter).</summary>
+    public bool ShowShimmer => _thumbnail == null && !_thumbnailFailed;
 
     /// <summary>marker the view sets when a tile is cleared
     /// (scrolled out of the ItemsRepeater virtualization window).

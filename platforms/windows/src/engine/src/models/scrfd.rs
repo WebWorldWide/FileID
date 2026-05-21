@@ -135,44 +135,69 @@ impl Scrfd {
         // This is the desired failure mode: wrong-variant ONNX silently
         // degrades to "no faces" rather than poisoning the cluster
         // pipeline with garbage embeddings.
+        //
+        // Classify outputs by SHAPE, not position. SCRFD ONNX exports differ in
+        // output ORDER — some interleave [score,bbox,kps] per stride, others
+        // group all three scores, then all bboxes, then all kps — and in output
+        // NAMES. The old positional indexing silently grabbed the wrong tensor
+        // on a group-by-type export: every stride failed its size check and
+        // ZERO faces were detected (the "faces not identified like macOS" bug;
+        // app.log showed "bbox/kps tensor undersized — skipping stride" on every
+        // image). A SCRFD head emits per stride a score tensor (last-dim
+        // channels = 1), a bbox tensor (channels = 4), and a kps tensor
+        // (channels = 10 = 5 landmarks × 2). Anchors-per-stride N (= rows) is
+        // largest for the smallest stride, so the distinct Ns sorted descending
+        // map to strides [8, 16, 32]. This is robust to ordering and naming.
+        struct RawOut<'a> {
+            n: usize,
+            c: usize,
+            data: &'a [f32],
+        }
         let outputs_vec: Vec<_> = outputs.iter().collect();
-        if outputs_vec.len() < STRIDES.len() * 3 {
-            tracing::warn!(
-                model = "SCRFD",
-                got = outputs_vec.len(),
-                expected = STRIDES.len() * 3,
-                "SCRFD ONNX output count != 9 — wrong export variant? returning empty"
-            );
-            return Ok(Vec::new());
+        let mut raws: Vec<RawOut> = Vec::with_capacity(outputs_vec.len());
+        for (_, val) in &outputs_vec {
+            let Ok((shape, data)) = val.try_extract_tensor::<f32>() else {
+                continue;
+            };
+            let c = shape.last().copied().unwrap_or(0) as usize;
+            if c == 0 || data.is_empty() || data.len() % c != 0 {
+                continue;
+            }
+            raws.push(RawOut {
+                n: data.len() / c,
+                c,
+                data,
+            });
         }
 
+        // Distinct anchor counts, largest first → strides 8, 16, 32.
+        let mut anchor_counts: Vec<usize> = raws.iter().map(|r| r.n).collect();
+        anchor_counts.sort_unstable();
+        anchor_counts.dedup();
+        anchor_counts.reverse();
+
         let mut candidates: Vec<Detection> = Vec::new();
-        for (stride_idx, &stride) in STRIDES.iter().enumerate() {
-            let base = stride_idx * 3;
-            let scores_v = &outputs_vec[base].1;
-            let bboxes_v = &outputs_vec[base + 1].1;
-            let kpss_v = &outputs_vec[base + 2].1;
-            let Ok((_, scores)) = scores_v.try_extract_tensor::<f32>() else {
-                tracing::warn!(stride, "SCRFD score tensor not f32");
-                continue;
-            };
-            let Ok((_, bboxes)) = bboxes_v.try_extract_tensor::<f32>() else {
-                tracing::warn!(stride, "SCRFD bbox tensor not f32");
-                continue;
-            };
-            let Ok((_, kpss)) = kpss_v.try_extract_tensor::<f32>() else {
-                tracing::warn!(stride, "SCRFD kps tensor not f32");
-                continue;
-            };
-            decode_scrfd_stride(
-                stride,
-                target_w,
-                target_h,
-                scores,
-                bboxes,
-                kpss,
-                &mut candidates,
-            );
+        for (rank, &n) in anchor_counts.iter().enumerate() {
+            if rank >= STRIDES.len() {
+                break;
+            }
+            let stride = STRIDES[rank];
+            let scores = raws.iter().find(|r| r.n == n && r.c == 1).map(|r| r.data);
+            let bboxes = raws.iter().find(|r| r.n == n && r.c == 4).map(|r| r.data);
+            let kpss = raws.iter().find(|r| r.n == n && r.c == 10).map(|r| r.data);
+            if let (Some(scores), Some(bboxes), Some(kpss)) = (scores, bboxes, kpss) {
+                decode_scrfd_stride(stride, target_w, target_h, scores, bboxes, kpss, &mut candidates);
+            } else {
+                tracing::warn!(
+                    model = "SCRFD",
+                    stride,
+                    n,
+                    have_score = scores.is_some(),
+                    have_bbox = bboxes.is_some(),
+                    have_kps = kpss.is_some(),
+                    "SCRFD: no score/bbox/kps triple for this anchor count — skipping stride"
+                );
+            }
         }
 
         // ── Coordinate space remap: letterbox-resized → original image

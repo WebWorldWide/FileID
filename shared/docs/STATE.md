@@ -6,6 +6,586 @@
 >
 > Older entries below V15.0 are historical context — load-bearing for archaeology, not for current state. Skim if you want the journey; skip if you want the destination.
 
+## 2026-05-21 — V16.11 thumbnails (real root cause) + Deep Analyze runtime + SmolVLM auto-tagging
+
+Three persistent bugs, root-caused from log + disk forensics, fixed in one pass.
+
+- **Track 1 — thumbnails render blank (THE fix).** Logs proved bitmaps decoded +
+  assigned (`DECODE_OK`/`TILE_THUMBNAIL_ASSIGNED`) yet the image area was blank.
+  Root cause was **layout collapse**, not rendering: `TileRoot` had
+  `Height="{Binding ActualWidth, RelativeSource=Self, Converter=IdentityDouble, ConverterParameter=68}"`.
+  `ActualWidth` is **not an observable DP**, so the OneWay bind read 0 before
+  layout → `0+68=68` → the `*` image row collapsed to ~0 while the fixed 68px
+  caption row still showed, and it never re-fired after arrange. Removed the
+  binding; added `SizeChanged="OnTileSizeChanged"` that sets `Height = width+68`
+  (guarded >0.5 to break the set→SizeChanged loop). Even if SizeChanged never
+  fired, dropping the bad binding lets UniformGridLayout's `MinItemHeight=248`
+  give the image row ~180px — no more collapse. Added px-dim + TILE_SIZED logs.
+- **Track 2 — Deep Analyze "runtime too old" toast (runtime was fine).** Disk had
+  b9254 with `llama-mtmd-cli.exe` (89 KB), `llama-server.exe`, `mtmd.dll`. Root
+  cause: `vlm.rs::sanity_check_binary` required **3 MB–200 MB**; modern llama.cpp
+  ships a thin ~89 KB launcher (heavy code in DLLs), so the floor rejected a
+  valid binary → `VlmRunner::find()` reported "missing" → toast, blocking BOTH
+  the CLI and persistent-server paths. Floor 3 MB → **20 KB**. Also reordered
+  `run_deep_analyze_batch`: resolve server-weights + CLI up front, try the
+  persistent server first (it only needs `llama-server.exe`), require the CLI
+  binary only when the server can't start — and keep the "runtime missing" error
+  *before* `DeepAnalyzeStarting` so the Error (which doesn't reset DeepAnalyze
+  state) can't strand the UI on a "Loading model…" banner.
+- **Track 3 — SmolVLM auto-tagging (CLIP stays as instant placeholder).**
+  - `AnalyzeMode::TagsOnly` (1 VLM call/file vs 3 → ~3× faster) on both the CLI
+    `analyze_file` and the server `analyze_file_via_server` (now mode-aware).
+  - Additive IPC field `tags_only: bool` on `DeepAnalyzeAllPayload` (Rust
+    `#[serde(default)]`, C# `DeepAnalyzeAllCommand`, `ipc.schema.json`, round-trip
+    + omitted-defaults-false tests). Auto-chain sends `tags_only:true`; manual
+    Deep Analyze sends `false` (full caption+rename+tags).
+  - `SmolVlmAutoInstaller` (mirrors `LlamaRuntimeAutoInstaller`) silently prewarms
+    SmolVLM weights at engine-ready; opt-out `DisableAutoInstallSmolVlm`.
+  - Default tagger → **smolvlm** (`AppSettings.SelectedVlmModelKind`), with a
+    one-time **schema v1→v2 migration** flipping existing users still on the old
+    `qwen2_5_vl_3b` default (the user's settings.json had exactly that); fresh
+    installs start at v2 so the migration can't clobber a deliberate re-pick.
+  - Aligned the welcome-sheet VLM + `ModelInstallerService` (`_vlmModelKind`, slot
+    label/bytes, `UpdateVlmRecommendation`) to SmolVLM universally on Windows so
+    Welcome auto-install never pulls a redundant ~1.65 GB Qwen; Qwen 3B/7B + Gemma
+    stay available in the Deep Analyze model picker.
+  - CLIP `SCENE_COSINE_THRESHOLD` 0.24 → **0.18** so placeholder scene chips
+    actually show during the scan (VLM tags supersede via ReadStore's
+    `source='vlm'` ordering).
+  - Re-surfaced a single **"Tag automatically with AI after scans"** switch in the
+    Settings → Cleanup card (bound to `AutoChainDeepAnalyze`).
+  - Fixed stale "SmolVLM 256M / ≈300 MB" UI labels → **500M / ≈700 MB** (registry
+    installs SmolVLM-500M-Instruct).
+
+### Build/test (all green)
+- Engine **158** tests + `cargo check` 0 + **clippy -D warnings clean**;
+  `FileID.App.Tests` **98**; `FileID.IpcSchema.Tests` **31**; .NET build x64 **0/0**;
+  `dotnet format --verify-no-changes` 0; BOM intact on edited/new `.cs`/`.xaml`.
+- **Not yet runtime-verified on hardware** (user runs the build): thumbnails
+  render square during+after scan; Deep Analyze captions with no toast
+  (`[VLM-SERVER] ready`); SmolVLM auto-tags after a scan and resumes mid-pass.
+
+## 2026-05-20 — V16.10 full bug sweep before first run (1 real bug + 4 hardening)
+
+Pre-run audit of the whole session's changes: full test suites + two independent
+read-only code-review agents (engine + app). Found one genuine bug + four
+defensive fixes; everything else verified clean.
+
+- **BUG (fixed): `vlm_server.rs` used `n_predict` on the OpenAI `/v1/chat/completions`
+  endpoint**, which reads `max_tokens` — so the 80/40/30 token caps were silently
+  ignored and every server-path caption/tag/rename ran to the server default
+  (long, slow; a rename could come back as a paragraph). Now sends both
+  `max_tokens` + `n_predict`. The CLI path was already correct (`--n-predict`).
+- **Hardening:** image data URIs now carry the real MIME (magic-byte sniff)
+  instead of always `image/jpeg`; per-request VLM timeout 180→300 s (large/CPU
+  models); `MergeById` defensively skips duplicate Ids; both auto-installers
+  check the `bin/` layout too (the engine accepts both — a flat-only check could
+  loop re-downloading a future nested build).
+- **Verified clean (no bugs):** SCRFD shape-classification (no panic on odd
+  shapes; strides can't collide N), cosine scorer + `embed_batch` fallback,
+  CUDA→Vulkan guarded fallback, `analyze_file` ownership/cancellation, the
+  Library `MergeById` index bounds + selection sync, `DetailHostView` lazy-build
+  (no zombie views), ReadStore SQL (4 sites identical), Settings deletions (no
+  dangling refs), dispatcher safety + subscription teardown.
+
+### Build/test (final, post-fix)
+- Engine **158** tests + `cargo check` 0 + **clippy clean**; `FileID.App.Tests`
+  **98**; `FileID.IpcSchema.Tests` **30**; .NET build x64 **0/0**;
+  `dotnet format --verify-no-changes` 0; BOM intact on edited `.cs`.
+
+## 2026-05-20 — V16.9 Settings → macOS parity (Advanced disclosure + trim toggles) + CUDA VLM path
+
+User: "Yes do this all" (the two V16.8 follow-ups).
+
+- **Settings (C2).** Trimmed the 3 Windows-only Behavior toggles macOS lacks
+  (Hide-unknown-clusters, Restructure-tree-diff, Auto-chain-Deep-Analyze) — XAML
+  + their handlers + the `HydrateToggles` sync; kept the Cleanup toggle (renamed
+  the card "Behavior" → "Cleanup" to match macOS). The underlying AppSettings
+  keys stay (other views read them at their defaults), so no behavior breaks —
+  the toggles just leave Settings. Converted the verbose **Diagnostics card into
+  a collapsed `Expander`** ("Advanced — diagnostics & tools"), mirroring macOS's
+  collapsed Advanced disclosure, so CPU/Mem/GPU/Power/scene/thumbnail info +
+  force-retag/refresh hide behind a chevron by default. Done in-place (no card
+  reorder) to stay safe on a render I can't see. Kept all genuinely
+  Windows-specific sections (GPU EP override, CUDA llama.cpp, cuDNN).
+- **CUDA VLM path (D).** Bumped `llama_runtime_cuda_x64` → b9254 cuda-12.4 **plus
+  the now-separate cudart asset** (b9254 split cudart out; both extract into
+  `llama.cpp-cuda\` so the CUDA binaries are self-contained — the engine
+  AddDllDirectory's that dir). Routed BOTH `VlmRunner::find` (CLI) and
+  `VlmServer::start` to **prefer the CUDA dir, with a guarded fallback to
+  Vulkan**: `find` skips a CUDA binary whose `--version` probe fails (missing
+  cudart), and `VlmServer::start` tries each candidate (CUDA → Vulkan) with an
+  early child-exit check so a broken CUDA build falls back in <1 s instead of a
+  120 s health timeout. This fixes the latent bug where the CUDA runtime was
+  installed but `VlmRunner` only ever looked in the Vulkan dir — so the promised
+  "15-25% faster Deep Analyze on NVIDIA" never actually engaged. `CudaAutoInstaller`
+  got the same stale-detection (mtmd-cli missing → re-fetch).
+
+### Build/test
+- Engine `cargo check` 0; clippy + .NET build + format running. App tests 98.
+- **NVIDIA download note:** the CUDA runtime is now ~650 MB (259 MB llama +
+  391 MB cudart) vs the old 210 MB self-contained zip — the auto-installer
+  pulls it on NVIDIA (opt-out via the Settings toggle). The Vulkan runtime
+  (33 MB) remains the universal default and the safe fallback.
+
+## 2026-05-20 — V16.8 VLM activated (runtime b9254) + persistent llama-server speedup + Settings declutter
+
+User: "Implement it all" (runtime + persistent server) and "make the settings
+page the same as macOS, no extra junk that isn't windows specific."
+
+- **A — llama runtime bumped + auto-reactivated.** `registry.rs`
+  `llama_runtime_x64` → **b9254** (`ggml-org/llama.cpp`, 2026-05-20). Verified
+  by downloading the win-vulkan-x64 zip and listing it: it ships
+  `llama-mtmd-cli.exe` + `llama-server.exe` + `mtmd.dll` (the prior b4404 pin
+  had none of the mtmd surface and predated Qwen2.5-VL — the root of the
+  "runtime not found" toast). `LlamaRuntimeAutoInstaller` now treats
+  "sentinel present but `llama-mtmd-cli.exe` missing" as stale → deletes the
+  sentinel + cached zip and re-installs, so the bump auto-activates on next
+  launch (no manual wipe). This alone fixes the toast and makes Deep Analyze
+  runnable. (CUDA runtime left at its pin — `VlmRunner`/`VlmServer` use the
+  Vulkan dir, and the new CUDA build splits cudart out; documented in NEXT.)
+- **B — persistent `VlmServer` (the speedup).** New `models/vlm_server.rs`
+  spawns `llama-server.exe` ONCE (model resident) and serves images over
+  `/v1/chat/completions` multimodal (base64 data URI; reqwest built without the
+  `json` feature so the body/response are hand-(de)serialized via serde_json;
+  `kill_on_drop`). `run_deep_analyze_batch` now starts one server for the whole
+  batch and routes each file through it (~1-3 s/file vs reload-per-file), with
+  graceful fallback to the per-file CLI (`analyze_file`) when weights are
+  missing or the server can't start. Refactored `analyze_file` to share
+  `rasterize_for_vlm` + `persist_vlm_results` with the new
+  `analyze_file_via_server`. So the V16.7 VLM tagging now runs at usable speed
+  over a whole library.
+- **C — Settings deduped toward macOS.** macOS Settings = Cleanup toggle + 3
+  model cards + a collapsed "Advanced" (engine/storage/scans/logs). Windows
+  keeps its genuinely-Windows-specific sections (GPU EP override, CUDA
+  llama.cpp, cuDNN, hardware diagnostics — macOS has none of these; it uses the
+  ANE). Removed two clear non-Windows extras: the pure-documentation **"Models"
+  card** (duplicated the Local AI card + About) and the **disabled "Performance
+  profile" combo** ("Eco/Performance — coming soon" placeholder). Both
+  XAML-only, zero code-behind deps (`ProfileCombo` unreferenced). Left the
+  functional Behavior toggles + the thumbnail/scene diagnostics in place rather
+  than delete working controls I can't visually verify — a fuller "collapse
+  diagnostics under Advanced + trim the 3 extra behavior toggles" restructure is
+  noted in NEXT for user confirmation.
+
+### Build/test
+- Engine `cargo check` 0 (clippy running); `deep_analyze` 11/11; .NET build
+  pending (running). VlmServer compiles with the existing crate features
+  (base64 0.22 direct dep; reqwest manual JSON).
+- **Activation is now in-code:** rebuild + relaunch → the auto-installer pulls
+  b9254 (mtmd-cli + server), Deep Analyze works, and "Analyze all" tags the
+  library via the persistent server. **Runtime-verify on hardware** that
+  b9254's `llama-server` answers `/v1/chat/completions` with an image for
+  Qwen2.5-VL (the one thing a compile can't prove).
+
+## 2026-05-20 — V16.7 VLM tagging implemented (reuses Deep Analyze; CLIP now removable) + accurate runtime error
+
+User: "ensure the VLM thing is totally implemented so if we decide to go that
+way we can simply remove the CLIP." Implemented VLM scene/content tagging by
+**reusing the existing Deep Analyze "Analyze all" pipeline** rather than
+building a parallel job — that path is already a resumable, cancellable,
+whole-library VLM pass with IPC + progress + a UI + a model picker; the only
+thing it lacked was writing tags.
+
+- **Engine (`pipeline/deep_analyze.rs`, `models/vlm.rs`):** `analyze_file` in
+  `Both` mode now runs a dedicated `TAG_PROMPT` against the already-rasterized
+  frame, parses the completion with `parse_vlm_tags` (splits on comma/newline,
+  strips numbering/bullets/quotes, drops >3-word fragments, dedups, caps at 8),
+  and persists them to the `tags` table as **`source='vlm'`** (DELETE prior vlm
+  tags for the file, then INSERT). Fully separate from CLIP's `source='auto'`.
+  5 new `parse_vlm_tags` unit tests.
+- **Read path (`ReadStore.cs`, all 4 GROUP_CONCAT sites):** added `'vlm'` to the
+  source filter and an `ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1
+  ELSE 2 END, score DESC, rowid` so VLM tags lead the 2-chip slice over CLIP.
+- **Trigger/UI/IPC:** none added — the existing Deep Analyze "Analyze all"
+  (`deepAnalyzeAll` → `run_deep_analyze_batch` → `analyze_file` in `Both`) now
+  produces VLM tags as a side effect of the full-enrichment pass. Resumable via
+  the existing `skip_existing` (on `vlm_description`).
+- **"Simply remove CLIP":** the CLIP scan-time scene tags are a single
+  self-contained block in `pipeline/tagging.rs` (`if let (Some(labeler), …)`),
+  and ReadStore already prefers `vlm` over `auto` — so dropping CLIP is deleting
+  that block (or gating it). VLM tags then lead unchallenged.
+- **llama toast (accurate now):** `VlmRunner::find()` previously bailed "runtime
+  not found → install from Settings" even though the runtime IS installed —
+  it's just **too old** (b4404, Dec 2024: ships `llama-server.exe` +
+  `llama-llava-cli.exe` + `llama-qwen2vl-cli.exe` but NOT the unified
+  `llama-mtmd-cli.exe` this code drives, and predates Qwen2.5-VL). `find()` now
+  detects a stale-but-present runtime and says "too old — update it" instead.
+
+**ACTIVATION PREREQUISITE (the one thing not done — see NEXT.md):** none of the
+VLM path (Deep Analyze OR the new tagging) can actually RUN until the llama
+runtime is bumped to a current build that ships `llama-mtmd-cli.exe` + supports
+Qwen2.5-VL. The registry URL is pinned to b4404. I did **not** blind-guess a new
+release URL (a wrong tag breaks the user's download); the bump + re-install +
+verification is the documented activation step.
+
+### Build/test
+- Engine `cargo check` 0; `dotnet build` x64 0/0 (pending — running);
+  `deep_analyze` tests (parse_vlm_tags) pending. CLIP/thumbnail/faces fixes from
+  V16.6 unchanged.
+
+## 2026-05-20 — V16.6 thumbnails persist (collection churn), CLIP cosine threshold, faces fixed (SCRFD ordering), llama toast diagnosed
+
+After V16.5c made tiles *visible*, the user reported: thumbnails still blank
+during a scan, tagging "10% accurate / awful", faces not detected like macOS,
+and a "llama.cpp runtime not found" toast. Diagnosed all four; fixed three,
+scoped the fourth into the VLM build (Track 3). Plan:
+`~/.claude/plans/okay-so-thumbnails-are-validated-castle.md`.
+
+- **Thumbnails blank during scan = collection-reset churn (FIXED).** The
+  `LastBatch` event drove `RefreshAsync` → `ReplaceItems` →
+  `BatchObservableCollection.ReplaceAll`, which raised a single `Reset` ~1 Hz.
+  ItemsRepeater re-realized every visible element against brand-new `FileTile`
+  instances (`Thumbnail==null`), so each thumbnail was nulled + reloaded every
+  second and raced the next reset (`TILE_THUMBNAIL_ASSIGNED` high, `IMAGE_OPENED`
+  zero). macOS keeps stable tile identities. Fix: `LibraryViewModel.MergeById`
+  — an identity-stable, in-place merge keyed by `FileTile.Id` that keeps
+  surviving instances (and their loaded `Thumbnail`), merges only mutable
+  display fields (`MergeMutableFrom`: Tags/TopTwoTags/ProposedName/HasFaces/
+  HasText), and emits granular Add/Remove (never Move). Made those FileTile
+  fields change-guarded settable. Disjoint result sets (a new search) fall back
+  to `ReplaceAll`. Also **deleted the dead Image-opacity dance**
+  (`OnTileImageOpened`/`EnsureThumbnailVisible`/`FindBoundImage` + the XAML
+  `ImageOpened` hook) — `ImageOpened` never fires for pre-decoded/cached
+  BitmapImages, nothing set Image opacity to 0, so it was dead code + a
+  composition fast-fail vector. Bonus: fixed a latent bug where selection
+  silently cleared on every mid-scan refresh. 8 new `MergeById` unit tests.
+- **Tagging "worthless" = softmax-prob threshold (FIXED).** `score_labels`
+  softmaxed cosine×temp100 over 164 labels and thresholded the *probability* at
+  0.12 — razor-peaky, so the top label scored ~0.99 even when the true cosine
+  was mediocre → every file got a confident WRONG tag. Image+text towers are the
+  same `Xenova/mobileclip_s2` export (shared 512-d space — mismatch ruled out).
+  Fix: threshold the **raw cosine** (`SCENE_COSINE_THRESHOLD = 0.24`,
+  the primary tuning lever), persist the cosine as `tags.score`, drop softmax.
+  A no-match image now gets NO tag instead of a confident wrong one. Rewrote the
+  `score_labels` tests for cosine semantics.
+- **Faces not detected = SCRFD output ordering (FIXED).** `engine.jsonl` was
+  full of `SCRFD bbox/kps tensor undersized — skipping stride`. `scrfd.rs::detect`
+  indexed the 9 ONNX outputs **positionally** assuming `[score,bbox,kps]×stride`
+  interleave; this export groups by type (`[score_8,score_16,score_32,bbox_8,…]`),
+  so every stride grabbed the wrong tensor, failed its size check, and detected
+  ZERO faces. Fix: classify outputs by **shape** — last-dim channels (1=score,
+  4=bbox, 10=kps), distinct anchor counts sorted descending → strides [8,16,32].
+  Robust to ordering AND naming. (Decode math unchanged.)
+- **"llama.cpp runtime not found" toast = outdated runtime (SCOPED to Track 3).**
+  Not "missing" — the runtime IS installed (sentinels + `llama-server.exe` +
+  per-model CLIs present, prewarm `outcome=installed`). But it's pinned to
+  release **b4404** (Dec 2024), which lacks `llama-mtmd-cli.exe` (the binary
+  `VlmRunner::find()` requires) and predates Qwen2.5-VL. So every Deep Analyze
+  emits `EngineError{kind:"llama_cpp_missing"}`. Crucially `llama-server.exe`
+  IS present — exactly what Track 3's persistent VLM uses. Fix folded into
+  Track 3: bump the runtime registry URL to a current build with mtmd-cli +
+  Qwen2.5-VL (invalidate sentinel to force re-install) AND route VLM through
+  `llama-server.exe`. Did NOT blind-guess a release URL.
+
+**User decision (this session):** tagging = "Both — fixed CLIP default + a VLM
+background upgrade." Track 3 (VLM-server background tagging) is the next big
+build; it also resolves the toast.
+
+### Build/test
+- Engine `cargo check` 0; `scene_vocab` 5/5; .NET build x64 **0/0**;
+  `FileID.App.Tests` **98 pass** (was 90; +8 MergeById tests); SCRFD `cargo check`
+  0 (tests running). BOM intact on edited `.cs`.
+- **No re-scan needed for thumbnails.** Faces + tagging need a re-tag
+  (`build-all.ps1 -WipeDbOnly`) to re-run SCRFD + the cosine tagger.
+
+## 2026-05-20 — V16.5c the SAME invisible-tile bug, root cause this time: tile-root entry spring + tab-crash hardening
+
+User rebuilt V16.5b and reported the trifecta again: "tagging not working,
+can't click sidebar tabs without the app crashing, thumbnails not loading."
+Log + DB forensics on the user's own session proved **all three engine
+features work** — the failures were two .NET-side defects, one of which V16.5b
+half-fixed.
+
+- **Invisible tiles (reads as BOTH "thumbnails not loading" AND "tags not
+  showing").** Same forensic signature V16.5b chased: `app.log` had **8611
+  `[THUMB] TILE_THUMBNAIL_ASSIGNED`** + 9148 L1/L2 hits + 346 `BITMAP_SET`, but
+  **zero `IMAGE_OPENED`/`OPACITY_SET`** — bitmaps bound, tiles invisible.
+  V16.5b fixed the *image*-level opacity pin in `OnRepeaterElementClearing` but
+  the bug survived because the real culprit was one level up:
+  `LibraryView.AnimateTileEntry` drove the **tile-root** composition `Opacity`
+  0 → 1 via a `SpringScalarNaturalMotionAnimation`. Under mid-scan churn the
+  `ItemsRepeater` re-realizes elements ~1 Hz (each throttled refresh raises a
+  Reset → 8721 PREPARE events in the log), and the interrupted opacity spring
+  stranded the **entire** tile — thumbnail, filename, AND tag chips all live
+  under that root — at Opacity 0. Fix: the tile-root opacity is now pinned to 1
+  on every prepare and **never animated**; the entrance is a scale-only pop
+  (0.96 → 1, the scale half of the macOS `.opacity.combined(with:.scale)`
+  transition) that can never hide content, gated to once per element instance
+  (a `ConditionalWeakTable`) so it doesn't replay on every Reset and pulse the
+  grid. This is why the DB had 24,762 auto-tags across 7,961 files (100%
+  coverage; `rainbow` 0.99, `wedding` 0.99, `storm` 0.98) yet the user "saw no
+  tags": the chips were rendering into an invisible root.
+- **Intermittent tab-switch crash (native fast-fail, no managed trace).** Two
+  `session-died-without-handler` breadcrumbs 9 s apart, then a clean 7-min
+  session — a timing race, not a deterministic bug. Hardened the teardown path
+  in `DetailHostView.Sync`: it used to build the next view **eagerly** and, on
+  a rapid second tab click, `Stop()` the in-flight storyboard — whose
+  `Completed` then never ran, so the just-built view was never mounted, never
+  `Unloaded`, and leaked as a zombie still subscribed to
+  `EngineClient.PropertyChanged` (re-querying a never-shown `ReadStore` on every
+  engine event). Now the view is built **lazily inside the fade-out
+  completion** (a superseded swap constructs nothing) and committed through one
+  synchronous helper so the outgoing view always tears down cleanly. Also added
+  a `_unloaded` guard to `LoadThumbAsync`'s UI continuation so a thumbnail that
+  resolves after a tab switch can't touch `Repeater` / composition visuals on a
+  detached view (a fast-fail vector).
+- **Engine hardening (not this user's bug, but flagged high-priority in
+  NEXT.md):** `SceneLabeler::build` now falls back to per-prompt `ClipText::embed`
+  when `embed_batch` errors, so a batch-pinned text ONNX export on another
+  machine degrades to sequential encoding instead of silently disabling all
+  scene tags (`labeler = None`). This user's export has a dynamic batch axis —
+  `[TAGGING] scene-label embeddings built n_labels=164` in their log — so the
+  fast path is unaffected.
+
+### Build/test
+
+- Engine `cargo check` 0; .NET build x64 **0 warning / 0 error**; BOM intact on
+  edited `.cs`. Targeted tests below.
+- **No re-scan required** — tags + the thumbnail disk cache are already on disk.
+  Rebuild the app, relaunch: tiles are now visible (so are their chips), tab
+  switching is hardened. The engine `embed_batch` fallback only matters on a
+  fresh model install on a different machine.
+
+## 2026-05-20 — V16.5b two display bugs: thumbnails loaded-but-invisible + scene tags hidden by tag order
+
+User rebuilt V16.5 and reported "thumbnails still not loading, tagging still
+sucks." Live log + DB forensics proved **both features work; the UI wasn't
+showing their output.** Both are display-only .NET fixes — no engine change,
+no re-scan needed.
+
+- **Thumbnails loaded but invisible.** `app.log` had 4711
+  `[THUMB] TILE_THUMBNAIL_ASSIGNED` + 929 `BITMAP_SET` (bitmaps WERE assigned)
+  but zero `IMAGE_OPENED`/`OPACITY_SET` — the reveal never ran. Root cause:
+  `OnRepeaterElementClearing` pinned the Image's *composition* opacity to 0,
+  and the reveal-back-to-1 (`EnsureThumbnailVisible` via
+  `Repeater.TryGetElement(IndexOf(tile))`) is unreliable under heavy mid-scan
+  re-virtualization on a 15K-item list → tiles stuck at opacity 0 despite a
+  valid Source. Fix: stop pinning image opacity to 0 on recycle; the Image
+  keeps its XAML default (1), and `ClearThumbnailForRecycle` already nulls the
+  Source, so a recycled tile shows the shimmer (not a stale bitmap), never a
+  permanent blank.
+- **Scene tags hidden by tag order.** DB had 3771/4004 files (94%) with scene
+  tags — `garage` 0.35, `tools` 0.48, `wedding` 0.99, `museum` 0.95 — but the
+  Library showed only `Has Location`/`2024`. `ReadStore`'s `GROUP_CONCAT(tag)`
+  had no ORDER BY, so enriched extras (NULL score) preceded scene tags and
+  `TopTwoTags` (first 2) never reached the scene label. Fix: order the
+  GROUP_CONCAT subquery `ORDER BY score DESC, rowid` at all four query sites
+  so scene tags lead by confidence, extras trail. Validated on the live DB:
+  visible files now emit `garage|Year_2024|Has Location` etc.
+
+### Build/test
+
+- .NET build 0/0; `FileID.App.Tests` 90 pass; `dotnet format --verify-no-changes` clean.
+- **No re-scan required** — tags + the thumbnail cache are already on disk;
+  rebuild the app + relaunch, and the Library re-queries (reordered tags) and
+  re-renders (now-visible thumbnails).
+
+## 2026-05-19 — V16.5 CLIP zero-shot tagging + thumbnail recycle fix + People double-tap + classifier removal
+
+Replaced the scan-time scene tagger and fixed the "thumbnails render from
+anything" recycle bug, then swept the same bug class app-wide. **Engine:**
+153 `cargo test --lib` pass + clippy `-D warnings` clean. **.NET:** build
+0/0, 90 `FileID.App.Tests` pass (was 86), `dotnet format --verify-no-changes`
+clean. All pending user verification on real hardware (rebuild + clean
+rescan / force re-tag).
+
+### Tagging — CLIP zero-shot replaces the ImageNet classifier
+
+- macOS tags scenes via Apple Vision (a scene taxonomy); Windows used a
+  MobileNetV3 **ImageNet object** classifier whose argmax labels
+  (`breakwater`, not `beach`) were the wrong taxonomy — the "horrible /
+  nothing like macOS" tags. Replaced with **CLIP zero-shot**: the per-file
+  MobileCLIP image embedding (already computed at `tagging.rs:945`) is
+  cosine-scored (softmax temp 100, threshold 0.12, top-4) against a curated
+  ~170-label scene vocabulary embedded by the matched MobileCLIP-S2 **text**
+  encoder (both towers ship from the same `Xenova/mobileclip_s2` repo → a
+  shared 512-d space). New `models/scene_vocab.rs` (vocabulary +
+  prompt-ensembled label matrix + the pure, tested `score_labels`);
+  `clip_text.rs` gained `embed_batch`. The label matrix builds once per
+  launch (process-static `OnceLock`); the 253 MB text session is dropped
+  after.
+- **No new download** — both CLIP halves are already required for scans, so
+  the redundant ~22 MB ImageNet classifier is **gone**: engine
+  `models/classifier.rs` + its registry arm deleted; .NET
+  `ClassifierAutoInstaller`, the Settings install slot, and the Library
+  "Install Scene Classifier" banner removed. This removes the "downloading
+  something for identifying" the user saw **and** drops a whole ONNX
+  inference + a 224×224 resize from the per-file hot path (net perf win).
+- **Confidence persisted.** `TaggedFile.tags` is now
+  `Vec<(String, Option<f32>)>`; the softmax probability lands in the
+  existing `tags.score` column (no migration — the column already existed).
+  Scene tags are pushed score-descending, so a card's top-2 chips are the
+  highest-confidence scene labels.
+- **Force re-tag** — Settings → "Re-scan everything (force re-tag)" calls the
+  already-plumbed `StartScanAsync(..., rescan: true)` against the current
+  library root, so a tagging/threshold change is visible without deleting
+  `fileid.sqlite`.
+
+### Thumbnails — recycle stale-bitmap fix
+
+- `OnRepeaterElementClearing` zeroed the Image opacity but never nulled
+  `tile.Thumbnail`; since the Image binds `Source="{x:Bind Thumbnail}"`, a
+  recycled element kept the previous file's bitmap and flashed it on reveal
+  (and off-screen tiles retained every bitmap → memory bloat). New
+  `FileTile.ClearThumbnailForRecycle()` releases the bitmap before
+  `IsDetached` flips; `[THUMB] RECYCLE_NULLED` traces it. 4 new headless
+  recycle/shimmer-contract tests.
+
+### People — double-tap fixed (same bug class)
+
+- `OnClusterDoubleTapped` read `el.DataContext is PersonCluster` with **no
+  Tag fallback**, so under x:Bind (DataContext null) double-tapping a cluster
+  silently did nothing. Added `OnClusterElementPrepared` (mirrors Library) to
+  bridge index→DataContext; drag/drop kept their Tag fallback. Cleanup
+  (classic `{Binding}`) and Restructure/Sidebar (display-only / stable
+  container) audited clean.
+
+### Deferred (see NEXT.md)
+
+- Verify `embed_batch` against the real text ONNX (assumes a dynamic batch
+  axis). Tune the vocabulary + threshold against real photos. Move the
+  one-time label-matrix build off the first scan if it's slow. Explicit
+  `ORDER BY score` in the ReadStore GROUP_CONCAT (insertion order already
+  approximates it).
+
+## 2026-05-19 — V16.4 two real bugs found via log+DB forensics: thumbnail trigger + classifier coverage
+
+User rebuilt V16.3 and reported "still broken thumbnails, still terrible
+tagging." A screenshot confirmed the V16.3b kind chip works but tiles were
+blank and chips were enriched-extras-only. Investigated the live
+`app.log` + `fileid.sqlite` (read-only) and found **both root causes sit
+in a layer no prior fix had touched.**
+
+### Thumbnails — `ThumbnailService` was never being called
+
+- `app.log` (3.1 MB, live scan) had **zero** `[THUMB]` lines.
+  `RequestAsync` logs `[THUMB] REQUEST` as its first statement, so it was
+  never invoked. The L2 disk cache (`thumbs.cache`) had **0 files across
+  every session** — not one thumbnail had ever rendered.
+- Root cause: `OnRepeaterElementPrepared` opened with
+  `if (... el.DataContext is not FileTile tile) return;`. **x:Bind in the
+  ItemsRepeater ItemTemplate does not populate the realized element's
+  DataContext** (compiled bindings bypass it), so the guard returned on
+  every tile, before `LoadThumbAsync` (the sole caller of
+  `RequestAsync`). Every V15.5→V16.2 thumbnail "fix" had patched the
+  `ThumbnailService` fallback chain — a layer that's never reached.
+- Fix (`LibraryView.xaml.cs`): resolve the tile from the authoritative
+  `args.Index` against `ViewModel.Items`, then **set `el.DataContext =
+  tile`** so the four sibling code-behind handlers that read
+  `el.DataContext` (Prepared / Clearing / Tapped / DragStarting — lines
+  443/617/746/932) all resolve correctly with no further change. Added a
+  `[THUMB] PREPARE idx=… dcWasNull=… resolved=…` diagnostic at the top of
+  the handler so the next run confirms the path.
+
+### Tagging — classifier is healthy; ImageNet-1k coverage is the problem
+
+- The classifier loads and runs on every file (`warmup complete
+  label_count=1000`, `pool loaded pool_size=2`; the screenshot file was
+  scanned twice *after* the model loaded). It is **not** a load failure.
+- DB forensics: 2,196 / 3,334 files (66%) had only enriched extras (no
+  scene label) at threshold 0.30. The labels that did fire were
+  object-specific ImageNet oddities (`breakwater`, `radio telescope`,
+  `dust jacket`), not scene categories.
+- Root cause: ImageNet-1k is an **object** classifier (wrong taxonomy for
+  "scene" tags) and 0.30 is too high for its diffuse softmax on
+  out-of-distribution personal photos.
+- Fix (`pipeline/tagging.rs`): lowered `CLASSIFIER_THRESHOLD` 0.30 → 0.20
+  to recover coverage. Confidence persistence into `tags.score` and a
+  Places365 scene-model swap were scoped but deferred (see NEXT.md) —
+  Places365 has no MobileNet ONNX on HF, and the score change ripples the
+  `TaggedFile.tags` type with no user-visible effect this round.
+
+### Build/test status
+
+- .NET: `dotnet build FileID.sln -c Debug -p:Platform=x64` 0/0;
+  `dotnet format --verify-no-changes` exit 0.
+- Engine: `cargo clippy --lib -D warnings` clean; `cargo test --lib`
+  152/152 pass.
+
+### Verification still pending (user, real hardware)
+
+1. **Re-tag is required** — existing rows are from the 0.30 ImageNet run
+   and incremental rescan skips current files. Delete
+   `%LOCALAPPDATA%\FileID\fileid.sqlite*`, rebuild, rescan.
+2. Thumbnails: tiles should render; `app.log` shows `[THUMB] PREPARE`
+   (with `dcWasNull=True` expected, confirming the diagnosis) →
+   `REQUEST` → `BITMAP_SET`; `thumbs.cache` fills; Settings → Diagnostics
+   → Thumbnails `ok>0`.
+3. Tagging: scene-label coverage should rise well above 34%; spot-check
+   chips name plausible content. If still too sparse, lower the threshold
+   further (or pursue Places365 per NEXT.md).
+
+## 2026-05-19 — V16.3 four-problem follow-up: file-type chip + classifier diagnostics + broken-image placeholder + video COM fix
+
+Picked up the "four problems" directive (tag accuracy / file-type chip /
+thumbnails / video). On audit, V16.1+V16.2 (commit 3c7ae32) had already
+landed most of it: classifier URL verified + both SHA256s pinned in
+`registry.rs`, preprocessing correct (RGB 224 ImageNet mean/std NCHW),
+softmax + threshold 0.30 + top-K 8 + 1001-class background offset,
+silent auto-installer, FileKind enum + `kind` DB column + IPC + ReadStore
+projection + thumbnail-corner kind icon badge, the V15.6 thumbnail
+fallback move, the Settings thumbnail diagnostics, and the Media
+Foundation keyframe→tagging path. This session closed the genuinely-open
+gaps and fixed the one real defect the audit surfaced.
+
+### What landed
+
+- **File-type text chip (Problem 2).** `TagChip` gained a `Variant` DP
+  (`Auto` gold | `Kind` gray). `FileTile` gained `ShowKindChip`
+  (`Kind != "other"`) + `HasChips` (`ShowKindChip || HasTags`). The card
+  chip row is now a `StackPanel` with the gray kind chip first, the gold
+  AI chips after; collapses entirely on bare Other-kind files. 16 new
+  unit tests (`FileTileKindChipTests`) cover the kind→display map and
+  the suppress-on-Other rule. The V16.2 icon badge is retained — badge
+  is glanceable on the thumbnail, chip is text-readable in the caption.
+- **Classifier diagnostics (Problem 1).** Settings → Diagnostics gained
+  a `ClassifierDiagnosticsText` line: installed/not + class count +
+  threshold 0.30 + top-K 8 + model MB. Disk-probe (sentinel +
+  `imagenet_classes.txt` line count + ONNX size) — no IPC change. Lets
+  the user confirm whether scene tags should appear without tailing
+  `engine.jsonl`. Re-bound on the existing Refresh button.
+- **Broken-image placeholder (Problem 3).** `FileTile` gained
+  `ThumbnailFailed` + `ShowShimmer` (`Thumbnail == null && !failed`).
+  `LoadThumbAsync` sets `ThumbnailFailed = true` (UI-dispatched) when
+  `RequestAsync` returns null; `OnRepeaterElementPrepared` clears it on
+  re-attach so a retry can fall back to shimmer. XAML shows a muted
+  procedural `FontIcon` (`&#xE91F;`) when failed; shimmer binding moved
+  from `Thumbnail`-null to `ShowShimmer`. No asset binary added.
+- **Video COM init (Problem 4 — the one real defect).**
+  `shell::video::keyframe_25pct` called `MFStartup` but never
+  `CoInitializeEx`. The decoder pool spawns raw OS threads
+  (`run_decoder_thread`, tagging.rs:520) and Deep Analyze runs keyframe
+  extraction on tokio blocking-pool threads — only the one thread that
+  won the `MFStartup` `Once` race had a COM apartment, so
+  `MFCreateSourceReaderFromURL` would `CO_E_NOTINITIALIZED` on the rest.
+  Added a thread-local `CoInitializeEx(COINIT_MULTITHREADED)` guard
+  inside `keyframe_25pct` (covers both call paths), matching the
+  per-thread COM init the other `shell::*` modules already do. The
+  BGRA→RGB conversion (video.rs:188-190) and the keyframe→classifier
+  wiring were audited and confirmed correct.
+
+### Build/test status
+
+- Engine: `cargo check --lib` clean, `cargo clippy --lib -D warnings`
+  clean, `cargo test --lib` 152/152 pass.
+- .NET: `dotnet build FileID.sln -c Debug -p:Platform=x64` 0 warnings /
+  0 errors; `FileID.App.Tests` 86/86 pass (was 70).
+
+### Verification still pending (user on real hardware)
+
+1. Scan `C:\Users\adamm\Desktop\Test Data`; confirm each card leads with
+   a gray file-type chip, gold AI chips follow.
+2. Settings → Diagnostics: Classifier line shows `Installed · 1000
+   classes · threshold 0.30 · top-K 8 · model ~21 MB`. If it says "Not
+   installed", the auto-installer hasn't completed a download yet.
+3. Scroll Library; tiles whose thumbnail render fails show the
+   image-glyph placeholder, not perpetual shimmer.
+4. Drop 10-20 `.mp4`/`.mov`/`.mkv` files in the corpus + rescan:
+   keyframe thumbnails render, kind chip says "Video", classifier emits
+   scene chips from the keyframe. (This is the COM-fix verification —
+   pre-fix, most videos would have produced no keyframe.)
+
 ## 2026-05-18 — V16.0 four-regression sweep: perf + thumbnails + classifier + tag chips
 
 Single-session pass against the directive in `/loops/four-regressions-windows.md`

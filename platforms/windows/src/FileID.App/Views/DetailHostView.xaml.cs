@@ -48,45 +48,25 @@ public sealed partial class DetailHostView : UserControl
 
     private void Sync(bool animate)
     {
-        var vm = AppViewModel.Instance;
-        UIElement child;
-        // Settings is reachable WITHOUT a folder (matches the special-case
-        // in SidebarTabList that keeps the Settings entry enabled at the
-        // pre-folder onboarding stage). Without this short-circuit the
-        // Sync below falls through to OnboardingSplash and the user never
-        // sees the Settings view they just clicked.
-        if (vm.ActiveTab.Id == "settings")
-        {
-            child = new Settings.SettingsView();
-        }
-        else if (!vm.HasFolder)
-        {
-            child = new OnboardingSplash();
-        }
-        else
-        {
-            child = vm.ActiveTab.Id switch
-            {
-                "library" => (UIElement)new Library.LibraryView(),
-                "people" => (UIElement)new People.PeopleView(),
-                "cleanup" => (UIElement)new Cleanup.CleanupView(),
-                "deepanalyze" => (UIElement)new DeepAnalyze.DeepAnalyzeView(),
-                "restructure" => (UIElement)new Restructure.RestructureView(),
-                _ => BuildPlaceholder("", vm.ActiveTab.Label, "Coming soon."),
-            };
-        }
-
         if (!animate || ReducedMotion.Instance.IsReduced)
         {
-            DisposePriorChild();
-            Host.Children.Clear();
-            Host.Children.Add(child);
+            try { _activeStoryboard?.Stop(); } catch { /* best-effort */ }
+            _activeStoryboard = null;
+            CommitChild(BuildChild());
+            Host.Opacity = 1.0;
             return;
         }
 
-        // Two-phase crossfade: fade existing content out (110 ms), swap
-        // the child, fade new content in (110 ms). Total 220 ms — matches
-        // the macOS tab transition.
+        // Crossfade: fade the current content out (110 ms), THEN build + swap
+        // the new view, then fade it in (110 ms). The new view is built inside
+        // the fade-out completion (not up front) for a load-bearing reason: a
+        // rapid second tab click Stops this storyboard, so its Completed never
+        // runs. If we built the view eagerly here, that view would have already
+        // subscribed to EngineClient.PropertyChanged in its ctor but never be
+        // added to the tree — so it would never Unload, never unsubscribe, and
+        // become a zombie that keeps refreshing a never-shown ReadStore on
+        // every engine event. Lazy-building in Completed means a superseded
+        // swap constructs nothing.
         var fadeOut = new DoubleAnimation
         {
             To = 0.0,
@@ -103,9 +83,12 @@ public sealed partial class DetailHostView : UserControl
         _activeStoryboard = sbOut;
         sbOut.Completed += (_, _) =>
         {
-            DisposePriorChild();
-            Host.Children.Clear();
-            Host.Children.Add(child);
+            // Superseded by a newer swap (defensive — Stop() shouldn't raise
+            // Completed, but never build/dispose for a stale storyboard).
+            if (!ReferenceEquals(_activeStoryboard, sbOut)) return;
+
+            CommitChild(BuildChild());
+
             var fadeIn = new DoubleAnimation
             {
                 From = 0.0,
@@ -125,6 +108,46 @@ public sealed partial class DetailHostView : UserControl
             sbIn.Begin();
         };
         sbOut.Begin();
+    }
+
+    /// <summary>Build the view for the currently-active tab. Pure construction;
+    /// no tree mutation — call <see cref="CommitChild"/> to mount it.</summary>
+    private UIElement BuildChild()
+    {
+        var vm = AppViewModel.Instance;
+        // Settings is reachable WITHOUT a folder (matches the special-case
+        // in SidebarTabList that keeps the Settings entry enabled at the
+        // pre-folder onboarding stage). Without this short-circuit the
+        // build falls through to OnboardingSplash and the user never
+        // sees the Settings view they just clicked.
+        if (vm.ActiveTab.Id == "settings")
+        {
+            return new Settings.SettingsView();
+        }
+        if (!vm.HasFolder)
+        {
+            return new OnboardingSplash();
+        }
+        return vm.ActiveTab.Id switch
+        {
+            "library" => (UIElement)new Library.LibraryView(),
+            "people" => (UIElement)new People.PeopleView(),
+            "cleanup" => (UIElement)new Cleanup.CleanupView(),
+            "deepanalyze" => (UIElement)new DeepAnalyze.DeepAnalyzeView(),
+            "restructure" => (UIElement)new Restructure.RestructureView(),
+            _ => BuildPlaceholder("", vm.ActiveTab.Label, "Coming soon."),
+        };
+    }
+
+    /// <summary>Atomically swap the hosted view: dispose any IDisposable
+    /// outgoing child, clear the host (which fires the outgoing view's Unloaded
+    /// → its subscription teardown), then mount the new child. Always run
+    /// synchronously so the outgoing view is never disposed mid-animation.</summary>
+    private void CommitChild(UIElement child)
+    {
+        DisposePriorChild();
+        Host.Children.Clear();
+        Host.Children.Add(child);
     }
 
     /// <summary>explicitly dispose the outgoing tab's UserControl

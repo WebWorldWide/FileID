@@ -303,10 +303,8 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         try
         {
             var s = AppViewModel.Instance.Settings;
-            HideUnknownToggle.IsOn = s.PeopleHideUnknown;
             CleanupAutoTagToggle.IsOn = s.CleanupAutoTagKept;
-            RestructureTreeModeToggle.IsOn = s.RestructureTreeMode;
-            AutoChainDeepAnalyzeToggle.IsOn = s.AutoChainDeepAnalyze;
+            AutoTagWithAiToggle.IsOn = s.AutoChainDeepAnalyze;
             // Inverted: AppSettings stores "Disable…" but the UI shows
             // "Auto-install on" (truthy = enabled).
             AutoInstallCudaToggle.IsOn = !s.DisableAutoInstallCuda;
@@ -329,15 +327,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         SyncNvidiaSection();
     }
 
-    private void OnHideUnknownToggled(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnHideUnknownToggled), () =>
-        {
-            if (_initializingToggles) return;
-            var s = AppViewModel.Instance.Settings;
-            s.PeopleHideUnknown = HideUnknownToggle.IsOn;
-            s.Save();
-        });
-
     private void OnCleanupAutoTagToggled(object sender, RoutedEventArgs e)
         => DebugLog.SafeRun(nameof(OnCleanupAutoTagToggled), () =>
         {
@@ -347,21 +336,12 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             s.Save();
         });
 
-    private void OnRestructureTreeModeToggled(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnRestructureTreeModeToggled), () =>
+    private void OnAutoTagWithAiToggled(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnAutoTagWithAiToggled), () =>
         {
             if (_initializingToggles) return;
             var s = AppViewModel.Instance.Settings;
-            s.RestructureTreeMode = RestructureTreeModeToggle.IsOn;
-            s.Save();
-        });
-
-    private void OnAutoChainDeepAnalyzeToggled(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnAutoChainDeepAnalyzeToggled), () =>
-        {
-            if (_initializingToggles) return;
-            var s = AppViewModel.Instance.Settings;
-            s.AutoChainDeepAnalyze = AutoChainDeepAnalyzeToggle.IsOn;
+            s.AutoChainDeepAnalyze = AutoTagWithAiToggle.IsOn;
             s.Save();
         });
 
@@ -546,6 +526,36 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
+    public string SceneTaggingDiagnosticsText
+    {
+        get
+        {
+            try
+            {
+                // Scene tags come from CLIP zero-shot — the image embedding is
+                // scored against a curated scene-label vocabulary using the
+                // MobileCLIP image + text encoders already installed for
+                // search. There is no separate classifier model; readiness is
+                // just whether both CLIP halves are installed.
+                var dir = System.IO.Path.Combine(AppPaths.ModelsDir, ".sentinels");
+                bool image = System.IO.File.Exists(System.IO.Path.Combine(dir, "mobileclip_s2.installed"));
+                bool text = System.IO.File.Exists(System.IO.Path.Combine(dir, "clip_text.installed"));
+                if (image && text)
+                {
+                    return "CLIP zero-shot scene tags active (MobileCLIP-S2 image + text) — " +
+                           "no separate classifier download.";
+                }
+                return "Install MobileCLIP (image + text) to enable scene tags. " +
+                       "Until then Library shows enriched-extras chips only " +
+                       "(Year, Camera, Has Faces/Text/Location).";
+            }
+            catch (Exception ex)
+            {
+                return $"Probe failed: {ex.GetType().Name}";
+            }
+        }
+    }
+
     private void OnRefreshDiagnosticsClicked(object sender, RoutedEventArgs e)
         => DebugLog.SafeRun(nameof(OnRefreshDiagnosticsClicked), () =>
         {
@@ -553,7 +563,29 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             OnPropertyChanged(nameof(MemoryDiagnosticsText));
             OnPropertyChanged(nameof(GpuDiagnosticsText));
             OnPropertyChanged(nameof(PowerDiagnosticsText));
+            OnPropertyChanged(nameof(SceneTaggingDiagnosticsText));
             OnPropertyChanged(nameof(ThumbnailDiagnosticsText));
+        });
+
+    // Force re-tag: re-scan the current library root with rescan=true so the
+    // engine recomputes tags for files it already has (incremental rescan
+    // skips up-to-date files). Without this, a tagging change isn't visible
+    // unless the user deletes fileid.sqlite. Root comes from the same place
+    // the normal scan path uses (AppViewModel.FolderPath).
+    private async void OnForceRetagClicked(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnForceRetagClicked), async () =>
+        {
+            var vm = FileID.ViewModels.AppViewModel.Instance;
+            var root = vm.FolderPath;
+            if (string.IsNullOrWhiteSpace(root))
+            {
+                DebugLog.Info("[RETAG] no library folder scanned yet; nothing to re-tag.");
+                return;
+            }
+            DebugLog.Info("[RETAG] force re-scan (re-tag) requested for the current library root.");
+            await FileID.ViewModels.EngineClient.Instance
+                .StartScanAsync(root!, vm.FolderDisplay, rescan: true)
+                .ConfigureAwait(true);
         });
 
     public string AppVersionText

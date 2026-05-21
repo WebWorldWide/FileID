@@ -43,7 +43,7 @@ fn perf_trace(stage: &str, path: &std::path::Path, elapsed_ms: f64) {
 
 use crate::coordinator::ScanCoordinator;
 use crate::models::runtime::error_has_device_removed_marker;
-use crate::models::{arcface::ArcFace, classifier::ClassifierSession, mobileclip::MobileClipImage, scrfd::{self, Scrfd}};
+use crate::models::{arcface::ArcFace, mobileclip::MobileClipImage, scene_vocab::SceneLabeler, scrfd::{self, Scrfd}};
 use crate::pipeline::batch_clip::ClipBatchCoordinator;
 use crate::pipeline::discovery::{DiscoveredFile, FileKind};
 use crate::shell;
@@ -119,20 +119,6 @@ const VISION_CONCURRENCY: usize = 4;
 /// VISION_CONCURRENCY.
 const CLIP_CONCURRENCY: usize = 2;
 
-/// Cap concurrent classifier inferences. Runs alongside CLIP under a
-/// separate semaphore so neither stage starves the other. Default 2 to
-/// match CLIP's caution against the DirectML TDR ceiling; tune upward
-/// only after measuring on a 500-file run.
-const CLASSIFIER_CONCURRENCY: usize = 2;
-
-/// Tags below this confidence are dropped — matches the macOS Vision
-/// classifier behaviour (`Tagging.swift`).
-const CLASSIFIER_THRESHOLD: f32 = 0.30;
-
-/// Per-file classifier top-K. macOS Vision pulls similar count of
-/// labels per file.
-const CLASSIFIER_TOP_K: usize = 8;
-
 /// Padding fraction added to the SCRFD bbox before cropping. Must match
 /// the macOS value (FaceClustering.swift = 0.15) so the same library
 /// produces the same ArcFace embeddings → same cluster IDs across
@@ -173,13 +159,14 @@ pub struct TaggedFile {
     pub failed: bool,
     pub error_message: Option<String>,
 
-    /// Semantic tags assembled from (a) the MobileNetV3 classifier top-K
-    /// labels above `CLASSIFIER_THRESHOLD` and (b) enriched-extras
-    /// derived from existing per-file signals (Year/Camera family/
-    /// Wide-Tall-Square/Has Faces/Has Text/Has Location). Persisted
-    /// into the `tags` table by DBWriter with source = `"auto"`; the
-    /// Library UI reads them via ReadStore and renders as TagChip rows.
-    pub tags: Vec<String>,
+    /// Semantic tags as `(label, score)` pairs, assembled from (a) CLIP
+    /// zero-shot scene labels (score = softmax probability) and (b)
+    /// enriched-extras derived from existing per-file signals (Year/Camera
+    /// family/Has Faces/Has Text/Has Location), which carry `None` (no
+    /// model confidence). Persisted into the `tags` table by DBWriter with
+    /// source = `"auto"` and the score in `tags.score`; the Library UI reads
+    /// them via ReadStore and renders the top-by-score as TagChip rows.
+    pub tags: Vec<(String, Option<f32>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -218,9 +205,12 @@ pub struct ModelStack {
     ///   CUDA EP or larger models where batching amortizes.
     pub mobileclip_pool: Option<Vec<Mutex<MobileClipImage>>>,
     pub mobileclip_batch: Option<Arc<ClipBatchCoordinator>>,
-    /// MobileNetV3 ImageNet-1k scene classifier. Optional — when absent
-    /// the per-file `tags` Vec is populated only from enriched extras.
-    pub classifier: Option<Vec<Mutex<ClassifierSession>>>,
+    /// CLIP zero-shot scene labeler — a label-embedding matrix built once
+    /// per launch from the (already-installed) CLIP text encoder. Scored
+    /// against the per-file MobileCLIP image embedding. Optional — when the
+    /// text model isn't installed the per-file `tags` Vec is populated only
+    /// from enriched extras.
+    pub scene_labeler: Option<Arc<SceneLabeler>>,
 }
 
 /// Aspirational pool size — actual cap is `min(this, vram_cap, worker_count)`
@@ -297,7 +287,11 @@ impl ModelStack {
             .map(|s| !(s == "0" || s.eq_ignore_ascii_case("false")))
             .unwrap_or(true);
 
-        let classifier = load_classifier_pool(pool_size);
+        // CLIP zero-shot scene labeler — built once per launch from the
+        // installed CLIP text encoder (the matched MobileCLIP-S2 text tower).
+        // Reuses the per-file MobileCLIP image embedding for scoring, so it
+        // adds no per-file inference. None when the text model isn't installed.
+        let scene_labeler = crate::models::scene_vocab::shared_scene_labeler();
 
         let (mobileclip_pool, mobileclip_batch) = if use_batch {
             // Batch-coordinator path (opt-in, experimental).
@@ -333,7 +327,7 @@ impl ModelStack {
             (pool, None)
         };
 
-        Self { arcface, scrfd, mobileclip_pool, mobileclip_batch, classifier }
+        Self { arcface, scrfd, mobileclip_pool, mobileclip_batch, scene_labeler }
     }
 
     #[allow(dead_code)]
@@ -343,62 +337,8 @@ impl ModelStack {
             scrfd: None,
             mobileclip_pool: None,
             mobileclip_batch: None,
-            classifier: None,
+            scene_labeler: None,
         }
-    }
-}
-
-/// Load the MobileNetV3 classifier as a small pool (same shape as the
-/// vision-model pools) so multiple workers can run inference in parallel
-/// against the GPU's command queue. Missing weights or labels degrade
-/// the stage to a no-op — pipeline still emits the enriched-extras tags.
-fn load_classifier_pool(pool_size: usize) -> Option<Vec<Mutex<ClassifierSession>>> {
-    let model_path = match crate::models::classifier::default_model_path() {
-        Ok(p) => p,
-        Err(err) => {
-            tracing::warn!(model = "classifier", ?err, "model path unresolved");
-            return None;
-        }
-    };
-    let labels_path = match crate::models::classifier::default_labels_path() {
-        Ok(p) => p,
-        Err(err) => {
-            tracing::warn!(model = "classifier", ?err, "labels path unresolved");
-            return None;
-        }
-    };
-    if !model_path.exists() || !labels_path.exists() {
-        tracing::info!(
-            model = "classifier",
-            model_path = %model_path.display(),
-            labels_path = %labels_path.display(),
-            "classifier model+labels not installed; stage will skip"
-        );
-        return None;
-    }
-    let mut pool = Vec::with_capacity(pool_size);
-    for idx in 0..pool_size {
-        if idx > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(250));
-        }
-        match ClassifierSession::load(&model_path, &labels_path) {
-            Ok(model) => pool.push(Mutex::new(model)),
-            Err(err) => {
-                use crate::models::runtime::error_has_device_removed_marker;
-                if error_has_device_removed_marker(&err) {
-                    tracing::error!(model = "classifier", slot = idx, ?err, "[STARTUP-TDR] device-removed during classifier warmup; aborting pool load");
-                    return None;
-                }
-                tracing::warn!(model = "classifier", slot = idx, ?err, "classifier pool load failed; stage will skip if pool empty");
-                break;
-            }
-        }
-    }
-    if pool.is_empty() {
-        None
-    } else {
-        tracing::info!(model = "classifier", pool_size = pool.len(), "classifier pool loaded");
-        Some(pool)
     }
 }
 
@@ -525,7 +465,6 @@ impl Tagger {
 
         let vision_sem = Arc::new(Semaphore::new(VISION_CONCURRENCY));
         let clip_sem = Arc::new(Semaphore::new(CLIP_CONCURRENCY));
-        let classifier_sem = Arc::new(Semaphore::new(CLASSIFIER_CONCURRENCY));
 
         for worker_idx in 0..self.worker_count {
             let rx = predecoded_rx.clone();
@@ -533,7 +472,6 @@ impl Tagger {
             let coord = self.coordinator.clone();
             let vision_sem = vision_sem.clone();
             let clip_sem = clip_sem.clone();
-            let classifier_sem = classifier_sem.clone();
             let models = self.models.clone();
 
             tokio::spawn(async move {
@@ -556,7 +494,7 @@ impl Tagger {
                     let timeout_modified = predecoded.file.modified_unix;
                     // Per-file timeout — image decoders or network UNC reads
                     // can hang indefinitely.
-                    let fut = process_file_predecoded(predecoded, &models, &vision_sem, &clip_sem, &classifier_sem, worker_idx, &coord);
+                    let fut = process_file_predecoded(predecoded, &models, &vision_sem, &clip_sem, worker_idx, &coord);
                     let tagged = match tokio::time::timeout(
                         std::time::Duration::from_secs(60),
                         fut,
@@ -765,7 +703,6 @@ async fn process_file_predecoded(
     models: &Arc<ModelStack>,
     vision_sem: &Arc<Semaphore>,
     clip_sem: &Arc<Semaphore>,
-    classifier_sem: &Arc<Semaphore>,
     worker_idx: usize,
     coord: &ScanCoordinator,
 ) -> TaggedFile {
@@ -985,48 +922,40 @@ async fn process_file_predecoded(
                 }
                 }
 
-                // Classifier — reuses the same decoded RGB. Resized
-                // separately to 224×224 (the MobileNetV3 input dimension)
-                // since CLIP wants 256×256.
-                if !coord.is_gpu_dead() {
-                    if let Some(classifier_pool) = &models.classifier {
-                        let permit = classifier_sem.acquire().await;
-                        let classifier_started = Instant::now();
-                        if permit.is_ok() {
-                            let classifier_mu = &classifier_pool[worker_idx % classifier_pool.len()];
-                            let n = crate::models::classifier::INPUT_SIZE;
-                            let resized_224 = resize_rgb_nearest(&rgb, w as usize, h as usize, n, n);
-                            let classify_result = {
-                                let mut c = classifier_mu.lock();
-                                c.classify_batch(&[resized_224], CLASSIFIER_TOP_K, CLASSIFIER_THRESHOLD)
-                            };
-                            match classify_result {
-                                Ok(mut batches) => {
-                                    if let Some(per_image) = batches.pop() {
-                                        for (label, _score) in per_image {
-                                            tagged.tags.push(label);
-                                        }
-                                    }
-                                }
-                                Err(err) => {
-                                    if error_has_device_removed_marker(&err) {
-                                        if coord.mark_gpu_dead() {
-                                            tracing::error!(?err, "[GPU-TDR] classifier device-removed; cancelling scan");
-                                        }
-                                    } else {
-                                        tracing::warn!(?err, "classifier classify failed");
-                                    }
-                                }
-                            }
+                // Scene tags — CLIP zero-shot. Scores the MobileCLIP image
+                // embedding computed just above against the scene-label
+                // matrix: a tiny CPU mat-vec + softmax, NOT a GPU inference,
+                // so there's no semaphore and no GPU-dead guard (and it's
+                // cheaper than the MobileNetV3 ImageNet classifier this
+                // replaces — that classifier's object taxonomy produced the
+                // "horrible / nothing like macOS" tags). Each label carries
+                // its softmax probability so the Library can confidence-order
+                // chips and the threshold can be tuned against persisted
+                // scores. Skips silently when the labeler isn't built (CLIP
+                // text model not installed) or the embedding is missing.
+                // Gated by ENABLE_CLIP_SCENE_TAGS — flip that const to false to
+                // drop CLIP scan-time tagging and rely solely on VLM tags.
+                if crate::models::scene_vocab::ENABLE_CLIP_SCENE_TAGS {
+                    if let (Some(labeler), Some(emb)) = (&models.scene_labeler, &tagged.clip_embedding) {
+                        let scene_started = Instant::now();
+                        let scored = labeler.score(
+                            emb,
+                            crate::models::scene_vocab::SCENE_COSINE_THRESHOLD,
+                            crate::models::scene_vocab::SCENE_TOP_K,
+                        );
+                        let redacted = crate::platform::redact_path_for_log(&file.path);
+                        for (idx, score) in scored {
+                            let label = labeler.label(idx);
+                            tracing::debug!(
+                                target: "FileIDEngine::tagging",
+                                path = %redacted,
+                                label,
+                                score,
+                                "[TAGGING] zero_shot"
+                            );
+                            tagged.tags.push((label.to_string(), Some(score)));
                         }
-                        perf_trace("classifier_done", &file.path, classifier_started.elapsed().as_secs_f64() * 1000.0);
-                    } else {
-                        // Classifier model not installed — log once, then
-                        // proceed with enriched-extras-only tags.
-                        static SKIP_LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-                        SKIP_LOGGED.get_or_init(|| {
-                            tracing::info!("[CLASSIFIER] model_not_installed; per-file tags are enriched-extras only");
-                        });
+                        perf_trace("scene_tags_done", &file.path, scene_started.elapsed().as_secs_f64() * 1000.0);
                     }
                 }
 
@@ -1063,7 +992,7 @@ async fn process_file_predecoded(
     // synonym path may push "dog"; we want the first to win.
     {
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        tagged.tags.retain(|t| seen.insert(t.to_ascii_lowercase()));
+        tagged.tags.retain(|(t, _)| seen.insert(t.to_ascii_lowercase()));
         tagged.tags.truncate(16);
     }
 
@@ -1153,7 +1082,7 @@ fn push_enriched_extras(tagged: &mut TaggedFile) {
         // available transitively but avoid the call cost here).
         if let Some(year) = unix_seconds_to_year(secs) {
             if (1990..2100).contains(&year) {
-                tagged.tags.push(format!("Year_{year}"));
+                tagged.tags.push((format!("Year_{year}"), None));
             }
         }
     }
@@ -1171,13 +1100,13 @@ fn push_enriched_extras(tagged: &mut TaggedFile) {
             else if lower.contains("pixel") { Some("Pixel") }
             else { None };
         if let Some(f) = family {
-            tagged.tags.push(f.to_string());
+            tagged.tags.push((f.to_string(), None));
         }
     }
-    if tagged.has_faces { tagged.tags.push("Has Faces".to_string()); }
-    if tagged.has_text { tagged.tags.push("Has Text".to_string()); }
+    if tagged.has_faces { tagged.tags.push(("Has Faces".to_string(), None)); }
+    if tagged.has_text { tagged.tags.push(("Has Text".to_string(), None)); }
     if tagged.location_lat.is_some() && tagged.location_lon.is_some() {
-        tagged.tags.push("Has Location".to_string());
+        tagged.tags.push(("Has Location".to_string(), None));
     }
 }
 
@@ -1518,7 +1447,7 @@ mod tests {
     fn enriched_does_not_emit_wide() {
         let mut t = stub_tagged(1920, 1080, 5_000_000);
         push_enriched_extras(&mut t);
-        assert!(!t.tags.contains(&"Wide".to_string()),
+        assert!(!t.tags.iter().any(|(s, _)| s == "Wide"),
             "Wide tag was dropped — too noisy, hid semantic tags");
     }
 
@@ -1526,7 +1455,7 @@ mod tests {
     fn enriched_does_not_emit_tall() {
         let mut t = stub_tagged(1080, 1920, 5_000_000);
         push_enriched_extras(&mut t);
-        assert!(!t.tags.contains(&"Tall".to_string()),
+        assert!(!t.tags.iter().any(|(s, _)| s == "Tall"),
             "Tall tag was dropped — too noisy, hid semantic tags");
     }
 
@@ -1534,7 +1463,7 @@ mod tests {
     fn enriched_does_not_emit_square() {
         let mut t = stub_tagged(1080, 1080, 5_000_000);
         push_enriched_extras(&mut t);
-        assert!(!t.tags.contains(&"Square".to_string()),
+        assert!(!t.tags.iter().any(|(s, _)| s == "Square"),
             "Square tag was dropped — too noisy, hid semantic tags");
     }
 
@@ -1545,9 +1474,9 @@ mod tests {
         // is emitted at any ratio.
         let mut t = stub_tagged(1300, 1000, 5_000_000);
         push_enriched_extras(&mut t);
-        assert!(!t.tags.contains(&"Square".to_string()));
-        assert!(!t.tags.contains(&"Wide".to_string()));
-        assert!(!t.tags.contains(&"Tall".to_string()));
+        assert!(!t.tags.iter().any(|(s, _)| s == "Square"));
+        assert!(!t.tags.iter().any(|(s, _)| s == "Wide"));
+        assert!(!t.tags.iter().any(|(s, _)| s == "Tall"));
     }
 
     #[test]

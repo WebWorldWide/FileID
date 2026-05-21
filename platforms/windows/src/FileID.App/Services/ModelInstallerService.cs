@@ -44,7 +44,6 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     private static readonly string[] ClipSentinelIds = { "mobileclip_s2", "clip_text" };
     private static readonly string[] ArcfaceSentinelIds = { "arcface" };
     private static readonly string[] VlmSentinelIds = { "qwen2_5_vl_3b", "qwen2_5_vl_7b", "smolvlm", "gemma_3_4b" };
-    private static readonly string[] ClassifierSentinelIds = { "classifier_mobilenetv3" };
     // one-button GPU acceleration pack on the welcome sheet.
     // The engine's `cudnn_runtime_x64` registry arm covers NVIDIA. Other
     // vendors stay no-op (DirectML is bundled with ORT and is the
@@ -65,12 +64,6 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     public ModelSlot Clip { get; }
     public ModelSlot Arcface { get; }
     public ModelSlot Vlm { get; }
-    /// <summary>Scene classifier (MobileNetV3-Large, ImageNet-1k). Drives
-    /// the semantic tags shown as chips on Library cards. When this slot
-    /// is NotInstalled, tagging falls back to enriched-extras only
-    /// (Year / Camera / Has Faces / Has Text / Has Location). 22 MB ONNX
-    /// + 21 KB labels — small enough to auto-install at first launch.</summary>
-    public ModelSlot Classifier { get; }
     /// <summary> one-button GPU acceleration pack. On NVIDIA the
     /// Install action downloads cuDNN; on AMD/Intel/Qualcomm/CPU the slot
     /// is pre-marked Installed with an explanatory Message (DirectML is
@@ -92,12 +85,14 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
 
     private int _installAllInFlight; // 0 = idle, 1 = in flight
 
-    /// <summary>VLM choice can update once we learn the user's RAM
-    /// (from EngineClient.Info). The slot's installAction reads this
-    /// field at click time, so a re-recommendation between app launch
-    /// and click takes effect. Default matches macOS's 8 GB threshold:
-    /// Qwen 2.5-VL 3B on 8 GB+ machines, SmolVLM below.</summary>
-    private string _vlmModelKind = "qwen2_5_vl_3b";
+    /// <summary>VLM the welcome-sheet slot installs. SmolVLM is the Windows
+    /// default tagger (smallest/fastest, ~700 MB) and is what the background
+    /// auto-tag pass + AppSettings.SelectedVlmModelKind use, so the welcome
+    /// sheet installs the same model — no redundant multi-GB Qwen download for
+    /// a model nothing uses by default. Larger models (Qwen 3B/7B, Gemma) stay
+    /// available from the Deep Analyze tab's model picker. The slot's
+    /// installAction reads this field at click time.</summary>
+    private string _vlmModelKind = "smolvlm";
 
     private ModelInstallerService()
     {
@@ -119,13 +114,9 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             approxBytes: 14UL * 1024 * 1024,
             installAction: () => PrewarmAsync("arcface_default"));
         Vlm = new ModelSlot(
-            displayLabel: "Qwen 2.5-VL 3B",
-            approxBytes: 1_650UL * 1024 * 1024,
+            displayLabel: "SmolVLM 500M",
+            approxBytes: 700UL * 1024 * 1024,
             installAction: () => PrewarmAsync(_vlmModelKind));
-        Classifier = new ModelSlot(
-            displayLabel: "Scene Classifier (MobileNetV3)",
-            approxBytes: 22UL * 1024 * 1024,
-            installAction: () => PrewarmAsync("classifier_mobilenetv3"));
         // GPU Acceleration Pack. Display label + Message are
         // adaptive — UpdateAcceleratorForVendor() refreshes them as soon
         // as the engine reports detected hardware. Until then, the row
@@ -139,7 +130,6 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         Clip.PropertyChanged += OnSlotPropertyChanged;
         Arcface.PropertyChanged += OnSlotPropertyChanged;
         Vlm.PropertyChanged += OnSlotPropertyChanged;
-        Classifier.PropertyChanged += OnSlotPropertyChanged;
         Accelerator.PropertyChanged += OnSlotPropertyChanged;
 
         SeedFromSentinels();
@@ -229,7 +219,6 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         FailIfDownloading(Clip, "Engine restarted — please retry.");
         FailIfDownloading(Arcface, "Engine restarted — please retry.");
         FailIfDownloading(Vlm, "Engine restarted — please retry.");
-        FailIfDownloading(Classifier, "Engine restarted — please retry.");
 
         SeedFromSentinels();
     }
@@ -343,12 +332,14 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
 
     public Task CancelAllAsync() => EngineClient.Instance.CancelPrewarmAsync();
 
-    /// <summary>Re-pick the VLM model based on detected RAM. Mirrors
-    /// macOS <c>AIModelKind.safeDefaultFor(ramGB:)</c>: Qwen 2.5-VL 3B
-    /// on 8 GB+ (≈1.5 GB), SmolVLM on smaller machines (≈700 MB) so
-    /// the user doesn't OOM their box on Welcome's auto-install.
-    /// No-op once the VLM is mid-flight or already installed — never
-    /// change a slot's identity while it's working.</summary>
+    /// <summary>VLM model recommendation for the welcome-sheet slot. The
+    /// Windows default is SmolVLM 500M (≈700 MB) regardless of RAM: it's the
+    /// smallest/fastest VLM and the model the background auto-tag pass uses, so
+    /// Welcome auto-install never pulls a multi-GB model nothing uses by
+    /// default. (macOS RAM-tiers Qwen vs SmolVLM; Windows deliberately picks the
+    /// small model per the user's "very small LLM" tagging choice — Qwen 3B/7B
+    /// and Gemma remain available from the Deep Analyze tab's model picker.)
+    /// No-op once the VLM is mid-flight or already installed.</summary>
     public void UpdateVlmRecommendation(double physicalMemoryGB)
     {
         if (Vlm.Status == ModelInstallStatus.Downloading
@@ -356,26 +347,12 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         {
             return;
         }
-        string kind;
-        string label;
-        ulong bytes;
-        if (physicalMemoryGB >= 8.0)
-        {
-            kind = "qwen2_5_vl_3b";
-            label = "Qwen 2.5-VL 3B";
-            bytes = 1_650UL * 1024 * 1024;
-        }
-        else
-        {
-            kind = "smolvlm";
-            label = "SmolVLM 256M";
-            bytes = 700UL * 1024 * 1024;
-        }
+        const string kind = "smolvlm";
         if (_vlmModelKind == kind) return;
-        DebugLog.Info($"[INSTALL] VLM recommendation: {label} ({physicalMemoryGB:F1} GB RAM)");
+        DebugLog.Info($"[INSTALL] VLM recommendation: SmolVLM 500M ({physicalMemoryGB:F1} GB RAM)");
         _vlmModelKind = kind;
-        Vlm.DisplayLabel = label;
-        Vlm.ApproxBytes = bytes;
+        Vlm.DisplayLabel = "SmolVLM 500M";
+        Vlm.ApproxBytes = 700UL * 1024 * 1024;
     }
 
     private bool _allInstalled;
@@ -421,7 +398,6 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         SeedSlot(Clip, ClipSentinelIds, requireAll: true);
         SeedSlot(Arcface, ArcfaceSentinelIds);
         SeedSlot(Vlm, VlmSentinelIds);
-        SeedSlot(Classifier, ClassifierSentinelIds);
         // Accelerator slot — only flip to Installed if the
         // sentinel exists. Otherwise leave it as
         // UpdateAcceleratorForVendor decided (NotInstalled for NVIDIA,
@@ -603,10 +579,6 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             case "gemma_3_4b":
             case "smolvlm":
                 return Vlm;
-            case "classifier_mobilenetv3":
-            case "classifier":
-            case "scene_classifier":
-                return Classifier;
             // cuDNN routes to the welcome-sheet Accelerator slot.
             case "cudnn_runtime_x64":
                 return Accelerator;

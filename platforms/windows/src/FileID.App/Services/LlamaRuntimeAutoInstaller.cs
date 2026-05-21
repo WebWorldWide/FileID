@@ -70,13 +70,31 @@ internal static class LlamaRuntimeAutoInstaller
 
             // Sentinel check — same canonical path the engine writes after
             // a successful prewarm. Matches ModelInstallerService.HasEngineSentinel.
+            // We ALSO require llama-mtmd-cli.exe to be present: a stale pre-mtmd
+            // runtime (e.g. the old b4404 pin) wrote the sentinel but lacks the
+            // multimodal binary, so the VLM can't run. Treat that as "needs
+            // reinstall" and clear the stale sentinel + cached zip so the
+            // prewarm below re-downloads the current build instead of
+            // short-circuiting on the sentinel or re-extracting the old zip.
             try
             {
+                var llamaDir = Path.Combine(AppPaths.ModelsDir, "llama.cpp");
                 var sentinel = Path.Combine(AppPaths.ModelsDir, ".sentinels", $"{ModelKind}.installed");
+                // Match the engine's VlmRunner, which accepts the binary at the
+                // dir root OR a bin/ subdir — checking only the flat path would
+                // re-download every launch if a future zip nests binaries.
+                bool mtmdPresent = File.Exists(Path.Combine(llamaDir, "llama-mtmd-cli.exe"))
+                                || File.Exists(Path.Combine(llamaDir, "bin", "llama-mtmd-cli.exe"));
+                if (File.Exists(sentinel) && mtmdPresent)
+                {
+                    DebugLog.Info("[VULKAN-AUTO] llama.cpp runtime already installed (mtmd-cli present); skipping.");
+                    return;
+                }
                 if (File.Exists(sentinel))
                 {
-                    DebugLog.Info("[VULKAN-AUTO] llama.cpp runtime already installed; skipping.");
-                    return;
+                    DebugLog.Info("[VULKAN-AUTO] runtime present but missing llama-mtmd-cli.exe (stale pre-mtmd build) — reinstalling current runtime.");
+                    try { File.Delete(sentinel); } catch { /* best-effort */ }
+                    try { File.Delete(Path.Combine(AppPaths.ModelsDir, "llama.cpp", "llama-runtime.zip")); } catch { /* best-effort */ }
                 }
             }
             catch { /* if FS check fails, engine's own short-circuit will catch it */ }

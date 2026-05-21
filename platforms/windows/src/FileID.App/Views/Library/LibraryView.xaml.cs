@@ -37,6 +37,15 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     // makes the Add/Remove pair safe regardless.
     private readonly System.Collections.Concurrent.ConcurrentDictionary<FileTile, CancellationTokenSource> _inflight = new();
     private readonly ClipSearchService _clip;
+    // One-shot tile-entrance gate. ItemsRepeater reuses element instances and
+    // re-realizes them on every collection Reset — the throttled mid-scan
+    // refresh raises a Reset ~1 Hz, so replaying the entrance on each
+    // ElementPrepared made the whole grid pulse every second during a scan.
+    // Track which element instances have already played their entrance so each
+    // plays it at most once per element lifetime. Keyed on the element (not the
+    // FileTile, which is recreated every Reset) so the mark survives rebinds.
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<UIElement, object> _enteredTiles = new();
+    private static readonly object _enteredMarker = new();
 
     public LibraryView()
     {
@@ -135,23 +144,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         catch { /* defensive */ }
         ClipMissingBanner.Visibility = clipMissingShow ? Visibility.Visible : Visibility.Collapsed;
 
-        // Classifier-missing banner: shown when the scene classifier slot
-        // isn't installed AND the Library has at least one image-kind row
-        // (no point pestering a user whose library is all documents).
-        bool classifierMissingShow = false;
-        try
-        {
-            if (ModelInstallerService.Instance.Classifier.Status != ModelInstallStatus.Installed)
-            {
-                foreach (var t in ViewModel.Items)
-                {
-                    if (t.Kind == "image") { classifierMissingShow = true; break; }
-                }
-            }
-        }
-        catch { /* defensive */ }
-        ClassifierMissingBanner.Visibility = classifierMissingShow ? Visibility.Visible : Visibility.Collapsed;
-
         // Deep Analyze banner: visible whenever the engine is mid-caption.
         // Engine throttles Progress events to 4 Hz; once Processed == Total
         // (or DeepAnalyzeComplete arrives, clearing DeepAnalyzeProgress in
@@ -190,20 +182,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             catch (Exception ex)
             {
                 DebugLog.Warn("CLIP install from banner failed: " + ex.Message);
-            }
-            SyncBanners();
-        });
-
-    private async void OnInstallClassifierFromBannerClicked(object sender, RoutedEventArgs e)
-        => await DebugLog.SafeRunAsync(nameof(OnInstallClassifierFromBannerClicked), async () =>
-        {
-            try
-            {
-                await ModelInstallerService.Instance.Classifier.InstallAsync().ConfigureAwait(true);
-            }
-            catch (Exception ex)
-            {
-                DebugLog.Warn("Classifier install from banner failed: " + ex.Message);
             }
             SyncBanners();
         });
@@ -440,28 +418,45 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     private void OnRepeaterElementPrepared(Microsoft.UI.Xaml.Controls.ItemsRepeater sender,
                                             Microsoft.UI.Xaml.Controls.ItemsRepeaterElementPreparedEventArgs args)
     {
-        if (args.Element is not FrameworkElement el || el.DataContext is not FileTile tile) return;
+        if (args.Element is not FrameworkElement el) return;
+        // x:Bind in the ItemsRepeater ItemTemplate does NOT populate the
+        // realized element's DataContext (compiled bindings bypass it), so
+        // the old `el.DataContext is not FileTile` guard returned on every
+        // tile — LoadThumbAsync never ran and not one thumbnail rendered
+        // (the L2 disk cache stayed empty across every session). Resolve the
+        // tile from the authoritative repeater index, then set DataContext
+        // so the sibling code-behind handlers (Clearing / Tapped / Drag)
+        // that read el.DataContext resolve the same tile.
+        var tile = (args.Index >= 0 && args.Index < ViewModel.Items.Count)
+            ? ViewModel.Items[args.Index]
+            : el.DataContext as FileTile;
+        Services.DebugLog.Debug(
+            $"[THUMB] PREPARE idx={args.Index} dcWasNull={el.DataContext is null} resolved={tile is not null}");
+        if (tile is null) return;
+        el.DataContext = tile;
+
         // tile is back in the virtualization window — undo the
         // ElementClearing detach so a fresh thumbnail load can bind.
         tile.IsDetached = false;
+        // Clear any prior failed-thumbnail state from the last attachment
+        // so a retry on re-prepare gets to fall through to the shimmer
+        // (and either land or surface the placeholder again).
+        tile.ThumbnailFailed = false;
 
-        // tile entry animation — fade + scale-in, matches macOS
-        // LibraryView.swift:566-575 (.transition(.opacity.combined(with:
-        // .scale(scale: 0.96))) with .easeOut(0.30)). Each tile springs
-        // in from opacity 0 + scale 0.96 to 1/1 on prepare. Recycled
-        // virtualized elements get the same treatment so a scroll-back
-        // looks identical to the first reveal. Reduced-motion users
-        // get a hard snap (no animation).
+        // tile entry animation — scale-in pop (0.96 → 1), the scale half of
+        // macOS LibraryView.swift:566-575's
+        // .transition(.opacity.combined(with: .scale(scale: 0.96))). The
+        // opacity half is deliberately NOT ported as a composition animation:
+        // see AnimateTileEntry's remarks — an interrupted opacity spring under
+        // mid-scan churn stranded whole tiles invisible. The pop plays once per
+        // element; reduced-motion users get a hard snap (no animation).
         AnimateTileEntry(el);
 
         if (tile.Thumbnail != null)
         {
-            // Already-loaded thumbnail (LRU cache hit on re-virtualization).
-            // The XAML Opacity="0" + ImageOpened="OnTileImageOpened" would
-            // wait for a decode event that won't fire if the BitmapImage is
-            // already decoded. Make the thumbnail visible immediately and
-            // let the parent tile-entry spring carry the visual reveal.
-            EnsureThumbnailVisible(el);
+            // Already-loaded thumbnail (LRU cache hit, or a surviving tile from
+            // the identity-stable merge). The Image binds Source directly at
+            // Opacity 1, so it's already on screen — nothing to do.
             return;
         }
 
@@ -476,53 +471,76 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         _ = LoadThumbAsync(tile, cts.Token);
     }
 
-    /// <summary>macOS-parity tile-entry animation. Snap to opacity=0
-    /// + scale=0.96 first, then spring to 1 using Tight tokens (0.35/0.78,
-    /// matches macOS scale-in feel). Operates on the Composition visual
-    /// directly so XAML Opacity bindings don't fight the animation.
+    /// <summary>macOS-parity tile-entry animation — a scale-in "pop"
+    /// (0.96 → 1, Tight tokens 0.35/0.78). Runs at most once per element
+    /// instance (see <see cref="_enteredTiles"/>).
+    ///
+    /// CRITICAL — opacity is NOT animated here, and the tile root's opacity is
+    /// pinned to 1 on every call. The previous version drove the root
+    /// composition Opacity 0 → 1 via a spring. Under mid-scan churn the
+    /// ItemsRepeater re-realizes elements ~1 Hz (each throttled refresh raises a
+    /// Reset), and an interrupted opacity spring stranded the ENTIRE tile — its
+    /// thumbnail, filename, and tag chips all live under this root — at
+    /// Opacity 0. That single defect read to users as both "thumbnails not
+    /// loading" and "tags not showing" (8611 TILE_THUMBNAIL_ASSIGNED but zero
+    /// IMAGE_OPENED in app.log: bitmaps bound, tiles invisible). A scale-only
+    /// entrance can never hide content, and a stranded scale at 0.96 is still
+    /// fully legible.
     ///
     /// Defensive: every Composition call wrapped in try/catch because
     /// StartAnimation on a detached / mid-recycle element can throw, and a
     /// throw from a fire-and-forget animation callback is one of the
     /// fast-fail vectors. Worst case here: the tile snaps in without
-    /// animation — never crashes the app.</summary>
+    /// animation — never crashes the app, never invisible.</summary>
     private static void AnimateTileEntry(FrameworkElement el)
     {
         try
         {
             var visual = Microsoft.UI.Xaml.Hosting.ElementCompositionPreview.GetElementVisual(el);
-            // Always stop in-flight animations on this visual (recycled
-            // tiles can have leftover springs from a previous prepare).
+            // Opacity is owned by the steady state and is ALWAYS 1. Stop any
+            // leftover opacity spring from an older build and force-reveal.
             visual.StopAnimation("Opacity");
-            visual.StopAnimation("Scale.X");
-            visual.StopAnimation("Scale.Y");
+            visual.Opacity = 1f;
+
+            bool firstEntry = !_enteredTiles.TryGetValue(el, out _);
 
             if (FileID.Theme.Motion.ReducedMotion.Instance.IsReduced)
             {
-                visual.Opacity = 1f;
+                visual.StopAnimation("Scale.X");
+                visual.StopAnimation("Scale.Y");
                 visual.Scale = new System.Numerics.Vector3(1f, 1f, 1f);
+                _enteredTiles.AddOrUpdate(el, _enteredMarker);
                 return;
             }
 
             var size = visual.Size;
             if (size.X <= 0 || size.Y <= 0)
             {
-                // Pre-layout: scale animation from corner would look wrong.
-                // Skip the scale; do opacity-only fade-in instead. This path
-                // hits during the very first prepare before measure/arrange.
-                visual.Opacity = 0f;
+                // Pre-layout: a corner-anchored scale would look wrong. Ensure
+                // the tile is visible at full scale and let a later prepare
+                // (post-arrange) carry the pop. Do NOT mark entered.
+                visual.StopAnimation("Scale.X");
+                visual.StopAnimation("Scale.Y");
                 visual.Scale = new System.Numerics.Vector3(1f, 1f, 1f);
-                var t1 = FileID.Theme.Motion.SpringEasing.Tokens.Tight;
-                FileID.Theme.Motion.SpringEasing.AnimateOpacity(el, 1f, t1.Response, t1.DampingFraction);
+                return;
+            }
+
+            if (!firstEntry)
+            {
+                // Already played its entrance (recycled / re-realized on a
+                // Reset) — snap to rest instead of replaying the pop every
+                // refresh, which looked like the grid pulsing during a scan.
+                visual.StopAnimation("Scale.X");
+                visual.StopAnimation("Scale.Y");
+                visual.Scale = new System.Numerics.Vector3(1f, 1f, 1f);
                 return;
             }
 
             visual.CenterPoint = new System.Numerics.Vector3(size.X / 2, size.Y / 2, 0);
-            visual.Opacity = 0f;
             visual.Scale = new System.Numerics.Vector3(0.96f, 0.96f, 1f);
             var t = FileID.Theme.Motion.SpringEasing.Tokens.Tight;
-            FileID.Theme.Motion.SpringEasing.AnimateOpacity(el, 1f, t.Response, t.DampingFraction);
             FileID.Theme.Motion.SpringEasing.AnimateScale(el, 1f, t.Response, t.DampingFraction);
+            _enteredTiles.AddOrUpdate(el, _enteredMarker);
         }
         catch (Exception ex)
         {
@@ -532,85 +550,20 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         }
     }
 
-    /// <summary>snap a recycled tile's thumbnail Image to opacity=1
-    /// when the BitmapImage is already decoded (ImageOpened won't fire on a
-    /// re-attached, already-decoded source). Operates on the composition
-    /// visual so animation state from a previous tile lifecycle is also
-    /// cleared.</summary>
-    private static void EnsureThumbnailVisible(FrameworkElement tileRoot)
-    {
-        var img = FindBoundImage(tileRoot);
-        if (img is null) return;
-        try
-        {
-            var visual = Microsoft.UI.Xaml.Hosting.ElementCompositionPreview.GetElementVisual(img);
-            visual.StopAnimation("Opacity");
-            visual.Opacity = 1f;
-        }
-        catch (Exception ex)
-        {
-            Services.DebugLog.Warn("EnsureThumbnailVisible: " + ex.Message);
-        }
-    }
-
-    private static Microsoft.UI.Xaml.Controls.Image? FindBoundImage(DependencyObject root)
-    {
-        var count = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(root);
-        for (int i = 0; i < count; i++)
-        {
-            var child = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(root, i);
-            if (child is Microsoft.UI.Xaml.Controls.Image img && img.Source is not null)
-            {
-                return img;
-            }
-            var nested = FindBoundImage(child);
-            if (nested is not null) return nested;
-        }
-        return null;
-    }
-
-    /// <summary>thumbnail crossfade. Fires once per BitmapImage
-    /// decode. The XAML <c>Opacity="0"</c> initial state is the static
-    /// fallback; this snaps composition Opacity to 0 (override any leftover
-    /// animation state) and springs to 1.
-    ///
-    /// Defensive try/catch — this is a XAML event callback that runs
-    /// outside any SafeRun scope, and a throw escapes to the dispatcher.</summary>
-    private void OnTileImageOpened(object sender, RoutedEventArgs e)
-    {
-        if (sender is not Microsoft.UI.Xaml.Controls.Image img) return;
-        // [THUMB] tracing — confirms the Image control actually decoded its
-        // assigned BitmapImage. If this never fires for a tile whose
-        // BITMAP_SET log line was emitted, the chain breaks between
-        // ThumbnailService and the Image.Source binding.
-        var path = (img.DataContext as ViewModels.FileTile)?.Path
-                  ?? (img.GetValue(FrameworkElement.TagProperty) as string)
-                  ?? "?";
-        Services.DebugLog.Debug($"[THUMB] IMAGE_OPENED file={path}");
-        // XAML default is Opacity 1, but OnRepeaterElementClearing may have
-        // forced the composition visual to 0 to reset for recycle. Snap
-        // back to 1 here so the tile is visible. (Earlier code did a
-        // spring 0→1, which flickered for already-decoded BitmapImages
-        // arriving via the LRU; the parent tile-entry spring in
-        // OnRepeaterElementPrepared carries the visual reveal.)
-        try
-        {
-            var visual = Microsoft.UI.Xaml.Hosting.ElementCompositionPreview.GetElementVisual(img);
-            visual.StopAnimation("Opacity");
-            visual.Opacity = 1f;
-            Services.DebugLog.Debug($"[THUMB] OPACITY_SET file={path} value=1");
-        }
-        catch (Exception ex)
-        {
-            Services.DebugLog.Warn("OnTileImageOpened threw: " + ex.Message);
-            try { img.Opacity = 1; } catch { /* swallow */ }
-        }
-    }
-
     private void OnRepeaterElementClearing(Microsoft.UI.Xaml.Controls.ItemsRepeater sender,
                                            Microsoft.UI.Xaml.Controls.ItemsRepeaterElementClearingEventArgs args)
     {
         if (args.Element is not FrameworkElement el || el.DataContext is not FileTile tile) return;
+        // Release the bound bitmap BEFORE detaching. The Image binds
+        // Source="{x:Bind Thumbnail}", so a recycled element otherwise keeps
+        // the PREVIOUS file's bitmap on Source and flashes it on the next
+        // reveal — the "thumbnails rendering from anything" symptom. Nulling
+        // here clears Source → shimmer, and frees the BitmapImage so
+        // off-screen tiles don't pin every bitmap they ever loaded (memory
+        // bloat on large libraries). Must run while still attached — the
+        // Thumbnail setter no-ops once IsDetached is set just below.
+        tile.ClearThumbnailForRecycle();
+        Services.DebugLog.Debug($"[THUMB] RECYCLE_NULLED file={tile.Path}");
         // mark detached so a late-arriving thumbnail render
         // doesn't bind into a stale tile.
         tile.IsDetached = true;
@@ -619,22 +572,12 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             try { cts.Cancel(); } catch { /* swallow */ }
             cts.Dispose();
         }
-        // reset thumbnail Image composition opacity so the next
-        // recycle gets a fresh crossfade. Setting XAML Opacity alone
-        // isn't enough — a finished StartAnimation leaves the visual
-        // pinned at its final value, decoupled from the XAML property.
-        // Stop the animation explicitly + snap visual.Opacity = 0.
-        var img = FindBoundImage(el);
-        if (img is not null)
-        {
-            try
-            {
-                var visual = Microsoft.UI.Xaml.Hosting.ElementCompositionPreview.GetElementVisual(img);
-                visual.StopAnimation("Opacity");
-                visual.Opacity = 0f;
-            }
-            catch { /* swallow — animation reset is best-effort */ }
-        }
+        // No opacity manipulation anywhere: the Image keeps its XAML default
+        // Opacity (1) and just renders its bound Source. ClearThumbnailForRecycle
+        // above already nulled the Source, so a recycled tile shows the shimmer
+        // (not a stale bitmap) until its own thumbnail reloads. With the
+        // identity-stable merge, on-screen tiles are no longer recycled on every
+        // refresh — only on real scroll — so this fires far less often now.
     }
 
     private async Task LoadThumbAsync(FileTile tile, CancellationToken ct)
@@ -651,6 +594,18 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             if (bmp == null)
             {
                 Services.DebugLog.Debug($"[THUMB] LOAD_NULL file={tile.Path}");
+                // Hand off from shimmer to a broken-image placeholder so the
+                // tile doesn't shimmer forever. Setter is UI-thread-affined
+                // because it raises PropertyChanged; route through the
+                // DispatcherQueue same as the bmp-assignment path below.
+                if (!tile.IsDetached)
+                {
+                    DispatcherQueue.TryEnqueue(() =>
+                    {
+                        if (_unloaded || tile.IsDetached) return;
+                        tile.ThumbnailFailed = true;
+                    });
+                }
                 return;
             }
             if (ct.IsCancellationRequested || tile.IsDetached)
@@ -660,22 +615,18 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             }
             var enqueued = DispatcherQueue.TryEnqueue(() =>
             {
-                if (tile.IsDetached) return;
+                // _unloaded guard: this continuation is queued from a worker
+                // thread (ConfigureAwait(false) above) and can run AFTER a tab
+                // switch tore down the view. Bail before touching the tile.
+                if (_unloaded || tile.IsDetached) return;
+                // Assign the bitmap; the x:Bind Source updates and the Image
+                // (Opacity 1) renders it. No opacity dance — the Image is never
+                // hidden, so there's nothing to "reveal".
                 tile.Thumbnail = bmp;
-                Services.DebugLog.Debug($"[THUMB] TILE_THUMBNAIL_ASSIGNED file={tile.Path}");
-                // Defensive: if ImageOpened doesn't fire for some reason
-                // (already-decoded BitmapImage from L1 cache rebind, or
-                // a decoded BitmapImage whose Image.ImageOpened handler
-                // misses the event), the tile's image composition opacity
-                // stays at the 0f set by OnRepeaterElementClearing → user
-                // sees the placeholder gradient forever even though
-                // tile.Thumbnail is set. Locate the Image element by walking
-                // the visual tree from the tile root + snap its visual.Opacity
-                // back to 1. EnsureThumbnailVisible already does this; reuse it.
-                if (Repeater.TryGetElement(ViewModel.Items.IndexOf(tile)) is FrameworkElement el)
-                {
-                    EnsureThumbnailVisible(el);
-                }
+                // Pixel dims confirm the bitmap actually carries content. If a
+                // tile is still blank after this, px>0 here means the problem is
+                // layout (image row collapsed), not a 0-pixel decode.
+                Services.DebugLog.Debug($"[THUMB] TILE_THUMBNAIL_ASSIGNED file={tile.Path} px={bmp.PixelWidth}x{bmp.PixelHeight}");
             });
             if (!enqueued)
             {
@@ -691,6 +642,29 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             _inflight.TryRemove(tile, out _);
         }
     }
+
+    // Tile height = width + 68 (square image area + fixed 68px caption row).
+    // Set here, not via a Height self-binding to ActualWidth: ActualWidth is
+    // not an observable DP, so a OneWay bind reads 0 before layout (→ height
+    // 68, image row collapses to ~0) and never re-fires after arrange. This
+    // was the long-standing "thumbnails decode but render blank" bug — the
+    // bitmap was assigned to a zero-height image row. SizeChanged runs
+    // post-arrange with the real width and again on column resize. The >0.5
+    // guard breaks the height-set → SizeChanged feedback loop (width is
+    // column-driven, so it doesn't change when we set Height).
+    private void OnTileSizeChanged(object sender, SizeChangedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnTileSizeChanged), () =>
+        {
+            if (sender is not FrameworkElement el) return;
+            double w = e.NewSize.Width;
+            if (w <= 0) return;
+            double target = w + 68;
+            if (Math.Abs(el.Height - target) > 0.5)
+            {
+                el.Height = target;
+                Services.DebugLog.Debug($"[THUMB] TILE_SIZED w={w:F0} h={target:F0}");
+            }
+        });
 
     // Single tap toggles selection when Ctrl is held; Shift extends from
     // the last clicked tile; otherwise sets a single selection.

@@ -267,6 +267,25 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         await ViewModel.RefreshAsync(CancellationToken.None);
     }
 
+    // ItemsRepeater + x:Bind does NOT populate the realized element's
+    // DataContext (compiled bindings bypass it — same gotcha that broke
+    // Library thumbnails). Resolve the cluster from the authoritative
+    // repeater index and set DataContext so the drag / drop / double-tap
+    // handlers that read el.DataContext resolve the right PersonCluster.
+    // OnClusterDoubleTapped has no Tag fallback, so without this bridge a
+    // double-tap silently returns and the person-detail sheet never opens.
+    // Mirrors LibraryView.OnRepeaterElementPrepared.
+    private void OnClusterElementPrepared(Microsoft.UI.Xaml.Controls.ItemsRepeater sender,
+                                          Microsoft.UI.Xaml.Controls.ItemsRepeaterElementPreparedEventArgs args)
+    {
+        if (args.Element is not FrameworkElement el) return;
+        var cluster = (args.Index >= 0 && args.Index < ViewModel.Clusters.Count)
+            ? ViewModel.Clusters[args.Index]
+            : el.DataContext as PersonCluster;
+        if (cluster is null) return;
+        el.DataContext = cluster;
+    }
+
     private void OnClusterDragStarting(UIElement sender, DragStartingEventArgs args)
     {
         if (sender is FrameworkElement el && el.DataContext is PersonCluster pc)

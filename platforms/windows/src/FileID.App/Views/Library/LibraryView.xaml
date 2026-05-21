@@ -135,37 +135,6 @@
                     <Button Grid.Column="2" Content="Install" Click="OnInstallClipFromBannerClicked" VerticalAlignment="Center" />
                 </Grid>
             </Border>
-            <!-- Scene Classifier missing banner. Shown when the
-                 ImageNet-1k classifier model isn't installed AND there are
-                 image files in the Library. Without the classifier, tagging
-                 falls back to enriched-extras only — users see "Has Location"
-                 / "iPhone" / "Year_2024" instead of "Dog" / "Beach" / "Food".
-                 ~22 MB download; small enough that we also auto-install on
-                 first launch via ClassifierAutoInstaller, but the banner
-                 covers users who launch before auto-install completes or
-                 who opted out of the auto path. -->
-            <Border x:Name="ClassifierMissingBanner"
-                    Visibility="Collapsed"
-                    CornerRadius="10"
-                    Padding="12,10"
-                    Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                    BorderBrush="{ThemeResource GoldBrush}"
-                    BorderThickness="1">
-                <Grid ColumnSpacing="10">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                    </Grid.ColumnDefinitions>
-                    <FontIcon Grid.Column="0" Glyph="&#xE8C1;" FontSize="14"
-                              Foreground="{ThemeResource GoldBrush}"
-                              VerticalAlignment="Top" Margin="0,1,0,0" />
-                    <TextBlock Grid.Column="1" TextWrapping="Wrap"
-                               Style="{StaticResource CaptionTextBlockStyle}"
-                               Text="Install the Scene Classifier for AI tags — automatically labels photos with 1000 categories like 'Dog', 'Beach', 'Document'. ~22 MB." />
-                    <Button Grid.Column="2" Content="Install" Click="OnInstallClassifierFromBannerClicked" VerticalAlignment="Center" />
-                </Grid>
-            </Border>
             <Border x:Name="DeepAnalyzeBanner"
                     Visibility="Collapsed"
                     CornerRadius="10"
@@ -270,8 +239,8 @@
                            ElementPrepared="OnRepeaterElementPrepared"
                            ElementClearing="OnRepeaterElementClearing">
                 <!-- Square tiles. UniformGridLayout cells are 180 wide minimum;
-                     each tile binds its own Height = ActualWidth + 68 (caption row)
-                     via IdentityDouble, so the image area is always 1:1. macOS
+                     each tile sets its own Height = width + 68 (caption row) in
+                     OnTileSizeChanged, so the image area is always 1:1. macOS
                      uses .aspectRatio(1, contentMode: .fit) for the same effect.
                      ItemsStretch="Fill" keeps the cells filling the grid width;
                      MinItemHeight=248 (180+68) reserves a square-friendly cell. -->
@@ -288,17 +257,23 @@
                         <!-- PointerEntered/Exited drive a spring
                              scale (1.012, response 0.18s) matching macOS
                              LibraryView.swift:681-682 hover affordance.
-                             Height = ActualWidth + 68 (caption row) so the
-                             image area is exactly square regardless of how
-                             long the caption is. Mirrors macOS's
-                             .aspectRatio(1, contentMode: .fit) pattern. -->
+                             Height = width + 68 (caption row) so the image
+                             area is exactly square regardless of how long
+                             the caption is. Mirrors macOS's
+                             .aspectRatio(1, contentMode: .fit) pattern.
+                             Set via SizeChanged (OnTileSizeChanged), NOT a
+                             self-binding to ActualWidth: ActualWidth isn't an
+                             observable DP, so a OneWay bind reads 0 before
+                             layout (→ height 68, image row collapses to ~0)
+                             and never re-fires. SizeChanged runs post-arrange
+                             with the real width and again on column resize. -->
                         <Grid x:Name="TileRoot"
                               CornerRadius="12"
                               Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                               BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                               BorderThickness="1"
                               Padding="12"
-                              Height="{Binding ActualWidth, RelativeSource={RelativeSource Self}, Converter={StaticResource IdentityDouble}, ConverterParameter=68}"
+                              SizeChanged="OnTileSizeChanged"
                               Tag="{x:Bind Path}"
                               Tapped="OnTileTapped"
                               RightTapped="OnTileRightTapped"
@@ -356,23 +331,35 @@
                                     CornerRadius="8">
                                 <Grid>
                                     <!-- Shimmer placeholder while
-                                         thumbnail loads. Visibility tied to
-                                         Thumbnail null-ness via converter. -->
+                                         thumbnail loads. ShowShimmer is
+                                         Thumbnail==null && !ThumbnailFailed
+                                         so the shimmer cedes to the
+                                         broken-image placeholder when
+                                         the fallback chain returns null. -->
                                     <motion:ShimmerView
-                                        Visibility="{x:Bind Thumbnail, Mode=OneWay, Converter={StaticResource NullToVisibility}}"/>
-                                    <!-- Initial Opacity is 1 to guarantee the tile is
-                                         visible as soon as the BitmapImage is bound. The
-                                         shimmer overlay's NullToVisibility converter is
-                                         the load indicator. OnTileImageOpened still fires
-                                         the spring fade for the macOS-parity visual when
-                                         the bitmap arrives (start at 0 inside the handler,
-                                         spring to 1) — if for any reason it doesn't fire,
-                                         the user still sees the rendered tile. -->
+                                        Visibility="{x:Bind ShowShimmer, Mode=OneWay, Converter={StaticResource BoolToVisibility}}"/>
+                                    <!-- The Image keeps its default Opacity=1 and just
+                                         renders its bound Source. No ImageOpened handler:
+                                         it never fired for pre-decoded / L1-cached
+                                         BitmapImages (so any opacity logic gated on it was
+                                         dead), and the tile-root entrance (scale-only) is
+                                         what carries the reveal. ShowShimmer is the load
+                                         indicator; ThumbnailFailed shows the broken glyph. -->
                                     <Image Source="{x:Bind Thumbnail, Mode=OneWay}"
                                            Stretch="UniformToFill"
                                            HorizontalAlignment="Stretch"
-                                           VerticalAlignment="Stretch"
-                                           ImageOpened="OnTileImageOpened" />
+                                           VerticalAlignment="Stretch" />
+                                    <!-- Broken-image placeholder when
+                                         ThumbnailService.RequestAsync
+                                         returns null after exhausting its
+                                         fallback chain. Procedural FontIcon
+                                         so no Assets bookkeeping. -->
+                                    <FontIcon Glyph="&#xE91F;"
+                                              FontSize="48"
+                                              Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                              HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"
+                                              Visibility="{x:Bind ThumbnailFailed, Mode=OneWay, Converter={StaticResource BoolToVisibility}}" />
                                 </Grid>
                             </Border>
                             <Border Grid.Row="0"
@@ -434,24 +421,30 @@
                                            TextTrimming="CharacterEllipsis"
                                            Visibility="{x:Bind HasProposedName, Mode=OneWay, Converter={StaticResource BoolToVisibility}}"
                                            ToolTipService.ToolTip="{x:Bind ProposedName, Mode=OneWay}" />
-                                <!-- Auto-tag chips. Bound to FileTile.TopTwoTags
-                                     (already prefix(2)-sliced server-side so we
-                                     don't allocate per layout pass). Visibility
-                                     collapses cleanly when Tags is empty so the
-                                     card height stays the same as before. -->
-                                <ItemsControl ItemsSource="{x:Bind TopTwoTags, Mode=OneWay}"
-                                              Visibility="{x:Bind HasTags, Mode=OneWay, Converter={StaticResource BoolToVisibility}}">
-                                    <ItemsControl.ItemsPanel>
-                                        <ItemsPanelTemplate>
-                                            <StackPanel Orientation="Horizontal" Spacing="4" />
-                                        </ItemsPanelTemplate>
-                                    </ItemsControl.ItemsPanel>
-                                    <ItemsControl.ItemTemplate>
-                                        <DataTemplate>
-                                            <theme:TagChip TagText="{Binding}" />
-                                        </DataTemplate>
-                                    </ItemsControl.ItemTemplate>
-                                </ItemsControl>
+                                <!-- Chip row: structured kind chip (gray) first,
+                                     then auto-tag chips (gold). HasChips collapses
+                                     the whole row on bare Other-kind files with
+                                     no tags so the caption row keeps its fixed
+                                     68 DIP height. -->
+                                <StackPanel Orientation="Horizontal" Spacing="4"
+                                            Visibility="{x:Bind HasChips, Mode=OneWay, Converter={StaticResource BoolToVisibility}}">
+                                    <theme:TagChip TagText="{x:Bind KindDisplay}"
+                                                   Variant="Kind"
+                                                   Visibility="{x:Bind ShowKindChip, Converter={StaticResource BoolToVisibility}}" />
+                                    <ItemsControl ItemsSource="{x:Bind TopTwoTags, Mode=OneWay}"
+                                                  Visibility="{x:Bind HasTags, Mode=OneWay, Converter={StaticResource BoolToVisibility}}">
+                                        <ItemsControl.ItemsPanel>
+                                            <ItemsPanelTemplate>
+                                                <StackPanel Orientation="Horizontal" Spacing="4" />
+                                            </ItemsPanelTemplate>
+                                        </ItemsControl.ItemsPanel>
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <theme:TagChip TagText="{Binding}" />
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </StackPanel>
                                 <TextBlock Text="{x:Bind SizeDisplay}"
                                            Style="{StaticResource CaptionTextBlockStyle}"
                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>

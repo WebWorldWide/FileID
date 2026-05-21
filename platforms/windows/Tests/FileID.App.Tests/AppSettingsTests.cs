@@ -34,7 +34,11 @@ public class AppSettingsTests
         Assert.False(s.DisableAutoInstallCuda);
         Assert.False(s.DisableAutoInstallVulkanRuntime);
         Assert.False(s.DisableAutoInstallCudnn);
-        Assert.Equal(1, s.SchemaVersion);
+        Assert.False(s.DisableAutoInstallSmolVlm);
+        // SmolVLM is the default tagger (smallest/fastest, auto-installed).
+        Assert.Equal("smolvlm", s.SelectedVlmModelKind);
+        // Fresh installs start at the current schema (v2).
+        Assert.Equal(2, s.SchemaVersion);
     }
 
     [Fact]
@@ -141,6 +145,7 @@ public class AppSettingsTests
         Assert.NotNull(decoded);
         Assert.Equal("library", decoded!.ActiveTab);
         Assert.True(decoded.SidebarVisible);
-        Assert.Equal(1, decoded.SchemaVersion);
+        // "{}" carries no schemaVersion → property default (current schema, v2).
+        Assert.Equal(2, decoded.SchemaVersion);
     }
 }

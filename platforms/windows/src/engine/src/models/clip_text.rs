@@ -79,6 +79,62 @@ impl ClipText {
         l2_normalize(&mut emb);
         Ok(emb)
     }
+
+    /// Batched variant of [`ClipText::embed`] — tokenize + encode every query
+    /// in one ONNX run with a `(B, 77)` input, returning one L2-normalized
+    /// embedding per query. Used to build the zero-shot scene-label matrix at
+    /// startup; far cheaper than B separate session runs. Assumes the exported
+    /// text model has a dynamic batch axis (the Xenova MobileCLIP-S2 export
+    /// does).
+    pub fn embed_batch(&mut self, queries: &[String]) -> Result<Vec<Vec<f32>>> {
+        if queries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let batch = queries.len();
+        let mut flat = vec![0i64; batch * CONTEXT_LEN];
+        for (qi, q) in queries.iter().enumerate() {
+            let tokens = self.tokenizer.encode(q);
+            for (i, t) in tokens.iter().take(CONTEXT_LEN).enumerate() {
+                flat[qi * CONTEXT_LEN + i] = *t as i64;
+            }
+        }
+        let input = Array2::<i64>::from_shape_vec((batch, CONTEXT_LEN), flat)
+            .context("CLIP text batch input shape")?;
+        let tensor = Tensor::from_array(input).context("CLIP text batch input tensor")?;
+        let input_name = self
+            .session
+            .inputs
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("CLIP text ONNX has no inputs"))?
+            .name
+            .clone();
+        let outputs: SessionOutputs = self
+            .session
+            .run(vec![(input_name, SessionInputValue::from(tensor))])
+            .context("CLIP text batch session.run")
+            .map_err(classify_inference_error)?;
+        let (_, value) = outputs
+            .iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("CLIP text produced no outputs"))?;
+        let (_shape, data) = value
+            .try_extract_tensor::<f32>()
+            .context("extract CLIP text batch output as f32")?;
+        if data.len() % batch != 0 {
+            anyhow::bail!(
+                "CLIP text batch output len {} not divisible by batch {batch}",
+                data.len()
+            );
+        }
+        let dim = data.len() / batch;
+        let mut out = Vec::with_capacity(batch);
+        for i in 0..batch {
+            let mut emb = data[i * dim..(i + 1) * dim].to_vec();
+            l2_normalize(&mut emb);
+            out.push(emb);
+        }
+        Ok(out)
+    }
 }
 
 fn l2_normalize(v: &mut [f32]) {

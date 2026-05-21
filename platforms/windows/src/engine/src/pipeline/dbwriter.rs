@@ -184,7 +184,7 @@ impl DbWriter {
                 .prepare_cached("DELETE FROM tags WHERE file_id = ?1 AND source = 'auto'")
                 .context("preparing tag delete")?;
             let mut tag_insert = tx
-                .prepare_cached("INSERT OR REPLACE INTO tags (file_id, tag, source, score) VALUES (?1, ?2, 'auto', NULL)")
+                .prepare_cached("INSERT OR REPLACE INTO tags (file_id, tag, source, score) VALUES (?1, ?2, 'auto', ?3)")
                 .context("preparing tag insert")?;
             let mut ocr_text_stmt = tx
                 .prepare_cached("INSERT OR REPLACE INTO ocr_text (file_id, text) VALUES (?1, ?2)")
@@ -294,11 +294,11 @@ impl DbWriter {
                 tag_delete
                     .execute(params![file_id])
                     .with_context(|| format!("tag delete for {}", path_text))?;
-                for tag in &f.tags {
+                for (tag, score) in &f.tags {
                     let trimmed = tag.trim();
                     if trimmed.is_empty() { continue; }
                     tag_insert
-                        .execute(params![file_id, trimmed])
+                        .execute(params![file_id, trimmed, score.map(|s| s as f64)])
                         .with_context(|| format!("tag insert for {}", path_text))?;
                 }
 

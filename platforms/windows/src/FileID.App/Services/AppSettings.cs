@@ -94,33 +94,37 @@ internal sealed class AppSettings
     /// + cuDNN if they prefer the BYO path.</summary>
     public bool DisableAutoInstallCudnn { get; set; } = false;
 
-    /// <summary>Default false (auto-install enabled). On engine-ready,
-    /// the MobileNetV3 scene classifier (~22 MB) is fetched silently so
-    /// Library tags include semantic labels ("Dog", "Beach", "Document")
-    /// on the first scan. Without this, tagging falls back to enriched-
-    /// extras only. True disables the auto-install; users can fall back
-    /// to the Library's manual "Install Scene Classifier" banner.</summary>
-    public bool DisableAutoInstallClassifier { get; set; } = false;
+    /// <summary>Default false (auto-install enabled). On engine-ready, the
+    /// SmolVLM weights (~700 MB) are fetched silently so the background
+    /// auto-tag pass has a model the first time the user scans — SmolVLM is
+    /// the smallest/fastest VLM and the default tagger. True disables the
+    /// auto-install (the model can still be installed from the Deep Analyze
+    /// tab's model picker).</summary>
+    public bool DisableAutoInstallSmolVlm { get; set; } = false;
 
     /// <summary>When true (the default), Deep Analyze is automatically
     /// chained after face clustering completes. Mirrors macOS's
     /// `autoPilotStage` advance from grouping → captioning. The chain
     /// is silently skipped if no VLM model is installed (the slot's
     /// status is checked at fire time, not at toggle time). Users can
-    /// opt out via Settings → "Automatically caption files after face
-    /// clustering".</summary>
+    /// opt out via Settings → "Tag automatically with AI after scans".</summary>
     public bool AutoChainDeepAnalyze { get; set; } = true;
 
     /// <summary>Persisted VLM model selection. Used by the auto-chain
-    /// after face clustering to pick which weights to caption with, and
-    /// by DeepAnalyzeView to remember the last manual choice across
-    /// launches. Accepted values mirror the engine's registry.rs ids
-    /// (qwen2_5_vl_3b, qwen2_5_vl_7b, gemma_3_4b, smolvlm); Sanitize()
-    /// coerces anything else to the safe default.</summary>
-    public string SelectedVlmModelKind { get; set; } = "qwen2_5_vl_3b";
+    /// after face clustering to pick which weights to tag with, and by
+    /// DeepAnalyzeView to remember the last manual choice across launches.
+    /// Accepted values mirror the engine's registry.rs ids (qwen2_5_vl_3b,
+    /// qwen2_5_vl_7b, gemma_3_4b, smolvlm); Sanitize() coerces anything else
+    /// to the safe default. Default is smolvlm — the smallest/fastest model,
+    /// auto-installed and used for the background auto-tag pass. The v1→v2
+    /// Sanitize migration flips existing users still on the OLD qwen2_5_vl_3b
+    /// default to smolvlm too.</summary>
+    public string SelectedVlmModelKind { get; set; } = "smolvlm";
 
-    /// <summary>Schema version of this settings.json. Bumped only on incompatible field renames.</summary>
-    public int SchemaVersion { get; set; } = 1;
+    /// <summary>Schema version of this settings.json. Fresh installs start at
+    /// the current version so one-time Sanitize migrations only ever touch
+    /// older files (and can't clobber a fresh user's first deliberate pick).</summary>
+    public int SchemaVersion { get; set; } = CurrentSchemaVersion;
 
     /// <summary>Whitelist of execution-provider tags the engine accepts.
     /// Matches the Rust ExecutionProvider enum in `runtime.rs`. Anything
@@ -162,8 +166,9 @@ internal sealed class AppSettings
     }
 
     /// <summary>Current schema version this build understands. Bumped only on
-    /// incompatible field renames. Sanitize() clamps loaded values to this.</summary>
-    private const int CurrentSchemaVersion = 1;
+    /// incompatible field renames or one-time value migrations. Sanitize()
+    /// clamps loaded values to this. v2: SmolVLM became the default tagger.</summary>
+    private const int CurrentSchemaVersion = 2;
 
     /// <summary>Defensive cleanup of fields a malicious settings.json
     /// could otherwise smuggle through. Currently scrubs the EP override
@@ -177,6 +182,19 @@ internal sealed class AppSettings
             DebugLog.Warn($"AppSettings: GpuExecutionProviderOverride '{v}' is not a recognized value; coercing to null (auto-detect).");
             s.GpuExecutionProviderOverride = null;
         }
+        // One-time migrations — run BEFORE the SchemaVersion clamp/advance so
+        // they observe the on-disk version.
+        // v1 → v2: SmolVLM became the default tagger. Flip users still on the
+        // OLD default (qwen2_5_vl_3b) to smolvlm; deliberate picks of other
+        // models (7b / gemma) are preserved. Almost every stored
+        // "qwen2_5_vl_3b" is the unchanged old default rather than a choice.
+        if (s.SchemaVersion < 2
+            && string.Equals(s.SelectedVlmModelKind, "qwen2_5_vl_3b", StringComparison.OrdinalIgnoreCase))
+        {
+            DebugLog.Info("AppSettings: migrating default VLM tagger qwen2_5_vl_3b → smolvlm (schema v2).");
+            s.SelectedVlmModelKind = "smolvlm";
+        }
+
         // clamp SchemaVersion to a known range. A corrupt or
         // malicious settings.json could otherwise set 999, and a future
         // migration path that branches on version could behave unsafely.
@@ -185,13 +203,20 @@ internal sealed class AppSettings
             DebugLog.Warn($"AppSettings: SchemaVersion {s.SchemaVersion} out of supported range [0, {CurrentSchemaVersion}]; coercing to {CurrentSchemaVersion}.");
             s.SchemaVersion = CurrentSchemaVersion;
         }
+        // Advance any older-but-in-range schema to current so the one-time
+        // migrations above don't re-run (which could clobber a later
+        // deliberate re-pick once it's persisted).
+        if (s.SchemaVersion < CurrentSchemaVersion)
+        {
+            s.SchemaVersion = CurrentSchemaVersion;
+        }
         // Bound other ranges defensively.
         if (string.IsNullOrWhiteSpace(s.ActiveTab)) s.ActiveTab = "library";
         if (string.IsNullOrWhiteSpace(s.LibraryKindFilter)) s.LibraryKindFilter = "all";
         if (string.IsNullOrWhiteSpace(s.SelectedVlmModelKind)
             || !AllowedVlmKinds.Contains(s.SelectedVlmModelKind))
         {
-            s.SelectedVlmModelKind = "qwen2_5_vl_3b";
+            s.SelectedVlmModelKind = "smolvlm";
         }
     }
 

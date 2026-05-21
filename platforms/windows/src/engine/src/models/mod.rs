@@ -19,13 +19,14 @@
 // pack detection) live in `runtime.rs`.
 
 pub mod arcface;
-pub mod classifier;
 pub mod clip_text;
 pub mod clip_tokenizer;
 pub mod mobileclip;
 pub mod registry;
 pub mod runtime;
+pub mod scene_vocab;
 pub mod scrfd;
 pub mod vlm;
+pub mod vlm_server;
 
 pub use clip_tokenizer::ClipTokenizer;

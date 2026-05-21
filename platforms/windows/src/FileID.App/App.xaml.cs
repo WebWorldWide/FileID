@@ -153,9 +153,14 @@ public partial class App : Application
             try { LlamaRuntimeAutoInstaller.Hook(); }
             catch (System.Exception ex) { Trace($"LlamaRuntimeAutoInstaller.Hook failed (non-fatal): {ex.Message}"); }
 
-            Trace("ClassifierAutoInstaller.Hook");
-            try { ClassifierAutoInstaller.Hook(); }
-            catch (System.Exception ex) { Trace($"ClassifierAutoInstaller.Hook failed (non-fatal): {ex.Message}"); }
+            Trace("SmolVlmAutoInstaller.Hook");
+            try { SmolVlmAutoInstaller.Hook(); }
+            catch (System.Exception ex) { Trace($"SmolVlmAutoInstaller.Hook failed (non-fatal): {ex.Message}"); }
+
+            // ClassifierAutoInstaller removed: scan-time scene tags now come
+            // from CLIP zero-shot (reusing the already-required MobileCLIP
+            // models), so the separate MobileNetV3 ImageNet classifier — and
+            // its silent ~22 MB "downloading for identifying" fetch — is gone.
 
             // CudnnAutoInstaller silent fetch removed. The ~430 MB
             // background download surprised users and added startup-time

@@ -178,8 +178,8 @@
                             Tag="smolvlm"
                             Tapped="OnModelCardTapped">
                         <StackPanel Spacing="6">
-                            <TextBlock Text="SmolVLM 256M" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                            <TextBlock Text="≈300 MB disk · 0.9 GB RAM · CPU-friendly"
+                            <TextBlock Text="SmolVLM 500M" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <TextBlock Text="≈700 MB disk · 0.9 GB RAM · CPU-friendly"
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             <TextBlock x:Name="SmolVlmStatus"

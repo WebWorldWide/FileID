@@ -171,7 +171,9 @@ Underlying `build-all.ps1` flags (use directly when you want finer control):
 | Flag | What it does |
 | --- | --- |
 | `-Wipe` | Full destructive wipe (Desktop + LocalAppData + build artifacts) |
-| `-Clean` | Wipe build artifacts only (preserves user data) |
+| `-Wipe -PreserveModels` | Full wipe **except** downloaded model weights — DB + logs + settings + sentinels cleared, no multi-GB re-download |
+| `-WipeDbOnly` | Lightest wipe — delete only `fileid.sqlite{,-wal,-shm}` for a fresh scan; keeps models, logs, settings, and build artifacts |
+| `-Clean` | Wipe build artifacts only (cargo + dotnet + `dist/`; preserves all user data) |
 | `-Desktop` | Stage to Desktop (implies `-Release`) |
 | `-Run` | Launch the app after build |
 | `-Release` | Release build (default for the unified script) |
@@ -181,6 +183,26 @@ Underlying `build-all.ps1` flags (use directly when you want finer control):
 | `-Arm64` | Cross-compile for ARM64 |
 | `-VlmNative` | Native llama.cpp bindings |
 | `-Sign -Thumbprint <hex>` | Authenticode-sign every binary |
+
+**The three iteration commands you'll reach for most** — run from the repo root in Windows Terminal. These assume PowerShell 7 (`pwsh`); on built-in Windows PowerShell 5.1 just drop the `pwsh` prefix and call `.\platforms\windows\build\build-all.ps1 …` directly. All three build **Debug** (engine + app) by default — add `-Release` for the slower self-contained build that ships, and `-Run` to launch the app when the build finishes.
+
+```powershell
+# 1. Build clean — clear build artifacts (cargo clean + dotnet clean + dist/),
+#    then a full from-scratch rebuild. Your library DB and downloaded models are
+#    left untouched. Use when a build is behaving stale or after switching branches.
+pwsh platforms\windows\build\build-all.ps1 -Clean
+
+# 2. Build + database wipe, keep models — incremental rebuild, then delete ONLY
+#    fileid.sqlite{,-wal,-shm} so the next launch re-scans and re-tags from scratch.
+#    Downloaded models (and logs/settings) survive, so nothing re-downloads.
+#    Close the app first: a running engine holds the SQLite file open.
+pwsh platforms\windows\build\build-all.ps1 -WipeDbOnly
+
+# 3. Just rebuild — fast incremental build of engine + app, no wipe of anything.
+pwsh platforms\windows\build\build-all.ps1
+```
+
+Examples with the optional add-ons: `... -Clean -Run` (clean rebuild then launch), `... -WipeDbOnly -Run` (fresh scan then launch), `... -Run` (rebuild then launch). Want the heavier "fresh install but don't re-download the multi-GB models" reset instead of just the DB? Use `-Wipe -PreserveModels`.
 
 **Release build (one downloadable installer for everyone):**
 

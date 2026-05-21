@@ -7,7 +7,10 @@
 
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Collections.Specialized;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using FileID.IpcSchema;
@@ -360,5 +363,254 @@ public class TagChipFormatTests
     public void FormatTag_KeepsMultiwordSpaceSeparatedTagsIntact()
     {
         Assert.Equal("Has Text", FileID.Theme.Controls.TagChip.FormatTag("Has Text"));
+    }
+}
+
+/// <summary>
+/// Unit tests for `FileTile.KindDisplay` / `ShowKindChip` / `HasChips` — the
+/// VM-side properties that drive the structured kind chip leading every
+/// Library card's chip row. Pure C# expressions, no UI thread needed.
+/// </summary>
+public class FileTileKindChipTests
+{
+    private static readonly string[] OneTag = { "Has Faces" };
+
+    private static FileTile Tile(string kind, IReadOnlyList<string>? tags = null) =>
+        new()
+        {
+            Id = 1,
+            Path = "C:/x.jpg",
+            FileName = "x.jpg",
+            Kind = kind,
+            SizeBytes = 0,
+            HasFaces = false,
+            HasText = false,
+            Tags = tags ?? Array.Empty<string>(),
+            TopTwoTags = tags ?? Array.Empty<string>(),
+        };
+
+    [Theory]
+    [InlineData("image", "Image")]
+    [InlineData("video", "Video")]
+    [InlineData("audio", "Audio")]
+    [InlineData("pdf", "PDF")]
+    [InlineData("doc", "Document")]
+    [InlineData("other", "File")]
+    [InlineData("unknown-kind-string", "File")]
+    public void KindDisplay_MatchesMacOSCapitalization(string kind, string expected)
+    {
+        Assert.Equal(expected, Tile(kind).KindDisplay);
+    }
+
+    [Theory]
+    [InlineData("image", true)]
+    [InlineData("video", true)]
+    [InlineData("audio", true)]
+    [InlineData("pdf", true)]
+    [InlineData("doc", true)]
+    [InlineData("other", false)]
+    public void ShowKindChip_SuppressesOnlyOtherKind(string kind, bool expected)
+    {
+        Assert.Equal(expected, Tile(kind).ShowKindChip);
+    }
+
+    [Fact]
+    public void HasChips_TrueWhenOnlyKindChipPresent()
+    {
+        Assert.True(Tile("image").HasChips);
+    }
+
+    [Fact]
+    public void HasChips_TrueWhenOnlyAutoTagsPresent()
+    {
+        Assert.True(Tile("other", OneTag).HasChips);
+    }
+
+    [Fact]
+    public void HasChips_FalseWhenOtherKindAndNoTags()
+    {
+        Assert.False(Tile("other").HasChips);
+    }
+}
+
+/// <summary>
+/// Recycle / shimmer contract for <see cref="FileTile"/> — the state behind
+/// the "thumbnails rendering from anything" fix. The real bitmap-release path
+/// (ClearThumbnailForRecycle nulling a live BitmapImage) needs a UI thread to
+/// allocate a BitmapImage, so it can't run headlessly; these guard the
+/// surrounding invariants that DON'T need one: shimmer visibility, the
+/// IsDetached write-guard, and that ClearThumbnailForRecycle is a safe no-op
+/// on an already-empty tile.
+/// </summary>
+public class FileTileThumbnailRecycleTests
+{
+    private static FileTile Tile() =>
+        new()
+        {
+            Id = 1,
+            Path = "C:/x.jpg",
+            FileName = "x.jpg",
+            Kind = "image",
+            SizeBytes = 0,
+            HasFaces = false,
+            HasText = false,
+        };
+
+    [Fact]
+    public void FreshTile_ShowsShimmer_NotFailed()
+    {
+        var t = Tile();
+        Assert.True(t.ShowShimmer);
+        Assert.False(t.HasThumbnail);
+        Assert.False(t.ThumbnailFailed);
+    }
+
+    [Fact]
+    public void ClearThumbnailForRecycle_OnEmptyTile_IsSafeNoOp()
+    {
+        var t = Tile();
+        var ex = Record.Exception(() => t.ClearThumbnailForRecycle());
+        Assert.Null(ex);
+        Assert.True(t.ShowShimmer);
+        Assert.False(t.HasThumbnail);
+    }
+
+    [Fact]
+    public void DetachedTile_IgnoresThumbnailFailedWrite()
+    {
+        // OnRepeaterElementClearing sets IsDetached = true after releasing the
+        // bitmap; a late LoadThumbAsync result must not flip ThumbnailFailed on
+        // the now-recycled tile. The setter's IsDetached guard enforces this.
+        var t = Tile();
+        t.IsDetached = true;
+        t.ThumbnailFailed = true;
+        Assert.False(t.ThumbnailFailed);
+    }
+
+    [Fact]
+    public void ThumbnailFailed_HidesShimmer_WhenAttached()
+    {
+        // Shimmer hands off to the broken-image placeholder once a load fails
+        // (ShowShimmer = thumbnail == null && !failed).
+        var t = Tile();
+        t.ThumbnailFailed = true;
+        Assert.True(t.ThumbnailFailed);
+        Assert.False(t.ShowShimmer);
+    }
+}
+
+/// <summary>
+/// Tests for <see cref="LibraryViewModel.MergeById"/> — the identity-stable
+/// collection merge that replaced ReplaceAll(Reset). Its whole purpose is to
+/// keep surviving FileTile instances (so their loaded Thumbnail persists across
+/// a mid-scan refresh) and emit only granular Add/Remove for real deltas. These
+/// run headlessly: MergeById is a static helper over a plain ObservableCollection.
+/// </summary>
+public class LibraryMergeTests
+{
+    // static readonly (not an inline array literal at the call site) per CA1861.
+    private static readonly string[] DogTag = { "dog" };
+
+    private static FileTile Tile(long id, string? proposed = null, IReadOnlyList<string>? tags = null) =>
+        new()
+        {
+            Id = id,
+            Path = $"C:/{id}.jpg",
+            FileName = $"{id}.jpg",
+            Kind = "image",
+            SizeBytes = 0,
+            HasFaces = false,
+            HasText = false,
+            Tags = tags ?? Array.Empty<string>(),
+            TopTwoTags = tags ?? Array.Empty<string>(),
+            ProposedName = proposed,
+        };
+
+    [Fact]
+    public void MergeById_EmptyTarget_AddsAll()
+    {
+        var items = new ObservableCollection<FileTile>();
+        LibraryViewModel.MergeById(items, new[] { Tile(1), Tile(2), Tile(3) });
+        Assert.Equal(new long[] { 1, 2, 3 }, items.Select(t => t.Id).ToArray());
+    }
+
+    [Fact]
+    public void MergeById_SameIds_KeepsExistingInstances()
+    {
+        var a = Tile(1);
+        var b = Tile(2);
+        var items = new ObservableCollection<FileTile> { a, b };
+        // Fresh instances with the same Ids (what RefreshAsync produces).
+        LibraryViewModel.MergeById(items, new[] { Tile(1), Tile(2) });
+        Assert.Same(a, items[0]);
+        Assert.Same(b, items[1]);
+    }
+
+    [Fact]
+    public void MergeById_MergesMutableFields_AndPreservesSelection()
+    {
+        var a = Tile(1);
+        a.IsSelected = true;
+        var items = new ObservableCollection<FileTile> { a };
+        LibraryViewModel.MergeById(items, new[] { Tile(1, proposed: "new-name", tags: DogTag) });
+        Assert.Same(a, items[0]);
+        Assert.Equal("new-name", items[0].ProposedName);
+        Assert.Equal(DogTag, items[0].Tags);
+        Assert.True(items[0].IsSelected, "selection must survive a merge");
+    }
+
+    [Fact]
+    public void MergeById_RemovesGoneRows()
+    {
+        var items = new ObservableCollection<FileTile> { Tile(1), Tile(2), Tile(3) };
+        LibraryViewModel.MergeById(items, new[] { Tile(1), Tile(3) });
+        Assert.Equal(new long[] { 1, 3 }, items.Select(t => t.Id).ToArray());
+    }
+
+    [Fact]
+    public void MergeById_InsertsNewRows_AtTargetIndex()
+    {
+        var a = Tile(1);
+        var c = Tile(3);
+        var items = new ObservableCollection<FileTile> { a, c };
+        LibraryViewModel.MergeById(items, new[] { Tile(1), Tile(2), Tile(3) });
+        Assert.Equal(new long[] { 1, 2, 3 }, items.Select(t => t.Id).ToArray());
+        Assert.Same(a, items[0]);
+        Assert.Same(c, items[2]);
+    }
+
+    [Fact]
+    public void MergeById_Prepend_KeepsOldInstancesShiftedDown()
+    {
+        var old1 = Tile(1);
+        var old2 = Tile(2);
+        var items = new ObservableCollection<FileTile> { old1, old2 };
+        // Two newer rows prepended (recent-first), olds shift down.
+        LibraryViewModel.MergeById(items, new[] { Tile(4), Tile(3), Tile(1), Tile(2) });
+        Assert.Equal(new long[] { 4, 3, 1, 2 }, items.Select(t => t.Id).ToArray());
+        Assert.Same(old1, items[2]);
+        Assert.Same(old2, items[3]);
+    }
+
+    [Fact]
+    public void MergeById_Reorder_EmitsNoMoveEvents_FinalOrderCorrect()
+    {
+        var items = new ObservableCollection<FileTile> { Tile(1), Tile(2), Tile(3) };
+        var actions = new List<NotifyCollectionChangedAction>();
+        items.CollectionChanged += (_, e) => actions.Add(e.Action);
+        LibraryViewModel.MergeById(items, new[] { Tile(3), Tile(2), Tile(1) });
+        Assert.Equal(new long[] { 3, 2, 1 }, items.Select(t => t.Id).ToArray());
+        Assert.DoesNotContain(NotifyCollectionChangedAction.Move, actions);
+    }
+
+    [Fact]
+    public void MergeById_UnchangedList_EmitsNoStructuralEvents()
+    {
+        var items = new ObservableCollection<FileTile> { Tile(1), Tile(2), Tile(3) };
+        int events = 0;
+        items.CollectionChanged += (_, _) => events++;
+        // Same Ids, same order, no field changes → nothing structural fires.
+        LibraryViewModel.MergeById(items, new[] { Tile(1), Tile(2), Tile(3) });
+        Assert.Equal(0, events);
     }
 }

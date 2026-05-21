@@ -47,7 +47,8 @@ public sealed record DeepAnalyzeFolderCommand(
 
 public sealed record DeepAnalyzeAllCommand(
     string ModelKind,
-    bool SkipExisting) : CommandPayload;
+    bool SkipExisting,
+    bool TagsOnly = false) : CommandPayload;
 
 public sealed record DeepAnalyzeCancelCommand : CommandPayload;
 

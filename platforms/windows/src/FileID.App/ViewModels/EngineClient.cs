@@ -1060,8 +1060,11 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 return;
             }
             var modelKind = settings.SelectedVlmModelKind;
-            Services.DebugLog.Info($"Auto-chaining Deep Analyze after face clustering complete. model={modelKind}");
-            await DeepAnalyzeAllAsync(modelKind, skipExisting: true).ConfigureAwait(false);
+            Services.DebugLog.Info($"Auto-chaining Deep Analyze after face clustering complete. model={modelKind} (tags-only)");
+            // tagsOnly: the background auto-pass only needs the chip tags (one
+            // VLM call/file → ~3× faster than caption+rename+tags). The user can
+            // still run a full manual pass from the Deep Analyze tab.
+            await DeepAnalyzeAllAsync(modelKind, skipExisting: true, tagsOnly: true).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

@@ -7,6 +7,340 @@
 
 ---
 
+## 2026-05-21 — Tile height via SizeChanged, not an ActualWidth self-binding
+
+**Context**: Library thumbnails decoded + were assigned to tiles (logs proved it)
+but the image area rendered blank — across ~5 prior "thumbnail" fixes. Root
+cause was finally isolated to layout, not rendering: `TileRoot` set
+`Height="{Binding ActualWidth, RelativeSource=Self, Converter=IdentityDouble, ConverterParameter=68}"`
+to make the tile square (image + 68px caption). But `FrameworkElement.ActualWidth`
+is **not a dependency property** and raises no change notification, so the OneWay
+binding read its value once *before* layout (0) → `0+68=68` → the `*` image row
+collapsed to ~0 while the fixed 68px caption row still showed, and it never
+re-fired after arrange computed the real width. The earlier tile-root opacity bug
+masked it (whole tile invisible); once that was fixed the collapsed row showed.
+
+**Decision**: Remove the self-binding; set `Height = width + 68` from a
+`SizeChanged` handler (`OnTileSizeChanged`), guarded with `Math.Abs(h-target)>0.5`
+to break the set→SizeChanged feedback loop. `SizeChanged` fires post-arrange with
+the real width and again on column resize — exactly what the non-observable
+`ActualWidth` binding could not do. Bonus robustness: even if `SizeChanged` never
+fired, simply *removing* the bad binding lets `UniformGridLayout`'s
+`MinItemHeight=248` give the image row ~180px, so the row no longer collapses.
+Alternatives rejected: making a custom attached DP that mirrors ActualWidth
+(more machinery for the same effect); a `ViewBox` (distorts UniformToFill +
+breaks the fixed caption row). `IdentityDoubleConverter` is left in the resource
+dict (harmless) but is now unused.
+
+## 2026-05-21 — VLM runtime sanity floor 3 MB → 20 KB; try the server before requiring the CLI binary
+
+**Context**: Deep Analyze showed "runtime too old / missing llama-mtmd-cli.exe"
+even though b9254 was correctly installed (mtmd-cli 89 KB, server, mtmd.dll all
+present). `vlm.rs::sanity_check_binary` required **3 MB–200 MB**; modern llama.cpp
+ships a thin ~89 KB launcher (the heavy code lives in `mtmd.dll`/`ggml*.dll`), so
+the floor rejected a valid binary → `VlmRunner::find()` reported "missing" → the
+toast. Because `run_deep_analyze_batch` called `find()` *before* trying the
+persistent server, the bogus CLI-check failure blocked BOTH the CLI and the
+server paths (the server only needs `llama-server.exe`).
+
+**Decision**: Lower the floor to **20 KB** (still catches truncated/empty
+downloads; the `--version` probe still catches missing DLLs). And resolve both
+backends up front, then try the persistent server first; require the CLI binary
+only when the server can't start. Critically, keep the "runtime missing" error
+*before* sending `DeepAnalyzeStarting`: the client's `Error` handler does not
+reset `DeepAnalyze*` state, so emitting `Starting` then `Error` would strand the
+UI on a "Loading model…" banner. `find()` (a cheap `--version` probe) +
+`find_weights` (file existence) are both cheap enough to run before `Starting`.
+
+## 2026-05-21 — SmolVLM is the Windows default tagger; auto-tag runs tags-only
+
+**Context**: CLIP zero-shot scene tags were too sparse to be useful (cards showed
+only the year at cosine threshold 0.24). The user chose to "pursue the very small
+LLM route" with SmolVLM, auto-running after scans, keeping CLIP as a placeholder.
+
+**Decision**: (1) `AppSettings.SelectedVlmModelKind` defaults to `smolvlm`, with a
+one-time settings **schema v1→v2 migration** that flips existing users still on
+the old `qwen2_5_vl_3b` default (the user's own settings.json had exactly that) —
+deliberate 7B/Gemma picks are preserved; fresh installs start at v2 so the
+migration can't clobber a first deliberate re-pick. (2) A `SmolVlmAutoInstaller`
+(mirroring `LlamaRuntimeAutoInstaller`) silently prewarms SmolVLM at engine-ready;
+opt-out `DisableAutoInstallSmolVlm`. (3) `ModelInstallerService` (the welcome-sheet
+VLM slot + `UpdateVlmRecommendation`) is pinned to SmolVLM universally on Windows
+— rejecting the macOS RAM-tiered Qwen-on-8GB+ default — so Welcome auto-install
+never pulls a redundant ~1.65 GB Qwen that nothing uses by default; Qwen 3B/7B +
+Gemma stay available from the Deep Analyze model picker. (4) The auto-chain pass
+uses a new `AnalyzeMode::TagsOnly` (one VLM call/file vs three) plumbed via an
+additive `tags_only: bool` IPC field (Rust `#[serde(default)]`, C# defaulted
+record param, schema optional) — ~3× faster for a whole-library pass; the manual
+Deep Analyze pass stays `Both` (full caption + rename + tags). (5) CLIP
+`SCENE_COSINE_THRESHOLD` 0.24 → 0.18 so the placeholder shows real chips during
+the scan; VLM (`source='vlm'`) tags supersede them via ReadStore's tag ordering.
+This is a deliberate Windows divergence from the macOS Qwen default, justified by
+the user's explicit "accuracy via a tiny VLM" directive.
+
+## 2026-05-20 — Library refreshes via an identity-stable merge, not ReplaceAll(Reset)
+
+**Context**: During a scan the engine emits `LastBatch` ~1 Hz; the Library
+reloaded by calling `BatchObservableCollection.ReplaceAll`, which raises a single
+`NotifyCollectionChangedAction.Reset`. ItemsRepeater treats Reset as "throw away
+every realized element and re-realize from scratch" — against brand-new
+`FileTile` instances whose `Thumbnail` is null. So every visible thumbnail was
+nulled and re-loaded each second, racing the next reset; thumbnails never
+persisted (the "blank tiles during scan" report; `app.log` showed thousands of
+`TILE_THUMBNAIL_ASSIGNED` with zero `IMAGE_OPENED`). macOS doesn't blank because
+SwiftUI diffs `rows` by `FileRow.id` and keeps each on-screen tile's loaded
+thumbnail.
+
+**Decision**: `LibraryViewModel.MergeById` reconciles the collection in place,
+keyed by `FileTile.Id` — surviving Ids keep their existing instance (and its
+loaded `Thumbnail`) and absorb only mutable display fields via
+`MergeMutableFrom`; gone Ids are removed; new Ids inserted at their target index;
+reorders use Remove+Insert (never a `Move` event — ItemsRepeater handles Move
+poorly). This required making `Tags`/`TopTwoTags`/`ProposedName`/`HasFaces`/
+`HasText` change-guarded settable. A fully-disjoint result (a brand-new search)
+falls back to `ReplaceAll` for one cheap Reset instead of remove-all+insert-all.
+Alternatives rejected: (a) keep ReplaceAll but carry bitmaps across the Reset by
+Id — stops the blank but leaves the per-second full re-realize (layout churn)
+and a latent selection-clear; (b) Move events — flaky on ItemsRepeater. As a
+bonus the merge fixed a latent bug where mid-scan refreshes silently cleared
+selection (each Reset rebuilt `_selected` from fresh, unselected instances).
+
+## 2026-05-20 — Scene tags threshold on raw cosine similarity, not softmax probability
+
+**Context**: CLIP zero-shot tagging was ~10% accurate ("worthless") — a video
+keyframe tagged "Museum/Classroom", snapshots "Storm/Diagram". Root cause:
+`scene_vocab.rs::score_labels` scaled cosine by temperature 100, softmaxed over
+164 labels, and thresholded the **softmax probability** at 0.12. A temp-100
+softmax is razor-peaky, so the single top label scored ~0.99 even when its true
+cosine was mediocre, and 0.12 (≈20× the 1/164 uniform) was trivially cleared by
+the argmax of *every* image → a confident wrong tag on everything. The image and
+text towers are the same `Xenova/mobileclip_s2` export (shared 512-d space), so a
+tower mismatch was ruled out — the embeddings were fine, the scoring was wrong.
+
+**Decision**: threshold the **raw cosine** (dot product of the two L2-normalized
+vectors) directly — `SCENE_COSINE_THRESHOLD = 0.24` — emit the top-K labels above
+it, drop the softmax entirely, and persist the cosine as `tags.score`. This is
+the standard CLIP zero-shot deployment: a no-match image emits NOTHING rather
+than a confident wrong label, and the persisted cosine makes the threshold
+data-tunable. The vocabulary is the secondary lever. (Separately, the user opted
+for a VLM background-tagging upgrade on top of this — Track 3 — for higher
+accuracy on demand; CLIP stays the fast scan-time default.)
+
+## 2026-05-20 — SCRFD outputs are classified by shape, not output position
+
+**Context**: Face detection found zero faces on Windows (`engine.jsonl` full of
+`SCRFD bbox/kps tensor undersized — skipping stride`). `scrfd.rs::detect`
+assumed the 9 ONNX outputs were ordered `[score,bbox,kps]` interleaved per
+stride and indexed them positionally (`outputs[base+0/1/2]`). The actual export
+groups by type (`[score_8,score_16,score_32, bbox_8,…, kps_8,…]`), so each stride
+read the wrong tensor, every size check failed, and detection silently returned
+empty.
+
+**Decision**: identify each output by its **shape** — the last-dim channel count
+is 1 (score), 4 (bbox), or 10 (kps = 5 landmarks × 2) — and group by anchor count
+(rows), whose three distinct values sorted descending map to strides [8,16,32].
+Robust to output ordering AND naming, both of which vary across SCRFD exports.
+The decode math (`decode_scrfd_stride`) is unchanged; only tensor *selection* was
+wrong. Rejected: matching by output name (export-specific) or bumping to a
+specific re-exported ONNX (unnecessary — the model was fine).
+
+## 2026-05-20 — Library tile entrance is scale-only; the tile-root opacity is never animated
+
+**Context**: macOS `LibraryView.swift` reveals tiles with
+`.transition(.opacity.combined(with: .scale(scale: 0.96)))`. The Windows port
+mapped this 1:1 onto the realized element's **composition** visual: set
+`Opacity = 0` + `Scale = 0.96`, then spring both to 1 in
+`AnimateTileEntry`. That opacity animation turned out to be a recurring,
+hard-to-see defect. `ItemsRepeater` re-realizes elements on every collection
+Reset, and the throttled mid-scan Library refresh raises a Reset ~1 Hz, so a
+spring that hasn't settled gets `StopAnimation`'d and re-seeded at 0 on the
+next prepare. Under sustained churn the tile root — which parents the
+thumbnail, the filename, AND the tag chips — could be stranded at Opacity 0
+indefinitely. Two prior sessions chased the same forensic signature (many
+`TILE_THUMBNAIL_ASSIGNED`, zero `IMAGE_OPENED`): V16.5b fixed an *image*-level
+opacity pin in the clearing handler but missed the tile-*root* spring in the
+entry handler.
+
+**Decision: do not animate the tile-root opacity at all.** It is pinned to 1
+on every `ElementPrepared`. The entrance keeps only the **scale** half of the
+macOS transition (0.96 → 1, Tight spring 0.35/0.78), which is still a real
+spring (preserves the motion language) but can never hide content — a tile
+stranded at scale 0.96 is fully legible. The pop is gated to once per element
+instance via a `ConditionalWeakTable<UIElement,object>` so it doesn't replay on
+every Reset and pulse the whole grid during a scan.
+
+**Alternatives rejected**: (a) keep the opacity spring but snap to 1 via a
+`CompositionScopedBatch.Completed` — a *stopped* (interrupted) animation
+doesn't reliably raise the batch completion, so the strand-at-0 case survives;
+(b) drive opacity through the XAML `UIElement.Opacity` DP instead of the
+composition visual — it fights a composition animation on the same property and
+the interaction is murky. Correctness (the user could not see ANY tile content)
+outweighs a 1:1 opacity-fade port. The hover scale spring and LavaLamp are
+untouched, so the "springs everywhere" language is preserved.
+
+## 2026-05-20 — Tab-swap builds the incoming view lazily, inside the fade-out completion
+
+**Context**: `DetailHostView.Sync` content-swaps tab views with a two-phase
+opacity crossfade. It used to construct the incoming view **up front** (before
+`sbOut.Begin()`). Because each tab view subscribes to
+`EngineClient.PropertyChanged` in its constructor and only unsubscribes in
+`Unloaded`, a rapid second tab click — which `Stop()`s the in-flight storyboard,
+so its `Completed` never fires — left the first view built-but-never-mounted:
+never `Loaded`, never `Unloaded`, never unsubscribed. It became a zombie that
+kept reacting to engine events (re-querying a `ReadStore` for a tab the user
+never sees) and a contributor to the intermittent tab-switch fast-fail.
+
+**Decision: build the incoming view lazily inside `sbOut.Completed`**, guarded
+by `ReferenceEquals(_activeStoryboard, sbOut)`, and commit the swap through one
+synchronous helper (`CommitChild`) that disposes/clears the outgoing view (so
+its `Unloaded` runs and it unsubscribes) before adding the new one. A superseded
+swap now constructs nothing, so there is no zombie to leak. Paired with a
+`_unloaded` guard on `LibraryView.LoadThumbAsync`'s UI continuation so a
+thumbnail resolving after a tab switch can't touch torn-down composition
+visuals. The crossfade timing (110 ms × 2, matching macOS) is unchanged.
+
+## 2026-05-19 — V16.5 CLIP zero-shot scene tagging replaces the ImageNet classifier
+
+**Context**: Scan-time tags were "horrible / nothing like macOS." macOS uses
+Apple Vision's scene taxonomy; the Windows port had no OS equivalent and used
+a MobileNetV3 ImageNet-1k classifier whose argmax labels are object-specific
+(`breakwater`, `radio telescope`) — the wrong taxonomy for "what's in this
+photo" chips. V16.4 only lowered its threshold.
+
+**Decision: CLIP zero-shot, not a tiny VLM or a downloaded scene model.** The
+engine already computes a MobileCLIP-S2 image embedding per file and already
+installs the matched MobileCLIP-S2 text encoder (for search). So we score the
+image embedding against a curated ~170-label scene vocabulary embedded by the
+text encoder (cosine → softmax temp 100 → threshold 0.12 → top-4).
+Alternatives rejected: a tiny VLM (e.g. SmolVLM) gives similar labels but at
+~1–3 s/file, blowing the ≥140 files/s bar; a Places365 ONNX classifier
+doesn't exist in MobileNet form on HF and would add a download. CLIP zero-shot
+is *more accurate* than ImageNet (scene taxonomy), *faster* than before
+(removes an ONNX inference + a 224×224 resize, replaced by an [N×512] mat-vec
++ softmax on an embedding already in hand), and needs **no new download** —
+directly resolving the user's "downloading something for identifying"
+complaint. The vocabulary ships as a `static` in the binary (no network
+surface; satisfies the privacy/binary-scan gate). The label matrix is built
+once per launch and the text session dropped after; the batched
+`ClipText::embed_batch` assumes the export has a dynamic batch axis (true for
+the Xenova MobileCLIP-S2 ONNX — flagged for live-fire verification). Accuracy
+now hinges on vocabulary + prompt ensembling + threshold, which is why score
+persistence (`tags.score`, no migration — column already existed) and a force
+re-tag affordance shipped in the same change: tune against real data, not
+guesses. The MobileNetV3 classifier (engine module + registry arm; .NET
+auto-installer, install slot, Library banner, Settings diagnostic) was
+**deleted** rather than kept as a fallback — two scene taggers is dead weight,
+and the classifier was the worse one.
+
+**Thumbnail recycle**: `OnRepeaterElementClearing` now nulls `tile.Thumbnail`
+(via `ClearThumbnailForRecycle`, which bypasses the `IsDetached` setter guard)
+*before* detaching, so a recycled `ItemsRepeater` element can't flash the
+previous file's bitmap through its `Source="{x:Bind Thumbnail}"` binding — and
+off-screen tiles release their bitmaps (bounds memory on large libraries).
+Mirrors macOS's release-on-recycle; the L1 cache makes the reload on
+re-prepare a dictionary hit.
+
+**People double-tap**: added an `ElementPrepared` index→DataContext bridge
+(same shape as Library's V16.4 fix) so `OnClusterDoubleTapped`'s
+`el.DataContext is PersonCluster` check resolves — it had no Tag fallback, so
+double-tap silently no-opped under x:Bind. The drag/drop handlers already had
+a `Tag`-based fallback and kept working; this makes the DataContext branch
+live for all three.
+
+## 2026-05-19 — V16.4 bridge x:Bind→DataContext for repeater code-behind; lower classifier threshold
+
+**Context**: After V16.3, thumbnails still never rendered and tagging was
+still sparse. Log + DB forensics (read-only) located both root causes in
+layers no prior fix had touched.
+
+**1. Set `el.DataContext` in the ItemsRepeater prepared handler to bridge
+x:Bind templates to code-behind.** The Library card template uses
+`x:Bind`, which binds via generated code and does **not** populate the
+realized element's `DataContext`. Four code-behind handlers
+(`OnRepeaterElementPrepared/Clearing`, `OnTileTapped`, `OnTileDragStarting`)
+guarded on `el.DataContext is not FileTile` and so returned on every tile
+— `LoadThumbAsync` (the only caller of `ThumbnailService.RequestAsync`)
+never ran, which is why no thumbnail had rendered in any session (L2 disk
+cache empty) despite five rounds of fallback-chain patches. Fix:
+`OnRepeaterElementPrepared` resolves the tile from the authoritative
+`args.Index` against `ViewModel.Items`, then assigns `el.DataContext =
+tile`. This is the minimal bridge — the three sibling handlers need no
+change because DataContext is now populated before they run. Chose this
+over rewriting each handler to call `ItemsRepeater.GetElementIndex` (more
+sites, and `GetElementIndex` is unreliable mid-clearing). A `[THUMB]
+PREPARE` diagnostic line was added so the next run confirms the
+DataContext-null hypothesis empirically.
+
+**2. Lower `CLASSIFIER_THRESHOLD` 0.30 → 0.20.** A live 3.3K-photo scan
+showed 66% of files cleared zero scene labels at 0.30: MobileNetV3 on
+ImageNet-1k produces a diffuse softmax on out-of-distribution personal
+photos, so a single class rarely passes 0.30. The directive set 0.30 but
+sanctioned tuning; 0.20 recovers coverage at the cost of some
+lower-confidence guesses. macOS Vision used 0.30, but its scene taxonomy
+fits personal photos far better than ImageNet-1k, so the floors aren't
+directly comparable.
+
+**Deferred (NEXT.md)**: persisting classifier confidence into
+`tags.score` (type ripple, no user-visible effect this round) and the
+Places365 scene-model swap (the real relevance fix, but no MobileNet
+ONNX on HF + a model-hosting question). The honest framing: lowering the
+threshold improves *coverage* but not *relevance* — ImageNet labels stay
+object-specific. Places365 is the relevance fix and is the recommended
+next step if the user wants `beach`/`kitchen`-style tags.
+
+---
+
+## 2026-05-19 — V16.3 file-type chip, broken-image placeholder, video COM init
+
+**Context**: Follow-up on the "four problems" directive. Three non-obvious
+calls in this session.
+
+**1. File-type chip AND icon badge both ship (not either/or).** V16.2
+added a kind icon badge in the thumbnail's top-left corner; the directive
+asked for a gray text chip leading the caption chip row. Rather than
+replace one with the other, both ship: the badge is glanceable while
+scanning a grid of thumbnails, the chip is text-readable in the caption
+strip and sits in the same visual register as the AI tag chips it leads.
+Implemented via a `Variant` DP on the existing `TagChip` control
+(`Auto` = gold AI tag, `Kind` = gray structured metadata) rather than a
+new control, so the brush-caching hot-path discipline (CLAUDE.md line 91)
+stays in one place. Chip suppressed for `Kind == "other"` so unknown
+files don't get a meaningless "File" chip.
+
+**2. Broken-image placeholder is procedural, not an asset PNG.** V15.5
+NEXT.md proposed an `Assets/PreviewUnavailable.png`. Shipped a XAML
+`FontIcon` (Segoe Fluent `&#xE91F;`) instead — no binary asset to author,
+register in the csproj, or ship per-DPI, and it matches the in-XAML
+pattern V16.2 already uses for the kind badge. Gated on a new
+`ThumbnailFailed` VM flag distinct from `Thumbnail == null` so "render
+failed" and "still loading" are separate states; the shimmer binding
+moved to a derived `ShowShimmer` (`Thumbnail == null && !ThumbnailFailed`)
+so the two never show at once.
+
+**3. Video keyframe COM init is MTA, lazy, thread-local, no uninit.**
+`keyframe_25pct` now does `CoInitializeEx(COINIT_MULTITHREADED)` per
+thread before the MF calls. MTA (not the STA the shell modules use)
+because Media Foundation's source reader is MTA-designed and the decoder
+threads don't pump a message loop; `RPC_E_CHANGED_MODE` on a thread
+already init as STA is tolerated (MF still works). Lazy thread-local
+guard rather than init-at-spawn because decoder threads that only ever
+process images never need COM. No matching `CoUninitialize`: the threads
+live for the whole scan and process exit cleans up — same posture as the
+long-lived shell worker threads. WinRT `BitmapDecoder` (HEIC path, same
+decoder threads) is agile/MTA-safe, so no STA/MTA conflict.
+
+**Alternatives rejected**:
+- A dedicated `KindChip` control (rather than a `Variant` on `TagChip`):
+  would duplicate the static brush-cache + `FormatTag` logic.
+- Plumbing video `durationSeconds` through DB + IPC for an `mm:ss`
+  overlay: 7-layer change for an optional polish item; deferred to a
+  NEXT.md follow-up.
+- An IPC `classifierLoaded` field for the Settings diagnostic: the C#
+  disk-probe (sentinel + labels-line-count) is sufficient and avoids
+  schema churn; the engine already logs `[CLASSIFIER] warmup complete`.
+
+---
+
 ## 2026-05-18 — V16.0 batch CLIP is now default-on (env var inverted to kill-switch)
 
 **Context**: User-observed scan rate of 0.04 files/sec on RTX 2060 / Ryzen 5

@@ -224,7 +224,7 @@ public sealed partial class DeepAnalyzeView : UserControl
         ActiveModelText.Text = _activeModel switch
         {
             "qwen2_5_vl_7b" => "Active model: Qwen 2.5-VL 7B (best quality)",
-            "smolvlm" => "Active model: SmolVLM 256M (fastest)",
+            "smolvlm" => "Active model: SmolVLM 500M (fastest)",
             _ => "Active model: Qwen 2.5-VL 3B (balanced)",
         };
     }
@@ -519,7 +519,9 @@ public sealed partial class DeepAnalyzeView : UserControl
     {
         try
         {
-            await EngineClient.Instance.DeepAnalyzeAllAsync(_activeModel, SkipExistingToggle.IsOn);
+            // Manual pass = full enrichment (caption + smart-rename + tags), so
+            // tagsOnly stays false. The background auto-pass uses tagsOnly:true.
+            await EngineClient.Instance.DeepAnalyzeAllAsync(_activeModel, SkipExistingToggle.IsOn, tagsOnly: false);
             StreamCard.Visibility = Visibility.Visible;
             CancelButton.IsEnabled = true;
         }

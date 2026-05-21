@@ -5,6 +5,7 @@
 // and the video preview sheet has a placeholder.
 
 use anyhow::{Context, Result};
+use std::cell::Cell;
 use std::path::Path;
 use std::sync::Once;
 
@@ -23,9 +24,37 @@ use windows::Win32::Media::MediaFoundation::{
 const READF_ENDOFSTREAM: u32 = 0x00000002;
 const READF_NEWSTREAM: u32 = 0x00000004;
 const READF_CURRENTMEDIATYPECHANGED: u32 = 0x00000010;
+use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 use windows::Win32::System::Com::StructuredStorage::PropVariantClear;
 
 static MF_INIT: Once = Once::new();
+
+thread_local! {
+    static COM_INIT: Cell<bool> = const { Cell::new(false) };
+}
+
+/// COM must be initialized on every thread that drives the MF source
+/// reader. The decoder pool spawns raw OS threads (`run_decoder_thread`)
+/// and Deep Analyze runs keyframe extraction on tokio blocking-pool
+/// threads — neither inherits the COM apartment of the thread that first
+/// called `MFStartup`. Without this, `MFCreateSourceReaderFromURL` fails
+/// with CO_E_NOTINITIALIZED on every thread but the one that won the
+/// `MF_INIT` race. Mirrors the per-thread `CoInitializeEx` the other
+/// `shell::*` modules (trash / thumbnail / tags / reveal) already do.
+/// MTA because these worker threads don't pump a message loop;
+/// RPC_E_CHANGED_MODE (a thread already init as STA) is fine — MF still
+/// works, we just don't own the apartment. No matching `CoUninitialize`:
+/// the threads live for the scan and process exit cleans up.
+fn ensure_com_initialized() {
+    COM_INIT.with(|flag| {
+        if !flag.get() {
+            unsafe {
+                let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            }
+            flag.set(true);
+        }
+    });
+}
 
 fn ensure_mf_started() {
     MF_INIT.call_once(|| unsafe {
@@ -47,6 +76,7 @@ pub struct VideoFrame {
 
 /// Extract a frame at 25% of duration. Returns the frame as RGB8.
 pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
+    ensure_com_initialized();
     ensure_mf_started();
 
     let path_str = path.to_str().context("video path must be UTF-8")?;

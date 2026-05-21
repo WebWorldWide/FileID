@@ -26,6 +26,14 @@ pub const CAPTION_PROMPT: &str = "Describe this image in one detailed sentence f
 /// suitable for `sanitize_proposed_name`.
 pub const RENAME_PROMPT: &str = "Suggest a 3 to 5 word lowercase filename for this image, separated by hyphens, no quotes, no extension.";
 
+/// Tagging prompt — produces a short comma-separated list of scene/content
+/// tags. Parsed by `deep_analyze::parse_vlm_tags` into individual `source='vlm'`
+/// tags shown as Library chips. This is the VLM equivalent of the CLIP
+/// zero-shot scene tags (and is intended to replace them if the user opts to
+/// drop CLIP): a real vision-language model describes what's actually in the
+/// image instead of scoring against a fixed vocabulary.
+pub const TAG_PROMPT: &str = "List 3 to 6 short lowercase tags for the main subjects, setting, and any prominent objects or text in this image. One or two words each, comma-separated, no sentences, no numbering.";
+
 #[derive(Debug)]
 pub struct VlmRunner {
     pub binary: PathBuf,
@@ -53,20 +61,42 @@ impl VlmRunner {
     /// callers surface that to the user as "VLM runtime not installed".
     pub fn find() -> Result<Self> {
         let root = crate::paths::models_dir().context("resolving Models dir")?;
-        let llama_dir = root.join("llama.cpp");
-        let candidates = [
-            llama_dir.join("llama-mtmd-cli.exe"),
-            llama_dir.join("bin").join("llama-mtmd-cli.exe"),
-        ];
-        for cand in candidates {
-            if cand.exists() {
-                sanity_check_binary(&cand)?;
-                return Ok(VlmRunner { binary: cand });
+        let vulkan_dir = root.join("llama.cpp");
+        let cuda_dir = root.join("llama.cpp-cuda");
+        // Prefer the CUDA runtime (faster on NVIDIA) when it has the multimodal
+        // binary AND it actually launches; otherwise the universal Vulkan
+        // runtime. `sanity_check_binary` runs `--version`, so a CUDA build
+        // missing its runtime DLLs fails the probe and we fall through to Vulkan
+        // instead of erroring.
+        for dir in [&cuda_dir, &vulkan_dir] {
+            for cand in [
+                dir.join("llama-mtmd-cli.exe"),
+                dir.join("bin").join("llama-mtmd-cli.exe"),
+            ] {
+                if cand.exists() && sanity_check_binary(&cand).is_ok() {
+                    return Ok(VlmRunner { binary: cand });
+                }
             }
+        }
+        // Distinguish "not installed at all" from "installed but too old".
+        // Pre-mtmd-unification llama.cpp builds (≈b4400 and earlier) ship
+        // llama-server.exe / llama-llava-cli.exe / llama-qwen2vl-cli.exe but
+        // NOT the unified llama-mtmd-cli.exe this code drives — and they also
+        // predate Qwen2.5-VL. Emit an accurate, actionable message rather than
+        // the misleading "runtime not found" when a stale runtime is present.
+        if vulkan_dir.join("llama-server.exe").exists()
+            || vulkan_dir.join("llama-cli.exe").exists()
+            || cuda_dir.join("llama-server.exe").exists()
+        {
+            bail!(
+                "The installed llama.cpp runtime is too old for image analysis \
+                 (missing llama-mtmd-cli.exe, and pre-Qwen2.5-VL). Update it from \
+                 Settings -> Performance -> 'Install llama.cpp runtime'."
+            )
         }
         bail!(
             "llama.cpp runtime not found under {}. Install it from Settings -> Performance -> 'Install llama.cpp runtime'.",
-            llama_dir.display()
+            vulkan_dir.display()
         )
     }
 }
@@ -89,9 +119,14 @@ pub fn find_weights(model_kind: &str) -> Option<(PathBuf, PathBuf)> {
 fn sanity_check_binary(p: &PathBuf) -> Result<()> {
     let meta = std::fs::metadata(p).with_context(|| format!("stat {}", p.display()))?;
     let len = meta.len();
-    if !(3_000_000..=200_000_000).contains(&len) {
+    // Floor is 20 KB, not 3 MB: modern llama.cpp ships a thin launcher
+    // (llama-mtmd-cli.exe ~89 KB, the heavy code lives in mtmd.dll / ggml DLLs),
+    // so a 3 MB floor rejected a perfectly valid binary and surfaced a bogus
+    // "runtime too old, re-install" toast. 20 KB still catches a truncated or
+    // empty download; the --version probe below catches missing DLLs.
+    if !(20_000..=200_000_000).contains(&len) {
         bail!(
-            "{}: unexpected size {} bytes (expected 3 MB..200 MB)",
+            "{}: unexpected size {} bytes (expected 20 KB..200 MB)",
             p.display(),
             len
         );

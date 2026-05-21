@@ -255,49 +255,6 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
             })
         }
 
-        // ── Scene classifier (MobileNetV3-Large, ImageNet-1k).
-        // Powers the per-file semantic tags shown as chips on Library
-        // cards ("Dog", "Beach", "Kitchen", etc.) alongside CLIP
-        // embeddings + face/OCR signals. Optional install — the scan
-        // pipeline falls back to enriched-extras-only tags (Year /
-        // Camera family / Wide/Tall/Square / Has Faces / Has Text /
-        // Has Location) when the model isn't present.
-        "classifier_mobilenetv3" | "classifier" | "scene_classifier" => {
-            let dir = models_root.join("classifier");
-            LookupResult::Found(Model {
-                id: "classifier_mobilenetv3",
-                display_name: "Scene classifier (MobileNetV3)",
-                files: vec![
-                    FileEntry {
-                        url: "https://huggingface.co/onnx-community/mobilenetv3_large_100.ra_in1k/resolve/main/onnx/model.onnx"
-                            .to_string(),
-                        dest: dir.join("mobilenetv3_large.onnx"),
-                        sha256: Some(
-                            "a88a7545cb3fbafffeb6f09140d56c88f73cebf6a892cd80cf8c5ce4f2a0293d"
-                                .to_string(),
-                        ),
-                        approx_bytes: 21_949_218,
-                    },
-                    FileEntry {
-                        // ImageNet-1k labels, plain one-per-line. The
-                        // canonical dataset (imagenet-1k) is gated; this
-                        // public mirror inside the clip-benchmark dataset
-                        // ships the same 1000 class names without auth.
-                        // The classifier's `parse_labels` handles both
-                        // synset and plain formats, so either shape works.
-                        url: "https://huggingface.co/datasets/clip-benchmark/wds_imagenet1k/resolve/main/classnames.txt"
-                            .to_string(),
-                        dest: dir.join("imagenet_classes.txt"),
-                        sha256: Some(
-                            "8800e39242cbed4c6889376e20a49cfdaf4f84a773a6686d15c3b39972ef94c4"
-                                .to_string(),
-                        ),
-                        approx_bytes: 11_814,
-                    },
-                ],
-            })
-        }
-
         // ── llama.cpp Windows runtime ZIP. Extracted in-place by
         // `handle_prewarm_model`; the .zip suffix triggers extraction.
         "llama_runtime_x64" => {
@@ -307,13 +264,21 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                 display_name: "llama.cpp runtime",
                 files: vec![FileEntry {
                     // Pinned to a specific release for reproducibility.
-                    // Bump intentionally and verify the binary still
-                    // accepts our `--mmproj` + image paths.
-                    url: "https://github.com/ggerganov/llama.cpp/releases/download/b4404/llama-b4404-bin-win-vulkan-x64.zip"
+                    // Bump intentionally and verify the zip still ships
+                    // `llama-mtmd-cli.exe` (Deep Analyze CLI) + `llama-server.exe`
+                    // (the persistent VlmServer) + `mtmd.dll`.
+                    //
+                    // b9254 (2026-05-20) verified to contain all three; the
+                    // prior pin b4404 (2024-12) predated the mtmd unification
+                    // (no llama-mtmd-cli.exe) and Qwen2.5-VL, which is why the
+                    // VLM path failed with "runtime not found". This is the
+                    // Vulkan build — works on NVIDIA/AMD/Intel/Adreno and is the
+                    // dir `VlmRunner`/`VlmServer` probe (`Models\llama.cpp\`).
+                    url: "https://github.com/ggml-org/llama.cpp/releases/download/b9254/llama-b9254-bin-win-vulkan-x64.zip"
                         .to_string(),
                     dest: dir.join("llama-runtime.zip"),
                     sha256: None,
-                    approx_bytes: 95_000_000,
+                    approx_bytes: 32_681_387,
                 }],
             })
         }
@@ -358,13 +323,34 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
             LookupResult::Found(Model {
                 id: "llama_runtime_cuda_x64",
                 display_name: "llama.cpp runtime (CUDA)",
-                files: vec![FileEntry {
-                    url: "https://github.com/ggml-org/llama.cpp/releases/download/b4475/llama-b4475-bin-win-cuda-cu12.4-x64.zip"
-                        .to_string(),
-                    dest: dir.join("llama-runtime.zip"),
-                    sha256: None,
-                    approx_bytes: 210_000_000,
-                }],
+                files: vec![
+                    // CUDA-backend llama binaries. b9254 ships
+                    // `llama-mtmd-cli.exe` + `llama-server.exe` + `mtmd.dll`
+                    // (same surface as the Vulkan build), so the VLM can use the
+                    // faster CUDA path on NVIDIA. The prior b4475 pin had none of
+                    // the mtmd surface.
+                    FileEntry {
+                        url: "https://github.com/ggml-org/llama.cpp/releases/download/b9254/llama-b9254-bin-win-cuda-12.4-x64.zip"
+                            .to_string(),
+                        dest: dir.join("llama-runtime.zip"),
+                        sha256: None,
+                        approx_bytes: 259_875_510,
+                    },
+                    // CUDA runtime DLLs (cudart / cublas). b9254 ships these as a
+                    // SEPARATE asset (b4475 bundled them). Extract into the same
+                    // dir so the CUDA binaries are self-contained — the engine
+                    // AddDllDirectory's `llama.cpp-cuda`, so the loader finds
+                    // cudart64_12.dll / cublas64_12.dll beside the exes. Without
+                    // this the CUDA server won't load and the VLM falls back to
+                    // the Vulkan runtime.
+                    FileEntry {
+                        url: "https://github.com/ggml-org/llama.cpp/releases/download/b9254/cudart-llama-bin-win-cuda-12.4-x64.zip"
+                            .to_string(),
+                        dest: dir.join("cudart.zip"),
+                        sha256: None,
+                        approx_bytes: 391_443_627,
+                    },
+                ],
             })
         }
 

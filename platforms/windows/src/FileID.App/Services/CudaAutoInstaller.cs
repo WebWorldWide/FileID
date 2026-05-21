@@ -92,10 +92,25 @@ internal static class CudaAutoInstaller
             try
             {
                 var sentinel = Path.Combine(AppPaths.ModelsDir, ".sentinels", $"{ModelKind}.installed");
+                var cudaDir = Path.Combine(AppPaths.ModelsDir, "llama.cpp-cuda");
+                // Match the engine's VlmRunner (dir root OR bin/ subdir).
+                bool mtmdPresent = File.Exists(Path.Combine(cudaDir, "llama-mtmd-cli.exe"))
+                                || File.Exists(Path.Combine(cudaDir, "bin", "llama-mtmd-cli.exe"));
+                if (File.Exists(sentinel) && mtmdPresent)
+                {
+                    DebugLog.Info("[CUDA-AUTO] CUDA llama.cpp already installed (mtmd-cli present); skipping.");
+                    return;
+                }
                 if (File.Exists(sentinel))
                 {
-                    DebugLog.Info("[CUDA-AUTO] CUDA llama.cpp already installed; skipping.");
-                    return;
+                    // Stale pre-mtmd CUDA build (e.g. b4475): sentinel present but
+                    // the multimodal binary is missing. Clear the sentinel + cached
+                    // zips so the prewarm re-downloads the current self-contained
+                    // build (llama binaries + cudart).
+                    DebugLog.Info("[CUDA-AUTO] CUDA runtime present but missing llama-mtmd-cli.exe (stale build) — reinstalling.");
+                    try { File.Delete(sentinel); } catch { /* best-effort */ }
+                    try { File.Delete(Path.Combine(cudaDir, "llama-runtime.zip")); } catch { /* best-effort */ }
+                    try { File.Delete(Path.Combine(cudaDir, "cudart.zip")); } catch { /* best-effort */ }
                 }
             }
             catch { /* if FS check fails, the engine's own short-circuit will catch it */ }

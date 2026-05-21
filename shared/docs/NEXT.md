@@ -4,6 +4,321 @@
 
 ---
 
+## V16.11 — verify on hardware: thumbnails + Deep Analyze runtime + SmolVLM auto-tag (2026-05-21)
+
+**Landed (compiles + clippy -D warnings + all tests + format + BOM; see STATE V16.11).**
+Three root-caused fixes + SmolVLM auto-tagging. A clean rebuild is required
+(`pwsh build/build-all.ps1 -Run`, or `-WipeDbOnly -Run` for a fresh DB). These
+are GUI/timing/runtime behaviors a compile cannot prove:
+
+1. **Thumbnails render (the NOW fix).** Scan a folder. Every visible card shows
+   its image immediately — square, image area NOT collapsed — during a live scan
+   AND at rest. The bug was the `TileRoot` `Height="{Binding ActualWidth …}"`
+   self-binding (non-observable DP → stuck at 68 → image row collapsed); now set
+   via `OnTileSizeChanged`. If a card is still blank, `app.log` `[THUMB]` lines
+   tell which: `TILE_SIZED w=… h=…` (layout) + `TILE_THUMBNAIL_ASSIGNED … px=WxH`
+   (bitmap). px>0 with no/!square TILE_SIZED ⇒ layout; px=0 ⇒ decode.
+2. **Deep Analyze: no "runtime too old" toast.** Deep Analyze a single image →
+   caption succeeds, no toast (the 3 MB→20 KB `sanity_check_binary` floor fix —
+   the thin 89 KB `llama-mtmd-cli.exe` now passes). `engine.jsonl` shows
+   `[VLM-SERVER] ready` on a batch; no orphan `llama-server.exe` after.
+3. **SmolVLM auto-tagging.** Existing settings.json (had `qwen2_5_vl_3b`) is
+   migrated to `smolvlm` on first launch (`[INSTALL]`/AppSettings v2). SmolVLM
+   auto-installs (`[SMOLVLM-AUTO] … installing`). Scan → CLIP placeholder chips
+   appear immediately (threshold 0.18); after the scan completes + SmolVLM is
+   installed, the next scan's auto-chain runs the tags-only pass
+   (`tags_only:true`) and `SELECT tag,COUNT(*) FROM tags WHERE source='vlm'
+   GROUP BY tag` climbs with real tags; cards switch from placeholder → VLM tags.
+   Kill + relaunch mid-pass → resumes (only untagged files). The single Settings
+   → Cleanup "Tag automatically with AI after scans" switch toggles it.
+
+**Known follow-ups (non-blocking):**
+- **First-scan auto-tag latency.** On the very first scan SmolVLM may still be
+  downloading when the auto-chain checks `Vlm.Status`, so auto-tagging starts
+  from the *second* scan. If we want first-scan coverage, trigger the auto-tag
+  pass on SmolVLM install-complete (listen for the smolvlm sentinel/slot →
+  Installed transition) rather than only on the scan→cluster→caption chain.
+- **"Remove CLIP" switch** is still `ENABLE_CLIP_SCENE_TAGS=false` (engine) once
+  VLM tagging is validated as strictly better; left on as the placeholder.
+
+## V16.8 — VLM activated (runtime b9254) + persistent server + Settings declutter (2026-05-20)
+
+**Landed (compiles + clippy + tests; closes the V16.7 activation prerequisite):**
+- ✅ **Runtime bumped to b9254** (`registry.rs` `llama_runtime_x64`), verified to
+  ship `llama-mtmd-cli.exe` + `llama-server.exe` + `mtmd.dll`. The auto-installer
+  re-fetches when the stale b4404 runtime is detected (sentinel present but
+  mtmd-cli missing), so it self-activates on next launch. Fixes the toast.
+- ✅ **Persistent `VlmServer`** (`models/vlm_server.rs`) — `run_deep_analyze_batch`
+  loads the model once via `llama-server.exe` and serves all files (~1-3 s/file),
+  CLI fallback retained.
+- ✅ **Settings decluttered** — removed the pure-doc "Models" card + the disabled
+  "Performance profile" placeholder.
+
+**Blocking hardware verification (a compile can't prove these):**
+1. **Runtime auto-activation.** Rebuild + relaunch on the user's box (which has
+   the stale b4404). Confirm the auto-installer logs `[VULKAN-AUTO] … stale … —
+   reinstalling`, downloads b9254, and `Models\llama.cpp\llama-mtmd-cli.exe`
+   appears. Then Deep Analyze a single image → caption succeeds (no toast).
+2. **Persistent-server multimodal.** Run "Analyze all" on a small folder. Confirm
+   `[VLM-SERVER] persistent server up` in `engine.jsonl`, the server answers
+   `/v1/chat/completions` with an image for Qwen2.5-VL, and `SELECT COUNT(*) FROM
+   tags WHERE source='vlm'` climbs. If the server 400s on the image payload,
+   check the `image_url` data-URI format against b9254's server API (the one
+   unknown I couldn't test from the build host).
+3. **No orphan `llama-server.exe`** after the job completes / is cancelled /
+   the engine exits (kill_on_drop should handle it — verify in Task Manager).
+
+**Optional follow-ups (NOT done — flagged for a decision):**
+- **CUDA runtime bump.** Left `llama_runtime_cuda_x64` at its old pin: the VLM
+  uses the Vulkan dir (`VlmRunner`/`VlmServer` probe `Models\llama.cpp\`), and the
+  current b9254 CUDA build splits `cudart` into a separate zip, so bumping it
+  needs the cudart handled too. Vulkan runs on the RTX 2060 fine. Only worth it
+  if CUDA-accelerated VLM is wanted.
+- **Settings: fuller macOS parity.** A bigger pass could collapse the Windows
+  diagnostics (CPU/Mem/GPU/Power/thumbnail) under an "Advanced" disclosure like
+  macOS, and trim the 3 extra Behavior toggles macOS lacks (Hide-unknown,
+  Restructure-tree-diff, Auto-chain-Deep-Analyze). NOT done this round — those
+  are *functional* controls; deleting them needs user confirmation, and the
+  WinUI render can't be visually verified from the build host.
+
+## V16.7 — VLM tagging implemented; runtime bump is the activation step (2026-05-20)
+
+**Landed (compiles + tests; reuses the existing Deep Analyze pipeline):**
+- ✅ VLM scene/content tags written as `source='vlm'` during Deep Analyze
+  `Both` mode (`pipeline/deep_analyze.rs` `analyze_file` + `parse_vlm_tags` +
+  `models/vlm.rs::TAG_PROMPT`). ReadStore surfaces + prefers them. CLIP
+  (`source='auto'`) and VLM tags coexist; VLM leads the chip slice.
+- ✅ One-line CLIP kill switch: `scene_vocab::ENABLE_CLIP_SCENE_TAGS` (set
+  `false` to drop CLIP scan-time tagging entirely — VLM tags then lead
+  unchallenged; no other code change needed).
+- ✅ `VlmRunner::find()` now emits an accurate "runtime too old — update it"
+  error when a stale-but-present runtime lacks `llama-mtmd-cli.exe`.
+
+**ACTIVATION PREREQUISITE — VLM cannot run until the llama runtime is bumped.**
+The runtime is pinned to **b4404** (`registry.rs` `llama_runtime_x64` /
+`llama_runtime_cuda_x64`), which ships `llama-server.exe` + the per-model CLIs
+but NOT the unified `llama-mtmd-cli.exe` this code drives, and predates
+Qwen2.5-VL. So Deep Analyze AND VLM tagging both fail until the runtime is
+current. To activate (do this with the ability to verify a download — I did NOT
+blind-guess a URL):
+1. Find a current llama.cpp release that ships `llama-mtmd-cli.exe` in its
+   `*-bin-win-vulkan-x64.zip` (and a CUDA `*-bin-win-cuda-*-x64.zip`). Verify
+   by downloading + listing the zip.
+2. Bump both `url:`s in `registry.rs` (vulkan: `llama_runtime_x64`; cuda:
+   `llama_runtime_cuda_x64`). Note the vulkan entry still uses the
+   `ggerganov/llama.cpp` org (redirects); the cuda entry uses `ggml-org`.
+3. Force re-install: the auto-installer skips when the `.installed` sentinel
+   exists, so delete `%LOCALAPPDATA%\FileID\Models\.sentinels\llama_runtime_x64.installed`
+   (+ the cuda one) and `Models\llama.cpp\` (+ `llama.cpp-cuda\`), then relaunch
+   (auto-install re-fires) or click Settings → Performance → "Install llama.cpp
+   runtime". Confirm `Models\llama.cpp\llama-mtmd-cli.exe` now exists.
+4. Verify a Qwen2.5-VL caption succeeds (Deep Analyze a single image), then run
+   "Analyze all" and confirm `source='vlm'` rows land
+   (`SELECT COUNT(*) FROM tags WHERE source='vlm'`).
+
+**Perf follow-up (the original Track-3 design — optional optimization):** the
+current path spawns `llama-mtmd-cli.exe` per file (model reload each time) +
+adds one tag call per file, so a full-library pass is many hours. A persistent
+`llama-server.exe` (`/v1/chat/completions` multimodal, load once) would cut that
+to ~1–3 s/file. `llama-server.exe` ships in the runtime; build a `VlmServer`
+wrapper (HTTP via the existing `reqwest` dep) and route `analyze_file` through
+it. Deferred — correctness first; this is a speed optimization.
+
+**To "simply remove CLIP" once VLM is validated:** set
+`ENABLE_CLIP_SCENE_TAGS=false` (engine), optionally delete the gated scene block
+in `pipeline/tagging.rs` and `models/scene_vocab.rs`. VLM tags already lead in
+ReadStore, so nothing else changes.
+
+---
+
+## V16.5c follow-ups — invisible-tile root cause + tab-crash hardening (2026-05-20)
+
+**Landed (pending user rebuild + relaunch — NO re-scan needed):**
+- ✅ **Invisible Library tiles fixed at the root.** `AnimateTileEntry` no longer
+  animates the tile-root composition opacity (it's pinned to 1 every prepare);
+  the entrance is scale-only (0.96→1), gated once-per-element via a
+  `ConditionalWeakTable`. This was the surviving cause of "thumbnails not
+  loading / tags not showing" after V16.5b fixed only the image-level opacity
+  pin. Forensics: 8611 `TILE_THUMBNAIL_ASSIGNED` + 0 `IMAGE_OPENED`; DB had
+  24,762 tags / 7,961 files (100%).
+- ✅ **Tab-switch crash hardened.** `DetailHostView.Sync` builds the incoming
+  view lazily inside the fade-out completion (no zombie views from a superseded
+  rapid swap) + commits synchronously via `CommitChild`. `LoadThumbAsync`'s UI
+  continuation gained a `_unloaded` guard.
+- ✅ **`embed_batch` sequential fallback** added in `SceneLabeler::build` (closes
+  the high-priority V16.5-followup #1 below).
+
+**Blocking user verification (the whole point — these are GUI/timing bugs that
+a compile cannot prove):**
+1. **Tiles visible.** Rebuild (`dotnet build … -p:Platform=x64`), relaunch,
+   open Library on the already-scanned folder. Every card must show its
+   thumbnail + filename + tag chips immediately (no blank/dim cards), during a
+   live re-scan AND at rest. If any card is blank, capture `app.log` and look
+   for `[THUMB] TILE_THUMBNAIL_ASSIGNED` without the tile appearing.
+2. **Tab switching doesn't crash.** With a scan running, click rapidly through
+   Library → People → Cleanup → Deep Analyze → Restructure → Settings and back,
+   several times. The app must not die. If it does, the new
+   `session-died-without-handler-*.txt` + the last `[ENGINE-SUB]`/`[THUMB]`
+   lines name the surviving vector. (Note: `app.log` is truncated per session —
+   grab it from the crashed session before relaunch overwrites it, or disable
+   the truncate-on-start to preserve the crash trace.)
+3. **Tags + thumbnails are NOT regressed by the scale-only entrance** — confirm
+   the tile "pop" still reads as a gentle scale-in, not a flash, and doesn't
+   pulse the grid every second during a scan.
+
+**Follow-up worth doing next session:**
+- **Preserve the crash-session `app.log`.** The truncate-on-launch behavior
+  destroyed the crashed session's trace this round (only the *surviving*
+  session's log remained), forcing reasoning-from-signature instead of
+  reading the actual fatal line. Rotate (`app.log` → `app.log.1`) on launch
+  instead of truncating, or write crash breadcrumbs to a session-stamped file.
+- **Consider re-realization throttling.** 8721 PREPARE events for a single
+  folder view means the `ReplaceAll`→Reset on every throttled refresh is doing
+  a full clear+re-realize of the visible window each second. A diff-based
+  collection update (or suppressing the refresh when the visible set is
+  unchanged) would cut UI-thread churn and remove the scale-pop-per-second
+  entirely. Medium effort; the once-per-element gate already hides the visual
+  symptom.
+
+---
+
+## V16.5 follow-ups — CLIP zero-shot tagging + thumbnail recycle + People fix (2026-05-19)
+
+**Landed (pending user rebuild + clean rescan / force re-tag):**
+- ✅ Scan tags via **CLIP zero-shot** against a curated scene vocabulary
+  (`models/scene_vocab.rs`), replacing the ImageNet classifier; reuses the
+  per-file MobileCLIP embedding, no new download.
+- ✅ MobileNetV3 classifier **removed** end-to-end (engine module + registry
+  arm; .NET auto-installer, install slot, Library banner; Settings
+  "Classifier" diagnostic → CLIP-zero-shot status line). Supersedes V16.4-3
+  (Places365) and kills the "downloading for identifying" UX.
+- ✅ Confidence **persisted** to `tags.score` (`TaggedFile.tags` →
+  `Vec<(String, Option<f32>)>`; no migration). Closes V16.4-2.
+- ✅ **Force re-tag** button (Settings → "Re-scan everything"). Closes
+  V16.4-1 / V15.1-N1.
+- ✅ Thumbnail recycle stale-bitmap fix + memory bound
+  (`FileTile.ClearThumbnailForRecycle`).
+- ✅ People double-tap fixed (ElementPrepared DataContext bridge). Partially
+  closes V16.4-4: Library + People done; Cleanup uses classic `{Binding}`,
+  Restructure/Sidebar are display-only/stable — audited clean.
+
+**New follow-ups:**
+
+1. ✅ **DONE (V16.5c): sequential `embed` fallback added.** `SceneLabeler::build`
+   now catches an `embed_batch` error and falls back to per-prompt `embed`
+   (a `(1,77)` input) for the remaining chunks, so a batch-pinned text export
+   no longer disables all scene tags. The real-text-ONNX verification question
+   is moot for the canonical Xenova export (dynamic batch axis confirmed in the
+   field: `[TAGGING] scene-label embeddings built n_labels=164`), but the
+   fallback protects fresh installs on other machines. Was **Priority: high** —
+   gated all scene tags.
+2. **Tune the scene vocabulary + threshold against real photos.** ~170
+   labels + threshold 0.12 + temp 100 are a first cut. Force re-tag a real
+   folder, inspect `tags.score`, adjust `SCENE_LABELS` / `SCENE_THRESHOLD` /
+   `SCENE_TEMPERATURE` in `models/scene_vocab.rs`. The main accuracy lever now.
+3. **Move the one-time label-matrix build off the first scan.** Built lazily
+   in `Models::load` (process-static) on the first scan after launch — N×M
+   batched text encodes. If the first-scan delay is noticeable, build during
+   model prewarm/install or cache the matrix to disk (keyed by vocab + model
+   hash).
+4. ✅ **DONE (V16.5b): Explicit `ORDER BY score DESC, rowid` in the ReadStore
+   tag GROUP_CONCAT** (all four query sites). Insertion order did NOT survive
+   `GROUP_CONCAT` — enriched extras (NULL score) preceded scene tags, so the
+   2-chip `TopTwoTags` slice showed `Has Location`/`2024` and never the scene
+   label despite 94% scene-tag coverage. Now scene tags lead by confidence.
+   Paired with the V16.5b thumbnail-visibility fix (image composition opacity
+   was pinned at 0 on recycle and never reliably reset → loaded thumbnails
+   stayed invisible).
+
+---
+
+## V16.4 follow-ups — thumbnail trigger + classifier coverage (2026-05-19)
+
+**Landed (pending user rebuild + clean rescan):**
+- ✅ Thumbnail trigger fixed — `OnRepeaterElementPrepared` resolves the tile by `args.Index` and sets `el.DataContext` (x:Bind didn't, so the old `DataContext is not FileTile` guard bailed before `LoadThumbAsync`). Closes the multi-version "thumbnails never render" saga — every prior fix patched the unreachable `ThumbnailService` fallback chain.
+- ✅ Classifier threshold 0.30 → 0.20 (`tagging.rs`) — 66% of personal photos cleared zero labels at 0.30.
+
+**New follow-ups discovered this session:**
+
+1. **Re-tag affordance (was V15.1-N1, now load-bearing).** Existing tags
+   are from the old 0.30 ImageNet run; incremental rescan skips current
+   files, so the threshold change isn't visible without a force re-tag.
+   `StartScanCommand.Rescan` is wired through IPC + `EngineClient` but has
+   no UI. Add a Sidebar/Settings "Re-scan everything (force re-tag)"
+   button. Until then the only way to validate a tagging change is to
+   delete `fileid.sqlite*`. **Priority: high** — blocks validation of any
+   future tagging tweak.
+2. **Persist classifier confidence into `tags.score`.** `dbwriter` writes
+   `score = NULL` today; the classifier computes the confidence and
+   `classify_batch` returns it, but `process_file_predecoded` discards it
+   (`for (label, _score)`). Carry `(label, score)` through
+   `TaggedFile.tags` (type change `Vec<String>` → e.g. `Vec<(String,
+   Option<f32>)>`, enriched extras = `None`) → `dbwriter` binds `?3`.
+   Enables data-driven threshold tuning (instead of guessing) and
+   confidence-ordered chips. Deferred from V16.4 — type ripple, no
+   user-visible effect alone.
+3. **Places365 scene classifier (the real tagging fix).** ImageNet-1k is
+   an object classifier; its labels are object-specific (`breakwater`,
+   not `beach`). The directive's own examples (`Beach`/`Kitchen`/
+   `Document`) are Places365 categories. No MobileNet-Places365 ONNX
+   exists on HF (only a heavier ViT-base, likely not ONNX-exported), so
+   this needs sourcing/converting a Places365 model to ONNX, a new
+   registry entry (URL+SHA), a 365-line label file, preprocessing verify
+   (Places365 uses the same ImageNet mean/std), re-download + rescan, and
+   a per-file latency check on DirectML. **Priority: medium** — the
+   highest-leverage tagging-relevance improvement, but a real chunk of
+   work + a model-hosting question.
+4. **Audit other x:Bind+ItemsRepeater code-behind handlers app-wide.**
+   The DataContext-null-under-x:Bind gotcha that broke Library thumbnails
+   may affect People / Cleanup / Restructure repeaters too. Now that
+   Library sets `el.DataContext` in its prepared handler, grep for
+   `ItemsRepeater` + `el.DataContext is` elsewhere and apply the same
+   bridge.
+
+---
+
+## V16.3 follow-ups — file-type chip + classifier diagnostics + broken-image placeholder + video COM fix (2026-05-19)
+
+**Closed this session (the "four problems" directive):**
+- ✅ Classifier URL verified + both SHA256s pinned — was already done in V16.2 (`registry.rs`); confirmed.
+- ✅ File-type chip on cards — gray `Variant=Kind` `TagChip` leads the caption chip row.
+- ✅ Broken-image placeholder — procedural `FontIcon`, gated on new `ThumbnailFailed` flag (closes the V15.5 `PreviewUnavailable.png` item — shipped procedurally, no asset).
+- ✅ Classifier installed-state diagnostic in Settings.
+- ✅ Video keyframe per-thread COM init (`CoInitializeEx` MTA in `keyframe_25pct`) — the one real defect; decoder-pool + Deep Analyze threads were missing it.
+
+**New follow-ups discovered this session:**
+
+1. **HEIC decode lacks per-thread COM init too.** `shell::heic::decode`
+   (WinRT `BitmapDecoder`, also called from decoder-pool threads) has no
+   explicit `CoInitializeEx`. WinRT is agile so it may work implicitly,
+   but the same latent risk video had applies. If HEIC files fail to
+   decode on decoder threads, add an `ensure_com_initialized()` call
+   (or hoist video.rs's guard to a shared `shell` helper). Low priority
+   until a HEIC decode failure is observed. Surfaces in:
+   `platforms/windows/src/engine/src/shell/heic.rs:31`.
+2. **Video `durationSeconds` → `mm:ss` overlay.** `keyframe_25pct`
+   already pulls `MF_PD_DURATION` but discards it. A bottom-right
+   `mm:ss` overlay on video cards (directive's optional Problem-4 item)
+   needs a 7-layer plumb: `TaggedFile.duration_seconds` → DB migration
+   v8 (`duration_seconds REAL NULL`) → `dbwriter` insert → IPC
+   `FileDoneEvent`/`FileRecord` → `ReadStore` projection → `FileTile`
+   `DurationDisplay` → XAML overlay. ~half a day. Deferred — polish, not
+   a regression.
+3. **FileKind taxonomy expansion (RawPhoto / Archive / Code).** Directive
+   proposed splitting these out. Blocked on a scope decision: `Archive`
+   (zip/7z) and `Code` (py/js/rs) are currently `FileKind::Other` and
+   filtered out at the discovery walk (`discovery.rs:259-260`), so they
+   never enter the corpus. Admitting them means deciding whether FileID
+   should scan code/archive files at all. `RawPhoto` (cr2/nef/dng) is
+   currently lumped under `Image`; splitting it is lower-risk. Punt
+   until the user wants code/archive files in the library.
+4. **macOS-side kind chip parity.** The file-type chip shipped Windows-
+   first per the directive. macOS `LibraryView.swift` should get the
+   equivalent leading chip in a follow-up (the macOS `FileKind` enum +
+   `kind` column already exist).
+
+---
+
 ## V16.0 follow-ups — perf+thumbnails+classifier+chips landed; verification + classifier SHA pinning (2026-05-18)
 
 **User verification (blocking):**
@@ -33,20 +348,13 @@
 
 **Stubbed-but-landed items (close out before V16.1):**
 
-1. **Classifier model + labels SHA256 pinning.** `models/registry.rs`
-   `"classifier_mobilenetv3"` slot ships with `sha256: None` and TODO(verify)
-   URL comments for both the MobileNetV3-Large ONNX export and the ImageNet
-   class-label file. Download once, compute SHA256 of both, pin both. Until
-   pinned, the model installs without integrity verification — fine for
-   private builds, blocker for shipping. Also verify the URL serves the
-   1000-class export (1001-class with a background class is accepted by
-   `ClassifierSession::load`, but the label-count check will fail on other
-   variants).
-2. **Classifier registry URL verification.** The placeholder URL
-   `https://huggingface.co/onnx-community/mobilenetv3_large_100.ra_in1k/...`
-   is plausible but unverified. If it 404s, swap to a known-good mirror
-   (Xenova / onnx-community both host MobileNet exports) and update the
-   `approx_bytes` if it changes.
+1. ~~**Classifier model + labels SHA256 pinning.**~~ ✅ **DONE (V16.2).**
+   `models/registry.rs` `"classifier_mobilenetv3"` slot pins both SHA256s
+   (ONNX `a88a7545…`, labels `8800e392…`). 1000-class export confirmed;
+   `ClassifierSession::load` handles the 1001-class background offset too.
+2. ~~**Classifier registry URL verification.**~~ ✅ **DONE (V16.2).** URL
+   `onnx-community/mobilenetv3_large_100.ra_in1k/.../onnx/model.onnx`
+   verified against a live download; `approx_bytes = 21_949_218`.
 3. **Phase model parity (Windows vs macOS).** Windows shows 5 pipeline
    phases (`Scan / Tag / People / Captions / Done`) in `SidebarPipelineProgress.xaml.cs:23-28`; macOS shows 3 active phases (`discovering / tagging / postScan` in `IPCProtocol.swift:138-146`). Decision needed:
    - Option A: Collapse Windows to 3 phases (matches macOS; loses People /
@@ -193,7 +501,7 @@ The user reported install buttons for CUDA llama.cpp + cuDNN don't reflect alrea
 
 **Follow-ups (non-blocking):**
 - **Wire `ThumbnailService.Stats` into Settings diagnostics.** The counters exist; add one line to the existing Settings diagnostics block: `Thumbnails: N ok / N failed / N dropped / N fallback`. ~10 LOC change in `Views/Settings/SettingsView.xaml(.cs)`.
-- **PreviewUnavailable glyph asset.** When `ThumbnailService.RenderAsync` returns null, consumers currently leave the shimmer placeholder visible indefinitely. A `Assets/PreviewUnavailable.png` (64×64 grey-glyph) + binding fallback would distinguish "loading" from "failed." User-provided PNG OR procedural draw via Win2D — defer until the user opines.
+- ~~**PreviewUnavailable glyph asset.**~~ ✅ **DONE (V16.3).** Shipped procedurally: a XAML `FontIcon` placeholder gated on a new `FileTile.ThumbnailFailed` flag, with the shimmer moved to a derived `ShowShimmer` so "loading" and "failed" are distinct states. No asset PNG — see DECISIONS.md 2026-05-19.
 - **CI integration of `gui-regression.ps1`.** Add `workflow_dispatch` trigger in `.github/workflows/windows-app.yml` so the harness can fire on demand. WinUI 3 unpackaged apps on GitHub Actions `windows-latest` have a fragile interactive-session story — start with manual trigger; auto-trigger later if reliable.
 - **EngineClientTests revisit.** Phase 5.1 deferred because `EngineClient`'s ctor requires a UI dispatcher. Two paths: (a) factor `Apply` into a pure function taking state as parameters, or (b) add a `FileID.App.UiTests` csproj with WinAppSDK test infrastructure. Path (a) is cleaner but touches user's heavy local edits to `EngineClient.cs` (+103). Coordinate before starting.
 

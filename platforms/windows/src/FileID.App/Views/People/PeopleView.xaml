@@ -126,7 +126,9 @@
         <ScrollViewer Grid.Row="1"
                       VerticalScrollBarVisibility="Auto"
                       HorizontalScrollBarVisibility="Disabled">
-            <ItemsRepeater ItemsSource="{x:Bind ViewModel.Clusters, Mode=OneWay}">
+            <ItemsRepeater x:Name="ClustersRepeater"
+                           ItemsSource="{x:Bind ViewModel.Clusters, Mode=OneWay}"
+                           ElementPrepared="OnClusterElementPrepared">
                 <ItemsRepeater.Layout>
                     <UniformGridLayout MinItemWidth="180"
                                        MinItemHeight="220"

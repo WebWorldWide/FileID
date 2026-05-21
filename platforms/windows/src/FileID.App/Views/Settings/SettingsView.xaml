@@ -421,17 +421,19 @@
                 </StackPanel>
             </Border>
 
-            <!-- V15.9 Diagnostics — adaptive hardware utilization snapshot.
-                 Shows what the engine detected at startup + the active
-                 throughput profile. Gives the user confidence the
-                 adaptive logic is doing something. -->
-            <Border CornerRadius="12"
-                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                    BorderThickness="1"
-                    Padding="20">
+            <!-- Advanced — collapsed by default, mirroring macOS's "Advanced"
+                 disclosure. Read-only hardware diagnostics + the power-user
+                 force-retag / thumbnail-cache actions live behind the chevron so
+                 the default Settings page stays clean. -->
+            <Expander HorizontalAlignment="Stretch"
+                      HorizontalContentAlignment="Stretch"
+                      CornerRadius="12"
+                      Padding="20,8,20,16">
+                <Expander.Header>
+                    <TextBlock Text="Advanced — diagnostics &amp; tools"
+                               Style="{StaticResource SubtitleTextBlockStyle}"/>
+                </Expander.Header>
                 <StackPanel Spacing="14">
-                    <TextBlock Text="Diagnostics" Style="{StaticResource SubtitleTextBlockStyle}"/>
 
                     <StackPanel Spacing="6">
                         <TextBlock Text="CPU"
@@ -478,6 +480,22 @@
                     </StackPanel>
 
                     <StackPanel Spacing="6">
+                        <TextBlock Text="Scene tags"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   FontWeight="SemiBold"
+                                   CharacterSpacing="40" />
+                        <TextBlock Text="{x:Bind SceneTaggingDiagnosticsText, Mode=OneWay}"
+                                   Style="{StaticResource BodyTextBlockStyle}"
+                                   TextWrapping="Wrap" />
+                        <Button Content="Re-scan everything (force re-tag)"
+                                Click="OnForceRetagClicked"
+                                HorizontalAlignment="Left"
+                                Margin="0,4,0,0"
+                                ToolTipService.ToolTip="Re-scan the current library folder and recompute tags for every file, even ones already scanned. Use after a tagging change to see updated chips without deleting the database." />
+                    </StackPanel>
+
+                    <StackPanel Spacing="6">
                         <TextBlock Text="Thumbnails"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
@@ -492,43 +510,21 @@
                                 HorizontalAlignment="Left" />
                     </StackPanel>
 
-                    <StackPanel Spacing="6">
-                        <TextBlock Text="Performance profile"
-                                   Style="{StaticResource CaptionTextBlockStyle}"
-                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   FontWeight="SemiBold"
-                                   CharacterSpacing="40" />
-                        <ComboBox x:Name="ProfileCombo"
-                                  Width="280"
-                                  SelectedIndex="1"
-                                  IsEnabled="False">
-                            <ComboBoxItem Content="Eco — force low-memory mode (coming soon)" Tag="eco"/>
-                            <ComboBoxItem Content="Auto — adaptive (recommended)" Tag="auto"/>
-                            <ComboBoxItem Content="Performance — uncap pool (coming soon)" Tag="performance"/>
-                        </ComboBox>
-                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
-                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   TextWrapping="Wrap"
-                                   Text="Auto applies the adaptive rules above (storage-aware walk threads, RAM-aware batch sizing, P/E core split). Eco and Performance ship in a follow-up." />
-                    </StackPanel>
                 </StackPanel>
-            </Border>
+            </Expander>
 
-            <!-- Behavior toggles. Each binds to a key in app-settings.json
-                 and persists across launches. -->
+            <!-- Cleanup. Mirrors macOS Settings' single "Cleanup" toggle, plus
+                 the one Windows control for the AI auto-tag pass: SmolVLM runs
+                 in the background after a scan to refine tags, and this is the
+                 single switch to enable/disable it. The other Windows-only
+                 People/Restructure toggles stay removed for macOS parity. -->
             <Border CornerRadius="12"
                     Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                     BorderThickness="1"
                     Padding="20">
                 <StackPanel Spacing="14">
-                    <TextBlock Text="Behavior" Style="{StaticResource SubtitleTextBlockStyle}"/>
-
-                    <ToggleSwitch x:Name="HideUnknownToggle"
-                                  Header="Hide unknown clusters in People"
-                                  OffContent="Show every face cluster"
-                                  OnContent="Hide clusters marked 'unknown'"
-                                  Toggled="OnHideUnknownToggled" />
+                    <TextBlock Text="Cleanup" Style="{StaticResource SubtitleTextBlockStyle}"/>
 
                     <ToggleSwitch x:Name="CleanupAutoTagToggle"
                                   Header="Tag kept files after Cleanup auto-trash"
@@ -536,32 +532,11 @@
                                   OnContent="Add a 'kept' tag to the keeper"
                                   Toggled="OnCleanupAutoTagToggled" />
 
-                    <ToggleSwitch x:Name="RestructureTreeModeToggle"
-                                  Header="Restructure tree-diff view"
-                                  OffContent="Show per-category cards (default)"
-                                  OnContent="Show side-by-side tree diff"
-                                  Toggled="OnRestructureTreeModeToggled" />
-
-                    <ToggleSwitch x:Name="AutoChainDeepAnalyzeToggle"
-                                  Header="Automatically caption files after face clustering"
-                                  OffContent="Stay manual — kick off Deep Analyze yourself"
-                                  OnContent="Auto-run Deep Analyze once face clustering finishes"
-                                  Toggled="OnAutoChainDeepAnalyzeToggled" />
-                </StackPanel>
-            </Border>
-
-            <!-- Models — install state. -->
-            <Border CornerRadius="12"
-                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                    BorderThickness="1"
-                    Padding="20">
-                <StackPanel Spacing="8">
-                    <TextBlock Text="Models" Style="{StaticResource SubtitleTextBlockStyle}"/>
-                    <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
-                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                               TextWrapping="Wrap"
-                               Text="ArcFace (face matching), MobileCLIP-S2 (image search), and SCRFD (face detection) are downloaded from HuggingFace on first use. Audit-able URLs in shared/docs/MODELS.md."/>
+                    <ToggleSwitch x:Name="AutoTagWithAiToggle"
+                                  Header="Tag automatically with AI after scans"
+                                  OffContent="Off — only fast CLIP tags during the scan"
+                                  OnContent="On — SmolVLM refines tags in the background"
+                                  Toggled="OnAutoTagWithAiToggled" />
                 </StackPanel>
             </Border>
 

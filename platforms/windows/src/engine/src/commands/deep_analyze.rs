@@ -12,7 +12,7 @@ use crate::ipc::{
     self, sink::Sink, DeepAnalyzeComplete, DeepAnalyzeFileDone, DeepAnalyzeProgress,
     DeepAnalyzeStarting, DeepAnalyzeStartingPhase, EngineError, EventPayload, IpcEvent, Wrap,
 };
-use crate::pipeline::deep_analyze::{analyze_file, AnalyzeMode};
+use crate::pipeline::deep_analyze::{analyze_file, analyze_file_via_server, AnalyzeMode};
 
 /// Append a per-token caption chunk from `llama-mtmd-cli` with normalized
 /// single-space separators. The CLI emits one stdout line per `on_token`
@@ -166,7 +166,8 @@ pub(crate) async fn handle_deep_analyze_folder(
             return;
         }
     };
-    run_deep_analyze_batch(sink, db, &payload.model_kind, ids, cancel, true).await;
+    // Folder-scoped Deep Analyze is a manual action → full enrichment (Both).
+    run_deep_analyze_batch(sink, db, &payload.model_kind, ids, cancel, true, false).await;
 }
 
 pub(crate) async fn handle_deep_analyze_all(
@@ -189,6 +190,7 @@ pub(crate) async fn handle_deep_analyze_all(
         ids,
         cancel,
         payload.skip_existing,
+        payload.tags_only,
     )
     .await;
 }
@@ -212,18 +214,45 @@ async fn run_deep_analyze_batch(
     file_ids: Vec<i64>,
     cancel: Arc<AtomicBool>,
     skip_existing: bool,
+    tags_only: bool,
 ) {
+    // TagsOnly = one VLM call/file (background auto-tag, ~3× faster); Both =
+    // caption + tags + rename (the manual Deep Analyze pass).
+    let mode = if tags_only {
+        AnalyzeMode::TagsOnly
+    } else {
+        AnalyzeMode::Both
+    };
+
+    // Resolve both VLM backends up front so we can gate correctly BEFORE
+    // sending DeepAnalyzeStarting. The persistent llama-server only needs
+    // llama-server.exe; the per-file CLI needs llama-mtmd-cli.exe. find() is a
+    // cheap (~one --version probe) check and find_weights is just file
+    // existence — doing them first lets a server-capable runtime proceed even
+    // when the CLI-binary check fails (the ordering trap), while still
+    // surfacing a clean "runtime missing" error when NOTHING is available.
+    let weights = crate::models::vlm::find_weights(model_kind);
     let runner = match crate::models::vlm::VlmRunner::find() {
-        Ok(r) => r,
+        Ok(r) => Some(r),
         Err(err) => {
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "llama_cpp_missing".into(),
-                message: format!("{err}"),
-                path: None,
-                model_kind: None,
-            }))))
-            .await;
-            return;
+            // No usable CLI binary. Fine IF the persistent server can run
+            // (weights present → it only needs llama-server.exe). But with no
+            // weights either, nothing can analyze: surface the error and return
+            // BEFORE Starting, because the client's Error handler does NOT clear
+            // DeepAnalyze* state — sending Starting first would strand the UI on
+            // a "Loading model…" banner forever.
+            if weights.is_none() {
+                sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                    kind: "llama_cpp_missing".into(),
+                    message: format!("{err}"),
+                    path: None,
+                    model_kind: None,
+                }))))
+                .await;
+                return;
+            }
+            tracing::warn!(?err, "[VLM] CLI binary unavailable; relying on the persistent server");
+            None
         }
     };
 
@@ -235,6 +264,28 @@ async fn run_deep_analyze_batch(
         },
     ))))
     .await;
+
+    // Prefer the PERSISTENT llama-server (loads the model ONCE → ~1-3 s/file).
+    // The per-file CLI `runner` reloads the multi-GB model on every call, which
+    // is fine for a 1-file Deep Analyze but turns a whole-library pass into many
+    // hours. Fall back to the CLI when weights are missing or the server can't
+    // start. The server is dropped (and killed) when this function returns —
+    // including the cancel-early path below.
+    let server = match weights {
+        Some((gguf, mmproj)) => {
+            match crate::models::vlm_server::VlmServer::start(&gguf, &mmproj).await {
+                Ok(s) => {
+                    tracing::info!(model_kind, "[VLM-SERVER] persistent server up; using it for the batch");
+                    Some(s)
+                }
+                Err(err) => {
+                    tracing::warn!(?err, "[VLM-SERVER] unavailable; falling back to per-file CLI");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
 
     let total = file_ids.len() as u64;
     let mut processed = 0u64;
@@ -259,13 +310,27 @@ async fn run_deep_analyze_batch(
         if skip_existing {
             let already = {
                 let conn = db.lock();
-                conn.query_row(
-                    "SELECT vlm_description FROM files WHERE id = ?1",
-                    rusqlite::params![file_id],
-                    |r| r.get::<_, Option<String>>(0),
-                )
-                .unwrap_or(None)
-                .is_some()
+                if tags_only {
+                    // TagsOnly never writes vlm_description, so "already done"
+                    // means the file already has ≥1 source='vlm' tag. Checking
+                    // vlm_description here (as the Both path does) would never
+                    // match → the auto-tag pass would re-tag the whole library
+                    // on every scan instead of resuming on untagged files only.
+                    conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM tags WHERE file_id=?1 AND source='vlm')",
+                        rusqlite::params![file_id],
+                        |r| r.get::<_, bool>(0),
+                    )
+                    .unwrap_or(false)
+                } else {
+                    conn.query_row(
+                        "SELECT vlm_description FROM files WHERE id = ?1",
+                        rusqlite::params![file_id],
+                        |r| r.get::<_, Option<String>>(0),
+                    )
+                    .unwrap_or(None)
+                    .is_some()
+                }
             };
             if already {
                 continue;
@@ -299,43 +364,47 @@ async fn run_deep_analyze_batch(
         let last_emit = Arc::new(Mutex::new(Instant::now() - Duration::from_millis(500)));
         let caption_buf_cb = caption_buf.clone();
         let last_emit_cb = last_emit.clone();
-        let outcome = analyze_file(
-            db.clone(),
-            &runner,
-            file_id,
-            model_kind,
-            AnalyzeMode::Both,
-            cancel.clone(),
-            move |chunk| {
-                append_caption_chunk(&caption_buf_cb, chunk);
-                let now = Instant::now();
-                let should_emit = {
-                    let mut last = last_emit_cb.lock();
-                    if now.duration_since(*last) >= Duration::from_millis(250) {
-                        *last = now;
-                        true
-                    } else {
-                        false
-                    }
-                };
-                if !should_emit {
-                    return;
+        let on_token = move |chunk: &str| {
+            append_caption_chunk(&caption_buf_cb, chunk);
+            let now = Instant::now();
+            let should_emit = {
+                let mut last = last_emit_cb.lock();
+                if now.duration_since(*last) >= Duration::from_millis(250) {
+                    *last = now;
+                    true
+                } else {
+                    false
                 }
-                let snapshot = caption_buf_cb.lock().clone();
-                let kind = model_kind_c.clone();
-                let _ = sink_c.try_send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(
-                    Wrap::new(DeepAnalyzeProgress {
-                        processed: idx as u64,
-                        total,
-                        eta_seconds: None,
-                        current_path: None,
-                        model_kind: kind,
-                        current_caption: Some(snapshot),
-                    }),
-                )));
-            },
-        )
-        .await;
+            };
+            if !should_emit {
+                return;
+            }
+            let snapshot = caption_buf_cb.lock().clone();
+            let kind = model_kind_c.clone();
+            let _ = sink_c.try_send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(
+                Wrap::new(DeepAnalyzeProgress {
+                    processed: idx as u64,
+                    total,
+                    eta_seconds: None,
+                    current_path: None,
+                    model_kind: kind,
+                    current_caption: Some(snapshot),
+                }),
+            )));
+        };
+        // Persistent server when up (model already resident); else per-file CLI.
+        let outcome = if let Some(srv) = server.as_ref() {
+            analyze_file_via_server(db.clone(), srv, file_id, model_kind, mode, cancel.clone(), on_token)
+                .await
+        } else if let Some(r) = runner.as_ref() {
+            analyze_file(db.clone(), r, file_id, model_kind, mode, cancel.clone(), on_token).await
+        } else {
+            // Neither backend available (server failed to start AND no CLI
+            // binary). Can't analyze this file — record a failure and move on.
+            Err(anyhow::anyhow!(
+                "no VLM backend available — server failed to start and the CLI binary is missing"
+            ))
+        };
 
         match outcome {
             Ok(out) => {

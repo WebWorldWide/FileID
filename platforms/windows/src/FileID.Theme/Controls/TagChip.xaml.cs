@@ -19,6 +19,15 @@ using Windows.UI;
 
 namespace FileID.Theme.Controls;
 
+/// <summary>Visual variant for <see cref="TagChip"/>. `Auto` is the
+/// gold-tinted AI-tag chip; `Kind` is the gray structured-metadata chip
+/// used for the file-type label that leads each card's chip row.</summary>
+public enum ChipVariant
+{
+    Auto = 0,
+    Kind = 1,
+}
+
 public sealed partial class TagChip : UserControl
 {
     // Property name is TagText (not Tag) because FrameworkElement already
@@ -32,21 +41,39 @@ public sealed partial class TagChip : UserControl
             typeof(TagChip),
             new PropertyMetadata(string.Empty, OnTagTextChanged));
 
+    public static readonly DependencyProperty VariantProperty =
+        DependencyProperty.Register(
+            nameof(Variant),
+            typeof(ChipVariant),
+            typeof(TagChip),
+            new PropertyMetadata(ChipVariant.Auto, OnVariantChanged));
+
     private static readonly SolidColorBrush FallbackForeground =
         new(Color.FromArgb(0xCC, 0xFF, 0xFF, 0xFF));
     private static readonly SolidColorBrush FallbackBackground =
         new(Color.FromArgb(0x1A, 0xFF, 0xFF, 0xFF));
 
+    // Kind variant — slightly more opaque background than the AI chip so
+    // the structured file-type label reads as primary metadata, foreground
+    // at full white to differentiate from the gold-tinted Auto chip.
+    private static readonly SolidColorBrush FallbackKindForeground =
+        new(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
+    private static readonly SolidColorBrush FallbackKindBackground =
+        new(Color.FromArgb(0x4D, 0x80, 0x80, 0x80));
+
     private static SolidColorBrush? _cachedFg;
     private static SolidColorBrush? _cachedBg;
+    private static SolidColorBrush? _cachedKindFg;
+    private static SolidColorBrush? _cachedKindBg;
 
     public TagChip()
     {
         InitializeComponent();
         _cachedFg ??= ResolveBrush("TagChipForegroundBrush", FallbackForeground);
         _cachedBg ??= ResolveBrush("TagChipBackgroundBrush", FallbackBackground);
-        LabelText.Foreground = _cachedFg;
-        ChipRoot.Background = _cachedBg;
+        _cachedKindFg ??= ResolveBrush("TagChipKindForegroundBrush", FallbackKindForeground);
+        _cachedKindBg ??= ResolveBrush("TagChipKindBackgroundBrush", FallbackKindBackground);
+        ApplyVariant();
     }
 
     private static SolidColorBrush ResolveBrush(string key, SolidColorBrush fallback)
@@ -65,11 +92,36 @@ public sealed partial class TagChip : UserControl
         set => SetValue(TagTextProperty, value);
     }
 
+    public ChipVariant Variant
+    {
+        get => (ChipVariant)GetValue(VariantProperty);
+        set => SetValue(VariantProperty, value);
+    }
+
     private static void OnTagTextChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
         if (d is TagChip c)
         {
             c.LabelText.Text = FormatTag((string?)e.NewValue ?? string.Empty);
+        }
+    }
+
+    private static void OnVariantChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is TagChip c) c.ApplyVariant();
+    }
+
+    private void ApplyVariant()
+    {
+        if (Variant == ChipVariant.Kind)
+        {
+            LabelText.Foreground = _cachedKindFg;
+            ChipRoot.Background = _cachedKindBg;
+        }
+        else
+        {
+            LabelText.Foreground = _cachedFg;
+            ChipRoot.Background = _cachedBg;
         }
     }
 

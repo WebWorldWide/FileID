@@ -88,13 +88,25 @@ public class IpcCommandTests
     [Fact]
     public void DeepAnalyzeAll_RoundTrips()
     {
-        var cmd = new IpcCommand("a", new DeepAnalyzeAllCommand("qwen2_5_vl_7b", SkipExisting: true));
+        var cmd = new IpcCommand("a", new DeepAnalyzeAllCommand("qwen2_5_vl_7b", SkipExisting: true, TagsOnly: true));
         var json = IpcCoder.Encode(cmd);
 
         var rt = IpcCoder.Decode<IpcCommand>(json);
         var p = Assert.IsType<DeepAnalyzeAllCommand>(rt.Payload);
         Assert.Equal("qwen2_5_vl_7b", p.ModelKind);
         Assert.True(p.SkipExisting);
+        Assert.True(p.TagsOnly);
+    }
+
+    [Fact]
+    public void DeepAnalyzeAll_OmittedTagsOnly_DefaultsFalse()
+    {
+        // Older clients omit tagsOnly; it must decode as false (serde default
+        // on the Rust side, defaulted record param on the C# side).
+        const string json = """{"id":"a","payload":{"deepAnalyzeAll":{"modelKind":"smolvlm","skipExisting":false}}}""";
+        var rt = IpcCoder.Decode<IpcCommand>(json);
+        var p = Assert.IsType<DeepAnalyzeAllCommand>(rt.Payload);
+        Assert.False(p.TagsOnly);
     }
 
     [Fact]

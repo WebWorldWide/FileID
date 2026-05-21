@@ -37,7 +37,7 @@ impl VlmModelKind {
             VlmModelKind::QwenVl3B => "Qwen2.5-VL 3B",
             VlmModelKind::QwenVl7B => "Qwen2.5-VL 7B (recommended)",
             VlmModelKind::Gemma3_4B => "Gemma 3 4B",
-            VlmModelKind::SmolVlm => "SmolVLM 256M",
+            VlmModelKind::SmolVlm => "SmolVLM 500M",
         }
     }
 
@@ -81,6 +81,10 @@ pub struct AnalyzeOutcome {
 pub enum AnalyzeMode {
     CaptionOnly,
     RenameOnly,
+    /// Tags only — the fast path for background auto-tagging. One VLM call per
+    /// file (tags) instead of three (caption + tags + rename), so a whole-library
+    /// pass is ~3× faster. Caption + proposed-name columns are left untouched.
+    TagsOnly,
     Both,
 }
 
@@ -98,47 +102,15 @@ pub async fn analyze_file(
     mut on_token: impl FnMut(&str),
 ) -> anyhow::Result<AnalyzeOutcome> {
     use crate::models::vlm::{self, CaptionRequest};
-    use std::path::PathBuf;
 
     let started = std::time::Instant::now();
-
-    // Resolve file path + kind from DB.
-    let (path_text, kind): (String, String) = {
-        let conn = db.lock();
-        conn.query_row(
-            "SELECT path_text, kind FROM files WHERE id = ?1",
-            rusqlite::params![file_id],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-        )?
-    };
-    let source_path = PathBuf::from(&path_text);
-    if !source_path.exists() {
-        anyhow::bail!("source file missing: {}", source_path.display());
-    }
 
     // Resolve weights for this model_kind.
     let (gguf, mmproj) = vlm::find_weights(model_kind)
         .ok_or_else(|| anyhow::anyhow!("VLM weights for '{}' not installed", model_kind))?;
 
-    // Rasterize the source into something the CLI accepts (JPEG path).
-    // Images: pass directly. Video / PDF: extract a keyframe / page-1
-    // image into a temp file. Audio + Other: skip with friendly error.
-    // Branch on kind so we know whether we wrote a temp file (video → yes,
-    // image → no) without a second equality check downstream.
-    let (rasterized, temp_to_clean): (PathBuf, Option<PathBuf>) = match kind.as_str() {
-        "image" => (source_path.clone(), None),
-        "video" => {
-            let r = rasterize_video_keyframe(&source_path).await?;
-            let temp = Some(r.clone());
-            (r, temp)
-        }
-        "pdf" => {
-            let r = rasterize_pdf_page(&source_path).await?;
-            let temp = Some(r.clone());
-            (r, temp)
-        }
-        _ => anyhow::bail!("kind '{}' isn't VLM-analyzable yet", kind),
-    };
+    // Resolve + rasterize the source (image as-is; video keyframe; PDF page-1).
+    let (rasterized, temp_to_clean) = rasterize_for_vlm(&db, file_id).await?;
 
     let mut description: Option<String> = None;
     let mut proposed_name: Option<String> = None;
@@ -158,6 +130,27 @@ pub async fn analyze_file(
         let result = vlm::caption(runner, &req, cancel.clone(), &mut on_token).await?;
         description = Some(result.text);
     }
+    // VLM scene/content tags (source='vlm'). Generated in "Both" (full
+    // enrichment) and "TagsOnly" (the fast background auto-tag pass), so a Deep
+    // Analyze run over the library produces the chip tags that REPLACE CLIP
+    // zero-shot if the user drops CLIP. Clones the weights + rasterized frame so
+    // the rename branch below can still take ownership.
+    let mut tags: Vec<String> = Vec::new();
+    if matches!(mode, AnalyzeMode::Both | AnalyzeMode::TagsOnly) {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            anyhow::bail!("cancelled");
+        }
+        let req = CaptionRequest {
+            gguf_path: gguf.clone(),
+            mmproj_path: mmproj.clone(),
+            image_path: rasterized.clone(),
+            prompt: vlm::TAG_PROMPT.to_string(),
+            max_tokens: 40,
+            greedy: true,
+        };
+        let result = vlm::caption(runner, &req, cancel.clone(), |_| {}).await?;
+        tags = parse_vlm_tags(&result.text);
+    }
     if matches!(mode, AnalyzeMode::RenameOnly | AnalyzeMode::Both) {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("cancelled");
@@ -174,22 +167,168 @@ pub async fn analyze_file(
         proposed_name = Some(sanitize_proposed_name(&result.text));
     }
 
-    // Persist to v3 schema columns.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0);
+    // Persist caption + proposed name (v3 `files` columns) + VLM tags.
     {
         let conn = db.lock();
-        conn.execute(
-            "UPDATE files SET vlm_description=COALESCE(?1, vlm_description), \
-                              vlm_proposed_name=COALESCE(?2, vlm_proposed_name), \
-                              vlm_model=?3, vlm_analyzed_at=?4 WHERE id=?5",
-            rusqlite::params![description, proposed_name, model_kind, now, file_id],
+        persist_vlm_results(
+            &conn,
+            file_id,
+            model_kind,
+            description.as_deref(),
+            proposed_name.as_deref(),
+            &tags,
         )?;
     }
 
     // Best-effort cleanup of any temp rasterized frame.
+    if let Some(temp) = temp_to_clean {
+        let _ = std::fs::remove_file(&temp);
+    }
+
+    Ok(AnalyzeOutcome {
+        file_id,
+        description,
+        proposed_name,
+        model: model_kind.to_string(),
+        elapsed_ms: started.elapsed().as_millis() as u64,
+    })
+}
+
+/// Resolve a file's on-disk path and rasterize it to an image the VLM can read:
+/// images pass through; video → 25%-duration keyframe; PDF → page-1 render.
+/// Returns the image path + an optional temp path the caller must clean up.
+/// Shared by the per-file CLI (`analyze_file`) and the persistent-server path.
+pub(crate) async fn rasterize_for_vlm(
+    db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    file_id: i64,
+) -> anyhow::Result<(std::path::PathBuf, Option<std::path::PathBuf>)> {
+    let (path_text, kind): (String, String) = {
+        let conn = db.lock();
+        conn.query_row(
+            "SELECT path_text, kind FROM files WHERE id = ?1",
+            rusqlite::params![file_id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )?
+    };
+    let source_path = std::path::PathBuf::from(&path_text);
+    if !source_path.exists() {
+        anyhow::bail!("source file missing: {}", source_path.display());
+    }
+    match kind.as_str() {
+        "image" => Ok((source_path, None)),
+        "video" => {
+            let r = rasterize_video_keyframe(&source_path).await?;
+            Ok((r.clone(), Some(r)))
+        }
+        "pdf" => {
+            let r = rasterize_pdf_page(&source_path).await?;
+            Ok((r.clone(), Some(r)))
+        }
+        _ => anyhow::bail!("kind '{}' isn't VLM-analyzable yet", kind),
+    }
+}
+
+/// Persist VLM enrichment for one file: caption + proposed name into the v3
+/// `files` columns, and tags into `tags` as `source='vlm'` (replacing any prior
+/// vlm tags for the file). Shared by the CLI + server paths.
+fn persist_vlm_results(
+    conn: &rusqlite::Connection,
+    file_id: i64,
+    model_kind: &str,
+    description: Option<&str>,
+    proposed_name: Option<&str>,
+    tags: &[String],
+) -> anyhow::Result<()> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    conn.execute(
+        "UPDATE files SET vlm_description=COALESCE(?1, vlm_description), \
+                          vlm_proposed_name=COALESCE(?2, vlm_proposed_name), \
+                          vlm_model=?3, vlm_analyzed_at=?4 WHERE id=?5",
+        rusqlite::params![description, proposed_name, model_kind, now, file_id],
+    )?;
+    if !tags.is_empty() {
+        conn.execute(
+            "DELETE FROM tags WHERE file_id=?1 AND source='vlm'",
+            rusqlite::params![file_id],
+        )?;
+        let mut stmt = conn.prepare(
+            "INSERT OR IGNORE INTO tags (file_id, tag, source, score) VALUES (?1, ?2, 'vlm', NULL)",
+        )?;
+        for t in tags {
+            stmt.execute(rusqlite::params![file_id, t])?;
+        }
+    }
+    Ok(())
+}
+
+/// Analyze one file through the PERSISTENT llama-server (model already loaded),
+/// with NO per-call model reload. `mode` selects which VLM calls run: `Both`
+/// does caption + tags + smart-rename (3 HTTP calls); `TagsOnly` does just the
+/// tag call (1 call → ~3× faster — the background auto-tag path); CaptionOnly /
+/// RenameOnly do their single call. The caption (or, in TagsOnly, the joined
+/// tags) is handed to `on_token` in one shot (these server calls are
+/// non-streaming). Mirrors `analyze_file`'s outputs so the batch loop is
+/// backend-agnostic.
+pub(crate) async fn analyze_file_via_server(
+    db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    server: &crate::models::vlm_server::VlmServer,
+    file_id: i64,
+    model_kind: &str,
+    mode: AnalyzeMode,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    mut on_token: impl FnMut(&str),
+) -> anyhow::Result<AnalyzeOutcome> {
+    use crate::models::vlm;
+    let started = std::time::Instant::now();
+    let (rasterized, temp_to_clean) = rasterize_for_vlm(&db, file_id).await?;
+
+    let mut description: Option<String> = None;
+    let mut proposed_name: Option<String> = None;
+    let mut tags: Vec<String> = Vec::new();
+
+    if matches!(mode, AnalyzeMode::CaptionOnly | AnalyzeMode::Both) {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            anyhow::bail!("cancelled");
+        }
+        let d = server.complete(&rasterized, vlm::CAPTION_PROMPT, 80).await?;
+        on_token(&d);
+        description = Some(d);
+    }
+
+    if matches!(mode, AnalyzeMode::TagsOnly | AnalyzeMode::Both) {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            anyhow::bail!("cancelled");
+        }
+        tags = parse_vlm_tags(&server.complete(&rasterized, vlm::TAG_PROMPT, 40).await?);
+        // Surface tags in the live stream so a tags-only pass shows feedback.
+        if !tags.is_empty() {
+            on_token(&tags.join(", "));
+        }
+    }
+
+    if matches!(mode, AnalyzeMode::RenameOnly | AnalyzeMode::Both) {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            anyhow::bail!("cancelled");
+        }
+        proposed_name = Some(sanitize_proposed_name(
+            &server.complete(&rasterized, vlm::RENAME_PROMPT, 30).await?,
+        ));
+    }
+
+    {
+        let conn = db.lock();
+        persist_vlm_results(
+            &conn,
+            file_id,
+            model_kind,
+            description.as_deref(),
+            proposed_name.as_deref(),
+            &tags,
+        )?;
+    }
     if let Some(temp) = temp_to_clean {
         let _ = std::fs::remove_file(&temp);
     }
@@ -321,6 +460,46 @@ fn sanitize_proposed_name(raw: &str) -> String {
     }
 }
 
+/// Parse a VLM tag completion ("dog, Beach, sunset.") into clean, deduplicated,
+/// lowercase tags. Defensive against numbering ("1. dog"), bullets, trailing
+/// punctuation, surrounding quotes, and the model occasionally returning a
+/// sentence (pieces with >3 words are dropped). Caps at `MAX_VLM_TAGS`.
+pub(crate) fn parse_vlm_tags(raw: &str) -> Vec<String> {
+    const MAX_VLM_TAGS: usize = 8;
+    let mut out: Vec<String> = Vec::new();
+    for piece in raw.split([',', '\n', ';']) {
+        let lowered = piece.trim().to_lowercase();
+        // Strip leading list markers ("1.", "-", "*", "•") then surrounding
+        // quotes / stray punctuation.
+        let stripped = lowered
+            .trim_start_matches(|c: char| {
+                c.is_ascii_digit()
+                    || c == '.'
+                    || c == ')'
+                    || c == '-'
+                    || c == '*'
+                    || c == '•'
+                    || c.is_whitespace()
+            })
+            .trim_matches(|c: char| c == '"' || c == '\'' || c == '.' || c.is_whitespace());
+        if stripped.is_empty() || stripped.len() > 40 {
+            continue;
+        }
+        // Drop sentence fragments masquerading as a tag.
+        if stripped.split_whitespace().count() > 3 {
+            continue;
+        }
+        let t = stripped.to_string();
+        if !out.iter().any(|e| e == &t) {
+            out.push(t);
+        }
+        if out.len() >= MAX_VLM_TAGS {
+            break;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::sanitize_proposed_name;
@@ -344,6 +523,37 @@ mod tests {
     fn sanitize_empty_falls_back() {
         assert_eq!(sanitize_proposed_name(""), "untitled");
         assert_eq!(sanitize_proposed_name("!!!"), "untitled");
+    }
+
+    #[test]
+    fn parse_vlm_tags_splits_lowercases_and_strips_punct() {
+        assert_eq!(parse_vlm_tags("dog, Beach, sunset."), vec!["dog", "beach", "sunset"]);
+    }
+
+    #[test]
+    fn parse_vlm_tags_strips_numbering_and_dedupes() {
+        assert_eq!(parse_vlm_tags("1. dog\n2. dog\n3. ocean"), vec!["dog", "ocean"]);
+    }
+
+    #[test]
+    fn parse_vlm_tags_drops_sentence_fragments_keeps_short() {
+        // First piece is a >3-word fragment → dropped; "beach" kept.
+        assert_eq!(
+            parse_vlm_tags("a dog running on the beach at sunset, beach"),
+            vec!["beach"]
+        );
+    }
+
+    #[test]
+    fn parse_vlm_tags_empty_is_empty() {
+        assert!(parse_vlm_tags("").is_empty());
+        assert!(parse_vlm_tags("   ").is_empty());
+    }
+
+    #[test]
+    fn parse_vlm_tags_caps_count() {
+        let many = (0..20).map(|i| format!("tag{i}")).collect::<Vec<_>>().join(", ");
+        assert!(parse_vlm_tags(&many).len() <= 8);
     }
 
     #[test]

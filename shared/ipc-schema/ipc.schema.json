@@ -96,7 +96,8 @@
               "required": ["modelKind", "skipExisting"],
               "properties": {
                 "modelKind":    { "type": "string" },
-                "skipExisting": { "type": "boolean", "description": "If true, skip files where vlm_description IS NOT NULL for this model." }
+                "skipExisting": { "type": "boolean", "description": "If true, skip files where vlm_description IS NOT NULL for this model." },
+                "tagsOnly":     { "type": "boolean", "description": "If true, run the fast tags-only pass (one VLM call/file) instead of full caption + smart-rename + tags. Used by the background auto-tag chain. Optional; defaults to false." }
               }
             }
           }

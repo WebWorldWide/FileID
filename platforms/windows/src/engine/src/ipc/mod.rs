@@ -194,6 +194,11 @@ pub struct DeepAnalyzeFolderPayload {
 pub struct DeepAnalyzeAllPayload {
     pub model_kind: String,
     pub skip_existing: bool,
+    /// Tags-only fast path (background auto-tag): one VLM call/file instead of
+    /// three. Defaults to false (manual Deep Analyze = full caption + rename +
+    /// tags). `#[serde(default)]` keeps older clients that omit the field valid.
+    #[serde(default)]
+    pub tags_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -959,6 +964,7 @@ mod tests {
             CommandPayload::DeepAnalyzeAll(DeepAnalyzeAllPayload {
                 model_kind: "qwen2_5_vl_3b".into(),
                 skip_existing: true,
+                tags_only: true,
             }),
             CommandPayload::DeepAnalyzeCancel(Empty {}),
             CommandPayload::PrewarmModel(PrewarmModelPayload {
