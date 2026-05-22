@@ -161,11 +161,12 @@ pub struct TaggedFile {
 
     /// Semantic tags as `(label, score)` pairs, assembled from (a) CLIP
     /// zero-shot scene labels (score = softmax probability) and (b)
-    /// enriched-extras derived from existing per-file signals (Year/Camera
-    /// family/Has Faces/Has Text/Has Location), which carry `None` (no
-    /// model confidence). Persisted into the `tags` table by DBWriter with
-    /// source = `"auto"` and the score in `tags.score`; the Library UI reads
-    /// them via ReadStore and renders the top-by-score as TagChip rows.
+    /// enriched-extras derived from existing per-file signals (Year + camera
+    /// family), which carry `None` (no model confidence). Persisted into the
+    /// `tags` table by DBWriter with source = `"auto"` and the score in
+    /// `tags.score`; the Library UI reads them via ReadStore and renders the
+    /// top-by-score as TagChip rows. (Descriptive content tags come from the
+    /// SmolVLM Deep-Analyze pass as `source='vlm'`.)
     pub tags: Vec<(String, Option<f32>)>,
 }
 
@@ -1004,11 +1005,11 @@ async fn process_file_predecoded(
                 }
     }
 
-    // Enriched extras — derive Year / Camera family / Wide-Tall-Square /
-    // Has Faces / Has Text / Has Location from the signals we already
-    // have. Cheap (no inference) and gives a baseline of useful chips
-    // even when the classifier model isn't installed. Mirrors macOS
-    // `Tagging.swift::extraTags`.
+    // Enriched extras — derive Year + camera family from the signals we
+    // already have. Cheap (no inference) and gives a baseline of useful chips
+    // even before the SmolVLM tag pass lands. (Aspect and the generic "Has
+    // Faces/Text/Location" capability tags were removed — see
+    // push_enriched_extras.) Mirrors macOS `Tagging.swift::extraTags`.
     push_enriched_extras(&mut tagged);
     // Dedupe (case-insensitive) + cap. Keep first occurrence to preserve
     // the classifier's confidence-ordered output; cap at 16 to avoid
@@ -1079,9 +1080,9 @@ fn should_run_ocr(path: &std::path::Path, tagged: &TaggedFile, _size_bytes: u64)
 /// Format choices to align with the macOS Library tile `formatTag`:
 /// - `"Year_2024"` keeps the underscore form (the formatter strips it).
 /// - Camera family is the human-friendly brand (`"iPhone"`, `"Canon"`).
-/// - Orientation tags (`"Wide"`, `"Tall"`, `"Square"`) read as-is.
-/// - Capability tags (`"Has Faces"`, `"Has Text"`, `"Has Location"`)
-///   contain a space and stay intact through `formatTag`.
+/// - Orientation (`"Wide"`/`"Tall"`/`"Square"`) and the generic capability
+///   tags (`"Has Faces"`/`"Has Text"`/`"Has Location"`) are intentionally NOT
+///   emitted — they read as noise; descriptive content comes from SmolVLM.
 fn push_enriched_extras(tagged: &mut TaggedFile) {
     // Order matters: the Library card's `TopTwoTags` slice takes the first
     // two tags it sees. Classifier output (when installed) appears first
@@ -1092,8 +1093,13 @@ fn push_enriched_extras(tagged: &mut TaggedFile) {
     // Priority (highest first):
     //   1. Year (from modified_unix; the single most useful low-cost tag)
     //   2. Camera family (iPhone / Canon / etc. — useful for filtering)
-    //   3. Has Faces / Has Text (capability signals tied to real content)
-    //   4. Has Location (GPS-tagged; useful but very common)
+    //
+    // The generic capability tags (Has Faces / Has Text / Has Location) used to
+    // be emitted here too, but they read as content tags in the Library while
+    // describing a capability rather than the image — and "Has Location" in
+    // particular crowded out the descriptive SmolVLM tags. The underlying
+    // signals still live in their own DB columns / filter facets (has_faces,
+    // has_text, location_*); they're just no longer surfaced as tag chips.
     //
     // Aspect tags (Wide/Tall/Square) were previously emitted here and
     // ended up dominating `TopTwoTags` on files without EXIF year/camera
@@ -1127,11 +1133,6 @@ fn push_enriched_extras(tagged: &mut TaggedFile) {
         if let Some(f) = family {
             tagged.tags.push((f.to_string(), None));
         }
-    }
-    if tagged.has_faces { tagged.tags.push(("Has Faces".to_string(), None)); }
-    if tagged.has_text { tagged.tags.push(("Has Text".to_string(), None)); }
-    if tagged.location_lat.is_some() && tagged.location_lon.is_some() {
-        tagged.tags.push(("Has Location".to_string(), None));
     }
 }
 

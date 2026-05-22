@@ -153,9 +153,12 @@ public partial class App : Application
             try { LlamaRuntimeAutoInstaller.Hook(); }
             catch (System.Exception ex) { Trace($"LlamaRuntimeAutoInstaller.Hook failed (non-fatal): {ex.Message}"); }
 
-            Trace("SmolVlmAutoInstaller.Hook");
-            try { SmolVlmAutoInstaller.Hook(); }
-            catch (System.Exception ex) { Trace($"SmolVlmAutoInstaller.Hook failed (non-fatal): {ex.Message}"); }
+            // SmolVlmAutoInstaller removed: model downloads are now strictly
+            // user-initiated from the welcome screen / Settings → AI Models —
+            // no silent ~700 MB background fetch at engine-ready. The first-scan
+            // auto-tag chain still runs once SmolVLM is present: it's gated on
+            // the weights being on disk and re-fires via WireVlmInstallWatch the
+            // moment the user finishes installing it.
 
             // ClassifierAutoInstaller removed: scan-time scene tags now come
             // from CLIP zero-shot (reusing the already-required MobileCLIP

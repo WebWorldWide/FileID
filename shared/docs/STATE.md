@@ -8,6 +8,42 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-05-22 — V16.21 welcome models, discrete-GPU forcing, tag quality, progress flicker
+
+Six Windows fixes spanning the WinUI app + Rust engine:
+
+- **No more silent SmolVLM download.** Deleted `SmolVlmAutoInstaller` and its `App.xaml.cs` hook +
+  `EngineClient` re-arm — model downloads are now strictly user-initiated (welcome screen / Deep
+  Analyze tab). First-scan auto-tagging still resumes the moment SmolVLM is installed (the
+  `WireVlmInstallWatch` path is unchanged).
+- **Welcome screen offers a hardware-tiered Deep-Analyze model.** Split the single VLM row into two:
+  the SmolVLM **tagger** row and a new **Qwen** Deep-Analyze row sized to the box
+  (`ModelInstallerService.DeepVlm` slot + `UpdateDeepVlmRecommendation`: ≥16 GB RAM **or** ≥8 GB
+  VRAM → Qwen 7B, else 3B). Installing it persists `AppSettings.SelectedVlmModelKind` so the Deep
+  Analyze tab agrees. `Install all` now covers both VLM rows; `SlotFor`/sentinels split smolvlm→Vlm,
+  qwen/gemma→DeepVlm.
+- **Better image tags.** `"Has Location"`/`"Has Text"`/`"Has Faces"` capability tags are no longer
+  emitted (`push_enriched_extras`) — they read as content but described a capability and crowded out
+  real tags. `TAG_PROMPT` rewritten for 1–2 specific concrete tags; `parse_vlm_tags` caps at 2 and
+  drops a generic-token stop-list (`photo`/`object`/`location`/…).
+- **Discrete GPU forced.** `probe_gpu_vendor` now returns the DXGI adapter index of the highest-VRAM
+  non-software adapter; `execution_providers_for_chain` pins DirectML to it via `with_device_id`
+  (the scan path: CLIP/ArcFace/SCRFD). CUDA stays default (the iGPU isn't CUDA-visible). For
+  llama.cpp (Deep Analyze) a best-effort `--list-devices` probe pins `--device VulkanN` only when a
+  clearly-dominant (≥2 GiB) discrete device exists — no-op on CUDA builds / single-GPU boxes.
+- **Download progress no longer flickers.** Welcome + Settings model rows now use one `ProgressBar`
+  (indeterminate → determinate at first byte) instead of swapping a `ProgressBar`↔`ProgressRing` on
+  every `Fraction`-crosses-0; the sidebar scan bar latches `IsIndeterminate=false` once the file
+  total is known.
+
+### Build/test (local, in-agent)
+- Engine: `cargo +1.90 clippy --all-targets -D warnings` clean; `cargo +1.90 test` → **163 passed, 0
+  failed** (new tests: `parse_vlm_tags` cap/stop-list, `parse_best_vulkan_device`). (Running clippy
+  from the repo root picks `stable` 1.95 and surfaces unrelated toolchain-drift lints — use `+1.90`.)
+- App: `dotnet build FileID.sln -c Debug` → **0 warnings, 0 errors**.
+- **Needs user hardware:** discrete-GPU forcing (verify dGPU load in Task Manager during a scan +
+  llama.cpp device log), the welcome flow end-to-end, and that tags read as 1–2 descriptive words.
+
 ## 2026-05-22 — V16.20 push V16.16–V16.19 + clear two pre-existing CI reds
 
 Committed and pushed the session's work (CLIP split, crash fix, Deep Analyze gating, preview

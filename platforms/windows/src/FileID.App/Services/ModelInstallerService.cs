@@ -39,11 +39,14 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     // because they download from different paths in the Xenova mobileclip_s2
     // HuggingFace repo. The pre-scan validation in main.rs::handle_start_scan
     // requires both sentinels, so the slot's "Installed" state must reflect
-    // that. ArcFace + VLM stay "any-of" — VLM has four alternative weights
-    // (3B / 7B / SmolVLM / Gemma) and any one is enough.
+    // that. The VLM concept is split across two welcome rows: the Vlm slot is
+    // the SmolVLM tagger (the small/fast background auto-tag model), and the
+    // DeepVlm slot is the Deep Analyze model (hardware-tiered Qwen — any of
+    // 3B / 7B / Gemma is enough). ArcFace stays a single-sentinel "any-of".
     private static readonly string[] ClipSentinelIds = { "mobileclip_s2", "clip_text" };
     private static readonly string[] ArcfaceSentinelIds = { "arcface" };
-    private static readonly string[] VlmSentinelIds = { "qwen2_5_vl_3b", "qwen2_5_vl_7b", "smolvlm", "gemma_3_4b" };
+    private static readonly string[] VlmSentinelIds = { "smolvlm" };
+    private static readonly string[] DeepVlmSentinelIds = { "qwen2_5_vl_3b", "qwen2_5_vl_7b", "gemma_3_4b" };
     // one-button GPU acceleration pack on the welcome sheet.
     // The engine's `cudnn_runtime_x64` registry arm covers NVIDIA. Other
     // vendors stay no-op (DirectML is bundled with ORT and is the
@@ -68,7 +71,13 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
 
     public ModelSlot Clip { get; }
     public ModelSlot Arcface { get; }
+    /// <summary>SmolVLM — the small/fast background tagger that writes the
+    /// 1–2 word image tags on the first scan.</summary>
     public ModelSlot Vlm { get; }
+    /// <summary>Deep Analyze model — a hardware-tiered Qwen 2.5-VL (3B or 7B).
+    /// Separate from the SmolVLM tagger so the welcome screen can offer both;
+    /// installing it persists AppSettings.SelectedVlmModelKind.</summary>
+    public ModelSlot DeepVlm { get; }
     /// <summary> one-button GPU acceleration pack. On NVIDIA the
     /// Install action downloads cuDNN; on AMD/Intel/Qualcomm/CPU the slot
     /// is pre-marked Installed with an explanatory Message (DirectML is
@@ -99,6 +108,12 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     /// installAction reads this field at click time.</summary>
     private string _vlmModelKind = "smolvlm";
 
+    /// <summary>Deep Analyze model the DeepVlm welcome row installs. Tiered to
+    /// the machine by UpdateDeepVlmRecommendation (Qwen 3B vs 7B). Read at click
+    /// time by the slot's installAction; mirrors the Deep Analyze tab default
+    /// (AppSettings.SelectedVlmModelKind).</summary>
+    private string _deepVlmModelKind = "qwen2_5_vl_3b";
+
     private ModelInstallerService()
     {
         Clip = new ModelSlot(
@@ -122,6 +137,17 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             displayLabel: "SmolVLM 500M",
             approxBytes: 700UL * 1024 * 1024,
             installAction: () => PrewarmAsync(_vlmModelKind));
+        DeepVlm = new ModelSlot(
+            displayLabel: "Qwen2.5-VL 3B",
+            approxBytes: 3_170_000_000UL,
+            installAction: async () =>
+            {
+                // Persist the hardware-recommended Deep Analyze model so the
+                // Deep Analyze tab + manual auto-chain use what the user just
+                // downloaded. (The first-scan tagger stays SmolVLM regardless.)
+                PersistSelectedVlmModelKind(_deepVlmModelKind);
+                await PrewarmAsync(_deepVlmModelKind).ConfigureAwait(false);
+            });
         // GPU Acceleration Pack. Display label + Message are
         // adaptive — UpdateAcceleratorForVendor() refreshes them as soon
         // as the engine reports detected hardware. Until then, the row
@@ -135,6 +161,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         Clip.PropertyChanged += OnSlotPropertyChanged;
         Arcface.PropertyChanged += OnSlotPropertyChanged;
         Vlm.PropertyChanged += OnSlotPropertyChanged;
+        DeepVlm.PropertyChanged += OnSlotPropertyChanged;
         Accelerator.PropertyChanged += OnSlotPropertyChanged;
 
         SeedFromSentinels();
@@ -224,6 +251,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         FailIfDownloading(Clip, "Engine restarted — please retry.");
         FailIfDownloading(Arcface, "Engine restarted — please retry.");
         FailIfDownloading(Vlm, "Engine restarted — please retry.");
+        FailIfDownloading(DeepVlm, "Engine restarted — please retry.");
 
         SeedFromSentinels();
     }
@@ -277,7 +305,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             var now = DateTime.UtcNow;
             // CLIP is included — it powers semantic search (it just no longer
             // emits scene tags; SmolVLM is the tagger).
-            var slotsToInstall = new List<ModelSlot> { Clip, Arcface, Vlm };
+            var slotsToInstall = new List<ModelSlot> { Clip, Arcface, Vlm, DeepVlm };
             if (IncludeAcceleratorInInstallAll())
             {
                 slotsToInstall.Add(Accelerator);
@@ -362,6 +390,57 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         Vlm.ApproxBytes = 700UL * 1024 * 1024;
     }
 
+    /// <summary>Deep Analyze model recommendation for the welcome-sheet DeepVlm
+    /// row, tiered to the machine: a roomy box (≥16 GB RAM or a discrete GPU
+    /// with ≥8 GB VRAM) gets Qwen 2.5-VL 7B for the best captions; everything
+    /// else gets the 3B (the smallest Qwen — ~3.2 GB download, ~3.5 GB RAM).
+    /// Does NOT persist the choice — that happens when the user actually
+    /// installs the row (PersistSelectedVlmModelKind), so a model the user
+    /// explicitly picked in the Deep Analyze tab is never stomped. No-op once
+    /// the row is mid-flight or installed.</summary>
+    public void UpdateDeepVlmRecommendation(double ramGB, ulong vramMB, string? gpuVendor)
+    {
+        if (DeepVlm.Status == ModelInstallStatus.Downloading
+            || DeepVlm.Status == ModelInstallStatus.Installed)
+        {
+            return;
+        }
+        bool wants7b = ramGB >= 16.0 || vramMB >= 8000;
+        string kind = wants7b ? "qwen2_5_vl_7b" : "qwen2_5_vl_3b";
+        if (_deepVlmModelKind == kind) return;
+        _deepVlmModelKind = kind;
+        if (wants7b)
+        {
+            DeepVlm.DisplayLabel = "Qwen2.5-VL 7B";
+            DeepVlm.ApproxBytes = 6_100_000_000UL;
+        }
+        else
+        {
+            DeepVlm.DisplayLabel = "Qwen2.5-VL 3B";
+            DeepVlm.ApproxBytes = 3_170_000_000UL;
+        }
+        DebugLog.Info($"[INSTALL] Deep Analyze recommendation: {DeepVlm.DisplayLabel} (RAM={ramGB:F1} GB, VRAM={vramMB} MB, GPU={gpuVendor ?? "?"})");
+    }
+
+    /// <summary>Persist the Deep Analyze model the user just chose to install so
+    /// the Deep Analyze tab + the manual auto-chain pass use the same weights.
+    /// Only writes when the value actually changes (avoids needless disk I/O).</summary>
+    private static void PersistSelectedVlmModelKind(string kind)
+    {
+        try
+        {
+            var s = AppSettings.Load();
+            if (s.SelectedVlmModelKind == kind) return;
+            s.SelectedVlmModelKind = kind;
+            s.Save();
+            DebugLog.Info($"[INSTALL] persisted SelectedVlmModelKind={kind} (welcome Deep Analyze pick)");
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("[INSTALL] PersistSelectedVlmModelKind threw: " + ex.Message);
+        }
+    }
+
     private bool _allInstalled;
     public bool AllInstalled
     {
@@ -381,11 +460,13 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         AllInstalled =
             Clip.Status == ModelInstallStatus.Installed
             && Arcface.Status == ModelInstallStatus.Installed
-            && Vlm.Status == ModelInstallStatus.Installed;
+            && Vlm.Status == ModelInstallStatus.Installed
+            && DeepVlm.Status == ModelInstallStatus.Installed;
         IsBusy =
             Clip.Status == ModelInstallStatus.Downloading
             || Arcface.Status == ModelInstallStatus.Downloading
-            || Vlm.Status == ModelInstallStatus.Downloading;
+            || Vlm.Status == ModelInstallStatus.Downloading
+            || DeepVlm.Status == ModelInstallStatus.Downloading;
     }
 
     private void OnSlotPropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -405,6 +486,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         SeedSlot(Clip, ClipSentinelIds, requireAll: true);
         SeedSlot(Arcface, ArcfaceSentinelIds);
         SeedSlot(Vlm, VlmSentinelIds);
+        SeedSlot(DeepVlm, DeepVlmSentinelIds);
         // Accelerator slot — only flip to Installed if the
         // sentinel exists. Otherwise leave it as
         // UpdateAcceleratorForVendor decided (NotInstalled for NVIDIA,
@@ -583,11 +665,12 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             case "arcface_iresnet50":
             case "arcface_mobileface":
                 return Arcface;
+            case "smolvlm":
+                return Vlm;
             case "qwen2_5_vl_3b":
             case "qwen2_5_vl_7b":
             case "gemma_3_4b":
-            case "smolvlm":
-                return Vlm;
+                return DeepVlm;
             // cuDNN routes to the welcome-sheet Accelerator slot.
             case "cudnn_runtime_x64":
                 return Accelerator;
@@ -623,11 +706,11 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         if (string.IsNullOrEmpty(path)) return null;
         if (path.Contains("MobileCLIP", StringComparison.OrdinalIgnoreCase)) return Clip;
         if (path.Contains("arcface", StringComparison.OrdinalIgnoreCase)) return Arcface;
+        if (path.Contains("SmolVLM", StringComparison.OrdinalIgnoreCase)) return Vlm;
         if (path.Contains("Qwen", StringComparison.OrdinalIgnoreCase)
-            || path.Contains("SmolVLM", StringComparison.OrdinalIgnoreCase)
             || path.Contains("Gemma", StringComparison.OrdinalIgnoreCase))
         {
-            return Vlm;
+            return DeepVlm;
         }
         return null;
     }
@@ -665,6 +748,10 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
                 if (info is not null)
                 {
                     UpdateVlmRecommendation(info.PhysicalMemoryGB);
+                    UpdateDeepVlmRecommendation(
+                        info.PhysicalMemoryGB,
+                        info.Hardware?.VramMb ?? 0,
+                        info.Hardware?.GpuVendor);
                     UpdateAcceleratorForVendor(info.Hardware?.GpuVendor);
                 }
                 return;
@@ -744,6 +831,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         if (ReferenceEquals(slot, Instance.Clip)) return ClipSentinelIds;
         if (ReferenceEquals(slot, Instance.Arcface)) return ArcfaceSentinelIds;
         if (ReferenceEquals(slot, Instance.Vlm)) return VlmSentinelIds;
+        if (ReferenceEquals(slot, Instance.DeepVlm)) return DeepVlmSentinelIds;
         if (ReferenceEquals(slot, Instance.Accelerator)) return AcceleratorSentinelIds;
         return Array.Empty<string>();
     }

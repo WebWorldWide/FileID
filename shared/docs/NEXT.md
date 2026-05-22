@@ -4,6 +4,29 @@
 
 ---
 
+## V16.21 — verify: welcome models, discrete-GPU, tag quality, progress (2026-05-22)
+
+**Landed (engine clippy/test on pinned 1.90 green — 163-0; C# `dotnet build` 0/0).** Rebuild +
+re-scan: `pwsh -File platforms\windows\build\build-all.ps1 -Run` (`-WipeDbOnly` for a fresh scan).
+
+1. **No silent download.** Fresh launch → nothing downloads until a button is clicked. Watch
+   `%LOCALAPPDATA%\FileID\Models` + `app.log` for the absence of any `[SMOLVLM-AUTO]` line.
+2. **Welcome screen.** 5 rows: CLIP · ArcFace · SmolVLM (tagging) · Qwen Deep Analyze · GPU pack.
+   The Qwen row shows **3B vs 7B** matching this PC (≥16 GB RAM **or** ≥8 GB VRAM → 7B). **Install
+   all** pulls every row (incl. both VLMs) to ✓. Installing the Qwen row sets
+   `SelectedVlmModelKind` (Deep Analyze tab shows the same model selected).
+3. **No progress flicker.** During any model download the row shows one smooth bar (indeterminate
+   until first byte, then fills) — no ProgressBar↔spinner flicker. Same in Settings → AI Models.
+4. **Tags are descriptive.** Re-scan a folder of geotagged phone photos → chips are **1–2 specific
+   words** (e.g. "golden retriever", "mountain lake"); **no** "Has Location"/"Has Text"/"Has Faces".
+   `SELECT tag FROM tags WHERE source='vlm'` shows concrete nouns; `SELECT DISTINCT tag FROM tags`
+   has no "Has *".
+5. **Discrete GPU (hybrid iGPU+dGPU).** Settings → Performance shows the dGPU adapter name. During
+   a scan, Task Manager → Performance shows load on the **discrete** GPU, not the iGPU. For Deep
+   Analyze on the **Vulkan** runtime, `engine.jsonl` shows `[VLM] pinning llama.cpp to discrete GPU`
+   with the chosen `VulkanN`. (If `--list-devices` output differs on your hardware and the line is
+   absent, share it — the parser in `vlm.rs::parse_best_vulkan_device` is keyed to the b9254 format.)
+
 ## V16.17 — verify: SmolVLM-only tags + CLIP semantic search kept (2026-05-21)
 
 **Landed (all gates green: engine clippy/test/fmt on the pinned 1.90; C# build 0/0 + format +

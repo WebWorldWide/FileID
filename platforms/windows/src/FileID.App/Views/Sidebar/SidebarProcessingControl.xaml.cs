@@ -346,6 +346,11 @@ public sealed partial class SidebarProcessingControl : UserControl
         EngineClient.Instance.LastWarning = null;
     }
 
+    /// <summary>Latched true once a scan's file Total is known, reset when no
+    /// scan is in flight. Keeps a momentary Total==0 mid-scan from bouncing
+    /// ScanProgressBar back to the indeterminate sweep (scan-bar flicker).</summary>
+    private bool _scanTotalKnown;
+
     private void Sync()
     {
         var prog = EngineClient.Instance.LastProgress;
@@ -354,6 +359,10 @@ public sealed partial class SidebarProcessingControl : UserControl
         bool isInFlight = phase is ScanPhase.Discovering or ScanPhase.Tagging or ScanPhase.PostScan;
         bool isCompleted = phase is ScanPhase.Completed;
         bool isFailed = phase is ScanPhase.Failed;
+
+        // Reset the latch between scans so the next scan starts indeterminate
+        // until its file count lands.
+        if (!isInFlight) _scanTotalKnown = false;
 
         // Failed: surface the engine error in the idle pill in red. Without
         // this branch a scan failure (e.g. missing model files) reported via
@@ -439,11 +448,15 @@ public sealed partial class SidebarProcessingControl : UserControl
                 ScanProgressBar.Maximum = prog.Total;
                 ScanProgressBar.Value = prog.Processed;
                 ScanProgressBar.IsIndeterminate = false;
+                _scanTotalKnown = true;
             }
-            else
+            else if (!_scanTotalKnown)
             {
+                // Total not yet known (still discovering) — sweep.
                 ScanProgressBar.IsIndeterminate = true;
             }
+            // else: a transient Total==0 after the count was already known this
+            // scan — keep the determinate bar rather than bouncing to the sweep.
 
             StatDiscovered.Text = prog.Discovered.ToString("N0");
             StatTagged.Text = prog.Processed.ToString("N0");

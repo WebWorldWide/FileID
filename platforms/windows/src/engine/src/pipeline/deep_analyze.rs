@@ -529,12 +529,25 @@ fn sanitize_proposed_name(raw: &str) -> String {
     }
 }
 
-/// Parse a VLM tag completion ("dog, Beach, sunset.") into clean, deduplicated,
+/// Generic, low-information tokens SmolVLM sometimes emits despite the prompt.
+/// A tag is dropped if any of its words is one of these — they describe the
+/// medium, not the content, and read as noise as a Library chip ("has location"
+/// used to be the worst offender; that one is no longer emitted at all).
+const VLM_TAG_STOPWORDS: &[&str] = &[
+    "photo", "photos", "image", "images", "picture", "pictures", "object",
+    "objects", "thing", "things", "scene", "background", "foreground",
+    "location", "text", "item", "items", "stuff", "view", "misc", "unknown",
+    "none",
+];
+
+/// Parse a VLM tag completion ("dog, Beach.") into clean, deduplicated,
 /// lowercase tags. Defensive against numbering ("1. dog"), bullets, trailing
 /// punctuation, surrounding quotes, and the model occasionally returning a
-/// sentence (pieces with >3 words are dropped). Caps at `MAX_VLM_TAGS`.
+/// sentence (pieces with >2 words are dropped). Generic tokens
+/// (`VLM_TAG_STOPWORDS`) are filtered out, and the result is capped at
+/// `MAX_VLM_TAGS` so the Library shows 1-2 descriptive tags.
 pub(crate) fn parse_vlm_tags(raw: &str) -> Vec<String> {
-    const MAX_VLM_TAGS: usize = 8;
+    const MAX_VLM_TAGS: usize = 2;
     let mut out: Vec<String> = Vec::new();
     for piece in raw.split([',', '\n', ';']) {
         let lowered = piece.trim().to_lowercase();
@@ -557,6 +570,14 @@ pub(crate) fn parse_vlm_tags(raw: &str) -> Vec<String> {
         // Tags are 1-2 words (the prompt asks for it); drop anything longer so
         // chips stay short and scannable.
         if stripped.split_whitespace().count() > 2 {
+            continue;
+        }
+        // Drop generic, low-information tags ("photo", "object", "background",
+        // "location", …) — they describe the medium, not the content.
+        if stripped
+            .split_whitespace()
+            .any(|w| VLM_TAG_STOPWORDS.contains(&w))
+        {
             continue;
         }
         let t = stripped.to_string();
@@ -597,7 +618,9 @@ mod tests {
 
     #[test]
     fn parse_vlm_tags_splits_lowercases_and_strips_punct() {
-        assert_eq!(parse_vlm_tags("dog, Beach, sunset."), vec!["dog", "beach", "sunset"]);
+        // Caps at 2 now; still lowercases ("Beach"→"beach") and strips the
+        // trailing period.
+        assert_eq!(parse_vlm_tags("Dog, beach."), vec!["dog", "beach"]);
     }
 
     #[test]
@@ -623,7 +646,17 @@ mod tests {
     #[test]
     fn parse_vlm_tags_caps_count() {
         let many = (0..20).map(|i| format!("tag{i}")).collect::<Vec<_>>().join(", ");
-        assert!(parse_vlm_tags(&many).len() <= 8);
+        assert_eq!(parse_vlm_tags(&many).len(), 2);
+    }
+
+    #[test]
+    fn parse_vlm_tags_drops_generic_tokens() {
+        // "photo" and "object" are generic medium-words → dropped; the concrete
+        // "golden retriever" survives.
+        assert_eq!(
+            parse_vlm_tags("photo, golden retriever, object"),
+            vec!["golden retriever"]
+        );
     }
 
     #[test]

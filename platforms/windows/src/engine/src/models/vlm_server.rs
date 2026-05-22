@@ -91,6 +91,10 @@ impl VlmServer {
             .arg("99")
             .arg("-c")
             .arg("4096");
+        // Pin to the discrete GPU on hybrid iGPU+dGPU systems (no-op otherwise).
+        if let Some(dev) = crate::models::vlm::discrete_gpu_device(bin).await {
+            cmd.arg("--device").arg(dev);
+        }
         cmd.stdout(Stdio::null())
             .stderr(Stdio::null())
             .stdin(Stdio::null());

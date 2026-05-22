@@ -26,13 +26,13 @@ pub const CAPTION_PROMPT: &str = "Describe this image in one detailed sentence f
 /// suitable for `sanitize_proposed_name`.
 pub const RENAME_PROMPT: &str = "Suggest a 3 to 5 word lowercase filename for this image, separated by hyphens, no quotes, no extension.";
 
-/// Tagging prompt — produces a short comma-separated list of scene/content
-/// tags. Parsed by `deep_analyze::parse_vlm_tags` into individual `source='vlm'`
-/// tags shown as Library chips. This is the VLM equivalent of the CLIP
-/// zero-shot scene tags (and is intended to replace them if the user opts to
-/// drop CLIP): a real vision-language model describes what's actually in the
-/// image instead of scoring against a fixed vocabulary.
-pub const TAG_PROMPT: &str = "List 3 to 6 short lowercase tags for the main subjects, setting, and any prominent objects or text in this image. One or two words each, comma-separated, no sentences, no numbering.";
+/// Tagging prompt — produces 1–2 specific, concrete content tags. Parsed by
+/// `deep_analyze::parse_vlm_tags` (which caps at 2 and drops generic tokens)
+/// into individual `source='vlm'` tags shown as Library chips. A real
+/// vision-language model names what's actually in the image; the prompt is
+/// deliberately strict (concrete nouns, no meta words) because SmolVLM
+/// otherwise drifts toward vague labels like "photo" / "object".
+pub const TAG_PROMPT: &str = "Give 1 or 2 specific lowercase tags naming the main subject of this image (for example: golden retriever, mountain lake, birthday cake, sushi platter). Use concrete nouns. Do not use generic words like photo, image, picture, object, thing, scene, background, location, or text. Comma-separated, no sentences, no numbering.";
 
 #[derive(Debug)]
 pub struct VlmRunner {
@@ -194,6 +194,10 @@ pub async fn caption(
         }
         // Don't print the prompt back at us; we only want the completion.
         cmd.arg("--no-display-prompt");
+        // Pin to the discrete GPU on hybrid iGPU+dGPU systems (no-op otherwise).
+        if let Some(dev) = discrete_gpu_device(&runner.binary).await {
+            cmd.arg("--device").arg(dev);
+        }
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
         cmd.stdin(std::process::Stdio::null());
@@ -265,5 +269,136 @@ mod native {
         // real llama-cpp-2 invocation once the native build wires up.
         let _ = (runner, req, cancel, on_token);
         bail!("vlm-native is a build-time placeholder; rebuild without the feature")
+    }
+}
+
+// ── Discrete-GPU selection for the llama.cpp runner ────────────────────
+//
+// On hybrid iGPU+dGPU systems the Vulkan backend can default to the integrated
+// GPU. We probe the runner once with `--list-devices`, and when a clearly
+// dominant (≥2 GiB more VRAM) discrete device exists we pass `--device VulkanN`
+// so Deep Analyze runs on the dGPU. Mirrors the DirectML `device_id` pinning
+// the ORT scan path does (see runtime.rs::execution_providers_for_chain).
+//
+// Safety: every failure path returns None → the caller passes no flag and
+// llama.cpp keeps its default. CUDA builds list "CUDAn" (not "Vulkann") device
+// lines, so this is a no-op there — and on a single-GPU box there's nothing to
+// pin. Because the probe uses the SAME binary that runs inference, a parseable
+// device list also proves the build supports `--device`.
+
+/// Best-effort discrete-GPU device name (e.g. `"Vulkan0"`) for `--device`,
+/// cached per binary. Returns None when it can't confidently pick one.
+pub(crate) async fn discrete_gpu_device(binary: &std::path::Path) -> Option<String> {
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+    use tokio::sync::Mutex;
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Option<String>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = cache.lock().await.get(binary) {
+        return hit.clone();
+    }
+    let resolved = probe_discrete_gpu_device(binary).await;
+    cache
+        .lock()
+        .await
+        .insert(binary.to_path_buf(), resolved.clone());
+    if let Some(dev) = &resolved {
+        tracing::info!(%dev, binary = %binary.display(), "[VLM] pinning llama.cpp to discrete GPU");
+    }
+    resolved
+}
+
+async fn probe_discrete_gpu_device(binary: &std::path::Path) -> Option<String> {
+    let mut cmd = Command::new(binary);
+    cmd.arg("--list-devices");
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    cmd.stdin(std::process::Stdio::null());
+    cmd.kill_on_drop(true);
+    let child = cmd.spawn().ok()?;
+    let out = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait_with_output())
+        .await
+        .ok()? // probe timed out
+        .ok()?; // spawn / wait failed
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    parse_best_vulkan_device(&text)
+}
+
+/// Parse `--list-devices` output for `"VulkanN: <name> (<vram> MiB, …)"` lines
+/// and return the device with the most VRAM — but only when it beats the
+/// runner-up by ≥2 GiB (a clear discrete-vs-integrated split). Returns None for
+/// <2 Vulkan devices or an ambiguous spread so we never pin the wrong adapter.
+fn parse_best_vulkan_device(text: &str) -> Option<String> {
+    let mut devices: Vec<(String, u64)> = Vec::new();
+    for line in text.lines() {
+        let l = line.trim();
+        let Some(colon) = l.find(':') else { continue };
+        let name = &l[..colon];
+        let is_vulkan = name.len() > 6
+            && name.starts_with("Vulkan")
+            && name[6..].chars().all(|c| c.is_ascii_digit());
+        if !is_vulkan {
+            continue;
+        }
+        // First "<digits> MiB" token-pair on the line is the device VRAM.
+        let toks: Vec<&str> = l.split_whitespace().collect();
+        let vram = toks.windows(2).find_map(|w| {
+            if w[1].starts_with("MiB") {
+                w[0].trim_matches(|c: char| !c.is_ascii_digit())
+                    .parse::<u64>()
+                    .ok()
+            } else {
+                None
+            }
+        });
+        if let Some(v) = vram {
+            devices.push((name.to_string(), v));
+        }
+    }
+    if devices.len() < 2 {
+        return None;
+    }
+    devices.sort_by_key(|d| std::cmp::Reverse(d.1));
+    let (best_name, best_vram) = &devices[0];
+    let (_, second_vram) = &devices[1];
+    if best_vram.saturating_sub(*second_vram) >= 2048 {
+        Some(best_name.clone())
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_best_vulkan_device;
+
+    #[test]
+    fn picks_discrete_over_integrated() {
+        let out = "Available devices:\n  \
+            Vulkan0: NVIDIA GeForce RTX 4070 (8188 MiB, 7900 MiB free)\n  \
+            Vulkan1: Intel(R) Iris(R) Xe Graphics (128 MiB, 64 MiB free)\n";
+        assert_eq!(parse_best_vulkan_device(out).as_deref(), Some("Vulkan0"));
+    }
+
+    #[test]
+    fn none_when_single_device() {
+        let out = "Available devices:\n  Vulkan0: NVIDIA GeForce RTX 4070 (8188 MiB, 7900 MiB free)\n";
+        assert_eq!(parse_best_vulkan_device(out), None);
+    }
+
+    #[test]
+    fn none_when_vram_close() {
+        // Two similar dGPUs — no clear discrete/integrated split; don't guess.
+        let out = "  Vulkan0: GPU A (8188 MiB, x)\n  Vulkan1: GPU B (8000 MiB, y)\n";
+        assert_eq!(parse_best_vulkan_device(out), None);
+    }
+
+    #[test]
+    fn none_for_cuda_device_lines() {
+        // CUDA build lists "CUDAn" not "Vulkann" → nothing to pin (default
+        // device 0 is the dGPU on hybrid systems).
+        let out = "Available devices:\n  CUDA0: NVIDIA GeForce RTX 4070 (8188 MiB, free)\n";
+        assert_eq!(parse_best_vulkan_device(out), None);
     }
 }

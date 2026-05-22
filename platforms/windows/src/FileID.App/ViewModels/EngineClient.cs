@@ -828,7 +828,6 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         // its sentinel/weights and only re-downloads if still
                         // missing. Harmless on the first Ready (nothing attempted
                         // yet → the gate is already 0).
-                        Services.SmolVlmAutoInstaller.ResetAttempt();
                         Services.LlamaRuntimeAutoInstaller.ResetAttempt();
                         Services.CudaAutoInstaller.ResetAttempt();
                         State = LifecycleState.Ready;
@@ -1090,9 +1089,10 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             // Tagging is ALWAYS SmolVLM (the small/fast tagger) — NOT
             // settings.SelectedVlmModelKind, which is the Deep Analyze (manual)
             // model (Qwen by default). Gate on SmolVLM weights actually being on
-            // disk so we never fire a tags-only pass the engine can't run; the
-            // SmolVlmAutoInstaller installs them and the Vlm-install watch
-            // (WireVlmInstallWatch) re-fires this once they land.
+            // disk so we never fire a tags-only pass the engine can't run.
+            // SmolVLM is installed by the user from the welcome screen /
+            // Settings → AI Models; the Vlm-install watch (WireVlmInstallWatch)
+            // re-fires this once the weights land.
             if (!SmolVlmWeightsPresent())
             {
                 Services.DebugLog.Info("[AUTO-ADVANCE] SmolVLM not installed yet; skipping auto-tag (will re-fire on install-complete).");

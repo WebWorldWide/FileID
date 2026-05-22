@@ -700,15 +700,10 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     internal Visibility VisibleIfFailed(Services.ModelInstallStatus s) =>
         s == Services.ModelInstallStatus.Failed ? Visibility.Visible : Visibility.Collapsed;
 
-    internal Visibility ShowDeterminate(Services.ModelInstallStatus s, double frac) =>
-        s == Services.ModelInstallStatus.Downloading && frac > 0
-            ? Visibility.Visible : Visibility.Collapsed;
-
-    internal Visibility ShowSpinner(Services.ModelInstallStatus s, double frac) =>
-        s == Services.ModelInstallStatus.Downloading && frac <= 0
-            ? Visibility.Visible : Visibility.Collapsed;
-
-    internal bool SpinnerActive(Services.ModelInstallStatus s, double frac) =>
+    // Single ProgressBar per model card: indeterminate until the first byte,
+    // then determinate. Replaces the old ProgressBar↔ProgressRing Visibility
+    // swap that flickered each time Fraction crossed 0.
+    internal bool IsStarting(Services.ModelInstallStatus s, double frac) =>
         s == Services.ModelInstallStatus.Downloading && frac <= 0;
 
     internal Visibility ShowActionButton(Services.ModelInstallStatus s) =>

@@ -7,6 +7,47 @@
 
 ---
 
+## 2026-05-22 — Force the discrete GPU per backend, not globally (V16.21)
+
+**Context**: On hybrid iGPU+dGPU laptops the app could end up running inference on the integrated
+GPU. ORT's DirectML EP was built with `::default()` (no `device_id`), so it landed on DXGI adapter
+0 — often the iGPU. The engine already walked DXGI to pick the highest-VRAM adapter for *vendor
+reporting* but threw the index away.
+
+**Decision**: thread the chosen DXGI adapter index (`RuntimeProbe.adapter_index`) into the EP
+builder and pin **DirectML only** via `with_device_id(idx)`. DirectML's `device_id` *is* the DXGI
+adapter index (same enumeration `probe_gpu_vendor` walks), so the mapping is exact. We deliberately
+do **not** pin CUDA/TensorRT to that index: their device ordinal is the CUDA enumeration, not DXGI,
+and on a hybrid box the iGPU isn't CUDA-visible so the dGPU is already CUDA device 0 — passing a
+DXGI index there would select a wrong/absent device. DirectML is also the EP AMD/Intel hybrids use,
+which is exactly the iGPU+dGPU case, so pinning it covers the throughput-critical scan path
+(CLIP/ArcFace/SCRFD). For llama.cpp (Deep Analyze) the Vulkan device order differs from DXGI, so
+rather than guess an index we probe the *same* runner binary once with `--list-devices`, parse the
+`VulkanN: … (<vram> MiB)` lines, and pass `--device VulkanN` **only** when one device dominates the
+runner-up by ≥2 GiB. Every failure path (timeout, parse miss, single device, CUDA build with no
+`Vulkan` lines) returns None → no flag → llama.cpp's default. Alternatives rejected: blindly setting
+`GGML_VK_VISIBLE_DEVICES` (can't know the right index → could force the iGPU) and an unconditional
+`--main-gpu` (wrong for Vulkan ordinals, and breaks if the build lacks the flag).
+
+## 2026-05-22 — Welcome models: explicit downloads, two VLM rows, fewer/sharper tags (V16.21)
+
+**Context**: SmolVLM auto-downloaded ~700 MB silently at engine-ready; the welcome sheet conflated
+"the VLM" into one row that always installed SmolVLM (no Deep-Analyze LLM offered); and image tags
+read as generic noise — the worst being `"Has Location"`, which users blamed on SmolVLM.
+
+**Decision**: (1) **Downloads are user-initiated.** Deleted `SmolVlmAutoInstaller` entirely rather
+than flipping its opt-out flag — no silent egress, and first-scan tagging still resumes via the
+existing install-complete watch once the user installs SmolVLM. (2) **Two VLM rows.** The welcome
+sheet now shows the SmolVLM *tagger* and a separate *Deep Analyze* Qwen row tiered by hardware
+(≥16 GB RAM or ≥8 GB VRAM → 7B, else 3B). The recommendation does **not** persist on its own (so it
+can't stomp a model the user picked in the Deep Analyze tab); it persists `SelectedVlmModelKind`
+only when the user actually installs the row. Sentinels/routing split smolvlm→`Vlm`,
+qwen/gemma→`DeepVlm`. (3) **"Has Location"/"Has Text"/"Has Faces" are not tags.** They came from
+`push_enriched_extras`, not the model — capability signals masquerading as content. Removed from the
+chip list (the `has_*`/`location_*` columns still drive filters). SmolVLM's `TAG_PROMPT` now demands
+1–2 specific concrete tags and `parse_vlm_tags` caps at 2 + drops a generic-token stop-list. Year +
+camera-family extras stay (factual, low-noise) — adjustable if the user wants SmolVLM-only chips.
+
 ## 2026-05-22 — Privacy URL-allowlist scan exempts loopback (V16.20)
 
 **Context**: The engine CI's source-URL allowlist scan (`windows-engine.yml`) asserts that every

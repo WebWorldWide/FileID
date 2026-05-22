@@ -85,13 +85,9 @@
                                    TextWrapping="Wrap" />
                         <ProgressBar Maximum="1"
                                      Value="{x:Bind Svc.Clip.Fraction, Mode=OneWay}"
+                                     IsIndeterminate="{x:Bind IsStarting(Svc.Clip.Status, Svc.Clip.Fraction), Mode=OneWay}"
                                      Foreground="{StaticResource GoldBrush}"
-                                     Visibility="{x:Bind ShowDeterminate(Svc.Clip.Status, Svc.Clip.Fraction), Mode=OneWay}" />
-                        <ProgressRing IsActive="{x:Bind SpinnerActive(Svc.Clip.Status, Svc.Clip.Fraction), Mode=OneWay}"
-                                      Visibility="{x:Bind ShowSpinner(Svc.Clip.Status, Svc.Clip.Fraction), Mode=OneWay}"
-                                      Width="18" Height="18"
-                                      HorizontalAlignment="Left"
-                                      Foreground="{StaticResource GoldBrush}" />
+                                     Visibility="{x:Bind VisibleIfDownloading(Svc.Clip.Status), Mode=OneWay}" />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
                                    Text="{x:Bind ProgressLabel(Svc.Clip.Message, Svc.Clip.Fraction, Svc.Clip.BytesDone, Svc.Clip.TotalBytes), Mode=OneWay}"
@@ -156,13 +152,9 @@
                                    TextWrapping="Wrap" />
                         <ProgressBar Maximum="1"
                                      Value="{x:Bind Svc.Arcface.Fraction, Mode=OneWay}"
+                                     IsIndeterminate="{x:Bind IsStarting(Svc.Arcface.Status, Svc.Arcface.Fraction), Mode=OneWay}"
                                      Foreground="{StaticResource GoldBrush}"
-                                     Visibility="{x:Bind ShowDeterminate(Svc.Arcface.Status, Svc.Arcface.Fraction), Mode=OneWay}" />
-                        <ProgressRing IsActive="{x:Bind SpinnerActive(Svc.Arcface.Status, Svc.Arcface.Fraction), Mode=OneWay}"
-                                      Visibility="{x:Bind ShowSpinner(Svc.Arcface.Status, Svc.Arcface.Fraction), Mode=OneWay}"
-                                      Width="18" Height="18"
-                                      HorizontalAlignment="Left"
-                                      Foreground="{StaticResource GoldBrush}" />
+                                     Visibility="{x:Bind VisibleIfDownloading(Svc.Arcface.Status), Mode=OneWay}" />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
                                    Text="{x:Bind ProgressLabel(Svc.Arcface.Message, Svc.Arcface.Fraction, Svc.Arcface.BytesDone, Svc.Arcface.TotalBytes), Mode=OneWay}"
@@ -194,7 +186,7 @@
                     </Grid>
                 </Grid>
 
-                <!-- Qwen 2.5-VL 3B — Deep Analyze. -->
+                <!-- SmolVLM — image auto-tagging (small/fast background tagger). -->
                 <Grid Padding="0,4">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="28" />
@@ -213,7 +205,7 @@
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
                             <TextBlock Grid.Column="0"
-                                       Text="{x:Bind VlmTitle(Svc.Vlm.DisplayLabel), Mode=OneWay}"
+                                       Text="{x:Bind VlmTaggerTitle(Svc.Vlm.DisplayLabel), Mode=OneWay}"
                                        Style="{StaticResource BodyStrongTextBlockStyle}" />
                             <TextBlock Grid.Column="1"
                                        Text="{x:Bind VlmSize(Svc.Vlm.ApproxBytes), Mode=OneWay}"
@@ -221,19 +213,15 @@
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                         </Grid>
-                        <TextBlock Text="On-device vision model that captions photos, PDFs, video keyframes, and writes smart filenames. Recommended pick for this PC."
+                        <TextBlock Text="Writes 1–2 descriptive tags per image during the first scan. Small and fast — runs in the background."
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                    TextWrapping="Wrap" />
                         <ProgressBar Maximum="1"
                                      Value="{x:Bind Svc.Vlm.Fraction, Mode=OneWay}"
+                                     IsIndeterminate="{x:Bind IsStarting(Svc.Vlm.Status, Svc.Vlm.Fraction), Mode=OneWay}"
                                      Foreground="{StaticResource GoldBrush}"
-                                     Visibility="{x:Bind ShowDeterminate(Svc.Vlm.Status, Svc.Vlm.Fraction), Mode=OneWay}" />
-                        <ProgressRing IsActive="{x:Bind SpinnerActive(Svc.Vlm.Status, Svc.Vlm.Fraction), Mode=OneWay}"
-                                      Visibility="{x:Bind ShowSpinner(Svc.Vlm.Status, Svc.Vlm.Fraction), Mode=OneWay}"
-                                      Width="18" Height="18"
-                                      HorizontalAlignment="Left"
-                                      Foreground="{StaticResource GoldBrush}" />
+                                     Visibility="{x:Bind VisibleIfDownloading(Svc.Vlm.Status), Mode=OneWay}" />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
                                    Text="{x:Bind ProgressLabel(Svc.Vlm.Message, Svc.Vlm.Fraction, Svc.Vlm.BytesDone, Svc.Vlm.TotalBytes), Mode=OneWay}"
@@ -262,6 +250,74 @@
                                 Content="{x:Bind ButtonLabel(Svc.Vlm.Status), Mode=OneWay}"
                                 MinWidth="86"
                                 Visibility="{x:Bind ShowActionButton(Svc.Vlm.Status), Mode=OneWay}" />
+                    </Grid>
+                </Grid>
+
+                <!-- Qwen 2.5-VL — Deep Analyze (hardware-tiered 3B / 7B, set by
+                     ModelInstallerService.UpdateDeepVlmRecommendation). -->
+                <Grid Padding="0,4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="28" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <FontIcon Grid.Column="0"
+                              Glyph="{x:Bind GlyphFor(Svc.DeepVlm.Status), Mode=OneWay}"
+                              Foreground="{x:Bind IconBrushFor(Svc.DeepVlm.Status), Mode=OneWay}"
+                              FontSize="22"
+                              VerticalAlignment="Top" />
+                    <StackPanel Grid.Column="1" Spacing="4" Margin="12,0,0,0" VerticalAlignment="Center">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0"
+                                       Text="{x:Bind VlmTitle(Svc.DeepVlm.DisplayLabel), Mode=OneWay}"
+                                       Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <TextBlock Grid.Column="1"
+                                       Text="{x:Bind VlmSize(Svc.DeepVlm.ApproxBytes), Mode=OneWay}"
+                                       Margin="12,0,0,0"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </Grid>
+                        <TextBlock Text="On-device vision model for Deep Analyze — captions photos, PDFs, and video keyframes and writes smart filenames. Sized to this PC."
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   TextWrapping="Wrap" />
+                        <ProgressBar Maximum="1"
+                                     Value="{x:Bind Svc.DeepVlm.Fraction, Mode=OneWay}"
+                                     IsIndeterminate="{x:Bind IsStarting(Svc.DeepVlm.Status, Svc.DeepVlm.Fraction), Mode=OneWay}"
+                                     Foreground="{StaticResource GoldBrush}"
+                                     Visibility="{x:Bind VisibleIfDownloading(Svc.DeepVlm.Status), Mode=OneWay}" />
+                        <TextBlock FontFamily="Consolas"
+                                   FontSize="11"
+                                   Text="{x:Bind ProgressLabel(Svc.DeepVlm.Message, Svc.DeepVlm.Fraction, Svc.DeepVlm.BytesDone, Svc.DeepVlm.TotalBytes), Mode=OneWay}"
+                                   Visibility="{x:Bind VisibleIfDownloading(Svc.DeepVlm.Status), Mode=OneWay}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock FontFamily="Consolas"
+                                   FontSize="11"
+                                   Text="{x:Bind RateEtaLabel(Svc.DeepVlm.BytesPerSecond, Svc.DeepVlm.EtaSeconds), Mode=OneWay}"
+                                   Visibility="{x:Bind ShowRateEta(Svc.DeepVlm.Status, Svc.DeepVlm.BytesPerSecond), Mode=OneWay}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ErrorLabel(Svc.DeepVlm.LastError), Mode=OneWay}"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                                   Visibility="{x:Bind VisibleIfFailed(Svc.DeepVlm.Status), Mode=OneWay}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                    <Grid Grid.Column="2" Margin="14,0,0,0" VerticalAlignment="Top">
+                        <TextBlock Text="Installed"
+                                   Foreground="{ThemeResource SystemFillColorSuccessBrush}"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   VerticalAlignment="Center"
+                                   Visibility="{x:Bind VisibleIfInstalled(Svc.DeepVlm.Status), Mode=OneWay}" />
+                        <Button Click="OnDeepVlmActionClicked"
+                                Content="{x:Bind ButtonLabel(Svc.DeepVlm.Status), Mode=OneWay}"
+                                MinWidth="86"
+                                Visibility="{x:Bind ShowActionButton(Svc.DeepVlm.Status), Mode=OneWay}" />
                     </Grid>
                 </Grid>
 
@@ -300,13 +356,9 @@
                                    TextWrapping="Wrap" />
                         <ProgressBar Maximum="1"
                                      Value="{x:Bind Svc.Accelerator.Fraction, Mode=OneWay}"
+                                     IsIndeterminate="{x:Bind IsStarting(Svc.Accelerator.Status, Svc.Accelerator.Fraction), Mode=OneWay}"
                                      Foreground="{StaticResource GoldBrush}"
-                                     Visibility="{x:Bind ShowDeterminate(Svc.Accelerator.Status, Svc.Accelerator.Fraction), Mode=OneWay}" />
-                        <ProgressRing IsActive="{x:Bind SpinnerActive(Svc.Accelerator.Status, Svc.Accelerator.Fraction), Mode=OneWay}"
-                                      Visibility="{x:Bind ShowSpinner(Svc.Accelerator.Status, Svc.Accelerator.Fraction), Mode=OneWay}"
-                                      Width="18" Height="18"
-                                      HorizontalAlignment="Left"
-                                      Foreground="{StaticResource GoldBrush}" />
+                                     Visibility="{x:Bind VisibleIfDownloading(Svc.Accelerator.Status), Mode=OneWay}" />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
                                    Text="{x:Bind RateEtaLabel(Svc.Accelerator.BytesPerSecond, Svc.Accelerator.EtaSeconds), Mode=OneWay}"

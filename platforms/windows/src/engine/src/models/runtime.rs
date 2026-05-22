@@ -54,6 +54,11 @@ impl ExecutionProvider {
 pub struct RuntimeProbe {
     pub vendor: GpuVendor,
     pub adapter_name: Option<String>,
+    /// DXGI adapter index of the chosen (highest-VRAM, non-software) adapter.
+    /// Passed to the DirectML EP as `device_id` so inference lands on the
+    /// discrete GPU on hybrid iGPU+dGPU systems instead of DXGI adapter 0
+    /// (often the integrated GPU).
+    pub adapter_index: Option<u32>,
     pub provider: ExecutionProvider,
     pub cuda_pack_present: bool,
     pub openvino_pack_present: bool,
@@ -65,7 +70,7 @@ impl RuntimeProbe {
     /// checks pack DLL presence, picks the best loadable EP. Idempotent
     /// — `RuntimeProbe::detect()` is safe to call repeatedly.
     pub fn detect() -> Self {
-        let (vendor, adapter_name) = probe_gpu_vendor();
+        let (vendor, adapter_name, adapter_index) = probe_gpu_vendor();
         let cuda_pack_present = pack_present("cuda");
         let openvino_pack_present = pack_present("openvino");
         let qnn_pack_present = pack_present("qnn");
@@ -93,6 +98,7 @@ impl RuntimeProbe {
         Self {
             vendor,
             adapter_name,
+            adapter_index,
             provider,
             cuda_pack_present,
             openvino_pack_present,
@@ -215,6 +221,7 @@ pub fn is_device_removed_error(err: &anyhow::Error) -> bool {
 /// session creation outright.
 pub fn execution_providers_for_chain(
     chain: &[ExecutionProvider],
+    adapter_index: Option<u32>,
 ) -> Vec<ort::execution_providers::ExecutionProviderDispatch> {
     use ort::execution_providers::{
         cuda::CUDAExecutionProvider,
@@ -229,7 +236,20 @@ pub fn execution_providers_for_chain(
             ExecutionProvider::Cuda => out.push(CUDAExecutionProvider::default().build()),
             ExecutionProvider::TensorRt => out.push(TensorRTExecutionProvider::default().build()),
             ExecutionProvider::OpenVino => out.push(OpenVINOExecutionProvider::default().build()),
-            ExecutionProvider::DirectMl => out.push(DirectMLExecutionProvider::default().build()),
+            ExecutionProvider::DirectMl => {
+                // Pin DirectML to the discrete adapter on hybrid iGPU+dGPU
+                // boxes. DirectML's `device_id` is the DXGI adapter index —
+                // the same enumeration `probe_gpu_vendor` walks — so the
+                // highest-VRAM adapter we found is the one we select. Without
+                // this DirectML defaults to adapter 0, which is often the iGPU.
+                // (CUDA/TensorRT use the CUDA device ordinal, not the DXGI
+                // index, and the iGPU isn't CUDA-visible, so they stay default.)
+                let mut dml = DirectMLExecutionProvider::default();
+                if let Some(idx) = adapter_index {
+                    dml = dml.with_device_id(idx as i32);
+                }
+                out.push(dml.build());
+            }
             ExecutionProvider::Qnn => out.push(QNNExecutionProvider::default().build()),
             ExecutionProvider::Cpu => { /* CPU is the implicit fallback */ }
         }
@@ -320,7 +340,7 @@ fn has_any_dll(dir: &PathBuf) -> bool {
 // ── DXGI vendor probe ──────────────────────────────────────────────
 
 #[cfg(windows)]
-fn probe_gpu_vendor() -> (GpuVendor, Option<String>) {
+fn probe_gpu_vendor() -> (GpuVendor, Option<String>, Option<u32>) {
     use windows::Win32::Graphics::Dxgi::{
         CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, DXGI_ADAPTER_FLAG,
         DXGI_ADAPTER_FLAG_SOFTWARE,
@@ -330,12 +350,12 @@ fn probe_gpu_vendor() -> (GpuVendor, Option<String>) {
         Ok(f) => f,
         Err(err) => {
             tracing::warn!(?err, "CreateDXGIFactory1 failed; skipping GPU probe");
-            return (GpuVendor::None, None);
+            return (GpuVendor::None, None, None);
         }
     };
 
     let mut idx: u32 = 0;
-    let mut best: Option<(GpuVendor, String, u64)> = None;
+    let mut best: Option<(GpuVendor, String, u64, u32)> = None;
     loop {
         let adapter: IDXGIAdapter1 = match unsafe { factory.EnumAdapters1(idx) } {
             Ok(a) => a,
@@ -365,24 +385,24 @@ fn probe_gpu_vendor() -> (GpuVendor, Option<String>) {
         };
         let vram = desc.DedicatedVideoMemory as u64;
         match best {
-            Some((_, _, best_vram)) if best_vram >= vram => {}
-            _ => best = Some((vendor, name, vram)),
+            Some((_, _, best_vram, _)) if best_vram >= vram => {}
+            _ => best = Some((vendor, name, vram, idx)),
         }
         idx += 1;
     }
 
     match best {
-        Some((vendor, name, _)) => (vendor, Some(name)),
-        None => (GpuVendor::None, None),
+        Some((vendor, name, _, adapter_idx)) => (vendor, Some(name), Some(adapter_idx)),
+        None => (GpuVendor::None, None, None),
     }
 }
 
 #[cfg(not(windows))]
-fn probe_gpu_vendor() -> (GpuVendor, Option<String>) {
+fn probe_gpu_vendor() -> (GpuVendor, Option<String>, Option<u32>) {
     // Non-Windows host (developer cross-compiling from macOS/Linux).
     // Returns None so the engine falls back to CPU EP — keeps the
     // engine buildable on dev hosts without affecting Windows runtime.
-    (GpuVendor::None, None)
+    (GpuVendor::None, None, None)
 }
 
 // ── System CUDA toolkit lookup ─────────────────────────────────────

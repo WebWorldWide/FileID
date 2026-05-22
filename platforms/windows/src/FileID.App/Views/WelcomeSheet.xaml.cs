@@ -166,15 +166,12 @@ public sealed partial class WelcomeSheet : UserControl
     internal Visibility VisibleIfFailed(ModelInstallStatus s) =>
         s == ModelInstallStatus.Failed ? Visibility.Visible : Visibility.Collapsed;
 
-    internal Visibility ShowDeterminate(ModelInstallStatus s, double frac) =>
-        s == ModelInstallStatus.Downloading && frac > 0
-            ? Visibility.Visible : Visibility.Collapsed;
-
-    internal Visibility ShowSpinner(ModelInstallStatus s, double frac) =>
-        s == ModelInstallStatus.Downloading && frac <= 0
-            ? Visibility.Visible : Visibility.Collapsed;
-
-    internal bool SpinnerActive(ModelInstallStatus s, double frac) =>
+    // A single ProgressBar per row (no ProgressBar↔ProgressRing swap). It's
+    // visible for the whole Downloading phase (VisibleIfDownloading) and just
+    // flips indeterminate → determinate the moment the first byte lands.
+    // Toggling one property once is flicker-free; swapping two controls'
+    // Visibility every time Fraction crossed 0 was the old flicker source.
+    internal bool IsStarting(ModelInstallStatus s, double frac) =>
         s == ModelInstallStatus.Downloading && frac <= 0;
 
     internal Visibility ShowActionButton(ModelInstallStatus s) =>
@@ -239,11 +236,13 @@ public sealed partial class WelcomeSheet : UserControl
     internal string ErrorLabel(string? lastError) =>
         "Failed: " + (lastError ?? "unknown error");
 
-    /// <summary>VLM row title — formats the slot's DisplayLabel for the
-    /// "Deep Analyze (…)" caption. Reads via x:Bind so a RAM-aware
-    /// recommendation change (Qwen 2.5-VL 3B ↔ SmolVLM) updates the
-    /// row text without a page reload.</summary>
+    /// <summary>Deep Analyze (Qwen) row title — e.g. "Deep Analyze (Qwen2.5-VL
+    /// 3B)". Reads DisplayLabel via x:Bind so the hardware-tiered recommendation
+    /// (3B ↔ 7B) updates the row text without a page reload.</summary>
     internal string VlmTitle(string displayLabel) => $"Deep Analyze ({displayLabel})";
+
+    /// <summary>SmolVLM tagging row title — e.g. "Auto-tagging (SmolVLM 500M)".</summary>
+    internal string VlmTaggerTitle(string displayLabel) => $"Auto-tagging ({displayLabel})";
 
     internal string VlmSize(ulong approxBytes)
     {
@@ -298,8 +297,14 @@ public sealed partial class WelcomeSheet : UserControl
 
     private void OnVlmActionClicked(object sender, RoutedEventArgs e)
     {
-        DebugLog.Info("[INSTALL] VLM per-row button clicked.");
+        DebugLog.Info("[INSTALL] SmolVLM (tagging) per-row button clicked.");
         HandleAction(Svc.Vlm);
+    }
+
+    private void OnDeepVlmActionClicked(object sender, RoutedEventArgs e)
+    {
+        DebugLog.Info("[INSTALL] Deep Analyze (Qwen) per-row button clicked.");
+        HandleAction(Svc.DeepVlm);
     }
 
     // GPU Acceleration Pack row. On NVIDIA this kicks off the

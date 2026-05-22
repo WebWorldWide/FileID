@@ -47,7 +47,7 @@ impl Scrfd {
             .with_intra_threads(1)
             .context("set intra threads (SCRFD)")?;
         let chain_labels: Vec<&'static str> = chain.iter().map(|e| e.as_str()).collect();
-        let providers = execution_providers_for_chain(&chain);
+        let providers = execution_providers_for_chain(&chain, probe.adapter_index);
         if !providers.is_empty() {
             builder = builder
                 .with_execution_providers(providers)
