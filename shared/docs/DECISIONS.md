@@ -7,6 +7,75 @@
 
 ---
 
+## 2026-05-22 — Privacy URL-allowlist scan exempts loopback (V16.20)
+
+**Context**: The engine CI's source-URL allowlist scan (`windows-engine.yml`) asserts that every
+`https?://` host appearing in the Windows source is on a small allowlist of real egress hosts +
+XAML namespace tokens. The persistent VLM server work added `models/vlm_server.rs`, which formats
+`http://127.0.0.1:{port}` for the local `llama-server` endpoint. `127.0.0.1` isn't on the
+allowlist, so the scan failed and the x64 engine job had been red ever since that file landed
+(arm64 stayed green — the scan is x64-only).
+
+**Decision**: exempt loopback hosts (`127.0.0.1`, `localhost`, `0.0.0.0`, `::1`) in the scan
+rather than allowlisting `127.0.0.1` as an "egress host". A loopback URL never leaves the
+machine, so it cannot be the thing the scan exists to catch — a download site, telemetry
+endpoint, or analytics URL. Modelling loopback as *exempt* (not allowlisted) keeps the allowlist
+honest as a list of real external hosts and is robust to any future local-IPC port. The
+telemetry-string deny-list and the egress allowlist themselves are unchanged.
+
+## 2026-05-21 — CLIP split: scene tags OFF, semantic search KEPT
+
+**Context**: The user wanted SmolVLM to be the tagger and CLIP to stop emitting tags, but to
+KEEP free-text semantic search. CLIP (MobileCLIP-S2) does two independent jobs that share the
+per-file image embedding: scan-time scene tags (`source='auto'`) and the Library's
+semantic-search embedding (`clip_embeddings`). SmolVLM is a generative VLM, not a dual-encoder,
+so it can't produce a retrieval embedding itself — CLIP has to run alongside it for search.
+(A first pass fully disabled CLIP; the user then asked to keep search, so we split the jobs.)
+
+**Decision**: split the two jobs across the two flags. `ENABLE_CLIP_SCENE_TAGS = false` drops
+the scan-time scene tags (the `tagging.rs` scene-scoring block skips). `ENABLE_CLIP = true`
+keeps the MobileCLIP load + per-file embedding for semantic search. `load_default` builds the
+scene labeler only when BOTH are on, so the tags-only ~21 s scene-matrix build is skipped. Net:
+SmolVLM is the sole tagger (`source='vlm'`, no `source='auto'`), semantic search is preserved,
+and the CLIP install card + onboarding stay (search needs the models). `ENABLE_CLIP = false`
+remains the full kill-switch — search then degrades to FTS5 over SmolVLM tags + filenames +
+OCR and the embed IPC handlers short-circuit — kept available but not the default.
+
+## 2026-05-21 — The mid-scan navigation crash was an init-fire NRE, not the V16.5c async race
+
+**Context**: STATE/DECISIONS recorded the "clicking a different page while scanning crashes
+the app" bug as fixed in V16.5c (DetailHostView builds the incoming view lazily in the
+fade-out completion to avoid a double-subscribe race). The user kept hitting it. Three crash
+dumps from today (pid 19792, 12:03:21/23/32) were identical and unambiguous:
+`System.NullReferenceException at RestructureView.OnVisualizationModeChanged` via
+`SelectionChangedEventHandler.Do_Abi_Invoke`. `RestructureView.xaml` declares
+`<ComboBox SelectedIndex="0" SelectionChanged="OnVisualizationModeChanged">` *before* the
+`Sankey`/`TreeDiff`/`VisualizationHeader` elements; applying `SelectedIndex="0"` raises
+`SelectionChanged` during `InitializeComponent()`, when those `x:Name` backing fields are
+still null → the handler dereferenced null. It was also the one RestructureView handler not
+wrapped in `DebugLog.SafeRun`.
+
+**Decision**: the real fix is per-handler — null-guard any control event handler wired in
+XAML that touches sibling `x:Name` elements declared later, because such handlers fire
+during `InitializeComponent()`. Applied to `RestructureView.OnVisualizationModeChanged` and
+`SettingsView.OnProviderOverrideChanged` (the latter was also silently clobbering the GPU EP
+override to "auto" on every Settings open via the same init-fire). The V16.5c DetailHostView
+work is kept — it fixed a *different* latent race and never prevented this NRE. Lesson: a
+documented "fixed" claim is not proof; reproduce from the actual crash artifact.
+
+## 2026-05-21 — Deep Analyze gating: model-weights first, then a single runtime error
+
+**Context**: `run_deep_analyze_batch` resolved the per-file CLI runner first and emitted
+`llama_cpp_missing` only when BOTH the CLI was absent AND weights were missing — so a missing
+*model* with a working runtime produced N silent per-file failures, and the dual-missing case
+blamed only the runtime.
+
+**Decision**: gate on model weights FIRST (a clear `vlm_model_missing` before
+`DeepAnalyzeStarting`), treat `llama-mtmd-cli.exe` as optional (the persistent llama-server
+only needs `llama-server.exe`), and emit a single `llama_cpp_missing` + `DeepAnalyzeComplete`
+when neither backend can run present weights — instead of failing every file. Honest,
+actionable errors; the persistent server stays the default whole-library backend.
+
 ## 2026-05-21 — Face crops: convert SCRFD [x1,y1,x2,y2] → [x,y,w,h] at the consumer
 
 **Context**: People-tab faces were blank or "not a face", and clustering was unreliable.
@@ -960,13 +1029,13 @@ This supersedes the 2026-05-14 cuDNN auto-fetch entry below. The 2026-05-14 entr
 
 ## 2026-05-14 — Auto-fetch cuDNN from NVIDIA's public CDN (policy reversal of V14.8.2)
 
-PACKS.md (since V14.8.2) said cuDNN auto-fetch was deferred pending redistribution-license review. The rationale at the time: every cuDNN distribution channel we knew of was either NVIDIA's developer portal (registration + per-user EULA) or a third-party mirror (clear redistribution problem). Bundling required negotiating NVIDIA's license for FileID specifically.
+As of V14.8.2, cuDNN auto-fetch was deferred pending redistribution-license review. The rationale at the time: every cuDNN distribution channel we knew of was either NVIDIA's developer portal (registration + per-user EULA) or a third-party mirror (clear redistribution problem). Bundling required negotiating NVIDIA's license for FileID specifically.
 
 NVIDIA now publishes the cuDNN Windows redistributables on a public CDN at `developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/` with no registration and no per-user EULA gate — the same channel any `pip install nvidia-cudnn-cu12` user pulls from (the wheel content is the same archive). Anyone can fetch from there; it is NVIDIA themselves distributing.
 
 Decision: auto-fetch cuDNN from that CDN on NVIDIA hardware. The legal framing is identical to fetching Qwen weights from HuggingFace — the vendor controls the channel; we are an end user pulling from the canonical source, not redistributing. The new `CudnnAutoInstaller.cs` triggers on engine-ready + NVIDIA detection, opt-out via `AppSettings.DisableAutoInstallCudnn`. The user sees the download progress through the existing model-install card UI.
 
-PRIVACY.md updated to disclose the new egress (`developer.download.nvidia.com`) alongside HuggingFace (model weights) and GitHub releases (llama.cpp runtimes). PACKS.md cuDNN section rewritten to describe the new auto-install behavior.
+PRIVACY.md updated to disclose the new egress (`developer.download.nvidia.com`) alongside HuggingFace (model weights) and GitHub releases (llama.cpp runtimes).
 
 Alternatives considered: (a) keep cuDNN BYO with a Settings button — rejected, defeats the "everything just works" goal the user has consistently pushed for; (b) bundle cuDNN into our own composite ZIP under a redistribution license — rejected, both the engineering cost and the legal-review cost are out of proportion to the 10-15% scanning perf gain; (c) only auto-install when the user opts in via Settings — rejected, the auto-installer is the opt-in (it fires only on NVIDIA hardware and is single-flag-opt-out), no need for a second opt-in layer.
 
@@ -992,7 +1061,7 @@ Related: introduces `-PreserveModels` to `build-all.ps1` so the wipe can spare t
 
 ## 2026-05-14 — `llama_runtime_cuda_x64` lives in the engine registry, not as ad-hoc plumbing in the C# auto-installer
 
-The `CudaAutoInstaller.cs` service hardcoded `ModelKind = "llama_runtime_cuda_x64"` and a per-install `SentinelDir = "llama.cpp-cuda"` constant, but the engine's `registry.rs` had no match arm for that kind. Every prewarm short-circuited at `LookupResult::Unknown` and surfaced "Add it to engine/src/models/registry.rs" as a user-visible toast. The PACKS.md doc had advertised the artifact for weeks.
+The `CudaAutoInstaller.cs` service hardcoded `ModelKind = "llama_runtime_cuda_x64"` and a per-install `SentinelDir = "llama.cpp-cuda"` constant, but the engine's `registry.rs` had no match arm for that kind. Every prewarm short-circuited at `LookupResult::Unknown` and surfaced "Add it to engine/src/models/registry.rs" as a user-visible toast.
 
 Decision: add the arm to `registry.rs` as a sibling of `llama_runtime_x64` (Vulkan), extracting into `Models/llama.cpp-cuda/` (matches the folder the engine's `register_dll_dirs_under` already calls and the C# constant already pointed at). Drop the `SentinelDir` constant from `CudaAutoInstaller.cs` and route its "already installed?" probe through the canonical `Models/.sentinels/{id}.installed` path that `ModelInstallerService.HasEngineSentinel` uses. The two systems now share one source of truth — adding a future runtime can't introduce the same drift again.
 
@@ -1726,13 +1795,9 @@ The knowledge-graph canvas was O(N×M) connection lines + a 6000×6000 DotGridCa
 
 **Why this is a feature not an oversight:** Users open FileID against their personal photos, work documents, financial scans. Even "anonymous" telemetry leaks structure ("user X scanned 47K files in folder Y, used Deep Analyze 3 times"). The product proposition is on-device privacy; telemetry would compromise the proposition. Documented in `shared/docs/PRIVACY.md` and surfaced in the Settings tab "What we don't do" panel.
 
-## 2026-05-02 — GPU acceleration: DirectML + Vulkan baseline, optional Performance Packs
+## 2026-05-02 — GPU acceleration: DirectML + Vulkan baseline (Performance Packs plan — SUPERSEDED by V14.8.2 removal)
 
-**Decision:** Out-of-the-box install ships ONNX Runtime with DirectML EP + CPU EP, and llama.cpp with Vulkan + DirectML + CPU backends. This covers NVIDIA, AMD, Intel discrete, Intel iGPU, AMD iGPU, and Snapdragon Adreno without any extra runtime install. Power users opt into Performance Packs via Settings: NVIDIA CUDA Pack (~600 MB), Intel OpenVINO Pack (~300 MB), Snapdragon NPU Pack (~150 MB). Auto-suggested when matching hardware is detected.
-
-**Why DirectML universal default (vs CUDA-required):** CUDA + cuDNN runtime is a 600 MB+ download and only benefits NVIDIA users. DirectML ships in Windows, works on every D3D12-capable GPU, and gets within 10–20% of CUDA for our model sizes. Bundling CUDA by default would bloat the install for the majority of users (Intel + AMD + Adreno) who don't benefit. Performance Packs pattern lets us serve the long tail without weighing down the base case.
-
-**Why Vulkan for llama.cpp baseline:** Vulkan in llama.cpp is mature and runs at 80–95% of CUDA perf on NVIDIA, full-tilt on AMD (where ROCm on Windows is unreliable), and full-tilt on Intel Arc + iGPU. Single backend covers all three vendors. CUDA backend remains opt-in for NVIDIA users who want maximum throughput.
+The original Phase-0 plan paired the DirectML-EP + Vulkan-llama.cpp baseline with optional per-vendor "Performance Packs" (CUDA / OpenVINO / QNN). The packs were **removed in V14.8.2** — none had a shippable, license-compliant URL — and DirectML became the universal GPU path with CPU as the floor. The surviving baseline rationale (DirectML within 10–20 % of CUDA on our model sizes; Vulkan llama.cpp covering NVIDIA/AMD/Intel/Adreno on one binary) is restated in the **2026-05-11 "GPU Performance Packs removed"** entry below, which is the live decision. Full original text in `git log`.
 
 ## 2026-05-02 — Windows on ARM (Snapdragon) is first-class from day one
 
@@ -1910,19 +1975,7 @@ These already live in `FileID.Theme/Theme.xaml` as `SpringResponseStandard` / `S
 
 **Decision.** Task closed. The deferral entry immediately below this one is superseded — no further work is needed in this area beyond the user-side verification that the visual still renders cleanly on Win11 26200+ (no `0xC000027B` regression).
 
-**Consequence.** SHIP.md Phase 3/4 LavaLamp checkbox can be marked done. The original V14.6 commit message documented the fix; this is just the audit-side acknowledgement.
-
----
-
-## 2026-05-17 — LavaLampBackground Composition migration deferred; needs Win11 26200+ render verification (SUPERSEDED by entry above)
-
-**Context.** The macOS `LavaLampBackground.swift` is a user-favorite visual (Canvas + spring-driven blob centers). The original Win2D port hit `DXGI_ERROR_DEVICE_HUNG` on Windows 11 build 26200+ — a known issue with `CanvasAnimatedControl` on recent Insider Builds. A `Microsoft.UI.Composition`-backed replacement would use `SpriteVisual` + `ScalarKeyFrameAnimation` (no D2D device, no DXGI surface), which sidesteps the hang.
-
-**Decision.** Defer the Composition migration to a session running on a Win11 26200+ device. The implementation is straightforward (~150 LOC, no new dependencies), but the only meaningful test is "does it render without crashing on the affected builds." Code I can't render is code I shouldn't ship.
-
-**Alternatives considered.** (a) Static CSS-gradient fallback only — rejected; loses the user's favorite touch. (b) Custom XAML `Canvas` with `Storyboard`-driven ellipse `Translation` — works but is heavier than `SpriteVisual` for the same effect. (c) Roll back Win2D and accept the hang risk on 26200+ — rejected; the user runs Insider Builds.
-
-**Consequence.** LavaLamp currently renders only on Win11 pre-26200. Sidebar shows a static gradient on affected builds. Visual parity gap with macOS; flagged in NEXT.md.
+**Consequence.** SHIP.md Phase 3/4 LavaLamp checkbox can be marked done. The original V14.6 commit message documented the fix; this is just the audit-side acknowledgement. (The earlier "Composition migration deferred" entry this supersedes has been trimmed — it lives in `git log`.)
 
 ---
 

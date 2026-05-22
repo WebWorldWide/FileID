@@ -122,4 +122,4 @@ Numerics (file counts, percentages) use `tabular nums` so columns align in lists
 
 ## Iconography
 
-SF Symbols on macOS. Segoe Fluent Icons on Windows (or shipped SVG fallbacks for icons that lack a Segoe equivalent — TBD list as Phase 1 lands).
+SF Symbols on macOS. Segoe Fluent Icons on Windows, with shipped SVG fallbacks for the few icons that lack a Segoe equivalent. Phase 1 is code-complete: the icon set in use is the one wired into the shipped views — revisit the fallback list only if a new view introduces a glyph Segoe Fluent doesn't cover.

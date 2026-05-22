@@ -51,7 +51,7 @@ Prereqs:
    ```
 4. **Run the relevant tests**. See `TESTING.md`. Coverage on the touched modules must stay within 2 pp of `COVERAGE.md` baseline.
 5. **Update docs** (`STATE.md`, `NEXT.md`, `DECISIONS.md`) per the rules below.
-6. **Open PR**. The CI matrix runs the same lint + test + privacy + parity gates as your local checks.
+6. **Open PR**. The CI matrix runs the same lint + test + privacy gates as your local checks. (A cross-platform parity gate is planned but not yet implemented — see `TESTING.md`.)
 
 ## When to update which doc
 
@@ -83,7 +83,7 @@ Prereqs:
 5. Write the handler in `engine/src/commands/<domain>.rs` (Windows) and the Swift dispatcher (macOS).
 6. Wire the dispatcher call in `engine/src/main.rs` `handle_line` (Windows) and `FileIDEngineMain.swift` (macOS).
 7. Add a round-trip test in `FileID.IpcSchema.Tests/IpcCommandTests.cs` AND `Tests/SharedTests/IPCProtocolTests.swift`.
-8. The parity test in `shared/parity-tests/` will catch any wire-shape drift.
+8. Once the `shared/parity-tests/` harness exists (not yet implemented — see `TESTING.md`), the parity test will catch any wire-shape drift.
 
 ### Adding a new model
 
@@ -118,7 +118,7 @@ The strategy is a regex-like generator. See `util/path_safety.rs` for working ex
 
 ### Adding a parity fixture
 
-Pending Phase 7 implementation. Will land under `shared/parity-tests/` with a README describing the fixture format.
+**Not yet implemented.** The `shared/parity-tests/` directory and its CI job don't exist yet. When the harness lands, fixtures will live there with a README describing the format.
 
 ## Code style
 

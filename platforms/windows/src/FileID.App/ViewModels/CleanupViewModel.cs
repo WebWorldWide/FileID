@@ -61,12 +61,15 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
     public async Task RefreshAsync(CancellationToken ct)
     {
         if (_disposed) return;
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
-        var token = linked.Token;
-        IsLoading = true;
-        ErrorMessage = null;
         try
         {
+            // Linked token created inside the try: a Dispose() race after the
+            // _disposed check makes _disposalCts.Token throw ObjectDisposedException,
+            // caught below as a clean teardown no-op instead of escaping to the caller.
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
+            var token = linked.Token;
+            IsLoading = true;
+            ErrorMessage = null;
             var groups = await Task.Run(() => Load(token), token).ConfigureAwait(false);
             if (_disposed || token.IsCancellationRequested) return;
             ApplyOnUi(groups);
@@ -269,6 +272,41 @@ internal sealed class DuplicateMember : INotifyPropertyChanged
             _isKeeper = value;
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsKeeper)));
         }
+    }
+
+    private Microsoft.UI.Xaml.Media.Imaging.BitmapImage? _thumbnail;
+    /// <summary>Shell thumbnail, loaded lazily by the view's members
+    /// ItemsRepeater (ElementPrepared) via ThumbnailService — mirrors macOS's
+    /// per-tile QLThumbnail. Null until loaded; cleared on tile recycle.</summary>
+    public Microsoft.UI.Xaml.Media.Imaging.BitmapImage? Thumbnail
+    {
+        get => _thumbnail;
+        set
+        {
+            if (IsDetached) return;
+            if (ReferenceEquals(_thumbnail, value)) return;
+            _thumbnail = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Thumbnail)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ShowPlaceholder)));
+        }
+    }
+
+    /// <summary>Placeholder-glyph visibility — shown until the thumbnail loads.</summary>
+    public Microsoft.UI.Xaml.Visibility ShowPlaceholder =>
+        _thumbnail == null ? Microsoft.UI.Xaml.Visibility.Visible : Microsoft.UI.Xaml.Visibility.Collapsed;
+
+    /// <summary>Marker set when the tile recycles out of the repeater so a late
+    /// thumbnail bind can't land on a stale tile.</summary>
+    public bool IsDetached { get; set; }
+
+    /// <summary>Release the bound bitmap on recycle (bypasses the IsDetached
+    /// guard so the recycled tile shows the placeholder, not a stale image).</summary>
+    public void ClearThumbnailForRecycle()
+    {
+        if (_thumbnail == null) return;
+        _thumbnail = null;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Thumbnail)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ShowPlaceholder)));
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;

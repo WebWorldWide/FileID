@@ -435,14 +435,10 @@ public sealed partial class DeepAnalyzeView : UserControl
 
     private async System.Threading.Tasks.Task LoadStreamThumbAsync(string path)
     {
-        // BitmapImage is a DispatcherObject. The await on GetThumbnailAsync
-        // can resume on a worker thread, and constructing the BitmapImage
-        // off the UI thread is a known crash shape — native
-        // RaiseFailFastException, no managed catch. Capture the dispatcher
-        // before any await and marshal both the BitmapImage construction
-        // AND the StreamImage.Source assignment inside one TryEnqueue
-        // lambda. On any failure we explicitly null the source so the
-        // placeholder glyph shows instead of a stale frame.
+        // BitmapImage is a UI-thread DispatcherObject; constructing it off the UI
+        // thread (this await can resume on a worker) is a native fast-fail. Capture
+        // the dispatcher before any await and do the construct + StreamImage.Source
+        // set inside one TryEnqueue; null the source on failure (placeholder, not stale).
         if (_unloaded) return;
         var dispatcher = DispatcherQueue;
         Windows.Storage.FileProperties.StorageItemThumbnail? thumb = null;

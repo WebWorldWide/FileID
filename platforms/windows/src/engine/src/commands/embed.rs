@@ -17,6 +17,21 @@ pub(crate) async fn handle_embed_image_query(
 ) {
     let query_id = payload.query_id.clone();
 
+    // CLIP is disabled (scene_vocab::ENABLE_CLIP) — emit an empty embedding so
+    // the app's "find similar" path falls back cleanly instead of awaiting a
+    // reply that never comes. No DB read, no model load.
+    if !crate::models::scene_vocab::ENABLE_CLIP {
+        sink.send(IpcEvent::now(EventPayload::ClipTextEmbedding(Wrap::new(
+            ClipTextEmbedding {
+                query_id,
+                query: format!("file:{}", payload.file_id),
+                embedding: Vec::new(),
+            },
+        ))))
+        .await;
+        return;
+    }
+
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<Vec<f32>>> {
         let conn = db.lock();
         let blob: Option<Vec<u8>> = conn
@@ -76,6 +91,21 @@ pub(crate) async fn handle_embed_image_query(
 pub(crate) async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQueryPayload) {
     let query = payload.query.clone();
     let query_id = payload.query_id.clone();
+
+    // CLIP is disabled (scene_vocab::ENABLE_CLIP) — emit an empty embedding so
+    // the search box falls back to FTS5 (over SmolVLM tags + filenames + OCR)
+    // without a 5 s timeout. No model load.
+    if !crate::models::scene_vocab::ENABLE_CLIP {
+        sink.send(IpcEvent::now(EventPayload::ClipTextEmbedding(Wrap::new(
+            ClipTextEmbedding {
+                query_id,
+                query,
+                embedding: Vec::new(),
+            },
+        ))))
+        .await;
+        return;
+    }
 
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<f32>> {
         use std::sync::OnceLock;

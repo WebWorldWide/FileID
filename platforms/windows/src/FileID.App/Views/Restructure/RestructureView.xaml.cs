@@ -24,7 +24,7 @@ public sealed partial class RestructureView : UserControl
         CategoryRepeater.ItemsSource = _categoryRows;
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         Sankey.RibbonInvoked += OnSankeyRibbonInvoked;
-        Loaded += (_, _) => _ = RefreshDeepAnalyzeHintAsync();
+        Loaded += OnLoaded;
         Unloaded += (_, _) =>
         {
             _unloaded = true;
@@ -32,6 +32,30 @@ public sealed partial class RestructureView : UserControl
             Sankey.RibbonInvoked -= OnSankeyRibbonInvoked;
         };
     }
+
+    // macOS parity (RestructureView.swift `.task`): the plan auto-generates on
+    // open — no manual "Generate plan" click. Render an already-computed plan if
+    // one exists (cached on the engine across tab switches); otherwise compute it
+    // now, provided a library folder has been scanned.
+    private async void OnLoaded(object sender, RoutedEventArgs e)
+        => await Services.DebugLog.SafeRunAsync(nameof(OnLoaded), async () =>
+        {
+            _ = RefreshDeepAnalyzeHintAsync();
+            if (_unloaded) return;
+            if (EngineClient.Instance.LastRestructurePlan is not null)
+            {
+                SyncPlan();
+                return;
+            }
+            var folder = AppViewModel.Instance.FolderPath;
+            if (string.IsNullOrEmpty(folder))
+            {
+                PlanStatusText.Text = "Pick a library folder in the sidebar to plan a reorganization.";
+                return;
+            }
+            PlanStatusText.Text = "Computing plan…";
+            await EngineClient.Instance.PlanRestructureAsync(folder);
+        });
 
     // Shows the Deep Analyze hint banner when there are unnamed person
     // clusters in the DB. Mirrors macOS RestructureView's "Name people
@@ -117,6 +141,22 @@ public sealed partial class RestructureView : UserControl
             {
                 Services.DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
                 DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncApplyResult(); });
+            }
+            else if (e.PropertyName == nameof(EngineClient.DeepAnalyzeComplete))
+            {
+                // macOS parity: re-generate when Deep Analyze finishes so the
+                // People/<name> buckets reflect newly-named clusters. Terminal
+                // event (fires once per batch) and only while this view is alive.
+                var folder = AppViewModel.Instance.FolderPath;
+                if (!string.IsNullOrEmpty(folder))
+                {
+                    DispatcherQueue.TryEnqueue(async () =>
+                    {
+                        if (_unloaded) return;
+                        try { await EngineClient.Instance.PlanRestructureAsync(folder!); }
+                        catch (System.Exception ex) { Services.DebugLog.Warn("Restructure auto-regen failed: " + ex.Message); }
+                    });
+                }
             }
         });
 
@@ -213,17 +253,23 @@ public sealed partial class RestructureView : UserControl
     }
 
     private void OnVisualizationModeChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (VisualizationModeCombo.SelectedItem is ComboBoxItem item && item.Tag is string mode)
+        => DebugLog.SafeRun(nameof(OnVisualizationModeChanged), () =>
         {
-            var sankey = mode == "sankey";
-            Sankey.Visibility = sankey ? Visibility.Visible : Visibility.Collapsed;
-            TreeDiff.Visibility = sankey ? Visibility.Collapsed : Visibility.Visible;
-            VisualizationHeader.Text = sankey
-                ? "Source folder → category flow"
-                : "Current ↔ proposed folder tree";
-        }
-    }
+            // ComboBox SelectedIndex="0" raises SelectionChanged during
+            // InitializeComponent — before Sankey/TreeDiff/VisualizationHeader
+            // are realized — so the fields are null on that first fire. The
+            // XAML already encodes the index-0 state, so bail until they exist.
+            if (Sankey is null || TreeDiff is null || VisualizationHeader is null) return;
+            if (VisualizationModeCombo.SelectedItem is ComboBoxItem item && item.Tag is string mode)
+            {
+                var sankey = mode == "sankey";
+                Sankey.Visibility = sankey ? Visibility.Visible : Visibility.Collapsed;
+                TreeDiff.Visibility = sankey ? Visibility.Collapsed : Visibility.Visible;
+                VisualizationHeader.Text = sankey
+                    ? "Source folder → category flow"
+                    : "Current ↔ proposed folder tree";
+            }
+        });
 
     private async void OnPlanClicked(object sender, RoutedEventArgs e)
     {

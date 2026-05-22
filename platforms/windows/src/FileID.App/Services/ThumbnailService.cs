@@ -39,13 +39,8 @@ public readonly record struct ThumbnailDiagnostics(
 
 internal sealed class ThumbnailService : IDisposable
 {
-    /// <summary>
-    /// LRU cap. ~5 KB per cached BitmapImage (256x256 thumbnails compressed
-    /// in shared memory) → ~25 MB at full cap. Sized for libraries up to
-    /// ~10K files where a power user might scroll-flick through and want
-    /// previously-seen thumbs instant. Smaller libraries cap themselves
-    /// naturally.
-    /// </summary>
+    /// <summary>LRU cap ~5000 entries (~25 MB at ~5 KB/thumb) — sized for
+    /// ~10K-file libraries; smaller ones cap themselves.</summary>
     private readonly MemoryCache _cache = new(new MemoryCacheOptions
     {
         SizeLimit = 5_000,
@@ -135,11 +130,9 @@ internal sealed class ThumbnailService : IDisposable
             }
             try
             {
-                // drop ConfigureAwait(false). The bitmap returned
-                // from RenderAsync is a UI-thread DispatcherObject; the
-                // post-await continuation here completes the caller's
-                // TCS with that handle, and we want the caller's continuation
-                // to also resume on the UI thread when it sets tile.Thumbnail.
+                // No ConfigureAwait(false): the returned BitmapImage is a
+                // UI-thread DispatcherObject, so keep the continuation (and the
+                // caller's, which sets tile.Thumbnail) on the UI thread.
                 var bmp = await RenderAsync(req.Path, req.ModifiedAt, _uiDispatcher, ct);
                 if (bmp != null)
                 {
@@ -161,21 +154,11 @@ internal sealed class ThumbnailService : IDisposable
     }
 
     /// <summary>
-    /// Render a thumbnail via the Windows.Storage shell-thumbnail API
-    /// (which uses the same IThumbnailProvider chain Explorer does — Office,
-    /// raw, .heic, .pages all work). 192-px request, scaled internally by
-    /// the shell with `UseCurrentScale`.
-    /// dropped from 256 → 192 px to match macOS
-    /// `ThumbnailService.swift:27` (size: 192). Same visual target, ~44%
-    /// less memory per cached tile.
-    ///
-    /// V16.1 reverted an attempt to add per-window DPI scaling. The
-    /// scaling helper called WinRT interop (`WindowNative.GetWindowHandle`)
-    /// from the worker-thread `DrainAsync` task, which has thread-affinity
-    /// constraints on WinUI 3 — the silent catch fell back to 192 anyway,
-    /// but it also appeared to poison subsequent `SetSourceAsync` calls
-    /// for some users (every tile showed the broken-image placeholder).
-    /// Holding at hardcoded 192 px keeps the known-good V16.0 behavior.
+    /// Shell-thumbnail request size. 192-px matches macOS ThumbnailService.swift
+    /// (the shell uses the same IThumbnailProvider chain as Explorer — Office /
+    /// raw / .heic all work). Do NOT add per-window DPI scaling here: the WinRT
+    /// `GetWindowHandle` interop is UI-thread-affined and, called from this
+    /// worker-thread drain, poisoned later `SetSourceAsync` calls (V16.1 revert).
     /// </summary>
     private const uint ThumbnailRequestPx = 192;
 

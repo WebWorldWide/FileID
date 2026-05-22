@@ -64,12 +64,8 @@ public sealed partial class SidebarProcessingControl : UserControl
                 DebugLog.Debug($"[ENGINE-SUB:SidebarProcessingControl] {e.PropertyName}");
                 DispatcherQueue.TryEnqueue(SyncWarningBanner);
             }
-            // D8 per-batch CompletionRipple removed. The
-            // 0.9 s ring animation re-triggered at ~5 Hz (one per
-            // BatchSummary, ≈200 ms apart) stacked 4-5 overlapping
-            // animations on TaggedStatBorder and was the main source
-            // of perceived sidebar instability during a scan. macOS
-            // doesn't have this affordance; removing for parity.
+            // No per-batch CompletionRipple: at ~5 Hz its 0.9 s rings stacked
+            // 4-5 deep and destabilized the sidebar; macOS has no such affordance.
         });
 
 
@@ -127,17 +123,10 @@ public sealed partial class SidebarProcessingControl : UserControl
                 return;
             }
 
-            // when the engine isn't Ready yet, instead of
-            // silently no-op'ing (the prior "Start Scan does nothing"
-            // symptom) WAIT for Ready with visible inline feedback. A
-            // user-driven retry queue is friendlier than a disabled
-            // button that gives no hint about why.
-            // bumped 15 s → 30 s for slow-HDD + cold-EP cases.
-            // The macOS engine has no equivalent timeout; on a fresh
-            // boot with a 5400 rpm drive plus cold DirectML probe, the
-            // first Ready event can land at 20-25 s. 30 s is generous
-            // for healthy hardware but still fails fast on a genuinely
-            // dead engine.
+            // Engine not Ready yet: wait (up to 30 s) with inline feedback
+            // instead of silently no-op'ing ("Start Scan does nothing"). 30 s
+            // covers a cold DirectML probe + slow HDD, where the first Ready
+            // can land at 20-25 s, while still failing fast on a dead engine.
             if (EngineClient.Instance.State != EngineClient.LifecycleState.Ready)
             {
                 IdleStatusText.Text = $"Waiting for engine ({EngineClient.Instance.State})…";

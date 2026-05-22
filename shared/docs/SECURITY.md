@@ -1,6 +1,6 @@
 # FileID — Security Notes
 
-What we've audited, what we've fixed, and what's still on the v1.0 ship gate.
+What we've audited, what we've fixed, and the hardening that must land before the v1.0 release.
 
 ## Threat model
 
@@ -30,9 +30,9 @@ FileID runs entirely on-device. The only network surface is HuggingFace model do
 - **Engine respawn race.** `EngineClient` keeps a single `process` reference and uses bounded backoff (1 s / 4 s / 16 s, 60 s window). No multi-instance race.
 - **File handle lifecycle.** `Process` pipes auto-close on termination. Security-scoped resources are released via `defer { url.stopAccessingSecurityScopedResource() }`.
 
-## Deferred to v1.0 ship
+## Open hardening — gates the v1.0 release (does NOT ship in the current build)
 
-Tracked in `docs/SHIP.md`:
+These three items **block the v1.0 ship gate**: they must land before the release tag, but they are not yet implemented and are not required for day-to-day development builds. (Note: on Windows the engine downloader already SHA256-verifies each model file at download time — the gap below is verify-*on-load* and the macOS path.)
 
 - **Per-model SHA256 verification.** Models in `~/Library/Application Support/FileID/Models/` are loaded without checksum verification today. An attacker who can already write to that directory can replace a `.mlpackage`. Mitigation: record SHA256 on download in `CLIPModelInstaller`, verify on every load. Equivalent for the MLX VLMs under `~/Documents/huggingface/models/`.
 - **Certificate pinning for HuggingFace.** No cert pinning today; an active MITM (or compromised CA) can swap downloads. Mitigation: pin `huggingface.co` via `URLSession` delegate. Best done together with the SHA256 work above.

@@ -32,13 +32,9 @@ public sealed partial class SidebarPipelineProgress : UserControl
     private readonly Rectangle?[] _rightConnectors = new Rectangle?[Stages.Length];
     private readonly TextBlock[] _labels = new TextBlock[Stages.Length];
 
-    // cache the brushes used by SyncStage. SyncStage fires up to
-    // 10 Hz during a scan (one call per Progress event); the previous
-    // version allocated four fresh SolidColorBrush objects on each call —
-    // 10×4×scan_duration brushes pinned on the UI thread plus the
-    // re-evaluation of three theme-resource lookups. Brushes don't change
-    // at runtime; cache once. SolidColorBrush is a DispatcherObject so
-    // ctor must run on the UI thread — done from the ctor below.
+    // Cache the SyncStage brushes once: it fires ~10 Hz during a scan, and
+    // allocating four SolidColorBrushes (DispatcherObjects) per call churned the
+    // UI thread. Built in the ctor (UI thread) since SolidColorBrush is UI-affined.
     private SolidColorBrush? _goldBrush;
     private SolidColorBrush? _fadedGold;
     private SolidColorBrush? _goldStroke;

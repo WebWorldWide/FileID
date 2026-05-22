@@ -15,13 +15,10 @@ namespace FileID.Views.Sidebar;
 
 public sealed partial class SidebarQueueList : UserControl
 {
-    // a dedicated StackPanel that holds the per-job rows, created
-    // once and reused. The previous design imperatively rebuilt the
-    // panel's parent's Children on every event — `JobsRepeater.ItemsSource
-    // = null` + sibling removal + new panel insertion mutates the visual
-    // tree mid-event-burst, which on Windows can race with a layout pass
-    // and fast-fail the renderer. Now we own a stable container and only
-    // swap its children content; layout passes see a steady reference.
+    // Stable per-job-rows container, created once and reused. Mutating the
+    // parent's Children mid-event-burst (the old rebuild-on-every-QueueState
+    // design) races the layout pass and fast-fails the renderer — so only this
+    // container's own children ever change.
     private StackPanel? _rowsContainer;
 
     // Two brushes per BuildRow (running vs idle background) used to be

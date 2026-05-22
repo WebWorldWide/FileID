@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
     WelcomeSheet — first-launch onboarding modal. 1:1 port of
     platforms/apple/app/Sources/FileID/Views/WelcomeSheet.swift.
@@ -51,7 +51,8 @@
                            Fill="{ThemeResource ControlStrokeColorDefaultBrush}"
                            Opacity="0.3" />
 
-                <!-- CLIP — Semantic search. -->
+                <!-- CLIP — semantic search. (Tagging is SmolVLM; CLIP only
+                     powers free-text image search now.) -->
                 <Grid Padding="0,4">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="28" />

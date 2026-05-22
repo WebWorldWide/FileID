@@ -142,37 +142,56 @@
                             <StackPanel Spacing="6">
                                 <TextBlock Text="{x:Bind Caption, Mode=OneWay}"
                                            Style="{StaticResource BodyStrongTextBlockStyle}"/>
-                                <ItemsRepeater ItemsSource="{x:Bind Members}">
-                                    <ItemsRepeater.Layout>
-                                        <StackLayout Orientation="Vertical" Spacing="4"/>
-                                    </ItemsRepeater.Layout>
-                                    <ItemsRepeater.ItemTemplate>
-                                        <DataTemplate x:DataType="vm:DuplicateMember">
-                                            <Grid ColumnSpacing="10" Padding="6,4">
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="Auto"/>
-                                                    <ColumnDefinition Width="*"/>
-                                                    <ColumnDefinition Width="Auto"/>
-                                                </Grid.ColumnDefinitions>
-                                                <RadioButton GroupName="{x:Bind GroupKey, Mode=OneTime}"
-                                                             IsChecked="{x:Bind IsKeeper, Mode=TwoWay}"
-                                                             Content="Keep"
-                                                             VerticalAlignment="Center" />
-                                                <TextBlock Grid.Column="1"
-                                                           Text="{x:Bind Path}"
-                                                           Style="{StaticResource CaptionTextBlockStyle}"
-                                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                                           TextTrimming="CharacterEllipsis"
-                                                           VerticalAlignment="Center"/>
-                                                <TextBlock Grid.Column="2"
-                                                           Text="{x:Bind SizeDisplay}"
-                                                           Style="{StaticResource CaptionTextBlockStyle}"
-                                                           Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                                           VerticalAlignment="Center" />
-                                            </Grid>
-                                        </DataTemplate>
-                                    </ItemsRepeater.ItemTemplate>
-                                </ItemsRepeater>
+                                <!-- Horizontal strip of thumbnail tiles (macOS CopyTile
+                                     parity). Thumbnails load lazily via the members
+                                     repeater's ElementPrepared (like LibraryView). -->
+                                <ScrollViewer HorizontalScrollMode="Auto"
+                                              HorizontalScrollBarVisibility="Auto"
+                                              VerticalScrollMode="Disabled"
+                                              VerticalScrollBarVisibility="Disabled">
+                                    <ItemsRepeater ItemsSource="{x:Bind Members}"
+                                                   ElementPrepared="OnMemberPrepared"
+                                                   ElementClearing="OnMemberClearing">
+                                        <ItemsRepeater.Layout>
+                                            <StackLayout Orientation="Horizontal" Spacing="10"/>
+                                        </ItemsRepeater.Layout>
+                                        <ItemsRepeater.ItemTemplate>
+                                            <DataTemplate x:DataType="vm:DuplicateMember">
+                                                <StackPanel Width="140" Spacing="4" Padding="2">
+                                                    <!-- Border clips the UniformToFill image to rounded corners. -->
+                                                    <Border Width="132" Height="132"
+                                                            CornerRadius="8"
+                                                            Background="{ThemeResource SubtleFillColorTertiaryBrush}">
+                                                        <Grid>
+                                                            <FontIcon Glyph="&#xEB9F;" FontSize="28"
+                                                                      Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                                                      HorizontalAlignment="Center"
+                                                                      VerticalAlignment="Center"
+                                                                      Visibility="{x:Bind ShowPlaceholder, Mode=OneWay}" />
+                                                            <Image Source="{x:Bind Thumbnail, Mode=OneWay}"
+                                                                   Stretch="UniformToFill" />
+                                                        </Grid>
+                                                    </Border>
+                                                    <TextBlock Text="{x:Bind FileName}"
+                                                               Style="{StaticResource CaptionTextBlockStyle}"
+                                                               TextTrimming="CharacterEllipsis"
+                                                               MaxLines="1"
+                                                               TextAlignment="Center"
+                                                               Width="132"
+                                                               ToolTipService.ToolTip="{x:Bind Path}" />
+                                                    <TextBlock Text="{x:Bind SizeDisplay}"
+                                                               Style="{StaticResource CaptionTextBlockStyle}"
+                                                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                                               HorizontalAlignment="Center" />
+                                                    <RadioButton GroupName="{x:Bind GroupKey, Mode=OneTime}"
+                                                                 IsChecked="{x:Bind IsKeeper, Mode=TwoWay}"
+                                                                 Content="Keep"
+                                                                 HorizontalAlignment="Center" />
+                                                </StackPanel>
+                                            </DataTemplate>
+                                        </ItemsRepeater.ItemTemplate>
+                                    </ItemsRepeater>
+                                </ScrollViewer>
                             </StackPanel>
                         </Grid>
                     </DataTemplate>

@@ -117,12 +117,15 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
     public async Task RefreshAsync(CancellationToken ct)
     {
         if (_disposed) return;
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
-        var token = linked.Token;
-        IsLoading = true;
-        ErrorMessage = null;
         try
         {
+            // Linked token created inside the try: a Dispose() race after the
+            // _disposed check makes _disposalCts.Token throw ObjectDisposedException,
+            // caught below as a clean teardown no-op instead of escaping to the caller.
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
+            var token = linked.Token;
+            IsLoading = true;
+            ErrorMessage = null;
             var clusters = await Task.Run(() => LoadClusters(token), token).ConfigureAwait(false);
             if (_disposed || token.IsCancellationRequested) return;
             ApplyOnUi(clusters);

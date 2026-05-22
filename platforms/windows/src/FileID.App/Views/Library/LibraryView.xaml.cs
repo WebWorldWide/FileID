@@ -131,6 +131,8 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         // CLIP-missing hint: only when the user has typed ≥3 chars
         // (semantic search threshold matches macOS) and the MobileCLIP
         // slot isn't installed.
+        // CLIP powers free-text semantic search; prompt to install it when the
+        // user types a query (≥3 chars) and the MobileCLIP slot isn't installed.
         bool clipMissingShow = false;
         try
         {
@@ -1029,7 +1031,8 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             var done = await System.Threading.Tasks.Task.WhenAny(tcs.Task, timeoutTask);
             if (done != tcs.Task) return;
             var seed = await tcs.Task;
-            if (seed == null) return;
+            // Empty seed = CLIP disabled engine-side; nothing to match on.
+            if (seed is null || seed.Length == 0) return;
             // Run a semantic search against the existing ReadStore via the
             // ViewModel's path. We don't need a separate sheet — the Library
             // grid itself is the result list.

@@ -51,7 +51,7 @@ Targets are **line coverage**, not branch. Branch is nice-to-have; line is the g
 | `FileID.IpcSchema` (all) | ≥ 95% | 30 tests | Round-trip + decode |
 | `FileID.App/Services/PathRedactor` | ≥ 95% | 6 tests | Includes case-insensitive Win + cross-platform Mac path |
 | `FileID.App/Services/UndoStack` | ≥ 90% | 5 tests | Push/pop/redo/capacity |
-| `FileID.App/Services/EngineProcessManager` | ≥ 80% | pending | Mock-Process pending (Phase 2 carry-over) |
+| `FileID.App/Services/EngineProcessManager` | ≥ 80% | pending | Mock-`Process` harness not yet written (test-backlog item, non-blocking) |
 | `FileID.App/Services/IpcDispatcher` | ≥ 80% | pending | Synthetic-stdout pending |
 | `FileID.App/Services/ModelInstallerService` | ≥ 80% | pending | Mock-HTTP + resume + SHA mismatch pending |
 | `FileID.App/Services/ReadStore` | ≥ 80% | pending | In-memory SQLite pending |

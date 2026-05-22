@@ -231,30 +231,31 @@ async fn run_deep_analyze_batch(
     // existence — doing them first lets a server-capable runtime proceed even
     // when the CLI-binary check fails (the ordering trap), while still
     // surfacing a clean "runtime missing" error when NOTHING is available.
+    // Weights gate FIRST: without the model's gguf/mmproj on disk, neither the
+    // persistent server nor the per-file CLI can analyze anything. Surface a
+    // clear, actionable error BEFORE DeepAnalyzeStarting — the client's Error
+    // handler doesn't clear DeepAnalyze* state, so erroring after Starting would
+    // strand the UI on a "Loading model…" banner.
     let weights = crate::models::vlm::find_weights(model_kind);
-    let runner = match crate::models::vlm::VlmRunner::find() {
-        Ok(r) => Some(r),
-        Err(err) => {
-            // No usable CLI binary. Fine IF the persistent server can run
-            // (weights present → it only needs llama-server.exe). But with no
-            // weights either, nothing can analyze: surface the error and return
-            // BEFORE Starting, because the client's Error handler does NOT clear
-            // DeepAnalyze* state — sending Starting first would strand the UI on
-            // a "Loading model…" banner forever.
-            if weights.is_none() {
-                sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                    kind: "llama_cpp_missing".into(),
-                    message: format!("{err}"),
-                    path: None,
-                    model_kind: None,
-                }))))
-                .await;
-                return;
-            }
-            tracing::warn!(?err, "[VLM] CLI binary unavailable; relying on the persistent server");
-            None
-        }
-    };
+    if weights.is_none() {
+        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+            kind: "vlm_model_missing".into(),
+            message: format!(
+                "The {model_kind} model isn't installed yet. Install it from the Deep Analyze tab, then try again."
+            ),
+            path: None,
+            model_kind: Some(model_kind.to_string()),
+        }))))
+        .await;
+        return;
+    }
+    // The CLI binary (llama-mtmd-cli.exe) is OPTIONAL: the persistent server only
+    // needs llama-server.exe. None just means "server-only"; the no-backend gate
+    // below surfaces a runtime error if the server also can't start.
+    let runner = crate::models::vlm::VlmRunner::find().ok();
+    if runner.is_none() {
+        tracing::warn!("[VLM] llama-mtmd-cli unavailable; will rely on the persistent server");
+    }
 
     sink.send(IpcEvent::now(EventPayload::DeepAnalyzeStarting(Wrap::new(
         DeepAnalyzeStarting {
@@ -313,6 +314,34 @@ async fn run_deep_analyze_batch(
     let mut processed = 0u64;
     let mut failed = 0u64;
     let started_at = Instant::now();
+
+    // No runtime can run the (present) weights: the persistent server didn't
+    // start AND there's no CLI binary. Surface the runtime problem ONCE here
+    // instead of failing every file in the loop, then clear the UI's
+    // DeepAnalyze* state (Starting was already sent above).
+    if server.is_none() && runner.is_none() {
+        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+            kind: "llama_cpp_missing".into(),
+            message: "The llama.cpp runtime isn't usable for image analysis (no working \
+                      llama-server.exe or llama-mtmd-cli.exe). Update it from \
+                      Settings -> Performance -> 'Install llama.cpp runtime'."
+                .into(),
+            path: None,
+            model_kind: None,
+        }))))
+        .await;
+        sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
+            DeepAnalyzeComplete {
+                processed: 0,
+                failed: 0,
+                total_seconds: started_at.elapsed().as_secs_f64(),
+                model_kind: model_kind.to_string(),
+                cancelled: true,
+            },
+        ))))
+        .await;
+        return;
+    }
 
     for (idx, file_id) in file_ids.iter().copied().enumerate() {
         if cancel.load(Ordering::Relaxed) {

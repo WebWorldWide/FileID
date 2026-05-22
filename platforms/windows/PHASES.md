@@ -35,11 +35,11 @@ Already in commit `6704a46`.
 
 ---
 
-## Phase 1 — App shell + theme + sidebar + welcome sheet  ✅ CODE-COMPLETE (awaiting on-hardware verification)
+## Phase 1 — App shell + theme + sidebar + welcome sheet  ✅ CODE-COMPLETE — checkboxes below track on-hardware verification
 
 The user opens `FileID.exe` for the first time. They see Mica/Acrylic, dark mode forced, the LavaLamp animating, the gold-accented sidebar, the welcome sheet. The engine is spawned and reports ready. They can pick a folder. **No scan logic yet** — that's Phase 2 — but the entire shell looks and feels like macOS.
 
-> Code-complete as of V11 (2026-05-02). Everything below is ticked. The acceptance gate is the on-hardware verification described in `shared/docs/NEXT.md`.
+> **Code-complete as of V11 (2026-05-02); every item below is implemented in the codebase.** The unchecked `[ ]` boxes in 1.1–1.14 are NOT missing work — they are the **on-hardware verification gate**: each box is checked only once the behavior is confirmed on a real Windows box. The authoritative verification checklist is [`PHASE_1_ACCEPTANCE.md`](PHASE_1_ACCEPTANCE.md); ongoing runtime sign-off lives in `shared/docs/NEXT.md`.
 
 ### 1.1 WinUI 3 app project bootstrap
 - [ ] `platforms/windows/FileID.sln` solution file

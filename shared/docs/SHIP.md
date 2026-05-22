@@ -296,7 +296,7 @@ If something genuinely critical comes up that doesn't fit, it goes into a "v1.0.
 
 ## Appendix W — Windows v1.0 per-vendor verification matrix
 
-The Windows port (`platforms/windows/`) is its own ship lane, parallel to the macOS v1.0 plan. The engine's ORT execution-provider picker auto-detects the best accelerator on every supported vendor's silicon. **Performance Packs were removed in V14.8.2** (see `PACKS.md`) — DirectML is now the universal GPU path for every D3D12-capable vendor, with CPU as the floor. Throughput targets below reflect that reality.
+The Windows port (`platforms/windows/`) is its own ship lane, parallel to the macOS v1.0 plan. The engine's ORT execution-provider picker auto-detects the best accelerator on every supported vendor's silicon. **GPU Performance Packs were removed in V14.8.2** (no shippable, license-compliant per-vendor URLs) — DirectML is now the universal GPU path for every D3D12-capable vendor, with CPU as the floor. The rationale is in `DECISIONS.md` (2026-05-11 "GPU Performance Packs removed"). Throughput targets below reflect that reality.
 
 For each row below, run a 1,000-file scan on a representative library and confirm the engine log + throughput target.
 
@@ -324,7 +324,7 @@ Each row passes when **all six** hold:
 
 ### What "100% certainty" means
 
-Code-level certainty is in place: `engine/src/models/runtime.rs` unit tests cover every vendor's EP pick + fallback, and the EP picker fails safely down the chain if any EP can't build a session. **Hardware certainty** is the missing layer — only running on each vendor's silicon proves drivers, DLLs, and ORT integration all line up. The six checkboxes above ARE the proof. Per-vendor pack installs are no longer part of the loop (packs are removed; see `PACKS.md`).
+Code-level certainty is in place: `engine/src/models/runtime.rs` unit tests cover every vendor's EP pick + fallback, and the EP picker fails safely down the chain if any EP can't build a session. **Hardware certainty** is the missing layer — only running on each vendor's silicon proves drivers, DLLs, and ORT integration all line up. The six checkboxes above ARE the proof. Per-vendor pack installs are no longer part of the loop (GPU performance packs were removed in V14.8.2 — DirectML + the CPU floor cover every vendor).
 
 ### Build pre-reqs for the verification pass
 

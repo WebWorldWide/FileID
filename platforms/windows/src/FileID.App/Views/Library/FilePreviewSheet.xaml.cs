@@ -39,20 +39,31 @@ public sealed partial class FilePreviewSheet : UserControl
     public FilePreviewSheet()
     {
         InitializeComponent();
-        KeyDown += OnKeyDown;
-        // media playback must stop when the sheet unloads.
-        // MediaPlayerElement holds an IMediaPlaybackSource that pins the
-        // file handle — without an explicit pause the audio keeps playing
-        // after the dialog dismisses.
+        // PreviewKeyDown (tunneling) so arrow-key navigation fires BEFORE a
+        // focused video player / button consumes the key — and skips when the
+        // tag TextBox is focused so typing still moves the cursor.
+        PreviewKeyDown += OnPreviewKeyDown;
+        Loaded += OnSheetLoaded;
         Unloaded += (_, _) =>
         {
+            // Stop playback + fully dispose the MediaPlayer so audio can't keep
+            // playing and the file handle is released after the dialog dismisses.
             StopAndClearMedia();
+            DisposeMediaPlayer();
             // Clear the cross-tab "currently previewed" hint so the Deep
             // Analyze tab's "Analyze current" button disables when the
             // user closes the sheet.
             FileID.Services.SelectionRegistry.Instance.PreviewedFileId = null;
         };
         IsTabStop = true;
+    }
+
+    private void OnSheetLoaded(object sender, RoutedEventArgs e)
+    {
+        // The host ContentDialog has no default button, so focus would otherwise
+        // sit on the dialog chrome and the tunneling PreviewKeyDown would never
+        // fire. Grab focus into the sheet so arrow keys navigate immediately.
+        try { Focus(FocusState.Programmatic); } catch { /* best-effort */ }
     }
 
     internal void SetSiblings(IReadOnlyList<FileID.ViewModels.FileTile> siblings, int currentIndex)
@@ -79,8 +90,16 @@ public sealed partial class FilePreviewSheet : UserControl
         }
     }
 
-    private void OnKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    private void OnPreviewKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
     {
+        // While typing in the tag box, let Left/Right move the text cursor.
+        if (e.Key is Windows.System.VirtualKey.Left or Windows.System.VirtualKey.Right)
+        {
+            var focused = XamlRoot is null
+                ? null
+                : Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(XamlRoot);
+            if (focused is TextBox) return;
+        }
         switch (e.Key)
         {
             case Windows.System.VirtualKey.Left:
@@ -191,10 +210,8 @@ public sealed partial class FilePreviewSheet : UserControl
                 await LoadShellThumbnailAsync(path, kind);
                 break;
             case "video":
-                LoadVideoOrAudio(path, kind);
-                break;
             case "audio":
-                LoadVideoOrAudio(path, kind);
+                await LoadVideoOrAudioAsync(path, kind, _mediaGen);
                 break;
             default:
                 ShowPlaceholder(kind, "No inline preview for this file type — use Open.");
@@ -290,17 +307,30 @@ public sealed partial class FilePreviewSheet : UserControl
     /// On failure we fall back to the kind placeholder + "Open in default
     /// app" hint, matching macOS's "video opens externally" behavior.</summary>
     private string _currentMediaKind = string.Empty;
-    private void LoadVideoOrAudio(string path, string kind)
+    private Windows.Media.Core.MediaSource? _currentMediaSource;
+    // Bumped on every SetFile / teardown so a slow async media load that
+    // resolves AFTER the user has navigated away detects it's stale and bails.
+    private int _mediaGen;
+
+    /// <summary>Load a video/audio file into the MediaPlayerElement via
+    /// CreateFromStorageFile (the StorageFile broker — the same path the
+    /// thumbnail loader uses), which is more reliable for arbitrary local paths
+    /// than a raw file:// URI. The MediaSource is tracked so it can be disposed
+    /// on the next navigation/close — setting Source=null alone leaks it and
+    /// pins the file handle.</summary>
+    private async Task LoadVideoOrAudioAsync(string path, string kind, int gen)
     {
         try
         {
+            var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(path);
+            if (gen != _mediaGen) return; // navigated away during the await
             _currentMediaKind = kind;
-            var uri = new Uri(path, UriKind.Absolute);
-            PreviewMedia.Source = Windows.Media.Core.MediaSource.CreateFromUri(uri);
+            var src = Windows.Media.Core.MediaSource.CreateFromStorageFile(file);
+            _currentMediaSource = src;
+            PreviewMedia.Source = src;
             PreviewMedia.Visibility = Visibility.Visible;
-            // Attach failure handler on the MediaPlayer (it's lazily created
-            // when Source is set). Detach the previous subscription so we
-            // don't multi-fire on rapid sibling navigation.
+            // Attach failure handler on the (lazily-created) MediaPlayer; detach
+            // first so rapid sibling navigation can't multi-subscribe.
             if (PreviewMedia.MediaPlayer is { } mp)
             {
                 mp.MediaFailed -= OnMediaPlayerFailed;
@@ -309,6 +339,7 @@ public sealed partial class FilePreviewSheet : UserControl
         }
         catch (Exception ex)
         {
+            if (gen != _mediaGen) return;
             Services.DebugLog.Warn($"FilePreviewSheet media load failed for {kind}: {ex.Message}");
             ShowPlaceholder(kind, "Media couldn't load — try Open in default app.");
         }
@@ -344,6 +375,9 @@ public sealed partial class FilePreviewSheet : UserControl
 
     private void StopAndClearMedia()
     {
+        // Invalidate any in-flight async media load so a slow StorageFile open
+        // can't bind a stale source after the user navigated away.
+        _mediaGen++;
         try
         {
             // MediaPlayer is null until Source is set; guard before
@@ -357,11 +391,39 @@ public sealed partial class FilePreviewSheet : UserControl
             {
                 PreviewMedia.Source = null;
             }
+            // Setting Source=null does NOT dispose the MediaSource — do it here
+            // so its file handle + buffers free (matters when arrow-navigating
+            // through many videos).
+            if (_currentMediaSource is { } src)
+            {
+                _currentMediaSource = null;
+                try { src.Dispose(); } catch { /* swallow */ }
+            }
             _currentMediaKind = string.Empty;
         }
         catch (Exception ex)
         {
             Services.DebugLog.Warn("FilePreviewSheet.StopAndClearMedia: " + ex.Message);
+        }
+    }
+
+    /// <summary>Fully tear down the MediaPlayerElement's auto-created MediaPlayer
+    /// on close — pausing + nulling the source isn't always enough to stop audio
+    /// or release the file handle. Only call on close (Unloaded), not on sibling
+    /// navigation (the element reuses its MediaPlayer for the next source).</summary>
+    private void DisposeMediaPlayer()
+    {
+        try
+        {
+            if (PreviewMedia?.MediaPlayer is { } mp)
+            {
+                PreviewMedia.SetMediaPlayer(null);
+                mp.Dispose();
+            }
+        }
+        catch (Exception ex)
+        {
+            Services.DebugLog.Warn("FilePreviewSheet.DisposeMediaPlayer: " + ex.Message);
         }
     }
 

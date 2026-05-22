@@ -13,7 +13,7 @@ Three layers, in order of cost:
 Plus three optional depth layers:
 
 4. **Fuzz testing** — `cargo-fuzz` (Rust), `SharpFuzz` (C#). Weekly cron, out of PR CI.
-5. **Parity testing** — Rust and Swift engines must produce byte-identical outputs for the same fixture. `shared/parity-tests/`. PR gate.
+5. **Parity testing** — Rust and Swift engines must produce byte-identical outputs for the same fixture. `shared/parity-tests/`. **Not yet implemented** (planned PR gate — the `shared/parity-tests/` harness and the CI job don't exist yet).
 6. **Snapshot testing** — `swift-snapshot-testing` for the six main macOS views. WinUI 3 snapshots are deferred (Mica + theme flakiness).
 
 ## Per-platform commands
@@ -124,7 +124,7 @@ bash scripts/iterate.sh
        }
    }
    ```
-2. **C#**: dev-dep `FsCheck.Xunit` (pending Phase 7). Use `[Property]` instead of `[Fact]`.
+2. **C#**: dev-dep `FsCheck.Xunit` — **not yet added** (planned; no C# property tests exist today). When adopted, use `[Property]` instead of `[Fact]`.
 3. **Swift**: use `@Test(arguments: [...])` parameterized. No new dep needed.
 
 ### Integration test
@@ -133,7 +133,7 @@ Add a new assertion to `iterate.ps1` (Windows) or `iterate.sh` (macOS). The harn
 
 ### Parity test (cross-platform regression guard)
 
-Add a deterministic fixture to `shared/parity-tests/`. The CI parity job runs the Rust engine against the fixture, exports JSON, and asserts byte-identical with the Swift engine's pre-recorded snapshot. Any platform drift fails CI. Pending implementation in Phase 7.
+**Not yet implemented** — the design below is the plan, not current behavior. When it lands: add a deterministic fixture to `shared/parity-tests/`; the CI parity job runs the Rust engine against the fixture, exports JSON, and asserts byte-identical with the Swift engine's pre-recorded snapshot, failing CI on any platform drift. Neither `shared/parity-tests/` nor the CI job exists yet.
 
 ## Test reading order for a new contributor
 

@@ -177,6 +177,13 @@ jobs:
           $sources = Get-ChildItem -Path platforms/windows/src -Recurse -File `
             -Include *.rs,*.cs,*.xaml,*.xaml.cs |
             Where-Object { $_.FullName -notmatch '\\(bin|obj|target|packages)\\' }
+          # Loopback is exempt: a 127.0.0.1 / localhost URL never leaves the
+          # machine, so it can't be a download site, telemetry endpoint, or
+          # analytics URL — the only things this scan exists to catch. The
+          # local VLM server (llama-server) binds an ephemeral port on
+          # 127.0.0.1 and we format an http:// base URL for it; that's IPC,
+          # not egress. See shared/docs/DECISIONS.md (V16.20).
+          $loopbackHosts = @("127.0.0.1", "localhost", "0.0.0.0", "::1")
           $hits = @()
           foreach ($file in $sources) {
             $content = Get-Content -Raw $file.FullName
@@ -184,6 +191,7 @@ jobs:
             $matches = [regex]::Matches($content, 'https?://([a-zA-Z0-9._-]+)')
             foreach ($m in $matches) {
               $hostName = $m.Groups[1].Value.ToLowerInvariant()
+              if ($loopbackHosts -contains $hostName) { continue }
               if ($allowedHosts -notcontains $hostName) {
                 $hits += "$($file.FullName): $($m.Value)"
               }

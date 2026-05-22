@@ -291,13 +291,22 @@ impl ModelStack {
             .map(|s| !(s == "0" || s.eq_ignore_ascii_case("false")))
             .unwrap_or(true);
 
-        // CLIP zero-shot scene labeler — built once per launch from the
-        // installed CLIP text encoder (the matched MobileCLIP-S2 text tower).
-        // Reuses the per-file MobileCLIP image embedding for scoring, so it
-        // adds no per-file inference. None when the text model isn't installed.
-        let scene_labeler = crate::models::scene_vocab::shared_scene_labeler();
+        // The scene labeler (and its ~21 s matrix build) is only needed to emit
+        // scan-time scene tags — off by default, since SmolVLM is the tagger. The
+        // per-file MobileCLIP embedding for semantic search does NOT need it.
+        let scene_labeler = if crate::models::scene_vocab::ENABLE_CLIP
+            && crate::models::scene_vocab::ENABLE_CLIP_SCENE_TAGS
+        {
+            crate::models::scene_vocab::shared_scene_labeler()
+        } else {
+            None
+        };
 
-        let (mobileclip_pool, mobileclip_batch) = if use_batch {
+        let (mobileclip_pool, mobileclip_batch) = if !crate::models::scene_vocab::ENABLE_CLIP {
+            // CLIP fully off — no MobileCLIP image encoder, so no per-file
+            // embedding and no semantic search.
+            (None, None)
+        } else if use_batch {
             // Batch-coordinator path (DEFAULT; opt out with FILEID_CLIP_USE_BATCH=0).
             let coord = match crate::models::mobileclip::default_weights_path() {
                 Ok(p) if p.exists() => match MobileClipImage::load(p.clone()) {

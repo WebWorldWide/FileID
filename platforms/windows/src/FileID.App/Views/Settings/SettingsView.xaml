@@ -116,7 +116,8 @@
                         </Grid>
                     </Grid>
 
-                    <!-- MobileCLIP-S2. Same x:Bind pattern as ArcFace. -->
+                    <!-- MobileCLIP-S2 — powers free-text semantic image search.
+                         (Tagging is SmolVLM; CLIP no longer emits scene tags.) -->
                     <Grid ColumnSpacing="12" Padding="14,12" CornerRadius="10"
                           Background="{ThemeResource SubtleFillColorTertiaryBrush}">
                         <Grid.ColumnDefinitions>
@@ -534,8 +535,8 @@
 
                     <ToggleSwitch x:Name="AutoTagWithAiToggle"
                                   Header="Tag automatically with AI after scans"
-                                  OffContent="Off — only fast CLIP tags during the scan"
-                                  OnContent="On — SmolVLM refines tags in the background"
+                                  OffContent="Off — files aren't tagged (tag manually from Deep Analyze)"
+                                  OnContent="On — SmolVLM tags every file in the background"
                                   Toggled="OnAutoTagWithAiToggled" />
                 </StackPanel>
             </Border>

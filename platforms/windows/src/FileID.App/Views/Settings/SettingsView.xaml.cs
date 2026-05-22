@@ -357,7 +357,12 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     private void OnProviderOverrideChanged(object sender, SelectionChangedEventArgs e)
         => DebugLog.SafeRun(nameof(OnProviderOverrideChanged), () =>
         {
-            if (_initializingToggles) return;
+            // The ComboBox's SelectedIndex="0" raises SelectionChanged during
+            // InitializeComponent — before HydrateToggles seeds the saved value
+            // and before _initializingToggles is set. Persisting here would
+            // clobber the user's GPU EP override to "auto" on every Settings
+            // open. Bail until the view is live; HydrateToggles re-selects then.
+            if (!IsLoaded || _initializingToggles) return;
             if (ProviderCombo.SelectedItem is not ComboBoxItem item || item.Tag is not string tag) return;
             var s = AppViewModel.Instance.Settings;
             s.GpuExecutionProviderOverride = (tag == "auto") ? null : tag;
@@ -526,35 +531,12 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
-    public string SceneTaggingDiagnosticsText
-    {
-        get
-        {
-            try
-            {
-                // Scene tags come from CLIP zero-shot — the image embedding is
-                // scored against a curated scene-label vocabulary using the
-                // MobileCLIP image + text encoders already installed for
-                // search. There is no separate classifier model; readiness is
-                // just whether both CLIP halves are installed.
-                var dir = System.IO.Path.Combine(AppPaths.ModelsDir, ".sentinels");
-                bool image = System.IO.File.Exists(System.IO.Path.Combine(dir, "mobileclip_s2.installed"));
-                bool text = System.IO.File.Exists(System.IO.Path.Combine(dir, "clip_text.installed"));
-                if (image && text)
-                {
-                    return "CLIP zero-shot scene tags active (MobileCLIP-S2 image + text) — " +
-                           "no separate classifier download.";
-                }
-                return "Install MobileCLIP (image + text) to enable scene tags. " +
-                       "Until then Library shows enriched-extras chips only " +
-                       "(Year, Camera, Has Faces/Text/Location).";
-            }
-            catch (Exception ex)
-            {
-                return $"Probe failed: {ex.GetType().Name}";
-            }
-        }
-    }
+    // Tagging is SmolVLM (source='vlm'); CLIP scene tags are off, but MobileCLIP
+    // still powers free-text semantic search.
+    public string SceneTaggingDiagnosticsText =>
+        "Tags: SmolVLM (Deep Analyze, source='vlm') — CLIP scene tagging is off. " +
+        "Semantic search: MobileCLIP-S2 (install it in Models above; without it, " +
+        "search falls back to keyword/tag matching).";
 
     private void OnRefreshDiagnosticsClicked(object sender, RoutedEventArgs e)
         => DebugLog.SafeRun(nameof(OnRefreshDiagnosticsClicked), () =>

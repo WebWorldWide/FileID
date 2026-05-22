@@ -26,6 +26,10 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     private long _lastSeenBatchIndex = -1;
     private DateTime _lastReloadAt = DateTime.MinValue;
     private static readonly TimeSpan CleanupReloadThrottle = TimeSpan.FromSeconds(1);
+    // Per-tile shell thumbnails (macOS CopyTile parity) — loaded lazily via the
+    // members repeater's ElementPrepared, cancelled on recycle, like LibraryView.
+    private readonly ThumbnailService _thumbnails = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<DuplicateMember, CancellationTokenSource> _inflightThumbs = new();
 
     public CleanupView()
     {
@@ -164,7 +168,59 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         try { ViewModel.PropertyChanged -= OnViewModelPropertyChanged; } catch { /* swallow */ }
         try { ViewModel.Groups.CollectionChanged -= OnGroupsCollectionChanged; } catch { /* swallow */ }
         try { ViewModels.EngineClient.Instance.PropertyChanged -= OnEngineChanged; } catch { /* swallow */ }
+        foreach (var (_, cts) in _inflightThumbs) { try { cts.Cancel(); } catch { /* swallow */ } cts.Dispose(); }
+        _inflightThumbs.Clear();
+        try { _thumbnails.Dispose(); } catch { /* swallow */ }
         try { ViewModel.Dispose(); } catch { /* swallow */ }
+    }
+
+    // ─── Lazy thumbnail loading (macOS CopyTile parity) ───────────────────
+    // Same pattern as LibraryView: load on ElementPrepared, cancel + release on
+    // ElementClearing so off-screen tiles don't pin BitmapImages.
+    private void OnMemberPrepared(Microsoft.UI.Xaml.Controls.ItemsRepeater sender,
+                                  Microsoft.UI.Xaml.Controls.ItemsRepeaterElementPreparedEventArgs args)
+    {
+        if (args.Element is not FrameworkElement el) return;
+        // x:Bind doesn't populate a realized element's DataContext, so resolve
+        // the member from the repeater's bound Members by index, then set
+        // DataContext so OnMemberClearing can read it.
+        DuplicateMember? member =
+            (sender.ItemsSource is IReadOnlyList<DuplicateMember> list
+                && args.Index >= 0 && args.Index < list.Count)
+                ? list[args.Index]
+                : el.DataContext as DuplicateMember;
+        if (member is null) return;
+        el.DataContext = member;
+        member.IsDetached = false;
+        if (member.Thumbnail != null) return;
+        var cts = new CancellationTokenSource();
+        if (!_inflightThumbs.TryAdd(member, cts)) { cts.Dispose(); return; }
+        _ = LoadMemberThumbAsync(member, cts.Token);
+    }
+
+    private void OnMemberClearing(Microsoft.UI.Xaml.Controls.ItemsRepeater sender,
+                                  Microsoft.UI.Xaml.Controls.ItemsRepeaterElementClearingEventArgs args)
+    {
+        if (args.Element is not FrameworkElement el || el.DataContext is not DuplicateMember member) return;
+        member.IsDetached = true;
+        member.ClearThumbnailForRecycle();
+        if (_inflightThumbs.TryRemove(member, out var cts)) { try { cts.Cancel(); } catch { /* swallow */ } cts.Dispose(); }
+    }
+
+    private async System.Threading.Tasks.Task LoadMemberThumbAsync(DuplicateMember member, CancellationToken ct)
+    {
+        try
+        {
+            var bmp = await _thumbnails.RequestAsync(member.Path, null, ct).ConfigureAwait(false);
+            if (bmp == null || ct.IsCancellationRequested || _unloaded) return;
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (_unloaded || member.IsDetached) return;
+                member.Thumbnail = bmp;
+            });
+        }
+        catch { /* best-effort thumbnail */ }
+        finally { _inflightThumbs.TryRemove(member, out _); }
     }
 
     public string StatusText

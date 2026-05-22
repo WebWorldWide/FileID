@@ -275,6 +275,8 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             // for NVIDIA + NotInstalled/Failed; non-NVIDIA slots stay
             // pseudo-Installed and are skipped naturally.
             var now = DateTime.UtcNow;
+            // CLIP is included — it powers semantic search (it just no longer
+            // emits scene tags; SmolVLM is the tagger).
             var slotsToInstall = new List<ModelSlot> { Clip, Arcface, Vlm };
             if (IncludeAcceleratorInInstallAll())
             {

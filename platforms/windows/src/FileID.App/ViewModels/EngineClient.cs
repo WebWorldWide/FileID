@@ -1161,7 +1161,10 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             if (e.PropertyName != nameof(Services.ModelSlot.Status)) return;
             if (!_scanCompletedThisSession) return;
             if (Services.ModelInstallerService.Instance.Vlm.Status
-                != Services.ModelInstallStatus.Installed) return;
+                != Services.ModelInstallStatus.Installed)
+            {
+                return;
+            }
             DebugLog.Info("[AUTO-ADVANCE] SmolVLM finished installing after a scan — triggering tags-only auto-pass.");
             _ = AutoTriggerDeepAnalyzeAsync();
         });

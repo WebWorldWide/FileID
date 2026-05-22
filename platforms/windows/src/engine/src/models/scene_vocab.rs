@@ -116,13 +116,19 @@ pub const SCENE_COSINE_THRESHOLD: f32 = 0.18;
 /// searchable.
 pub const SCENE_TOP_K: usize = 4;
 
-/// Master switch for CLIP zero-shot scene tagging during a scan. Flip to
-/// `false` to drop CLIP entirely and rely solely on VLM tags (`source='vlm'`,
-/// produced by Deep Analyze's full-enrichment pass). Left `true` so CLIP stays
-/// the fast scan-time default; VLM tags already take display precedence in the
-/// ReadStore tag ordering, so this is the clean, one-line "remove the CLIP"
-/// switch — no other code needs to change.
-pub const ENABLE_CLIP_SCENE_TAGS: bool = true;
+/// Master switch for CLIP (MobileCLIP-S2). When true, the scan computes a
+/// per-file image embedding (stored in `clip_embeddings`) that powers the
+/// Library's free-text **semantic search** ("a dog at the beach"). When false,
+/// CLIP does no work at all — no model load, no embedding — and search degrades
+/// to FTS5 keyword/tag matching over filenames + OCR + SmolVLM tags. Independent
+/// of tagging: SmolVLM is always the tagger (`source='vlm'`); see below.
+pub const ENABLE_CLIP: bool = true;
+
+/// Whether the scan ALSO emits CLIP zero-shot scene tags (`source='auto'`).
+/// OFF — SmolVLM is the sole tagger; CLIP runs ONLY for the semantic-search
+/// embedding above. (When on, requires ENABLE_CLIP and builds the ~21 s
+/// scene-label matrix at first launch.)
+pub const ENABLE_CLIP_SCENE_TAGS: bool = false;
 
 /// Prompts text-encoded per ONNX batch when building the label matrix.
 const BUILD_BATCH: usize = 64;
