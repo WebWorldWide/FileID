@@ -8,6 +8,201 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-05-22 — V16.26 no-self-host policy + hanging-feature sweep + PDF / HNSW / BGE unhang
+
+Hardened-policy pass on top of V16.25: every artifact the engine downloads must already exist on
+a public upstream (HuggingFace, ggml-org GitHub releases, NVIDIA developer CDN). No FileID-hosted
+files. Plus a sweep that wires three previously-dormant modules.
+
+**Removed (would require self-hosting; legal + sustainability exposure)**:
+- **RAM++ integration** — `models::ramplus`, the scan-pipeline block, `ModelStack.ramplus`, the
+  registry arm, `shared/scripts/convert_ramplus_onnx.py`, the `MODELS.md` entry. No public RAM++
+  ONNX exists — only the official PyTorch `.pth` on `xinyu1205/recognize-anything-plus-model`.
+  Image tagging stays on the V16.21 VLM tagger (SmolVLM / Qwen2.5-VL / Gemma 3) exactly as shipped.
+- **Performance-Pack registry arms** (`cuda_pack_x64`, `openvino_pack_x64`, `qnn_pack_arm64`)
+  plus the `LookupResult::NotYetAvailable` variant + `not_yet_available()` helper they used. The
+  engine still picks up the matching execution providers when the user has the SDK DLLs on the
+  loader path (system CUDA toolkit via `runtime::system_cuda_toolkit_dir`; user-installed Intel
+  OpenVINO redist; Snapdragon's bundled QNN runtime). cuDNN + llama.cpp runtimes remain bundled
+  (both publicly redistributable: NVIDIA developer CDN + ggml-org GitHub releases).
+- **YAMNet (Phase 5b)** — same hosting blocker as RAM++ (no public general ONNX). Documentation
+  removed.
+
+**Unhung (modules previously gated behind `allow(dead_code)` now have real callers)**:
+- **HNSW into `face_clustering`** above 5 k faces — turns O(n²) all-pairs cosine into O(log n)
+  per query. Uses `instant-distance` (pure-Rust); the brute-force path still wins ≤ 5 k.
+- **PDF text extraction** added to `doc_extract` via the gated `pdfium-render` binding (same
+  binding `deep_analyze` already uses for rasterization).
+- **BGE-small text embeddings** (`models::bge_text`) registered + loaded in `ModelStack` +
+  invoked in `process_file_predecoded` for doc text + persisted into `text_embeddings` (new
+  migration v11). The pure-Rust WordPiece tokenizer is now live via BGE.
+
+**Tagging promise vs V16.21 — strictly better-or-equal, never worse**:
+- Images: same (VLM tagger).
+- Documents: strictly new (RAKE keyword chips + FTS5 + BGE semantic search; was zero before).
+- Audio: strictly new (artist / album / title / genre / year chips; was zero before).
+- Faces: same accuracy, faster above 5 k.
+- Rename/move: tags preserved (was orphaned).
+
+### Build/test (local, in-agent)
+- `cargo +1.90 clippy --all-targets -- -D warnings` clean; `cargo +1.90 test --lib` → **204
+  passed, 0 failed**. C# `dotnet build FileID.sln -c Debug` → 0 warnings, 0 errors.
+
+### Documented follow-ups (in-policy; no self-hosting needed)
+- USN reader (`FSCTL_READ_USN_JOURNAL`) + scan-skip-set integration.
+- Whisper.cpp subprocess transcription (whisper.cpp binaries on ggml-org GitHub + GGUF Whisper
+  models on HuggingFace — fully publicly downloadable).
+- Florence-2 inference: 4 ORT sessions + Rust autoregressive generation loop + `tokenizers`
+  crate + Deep Analyze backend `modelKind: "florence2_base"`.
+- General image multi-label tagger: hold pending a public, clean-licensed, general-purpose ONNX
+  (WD-Tagger family is anime-trained → bad for typical user photos; RAM++ has no public ONNX).
+
+## 2026-05-22 — V16.25 research-implementation Phases 3–7: identity, docs, audio, variants, Florence-2
+
+Five phases land on top of V16.24 (Phases 0–2 + content_hash brick from earlier today).
+
+**Phase 3 — identity / USN / vector index.**
+- **Rename/move heal**: BLAKE3 `content_hash` + Win32 MFT `file_ref` columns (migration v8),
+  computed in discovery/tagging, dbwriter does a pre-INSERT lookup + `UPDATE OR REPLACE` so a
+  renamed/moved file re-binds to its existing row instead of orphaning tags / embeddings / faces /
+  OCR.
+- **USN journal foundation**: `util::elevation::is_elevated` + `pipeline::usn::query_journal`
+  (`FSCTL_QUERY_USN_JOURNAL`) + v9 `usn_state` cursor table. Scan-driver integration is Phase 3b;
+  the default scan stays on the verified jwalk + timestamp-skip path.
+- **Vector index**: pure-Rust HNSW via `instant-distance` — no C/C++ build dep (`usearch` rejected
+  for that reason). `util::hnsw_index` build/search wrapper + tests; face_clustering integration
+  above ~5 k faces is Phase 3c.
+
+**Phase 4 — document content pipeline.**
+- Pure-Rust text extraction (`pipeline::doc_extract`) for txt / md / docx / pptx / xlsx via the
+  existing `zip` + new `quick-xml` 0.36. PDF text extraction is Phase 4b (re-uses the gated
+  `pdfium-render` binding).
+- RAKE-style keyword extraction (`util::keywords`) → `source='auto'` tag chips, no ML model.
+- Migration v10: `doc_text` + `doc_fts` (FTS5) — same shape as `ocr_text` / `ocr_fts`.
+
+**Phase 5 — audio metadata.**
+- `pipeline::audio_meta` reads artist / album / title / genre / year via `symphonia` (pure-Rust,
+  MPL-2.0, no system ffmpeg) → `source='auto'` chips. Audio libraries get real content-style tags
+  today. YAMNet sound-event tagging + Whisper transcription are Phase 5b (both need offline ONNX
+  conversion, same Python-3.14 constraint that gated RAM++).
+
+**Phase 6 — per-vendor quantized variants.**
+- Framework landed in Phase 1 (`models::variants` + pack-presence gating). This phase = explicit
+  documentation that per-model accelerated variants (`_int8` for OpenVINO/Intel-NPU, `_qnn.bin` for
+  Snapdragon HTP) ship alongside each model's base hosting; the resolver falls back to fp32 when
+  the variant file is absent, so untested NPU hardware safely runs on DirectML/CPU.
+
+**Phase 7 — Florence-2 foundation.**
+- `models::florence2` skeleton + a real registry arm for `onnx-community/Florence-2-base` (4 ONNX
+  files + tokenizer + config, ~440 MB total, MIT). Users can install today; the inference wiring (4
+  ORT sessions + Rust autoregressive generation loop + `tokenizers` crate for the BART tokenizer +
+  Deep Analyze backend `modelKind: "florence2_base"`) is Phase 7b — the plan ranked it last and
+  defer-able since SmolVLM / Qwen / Gemma + RAM++ + Windows.Media.Ocr cover everything except
+  phrase-grounded OD.
+
+### Build/test (local, in-agent)
+- `cargo +1.90 clippy --all-targets -- -D warnings` clean; `cargo +1.90 test` green across the full
+  suite. 10 migrations applied (`v1`–`v10`); new tests: HNSW round-trip + composite hash edges +
+  RAKE keywords + doc_extract OOXML + audio_meta dedup + florence2 paths + v8/v9/v10 schema spot-checks.
+- **Needs user hardware:** Phase 0 long-path / OneDrive online-only / file-lock retry; CPU
+  multi-threading uplift (Phase 1); rename-heal across a real move; doc/audio tag chips render.
+
+### Documented follow-ups (foundation present; full integration deferred)
+- **Phase 3b**: USN reader (`FSCTL_READ_USN_JOURNAL`) + scan-skip-set integration.
+- **Phase 3c**: HNSW into `face_clustering` above ~5 k faces.
+- **Phase 4b**: PDF text extraction (re-use existing pdfium binding); BGE-small text embeddings for
+  semantic doc search; GLiNER NER for entity tags.
+- **Phase 5b**: YAMNet sound-event tagging + Whisper transcription (both need offline ONNX hosting).
+- **Phase 6 hosting**: per-model `_int8` (OpenVINO) + `_qnn` (Qualcomm AI Hub) variant files.
+- **Phase 7b**: Florence-2 inference (4 ORT sessions + generation loop + `tokenizers` dep + Deep
+  Analyze grounded-OD backend).
+- **RAM++ activation**: run `shared/scripts/convert_ramplus_onnx.py` on **transformers 4.x / Python
+  3.11–3.13** to produce + host the ONNX (Python 3.14 / transformers 5 blocked locally).
+
+## 2026-05-22 — V16.24 research-implementation Phase 2: RAM++ tagging (+ Phase 3 kickoff)
+
+- **RAM++ wrapper + pipeline** (`models/ramplus.rs`): 384px ImageNet-norm input → per-tag logits →
+  sigmoid + per-tag calibrated threshold → `(tag, score)` (`source='auto'`). Wired into the scan
+  fast pass right after the CLIP embed as the **primary scan-time tagger when installed**, gated
+  behind the existing "model missing → stage skips" path — **zero regression**: the VLM tagger stays
+  default until RAM++ is present. Single VRAM-bounded Session (batch-coordinator perf is a noted
+  follow-up). I/O tensor names read from the session (robust to re-export). Supersedes the CLIP
+  zero-shot scene labeler. Variant-aware load via `models::variants` (Phase 1).
+- **Offline conversion**: RAM++ has no first-party ONNX. `shared/scripts/convert_ramplus_onnx.py`
+  exports the `generate_tag` image→logits path (opset 17, einsum-vectorized) + copies the tag list +
+  thresholds; `MODELS.md` + `DECISIONS.md` document hosting. Registry arm `"ramplus"` is
+  `not_yet_available` until hosting lands; a locally-converted `ramplus.onnx` in `Models\ramplus\`
+  is picked up directly.
+- **Local conversion attempt — blocked (documented)**: the only local interpreter is Python 3.14,
+  which forces transformers 5.x; the 2023 RAM++ stack targets transformers 4.x. The script's bundled
+  compat shims clear all imports + reach model construction, but full v5 support isn't worth chasing.
+  Run the script on **transformers 4.x / Python 3.11–3.13** for a clean export. App behavior is
+  unchanged meanwhile (RAM++ gated off). Toolchain (torch/transformers/timm/scipy) was installed into
+  the user Python; RAM++ source + weights are cached under `%TEMP%`.
+- **Phase 3 kickoff**: `util::content_hash` — BLAKE3 content identity (full ≤ 16 MB; head+tail+size
+  composite above) for rename/move rebind. `blake3` dep added (pure-Rust, no C/C++ build).
+
+### Build/test (local, in-agent)
+- `cargo +1.90 clippy --all-targets -- -D warnings` clean; `cargo +1.90 test` → **184 passed, 0
+  failed** (177 after Phase 1, +3 RAM++ wrapper, +4 content-hash incl. composite-path edge cases).
+
+## 2026-05-22 — V16.23 research-implementation Phase 1: ML/hardware foundation
+
+Shared plumbing every later phase builds on. Engine-only; no new dependencies.
+
+- **`runtime::active_provider()`** — cached (`OnceLock`) single source of truth for which EP this
+  process binds, driving the two helpers below.
+- **`runtime::configure_session_builder()`** — replaces the hardcoded `.with_intra_threads(1)` in all
+  four model wrappers (ArcFace / SCRFD / MobileCLIP / CLIP-text). Graph-opt Level3 everywhere except
+  QNN (Level1/Basic — the HTP partitioner rejects ORT's aggressive fusion); intra-op threads =
+  performance-core count on the **CPU EP** (CPU-only boxes were single-threaded before — a real
+  throughput uplift) while staying 1 on GPU/NPU EPs.
+- **`models::variants::resolve_model_path()`** — per-EP quantized-variant selection (`_int8` for
+  OpenVINO/Intel-NPU, `_qnn.bin` for Snapdragon HTP) with **fp32 fallback when the variant file is
+  absent**, so untested hardware always runs the universal graph (DirectML → CPU) rather than failing.
+  Consumed by the Phase 2+ models.
+- **`models::wordpiece_tokenizer`** — pure-Rust BERT WordPiece (no `tokenizers` crate) for the
+  upcoming GLiNER + BGE text models.
+- **QNN HTP backend** — `execution_providers_for_chain` now binds `QnnHtp.dll` for the Snapdragon NPU
+  (falls through to DirectML/Adreno if the pack is absent). OpenVINO's NPU `device_type` hint + INT8
+  variants are deferred to Phase 6 (need NPU detection; can't regress Intel-GPU users untested).
+
+### Build/test (local, in-agent)
+- `cargo +1.90 clippy --all-targets -- -D warnings` clean; `cargo +1.90 test` → **177 passed, 0
+  failed** (+10: 4 variant-resolution incl. fp32 fallback, 6 WordPiece).
+- **Needs user hardware:** confirm CPU-only inference now uses multiple threads (faster scan where no
+  usable GPU); QNN/OpenVINO NPU paths await Snapdragon/Intel hardware + the Phase 6 variants.
+
+## 2026-05-22 — V16.22 research-implementation Phase 0: robustness + doc accuracy
+
+First slice of the approved multi-phase plan to implement the "local high-accuracy file tagging"
+research (`~/.claude/plans/i-want-to-implement-radiant-sunset.md`). Phase 0 is engine-side robustness
++ the report's pitfall fixes; no new dependencies.
+
+- **Long paths (>260).** The engine `.exe` has no long-path manifest, so deep directories were
+  invisible to the scan and deep files failed to open. `discovery` now walks a `\\?\`-verbatim root
+  (children inherit it; jwalk traverses past MAX_PATH), stores normal-form paths (verbatim stripped on
+  emit — DB / UI / cross-platform parity preserved), and reconverts to extended-length at the FS-access
+  sites (image decode + EXIF). New `util::path_safety::{to_extended_length, strip_extended_length}`
+  (+ 4 round-trip tests).
+- **OneDrive / cloud placeholders.** Discovery flags `online_only` from the file attributes
+  (`OFFLINE` | `RECALL_ON_OPEN` | `RECALL_ON_DATA_ACCESS`); the decoder skips content reads for those
+  files (metadata-only row) so scanning never silently hydrates a multi-GB cloud download — both a perf
+  and a no-telemetry-egress concern.
+- **File-lock resilience + AV-friendliness.** Image opens go through `open_image_file`: 3-attempt
+  retry-with-backoff on `ERROR_SHARING_VIOLATION` / `LOCK_VIOLATION`, opened with
+  `FILE_FLAG_SEQUENTIAL_SCAN`.
+- **Doc accuracy.** `platforms/windows/CLAUDE.md` no longer claims "Phase 0 ships only the engine"
+  (everything it listed as deferred shipped by V16.21); MSRV corrected 1.78 → 1.90. Fixed a pre-existing
+  `useless_conversion` clippy warning in `shell/tags.rs`.
+
+### Build/test (local, in-agent)
+- Engine: `cargo +1.90 clippy --all-targets -- -D warnings` clean; `cargo +1.90 test` → **167 passed,
+  0 failed** (+4 long-path round-trip tests). App: `dotnet build FileID.sln -c Debug` → 0/0.
+- **Needs user hardware:** a real scan over a >260-char path tree and a OneDrive online-only folder
+  (confirm deep files get analyzed + stored with normal-form paths; online-only files get metadata-only
+  rows and trigger no download).
+
 ## 2026-05-22 — V16.21 welcome models, discrete-GPU forcing, tag quality, progress flicker
 
 Six Windows fixes spanning the WinUI app + Rust engine:

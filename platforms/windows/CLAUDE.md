@@ -50,27 +50,26 @@ pwsh platforms/windows/build/build.ps1 -RunTests        # x64 + cargo test
 pwsh platforms/windows/build/build-arm64.ps1            # arm64 (cross-compile)
 ```
 
-Outputs `FileIDEngine.exe` under `platforms/windows/dist/<arch>/FileID/`. Phase 0 ships only the engine — the WinUI 3 app lands in Phase 1.
+Outputs `FileIDEngine.exe` under `platforms/windows/dist/<arch>/FileID/`. The WinUI 3 app builds via `FileID.sln` (`dotnet build`).
 
-## What Phase 0 ships (current commit)
+## Current status (V16.21)
 
-- Repo restructure: macOS code in `platforms/apple/`, Windows scaffolding under `platforms/windows/`, shared docs in `shared/`
-- Canonical IPC schema at `shared/ipc-schema/ipc.schema.json`
-- Rust engine: cargo workspace, IPC types, stdio loop, parent-PID watchdog, WAL checkpoint at shutdown, v1–v7 migrations, paths + platform helpers, structured local-only tracing
-- Build scripts (x64 + ARM64 cross-compile)
-- GitHub Actions CI matrix: `windows-latest` (x64) + `windows-11-arm` (ARM64) + arm64-cross. Includes a privacy gate that scans the shipped binary for telemetry-related strings.
+The "Phase 0 / Phase 1" split that earlier versions of this file described is historical. As of V16.21 the engine and the WinUI 3 app are both built and feature-rich; current work is hardening + on-hardware verification (see `shared/docs/STATE.md`).
 
-What Phase 0 does NOT ship (deferred to Phase 1):
-- WinUI 3 app (Visual Studio + Windows App SDK install gates this)
-- ML pipeline (ONNX Runtime + llama.cpp wiring)
-- Scan pipeline (discovery / tagging / dbwriter)
-- Deep Analyze
-- Restructure
-- WiX MSI
+Shipped:
+- Rust engine: full scan pipeline (discovery / tagging / dbwriter); ONNX Runtime ML inference (SCRFD + ArcFace faces, MobileCLIP embeddings) with EP auto-select (CUDA / TensorRT / DirectML / OpenVINO / QNN / CPU) + discrete-GPU pinning + TDR (`DXGI_ERROR_DEVICE_REMOVED`) hardening; Windows.Media.Ocr; llama.cpp-subprocess VLMs (SmolVLM / Qwen2.5-VL / Gemma) for Deep Analyze + first-scan tagging; face clustering; restructure / cleanup; v1–v7 migrations; HuggingFace model downloader; parent-PID watchdog; WAL checkpoint; structured local-only tracing.
+- WinUI 3 app: Library, People, Cleanup, Deep Analyze, Restructure, Settings, onboarding + welcome model installer; talks to the engine over newline-delimited JSON (`EngineClient`).
+- Canonical IPC schema (`shared/ipc-schema/ipc.schema.json`) mirrored to C# (`FileID.IpcSchema`) + Rust (`ipc/generated.rs`).
+- Build scripts (x64 + ARM64 cross-compile); GitHub Actions CI matrix (`windows-latest` x64 + `windows-11-arm` ARM64 + arm64-cross) with a privacy gate that scans the shipped binary for telemetry-related strings.
+
+In progress / not yet complete:
+- WiX MSI packaging + Authenticode signing (`build/publish.ps1`).
+- On-hardware verification across GPU/NPU vendors (see `shared/docs/SHIP.md`).
+- Intel OpenVINO + Snapdragon QNN Performance Packs (hosting pending).
 
 ## Conventions (Rust engine)
 
-- **Edition 2021, MSRV 1.78** (pinned in `rust-toolchain.toml`).
+- **Edition 2021, MSRV 1.90** (floor 1.88; toolchain pinned in `rust-toolchain.toml`).
 - **No new dependencies without asking.** Locked set in `Cargo.toml`. New crates require justification in `shared/docs/DECISIONS.md`.
 - **No telemetry, ever.** The only network call site is `engine/src/downloader.rs` (HuggingFace model fetch). CI grep-gates the binary for telemetry-related strings as a release blocker.
 - **Path redaction in logs.** Use `redact_path_for_log(path)` (Phase 1+) before any `tracing::*!()` that includes a user file path.

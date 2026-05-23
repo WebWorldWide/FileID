@@ -7,6 +7,157 @@
 
 ---
 
+## 2026-05-22 — No self-hosting: remove RAM++, Performance-Pack arms, RAM++ conversion script (SUPERSEDES Phase 2 + Phase 6 hosting)
+
+**Context**: FileID is open-source with no infrastructure of its own. Earlier Phase 2 / Phase 5 / Phase 6
+plans had us hosting a fileid-app HuggingFace dataset repo for items without a public ONNX export
+(RAM++, YAMNet, OpenVINO INT8 / QNN w8a8 model variants, CUDA EP DLL packs). That posture creates
+legal + sustainability exposure we won't take on.
+
+**Decision**: every artifact the engine downloads must already exist on a public upstream (HuggingFace
+model repo, GitHub release, NVIDIA developer CDN, etc.). Removed today:
+- **RAM++ integration** (`models::ramplus`, scan-pipeline block, `ModelStack.ramplus`, registry arm,
+  conversion script `shared/scripts/convert_ramplus_onnx.py`, MODELS.md section). No public RAM++
+  ONNX exists ([only the official PyTorch `.pth` on `xinyu1205/recognize-anything-plus-model`](https://huggingface.co/xinyu1205/recognize-anything-plus-model)).
+  Image tagging stays on the VLM tagger (SmolVLM / Qwen2.5-VL / Gemma 3) it always was.
+- **Performance-Pack registry arms** (`cuda_pack_x64`, `openvino_pack_x64`, `qnn_pack_arm64`). The
+  engine still uses CUDA / OpenVINO / QNN execution providers when the matching SDK DLLs are on the
+  process search path (system CUDA toolkit via `runtime::system_cuda_toolkit_dir`; user-installed
+  OpenVINO redist; Snapdragon's bundled QNN runtime). cuDNN + llama.cpp runtimes remain bundled
+  (both are publicly redistributable: NVIDIA's developer CDN + ggml-org GitHub releases).
+- **Per-model NPU variants hosting plan**. `models::variants::resolve_model_path` still picks up
+  `_int8.onnx` / `_qnn.bin` files when present on disk (user-supplied / future public variants),
+  with the same fp32 fallback Phase 1 tested. The engine doesn't ship the variants.
+
+YAMNet (Phase 5b) is in the same "needs hosting" bucket as RAM++ and is correspondingly out of scope
+unless a public ONNX export surfaces. Whisper integration (also Phase 5b) stays viable since
+whisper.cpp binaries + GGUF Whisper models ship publicly on ggml-org's GitHub + HuggingFace.
+
+## 2026-05-22 — Per-vendor quantized variants: framework + per-model hosting (Phase 6)
+
+**Context**: the research plan named OpenVINO-INT8 (Intel NPU) and QNN-w8a8 (Snapdragon HTP) variants
+as Phase 6. The framework — `models::variants::resolve_model_path` with fp32 fallback + pack-presence
+gating in `runtime` — already landed in Phase 1 (it was the prerequisite for everything else's
+variant-aware load).
+
+**Decision**: Phase 6 is the **documentation** that per-model accelerated variants ship with each
+model's base hosting (alongside `ramplus.onnx`, `bge.onnx`, etc., on the fileid-app HF repo) using
+the `_int8` / `_qnn` suffix convention the resolver already understands. No new code lands now —
+producing the actual quantized files (NNCF/POT for OpenVINO, Qualcomm AI Hub w8a8 contexts for QNN)
+is per-model, per-hardware engineering that happens in the same offline conversion sub-step that
+mints each base ONNX. Until variant hosting catches up, untested NPU hardware safely runs the fp32
+graph via DirectML/CPU per the Phase-1 fallback test.
+
+## 2026-05-22 — Florence-2: foundation now, generation-loop integration deferred (Phase 7)
+
+**Context**: the research plan flagged Florence-2 as "optional / last" — its non-redundant capability
+vs. the existing FileID stack is **phrase-grounded object detection** (`<OD>` +
+`<CAPTION_TO_PHRASE_GROUNDING>`). Captioning / OCR / tags are already covered by SmolVLM,
+Qwen2.5-VL, Gemma 3, RAM++, and Windows.Media.Ocr. Microsoft's Florence-2-base has community ONNX at
+`onnx-community/Florence-2-base` (no offline conversion needed), but the **inference** is
+non-trivial: 4 ORT sessions + a Rust autoregressive generation loop + the heavyweight `tokenizers`
+crate for the BART tokenizer.
+
+**Decision**: register the real downloadable model arm + a `models::florence2` skeleton documenting
+the planned 4-session architecture + canonical install dir. **Defer the generation-loop wiring to
+Phase 7b** when grounded OD becomes a concrete product need. Until then the model is installable but
+not yet consumed by any code path — the user-facing capability surface is unchanged. Rejected:
+bundling `tokenizers` + the 4-session loader now (premature; adds a heavy build dep for an
+unused-by-default code path).
+
+## 2026-05-22 — Audio: ship metadata tags now, defer YAMNet + Whisper to follow-up (Phase 5)
+
+**Context**: audio files (mp3/flac/wav/ogg/m4a/aac) were discovered but never content-tagged. The
+research plan named YAMNet (sound-event classification) + Whisper (transcription) for the full pipeline,
+but both need an offline ONNX conversion + HuggingFace hosting step the locally-available Python 3.14
+toolchain blocked for RAM++ (transformers v5 vs the 2023 stack).
+
+**Decision**: a focused Phase 5 MVP — `pipeline::audio_meta` reads artist/album/title/genre/year via
+`symphonia` (pure-Rust, MPL-2.0, no system ffmpeg) and surfaces them as `source='auto'` tag chips. Real
+user-visible audio tagging today (a Library full of MP3s gets artist + album + genre chips); the heavier
+YAMNet + Whisper integrations land later (same pattern as the RAM++ ONNX gate). New dep: `symphonia`
+0.5 with the common-format feature set. Rejected: shipping nothing for audio until YAMNet hosts (a much
+longer wait for a much smaller marginal win over metadata, which catches what users actually search by).
+
+## 2026-05-22 — Pure-Rust OOXML extraction (`quick-xml` + `zip`) over a Tika sidecar (Phase 4)
+
+**Context**: Doc-kind files (`txt`/`md`/`docx`/`pptx`/`xlsx`/`pdf`) were discovered but never
+content-tagged. Phase 4 adds keyword tags + FTS5 over their text. The research plan named Apache
+Tika for breadth, but Tika ships as a Java sidecar — a heavy runtime against the engine's
+"download-and-run" promise.
+
+**Decision**: pure-Rust extraction in `pipeline::doc_extract` — txt/md are trivial, OOXML
+(`docx`/`pptx`/`xlsx`) is zip + XML (existing `zip` dep + new `quick-xml` 0.36, MIT, ~5 KLOC), and
+PDF lands in a Phase-4b step that reuses the already-gated `pdfium-render` binding. Storage mirrors
+the `ocr_text` / `ocr_fts` pair as `doc_text` / `doc_fts` (migration v10) so the dbwriter inserts +
+existing FTS5 search syntax carry over. Tags come from a pure-Rust RAKE-style extractor
+(`util::keywords`) — no model needed for the first pass; a future sub-step layers BGE-small text
+embeddings for semantic search and GLiNER ONNX for NER. Rejected: Tika (Java runtime); regex
+`<w:t>` scrape (no namespace handling, brittle on real docx); roll-our-own XML reader (`quick-xml`
+is small + battle-tested).
+
+## 2026-05-22 — Pure-Rust HNSW (`instant-distance`) over `usearch` for the vector index (Phase 3)
+
+**Context**: face-clustering and CLIP/BGE semantic search are brute-force cosine today — fine ≤ 10 k
+vectors, the bottleneck above. The research plan named `usearch`, but `usearch`'s default `numkong`
+feature pulls a C++ build (cmake/cc) into the default build pipeline, breaking the "user downloads and
+runs" promise that the engine otherwise keeps (we already gate `llama-cpp-2` off-by-default for the
+same reason).
+
+**Decision**: `instant-distance` 0.6 — pure-Rust HNSW (Apache-2.0/MIT, no C/C++ build dep). Embeddings
+are L2-normalized upstream, so the squared-L2 distance instant-distance computes is monotonic in
+`(1 − cosine_similarity)` and yields the same nearest-neighbor ordering as true cosine. `util::hnsw_index`
+exposes a small `build` / `search_top_k` wrapper with tests; integration into `face_clustering` (above
+~5 k faces) and the C# CLIP search ranker is a follow-up sub-task. Rejected: `usearch` (C++ build dep);
+brute-force forever (O(n²) face clustering breaks at scale).
+
+## 2026-05-22 — USN journal: foundation only (admin gate + query primitive + v9 cursor table) (Phase 3)
+
+**Context**: the research plan called for full NTFS USN journal scanning to turn 1M+-file repeat
+scans into a change-list read. The full implementation (record-reader, RENAME pair correlation, scan-
+driver integration that replaces the timestamp-based skip set) is a substantial subsystem and only
+matters at scale beyond what current users hit; the working `jwalk` + timestamp-skip path is fine for
+today's corpora.
+
+**Decision**: land the FOUNDATION in Phase 3 — `util::elevation::is_elevated`, `pipeline::usn::query_journal`
+(the `FSCTL_QUERY_USN_JOURNAL` primitive returning `JournalInfo`), and the v9 `usn_state` table that
+stores the per-volume cursor. The scan-driver integration is a future sub-task; until then the
+default scan path is unchanged. This gives a future PR a clean place to land
+`FSCTL_READ_USN_JOURNAL` + skip-set augmentation without re-litigating elevation handling or schema.
+Synergy with v8: USN records expose file refs, and v8 stores `files.file_ref`, so USN-derived change
+notifications map to existing rows via a single indexed lookup.
+
+## 2026-05-22 — BLAKE3 + head/tail/size composite for content identity (Phase 3)
+
+**Context**: file identity was path-based, so a rename or move orphaned a file's catalog row (tags,
+embeddings, faces) and forced a full recompute on the next scan. Rename/move detection needs a
+path-independent content hash.
+
+**Decision**: BLAKE3 (`blake3` crate) over the already-present SHA-256 (`sha2`) — faster on commodity
+CPUs, pure-Rust + SIMD (no C/C++ build dependency, unlike `usearch`), and 32 bytes is ample for
+collision-free identity at our scale. Files ≤ 16 MB are hashed in full; larger files hash a composite
+of head(1 MB) + tail(1 MB) + size, so a multi-GB video costs a 2 MB read rather than a full scan
+(`util::content_hash`). Rejected: SHA-256 (slower, no benefit here) and full-file hashing for all
+sizes (unacceptable I/O on large media).
+
+## 2026-05-22 — RAM++ ships as an offline-converted ONNX, not a first-party download (Phase 2)
+
+**Context**: RAM++ (the multi-label tagger that supersedes CLIP-as-classifier) publishes only PyTorch
+weights; the engine consumes ONNX and there is no first-party RAM++ ONNX. The no-telemetry rule
+requires HuggingFace-only egress.
+
+**Decision**: a one-time offline conversion (`shared/scripts/convert_ramplus_onnx.py`, exporting the
+`generate_tag` image→logits path at opset 17) whose outputs are hosted on the fileid-app HF repo; the
+`"ramplus"` registry arm stays `not_yet_available` until hosting lands. The engine applies sigmoid +
+per-tag threshold from a shipped data file (calibration tunable without re-exporting), and RAM++ is
+gated behind the existing "model missing → stage skips" path — **zero regression**, the VLM tagger
+stays default until RAM++ is installed. **Toolchain finding**: the 2023 RAM++ stack targets
+transformers 4.x; on the only locally-available interpreter (Python 3.14, which forces transformers
+5.x) the conversion clears imports and reaches model construction via bundled compat shims, but the
+2023 stack is not fully transformers-5-compatible — run the script on transformers 4.x / Python
+3.11-3.13 for a clean export. Rejected: bundling weights (violates no-ship-weights), any cloud tagging
+call (violates no-telemetry).
+
 ## 2026-05-22 — Force the discrete GPU per backend, not globally (V16.21)
 
 **Context**: On hybrid iGPU+dGPU laptops the app could end up running inference on the integrated

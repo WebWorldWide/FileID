@@ -13,7 +13,7 @@ use ndarray::Array4;
 use ort::session::{Session, SessionInputValue, SessionOutputs};
 use ort::value::Tensor;
 
-use super::runtime::{classify_inference_error, execution_providers_for_chain, priority_chain, RuntimeProbe};
+use super::runtime::{classify_inference_error, configure_session_builder, execution_providers_for_chain, priority_chain, RuntimeProbe};
 
 const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
@@ -31,10 +31,9 @@ impl MobileClipImage {
         }
         let probe = RuntimeProbe::detect();
         let chain = priority_chain(probe.vendor);
-        let mut builder = Session::builder()
-            .context("ORT session builder")?
-            .with_intra_threads(1)
-            .context("set intra threads (MobileCLIP image)")?;
+        let builder = Session::builder().context("ORT session builder")?;
+        let mut builder = configure_session_builder(builder)
+            .context("configure session (MobileCLIP image)")?;
         let chain_labels: Vec<&'static str> = chain.iter().map(|e| e.as_str()).collect();
         let providers = execution_providers_for_chain(&chain, probe.adapter_index);
         if !providers.is_empty() {

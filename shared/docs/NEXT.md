@@ -4,6 +4,105 @@
 
 ---
 
+## V16.26 — No-self-host posture + hanging-feature sweep (2026-05-22)
+
+**Landed (engine clippy `-D warnings` + test on pinned 1.90 green — 204-0; C# dotnet build 0/0).**
+Hardened policy: every artifact the engine downloads must already exist on a public upstream.
+
+**Removed**: RAM++ integration (no public ONNX), Performance-Pack registry arms,
+`NotYetAvailable` variant, conversion script. **Unhung**: HNSW into face_clustering, PDF text
+extraction, BGE-small text embeddings (with migration v11 + persistence).
+
+**Tagging promise vs V16.21 — strictly better-or-equal, never worse**: images same; documents +
+audio gain strictly-new tag chips; faces faster on big libraries; rename/move preserves tags.
+
+**On-hardware verify**: rename a file mid-scan → tags preserved; deep paths get scanned; OneDrive
+cloud files don't hydrate; doc files get keyword chips + show up in semantic search once BGE is
+installed; audio files render artist/album/year chips.
+
+**In-policy follow-ups** (no self-hosting needed):
+- USN reader (`FSCTL_READ_USN_JOURNAL`) + scan-skip-set integration.
+- Whisper.cpp subprocess (whisper.cpp binaries + GGUF Whisper models are public).
+- Florence-2 inference (4 ORT sessions + generation loop + `tokenizers` dep).
+
+## V16.25 — Research-implementation Phases 3–7 landed (2026-05-22)
+
+**Landed (engine clippy `-D warnings` + test on pinned 1.90 green across the full suite).**
+Five phases in one session on top of V16.24 (Phases 0–2 + content-hash brick):
+- **Phase 3**: rename/move heal (BLAKE3 + NTFS MFT-ref, migration v8) + USN journal foundation
+  (admin gate + query primitive, migration v9) + pure-Rust HNSW vector index
+  (`instant-distance` — no C++ build).
+- **Phase 4**: doc content pipeline — txt/md/docx/pptx/xlsx via `quick-xml`; RAKE keyword tags;
+  `doc_text` + `doc_fts` FTS5 (migration v10).
+- **Phase 5**: audio metadata chips (artist/album/title/genre/year via `symphonia`).
+- **Phase 6**: per-vendor quantized-variant framework documented (resolver was Phase 1; variants
+  ship with each model's base hosting).
+- **Phase 7**: Florence-2 foundation — real registry arm for `onnx-community/Florence-2-base`
+  (downloadable today) + skeleton module + docs.
+
+**Verify on hardware:** Phase 0 robustness (long-path / OneDrive online-only / file-lock) +
+CPU multi-thread inference uplift (Phase 1) + rename-heal preserves tags across a move +
+doc/audio files now render content tag chips.
+
+**Documented follow-ups** (foundation in place; full integration deferred):
+- Phase 3b: USN reader + scan-skip-set integration.
+- Phase 3c: HNSW into `face_clustering` above ~5 k faces.
+- Phase 4b: PDF text extraction + BGE-small text embeddings + GLiNER NER.
+- Phase 5b: YAMNet sound-event tagging + Whisper transcription.
+- Phase 6 hosting: per-model `_int8` (OpenVINO) + `_qnn` (Qualcomm AI Hub) variants.
+- Phase 7b: Florence-2 inference (4 ORT sessions + generation loop + `tokenizers` dep + Deep
+  Analyze grounded-OD backend).
+- **RAM++ activation**: run `shared/scripts/convert_ramplus_onnx.py` on **transformers 4.x /
+  Python 3.11–3.13** to produce + host the ONNX. Until then RAM++ stays gated; the VLM tagger
+  remains the default (zero regression).
+
+## V16.24 — Phase 2 RAM++ landed (code); Phase 3 underway (2026-05-22)
+
+**Landed (engine clippy `-D warnings` + test on pinned 1.90 green — 184-0).** RAM++ multi-label
+tagger wired as the primary scan tagger *when installed* (gated; no regression). `blake3` content-hash
+utility added for Phase 3 rename/move identity.
+
+- **RAM++ activation requires an offline ONNX conversion** (`shared/scripts/convert_ramplus_onnx.py`)
+  — run it on **transformers 4.x / Python 3.11–3.13** (Python 3.14 forces transformers 5.x, which the
+  2023 RAM++ stack doesn't fully support), then host the outputs and flip the `"ramplus"` registry arm
+  from `not_yet_available` to a real `Model`, or drop `ramplus.onnx` + tag-list files into
+  `%LOCALAPPDATA%\FileID\Models\ramplus\` for local testing.
+- **Continue Phase 3**: rename/move rebind (content_hash + NTFS-ref `file_ref` column, migration v8,
+  dbwriter lookup-before-insert) → USN journal scanning (admin-gated, jwalk fallback) → vector index.
+  ⚠️ Decision pending: `usearch` pulls a C++ build dependency — likely feature-gate it or use a
+  pure-Rust HNSW to keep the default "download-and-run" build.
+- Then Phases 4 (documents), 5 (audio), 6 (per-vendor NPU variants), 7 (Florence-2, optional).
+
+## V16.23 — Phase 1 ML/hardware foundation landed (2026-05-22)
+
+**Landed (engine clippy `-D warnings` + test on pinned 1.90 green — 177-0).** `active_provider` +
+`configure_session_builder` (per-EP graph-opt + CPU multi-threading) + `models::variants`
+(per-EP variant resolver, fp32 fallback) + pure-Rust `wordpiece_tokenizer` + QNN HTP backend.
+
+- Mostly headless-verifiable. **On hardware:** a CPU-only box should now scan faster (multi-threaded
+  ONNX intra-op). NPU paths (Intel OpenVINO device hint + INT8, Snapdragon QNN w8a8) finish in Phase 6.
+- **Next — Phase 2 (RAM++ multi-label tagging).** ⚠️ Prereq: RAM++ has no first-party ONNX, so the
+  code lands behind the existing "model not installed → stage skips" gate (no regression — SmolVLM
+  stays the tagger until RAM++ is present). A one-time **offline conversion + HuggingFace hosting**
+  of the RAM++ ONNX (script + `shared/docs/MODELS.md` entry to be added) is required before RAM++
+  actually runs.
+
+## V16.22 — verify: Phase 0 robustness (long-path / OneDrive / file-lock) (2026-05-22)
+
+**Landed (engine clippy `-D warnings` + test on pinned 1.90 green — 167-0; C# build 0/0).** First
+slice of the research-implementation plan (`~/.claude/plans/i-want-to-implement-radiant-sunset.md`).
+Rebuild + re-scan: `pwsh -File platforms\windows\build\build-all.ps1 -Run` (`-WipeDbOnly` for fresh).
+
+1. **Long paths.** Scan a tree with a path >260 chars (deeply nested folders). The deep files appear
+   in Library and get analyzed (previously silently skipped). `SELECT path_text FROM files` shows
+   normal-form paths (no `\\?\` prefix).
+2. **OneDrive online-only.** Point at a folder of dehydrated (cloud-only) OneDrive files. Scanning does
+   NOT trigger downloads (watch the OneDrive tray + network); they get a metadata row with no content
+   tags. Hydrated files scan normally.
+3. **File locks.** A file mid-write by another app is retried briefly instead of one-shot skipped.
+4. **Next:** Phase 1 (shared ML/hardware foundation: per-EP variant resolver + session tuning +
+   WordPiece tokenizer + NPU/QNN wiring), then Phase 2 (RAM++ multi-label tagging).
+
 ## V16.21 — verify: welcome models, discrete-GPU, tag quality, progress (2026-05-22)
 
 **Landed (engine clippy/test on pinned 1.90 green — 163-0; C# `dotnet build` 0/0).** Rebuild +

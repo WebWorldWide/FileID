@@ -44,6 +44,29 @@ Files live under each platform's models directory. Downloads triggered by the we
 | macOS layout | `~/Library/Application Support/FileID/Models/clip_text/` (CoreML `.mlpackage` + `vocab.json` + `merges.txt`) |
 | Windows layout | `%LOCALAPPDATA%\FileID\Models\clip_text\clip_text.onnx` + `vocab.json` + `merges.txt` |
 
+### BGE-small text embeddings (Windows — semantic doc search)
+
+| Aspect | Value |
+|---|---|
+| Source | [`Xenova/bge-small-en-v1.5`](https://huggingface.co/Xenova/bge-small-en-v1.5) — `onnx/model.onnx` + `vocab.txt` (community ONNX export of BAAI's MIT-licensed BGE) |
+| License | MIT |
+| Windows layout | `%LOCALAPPDATA%\FileID\Models\bge_text\{bge_small.onnx, vocab.txt}` |
+| Input | WordPiece tokens up to 256 — `input_ids` / `attention_mask` / `token_type_ids` (i64) |
+| Output | last_hidden_state `(1, seq, 384)` → mean-pooled (mask-weighted) + L2-normalized to 384-d |
+| Persistence | `text_embeddings(file_id, embedding BLOB, model)` (migration v11); the `model` column lets future text-embedding families coexist. |
+| Role | Semantic search over extracted document text (Phase 4). Skipped when not installed; FTS5 (`doc_fts`) still serves keyword search. |
+
+### Florence-2 base (Phase 7 — grounded regions, foundation only)
+
+| Aspect | Value |
+|---|---|
+| Source | [`onnx-community/Florence-2-base`](https://huggingface.co/onnx-community/Florence-2-base) — `onnx/{vision_encoder,embed_tokens,encoder_model,decoder_model_merged}.onnx` + `tokenizer.json` + `config.json` |
+| License | MIT (Microsoft Florence-2) |
+| Windows layout | `%LOCALAPPDATA%\FileID\Models\florence2\{vision_encoder,embed_tokens,encoder_model,decoder_model_merged}.onnx` + `tokenizer.json` + `config.json` |
+| Approx size | ~445 MB total (vision + embed + encoder + decoder + tokenizer) |
+| Role | **Phrase-grounded object detection** (`<OD>` / `<CAPTION_TO_PHRASE_GROUNDING>`) — the one capability not covered by the rest of the stack (SmolVLM / Qwen2.5-VL / Gemma 3 cover captioning + tags; Windows.Media.Ocr covers OCR). |
+| Status | Registry arm + `models::florence2` skeleton. **Inference is Phase 7b**: 4 ORT sessions + a Rust autoregressive generation loop + the `tokenizers` crate for the BART tokenizer + a `modelKind: "florence2_base"` Deep-Analyze backend. Build out when grounded OD becomes a concrete product need. |
+
 ### ArcFace iResNet50 (default ≥ 16 GB hardware)
 
 | Aspect | Value |

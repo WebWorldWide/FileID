@@ -66,6 +66,10 @@ futures-util = "0.3"
 # Hex / SHA256 for model integrity verification.
 sha2 = "0.10"
 hex  = "0.4"
+# BLAKE3 content hashing for rename/move detection (Phase 3 identity). Faster
+# than SHA-256 on commodity CPUs, pure-Rust + SIMD (no C/C++ build dep). See
+# shared/docs/DECISIONS.md.
+blake3 = "1"
 
 # Image pipeline. image-rs covers JPEG/PNG/WebP/TIFF; HEIC would need
 # libheif-rs separately.
@@ -87,9 +91,27 @@ pdfium-render = { version = "0.8", optional = true }
 # Lock-free queues for the hottest hot paths if benchmarks justify it.
 crossbeam-channel = "0.5"
 
-# Zip extraction for the llama.cpp runtime + Performance Pack downloads.
+# Pure-Rust approximate-nearest-neighbor (HNSW) for face-clustering and
+# CLIP/BGE semantic search above ~10 k vectors, where brute-force cosine
+# becomes the bottleneck. No C/C++ build dep (rejected `usearch` for that
+# reason — see shared/docs/DECISIONS.md). MIT/Apache-2.0.
+instant-distance = "0.6"
+
+# Zip extraction for the llama.cpp runtime + Performance Pack downloads,
+# AND Phase 4 OOXML document text extraction (.docx/.pptx/.xlsx are zip+xml).
 # `default-features = false` skips bzip2/zstd which we don't need.
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# Streaming XML pull-parser for Phase 4 OOXML text extraction. Pure-Rust,
+# tiny, MIT-licensed. The alternative (`xml-rs`) is heavier + DOM-oriented.
+quick-xml = "0.36"
+
+# Phase 5: pure-Rust audio metadata + decode (no Java/ffmpeg system dep). Used
+# to read artist/album/title/genre/year tags from mp3/flac/wav/ogg/m4a/aac so
+# audio files in the library get real content-style tag chips. MPL-2.0 (file-
+# level copyleft; fine for separate use). YAMNet sound-event tagging + Whisper
+# transcription are documented follow-ups (need offline ONNX conversion).
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "flac", "wav", "ogg", "vorbis", "aac", "isomp4", "pcm"] }
 
 # Native llama.cpp bindings (in-process VLM inference, no subprocess).
 # Off by default to keep CI build fast — adds ~150 MB build artifacts +

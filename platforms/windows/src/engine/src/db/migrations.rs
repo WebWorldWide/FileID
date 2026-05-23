@@ -6,7 +6,8 @@
 //!
 //!   v1_core_tables, v2_clip_embeddings, v3_deep_analyze,
 //!   v4_face_verifications, v5_person_naming_structured,
-//!   v6_arcface_embeddings, v7_identity_anchors
+//!   v6_arcface_embeddings, v7_identity_anchors, v8_content_identity,
+//!   v9_usn_state, v10_doc_text, v11_text_embeddings
 //!
 //! Migrations are append-only. NEVER edit a registered migration once
 //! committed; add a new vN+1 migration instead.
@@ -31,6 +32,10 @@ fn registry() -> Vec<(&'static str, &'static str)> {
         ("v5_person_naming_structured", V5_PERSON_NAMING_STRUCTURED),
         ("v6_arcface_embeddings",       V6_ARCFACE_EMBEDDINGS),
         ("v7_identity_anchors",         V7_IDENTITY_ANCHORS),
+        ("v8_content_identity",         V8_CONTENT_IDENTITY),
+        ("v9_usn_state",                V9_USN_STATE),
+        ("v10_doc_text",                V10_DOC_TEXT),
+        ("v11_text_embeddings",         V11_TEXT_EMBEDDINGS),
     ]
 }
 
@@ -218,6 +223,71 @@ ALTER TABLE persons ADD COLUMN anchor_radius      DOUBLE;
 ALTER TABLE persons ADD COLUMN last_clustered_at  DOUBLE;
 "#;
 
+// v11: BGE-small (or future) text embeddings for documents — parallel to
+// `clip_embeddings` (image space). Distinct table because the vector dim +
+// model are different; the `model` column lets multiple text-embedding
+// families coexist if we add another later.
+const V11_TEXT_EMBEDDINGS: &str = r#"
+CREATE TABLE IF NOT EXISTS text_embeddings (
+    file_id   INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+    embedding BLOB    NOT NULL,
+    model     TEXT    NOT NULL
+);
+"#;
+
+// v10: document text extracted by `pipeline::doc_extract` for txt/md/docx/
+// pptx/xlsx (and a future Phase 4b pdf step). Mirrors the `ocr_text` /
+// `ocr_fts` shape so the dbwriter inserts are near copy-paste and the
+// existing search ranker can search `doc_fts` with the same query syntax.
+const V10_DOC_TEXT: &str = r#"
+CREATE TABLE IF NOT EXISTS doc_text (
+    file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+    text    TEXT    NOT NULL
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS doc_fts USING fts5(
+    text,
+    content='doc_text',
+    content_rowid='file_id',
+    tokenize='porter unicode61'
+);
+"#;
+
+// v9: per-volume USN journal cursor. Provisioned by the Phase 3 foundation;
+// the (Windows-only) scan-driver integration that reads
+// `FSCTL_READ_USN_JOURNAL` since `next_usn` and prunes the skip-set
+// accordingly is a follow-up — until then this table stays unwritten and the
+// scan uses the (always-allowed) `jwalk` + timestamp-skip path. `journal_id`
+// detects deletion/recreation so a stale cursor never reads garbage.
+const V9_USN_STATE: &str = r#"
+CREATE TABLE IF NOT EXISTS usn_state (
+    volume_id       TEXT    PRIMARY KEY,
+    journal_id      INTEGER NOT NULL,
+    next_usn        INTEGER NOT NULL,
+    last_polled_at  DOUBLE  NOT NULL
+);
+"#;
+
+// v8: rename / move identity. `content_hash` is BLAKE3 (full for ≤16 MB, head+
+// tail+size composite above — see util::content_hash). `file_ref` is the
+// platform's volume-local file id (NTFS MFT reference on Windows via
+// GetFileInformationByHandle; inode on macOS). Both are nullable so a row
+// missing them (e.g. an online-only OneDrive placeholder, or a permission
+// error during the metadata pass) still inserts. The partial indexes keep the
+// rename-heal lookup O(log n) without paying index cost on the NULL rows.
+const V8_CONTENT_IDENTITY: &str = r#"
+ALTER TABLE files ADD COLUMN content_hash BLOB;
+ALTER TABLE files ADD COLUMN file_ref     INTEGER;
+
+CREATE INDEX IF NOT EXISTS idx_files_content_hash
+    ON files(content_hash)
+    WHERE content_hash IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_files_file_ref
+    ON files(file_ref)
+    WHERE file_ref IS NOT NULL;
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,18 +302,19 @@ mod tests {
         }
         apply(&conn).expect("migrations apply");
 
-        // grdb_migrations has 7 rows.
+        // grdb_migrations has 11 rows.
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 7, "expected 7 applied migrations");
+        assert_eq!(n, 11, "expected 11 applied migrations");
 
-        // Spot-check schema cardinals: files has 21 columns including v3
-        // additions; persons has 11 columns including v5 + v7 additions.
+        // Spot-check schema cardinals: files has 23 columns including v3
+        // additions (vlm_*) and v8 additions (content_hash, file_ref);
+        // persons has 11 columns including v5 + v7 additions.
         let files_cols: i64 = conn
             .query_row("SELECT COUNT(*) FROM pragma_table_info('files')", [], |r| r.get(0))
             .unwrap();
-        assert!(files_cols >= 21, "files expected >= 21 columns, got {files_cols}");
+        assert!(files_cols >= 23, "files expected >= 23 columns, got {files_cols}");
 
         let persons_cols: i64 = conn
             .query_row("SELECT COUNT(*) FROM pragma_table_info('persons')", [], |r| r.get(0))
@@ -286,6 +357,101 @@ mod tests {
         apply(&conn).unwrap();
         apply(&conn).unwrap(); // second run is a no-op
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 7);
+        assert_eq!(n, 11);
+    }
+
+    /// V10 added the `doc_text` + `doc_fts` (FTS5) pair, mirroring `ocr_text`
+    /// /`ocr_fts`. Verify the table + virtual table both exist and the FTS5
+    /// content_rowid is wired correctly (insert → match).
+    #[test]
+    fn v10_doc_text_and_fts_are_searchable() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply(&conn).unwrap();
+
+        conn.execute_batch(
+            r#"
+            INSERT INTO files (path_text, path_hash, size_bytes, scanned_at, kind, extension)
+              VALUES ('/test/doc.docx', 1, 100, 1.0, 'doc', 'docx');
+            INSERT INTO doc_text (file_id, text) VALUES (
+                (SELECT id FROM files WHERE path_text = '/test/doc.docx'),
+                'quarterly revenue report and projections'
+            );
+            INSERT INTO doc_fts (rowid, text) VALUES (
+                (SELECT id FROM files WHERE path_text = '/test/doc.docx'),
+                'quarterly revenue report and projections'
+            );
+            "#,
+        )
+        .unwrap();
+
+        let file_id: i64 = conn
+            .query_row("SELECT id FROM files WHERE path_text = '/test/doc.docx'", [], |r| r.get(0))
+            .unwrap();
+
+        let hit: i64 = conn
+            .query_row("SELECT rowid FROM doc_fts WHERE doc_fts MATCH 'revenue'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(hit, file_id);
+
+        let miss: i64 = conn
+            .query_row("SELECT COUNT(*) FROM doc_fts WHERE doc_fts MATCH 'aardvark'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(miss, 0);
+    }
+
+    /// V9 provisioned the per-volume USN cursor table (foundation; reader
+    /// integration is a follow-up). Verify the table + the key column exist.
+    #[test]
+    fn v9_usn_state_table_exists() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply(&conn).unwrap();
+
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='usn_state'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "usn_state table missing");
+
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('usn_state')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .flatten()
+            .collect();
+        for name in ["volume_id", "journal_id", "next_usn", "last_polled_at"] {
+            assert!(cols.iter().any(|c| c == name), "usn_state.{name} missing");
+        }
+    }
+
+    /// V8 added `content_hash` (BLOB) + `file_ref` (INTEGER) on `files` for
+    /// rename/move identity. Verify the columns + their partial indexes exist.
+    #[test]
+    fn v8_adds_content_identity_columns_and_indexes() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply(&conn).unwrap();
+
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('files')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert!(cols.iter().any(|c| c == "content_hash"), "files.content_hash missing");
+        assert!(cols.iter().any(|c| c == "file_ref"), "files.file_ref missing");
+
+        let idx: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' \
+                 AND name IN ('idx_files_content_hash', 'idx_files_file_ref')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, 2, "both v8 partial indexes must exist");
     }
 }

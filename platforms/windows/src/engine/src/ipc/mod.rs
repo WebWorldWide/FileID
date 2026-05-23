@@ -663,11 +663,9 @@ pub struct EngineError {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     /// For errors that pertain to a specific model install/download, the
-    /// model id (e.g. `mobileclip_s2`, `cuda_pack_x64`). Lets the app route
-    /// the error to the right install slot without fragile path-string
-    /// matching — pack paths and model paths can collide on substrings
-    /// (e.g. `cuda` appears in both the CUDA pack path and any error
-    /// message that mentions cuda.zip).
+    /// model id (e.g. `mobileclip_s2`, `bge_text`, `florence2_base`). Lets
+    /// the app route the error to the right install slot without fragile
+    /// path-string matching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_kind: Option<String>,
 }

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use tokio::sync::mpsc;
 
 use crate::coordinator::ScanCoordinator;
@@ -171,9 +171,21 @@ impl DbWriter {
             let mut file_stmt = tx
                 .prepare_cached(INSERT_FILE_RETURNING_ID_SQL)
                 .context("preparing file insert (RETURNING)")?;
+            let mut heal_lookup_stmt = tx
+                .prepare_cached(HEAL_LOOKUP_SQL)
+                .context("preparing rename-heal lookup")?;
+            let mut heal_update_stmt = tx
+                .prepare_cached(HEAL_UPDATE_SQL)
+                .context("preparing rename-heal update")?;
             let mut clip_stmt = tx
                 .prepare_cached(INSERT_CLIP_SQL)
                 .context("preparing clip insert")?;
+            let mut text_embed_stmt = tx
+                .prepare_cached(
+                    "INSERT OR REPLACE INTO text_embeddings (file_id, embedding, model) \
+                     VALUES (?1, ?2, ?3)",
+                )
+                .context("preparing text_embeddings insert")?;
             let mut face_delete = tx
                 .prepare_cached("DELETE FROM face_prints WHERE file_id = ?1")
                 .context("preparing face delete")?;
@@ -195,6 +207,16 @@ impl DbWriter {
             let mut ocr_fts_stmt = tx
                 .prepare_cached("INSERT INTO ocr_fts (rowid, text) VALUES (?1, ?2)")
                 .context("preparing ocr_fts insert")?;
+            // Phase 4: document text + FTS5 (same shape as ocr_text/ocr_fts).
+            let mut doc_text_stmt = tx
+                .prepare_cached("INSERT OR REPLACE INTO doc_text (file_id, text) VALUES (?1, ?2)")
+                .context("preparing doc_text insert")?;
+            let mut doc_fts_delete = tx
+                .prepare_cached("DELETE FROM doc_fts WHERE rowid = ?1")
+                .context("preparing doc_fts delete")?;
+            let mut doc_fts_stmt = tx
+                .prepare_cached("INSERT INTO doc_fts (rowid, text) VALUES (?1, ?2)")
+                .context("preparing doc_fts insert")?;
             for f in buffer.iter() {
                 let insert_started = Instant::now();
                 let path_text = f.path.to_string_lossy();
@@ -205,6 +227,34 @@ impl DbWriter {
                     .and_then(|s| s.to_str())
                     .unwrap_or("")
                     .to_ascii_lowercase();
+
+                // Rename/move heal: if an existing row matches this file's
+                // content identity at a DIFFERENT path, move it to the new
+                // path BEFORE the INSERT. The ON CONFLICT(path_text) clause
+                // below then updates the (now-relocated) existing row,
+                // preserving its id + every FK-linked row (tags / embeddings /
+                // faces / OCR) — what the rename-heal is for. Skipped when we
+                // have neither identity (no heal possible).
+                if f.file_ref.is_some() || f.content_hash.is_some() {
+                    let ch_bytes = f.content_hash.as_ref().map(|h| h.as_slice());
+                    let healed_id: Option<i64> = heal_lookup_stmt
+                        .query_row(
+                            params![f.file_ref, ch_bytes, path_text.as_ref()],
+                            |r| r.get(0),
+                        )
+                        .optional()
+                        .with_context(|| format!("rename-heal lookup for {}", path_text))?;
+                    if let Some(id) = healed_id {
+                        heal_update_stmt
+                            .execute(params![path_text, path_hash, id])
+                            .with_context(|| format!("rename-heal update for {}", path_text))?;
+                        tracing::info!(
+                            id,
+                            new_path = %crate::platform::redact_path_for_log(&f.path),
+                            "[RENAME-HEAL] re-bound existing row to new path"
+                        );
+                    }
+                }
 
                 let file_id: i64 = file_stmt
                     .query_row(
@@ -226,6 +276,8 @@ impl DbWriter {
                             f.location_lon,
                             f.failed as i64,
                             f.error_message,
+                            f.content_hash.as_ref().map(|h| h.as_slice()),
+                            f.file_ref,
                         ],
                         |row| row.get(0),
                     )
@@ -236,6 +288,17 @@ impl DbWriter {
                     clip_stmt
                         .execute(params![file_id, bytes, "mobileclip_s2"])
                         .with_context(|| format!("clip insert for {}", path_text))?;
+                }
+
+                // BGE-small text embeddings (Phase 4b) — parallel to clip
+                // above but in a different vector space; persisted into
+                // `text_embeddings` keyed by model so future embeddings
+                // (BGE-m3, Nomic, ...) can coexist without table churn.
+                if let Some(emb) = &f.text_embedding {
+                    let bytes = floats_to_le_bytes(emb);
+                    text_embed_stmt
+                        .execute(params![file_id, bytes, "bge_small_en_v1_5"])
+                        .with_context(|| format!("text_embeddings insert for {}", path_text))?;
                 }
 
                 if !f.faces.is_empty() {
@@ -284,6 +347,20 @@ impl DbWriter {
                         ocr_fts_stmt
                             .execute(params![file_id, text])
                             .with_context(|| format!("ocr_fts insert for {}", path_text))?;
+                    }
+                }
+
+                // Phase 4: document text + FTS5 — same contentless-FTS shape
+                // as ocr_text/ocr_fts above.
+                if let Some(text) = &f.doc_text {
+                    if !text.trim().is_empty() {
+                        doc_text_stmt
+                            .execute(params![file_id, text])
+                            .with_context(|| format!("doc_text insert for {}", path_text))?;
+                        let _ = doc_fts_delete.execute(params![file_id]);
+                        doc_fts_stmt
+                            .execute(params![file_id, text])
+                            .with_context(|| format!("doc_fts insert for {}", path_text))?;
                     }
                 }
 
@@ -394,9 +471,10 @@ const INSERT_FILE_SQL: &str = r#"
         phash, aesthetic,
         has_faces, has_text,
         camera_model, location_lat, location_lon,
-        failed, error_message
+        failed, error_message,
+        content_hash, file_ref
     )
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
     ON CONFLICT(path_text) DO UPDATE SET
         path_hash    = excluded.path_hash,
         size_bytes   = excluded.size_bytes,
@@ -411,7 +489,9 @@ const INSERT_FILE_SQL: &str = r#"
         location_lat = excluded.location_lat,
         location_lon = excluded.location_lon,
         failed       = excluded.failed,
-        error_message= excluded.error_message
+        error_message= excluded.error_message,
+        content_hash = COALESCE(excluded.content_hash, content_hash),
+        file_ref     = COALESCE(excluded.file_ref, file_ref)
 "#;
 
 /// Hot-path INSERT. Returns `id` whether the row was freshly inserted or
@@ -427,9 +507,10 @@ const INSERT_FILE_RETURNING_ID_SQL: &str = r#"
         phash, aesthetic,
         has_faces, has_text,
         camera_model, location_lat, location_lon,
-        failed, error_message
+        failed, error_message,
+        content_hash, file_ref
     )
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
     ON CONFLICT(path_text) DO UPDATE SET
         path_hash    = excluded.path_hash,
         size_bytes   = excluded.size_bytes,
@@ -444,8 +525,36 @@ const INSERT_FILE_RETURNING_ID_SQL: &str = r#"
         location_lat = excluded.location_lat,
         location_lon = excluded.location_lon,
         failed       = excluded.failed,
-        error_message= excluded.error_message
+        error_message= excluded.error_message,
+        -- Preserve a previously-computed identity if the incoming value is
+        -- NULL (e.g. an online-only re-scan after the original full read).
+        content_hash = COALESCE(excluded.content_hash, content_hash),
+        file_ref     = COALESCE(excluded.file_ref, file_ref)
     RETURNING id
+"#;
+
+// Rename/move heal lookup (v8 identity). Find an existing row whose
+// `file_ref` (volume-local; the common rename case) or `content_hash`
+// (cross-volume) matches, but at a DIFFERENT path. NULL identity columns
+// never match — a row without identity can't be healed.
+const HEAL_LOOKUP_SQL: &str = r#"
+    SELECT id FROM files
+    WHERE path_text != ?3
+      AND (
+          (file_ref IS NOT NULL AND file_ref = ?1)
+          OR (content_hash IS NOT NULL AND content_hash = ?2)
+      )
+    LIMIT 1
+"#;
+
+// Heal: move the existing row to the new path. `UPDATE OR REPLACE` handles
+// the rare case where ANOTHER row already sits at the new path (e.g. a copy
+// preceded the rename) — SQLite REPLACE deletes the colliding row and
+// FK-cascades its tags/embeddings/faces, then the healed row wins.
+const HEAL_UPDATE_SQL: &str = r#"
+    UPDATE OR REPLACE files
+       SET path_text = ?1, path_hash = ?2
+     WHERE id = ?3
 "#;
 
 const INSERT_CLIP_SQL: &str = r#"
@@ -533,6 +642,8 @@ mod tests {
                 f.location_lon,
                 f.failed as i64,
                 f.error_message,
+                f.content_hash.as_ref().map(|h| h.as_slice()),
+                f.file_ref,
             ],
         )?;
         Ok(())
@@ -562,6 +673,10 @@ mod tests {
             total_ms: 0.0,
             failed: false,
             error_message: None,
+            file_ref: None,
+            content_hash: None,
+            text_embedding: None,
+            doc_text: None,
             tags: vec![],
         }
     }
@@ -605,19 +720,22 @@ mod tests {
              extension.clone(), f.phash, None::<f64>,
              f.has_faces as i64, f.has_text as i64,
              f.camera_model.clone(), f.location_lat, f.location_lon,
-             f.failed as i64, f.error_message.clone())
+             f.failed as i64, f.error_message.clone(),
+             f.content_hash.as_ref().map(|h| h.to_vec()), f.file_ref)
         };
         let row = bind(&f);
         let id1: i64 = conn.query_row(
             INSERT_FILE_RETURNING_ID_SQL,
             params![row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7,
-                    row.8, row.9, row.10, row.11, row.12, row.13, row.14, row.15, row.16],
+                    row.8, row.9, row.10, row.11, row.12, row.13, row.14, row.15, row.16,
+                    row.17, row.18],
             |r| r.get(0),
         ).expect("first insert returns id");
         let id2: i64 = conn.query_row(
             INSERT_FILE_RETURNING_ID_SQL,
             params![row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7,
-                    row.8, row.9, row.10, row.11, row.12, row.13, row.14, row.15, row.16],
+                    row.8, row.9, row.10, row.11, row.12, row.13, row.14, row.15, row.16,
+                    row.17, row.18],
             |r| r.get(0),
         ).expect("ON CONFLICT branch must also return id");
         assert_eq!(id1, id2, "RETURNING must yield stable id across insert + update");

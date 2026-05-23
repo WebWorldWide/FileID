@@ -235,6 +235,9 @@ pub fn execution_providers_for_chain(
         match ep {
             ExecutionProvider::Cuda => out.push(CUDAExecutionProvider::default().build()),
             ExecutionProvider::TensorRt => out.push(TensorRTExecutionProvider::default().build()),
+            // Intel: GPU/CPU today. The NPU device hint
+            // (`with_device_type("NPU")`) + INT8 model variants land in
+            // Phase 6 alongside NPU detection.
             ExecutionProvider::OpenVino => out.push(OpenVINOExecutionProvider::default().build()),
             ExecutionProvider::DirectMl => {
                 // Pin DirectML to the discrete adapter on hybrid iGPU+dGPU
@@ -250,11 +253,65 @@ pub fn execution_providers_for_chain(
                 }
                 out.push(dml.build());
             }
-            ExecutionProvider::Qnn => out.push(QNNExecutionProvider::default().build()),
+            ExecutionProvider::Qnn => {
+                // Snapdragon: bind the Hexagon NPU (HTP) backend explicitly.
+                // `QnnHtp.dll` ships in the QNN Performance Pack and is on the
+                // process DLL search path (`register_dll_dirs_under`). If it's
+                // absent the EP fails to load and we fall through to DirectML
+                // on the Adreno GPU.
+                out.push(
+                    QNNExecutionProvider::default()
+                        .with_backend_path("QnnHtp.dll")
+                        .build(),
+                );
+            }
             ExecutionProvider::Cpu => { /* CPU is the implicit fallback */ }
         }
     }
     out
+}
+
+/// The execution provider this process will actually bind, cached. Single
+/// source of truth for per-EP decisions: model-variant selection
+/// (`models::variants`) and session tuning (`configure_session_builder`).
+/// `RuntimeProbe::detect()` is idempotent but walks DXGI + probes the
+/// filesystem, so memoize it for the life of the process.
+pub fn active_provider() -> ExecutionProvider {
+    static CELL: std::sync::OnceLock<ExecutionProvider> = std::sync::OnceLock::new();
+    *CELL.get_or_init(|| RuntimeProbe::detect().provider)
+}
+
+/// Apply execution-provider-specific session tuning that would otherwise be
+/// copy-pasted into every model wrapper. Call right after `Session::builder()`
+/// and before `with_execution_providers` / `commit_from_file`; it replaces the
+/// bare `.with_intra_threads(1)` the wrappers used to hardcode.
+///
+/// - **Graph optimization**: Level3 (all) everywhere except QNN, where the
+///   Hexagon (HTP) backend's own partitioner wants Basic (Level1) — ORT's
+///   aggressive op fusion otherwise emits nodes QNN can't consume, silently
+///   forcing a CPU fallback. (Level3 is ORT's default; we set it explicitly
+///   so the intent is on the page.)
+/// - **Intra-op threads**: on the CPU EP, use all performance cores so
+///   CPU-only boxes get multi-threaded inference — the wrappers previously
+///   pinned 1, leaving CPU users single-threaded and badly underutilized. On
+///   GPU/NPU EPs keep 1: the accelerator does the parallelism and extra host
+///   threads only contend with it.
+pub fn configure_session_builder(
+    builder: ort::session::builder::SessionBuilder,
+) -> ort::Result<ort::session::builder::SessionBuilder> {
+    use ort::session::builder::GraphOptimizationLevel;
+    let ep = active_provider();
+    let opt = if ep == ExecutionProvider::Qnn {
+        GraphOptimizationLevel::Level1
+    } else {
+        GraphOptimizationLevel::Level3
+    };
+    let intra: usize = if ep == ExecutionProvider::Cpu {
+        crate::platform::cpu_topology().p_cores.max(1) as usize
+    } else {
+        1
+    };
+    builder.with_optimization_level(opt)?.with_intra_threads(intra)
 }
 
 /// User-supplied EP override stored in the C# app's `app-settings.json`

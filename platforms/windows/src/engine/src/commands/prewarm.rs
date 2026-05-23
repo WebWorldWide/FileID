@@ -94,23 +94,6 @@ pub(crate) async fn handle_prewarm_model(
 
     let model = match registry::lookup_full(&model_kind) {
         LookupResult::Found(m) => m,
-        LookupResult::NotYetAvailable {
-            display_name,
-            message,
-        } => {
-            sink.send(IpcEvent::now(EventPayload::ModelDownloadProgress(Wrap::new(
-                ModelDownloadProgress {
-                    model_kind: model_kind.clone(),
-                    fraction: 0.0,
-                    message: format!("{display_name}: {message}"),
-                    bytes_done: None,
-                    total_bytes: None,
-                },
-            ))))
-            .await;
-            tracing::info!(model_kind = %model_kind, outcome = "not_yet_available", "[PREWARM] exiting");
-            return;
-        }
         LookupResult::Unknown => {
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                 kind: "unknown_model".into(),

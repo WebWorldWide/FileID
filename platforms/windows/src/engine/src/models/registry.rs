@@ -36,16 +36,11 @@ pub struct Model {
     pub files: Vec<FileEntry>,
 }
 
-/// Outcome of `lookup_full`. The welcome sheet treats `NotYetAvailable`
-/// as a friendly note (the row sticks at "Not installed" but with a
-/// message); `Unknown` surfaces as an error popup.
+/// Outcome of `lookup_full`. `Unknown` surfaces as an error popup in the
+/// welcome sheet — registered model_kinds resolve to `Found`.
 #[derive(Debug)]
 pub enum LookupResult {
     Found(Model),
-    NotYetAvailable {
-        display_name: String,
-        message: String,
-    },
     Unknown,
 }
 
@@ -354,32 +349,97 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
             })
         }
 
-        // ── Performance Packs (CUDA / OpenVINO / QNN). Hosted on the
-        // fileid-app HF dataset repo. If the repo hasn't been populated
-        // yet the downloader surfaces the HTTP 404 as a friendly error;
-        // until then we surface "not yet available" so the install button
-        // stays usable but doesn't hard-fail.
-        "cuda_pack_x64" => not_yet_available(
-            "CUDA Performance Pack",
-            "Pack hosting is not configured yet. Watch shared/docs/SHIP.md for the upload date.",
-        ),
-        "openvino_pack_x64" => not_yet_available(
-            "OpenVINO Performance Pack",
-            "Pack hosting is not configured yet. Watch shared/docs/SHIP.md for the upload date.",
-        ),
-        "qnn_pack_arm64" => not_yet_available(
-            "QNN Performance Pack",
-            "Pack hosting is not configured yet. Watch shared/docs/SHIP.md for the upload date.",
-        ),
+        // ── BGE-small-en-v1.5 text embeddings (Phase 4b). MIT. ONNX from
+        // Xenova's community export; the WordPiece vocab travels with it.
+        // Used for semantic search over document text.
+        "bge_text" | "bge_small_en_v1_5" | "bge_small" => {
+            let dir = models_root.join("bge_text");
+            LookupResult::Found(Model {
+                id: "bge_text",
+                display_name: "BGE-small text embeddings",
+                files: vec![
+                    FileEntry {
+                        url: "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model.onnx".to_string(),
+                        dest: dir.join("bge_small.onnx"),
+                        sha256: None,
+                        approx_bytes: 135_000_000,
+                    },
+                    FileEntry {
+                        url: "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/vocab.txt".to_string(),
+                        dest: dir.join("vocab.txt"),
+                        sha256: None,
+                        approx_bytes: 232_000,
+                    },
+                ],
+            })
+        }
 
+        // ── Florence-2 base (Phase 7 — registry arm + skeleton; the generation
+        // loop wiring is the documented Phase 7b follow-up). 4-ONNX split +
+        // BART tokenizer + config from the community ONNX export at
+        // `onnx-community/Florence-2-base` (Microsoft Florence-2, MIT). The
+        // model is downloadable today; `models::florence2` exposes the canonical
+        // install dir so progress UI works against the same layout the future
+        // loader will read.
+        "florence2_base" | "florence2" => {
+            let dir = models_root.join("florence2");
+            LookupResult::Found(Model {
+                id: "florence2_base",
+                display_name: "Florence-2 base (grounded regions)",
+                files: vec![
+                    FileEntry {
+                        url: "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/onnx/vision_encoder.onnx".to_string(),
+                        dest: dir.join("vision_encoder.onnx"),
+                        sha256: None,
+                        approx_bytes: 110_000_000,
+                    },
+                    FileEntry {
+                        url: "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/onnx/embed_tokens.onnx".to_string(),
+                        dest: dir.join("embed_tokens.onnx"),
+                        sha256: None,
+                        approx_bytes: 25_000_000,
+                    },
+                    FileEntry {
+                        url: "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/onnx/encoder_model.onnx".to_string(),
+                        dest: dir.join("encoder_model.onnx"),
+                        sha256: None,
+                        approx_bytes: 110_000_000,
+                    },
+                    FileEntry {
+                        url: "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/onnx/decoder_model_merged.onnx".to_string(),
+                        dest: dir.join("decoder_model_merged.onnx"),
+                        sha256: None,
+                        approx_bytes: 200_000_000,
+                    },
+                    FileEntry {
+                        url: "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/tokenizer.json".to_string(),
+                        dest: dir.join("tokenizer.json"),
+                        sha256: None,
+                        approx_bytes: 5_000_000,
+                    },
+                    FileEntry {
+                        url: "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/config.json".to_string(),
+                        dest: dir.join("config.json"),
+                        sha256: None,
+                        approx_bytes: 10_000,
+                    },
+                ],
+            })
+        }
+
+        // ── Per-vendor accelerated runtimes (CUDA EP / OpenVINO EP / QNN EP)
+        // are deliberately NOT downloaded by the engine: each requires a
+        // vendor-specific SDK whose redistribution terms (Qualcomm AI Hub
+        // auth, OpenVINO redist guidance, NVIDIA CUDA toolkit) put it
+        // outside the "publicly downloadable for an open-source app" line.
+        // The engine still uses these EPs when their DLLs are on the system
+        // search path: CUDA via the user's system CUDA toolkit (probed in
+        // runtime::system_cuda_toolkit_dir); OpenVINO when the user
+        // installs Intel's redistributable; QNN on Snapdragon devices that
+        // ship the QNN runtime. Per-model `_int8`/`_qnn` variants follow
+        // the same rule — `models::variants` picks them up if dropped into
+        // the model dir by hand, and falls back to the fp32 graph otherwise.
         _ => LookupResult::Unknown,
-    }
-}
-
-fn not_yet_available(display: &str, msg: &str) -> LookupResult {
-    LookupResult::NotYetAvailable {
-        display_name: display.into(),
-        message: msg.into(),
     }
 }
 

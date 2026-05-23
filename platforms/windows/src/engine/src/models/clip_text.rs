@@ -12,7 +12,7 @@ use ort::session::{Session, SessionInputValue, SessionOutputs};
 use ort::value::Tensor;
 
 use super::clip_tokenizer::ClipTokenizer;
-use super::runtime::{classify_inference_error, execution_providers_for_chain, priority_chain, RuntimeProbe};
+use super::runtime::{classify_inference_error, configure_session_builder, execution_providers_for_chain, priority_chain, RuntimeProbe};
 
 const CONTEXT_LEN: usize = 77;
 
@@ -29,10 +29,9 @@ impl ClipText {
         }
         let probe = RuntimeProbe::detect();
         let chain = priority_chain(probe.vendor);
-        let mut builder = Session::builder()
-            .context("ORT session builder")?
-            .with_intra_threads(1)
-            .context("set intra threads (CLIP text)")?;
+        let builder = Session::builder().context("ORT session builder")?;
+        let mut builder = configure_session_builder(builder)
+            .context("configure session (CLIP text)")?;
         let chain_labels: Vec<&'static str> = chain.iter().map(|e| e.as_str()).collect();
         let providers = execution_providers_for_chain(&chain, probe.adapter_index);
         if !providers.is_empty() {

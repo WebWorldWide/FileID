@@ -43,7 +43,7 @@ fn perf_trace(stage: &str, path: &std::path::Path, elapsed_ms: f64) {
 
 use crate::coordinator::ScanCoordinator;
 use crate::models::runtime::error_has_device_removed_marker;
-use crate::models::{arcface::ArcFace, mobileclip::MobileClipImage, scene_vocab::SceneLabeler, scrfd::{self, Scrfd}};
+use crate::models::{arcface::ArcFace, bge_text::BgeText, mobileclip::MobileClipImage, scene_vocab::SceneLabeler, scrfd::{self, Scrfd}};
 use crate::pipeline::batch_clip::ClipBatchCoordinator;
 use crate::pipeline::discovery::{DiscoveredFile, FileKind};
 use crate::shell;
@@ -159,6 +159,30 @@ pub struct TaggedFile {
     pub failed: bool,
     pub error_message: Option<String>,
 
+    /// Volume-local file identity (propagated from `DiscoveredFile.file_ref`)
+    /// and BLAKE3 content identity (computed here). Together they drive the
+    /// dbwriter's rename/move heal: a moved file with a matching `file_ref`
+    /// (same volume) or `content_hash` (cross-volume) re-binds to its
+    /// existing catalog row instead of orphaning its tags + embeddings +
+    /// faces. Both nullable — a row with neither just falls through to a
+    /// fresh INSERT.
+    pub file_ref: Option<u64>,
+    pub content_hash: Option<[u8; 32]>,
+
+    /// BGE-small text embedding (Phase 4b) — 384-d L2-normalized float vector
+    /// for the document's extracted text. Persisted by the dbwriter into
+    /// `text_embeddings` (parallel to `clip_embeddings`); enables semantic
+    /// search beyond the doc_fts keyword match. `None` when BGE isn't
+    /// installed or no doc text was extracted.
+    pub text_embedding: Option<Vec<f32>>,
+
+    /// Plain-text extraction of the file's content (Phase 4) for Doc-kind
+    /// inputs (.txt / .md / .docx / .pptx / .xlsx; .pdf is a Phase-4b
+    /// follow-up). Persisted to `doc_text` + the `doc_fts` FTS5 index by
+    /// the dbwriter so the user can full-text-search their docs. Capped at
+    /// `pipeline::doc_extract::MAX_TEXT_BYTES` upstream.
+    pub doc_text: Option<String>,
+
     /// Semantic tags as `(label, score)` pairs, assembled from (a) CLIP
     /// zero-shot scene labels (score = softmax probability) and (b)
     /// enriched-extras derived from existing per-file signals (Year + camera
@@ -216,6 +240,10 @@ pub struct ModelStack {
     /// text model isn't installed the per-file `tags` Vec is populated only
     /// from enriched extras.
     pub scene_labeler: Option<Arc<SceneLabeler>>,
+    /// BGE-small text embedder (Phase 4b) — computes a 384-d vector for each
+    /// document's extracted text so the library can do semantic search beyond
+    /// FTS5 keyword match. Optional: missing model → no embedding emitted.
+    pub bge_text: Option<Mutex<BgeText>>,
 }
 
 /// Aspirational pool size — actual cap is `min(this, vram_cap, worker_count)`
@@ -341,7 +369,35 @@ impl ModelStack {
             (pool, None)
         };
 
-        Self { arcface, scrfd, mobileclip_pool, mobileclip_batch, scene_labeler }
+        // BGE-small text embedder — single session, only built when both the
+        // weights AND the vocab.txt are on disk. Drives semantic search over
+        // document text; absent → just no text embedding row, FTS5 still
+        // works.
+        let bge_text = match (
+            crate::models::bge_text::default_weights_path(),
+            crate::models::bge_text::default_vocab_path(),
+        ) {
+            (Ok(wp), Ok(vp)) if wp.exists() && vp.exists() => match BgeText::load(wp.clone(), vp) {
+                Ok(m) => {
+                    tracing::info!(model = "BGE-small", path = %wp.display(), "model loaded");
+                    Some(Mutex::new(m))
+                }
+                Err(err) => {
+                    tracing::warn!(model = "BGE-small", ?err, "model load failed; stage will skip");
+                    None
+                }
+            },
+            (Ok(wp), _) => {
+                tracing::info!(model = "BGE-small", path = %wp.display(), "model not installed; stage will skip");
+                None
+            }
+            (Err(err), _) => {
+                tracing::warn!(model = "BGE-small", ?err, "model path unresolved");
+                None
+            }
+        };
+
+        Self { arcface, scrfd, mobileclip_pool, mobileclip_batch, scene_labeler, bge_text }
     }
 
     #[allow(dead_code)]
@@ -352,6 +408,7 @@ impl ModelStack {
             mobileclip_pool: None,
             mobileclip_batch: None,
             scene_labeler: None,
+            bge_text: None,
         }
     }
 }
@@ -547,6 +604,10 @@ impl Tagger {
                                 total_ms: 60000.0,
                                 failed: true,
                                 error_message: Some("per-file timeout after 60s".into()),
+                                file_ref: None,
+                                content_hash: None,
+                                text_embedding: None,
+                                doc_text: None,
                                 tags: Vec::new(),
                             }
                         }
@@ -576,6 +637,12 @@ impl Tagger {
 pub struct PreDecoded {
     pub file: DiscoveredFile,
     pub decoded: Option<anyhow::Result<(Vec<u8>, u32, u32)>>,
+    /// Phase 4 doc-kind text extraction (txt/md/docx/pptx/xlsx). `None` on
+    /// non-doc kinds, online-only files, and extraction failures.
+    pub doc_text: Option<String>,
+    /// Phase 5 audio-kind metadata tags (artist/album/title/genre/year).
+    /// Empty for non-audio kinds + online-only + extraction failures.
+    pub audio_tags: Vec<(String, Option<f32>)>,
 }
 
 /// Decoder-pool worker. Sync OS thread (not a tokio task) so the
@@ -597,19 +664,94 @@ fn run_decoder_thread(
             Err(_) => return,
         };
         let decode_started = Instant::now();
-        let decoded = match file.kind {
-            FileKind::Image => Some(decode_image_sync(&file.path)),
-            FileKind::Video => Some(decode_video_keyframe_sync(&file.path)),
-            _ => None,
+        // Cloud placeholders: never read content (reading hydrates the file,
+        // a surprise network download). Emit a metadata-only row (decoded =
+        // None) just like an unsupported kind; a later scan after the user
+        // hydrates the file picks up its content.
+        let decoded = if file.online_only {
+            None
+        } else {
+            match file.kind {
+                FileKind::Image => Some(decode_image_sync(&file.path)),
+                FileKind::Video => Some(decode_video_keyframe_sync(&file.path)),
+                _ => None,
+            }
         };
         if decoded.is_some() {
             STATS_DECODE_US.fetch_add(decode_started.elapsed().as_micros() as u64, Ordering::Relaxed);
         }
-        let item = PreDecoded { file, decoded };
+        // Phase 4: for Doc-kind files, extract text on the same decoder
+        // thread (cheap I/O; same online_only gate as content read).
+        let doc_text = if file.online_only {
+            None
+        } else {
+            match file.kind {
+                FileKind::Doc | FileKind::Pdf => crate::pipeline::doc_extract::extract(&file.path)
+                    .ok()
+                    .flatten(),
+                _ => None,
+            }
+        };
+        // Phase 5: for Audio-kind files, read container metadata via symphonia
+        // (artist/album/title/genre/year). Pure-Rust, no system ffmpeg.
+        let audio_tags = if file.online_only {
+            Vec::new()
+        } else {
+            match file.kind {
+                FileKind::Audio => crate::pipeline::audio_meta::extract(&file.path),
+                _ => Vec::new(),
+            }
+        };
+        let item = PreDecoded { file, decoded, doc_text, audio_tags };
         if tx.send_blocking(item).is_err() {
             return;
         }
     }
+}
+
+/// Open a file for sequential read on Windows. `FILE_FLAG_SEQUENTIAL_SCAN`
+/// tells the cache manager we won't seek back (so it doesn't pollute the
+/// standby list) and is friendlier to real-time AV scanning. Plain open
+/// elsewhere.
+#[cfg(windows)]
+fn open_read_sequential(p: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_SEQUENTIAL_SCAN)
+        .open(p)
+}
+
+#[cfg(not(windows))]
+fn open_read_sequential(p: &std::path::Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(p)
+}
+
+/// Open an image file for decoding, with long-path support and a short
+/// retry-with-backoff for transient sharing/lock violations (a file still
+/// being written by another app, or an AV scanner holding a momentary
+/// lock). `\\?\`-prefix so deep (>260-char) paths open at all. Genuine
+/// errors (not found, access denied) fail fast without burning retries.
+fn open_image_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let p = crate::util::path_safety::to_extended_length(path);
+    let mut last_err: Option<std::io::Error> = None;
+    for attempt in 0..3u32 {
+        match open_read_sequential(&p) {
+            Ok(f) => return Ok(f),
+            Err(e) => {
+                // ERROR_SHARING_VIOLATION (32) / ERROR_LOCK_VIOLATION (33)
+                // are the only transient cases worth retrying.
+                let transient = matches!(e.raw_os_error(), Some(32 | 33));
+                last_err = Some(e);
+                if !transient || attempt == 2 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50 * (u64::from(attempt) + 1)));
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| std::io::Error::other("open failed")))
 }
 
 /// Decode an image off disk into RGB8 bytes + dimensions on the calling
@@ -655,7 +797,7 @@ fn decode_image_sync(path: &std::path::Path) -> anyhow::Result<(Vec<u8>, u32, u3
 fn decode_image_sync_imagecrate(path: &std::path::Path) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> anyhow::Result<(Vec<u8>, u32, u32)> {
         use std::io::Cursor;
-        let file = std::fs::File::open(path)
+        let file = open_image_file(path)
             .map_err(|e| anyhow::anyhow!("open: {e}"))?;
         let mmap = unsafe {
             memmap2::Mmap::map(&file)
@@ -720,7 +862,7 @@ async fn process_file_predecoded(
     worker_idx: usize,
     coord: &ScanCoordinator,
 ) -> TaggedFile {
-    let PreDecoded { file, decoded } = predecoded;
+    let PreDecoded { file, decoded, doc_text, audio_tags } = predecoded;
     let file = &file;
     let started = Instant::now();
     let scanned_unix = std::time::SystemTime::now()
@@ -751,8 +893,62 @@ async fn process_file_predecoded(
         total_ms: 0.0,
         failed: false,
         error_message: None,
+        file_ref: file.file_ref,
+        content_hash: None,
+        text_embedding: None,
+        doc_text: None,
         tags: Vec::new(),
     };
+
+    // Content identity for rename/move heal. Skipped for cloud placeholders
+    // so we never trigger a content read (which would hydrate a OneDrive
+    // online-only file). On any read error the row simply lacks a
+    // content_hash — the heal-by-file_ref path still applies.
+    if !file.online_only {
+        tagged.content_hash =
+            crate::util::content_hash::content_hash(&file.path, file.size_bytes).ok();
+    }
+
+    // Document content (Phase 4): the decoder thread already pulled the text
+    // for FileKind::Doc. Run a cheap RAKE-style keyword extractor → tag chips
+    // (source='auto'), and stash the text on the row so the dbwriter can
+    // persist it into doc_text/doc_fts for full-text search.
+    if let Some(text) = doc_text {
+        if !text.trim().is_empty() {
+            for (label, score) in crate::util::keywords::extract(&text) {
+                tagged.tags.push((label, Some(score)));
+            }
+            // BGE-small semantic embedding for the doc text (Phase 4b). Same
+            // single-Session-behind-Mutex pattern as RAM++; runs on the
+            // calling worker thread (sync inference under the lock). Skipped
+            // when BGE isn't installed — FTS5 still serves keyword search.
+            if !coord.is_gpu_dead() {
+                if let Some(bge_mu) = &models.bge_text {
+                    let mut bge = bge_mu.lock();
+                    match bge.embed(&text) {
+                        Ok(emb) => tagged.text_embedding = Some(emb),
+                        Err(err) => {
+                            if error_has_device_removed_marker(&err) {
+                                if coord.mark_gpu_dead() {
+                                    tracing::error!(?err, "[GPU-TDR] BGE device-removed; cancelling scan");
+                                }
+                            } else {
+                                tracing::warn!(?err, "BGE embed failed");
+                            }
+                        }
+                    }
+                }
+            }
+            tagged.doc_text = Some(text);
+        }
+    }
+
+    // Audio metadata (Phase 5): artist/album/title/genre/year, surfaced as
+    // tag chips so the user can filter their library by these facts. Each
+    // tag carries score=None — these are facts, not model probabilities.
+    for (label, score) in audio_tags {
+        tagged.tags.push((label, score));
+    }
 
     // SEC/perf: once the GPU is marked dead (TDR or device-removed),
     // skip the whole ML pipeline for the rest of this process lifetime.
@@ -1183,7 +1379,7 @@ async fn run_ocr_blocking(rgb: Vec<u8>, w: u32, h: u32) -> anyhow::Result<Option
 /// fails — returns None on any error.
 async fn parse_exif_blocking(path: PathBuf) -> Option<(Option<String>, Option<f64>, Option<f64>)> {
     tokio::task::spawn_blocking(move || -> Option<(Option<String>, Option<f64>, Option<f64>)> {
-        let file = std::fs::File::open(&path).ok()?;
+        let file = std::fs::File::open(crate::util::path_safety::to_extended_length(&path)).ok()?;
         let mut reader = std::io::BufReader::new(file);
         let exif = exif::Reader::new().read_from_container(&mut reader).ok()?;
 
@@ -1341,6 +1537,8 @@ mod tests {
             kind: FileKind::Image,
             size_bytes: 1024,
             modified_unix: 1.0,
+            online_only: false,
+            file_ref: None,
         })
         .await
         .unwrap();
@@ -1442,6 +1640,10 @@ mod tests {
             total_ms: 0.0,
             failed: false,
             error_message: None,
+            file_ref: None,
+            content_hash: None,
+            text_embedding: None,
+            doc_text: None,
             tags: Vec::new(),
         }
     }

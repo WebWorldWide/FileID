@@ -100,7 +100,7 @@ pub fn read_tags(path: &Path) -> Result<Vec<String>> {
 
     let mut out = Vec::with_capacity(sidecar_tags.len() + store_tags.len());
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for t in sidecar_tags.into_iter().chain(store_tags.into_iter()) {
+    for t in sidecar_tags.into_iter().chain(store_tags) {
         let key = t.to_lowercase();
         if seen.insert(key) {
             out.push(t);

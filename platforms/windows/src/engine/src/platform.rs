@@ -462,6 +462,65 @@ pub fn storage_type_for_path(_path: &Path) -> StorageType {
     StorageType::Unknown
 }
 
+// ─── Volume-local file identity (NTFS MFT reference) ───────────────────────
+//
+// Rename/move detection (v8 schema) keys off a volume-local file id: NTFS's
+// 64-bit MFT reference on Windows, the inode on POSIX. A rename within the
+// same volume keeps the same id, so we can re-bind a file's catalog row to
+// the new path instead of recomputing its tags + embeddings + faces. Across
+// volumes the id can collide, so a cross-volume move falls through to the
+// content-hash lookup.
+
+/// 64-bit volume-local file identity for `path`, or `None` if the file can't
+/// be opened (permission, deletion mid-scan, ...). Cheap: just opens with
+/// `FILE_FLAG_BACKUP_SEMANTICS` (works for both files and directories without
+/// triggering OneDrive hydration) and reads the metadata; no content I/O.
+#[cfg(windows)]
+pub fn file_ref(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    let p = crate::util::path_safety::to_extended_length(path);
+    let mut wide: Vec<u16> = p.as_os_str().encode_wide().collect();
+    wide.push(0);
+
+    let handle = unsafe {
+        match CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_ATTRIBUTE_NORMAL,
+            None,
+        ) {
+            Ok(h) if !h.is_invalid() => h,
+            _ => return None,
+        }
+    };
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    let result = unsafe { GetFileInformationByHandle(handle, &mut info) };
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    if result.is_err() {
+        return None;
+    }
+    Some((u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow))
+}
+
+#[cfg(not(windows))]
+pub fn file_ref(_path: &Path) -> Option<u64> {
+    // Linux/macOS would use libc::stat::st_ino; deferred until the Linux port.
+    None
+}
+
 // ─── Battery / AC power detection ───────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

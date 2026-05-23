@@ -56,23 +56,46 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
         return (Vec::new(), Vec::new());
     }
 
-    // Brute-force kNN searcher — quadratic in face count but at scan-time
-    // scale (≤ a few thousand faces per session) this is faster than the
-    // overhead of an HNSW dep, and matches the existing O(n²) pass that
-    // produced uncertain_pairs(). If face counts grow past ~10K we'd swap
-    // this for instant-distance or hora.
+    // kNN searcher. Below ~5 k faces the brute-force O(n²) all-pairs cosine
+    // beats the HNSW build overhead. Above it, we build an `instant-distance`
+    // HNSW index once and serve each kNN query in O(log n) — turns People-tab
+    // refresh from quadratic into log-linear on big libraries. ArcFace
+    // embeddings are L2-normalized, so squared-L2 distance is monotonic in
+    // `(1 − cosine)` (the index gives the same neighbor ranking as cosine).
+    const HNSW_MIN: usize = 5_000;
     let embeddings: Vec<Vec<f32>> = faces.iter().map(|f| f.embedding.clone()).collect();
     let k = super::identity_clustering::Hyperparameters::default().k_nn;
+    let hnsw_idx = (embeddings.len() >= HNSW_MIN).then(|| {
+        let points: Vec<(Vec<f32>, usize)> = embeddings
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.clone(), i))
+            .collect();
+        crate::util::hnsw_index::build(points)
+    });
     let result = super::identity_clustering::cluster(
         &embeddings,
         |i| {
-            let mut hits: Vec<super::identity_clustering::Neighbor> = (0..embeddings.len())
-                .filter(|&j| j != i)
-                .map(|j| super::identity_clustering::Neighbor {
-                    idx: j,
-                    similarity: cosine(&embeddings[i], &embeddings[j]),
-                })
-                .collect();
+            let mut hits: Vec<super::identity_clustering::Neighbor> = if let Some(idx) = &hnsw_idx {
+                // Query k+1 so we can drop the self-hit; convert squared-L2 →
+                // cosine (vectors are unit-norm: d = 2(1 − cos)).
+                crate::util::hnsw_index::search_top_k(idx, &embeddings[i], k + 1)
+                    .into_iter()
+                    .filter(|(j, _)| *j != i)
+                    .map(|(j, d)| super::identity_clustering::Neighbor {
+                        idx: j,
+                        similarity: 1.0 - d / 2.0,
+                    })
+                    .collect()
+            } else {
+                (0..embeddings.len())
+                    .filter(|&j| j != i)
+                    .map(|j| super::identity_clustering::Neighbor {
+                        idx: j,
+                        similarity: cosine(&embeddings[i], &embeddings[j]),
+                    })
+                    .collect()
+            };
             hits.sort_by(|a, b| {
                 b.similarity
                     .partial_cmp(&a.similarity)

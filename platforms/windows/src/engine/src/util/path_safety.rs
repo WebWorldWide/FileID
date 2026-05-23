@@ -104,6 +104,82 @@ pub(crate) fn stable_path_hash(path: &str) -> i64 {
     h.finish() as i64
 }
 
+/// Convert an absolute path to Windows extended-length ("\\?\") form so
+/// Win32 file APIs accept it past the 260-char MAX_PATH limit. The engine
+/// process has no long-path manifest (the app's `longPathAware` doesn't
+/// cover this separate `.exe`) and the system `LongPathsEnabled` registry
+/// flag is off by default, so std::fs / jwalk silently fail on deep paths
+/// unless we prefix explicitly — a verbatim path bypasses MAX_PATH
+/// unconditionally. Stored + displayed paths stay in normal form (see
+/// `strip_extended_length`); the prefix is applied only at FS-access sites.
+///
+/// Only absolute paths convert (a verbatim path must be fully-qualified,
+/// backslash-separated, with no `.`/`..`). Relative paths, already-verbatim
+/// paths, and non-Windows builds pass through unchanged. Forward slashes are
+/// normalized to backslashes because verbatim paths reject `/`.
+///   `C:\a\b`            → `\\?\C:\a\b`
+///   `\\server\share\x`  → `\\?\UNC\server\share\x`
+#[cfg(windows)]
+pub(crate) fn to_extended_length(path: &Path) -> PathBuf {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    if !path.is_absolute() {
+        return path.to_path_buf();
+    }
+    const BS: u16 = b'\\' as u16;
+    const FS: u16 = b'/' as u16;
+    let mut wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .map(|c| if c == FS { BS } else { c })
+        .collect();
+
+    // Already "\\?\…" (after slash normalization) → leave it.
+    if wide.starts_with(&[BS, BS, b'?' as u16, BS]) {
+        return PathBuf::from(OsString::from_wide(&wide));
+    }
+    let out: Vec<u16> = if wide.starts_with(&[BS, BS]) {
+        // UNC "\\server\share\…" → "\\?\UNC\server\share\…"
+        let mut v: Vec<u16> = r"\\?\UNC\".encode_utf16().collect();
+        v.extend_from_slice(&wide[2..]);
+        v
+    } else {
+        // Drive "C:\…" → "\\?\C:\…"
+        let mut v: Vec<u16> = r"\\?\".encode_utf16().collect();
+        v.append(&mut wide);
+        v
+    };
+    PathBuf::from(OsString::from_wide(&out))
+}
+
+#[cfg(not(windows))]
+pub(crate) fn to_extended_length(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
+/// Inverse of `to_extended_length`: strip a "\\?\" / "\\?\UNC\" prefix so
+/// stored + displayed paths stay in normal user-facing form (matching the
+/// cross-platform DB + the C# side). Non-prefixed paths pass through.
+///   `\\?\C:\a\b`              → `C:\a\b`
+///   `\\?\UNC\server\share\x`  → `\\server\share\x`
+#[cfg(windows)]
+pub(crate) fn strip_extended_length(path: &Path) -> PathBuf {
+    let s = path.as_os_str().to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest.to_owned());
+    }
+    path.to_path_buf()
+}
+
+#[cfg(not(windows))]
+pub(crate) fn strip_extended_length(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,5 +306,52 @@ mod tests {
         let root_srv1 = std::path::PathBuf::from(r"\\srv1\share");
         let path_srv2 = std::path::PathBuf::from(r"\\srv2\share\file.jpg");
         assert!(!path_srv2.starts_with(&root_srv1));
+    }
+
+    /// A normal drive path round-trips through the verbatim helpers: prefix
+    /// for FS access, strip back to the form we store + display.
+    #[test]
+    #[cfg(windows)]
+    fn extended_length_roundtrip_drive() {
+        let p = Path::new(r"C:\Users\me\pic.jpg");
+        let ext = to_extended_length(p);
+        assert_eq!(ext.as_os_str().to_string_lossy(), r"\\?\C:\Users\me\pic.jpg");
+        assert_eq!(strip_extended_length(&ext), p.to_path_buf());
+    }
+
+    /// UNC paths use the "\\?\UNC\" verbatim form and round-trip back to the
+    /// "\\server\share" form.
+    #[test]
+    #[cfg(windows)]
+    fn extended_length_roundtrip_unc() {
+        let p = Path::new(r"\\server\share\dir\file.png");
+        let ext = to_extended_length(p);
+        assert_eq!(ext.as_os_str().to_string_lossy(), r"\\?\UNC\server\share\dir\file.png");
+        assert_eq!(strip_extended_length(&ext), p.to_path_buf());
+    }
+
+    /// Already-verbatim paths and relative paths pass through unchanged;
+    /// stripping a non-prefixed path is a no-op.
+    #[test]
+    #[cfg(windows)]
+    fn extended_length_idempotent_and_passthrough() {
+        let v = Path::new(r"\\?\C:\a\b");
+        assert_eq!(to_extended_length(v), v.to_path_buf());
+        let rel = Path::new(r"sub\file.jpg");
+        assert_eq!(to_extended_length(rel), rel.to_path_buf());
+        let plain = Path::new(r"C:\a\b");
+        assert_eq!(strip_extended_length(plain), plain.to_path_buf());
+    }
+
+    /// IPC callers may hand us forward slashes; the verbatim form must use
+    /// backslashes or Win32 rejects it.
+    #[test]
+    #[cfg(windows)]
+    fn extended_length_normalizes_forward_slashes() {
+        let p = Path::new("C:/Users/me/pic.jpg");
+        assert_eq!(
+            to_extended_length(p).as_os_str().to_string_lossy(),
+            r"\\?\C:\Users\me\pic.jpg"
+        );
     }
 }

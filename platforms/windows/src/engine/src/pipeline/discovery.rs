@@ -94,6 +94,18 @@ pub struct DiscoveredFile {
     /// Last-modified timestamp as Unix seconds. Used for incremental
     /// rescans: files unchanged since their `scanned_at` row are skipped.
     pub modified_unix: f64,
+    /// True when the file is a cloud placeholder (OneDrive Files-On-Demand /
+    /// `OFFLINE` / `RECALL_ON_*`). Reading its content would trigger a
+    /// network hydration (a surprise download — and the only non-model
+    /// egress), so the pipeline does a metadata-only pass and skips
+    /// decode / embed / OCR for it. Always false on non-Windows.
+    pub online_only: bool,
+    /// Volume-local file identity (NTFS MFT reference on Windows; inode on
+    /// POSIX). The dbwriter's rename/move heal uses it to re-bind a moved
+    /// file's catalog row instead of orphaning it. `None` when the metadata
+    /// open failed (permission, race, ...) — the heal then falls through to
+    /// content_hash. Always `None` on non-Windows for now.
+    pub file_ref: Option<u64>,
 }
 
 pub struct Discovery {
@@ -187,7 +199,20 @@ impl Discovery {
             // dropped with a single name check per directory rather than
             // per-file component traversal).
             let coord_for_dir = coordinator.clone();
-            let walker = jwalk::WalkDir::new(&root)
+            // Walk a verbatim ("\\?\") root so directories whose full path
+            // exceeds MAX_PATH (260) are traversable — std/jwalk silently
+            // fail on them otherwise (this engine .exe has no long-path
+            // manifest). Children inherit the prefix; we strip it back to
+            // normal form on emit. Fall back to the plain root if the
+            // converted form isn't statable, so short-path scans never
+            // regress.
+            let verbatim_root = crate::util::path_safety::to_extended_length(&root);
+            let walk_root = if std::fs::metadata(&verbatim_root).is_ok() {
+                verbatim_root
+            } else {
+                root.clone()
+            };
+            let walker = jwalk::WalkDir::new(&walk_root)
                 .follow_links(false)
                 .skip_hidden(false)   // we do our own dot-file filter to also catch thumbs.db etc.
                 .parallelism(jwalk::Parallelism::RayonNewPool(walk_threads))
@@ -227,7 +252,11 @@ impl Discovery {
                 if !entry.file_type().is_file() {
                     continue;
                 }
-                let path = entry.path();
+                // Strip the verbatim prefix back to normal form: this is what
+                // we store + display + compare against the skip-set (which
+                // holds normal-form DB paths). FS access reconverts via
+                // `to_extended_length` at the open site.
+                let path = crate::util::path_safety::strip_extended_length(&entry.path());
                 // Skip files the orchestrator pre-loaded as already-current.
                 // Hash lookup is O(1); a 1M-file set costs ~80 MB RAM but
                 // lets a repeat scan complete in seconds instead of hours.
@@ -251,6 +280,25 @@ impl Discovery {
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_secs_f64())
                     .unwrap_or(0.0);
+
+                // Cloud placeholder detection. OneDrive / generic
+                // Files-On-Demand mark dehydrated files with these
+                // attributes; touching their content forces a download.
+                #[cfg(windows)]
+                let online_only = {
+                    use std::os::windows::fs::MetadataExt;
+                    const FILE_ATTRIBUTE_OFFLINE: u32 = 0x0000_1000;
+                    const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x0004_0000;
+                    const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+                    metadata.file_attributes()
+                        & (FILE_ATTRIBUTE_OFFLINE
+                            | FILE_ATTRIBUTE_RECALL_ON_OPEN
+                            | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
+                        != 0
+                };
+                #[cfg(not(windows))]
+                let online_only = false;
+
                 let kind = path
                     .extension()
                     .and_then(|e| e.to_str())
@@ -267,11 +315,19 @@ impl Discovery {
                 // could stall a file's count when ML stalled.
                 count_inner.fetch_add(1, Ordering::Relaxed);
 
+                // Volume-local file id: lets the dbwriter heal a renamed/moved
+                // file's existing row instead of recomputing its tags. Cheap
+                // metadata-only open via `FILE_FLAG_BACKUP_SEMANTICS`; `None`
+                // on permission/race errors (the heal then falls through to
+                // content_hash).
+                let file_ref = crate::platform::file_ref(&entry.path());
                 let discovered = DiscoveredFile {
                     path,
                     kind,
                     size_bytes: size,
                     modified_unix: modified,
+                    online_only,
+                    file_ref,
                 };
                 // blocking_send applies backpressure when the channel fills
                 // (cap 32768 → roughly 6 MB queued path metadata). On

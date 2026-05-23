@@ -61,7 +61,7 @@ pub(crate) async fn handle_start_scan(
         .filter_map(|kind| {
             let model = match models::registry::lookup_full(kind) {
                 LookupResult::Found(m) => m,
-                _ => return Some(*kind),
+                LookupResult::Unknown => return Some(*kind),
             };
             match models::registry::sentinel_path(&model) {
                 Some(p) if p.exists() => None,
