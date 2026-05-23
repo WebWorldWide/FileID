@@ -5,9 +5,9 @@
 //! existing FileID model stack is **phrase-grounded object detection** —
 //! the `<OD>` and `<CAPTION_TO_PHRASE_GROUNDING>` prompt heads emit bounding
 //! boxes tied to text phrases, which nothing else here produces:
-//! - Captioning + tags: SmolVLM / Qwen2.5-VL / Gemma 3 (Deep Analyze) + RAM++.
+//! - Captioning + tags: SmolVLM / Qwen2.5-VL / Gemma 3 (Deep Analyze).
 //! - OCR: Windows.Media.Ocr (built-in).
-//! - Multi-label tagging: RAM++ (Phase 2).
+//! - Image tags: MobileCLIP zero-shot + Deep Analyze VLM refinement.
 //! - Documents: pipeline::doc_extract + util::keywords (Phase 4).
 //!
 //! ## What this module ships today

@@ -6,8 +6,8 @@
 //! Returns `(label, score)` pairs ready to push onto `TaggedFile.tags`. Each
 //! tag's score is `None` — these are metadata-derived facts, not model
 //! probabilities. The full YAMNet sound-event tagger + Whisper transcription
-//! are documented Phase-5b follow-ups (both need an offline ONNX conversion
-//! step similar to RAM++).
+//! are documented Phase-5b follow-ups; both need a publicly downloadable ONNX
+//! release per the no-self-host policy.
 #![allow(dead_code)] // wired into run_decoder_thread for FileKind::Audio.
 
 use std::path::Path;

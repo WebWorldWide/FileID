@@ -918,10 +918,10 @@ async fn process_file_predecoded(
             for (label, score) in crate::util::keywords::extract(&text) {
                 tagged.tags.push((label, Some(score)));
             }
-            // BGE-small semantic embedding for the doc text (Phase 4b). Same
-            // single-Session-behind-Mutex pattern as RAM++; runs on the
-            // calling worker thread (sync inference under the lock). Skipped
-            // when BGE isn't installed — FTS5 still serves keyword search.
+            // BGE-small semantic embedding for the doc text (Phase 4b). Runs on
+            // the calling worker thread under a single-Session Mutex (sync
+            // inference). Skipped when BGE isn't installed — FTS5 still
+            // serves keyword search.
             if !coord.is_gpu_dead() {
                 if let Some(bge_mu) = &models.bge_text {
                     let mut bge = bge_mu.lock();
