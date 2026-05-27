@@ -270,6 +270,59 @@ public final class Database: @unchecked Sendable {
             }
         }
 
+        m.registerMigration("v8_content_identity") { db in
+            try db.execute(sql: "ALTER TABLE files ADD COLUMN content_hash BLOB")
+            try db.execute(sql: "ALTER TABLE files ADD COLUMN file_ref INTEGER")
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS idx_files_content_hash
+                    ON files(content_hash)
+                    WHERE content_hash IS NOT NULL
+                """)
+            try db.execute(sql: """
+                CREATE INDEX IF NOT EXISTS idx_files_file_ref
+                    ON files(file_ref)
+                    WHERE file_ref IS NOT NULL
+                """)
+        }
+
+        m.registerMigration("v9_usn_state") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS usn_state (
+                    volume_id       TEXT    PRIMARY KEY,
+                    journal_id      INTEGER NOT NULL,
+                    next_usn        INTEGER NOT NULL,
+                    last_polled_at  DOUBLE  NOT NULL
+                )
+                """)
+        }
+
+        m.registerMigration("v10_doc_text") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS doc_text (
+                    file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+                    text    TEXT    NOT NULL
+                )
+                """)
+            try db.execute(sql: """
+                CREATE VIRTUAL TABLE IF NOT EXISTS doc_fts USING fts5(
+                    text,
+                    content='doc_text',
+                    content_rowid='file_id',
+                    tokenize='porter unicode61'
+                )
+                """)
+        }
+
+        m.registerMigration("v11_text_embeddings") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS text_embeddings (
+                    file_id   INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+                    embedding BLOB    NOT NULL,
+                    model     TEXT    NOT NULL
+                )
+                """)
+        }
+
         return m
     }
 
