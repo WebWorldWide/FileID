@@ -24,6 +24,7 @@ public sealed partial class RestructureView : UserControl
         CategoryRepeater.ItemsSource = _categoryRows;
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         Sankey.RibbonInvoked += OnSankeyRibbonInvoked;
+        WireApplyBarHoverSprings();
         Loaded += OnLoaded;
         Unloaded += (_, _) =>
         {
@@ -31,6 +32,32 @@ public sealed partial class RestructureView : UserControl
             EngineClient.Instance.PropertyChanged -= OnEngineChanged;
             Sankey.RibbonInvoked -= OnSankeyRibbonInvoked;
         };
+    }
+
+    // macOS parity (RestructureApplyBar.swift:114-117): the gold primary and
+    // outlined secondary apply buttons scale up to 1.02× on hover with a
+    // response: 0.28 / dampingFraction: 0.7 spring, gated by canApply.
+    // SpringEasing.AnimateScale wraps Composition SpringScalarNaturalMotionAnimation
+    // (Period=response, DampingRatio=dampingFraction) — the XAML comment at
+    // RestructureView.xaml:280-281 promises this; this wires it.
+    private void WireApplyBarHoverSprings()
+    {
+        const double SpringResponse = 0.28;
+        const double SpringDamping = 0.7;
+        ApplySymlinkButton.PointerEntered += (_, _) =>
+        {
+            if (ApplySymlinkButton.IsEnabled)
+                FileID.Theme.Motion.SpringEasing.AnimateScale(ApplySymlinkButton, 1.02f, SpringResponse, SpringDamping);
+        };
+        ApplySymlinkButton.PointerExited += (_, _) =>
+            FileID.Theme.Motion.SpringEasing.AnimateScale(ApplySymlinkButton, 1.0f, SpringResponse, SpringDamping);
+        ApplyMovesButton.PointerEntered += (_, _) =>
+        {
+            if (ApplyMovesButton.IsEnabled)
+                FileID.Theme.Motion.SpringEasing.AnimateScale(ApplyMovesButton, 1.02f, SpringResponse, SpringDamping);
+        };
+        ApplyMovesButton.PointerExited += (_, _) =>
+            FileID.Theme.Motion.SpringEasing.AnimateScale(ApplyMovesButton, 1.0f, SpringResponse, SpringDamping);
     }
 
     // macOS parity (RestructureView.swift `.task`): the plan auto-generates on

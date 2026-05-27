@@ -21,12 +21,28 @@
 // built once per engine launch (text-encoding every label×template, batched)
 // and cached process-static.
 
+#[allow(unused_imports)]
 use std::sync::{Arc, OnceLock};
 
+#[allow(unused_imports)]
 use anyhow::{Context, Result};
 
+#[allow(unused_imports)]
 use super::clip_text::ClipText;
+#[allow(unused_imports)]
 use super::ClipTokenizer;
+
+// Generated CLIP scene-vocab embeddings (one f32×512 row per SCENE_LABELS
+// entry, precomputed offline). Floats are kept at the full PyTorch print
+// width so the matrix is byte-faithful with the source notebook — clippy's
+// excessive_precision lint would have us truncate them for "readability"
+// but precision is the point here.
+#[allow(clippy::excessive_precision)]
+mod scene_embeddings {
+    include!("../../scene_embeddings_precomputed.rs");
+}
+pub use scene_embeddings::SCENE_EMBEDDINGS;
+
 
 /// Curated 1-2 word scene/content labels scored by CLIP zero-shot. Chosen to
 /// cover the common contents of a personal file library — outdoor/indoor
@@ -128,9 +144,10 @@ pub const ENABLE_CLIP: bool = true;
 /// OFF — SmolVLM is the sole tagger; CLIP runs ONLY for the semantic-search
 /// embedding above. (When on, requires ENABLE_CLIP and builds the ~21 s
 /// scene-label matrix at first launch.)
-pub const ENABLE_CLIP_SCENE_TAGS: bool = false;
+pub const ENABLE_CLIP_SCENE_TAGS: bool = true;
 
 /// Prompts text-encoded per ONNX batch when building the label matrix.
+#[allow(dead_code)]
 const BUILD_BATCH: usize = 64;
 
 /// On-disk cache of the prompt-ensembled label matrix. Building it text-encodes
@@ -140,9 +157,12 @@ const BUILD_BATCH: usize = 64;
 /// deterministic given (SCENE_LABELS, PROMPT_TEMPLATES, the CLIP-text weights),
 /// so we serialize it once and reload it (~instant, and skips loading the
 /// 253 MB text session entirely) on every subsequent launch.
+#[allow(dead_code)]
 const SCENE_CACHE_MAGIC: u32 = 0x53_43_4E_31; // "SCN1"
+#[allow(dead_code)]
 const SCENE_CACHE_VERSION: u32 = 1;
 /// Fixed header size: magic(4) + version(4) + key(8) + n_labels(4) + dim(4).
+#[allow(dead_code)]
 const SCENE_CACHE_HEADER: usize = 24;
 
 /// The label-embedding matrix used for zero-shot scoring. Holds one
@@ -163,6 +183,7 @@ impl SceneLabeler {
     /// Build the label matrix from an already-loaded CLIP text encoder.
     /// Embeds every label×template prompt (batched), averages each label's
     /// template embeddings, and L2-renormalizes.
+    #[allow(dead_code)]
     pub fn build(model: &mut ClipText) -> Result<Self> {
         let started = std::time::Instant::now();
         let templates = PROMPT_TEMPLATES.len();
@@ -239,30 +260,10 @@ impl SceneLabeler {
     /// cache miss it loads the encoder + tokenizer, builds the matrix, drops the
     /// encoder, and writes the cache for next launch.
     pub fn build_from_default_model() -> Result<Self> {
-        let weights = super::clip_text::default_weights_path()?;
-        if !weights.exists() {
-            anyhow::bail!("CLIP text weights not installed at {}", weights.display());
-        }
-        let weights_len = std::fs::metadata(&weights).map(|m| m.len()).unwrap_or(0);
-        let key = scene_cache_key(weights_len);
-        if let Some(cached) = try_load_scene_cache(key) {
-            tracing::info!(
-                n_labels = cached.matrix.len(),
-                "[TAGGING] scene-label matrix loaded from cache (skipped text-session load + build)"
-            );
-            return Ok(cached);
-        }
-        let dir = weights
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("CLIP text weights have no parent dir"))?;
-        let vocab = std::fs::read_to_string(dir.join("vocab.json")).context("read vocab.json")?;
-        let merges = std::fs::read_to_string(dir.join("merges.txt")).context("read merges.txt")?;
-        let tokenizer = ClipTokenizer::new(&vocab, &merges)?;
-        let mut model = ClipText::load(weights, tokenizer)?;
-        let labeler = Self::build(&mut model)?;
-        write_scene_cache(key, &labeler.matrix);
-        Ok(labeler)
+        let matrix = SCENE_EMBEDDINGS.iter().map(|row| row.to_vec()).collect();
+        Ok(Self { matrix })
     }
+
 
     /// Score an image embedding against the vocabulary. Returns up to
     /// `top_k` `(label_index, cosine_similarity)` pairs whose cosine clears
@@ -276,6 +277,7 @@ impl SceneLabeler {
 /// the prompt templates, and (as a proxy for "same text model") the CLIP-text
 /// weights file length. Editing the vocabulary or swapping the model changes the
 /// key, so a stale cache is ignored and rebuilt.
+#[allow(dead_code)]
 fn scene_cache_key(weights_len: u64) -> u64 {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
@@ -296,6 +298,7 @@ fn scene_cache_key(weights_len: u64) -> u64 {
     u64::from_le_bytes(k)
 }
 
+#[allow(dead_code)]
 fn scene_cache_path() -> Result<std::path::PathBuf> {
     Ok(crate::paths::models_dir()?
         .join("clip_scene_cache")
@@ -305,6 +308,7 @@ fn scene_cache_path() -> Result<std::path::PathBuf> {
 /// Load the cached matrix iff the file is present, well-formed, and current
 /// (magic + version + key + vocabulary length all match). Any mismatch or read
 /// error returns None → the caller rebuilds.
+#[allow(dead_code)]
 fn try_load_scene_cache(key: u64) -> Option<SceneLabeler> {
     let path = scene_cache_path().ok()?;
     let bytes = std::fs::read(&path).ok()?;
@@ -338,12 +342,14 @@ fn try_load_scene_cache(key: u64) -> Option<SceneLabeler> {
 
 /// Best-effort cache write (temp + rename). A failure just means we rebuild next
 /// launch — never fatal, so log + swallow.
+#[allow(dead_code)]
 fn write_scene_cache(key: u64, matrix: &[Vec<f32>]) {
     if let Err(err) = write_scene_cache_inner(key, matrix) {
         tracing::warn!(?err, "[TAGGING] failed to persist scene-label cache (will rebuild next launch)");
     }
 }
 
+#[allow(dead_code)]
 fn write_scene_cache_inner(key: u64, matrix: &[Vec<f32>]) -> Result<()> {
     let path = scene_cache_path()?;
     if let Some(parent) = path.parent() {
@@ -503,4 +509,6 @@ mod tests {
             assert!(tmpl.contains("{}"), "template must contain the label placeholder: {tmpl}");
         }
     }
+
+
 }

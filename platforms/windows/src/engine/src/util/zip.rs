@@ -74,7 +74,21 @@ pub(crate) fn extract_into_parent(zip_path: &Path) -> anyhow::Result<()> {
 
         if let Some(p) = dest.parent() {
             std::fs::create_dir_all(p).ok();
+            let p_canon = std::fs::canonicalize(p)
+                .with_context(|| format!("canonicalizing parent dir of {}", dest.display()))?;
+            if !p_canon.starts_with(&parent_canon) {
+                anyhow::bail!("zip entry parent escaped extraction root: {}", p_canon.display());
+            }
         }
+
+        if let Ok(meta) = std::fs::symlink_metadata(&dest) {
+            if meta.file_type().is_symlink() {
+                std::fs::remove_file(&dest).ok();
+            } else if meta.is_dir() {
+                std::fs::remove_dir(&dest).ok();
+            }
+        }
+
         let mut out = std::fs::File::create(&dest)
             .with_context(|| format!("creating {}", dest.display()))?;
         std::io::copy(&mut entry, &mut out)

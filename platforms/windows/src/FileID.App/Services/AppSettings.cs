@@ -1,4 +1,4 @@
-﻿// AppSettings — durable user preferences.
+// AppSettings — durable user preferences.
 //
 // Persisted as JSON at %LOCALAPPDATA%\FileID\app-settings.json. Atomic
 // writes via temp-file + File.Move so a crash mid-save doesn't corrupt
@@ -108,7 +108,7 @@ internal sealed class AppSettings
     /// is silently skipped if no VLM model is installed (the slot's
     /// status is checked at fire time, not at toggle time). Users can
     /// opt out via Settings → "Tag automatically with AI after scans".</summary>
-    public bool AutoChainDeepAnalyze { get; set; } = true;
+    public bool AutoChainDeepAnalyze { get; set; } = false;
 
     /// <summary>Persisted Deep Analyze (manual) VLM model — the model the Deep
     /// Analyze tab uses for full caption + smart-rename + tags. This is NOT the

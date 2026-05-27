@@ -1,4 +1,4 @@
-﻿// SankeyFlowControl — pure-XAML Sankey diagram (no Win2D dep).
+// SankeyFlowControl — pure-XAML Sankey diagram (no Win2D dep).
 //
 // Renders source-folder → category
 // flows with cubic-bezier ribbons whose thickness is proportional to
@@ -137,14 +137,62 @@ public sealed class SankeyFlowControl : Control
             return parts.Length > 1 ? parts[0] : "(root)";
         }
 
-        var bySource = moves.GroupBy(SourceOf)
-                            .OrderByDescending(g => g.Count())
-                            .Take(12)
-                            .ToList();
-        var byCategory = moves.GroupBy(m => m.Category)
-                              .OrderByDescending(g => g.Count())
-                              .Take(12)
-                              .ToList();
+        var rawSourceGroups = moves.GroupBy(SourceOf)
+                                   .OrderByDescending(g => g.Count())
+                                   .Take(12)
+                                   .ToList();
+        var rawCategoryGroups = moves.GroupBy(m => m.Category)
+                                     .OrderByDescending(g => g.Count())
+                                     .Take(12)
+                                     .ToList();
+
+        var sourceList = rawSourceGroups.Select(g => g.Key).ToList();
+        var categoryList = rawCategoryGroups.Select(g => g.Key).ToList();
+
+        // 2 iterations of barycentric sorting to minimize ribbon crossings
+        for (int iter = 0; iter < 2; iter++)
+        {
+            var catWeights = new Dictionary<string, double>();
+            foreach (var cat in categoryList)
+            {
+                double weightedSum = 0;
+                double totalWeight = 0;
+                for (int sIdx = 0; sIdx < sourceList.Count; sIdx++)
+                {
+                    var srcName = sourceList[sIdx];
+                    var flow = moves.Count(m => SourceOf(m) == srcName && m.Category == cat);
+                    if (flow > 0)
+                    {
+                        weightedSum += sIdx * flow;
+                        totalWeight += flow;
+                    }
+                }
+                catWeights[cat] = totalWeight > 0 ? (weightedSum / totalWeight) : 0.0;
+            }
+            categoryList = categoryList.OrderBy(c => catWeights[c]).ToList();
+
+            var srcWeights = new Dictionary<string, double>();
+            foreach (var src in sourceList)
+            {
+                double weightedSum = 0;
+                double totalWeight = 0;
+                for (int cIdx = 0; cIdx < categoryList.Count; cIdx++)
+                {
+                    var catName = categoryList[cIdx];
+                    var flow = moves.Count(m => SourceOf(m) == src && m.Category == catName);
+                    if (flow > 0)
+                    {
+                        weightedSum += cIdx * flow;
+                        totalWeight += flow;
+                    }
+                }
+                srcWeights[src] = totalWeight > 0 ? (weightedSum / totalWeight) : 0.0;
+            }
+            sourceList = sourceList.OrderBy(s => srcWeights[s]).ToList();
+        }
+
+        var bySource = sourceList.Select(sKey => rawSourceGroups.First(g => g.Key == sKey)).ToList();
+        var byCategory = categoryList.Select(cKey => rawCategoryGroups.First(g => g.Key == cKey)).ToList();
         if (bySource.Count == 0 || byCategory.Count == 0) return;
 
         // Layout: left column of source rects, right column of category rects.

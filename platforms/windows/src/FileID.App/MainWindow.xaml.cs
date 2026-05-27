@@ -128,17 +128,17 @@ public sealed partial class MainWindow : Window
         // Mirror macOS shouldShowWelcome() (FileIDApp.swift:64-72): show
         // the sheet on first launch (welcomeSheetSeen == false) OR any
         // time a required model is missing on a subsequent launch.
+        // The second early-return (AllInstalled alone) used to suppress
+        // the sheet on first launch when models happened to already be
+        // present — e.g. after a partial wipe that left %LOCALAPPDATA%
+        // \FileID\Models on disk but recreated app-settings.json. A user
+        // who's never seen Welcome must see it.
         var seen = false;
         try { seen = AppSettings.Load().WelcomeSheetSeen; }
         catch (Exception ex) { DebugLog.Warn("MaybeShowWelcomeSheet: AppSettings.Load threw: " + ex.Message); }
         if (seen && svc.AllInstalled)
         {
             DebugLog.Info("[INSTALL] welcomeSheetSeen=true and all models installed; skipping.");
-            return;
-        }
-        if (svc.AllInstalled)
-        {
-            DebugLog.Info("[INSTALL] all three models already installed; skipping welcome sheet.");
             return;
         }
 

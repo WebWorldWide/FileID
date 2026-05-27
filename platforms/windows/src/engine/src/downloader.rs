@@ -283,10 +283,23 @@ where
             let got_hex = if let Some(h) = hasher {
                 hex::encode(h.finalize())
             } else {
-                let bytes = tokio::fs::read(&tmp).await
-                    .with_context(|| format!("reading {} for sha verification", tmp.display()))?;
+                let mut file = tokio::fs::File::open(&tmp).await
+                    .with_context(|| format!("opening {} for sha verification", tmp.display()))?;
                 let mut h = Sha256::new();
-                h.update(&bytes);
+                // Heap-allocated so the 64 KB chunk doesn't bloat this async
+                // function's future state. Callers (download_simple in
+                // prewarm.rs) trip clippy's large_futures lint otherwise —
+                // every level of the call chain inherits the size.
+                let mut buffer = vec![0u8; 65536];
+                loop {
+                    use tokio::io::AsyncReadExt;
+                    let n = file.read(&mut buffer).await
+                        .with_context(|| format!("reading chunk from {}", tmp.display()))?;
+                    if n == 0 {
+                        break;
+                    }
+                    h.update(&buffer[..n]);
+                }
                 hex::encode(h.finalize())
             };
             if !expected.eq_ignore_ascii_case(&got_hex) {

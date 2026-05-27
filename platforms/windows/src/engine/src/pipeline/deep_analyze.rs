@@ -453,7 +453,11 @@ async fn rasterize_pdf_page(path: &std::path::Path) -> anyhow::Result<std::path:
     use pdfium_render::prelude::*;
     let p = path.to_path_buf();
     tokio::task::spawn_blocking(move || -> anyhow::Result<std::path::PathBuf> {
-        let pdfium = Pdfium::default();
+        // Pdfium::default() panics on a missing pdfium.dll. Bind explicitly so
+        // the caller gets a per-file Err instead of an engine crash.
+        let bindings = Pdfium::bind_to_system_library()
+            .map_err(|e| anyhow::anyhow!("pdfium bind: {e}"))?;
+        let pdfium = Pdfium::new(bindings);
         let doc = pdfium
             .load_pdf_from_file(&p, None)
             .map_err(|e| anyhow::anyhow!("pdfium load: {e}"))?;

@@ -1,26 +1,22 @@
-﻿// ThumbnailDiskCache — persistent on-disk LRU cache for decoded
+// ThumbnailDiskCache — persistent on-disk LRU cache for decoded
 // thumbnails. Survives app restarts so a rescan of a 50K-tile library
-// doesn't re-render every thumbnail from scratch (previously: every cold
-// open of the app re-paid the shell thumbnail extraction cost for every
-// visible tile).
+// doesn't re-render every thumbnail from scratch.
 //
-// Layout: %LOCALAPPDATA%\FileID\thumbs.cache\<2hex>\<rest>.bin
+// Layout: %LOCALAPPDATA%\FileID\thumbs.cache\v1\<2hex>\<key>.bin
 //   - 2-hex fanout prevents the OS dir-entry limit at 100K+ thumbnails.
-//   - SHA1(path|mtime) keying invalidates on file edit (mtime change).
-//   - Stored payload is the raw bytes from the source (shell thumbnail
-//     stream OR original file stream); BitmapImage's decoder handles
-//     JPEG/PNG/BMP/GIF transparently.
-//   - 500 MB cap (configurable later). Sweep: every 30s, drop oldest
-//     files until total drops below cap.
-//   - Files larger than 500 KB are NOT written to disk — the in-memory
-//     LRU still covers them; persisting big originals would blow the cap
-//     in dozens of entries.
+//   - SHA256(path|mtime) keying invalidates on file edit.
+//   - Stored payload is raw bytes (shell thumbnail or original file);
+//     BitmapImage decodes JPEG/PNG/BMP/GIF transparently.
+//   - 500 MB cap. Eviction is by in-memory LRU; no recurring disk walk.
+//   - Files > 500 KB skip disk; in-memory LRU still serves them.
 //
-// Concurrency: file writes go via a temp + rename so a concurrent read
-// never sees a partial file. Reads are bare File.Open since we control
-// the entire writing side.
+// Concurrency: writes go temp+rename; reads are bare File.Open. The
+// in-memory index keeps (path → size, lastAccessTicks) so eviction
+// doesn't need to re-walk the directory on every cap trip.
 
 using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
@@ -35,19 +31,8 @@ namespace FileID.Services;
 
 internal static class ThumbnailDiskCache
 {
-    /// <summary>Don't write payloads above this size — the in-memory LRU
-    /// still serves them, but writing a 5 MB original to disk per tile
-    /// blows the 500 MB cap in ~100 tiles. Shell thumbnails are typically
-    /// 5–50 KB; the fallback path's original images are kept in this
-    /// budget too.</summary>
     private const int MaxBytesToCache = 500 * 1024;
-
-    /// <summary>Total cache cap. Sweep drops oldest files until total
-    /// drops below this number. Sized for ~10K avg-size thumbnails.</summary>
     private const long CacheCapBytes = 500L * 1024 * 1024;
-
-    /// <summary>Minimum interval between sweeps. Keeps a hot-cache scan
-    /// from running a directory-walk every other thumbnail write.</summary>
     private static readonly TimeSpan SweepInterval = TimeSpan.FromSeconds(30);
 
     private static DateTime _lastSweep = DateTime.MinValue;
@@ -57,10 +42,23 @@ internal static class ThumbnailDiskCache
     private static long _diskWrites;
     private static long _diskSweeps;
 
+    // path → (sizeBytes, lastAccessTicks). Populated by Prime(), kept
+    // current by reads/writes. Eviction iterates this dictionary instead
+    // of re-walking the filesystem.
+    private static readonly ConcurrentDictionary<string, CacheEntry> _index =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    internal sealed class CacheEntry
+    {
+        public long SizeBytes;
+        public long LastAccessTicks;
+    }
+
     public static long DiskHits => Interlocked.Read(ref _diskHits);
     public static long DiskWrites => Interlocked.Read(ref _diskWrites);
     public static long DiskSweeps => Interlocked.Read(ref _diskSweeps);
     public static long CachedBytes => Interlocked.Read(ref _cachedBytes);
+    public static int IndexedEntries => _index.Count;
 
     private static string CacheRoot { get; } = Path.Combine(AppPaths.ThumbsDir, "v1");
 
@@ -109,13 +107,16 @@ internal static class ThumbnailDiskCache
         try
         {
             bytes = await File.ReadAllBytesAsync(cached, ct).ConfigureAwait(false);
-            // Touch the access time so the LRU sweep treats this as warm.
-            try { File.SetLastAccessTimeUtc(cached, DateTime.UtcNow); } catch { /* swallow */ }
+            if (_index.TryGetValue(cached, out var entry))
+            {
+                Interlocked.Exchange(ref entry.LastAccessTicks, DateTime.UtcNow.Ticks);
+            }
         }
         catch (Exception ex)
         {
             DebugLog.Warn($"ThumbnailDiskCache read ({path}): {ex.GetType().Name}: {ex.Message}");
             try { File.Delete(cached); } catch { /* swallow */ }
+            ForgetIndexEntry(cached);
             return null;
         }
 
@@ -126,11 +127,19 @@ internal static class ThumbnailDiskCache
         }
         else
         {
-            // Cached file decoded to null — almost certainly poisoned;
-            // delete so a subsequent fresh render replaces it.
+            // Decoded to null — treat as poisoned, drop the file + index entry.
             try { File.Delete(cached); } catch { /* swallow */ }
+            ForgetIndexEntry(cached);
         }
         return bmp;
+    }
+
+    private static void ForgetIndexEntry(string cached)
+    {
+        if (_index.TryRemove(cached, out var removed))
+        {
+            Interlocked.Add(ref _cachedBytes, -removed.SizeBytes);
+        }
     }
 
     /// <summary>Fire-and-forget write. Validates size + writes via temp + rename
@@ -149,16 +158,25 @@ internal static class ThumbnailDiskCache
                 var cached = CachePathFor(key);
                 var dir = Path.GetDirectoryName(cached)!;
                 Directory.CreateDirectory(dir);
-                // Skip if already cached + same size (mtime guarantees content).
                 if (File.Exists(cached) && new FileInfo(cached).Length == bytes.Length)
                 {
                     return;
                 }
                 var tmp = cached + ".tmp";
                 File.WriteAllBytes(tmp, bytes);
-                // Move clobbers the destination atomically on NTFS.
                 File.Move(tmp, cached, overwrite: true);
-                Interlocked.Add(ref _cachedBytes, bytes.Length);
+
+                long delta = bytes.Length;
+                var now = DateTime.UtcNow.Ticks;
+                _index.AddOrUpdate(
+                    cached,
+                    _ => new CacheEntry { SizeBytes = bytes.Length, LastAccessTicks = now },
+                    (_, old) =>
+                    {
+                        delta = bytes.Length - old.SizeBytes;
+                        return new CacheEntry { SizeBytes = bytes.Length, LastAccessTicks = now };
+                    });
+                Interlocked.Add(ref _cachedBytes, delta);
                 Interlocked.Increment(ref _diskWrites);
                 MaybeSweep();
             }
@@ -171,7 +189,7 @@ internal static class ThumbnailDiskCache
 
     private static void MaybeSweep()
     {
-        // Cheap probe outside the lock — only one writer thread proceeds.
+        if (Interlocked.Read(ref _cachedBytes) <= CacheCapBytes) { return; }
         var now = DateTime.UtcNow;
         if (now - _lastSweep < SweepInterval) { return; }
         lock (_sweepLock)
@@ -182,38 +200,44 @@ internal static class ThumbnailDiskCache
 
         try
         {
-            if (!Directory.Exists(CacheRoot)) { return; }
-            var files = Directory.EnumerateFiles(CacheRoot, "*.bin", SearchOption.AllDirectories)
-                .Select(p =>
-                {
-                    var fi = new FileInfo(p);
-                    return (Path: p, Size: fi.Length, LastAccess: fi.LastAccessTimeUtc);
-                })
-                .ToList();
-            var total = files.Sum(f => f.Size);
-            Interlocked.Exchange(ref _cachedBytes, total);
-            if (total <= CacheCapBytes) { return; }
-            // Drop oldest-access-first until under cap. The 80% headroom
-            // gives the next 100MB of writes breathing room before the
-            // next sweep — avoids thrashing right after eviction.
             var headroom = (long)(CacheCapBytes * 0.8);
-            foreach (var f in files.OrderBy(f => f.LastAccess))
+            var evicted = SelectEvictions(_index, Interlocked.Read(ref _cachedBytes), headroom);
+            long freed = 0;
+            foreach (var path in evicted)
             {
-                if (total <= headroom) { break; }
                 try
                 {
-                    File.Delete(f.Path);
-                    total -= f.Size;
+                    File.Delete(path);
+                    if (_index.TryRemove(path, out var entry)) { freed += entry.SizeBytes; }
                 }
                 catch { /* swallow — file may have been re-written */ }
             }
-            Interlocked.Exchange(ref _cachedBytes, total);
+            if (freed > 0) { Interlocked.Add(ref _cachedBytes, -freed); }
             Interlocked.Increment(ref _diskSweeps);
         }
         catch (Exception ex)
         {
             DebugLog.Warn($"ThumbnailDiskCache sweep: {ex.GetType().Name}: {ex.Message}");
         }
+    }
+
+    // Pure eviction policy — exposed internal for unit-test coverage.
+    internal static IReadOnlyList<string> SelectEvictions(
+        IEnumerable<KeyValuePair<string, CacheEntry>> entries,
+        long currentBytes,
+        long headroomBytes)
+    {
+        if (currentBytes <= headroomBytes) { return Array.Empty<string>(); }
+        var sorted = entries.OrderBy(kvp => kvp.Value.LastAccessTicks);
+        var picks = new List<string>();
+        long total = currentBytes;
+        foreach (var kvp in sorted)
+        {
+            if (total <= headroomBytes) { break; }
+            picks.Add(kvp.Key);
+            total -= kvp.Value.SizeBytes;
+        }
+        return picks;
     }
 
     /// <summary>Decode raw bytes into a BitmapImage on the UI dispatcher.
@@ -270,19 +294,29 @@ internal static class ThumbnailDiskCache
         return await tcs.Task.ConfigureAwait(false);
     }
 
-    /// <summary>Pre-load the cached-bytes counter so Diagnostics shows a
-    /// real number on startup without waiting for the first sweep. Called
-    /// once from app init; cheap (one directory walk, sized for ≤10K
-    /// files).</summary>
+    /// <summary>One-time startup walk that seeds the in-memory LRU index
+    /// (path → size, lastAccessTicks). After Prime returns, eviction never
+    /// re-walks the directory — all subsequent reads/writes update the
+    /// index in place. Called once from app init.</summary>
     public static void Prime()
     {
         try
         {
             if (!Directory.Exists(CacheRoot)) { return; }
+            var dirInfo = new DirectoryInfo(CacheRoot);
             long total = 0;
-            foreach (var p in Directory.EnumerateFiles(CacheRoot, "*.bin", SearchOption.AllDirectories))
+            foreach (var fi in dirInfo.EnumerateFiles("*.bin", SearchOption.AllDirectories))
             {
-                try { total += new FileInfo(p).Length; } catch { /* swallow */ }
+                try
+                {
+                    _index[fi.FullName] = new CacheEntry
+                    {
+                        SizeBytes = fi.Length,
+                        LastAccessTicks = fi.LastAccessTimeUtc.Ticks,
+                    };
+                    total += fi.Length;
+                }
+                catch { /* swallow */ }
             }
             Interlocked.Exchange(ref _cachedBytes, total);
         }

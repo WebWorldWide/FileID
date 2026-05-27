@@ -1,4 +1,4 @@
-﻿// FilePreviewSheet code-behind. Kind-dispatched preview matching the macOS
+// FilePreviewSheet code-behind. Kind-dispatched preview matching the macOS
 // LibraryView.swift:902-1112 preview sheet:
 //   image  → BitmapImage at 1024 px (shell IThumbnailProvider chain).
 //   video  → MediaPlayerElement with transport controls (in-app playback;
@@ -625,10 +625,11 @@ public sealed partial class FilePreviewSheet : UserControl
             double rowDip = 0;
             foreach (var t in tags)
             {
-                var chip = new FileID.Theme.Controls.TagChip { TagText = t };
+                var formatted = FileID.Theme.Controls.TagChip.FormatTag(t);
+                var chip = new FileID.Theme.Controls.TagChip { TagText = formatted };
                 // Estimate chip width — TagChip is 11pt font; rough heuristic
                 // is "~7 DIP per char + 10 DIP padding", capped at 120.
-                double estDip = System.Math.Min(120, 7.0 * System.Math.Max(2, t.Length) + 10.0);
+                double estDip = System.Math.Min(120, 7.0 * System.Math.Max(2, formatted.Length) + 10.0);
                 if (rowDip + estDip > maxRowDip && row.Children.Count > 0)
                 {
                     outer.Children.Add(row);

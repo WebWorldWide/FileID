@@ -1,4 +1,4 @@
-﻿// LibraryView code-behind. Routes search-box + kind-filter input into the
+// LibraryView code-behind. Routes search-box + kind-filter input into the
 // LibraryViewModel + drives the footer's loading/empty/error states.
 
 using System;
@@ -229,7 +229,10 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             }
             else
             {
-                foreach (var t in ViewModel.Items) t.IsSelected = true;
+                using (ViewModel.BulkSelectionScope())
+                {
+                    foreach (var t in ViewModel.Items) t.IsSelected = true;
+                }
                 SelectAllText.Text = "Clear";
             }
             UpdateSelectionBar();
@@ -698,6 +701,30 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         // SwiftUI LibraryView.swift:681-682.
         FileID.Theme.Motion.SpringEasing.AnimateScalarEaseOut(el, "Scale.X", scale, 0.18);
         FileID.Theme.Motion.SpringEasing.AnimateScalarEaseOut(el, "Scale.Y", scale, 0.18);
+        ApplyTileStrokeOpacity(el, hovering: scale > 1.0f);
+    }
+
+    // macOS LibraryView.swift:676-677 ramps the tile's white stroke opacity
+    // 0.08 → 0.18 alongside the scale on pointer enter. The brush is defined
+    // inline in the DataTemplate so each tile owns its own instance.
+    private static void ApplyTileStrokeOpacity(FrameworkElement el, bool hovering)
+    {
+        if (el is not Grid grid) return;
+        if (grid.BorderBrush is not Microsoft.UI.Xaml.Media.SolidColorBrush brush) return;
+        var sb = new Microsoft.UI.Xaml.Media.Animation.Storyboard();
+        var anim = new Microsoft.UI.Xaml.Media.Animation.DoubleAnimation
+        {
+            To = hovering ? 0.18 : 0.08,
+            Duration = new Microsoft.UI.Xaml.Duration(TimeSpan.FromSeconds(0.18)),
+            EasingFunction = new Microsoft.UI.Xaml.Media.Animation.CubicEase
+            {
+                EasingMode = Microsoft.UI.Xaml.Media.Animation.EasingMode.EaseOut,
+            },
+        };
+        Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTarget(anim, brush);
+        Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTargetProperty(anim, "Opacity");
+        sb.Children.Add(anim);
+        sb.Begin();
     }
 
     private void OnTileTapped(object sender, TappedRoutedEventArgs e)
@@ -720,8 +747,11 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                 {
                     int lo = Math.Min(a, b);
                     int hi = Math.Max(a, b);
-                    if (!ctrl) foreach (var t in ViewModel.Items) t.IsSelected = false;
-                    for (int i = lo; i <= hi; i++) ViewModel.Items[i].IsSelected = true;
+                    using (ViewModel.BulkSelectionScope())
+                    {
+                        if (!ctrl) foreach (var t in ViewModel.Items) t.IsSelected = false;
+                        for (int i = lo; i <= hi; i++) ViewModel.Items[i].IsSelected = true;
+                    }
                 }
             }
             else if (ctrl)
@@ -736,8 +766,11 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                 // selection.
                 if (ViewModel.SelectedCount > 0)
                 {
-                    foreach (var t in ViewModel.Items) t.IsSelected = false;
-                    tile.IsSelected = true;
+                    using (ViewModel.BulkSelectionScope())
+                    {
+                        foreach (var t in ViewModel.Items) t.IsSelected = false;
+                        tile.IsSelected = true;
+                    }
                     _lastClickedTile = tile;
                 }
             }
@@ -1001,47 +1034,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     private async void OnContextFindSimilar(object sender, RoutedEventArgs e)
     {
         if (sender is not MenuFlyoutItem item || item.Tag is not long fileId) return;
-        var queryId = Guid.NewGuid().ToString("N");
-        var tcs = new System.Threading.Tasks.TaskCompletionSource<float[]?>();
-        void OnceHandler(object? _, System.ComponentModel.PropertyChangedEventArgs ev)
-        {
-            if (ev.PropertyName != nameof(EngineClient.LastClipTextEmbedding)) return;
-            var emb = EngineClient.Instance.LastClipTextEmbedding;
-            if (emb is null || emb.QueryId != queryId) return;
-            EngineClient.Instance.PropertyChanged -= OnceHandler;
-            tcs.TrySetResult(emb.Embedding?.ToArray());
-        }
-        // subscribe + try/finally so any throw between subscribe
-        // and the final unsubscribe still cleans up. -= is idempotent, so
-        // double-removal (handler self-removed + finally) is safe.
-        EngineClient.Instance.PropertyChanged += OnceHandler;
-        try
-        {
-            try
-            {
-                await EngineClient.Instance.EmbedImageQueryAsync(fileId, queryId);
-            }
-            catch (Exception ex)
-            {
-                DebugLog.Warn("OnContextFindSimilar: EmbedImageQueryAsync threw: " + ex.Message);
-                return;
-            }
-            // 5-second timeout.
-            var timeoutTask = System.Threading.Tasks.Task.Delay(TimeSpan.FromSeconds(5));
-            var done = await System.Threading.Tasks.Task.WhenAny(tcs.Task, timeoutTask);
-            if (done != tcs.Task) return;
-            var seed = await tcs.Task;
-            // Empty seed = CLIP disabled engine-side; nothing to match on.
-            if (seed is null || seed.Length == 0) return;
-            // Run a semantic search against the existing ReadStore via the
-            // ViewModel's path. We don't need a separate sheet — the Library
-            // grid itself is the result list.
-            await ViewModel.SemanticSearchWithSeedAsync(seed, System.Threading.CancellationToken.None);
-        }
-        finally
-        {
-            EngineClient.Instance.PropertyChanged -= OnceHandler;
-        }
+        await ViewModel.FindSimilarAsync(fileId, System.Threading.CancellationToken.None);
     }
 
     private void OnContextCopyPath(object sender, RoutedEventArgs e)

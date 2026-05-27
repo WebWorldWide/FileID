@@ -1,4 +1,4 @@
-﻿// WinVerifyTrustChecker — Authenticode integrity check on the engine binary.
+// WinVerifyTrustChecker — Authenticode integrity check on the engine binary.
 //
 //'s SecCode/SecStaticCode validation. On
 // every spawn, the app verifies that FileIDEngine.exe's Authenticode chain
@@ -106,7 +106,11 @@ internal static class WinVerifyTrustChecker
         finally
         {
             if (trustDataPtr != IntPtr.Zero) Marshal.FreeHGlobal(trustDataPtr);
-            Marshal.FreeHGlobal(fileInfoPtr);
+            if (fileInfoPtr != IntPtr.Zero)
+            {
+                Marshal.DestroyStructure<WinTrustFileInfo>(fileInfoPtr);
+                Marshal.FreeHGlobal(fileInfoPtr);
+            }
         }
     }
 

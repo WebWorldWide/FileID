@@ -41,7 +41,7 @@ pub(crate) fn extract(text: &str) -> Vec<(String, f32)> {
     let mut word_freq: HashMap<String, u32> = HashMap::new();
     let mut word_degree: HashMap<String, u32> = HashMap::new();
     for phrase in &phrases {
-        let n = u32::try_from(phrase.len()).unwrap_or(u32::MAX);
+        let n = phrase.len() as u32;
         for w in phrase {
             *word_freq.entry(w.clone()).or_insert(0) += 1;
             *word_degree.entry(w.clone()).or_insert(0) += n;
@@ -92,11 +92,12 @@ fn split_into_phrases(text: &str, stops: &HashSet<&str>) -> Vec<Vec<String>> {
     };
     for raw in text.split(|c: char| !c.is_alphanumeric()) {
         let w = raw.trim().to_ascii_lowercase();
-        if w.is_empty() {
-            flush(&mut cur, &mut phrases);
-            continue;
-        }
-        if stops.contains(w.as_str()) {
+        if w.is_empty() || stops.contains(w.as_str()) || starts_with_digit(&w) {
+            // A digit-starting token (year, ID, ISO-8601 chunk like "02t09")
+            // is never a useful keyword on its own AND, left in the stream,
+            // chains adjacent digit-tokens into noise tags like
+            // "2026 03 02t09 01 02 06 00" — observed on a syncthing folder
+            // marker .txt. Phrase boundary, same as a stopword.
             flush(&mut cur, &mut phrases);
             continue;
         }
@@ -104,6 +105,10 @@ fn split_into_phrases(text: &str, stops: &HashSet<&str>) -> Vec<Vec<String>> {
     }
     flush(&mut cur, &mut phrases);
     phrases
+}
+
+fn starts_with_digit(w: &str) -> bool {
+    w.chars().next().is_some_and(|c| c.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -150,5 +155,32 @@ mod tests {
         for w in tags.windows(2) {
             assert!(w[0].1 >= w[1].1, "tags must be descending by score: {tags:?}");
         }
+    }
+
+    #[test]
+    fn iso_timestamp_does_not_become_a_tag() {
+        // Regression: syncthing folder marker .txt produced a phantom
+        // "2026 03 02t09 01 02 06 00" tag chip because each digit-token
+        // from the ISO timestamp chained into one phrase with no
+        // stopword separator. Real folder markers also include the words
+        // "syncthing folder marker" — those should still be tagged.
+        let text = "folderID: fc881c\ncreated: 2026-03-02T09:01:02.06000Z\n\
+                    syncthing folder marker";
+        let raw = extract(text);
+        let tags: Vec<&str> = raw.iter().map(|t| t.0.as_str()).collect();
+        for t in &tags {
+            assert!(
+                !t.starts_with(char::is_numeric),
+                "no tag should start with a digit; got {t:?} in {tags:?}"
+            );
+            assert!(
+                !t.contains("02t09"),
+                "ISO chunk must not appear in tag; got {t:?}"
+            );
+        }
+        assert!(
+            tags.iter().any(|t| t.contains("syncthing")),
+            "alphabetic content should still tag; got {tags:?}"
+        );
     }
 }

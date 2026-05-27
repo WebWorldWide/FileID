@@ -384,6 +384,20 @@ async fn run_deep_analyze_batch(
                 }
             };
             if already {
+                let is_last = idx as u64 == total.saturating_sub(1);
+                if idx % 100 == 0 || is_last {
+                    sink.send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(Wrap::new(
+                        DeepAnalyzeProgress {
+                            processed: idx as u64,
+                            total,
+                            eta_seconds: None,
+                            current_path: None,
+                            model_kind: model_kind.to_string(),
+                            current_caption: None,
+                        },
+                    ))))
+                    .await;
+                }
                 continue;
             }
         }

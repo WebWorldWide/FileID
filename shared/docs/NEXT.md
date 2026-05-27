@@ -4,6 +4,67 @@
 
 ---
 
+## V16.28 — OCR overflow defense, thumb-cache LRU index, bulk-select batching, tile hover (2026-05-26)
+
+**Landed (engine clippy `-D warnings` + test green at 212/0; dotnet build clean; app tests 102/0).**
+Hardening pass on top of V16.27. Stacks under V16.27's hardware verify — same scan-and-look
+checklist applies, plus three additional checks below.
+
+**Acceptance criteria** (also do the V16.27 set):
+- Open a library that has historically had 10K+ cached thumbnails. After the first scan there
+  should be **no pause every ~30 seconds** while scrolling (the old `Directory.EnumerateFiles`
+  sweep is gone). Diagnostics → cache bytes still updates as before.
+- Click Library → click "Select" (or press Ctrl+A) on a ~10K tile library. Selection should land
+  instantly. Previously this stalled for multiple seconds on the per-tile PropertyChanged storm
+  + N×N `_selected.ToList()` reallocations.
+- Hover a Library tile (no click). The white border ring should brighten visibly over ~0.18s
+  alongside the existing 1.012× scale spring. Matches macOS LibraryView.swift:676-680.
+
+**Deferred to follow-ups (not in V16.28)**:
+- **ReadStore FTS5 v8 migration**: `ReadStore.SearchAsync` (lines 144-166) OR-joins MATCH against
+  `ocr_fts`/`doc_fts` with `LIKE '%x%'` against `f.path_text`, `f.vlm_proposed_name`,
+  `f.vlm_description`, `tags.tag`, and `persons.name`. The leading-wildcard `LIKE` branches are
+  non-sargable, so any branch forces a full `files` scan. Real fix: extend `doc_fts` (or add
+  `text_fts`) to include those columns, route the query through MATCH only. Needs the user's
+  real DB to test the migration safely; queued here so the perf payoff is captured.
+- **Tile hover shadow animation** (`Views/Library/LibraryView.xaml` + `.xaml.cs`): C2 of V16.28
+  shipped only the stroke part of the macOS hover spec. Shadow opacity 0.18→0.45 + blur 5→14
+  needs per-tile `Microsoft.UI.Composition.DropShadow` with cleanup on `ItemsRepeater`
+  recycle; non-trivial relative to a comment-and-scope session.
+- **TagChip color canonicalization (decision needed from user)**: Windows
+  `TagChipForegroundBrush`/`TagChipBackgroundBrush` are gold `#FFCD3C` @ 0.85 / 0.10 (Theme.xaml
+  lines 71-72). macOS LibraryView.swift:734-739 uses `.foregroundStyle(.secondary)` +
+  `.fill(Color.secondary.opacity(0.10))` — i.e. system gray, NOT gold. Three options:
+  1. Match macOS literally (system gray, no brand color).
+  2. Keep current Windows gold (`#FFCD3C` is brand-aligned; CLAUDE.md says gold reserved for
+     "primary actions + the Smart name result"; gold-tinted chips technically violate that).
+  3. Use palette gold `#FFCC00` instead of `#FFCD3C` (the latter is a stray near-miss).
+  No code change pending decision.
+
+## V16.27 — Scan-pipeline single-read + UI parity polish (2026-05-26)
+
+**Landed (engine cargo check + clippy `-D warnings` + test green; awaiting hardware verify).**
+Image EXIF ghost-read eliminated; doc/pdf/audio extract paths now share the decoder-thread
+pre-read buffer for files ≤ 16 MB (one fewer file open per matching file). ApplyBar hover
+spring wired to match macOS. TagChip Kind theme brushes defined. Stray DLLs gitignored.
+
+**On-hardware verify** (run a scan against a mixed library):
+- Image tiles still surface camera/GPS for JPEGs; PNG/GIF/screenshot tiles scan cleanly with
+  no EXIF and no crash.
+- Doc / PDF / Audio files still surface keyword chips / artist+album tags as before; > 16 MB
+  files still scan via the composite-hash fallback.
+- Restructure ApplyBar buttons scale up to 1.02× on hover when enabled, snap back on exit.
+- Library Kind chips visually identical to V16.26.
+
+**Deferred (next sessions, not in V16.27)**:
+- **Video keyframe single-read**: `shell::video::keyframe_25pct` calls ffmpeg / Windows Media
+  Foundation, both want a file path / IMFByteStream. Streaming bytes in needs a meaningful
+  adapter and the typical video exceeds the 16 MB cap anyway; composite-hash + path-based
+  decode is fine.
+- **Deep Analyze cross-pass RGB cache**: re-rasterizes images for the VLM. Reusing scan-time
+  decoded RGB would mean caching ~50K decoded frames — disk thrash or unbounded memory. Deep
+  Analyze is user-triggered, so the second read is acceptable.
+
 ## V16.26 — No-self-host posture + hanging-feature sweep (2026-05-22)
 
 **Landed (engine clippy `-D warnings` + test on pinned 1.90 green — 204-0; C# dotnet build 0/0).**

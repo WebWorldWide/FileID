@@ -5,12 +5,14 @@
 // requested locale isn't installed. Privacy: runs entirely on-device.
 
 use anyhow::{Context, Result};
-use std::io::Cursor;
 
-use windows::Graphics::Imaging::{BitmapDecoder, SoftwareBitmap};
+use windows::Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap};
 use windows::Media::Ocr::OcrEngine;
-use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream};
+use windows::Storage::Streams::DataWriter;
 
+// Public API surface — current callers only consume `text`, but `lines`
+// and `locale` are populated so the UI can later render per-line OCR
+// overlays without a schema change. Keep until that consumer lands.
 #[allow(dead_code)]
 pub struct OcrResult {
     pub text: String,
@@ -26,52 +28,44 @@ pub struct OcrLine {
     pub confidence: f32,
 }
 
-/// Run OCR on a tightly-packed RGB buffer. Encodes to PNG in memory,
-/// hands to WinRT BitmapDecoder → SoftwareBitmap → OcrEngine.
+/// Run OCR on a tightly-packed RGB buffer. Maps to BGRA8 in memory,
+/// populates a WinRT IBuffer, and calls SoftwareBitmap::CreateCopyFromBuffer.
 /// Returns a structured result; empty `text` means nothing matched.
 pub fn recognize(rgb: &[u8], width: u32, height: u32) -> Result<OcrResult> {
-    if width == 0 || height == 0 || rgb.len() < (width as usize) * (height as usize) * 3 {
+    // Cap each side at 16384 so `width * height * 4` cannot overflow u32 and
+    // `SoftwareBitmap::CreateCopyFromBuffer` (which takes i32 dims) stays in
+    // range. Windows.Media.Ocr tops out well below this in practice.
+    const MAX_DIM: u32 = 16384;
+    if width == 0 || height == 0 || width > MAX_DIM || height > MAX_DIM {
+        anyhow::bail!("OCR.recognize: dimensions out of range ({width}x{height})");
+    }
+    let pixels = (width as usize) * (height as usize);
+    if rgb.len() < pixels * 3 {
         anyhow::bail!("OCR.recognize: invalid RGB buffer");
     }
 
-    // Encode RGB → PNG so BitmapDecoder can hand back a SoftwareBitmap
-    // in BGRA8 (the format OcrEngine accepts).
-    let img: image::ImageBuffer<image::Rgb<u8>, _> =
-        image::ImageBuffer::from_raw(width, height, rgb.to_vec())
-            .context("invalid RGB ImageBuffer")?;
-    let mut png_bytes = Vec::with_capacity(((width * height) as usize) / 4 + 1024);
-    img.write_to(&mut Cursor::new(&mut png_bytes), image::ImageFormat::Png)
-        .context("encode RGB → PNG")?;
+    let mut bgra = Vec::with_capacity(pixels * 4);
+    for chunk in rgb.chunks_exact(3) {
+        bgra.push(chunk[2]); // B
+        bgra.push(chunk[1]); // G
+        bgra.push(chunk[0]); // R
+        bgra.push(255);      // A
+    }
+
+    let writer = DataWriter::new()?;
+    writer.WriteBytes(&bgra)?;
+    let buffer = writer.DetachBuffer()?;
+
+    // Create SoftwareBitmap directly from the BGRA8 buffer.
+    let soft_bitmap = SoftwareBitmap::CreateCopyFromBuffer(
+        &buffer,
+        BitmapPixelFormat::Bgra8,
+        width as i32,
+        height as i32,
+    )?;
 
     let engine = OcrEngine::TryCreateFromUserProfileLanguages()
         .context("OcrEngine::TryCreateFromUserProfileLanguages")?;
-
-    let stream = InMemoryRandomAccessStream::new().context("create InMemoryRandomAccessStream")?;
-    let writer = DataWriter::CreateDataWriter(&stream.GetOutputStreamAt(0)?)
-        .context("create DataWriter")?;
-    writer.WriteBytes(&png_bytes).context("write PNG bytes")?;
-    writer
-        .StoreAsync()
-        .context("DataWriter::StoreAsync")?
-        .get()
-        .context("flush bytes")?;
-    writer
-        .FlushAsync()
-        .context("DataWriter::FlushAsync")?
-        .get()
-        .context("flush op")?;
-    let _ = writer.DetachStream();
-
-    let _ = stream.Seek(0);
-    let decoder = BitmapDecoder::CreateAsync(&stream)
-        .context("BitmapDecoder::CreateAsync")?
-        .get()
-        .context("decoder build")?;
-    let soft_bitmap: SoftwareBitmap = decoder
-        .GetSoftwareBitmapAsync()
-        .context("GetSoftwareBitmapAsync")?
-        .get()
-        .context("get bitmap")?;
 
     let result = engine
         .RecognizeAsync(&soft_bitmap)
@@ -141,3 +135,33 @@ pub fn user_locales() -> Result<Vec<String>> {
 const _: () = {
     let _ = std::mem::size_of::<OcrEngine>;
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognize_rejects_zero_dim() {
+        assert!(recognize(&[], 0, 10).is_err());
+        assert!(recognize(&[], 10, 0).is_err());
+    }
+
+    #[test]
+    fn recognize_rejects_oversize_dim() {
+        // 200_000 > MAX_DIM (16384). Bails before any Windows API call.
+        match recognize(&[], 200_000, 200_000) {
+            Ok(_) => panic!("oversize must bail"),
+            Err(e) => assert!(
+                format!("{e}").contains("out of range"),
+                "unexpected error: {e}"
+            ),
+        }
+    }
+
+    #[test]
+    fn recognize_rejects_short_buffer() {
+        // 100x100 RGB needs 30_000 bytes; pass 100 to force the length check.
+        let buf = vec![0u8; 100];
+        assert!(recognize(&buf, 100, 100).is_err());
+    }
+}

@@ -1,4 +1,4 @@
-﻿// SettingsView code-behind.
+// SettingsView code-behind.
 
 using System;
 using System.ComponentModel;
@@ -531,12 +531,9 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
-    // Tagging is SmolVLM (source='vlm'); CLIP scene tags are off, but MobileCLIP
-    // still powers free-text semantic search.
+    // Scan-time scene tagging uses CLIP (source='auto') and is enabled by default.
     public string SceneTaggingDiagnosticsText =>
-        "Tags: SmolVLM (Deep Analyze, source='vlm') — CLIP scene tagging is off. " +
-        "Semantic search: MobileCLIP-S2 (install it in Models above; without it, " +
-        "search falls back to keyword/tag matching).";
+        "Tags: CLIP zero-shot (source='auto', scan-time, fast) + manual VLM refinement.";
 
     private void OnRefreshDiagnosticsClicked(object sender, RoutedEventArgs e)
         => DebugLog.SafeRun(nameof(OnRefreshDiagnosticsClicked), () =>

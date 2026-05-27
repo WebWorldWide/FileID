@@ -7,6 +7,99 @@
 
 ---
 
+## 2026-05-26 — ThumbnailDiskCache: in-memory LRU index, no on-disk persistence
+
+**Context**: V16.28 replaced the periodic `Directory.EnumerateFiles("*.bin", AllDirectories)`
+sweep with a `ConcurrentDictionary<string, CacheEntry>` index. The old sweep ran every 30s on
+write and rewalked the entire cache directory; on libraries with 10K+ cached thumbnails that's
+hundreds of ms of disk IO per sweep, blocking the cache-write Task pool. The new index keeps
+`(path → sizeBytes, lastAccessTicks)` in memory and only does a single `EnumerateFiles` walk in
+`Prime()` at startup.
+
+**Decision**: do NOT persist the index to a sidecar file across runs. Rebuild it from a startup
+disk walk every time the app launches.
+
+**Reasoning**: a sidecar adds three failure modes (write race during shutdown, sidecar/disk
+divergence if files get deleted out-of-band, JSON-format-version migration) for a marginal win.
+Prime's walk is bounded by the cap (500 MB / ~5 KB avg → ~100K files maximum), which the OS
+file-table walk handles in <100 ms on SSD. The savings — startup-only — aren't worth the
+complexity vs the new sweep cost, which is now sort + delete on the in-memory index (O(N log N)
+on 10K entries = sub-millisecond).
+
+**Alternatives considered**:
+- **SQLite sidecar**: adds a second writer to the cache directory and another lock domain. The
+  existing main DB writer is single-process for a reason; introducing a second one for thumbnail
+  metadata is over-engineering for a cache.
+- **File `LastAccessTimeUtc` as durable ground truth**: NTFS has `NtfsDisableLastAccessUpdate=1`
+  enabled by default since Windows Vista, so writing `SetLastAccessTimeUtc` may be a no-op. Not
+  durable. The in-memory index plus a startup walk seeded from `LastAccessTimeUtc` (best-effort)
+  is honest about the limit.
+
+## 2026-05-26 — LibraryViewModel bulk-selection uses an IDisposable scope, not Begin/End calls
+
+**Context**: V16.28 added `BulkSelectionScope()` to coalesce per-tile `PropertyChanged` storms
+during Ctrl+A / shift-click range select / clear-and-reselect paths. The naive shape would be
+`BeginBulkSelection()` / `EndBulkSelection()` paired by callers, with try/finally at each site.
+
+**Decision**: return an `IDisposable` from `BulkSelectionScope()`. Callers wrap with `using`
+blocks, and `EndBulkSelection` runs on dispose (including the exception path).
+
+**Reasoning**: three call sites in `LibraryView.xaml.cs` all want exception-safe pairing. A
+`using` block is one line per site vs three for try/finally and won't be silently broken if
+someone copies the scope into a new code path without remembering to wire `finally`. The
+IDisposable also nests cleanly (`_bulkDepth` is an int, not a bool) so a future nested helper
+caller "just works." `Interlocked.Exchange` inside `BulkScope.Dispose` makes double-dispose a
+no-op rather than a corrupting double-decrement.
+
+## 2026-05-26 — OCR dimension cap at 16384 per side
+
+**Context**: V16.28 hardened `engine/src/shell/ocr.rs::recognize` against integer overflow in
+`width * height * 4` (BGRA byte count). The cap doubles as the natural defense.
+
+**Decision**: reject inputs with either dimension > 16384.
+
+**Reasoning**: 16384 × 16384 × 4 = 1 GiB, which fits in u32 with 4x headroom — so the existing
+`(width * height * 4) as usize` math (and the analogous `* 3` for RGB) can no longer overflow.
+Windows.Media.Ocr's `SoftwareBitmap` ceiling is far below this in practice (the implementation
+tops out around 50 megapixels for engine internals); 16384 is a generous bound that catches
+pathological inputs (`u32::MAX × u32::MAX`) without rejecting any realistic image. The cap also
+keeps the cast to i32 for `CreateCopyFromBuffer` safe (16384 < i32::MAX / 2).
+
+## 2026-05-26 — Decoder-thread bytes pre-read cap matches FULL_HASH_MAX_BYTES (16 MB)
+
+**Context**: V16.27 extended the image-style "read once, share buffer with the BLAKE3 hash and
+the kind-specific extractor" pattern to Doc / Pdf / Audio kinds. Open question: how big a file
+is safe to pre-read into a decoder-thread `Vec<u8>` before falling back to the path-based
+extractor? The decoder thread has a small fixed pool, but each thread holds at most one
+in-flight file's bytes, so the upper bound is `pool_size × max_pre_read_bytes`. A 1 GB cap
+with a 4-thread pool means ~4 GB transient peak — fine on a 32 GB box, ruinous on an 8 GB.
+
+**Decision**: cap the pre-read at `crate::util::content_hash::FULL_HASH_MAX_BYTES` (16 MB), the
+same threshold the BLAKE3 hash uses to choose full vs composite. Files above the cap fall
+through to the existing path-based extractor and the composite-hash path (head + tail + size,
+2 MB total I/O). Three reasons:
+
+1. **Matches existing semantics**: above 16 MB the hash already changes character — composite
+   not full — so dispatching the rest of the pipeline at the same threshold keeps a single
+   mental boundary for "small file fast path" vs "large file streamed".
+2. **Bounded memory**: even a saturated decoder pool can't exceed `pool_size × 16 MB` transient
+   bytes. On the documented 4-thread decoder pool that's 64 MB peak — invisible vs the
+   `MAX_DECODED_PIXELS` budget the image branch already operates under.
+3. **Covers the common case**: typical docs, mp3s, and even small/mid PDFs are well below
+   16 MB. The long tail (giant PDFs, multi-hour audio archives) falls through to the existing
+   path-based codepath that was already shipping in V16.26.
+
+**Alternatives considered**:
+- **No cap (always pre-read)**: rejected — a pathological 5 GB file with the wrong extension
+  would OOM the engine. The image branch *does* read unbounded today, but image discovery
+  already gates by magic + `MAX_DECODED_PIXELS`; doc/audio classification is extension-only.
+- **Higher cap (64 MB / 256 MB)**: tempting for large PDFs, but pdfium already opens the file
+  separately via `load_pdf_from_file` — pre-reading the bytes wouldn't even help. For audio,
+  symphonia probes only the container header; the body never sees the buffer. So the marginal
+  benefit above 16 MB is small.
+- **Per-kind caps**: more code, no measurable upside given the above. One number, one mental
+  model.
+
 ## 2026-05-22 — No self-hosting: remove RAM++, Performance-Pack arms, RAM++ conversion script (SUPERSEDES Phase 2 + Phase 6 hosting)
 
 **Context**: FileID is open-source with no infrastructure of its own. Earlier Phase 2 / Phase 5 / Phase 6

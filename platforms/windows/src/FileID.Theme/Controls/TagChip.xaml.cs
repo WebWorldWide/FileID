@@ -1,4 +1,4 @@
-﻿// TagChip — code-behind for the small auto-tag chip Library cards show
+// TagChip — code-behind for the small auto-tag chip Library cards show
 // below the filename. Visual spec mirrors macOS LibraryView.swift:729-744
 // (`Color.secondary.opacity(0.10)` fill + secondary foreground, 11 pt
 // Medium, 5×2 padding, 4 px corner radius). One DependencyProperty —
@@ -126,21 +126,36 @@ public sealed partial class TagChip : UserControl
     }
 
     /// <summary>
-    /// 1:1 port of macOS LibraryView.swift `formatTag(_:)`. Tags that
-    /// already contain a space ("Has Faces") render as-is. Tags with
-    /// underscores strip the hierarchical prefix and title-case the
-    /// final segment ("animal_dog" → "Dog"). Dashes become spaces
-    /// ("iPhone-14" → "Iphone 14"). Empty input returns empty.
+    /// 1:1 port of macOS <c>LibraryView.swift:646</c> <c>formatTag(_:)</c>.
+    /// Tags that already contain a space ("Has Faces") render as-is. Tags
+    /// with underscores strip the hierarchical prefix and uppercase the
+    /// first character of the final segment ("animal_dog" → "Dog"). Dashes
+    /// become spaces, and ONLY the leading character is uppercased — internal
+    /// camelCase / model-number capitals are preserved
+    /// ("iPhone-14" → "IPhone 14"). Empty input returns empty.
     /// </summary>
     public static string FormatTag(string tag)
     {
         if (string.IsNullOrEmpty(tag)) return tag;
+        // Pre-formatted multi-word labels ("Has Faces", "Has TEXT") render
+        // as-is — must come before the underscore / dash transforms so we
+        // don't accidentally re-case an already-curated string.
         if (tag.Contains(' ')) return tag;
+
+        // Take the last segment after '_' (hierarchical labels like
+        // "animal_dog" become "dog"). Matches macOS split(separator: "_").last.
         var segment = tag.Contains('_')
             ? tag[(tag.LastIndexOf('_') + 1)..]
             : tag;
+
+        // Dashes become spaces ("iPhone-14" → "iPhone 14").
         segment = segment.Replace('-', ' ');
-        if (segment.Length == 0) return tag;
+
+        if (segment.Length == 0) return segment;
+        // Uppercase only the first character, preserve everything else
+        // exactly. Matches macOS `first.uppercased() + withSpaces.dropFirst()`.
+        // We deliberately don't `ToTitleCase(ToLowerInvariant(...))` — that
+        // would mangle "iPhone 14" → "Iphone 14" and lose model-number casing.
         return char.ToUpperInvariant(segment[0]) + segment[1..];
     }
 }

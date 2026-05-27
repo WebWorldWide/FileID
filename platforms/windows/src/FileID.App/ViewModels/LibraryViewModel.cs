@@ -1,10 +1,4 @@
-﻿// LibraryViewModel — backs the Library tab grid + search bar.
-//
-// The
-// shape is the same: a debounced query string, a kind filter, a page of
-// FileTile items, plus a banner state machine. The Windows port runs on
-// INotifyPropertyChanged + DispatcherQueue marshalling instead of
-// SwiftUI's @Observable.
+// LibraryViewModel — backs the Library tab grid + search bar.
 
 using System;
 using System.Collections.Generic;
@@ -47,14 +41,10 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         _store = store;
         _clip = clip;
         _ui = ui;
-        // maintain a HashSet of selected tiles in O(1) per
-        // selection change instead of re-walking every Item on each
-        // SelectedCount/SelectedItems read. Subscribe to PropertyChanged
-        // on every tile via the CollectionChanged hook; without this the
-        // VM's SelectedCount binding was actually never re-fired on
-        // per-tile toggle (PropertyChanged on FileTile only raised
-        // IsSelected on itself), so the bulk-action toolbar visibility
-        // was silently stale.
+        // Per-tile PropertyChanged subscription happens via this hook —
+        // FileTile only raises IsSelected on itself, so without forwarding
+        // here the VM's SelectedCount stays stale and the bulk-action
+        // toolbar visibility breaks.
         Items.CollectionChanged += OnItemsCollectionChanged;
     }
 
@@ -70,8 +60,6 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         try { _searchCts?.Cancel(); } catch { /* swallow */ }
         _searchCts?.Dispose();
         _searchCts = null;
-        // detach the per-tile listeners we attached in
-        // OnItemsCollectionChanged so the VM can be GC'd cleanly.
         Items.CollectionChanged -= OnItemsCollectionChanged;
         foreach (var t in Items) t.PropertyChanged -= OnTilePropertyChanged;
         _selected.Clear();
@@ -82,6 +70,44 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     public BatchObservableCollection<FileTile> Items { get; } = new();
 
     private readonly HashSet<FileTile> _selected = new();
+    private IReadOnlyList<FileTile>? _selectedItemsCache;
+
+    // Bulk-selection batching. While depth > 0, per-tile IsSelected toggles
+    // update _selected but skip raising PropertyChanged + registry publish.
+    // On the final EndBulkSelection, if anything actually changed, fire one
+    // batch of notifications. Drops a Ctrl+A on 10K tiles from O(N²) work
+    // (N notifications × O(N) SelectedItems.ToList() allocations) to O(N).
+    private int _bulkDepth;
+    private bool _bulkSelectionDirty;
+
+    public IDisposable BulkSelectionScope()
+    {
+        _bulkDepth++;
+        return new BulkScope(this);
+    }
+
+    private void EndBulkSelection()
+    {
+        if (_bulkDepth == 0) return;
+        _bulkDepth--;
+        if (_bulkDepth != 0 || !_bulkSelectionDirty) return;
+        _bulkSelectionDirty = false;
+        _selectedItemsCache = null;
+        OnPropertyChanged(nameof(SelectedCount));
+        OnPropertyChanged(nameof(SelectedItems));
+        PublishSelectionToRegistry();
+    }
+
+    private sealed class BulkScope : IDisposable
+    {
+        private LibraryViewModel? _vm;
+        public BulkScope(LibraryViewModel vm) { _vm = vm; }
+        public void Dispose()
+        {
+            var vm = Interlocked.Exchange(ref _vm, null);
+            vm?.EndBulkSelection();
+        }
+    }
 
     private void OnItemsCollectionChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
     {
@@ -122,6 +148,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             }
             selectionChanged = true;
         }
+        if (selectionChanged) _selectedItemsCache = null;
         OnPropertyChanged(nameof(SelectedCount));
         OnPropertyChanged(nameof(SelectedItems));
         if (selectionChanged) PublishSelectionToRegistry();
@@ -132,14 +159,16 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         if (e.PropertyName != nameof(FileTile.IsSelected)) return;
         if (sender is not FileTile t) return;
         bool changed = t.IsSelected ? _selected.Add(t) : _selected.Remove(t);
-        if (changed)
+        if (!changed) return;
+        _selectedItemsCache = null;
+        if (_bulkDepth > 0)
         {
-            OnPropertyChanged(nameof(SelectedCount));
-            OnPropertyChanged(nameof(SelectedItems));
-            // Publish to the cross-view registry so other tabs (Deep
-            // Analyze, Restructure) can act on the current selection.
-            PublishSelectionToRegistry();
+            _bulkSelectionDirty = true;
+            return;
         }
+        OnPropertyChanged(nameof(SelectedCount));
+        OnPropertyChanged(nameof(SelectedItems));
+        PublishSelectionToRegistry();
     }
 
     private void PublishSelectionToRegistry()
@@ -153,23 +182,18 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         FileID.Services.SelectionRegistry.Instance.LibrarySelection = ids;
     }
 
-    public IReadOnlyList<FileTile> SelectedItems => _selected.ToList();
+    public IReadOnlyList<FileTile> SelectedItems => _selectedItemsCache ??= _selected.ToList();
 
     public int SelectedCount => _selected.Count;
 
     public void ClearSelection()
     {
         if (_selected.Count == 0) return;
-        // Snapshot before mutating so the per-tile callback doesn't
-        // remove from a collection we're iterating.
         var snapshot = _selected.ToList();
-        foreach (var t in snapshot) t.IsSelected = false;
-        // The per-tile callback already raised PropertyChanged for each
-        // toggle; raise once more in case any tile silently failed to
-        // notify (defensive — shouldn't happen).
-        OnPropertyChanged(nameof(SelectedCount));
-        OnPropertyChanged(nameof(SelectedItems));
-        PublishSelectionToRegistry();
+        using (BulkSelectionScope())
+        {
+            foreach (var t in snapshot) t.IsSelected = false;
+        }
     }
 
     public string Query
@@ -296,6 +320,38 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
                     continue;
                 }
                 filtered.Add(FileTile.From(hit.Row));
+            }
+            ApplyOnUi(filtered);
+        }
+        catch (OperationCanceledException) { /* expected */ }
+        catch (ObjectDisposedException) { /* expected during teardown */ }
+        catch (Exception ex) { if (!_disposed) ErrorMessage = ex.Message; }
+        finally { if (!_disposed) IsLoading = false; }
+    }
+
+    /// <summary>
+    /// Fetch similar files directly using the seed file ID.
+    /// Eliminates the multi-step IPC roundtrip.
+    /// </summary>
+    public async Task FindSimilarAsync(long fileId, CancellationToken ct)
+    {
+        if (_disposed) return;
+        try
+        {
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
+            var token = linked.Token;
+            IsLoading = true;
+            ErrorMessage = null;
+            var similar = await _store.SimilarFilesAsync(fileId, PageSize, token).ConfigureAwait(false);
+            if (_disposed || token.IsCancellationRequested) return;
+            var filtered = new List<FileTile>(similar.Count);
+            foreach (var r in similar)
+            {
+                if (_kindFilter != "all" && !string.Equals(r.Kind, _kindFilter, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                filtered.Add(FileTile.From(r));
             }
             ApplyOnUi(filtered);
         }
@@ -558,6 +614,26 @@ internal sealed class FileTile : INotifyPropertyChanged
 
     public string SizeDisplay => FormatSize(SizeBytes);
 
+    public string DateDisplay
+    {
+        get
+        {
+            if (ModifiedAt.HasValue)
+            {
+                try
+                {
+                    var dt = System.DateTimeOffset.FromUnixTimeSeconds((long)ModifiedAt.Value).LocalDateTime;
+                    return dt.ToString("d");
+                }
+                catch
+                {
+                    // Fallback
+                }
+            }
+            return string.Empty;
+        }
+    }
+
     /// <summary>Segoe Fluent Icons glyph that summarizes the file's kind
     /// for the top-left badge stack. Mirrors macOS's SF Symbol per-kind
     /// glyph (photo / video / music / doc.text / doc / file). Returns a
@@ -699,7 +775,14 @@ internal sealed class FileTile : INotifyPropertyChanged
 
     public static FileTile From(FileRow r)
     {
-        var tags = r.Tags ?? (System.Collections.Generic.IReadOnlyList<string>)System.Array.Empty<string>();
+        var rawTags = r.Tags ?? (System.Collections.Generic.IReadOnlyList<string>)System.Array.Empty<string>();
+        var formattedTags = new System.Collections.Generic.List<string>(rawTags.Count);
+        foreach (var t in rawTags)
+        {
+            formattedTags.Add(FileID.Theme.Controls.TagChip.FormatTag(t));
+        }
+        var tags = (System.Collections.Generic.IReadOnlyList<string>)formattedTags;
+
         // Materialise the prefix(2) once so the card binding doesn't
         // allocate on every layout pass.
         var topTwo = tags.Count <= 2

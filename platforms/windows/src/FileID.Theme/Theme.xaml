@@ -71,6 +71,13 @@
     <SolidColorBrush x:Key="TagChipForegroundBrush" Color="#FFCD3C" Opacity="0.85" />
     <SolidColorBrush x:Key="TagChipBackgroundBrush" Color="#FFCD3C" Opacity="0.10" />
 
+    <!-- Kind variant — neutral white-on-gray (distinct from the gold Auto chip),
+         used for the file-type label that leads each card's chip row. Hex
+         values mirror the TagChip.xaml.cs:59-62 fallbacks (Opacity 0.30 ≈
+         alpha 0x4D). -->
+    <SolidColorBrush x:Key="TagChipKindForegroundBrush" Color="#FFFFFF" />
+    <SolidColorBrush x:Key="TagChipKindBackgroundBrush" Color="#808080" Opacity="0.30" />
+
     <!-- Scrim — for badge pills atop tile thumbnails. ~60% black. -->
     <SolidColorBrush x:Key="TileScrimBrush"              Color="#000000" Opacity="0.60" />
 

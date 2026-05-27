@@ -1,4 +1,4 @@
-﻿// ReadStore — app-side read-only SQLite access.
+// ReadStore — app-side read-only SQLite access.
 //
 // The engine owns the writer connection (rusqlite, single-threaded by
 // design — see platforms/apple/CLAUDE.md and engine/src/db/mod.rs). The
@@ -120,40 +120,58 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
         {
             return Array.Empty<FileRow>();
         }
-        var match = BuildMatchExpression(query);
-        // Empty match → delegate to RecentAsync. Done BEFORE acquiring
-        // the gate so RecentAsync's own gate acquisition isn't reentrant.
-        if (string.IsNullOrEmpty(match))
+        var trimmedSearch = query?.Trim();
+        if (string.IsNullOrEmpty(trimmedSearch))
         {
             return await RecentAsync(limit, ct).ConfigureAwait(false);
         }
-        // Gate the connection across the entire query lifetime —
-        // Microsoft.Data.Sqlite connections are NOT thread-safe across
-        // simultaneous commands, so two parallel callers would race on
-        // the same SqliteConnection's transaction state.
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             if (_connection == null) return Array.Empty<FileRow>();
-            // Two sources, deduped by file id: ocr_fts (FTS5 over OCR text;
-            // ranked by bm25) UNION filename LIKE matches over files.path_text.
-            //::searchFiles which combines OCR
-            // hits with filename hits in the same result set.
             var rows = new List<FileRow>(limit);
             var seen = new HashSet<long>();
             using var cmd = _connection.CreateCommand();
-            cmd.CommandText = """
+
+            var escapedSearch = trimmedSearch
+                .Replace("\\", "\\\\")
+                .Replace("%", "\\%")
+                .Replace("_", "\\_");
+            var like = $"%{escapedSearch}%";
+            var match = BuildMatchExpression(trimmedSearch);
+            var hasMatch = !string.IsNullOrEmpty(match);
+
+            cmd.CommandText = $"""
             SELECT f.id, f.path_text, f.kind, f.size_bytes, f.modified_at, f.has_faces, f.has_text,
                    (SELECT GROUP_CONCAT(tag, '|') FROM (SELECT tag FROM tags WHERE file_id = f.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, score DESC, rowid)) AS auto_tags,
                    f.vlm_proposed_name
-            FROM ocr_fts
-            JOIN files f ON f.id = ocr_fts.rowid
-            WHERE ocr_fts MATCH $match
-            ORDER BY bm25(ocr_fts)
+            FROM files f
+            WHERE f.failed = 0
+              AND (
+                   {(hasMatch ? "f.id IN (SELECT rowid FROM ocr_fts WHERE ocr_fts MATCH $match) OR f.id IN (SELECT rowid FROM doc_fts WHERE doc_fts MATCH $match)" : "0")}
+                   OR f.path_text LIKE $like ESCAPE '\'
+                   OR f.vlm_proposed_name LIKE $like ESCAPE '\'
+                   OR f.vlm_description LIKE $like ESCAPE '\'
+                   OR f.id IN (SELECT file_id FROM tags WHERE tag LIKE $like ESCAPE '\')
+                   OR f.id IN (
+                       SELECT fp.file_id FROM face_prints fp
+                       INNER JOIN persons p ON p.id = fp.person_id
+                       WHERE p.name LIKE $like ESCAPE '\'
+                          OR p.first_name LIKE $like ESCAPE '\'
+                          OR p.last_name LIKE $like ESCAPE '\'
+                   )
+              )
+            ORDER BY f.modified_at DESC NULLS LAST
             LIMIT $limit
             """;
-            cmd.Parameters.AddWithValue("$match", match);
+
+            if (hasMatch)
+            {
+                cmd.Parameters.AddWithValue("$match", match);
+            }
+            cmd.Parameters.AddWithValue("$like", like);
             cmd.Parameters.AddWithValue("$limit", limit);
+
             using (var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false))
             {
                 while (await reader.ReadAsync(ct).ConfigureAwait(false))
@@ -163,52 +181,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
                     {
                         rows.Add(row);
                     }
-                }
-            }
-            if (rows.Count >= limit)
-            {
-                return rows;
-            }
-            // Filename fallback. Each whitespace-separated term must appear
-            // somewhere in path_text; trailing wildcard via LIKE.
-            var likePieces = new List<string>();
-            var likeArgs = new List<(string name, string value)>();
-            var i = 0;
-            foreach (var raw in query.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-            {
-                var token = raw.Trim();
-                if (token.Length < 2) continue;
-                var p = $"$t{i++}";
-                likePieces.Add($"path_text LIKE {p}");
-                likeArgs.Add((p, $"%{token}%"));
-            }
-            if (likePieces.Count == 0)
-            {
-                return rows;
-            }
-            using var cmd2 = _connection.CreateCommand();
-            cmd2.CommandText = $"""
-            SELECT id, path_text, kind, size_bytes, modified_at, has_faces, has_text,
-                   (SELECT GROUP_CONCAT(tag, '|') FROM (SELECT tag FROM tags WHERE file_id = files.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, score DESC, rowid)) AS auto_tags,
-                   vlm_proposed_name
-            FROM files
-            WHERE {string.Join(" AND ", likePieces)}
-            ORDER BY modified_at DESC NULLS LAST
-            LIMIT $limit
-            """;
-            foreach (var (n, v) in likeArgs)
-            {
-                cmd2.Parameters.AddWithValue(n, v);
-            }
-            cmd2.Parameters.AddWithValue("$limit", limit);
-            using var reader2 = await cmd2.ExecuteReaderAsync(ct).ConfigureAwait(false);
-            while (await reader2.ReadAsync(ct).ConfigureAwait(false))
-            {
-                if (rows.Count >= limit) break;
-                var row = ReadRow(reader2);
-                if (seen.Add(row.Id))
-                {
-                    rows.Add(row);
                 }
             }
             return rows;
@@ -279,7 +251,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
             {
-                var blob = (byte[])reader.GetValue(8);
+                var blob = (byte[])reader.GetValue(9);
                 float score = DotProduct(queryEmbedding, blob);
                 var row = ReadRow(reader);
                 if (heap.Count < limit)
@@ -300,6 +272,120 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             }
             sorted.Reverse();
             return sorted;
+        }
+        finally { _gate.Release(); }
+    }
+
+    /// <summary>
+    /// Fetch similar files by finding the seed file's embedding and ranking others by cosine similarity.
+    /// Matches macOS similarFiles(toFileID:limit:) exactly.
+    /// </summary>
+    public async Task<IReadOnlyList<FileRow>> SimilarFilesAsync(long seedId, int limit, CancellationToken ct)
+    {
+        if (_connection == null)
+        {
+            return Array.Empty<FileRow>();
+        }
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_connection == null) return Array.Empty<FileRow>();
+            
+            // 1. Get seed embedding
+            float[]? seedVec = null;
+            using (var cmd = _connection.CreateCommand())
+            {
+                cmd.CommandText = "SELECT embedding FROM clip_embeddings WHERE file_id = $seedId";
+                cmd.Parameters.AddWithValue("$seedId", seedId);
+                using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                if (await reader.ReadAsync(ct).ConfigureAwait(false))
+                {
+                    seedVec = BlobToFloats((byte[])reader.GetValue(0));
+                }
+            }
+
+            if (seedVec == null || seedVec.Length == 0)
+            {
+                return Array.Empty<FileRow>();
+            }
+
+            // 2. Fetch all other embeddings and calculate cosine similarity
+            var heap = new PriorityQueue<long, float>(limit);
+            using (var cmd = _connection.CreateCommand())
+            {
+                cmd.CommandText = "SELECT file_id, embedding FROM clip_embeddings WHERE file_id != $seedId";
+                cmd.Parameters.AddWithValue("$seedId", seedId);
+                using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                {
+                    var fid = reader.GetInt64(0);
+                    var blob = (byte[])reader.GetValue(1);
+                    float score = DotProduct(seedVec, blob);
+                    
+                    if (heap.Count < limit)
+                    {
+                        heap.Enqueue(fid, score);
+                    }
+                    else if (heap.TryPeek(out _, out var minScore) && score > minScore)
+                    {
+                        heap.Dequeue();
+                        heap.Enqueue(fid, score);
+                    }
+                }
+            }
+
+            // 3. Extract the best IDs in descending order
+            var topIDs = new List<long>(heap.Count);
+            while (heap.Count > 0)
+            {
+                topIDs.Add(heap.Dequeue());
+            }
+            topIDs.Reverse();
+
+            if (topIDs.Count == 0)
+            {
+                return Array.Empty<FileRow>();
+            }
+
+            // 4. Fetch file rows for those IDs in the ranked order
+            var rows = new List<FileRow>(topIDs.Count);
+            var idPlaceholders = new List<string>();
+            using (var cmd = _connection.CreateCommand())
+            {
+                for (int j = 0; j < topIDs.Count; j++)
+                {
+                    var paramName = $"$id{j}";
+                    idPlaceholders.Add(paramName);
+                    cmd.Parameters.AddWithValue(paramName, topIDs[j]);
+                }
+                cmd.CommandText = $"""
+                SELECT id, path_text, kind, size_bytes, modified_at, has_faces, has_text,
+                       (SELECT GROUP_CONCAT(tag, '|') FROM (SELECT tag FROM tags WHERE file_id = files.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, score DESC, rowid)) AS auto_tags,
+                       vlm_proposed_name
+                FROM files
+                WHERE id IN ({string.Join(",", idPlaceholders)}) AND failed = 0
+                """;
+
+                var byId = new Dictionary<long, FileRow>();
+                using (var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false))
+                {
+                    while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                    {
+                        var row = ReadRow(reader);
+                        byId[row.Id] = row;
+                    }
+                }
+
+                foreach (var id in topIDs)
+                {
+                    if (byId.TryGetValue(id, out var row))
+                    {
+                        rows.Add(row);
+                    }
+                }
+            }
+
+            return rows;
         }
         finally { _gate.Release(); }
     }
@@ -443,24 +529,33 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
         return string.Join(' ', parts);
     }
 
+    private static float[] BlobToFloats(byte[] blob)
+    {
+        var span = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(blob);
+        return span.ToArray();
+    }
+
     private static float DotProduct(float[] q, byte[] blob)
     {
-        // BLOB layout: little-endian float32, length = q.Length * 4.
-        if (blob.Length != q.Length * 4)
-        {
-            return 0f;
-        }
-        // Cast the blob to a Span<float> in place — zero allocation. The
-        // JIT auto-vectorizes the multiply-accumulate loop into AVX2/NEON
-        // FMA on every modern x86_64 / ARM64 CPU; ~3x faster than the
-        // per-element BitConverter.ToSingle path without taking a dep
-        // on System.Numerics.Tensors. Endianness is correct because
-        // both writer (engine, little-endian) and reader (Windows on
-        // x86_64/ARM64, little-endian) match.
+        if (blob.Length != q.Length * 4) return 0f;
         var qSpan = q.AsSpan();
         var blobFloats = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(blob);
         float acc = 0f;
-        for (int i = 0; i < qSpan.Length; i++)
+        int i = 0;
+        int simdLength = System.Numerics.Vector<float>.Count;
+        if (System.Numerics.Vector.IsHardwareAccelerated && qSpan.Length >= simdLength)
+        {
+            var sumVector = System.Numerics.Vector<float>.Zero;
+            int limit = qSpan.Length - (qSpan.Length % simdLength);
+            for (; i < limit; i += simdLength)
+            {
+                var qVec = new System.Numerics.Vector<float>(qSpan.Slice(i, simdLength));
+                var bVec = new System.Numerics.Vector<float>(blobFloats.Slice(i, simdLength));
+                sumVector += qVec * bVec;
+            }
+            acc = System.Numerics.Vector.Dot(sumVector, System.Numerics.Vector<float>.One);
+        }
+        for (; i < qSpan.Length; i++)
         {
             acc += qSpan[i] * blobFloats[i];
         }

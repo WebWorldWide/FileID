@@ -8,6 +8,167 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-05-26 — V16.28 hardening pass: OCR overflow, thumbnail-cache LRU, bulk-select batching, tile hover (Windows)
+
+Targeted security/perf/parity pass on top of V16.27. No new features; the goal was to land concrete
+fixes for issues surfaced by a code audit while pushing back on the audit items that turned out to
+be wrong (`restructure_apply.rs` "unwraps" are test-only; `platform.rs:389` already uses
+`unwrap_or`; `LibraryView.swift:506` is the kind-filter chip animation, not the tab switcher —
+tab crossfade already matches at 0.22s).
+
+**Engine (Rust)**:
+- **OCR dimension overflow defense** (`engine/src/shell/ocr.rs`): `recognize` now caps each side
+  at 16384 before any multiplication, so `width * height * 4` cannot overflow u32 and
+  `SoftwareBitmap::CreateCopyFromBuffer`'s i32 dim parameters stay in range. Added 3 unit tests
+  (zero dim, oversize dim, short buffer); all early-bail before any Windows API call.
+- **Keyword extractor tidy** (`engine/src/util/keywords.rs:44`): replaced
+  `u32::try_from(phrase.len()).unwrap_or(u32::MAX)` with `phrase.len() as u32`. Phrase length is
+  bounded by the doc-extract 16 MB cap upstream; the saturating-cast defense was dead code.
+- **OCR public-API comment** (`engine/src/shell/ocr.rs:13-25`): `OcrResult.lines` /
+  `OcrResult.locale` / `OcrLine` are populated but not yet consumed. Replaced bare
+  `#[allow(dead_code)]` with a one-line comment naming the future consumer (per-line OCR overlay)
+  so the next maintainer knows why the surface is intentionally fat.
+
+**Windows App (C#)**:
+- **ThumbnailDiskCache: in-memory LRU index** (`FileID.App/Services/ThumbnailDiskCache.cs`): the
+  previous sweep walked `EnumerateFiles("*.bin", SearchOption.AllDirectories)` on every cap trip
+  — O(N) disk IO on libraries with 10K+ cached thumbnails. Replaced with a
+  `ConcurrentDictionary<string, CacheEntry>` index seeded once at startup by `Prime()`. Reads
+  touch `LastAccessTicks` in memory (no more `SetLastAccessTimeUtc` syscall per cache hit);
+  writes update the index and recompute `_cachedBytes` by delta. On cap exceed, sort the
+  in-memory index by ticks and delete oldest until under headroom — zero filesystem walks after
+  startup. Eviction policy is factored into a pure `SelectEvictions(...)` helper covered by 4
+  unit tests in `Tests/FileID.App.Tests/ThumbnailDiskCacheTests.cs`.
+- **LibraryViewModel: bulk-selection batching** (`FileID.App/ViewModels/LibraryViewModel.cs` +
+  `Views/Library/LibraryView.xaml.cs`): `OnTilePropertyChanged` was firing two PropertyChanged
+  events + a `SelectionRegistry` republish on every per-tile `IsSelected` toggle. Ctrl+A on 10K
+  tiles burned 20K notifications and 10K `_selected.ToList()` allocations (`SelectedItems`
+  getter). New `BulkSelectionScope()` IDisposable wraps the three bulk-mutation sites in
+  `LibraryView.xaml.cs` (Ctrl+A / `OnSelectAllClicked`, shift-click range select, plain-click
+  clear-all). Per-tile handler still updates `_selected` but defers notifications under the
+  scope; on dispose, fires one batch. `SelectedItems` now caches the list snapshot and
+  invalidates on real change. `ClearSelection()` rewired through the same scope.
+- **Tile hover stroke animation** (`Views/Library/LibraryView.xaml` + `.xaml.cs`): macOS tiles
+  ramp their white stroke 0.08 → 0.18 opacity over `easeOut(0.18s)` alongside the existing
+  scale (LibraryView.swift:676-680). Windows tiles were animating scale only. Replaced the
+  Grid's themed `BorderBrush` with an inline `SolidColorBrush` per tile (so each instance owns
+  an animatable opacity), and added `ApplyTileStrokeOpacity` — a `Storyboard` + `DoubleAnimation`
+  with `CubicEase EaseOut` that runs alongside the scale spring. Shadow opacity animation
+  (0.18 → 0.45, blur 5 → 14) is deferred since it needs per-tile `Composition.DropShadow`
+  plumbing with cleanup on tile recycle.
+- **ReadStore.cs: pre-existing Span-in-async fix** (`FileID.App/Services/ReadStore.cs:303`): the
+  V16.27 in-flight work had introduced `MemoryMarshal.Cast<byte, float>` inside an `async`
+  method, which is a C# 13 preview feature unsupported under .NET 8's stable language version
+  (CS8652). Extracted the cast into a sync `BlobToFloats(byte[]) -> float[]` helper at the
+  same level as `DotProduct`. Pre-existing blocker, not a regression from this session — the
+  V16.27 build was broken on disk until this fix.
+
+**ReadStore search query audit** (B3, audit-only): `SearchAsync` at `ReadStore.cs:144-166`
+OR-joins six branches. The `ocr_fts` / `doc_fts` MATCH branches are fast (FTS5-backed). The four
+`LIKE '%x%'` branches (`f.path_text`, `f.vlm_proposed_name`, `f.vlm_description`, `tags.tag`,
+`persons.name/first_name/last_name`) are non-sargable — any one of them forces SQLite into a
+files-table full scan, and indexes won't help leading-wildcard LIKE. The real fix is a migration
+v8 that extends `doc_fts` (or adds a new `text_fts`) covering `path_text`,
+`vlm_proposed_name`/`description`, `tag`, and `person_name` so the query becomes MATCH-only. Out
+of scope this session — needs the user's real library to validate the migration. Surfaced as a
+NEXT.md follow-up.
+
+**Comment surgery** (D2, narrow): cleaned the LibraryViewModel header (was mangled with a stray
+"The shape is the same:" run-on), trimmed the redundant "detach listeners" prose in `Dispose`,
+and compressed the per-tile-PropertyChanged-forwarding comment to keep just the WHY (the "VM's
+SelectedCount stayed silently stale" bug rationale). Other V16.27 files (`tagging.rs`,
+`doc_extract.rs`, `audio_meta.rs`, `ReadStore.cs`) were inspected; no slop worth churning over —
+the comments there are WHY-style technical notes (cross-references to SwiftUI line numbers,
+performance pitfalls, invariant statements) that map cleanly to CLAUDE.md's keep-WHY rule.
+
+### Build/test (local, in-agent)
+- `cargo +1.90 check` clean. `cargo +1.90 clippy --all-targets -- -D warnings` clean.
+- `cargo +1.90 test --lib` → **212 passed, 0 failed** (V16.27 was 209; +3 OCR overflow tests).
+- `dotnet build src/FileID.App/FileID.App.csproj` → 0 warnings, 0 errors.
+- `dotnet test Tests/FileID.App.Tests/` → **102 passed, 0 failed** (V16.27 was 98; +4
+  `ThumbnailDiskCacheTests.SelectEvictions_*` tests).
+- `dotnet test Tests/FileID.IpcSchema.Tests/` → **31 passed, 0 failed**.
+
+### On-hardware verify (gated on user)
+Same gates as V16.27 still pending. Additionally:
+- Scroll a library with 10K+ thumbnails; the previous 30s "cache sweep" pause should be gone (no
+  more directory walk after startup).
+- Ctrl+A in a 10K-tile library: selection should land instantly, not over multiple seconds.
+- Hover a Library tile: stroke should brighten from a faint 0.08 to a clear 0.18 over 0.18s,
+  matching the macOS tile hover affordance.
+
+## 2026-05-26 — V16.27 scan-pipeline single-read finalization + UI parity polish (Windows)
+
+Pipeline I/O consolidation on top of V16.26, paired with two surgical UI-parity fixes the macOS
+audit surfaced.
+
+**Engine (Windows, `pipeline/tagging.rs` + `doc_extract.rs` + `audio_meta.rs`)**:
+- **EXIF ghost-read fix**: `run_decoder_thread` now seeds `exif_data = Some((None, None, None))`
+  on every successful image `read_to_end`, so the worker's `parse_exif_blocking` fallback is
+  unreachable for images. Every non-EXIF format (PNG, GIF, screenshots, etc.) skips one wasted
+  re-open + re-fail per file. `parse_exif_blocking` deleted as dead code.
+- **Doc / PDF / Audio single-read**: extended the image-style pre-read pattern to Doc/Pdf/Audio
+  kinds (files ≤ `FULL_HASH_MAX_BYTES` = 16 MB). The decoder thread reads once, hashes from the
+  buffer, and threads `Option<&[u8]>` into the kind-specific extractor. `doc_extract::extract`
+  and `audio_meta::extract` now accept `bytes: Option<&[u8]>` and dispatch internally:
+    - `doc_extract`: zip helpers refactored to generic `<R: Read + Seek>` inner functions that
+      take either a `File` or a `Cursor<&[u8]>`; plain-text path uses `String::from_utf8_lossy`
+      on the buffer when supplied.
+    - `audio_meta`: tiny `BytesMediaSource` adapter wraps `Cursor<Vec<u8>>` with symphonia's
+      `MediaSource` trait (declares seekable + byte_len).
+  Worker's `content_hash` fallback is unchanged — still fires correctly for video (codec API
+  needs a path), unrecognized kinds, and the > 16 MB long-tail.
+
+**Windows UI parity**:
+- **ApplyBar hover spring** (`RestructureView.xaml.cs`): wired four `PointerEntered`/`PointerExited`
+  handlers on `ApplySymlinkButton` + `ApplyMovesButton` via the existing `SpringEasing.AnimateScale`
+  helper, mirroring macOS `RestructureApplyBar.swift:114-117` (response: 0.28, dampingFraction: 0.7,
+  scale 1.02 on hover-while-enabled). The XAML comment had promised this; now it matches.
+- **TagChip Kind brushes** (`Theme.xaml`): defined `TagChipKindForegroundBrush` (#FFFFFF) and
+  `TagChipKindBackgroundBrush` (#808080 @ 0.30) so `TagChip.xaml.cs:74-75` no longer silently
+  falls through to hardcoded values. Latent footgun closed.
+- **TagChip.FormatTag macOS-parity fix** (`TagChip.xaml.cs:135`): the C# port used
+  `ToTitleCase(ToLowerInvariant(...))`, which mangled internal capitals — `iPhone-14` → `Iphone 14`
+  vs macOS `LibraryView.swift:646-652` `first.uppercased() + dropFirst()` → `IPhone 14`. Rewrote
+  to match the Swift implementation exactly: pre-formatted space-bearing labels pass through, only
+  the leading character of the final segment is uppercased, internal model-number casing is
+  preserved. Adds an early `Contains(' ')` guard so `"Has TEXT"` stays as-is (previously it would
+  have title-cased to `"Has Text"`). Test `FormatTag_MatchesMacParitySpec(iPhone-14, IPhone 14)`
+  now passes — was failing on HEAD.
+
+**Repo hygiene**:
+- `.gitignore`: stray `onnxruntime.dll` / `onnxruntime_providers_shared.dll` under
+  `src/engine/` (fetch-runtime-deps.ps1 sometimes drops them next to the binary for local dev).
+- Staged `scene_embeddings_precomputed.rs` (real source — `scene_vocab.rs:35` includes it). The
+  include is now wrapped in `mod scene_embeddings { ... } pub use scene_embeddings::SCENE_EMBEDDINGS;`
+  with `#[allow(clippy::excessive_precision)]` so the precomputed CLIP rows stay byte-faithful with
+  the source notebook without spamming 5 884 lint suggestions.
+- `downloader.rs` SHA streaming: heap-allocated the 64 KB chunk buffer (`vec![0u8; 65536]`
+  instead of `[0u8; 65536]`) so the async future doesn't balloon to ~67 KB and propagate
+  `clippy::large_futures` errors through `prewarm.rs` callers. Pure quality fix; preserves the
+  user's in-flight streaming-SHA logic exactly.
+- `xml_text_runs` in `doc_extract.rs`: collapsed the nested-`if` into a match guard
+  (`Ok(Event::Text(t)) if depth > 0 =>`) to silence the new `clippy::collapsible_match` lint.
+
+### Build/test (local, in-agent)
+- `cargo +1.90 check` clean. `cargo +1.90 clippy --all-targets -- -D warnings` clean against
+  the full working tree (engine + user's in-flight edits). `cargo +1.90 test --lib` →
+  **209 passed, 0 failed** (up from V16.26's 204 — added bytes-vs-path equivalence tests for
+  `doc_extract` (txt + docx) and `audio_meta`, plus a sanity test for the new
+  `BytesMediaSource` adapter). `dotnet build FileID.sln -c Debug` → 0 errors, 0 warnings.
+  `dotnet test Tests/FileID.App.Tests/` → **98 passed, 0 failed** (the
+  `FormatTag_MatchesMacParitySpec(iPhone-14, IPhone 14)` regression that was failing on HEAD
+  is now green).  `dotnet test Tests/FileID.IpcSchema.Tests/` → **31 passed, 0 failed**.
+
+### On-hardware verify
+- Scan a library with PNG + GIF + JPG + docx + mp3 + pdf + a > 16 MB file. JPEGs surface
+  camera/GPS in the preview metadata; PNGs scan without crash; docs/audio surface keyword chips
+  / artist+album tags; > 16 MB file exercises the composite-hash fallback successfully.
+- Restructure tab: hover the gold "Apply as shortcuts" and outlined "Convert to real moves" —
+  both spring up to ~1.02× and settle. Disabled state stays at 1.0.
+- Library Kind chips render visually identical to before (theme brushes match the previous
+  hardcoded hex).
+
 ## 2026-05-22 — V16.26 no-self-host policy + hanging-feature sweep + PDF / HNSW / BGE unhang
 
 Hardened-policy pass on top of V16.25: every artifact the engine downloads must already exist on

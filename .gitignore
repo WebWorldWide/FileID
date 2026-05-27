@@ -76,6 +76,12 @@ platforms/windows/build/smoke-out/
 # fetch-runtime-deps.ps1; large binaries, not source).
 platforms/windows/build/runtime-cache/
 
+# Stray ONNX Runtime DLLs that fetch-runtime-deps.ps1 sometimes drops next
+# to the engine binary for local dev. The canonical copies live under
+# build/runtime-cache/ and ship via the MSI — these duplicates are not source.
+platforms/windows/src/engine/onnxruntime.dll
+platforms/windows/src/engine/onnxruntime_providers_shared.dll
+
 # Stray dotnet build output redirected by build scripts.
 platforms/windows/stderr.txt
 platforms/windows/stdout.txt

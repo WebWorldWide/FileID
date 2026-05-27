@@ -643,6 +643,8 @@ pub struct PreDecoded {
     /// Phase 5 audio-kind metadata tags (artist/album/title/genre/year).
     /// Empty for non-audio kinds + online-only + extraction failures.
     pub audio_tags: Vec<(String, Option<f32>)>,
+    pub content_hash: Option<[u8; 32]>,
+    pub exif: Option<(Option<String>, Option<f64>, Option<f64>)>,
 }
 
 /// Decoder-pool worker. Sync OS thread (not a tokio task) so the
@@ -664,6 +666,72 @@ fn run_decoder_thread(
             Err(_) => return,
         };
         let decode_started = Instant::now();
+
+        let mut file_bytes = None;
+        let mut content_hash = None;
+        let mut exif_data = None;
+
+        if !file.online_only {
+            match file.kind {
+                FileKind::Image => {
+                    if let Ok(mut f) = open_image_file(&file.path) {
+                        let mut bytes = Vec::with_capacity(file.size_bytes as usize);
+                        if std::io::Read::read_to_end(&mut f, &mut bytes).is_ok() {
+                            // Baseline: a successful read always produces Some(_)
+                            // so the worker's parse_exif_blocking fallback is
+                            // unreachable for images. Non-EXIF formats (PNG, GIF,
+                            // screenshots) hit this branch and skip the wasted
+                            // re-open + re-fail.
+                            exif_data = Some((None, None, None));
+                            // Parse EXIF from memory
+                            if let Ok(exif) = exif::Reader::new().read_from_container(&mut std::io::Cursor::new(&bytes)) {
+                                let camera_model = exif
+                                    .get_field(exif::Tag::Model, exif::In::PRIMARY)
+                                    .map(|f| f.display_value().with_unit(&exif).to_string().trim_matches('"').to_string())
+                                    .filter(|s| !s.is_empty());
+                                let lat = read_gps_coord(&exif, exif::Tag::GPSLatitude, exif::Tag::GPSLatitudeRef);
+                                let lon = read_gps_coord(&exif, exif::Tag::GPSLongitude, exif::Tag::GPSLongitudeRef);
+                                exif_data = Some((camera_model, lat, lon));
+                            }
+                            // Compute BLAKE3 content hash from memory
+                            let hash = if bytes.len() <= crate::util::content_hash::FULL_HASH_MAX_BYTES as usize {
+                                *blake3::hash(&bytes).as_bytes()
+                            } else {
+                                let span = bytes.len().min(1024 * 1024);
+                                let mut hasher = blake3::Hasher::new();
+                                hasher.update(&bytes[..span]);
+                                let start_tail = bytes.len().saturating_sub(span);
+                                hasher.update(&bytes[start_tail..]);
+                                hasher.update(&(bytes.len() as u64).to_le_bytes());
+                                *hasher.finalize().as_bytes()
+                            };
+                            content_hash = Some(hash);
+                            file_bytes = Some(bytes);
+                        }
+                    }
+                }
+                // Doc / PDF / Audio share the image-style single-read pattern
+                // when the file fits in the full-hash window (16 MB). The
+                // buffer feeds both BLAKE3 and the kind-specific extractor,
+                // skipping the worker's content_hash fallback re-open. Files
+                // above the cap fall through to the composite-hash + path-
+                // based extractor path (a head+tail+size read of 2 MB total),
+                // bounding decoder-thread peak memory at one file's bytes.
+                FileKind::Doc | FileKind::Pdf | FileKind::Audio
+                    if file.size_bytes <= crate::util::content_hash::FULL_HASH_MAX_BYTES =>
+                {
+                    if let Ok(mut f) = open_image_file(&file.path) {
+                        let mut bytes = Vec::with_capacity(file.size_bytes as usize);
+                        if std::io::Read::read_to_end(&mut f, &mut bytes).is_ok() {
+                            content_hash = Some(*blake3::hash(&bytes).as_bytes());
+                            file_bytes = Some(bytes);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
         // Cloud placeholders: never read content (reading hydrates the file,
         // a surprise network download). Emit a metadata-only row (decoded =
         // None) just like an unsupported kind; a later scan after the user
@@ -672,7 +740,7 @@ fn run_decoder_thread(
             None
         } else {
             match file.kind {
-                FileKind::Image => Some(decode_image_sync(&file.path)),
+                FileKind::Image => Some(decode_image_sync(&file.path, file_bytes.as_deref())),
                 FileKind::Video => Some(decode_video_keyframe_sync(&file.path)),
                 _ => None,
             }
@@ -681,28 +749,36 @@ fn run_decoder_thread(
             STATS_DECODE_US.fetch_add(decode_started.elapsed().as_micros() as u64, Ordering::Relaxed);
         }
         // Phase 4: for Doc-kind files, extract text on the same decoder
-        // thread (cheap I/O; same online_only gate as content read).
+        // thread (cheap I/O; same online_only gate as content read). Re-uses
+        // the file_bytes buffer (≤ 16 MB) when the doc/pdf branch above
+        // pre-read it; otherwise the extractor falls back to opening the
+        // path itself.
         let doc_text = if file.online_only {
             None
         } else {
             match file.kind {
-                FileKind::Doc | FileKind::Pdf => crate::pipeline::doc_extract::extract(&file.path)
-                    .ok()
-                    .flatten(),
+                FileKind::Doc | FileKind::Pdf => {
+                    crate::pipeline::doc_extract::extract(&file.path, file_bytes.as_deref())
+                        .ok()
+                        .flatten()
+                }
                 _ => None,
             }
         };
         // Phase 5: for Audio-kind files, read container metadata via symphonia
         // (artist/album/title/genre/year). Pure-Rust, no system ffmpeg.
+        // Reuses file_bytes when present (same 16 MB cap as docs).
         let audio_tags = if file.online_only {
             Vec::new()
         } else {
             match file.kind {
-                FileKind::Audio => crate::pipeline::audio_meta::extract(&file.path),
+                FileKind::Audio => {
+                    crate::pipeline::audio_meta::extract(&file.path, file_bytes.as_deref())
+                }
                 _ => Vec::new(),
             }
         };
-        let item = PreDecoded { file, decoded, doc_text, audio_tags };
+        let item = PreDecoded { file, decoded, doc_text, audio_tags, content_hash, exif: exif_data };
         if tx.send_blocking(item).is_err() {
             return;
         }
@@ -728,11 +804,13 @@ fn open_read_sequential(p: &std::path::Path) -> std::io::Result<std::fs::File> {
     std::fs::File::open(p)
 }
 
-/// Open an image file for decoding, with long-path support and a short
-/// retry-with-backoff for transient sharing/lock violations (a file still
-/// being written by another app, or an AV scanner holding a momentary
-/// lock). `\\?\`-prefix so deep (>260-char) paths open at all. Genuine
-/// errors (not found, access denied) fail fast without burning retries.
+/// Open a file in the decoder thread for pre-reading (image bytes for
+/// decode + hash, doc/audio bytes for hash + extraction). Long-path support
+/// via `\\?\` prefix and short retry-with-backoff for transient sharing /
+/// lock violations (file still being written by another app, AV scanner
+/// holding a momentary lock). Genuine errors (not found, access denied)
+/// fail fast without burning retries. Named historically for the image
+/// path; reused for Doc/Pdf/Audio under the same hardening rationale.
 fn open_image_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     let p = crate::util::path_safety::to_extended_length(path);
     let mut last_err: Option<std::io::Error> = None;
@@ -763,8 +841,8 @@ fn open_image_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
 /// On Windows, falls back to the WinRT BitmapDecoder (HEIF Image
 /// Extensions) when image-rs fails on a .heic / .heif file. The
 /// fallback is silent on other extensions.
-fn decode_image_sync(path: &std::path::Path) -> anyhow::Result<(Vec<u8>, u32, u32)> {
-    let primary = decode_image_sync_imagecrate(path);
+fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Result<(Vec<u8>, u32, u32)> {
+    let primary = decode_image_sync_imagecrate(path, bytes);
     if primary.is_ok() {
         return primary;
     }
@@ -794,16 +872,21 @@ fn decode_image_sync(path: &std::path::Path) -> anyhow::Result<(Vec<u8>, u32, u3
     primary
 }
 
-fn decode_image_sync_imagecrate(path: &std::path::Path) -> anyhow::Result<(Vec<u8>, u32, u32)> {
+fn decode_image_sync_imagecrate(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> anyhow::Result<(Vec<u8>, u32, u32)> {
         use std::io::Cursor;
-        let file = open_image_file(path)
-            .map_err(|e| anyhow::anyhow!("open: {e}"))?;
-        let mmap = unsafe {
-            memmap2::Mmap::map(&file)
-                .map_err(|e| anyhow::anyhow!("mmap: {e}"))?
+        let mmap;
+        let bytes: &[u8] = if let Some(pre_read) = bytes {
+            pre_read
+        } else {
+            let file = open_image_file(path)
+                .map_err(|e| anyhow::anyhow!("open: {e}"))?;
+            mmap = unsafe {
+                memmap2::Mmap::map(&file)
+                    .map_err(|e| anyhow::anyhow!("mmap: {e}"))?
+            };
+            &mmap
         };
-        let bytes: &[u8] = &mmap;
 
         let peek = image::ImageReader::new(Cursor::new(bytes))
             .with_guessed_format()
@@ -862,7 +945,7 @@ async fn process_file_predecoded(
     worker_idx: usize,
     coord: &ScanCoordinator,
 ) -> TaggedFile {
-    let PreDecoded { file, decoded, doc_text, audio_tags } = predecoded;
+    let PreDecoded { file, decoded, doc_text, audio_tags, content_hash, exif } = predecoded;
     let file = &file;
     let started = Instant::now();
     let scanned_unix = std::time::SystemTime::now()
@@ -905,8 +988,9 @@ async fn process_file_predecoded(
     // online-only file). On any read error the row simply lacks a
     // content_hash — the heal-by-file_ref path still applies.
     if !file.online_only {
-        tagged.content_hash =
-            crate::util::content_hash::content_hash(&file.path, file.size_bytes).ok();
+        tagged.content_hash = content_hash.or_else(|| {
+            crate::util::content_hash::content_hash(&file.path, file.size_bytes).ok()
+        });
     }
 
     // Document content (Phase 4): the decoder thread already pulled the text
@@ -991,7 +1075,7 @@ async fn process_file_predecoded(
         }
             if matches!(file.kind, FileKind::Image) {
                 let exif_started = Instant::now();
-                if let Some((cam, lat, lon)) = parse_exif_blocking(file.path.clone()).await {
+                if let Some((cam, lat, lon)) = exif {
                     tagged.camera_model = cam;
                     tagged.location_lat = lat;
                     tagged.location_lon = lon;
@@ -1373,29 +1457,6 @@ async fn run_ocr_blocking(rgb: Vec<u8>, w: u32, h: u32) -> anyhow::Result<Option
         }
     })
     .await?
-}
-
-/// Parse camera model + GPS from EXIF if present. Best-effort, never
-/// fails — returns None on any error.
-async fn parse_exif_blocking(path: PathBuf) -> Option<(Option<String>, Option<f64>, Option<f64>)> {
-    tokio::task::spawn_blocking(move || -> Option<(Option<String>, Option<f64>, Option<f64>)> {
-        let file = std::fs::File::open(crate::util::path_safety::to_extended_length(&path)).ok()?;
-        let mut reader = std::io::BufReader::new(file);
-        let exif = exif::Reader::new().read_from_container(&mut reader).ok()?;
-
-        let camera_model = exif
-            .get_field(exif::Tag::Model, exif::In::PRIMARY)
-            .map(|f| f.display_value().with_unit(&exif).to_string().trim_matches('"').to_string())
-            .filter(|s| !s.is_empty());
-
-        let lat = read_gps_coord(&exif, exif::Tag::GPSLatitude, exif::Tag::GPSLatitudeRef);
-        let lon = read_gps_coord(&exif, exif::Tag::GPSLongitude, exif::Tag::GPSLongitudeRef);
-
-        Some((camera_model, lat, lon))
-    })
-    .await
-    .ok()
-    .flatten()
 }
 
 fn read_gps_coord(exif: &exif::Exif, value_tag: exif::Tag, ref_tag: exif::Tag) -> Option<f64> {

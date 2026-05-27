@@ -4,7 +4,7 @@
 //! the existing `shell::ocr` path for OCR.
 #![allow(dead_code)] // wired into run_decoder_thread for FileKind::Doc / FileKind::Pdf.
 
-use std::io::Read;
+use std::io::{Cursor, Read, Seek};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -17,17 +17,23 @@ pub(crate) const MAX_TEXT_BYTES: usize = 256 * 1024;
 /// extension is recognised-as-doc-but-unsupported (e.g. `.doc` legacy OLE)
 /// AND when the extension isn't a document at all — callers treat both as
 /// "no doc text" without distinguishing.
-pub(crate) fn extract(path: &Path) -> Result<Option<String>> {
+///
+/// `bytes` is an optional pre-read content buffer (decoder thread reads the
+/// file once for hashing + extraction on small files). When supplied, the
+/// zip / text path skips a second file open; when `None`, the path-based
+/// reader is used. PDF always uses the path because pdfium owns the file
+/// handle and typical PDFs blow past the pre-read size cap.
+pub(crate) fn extract(path: &Path, bytes: Option<&[u8]>) -> Result<Option<String>> {
     let ext = path
         .extension()
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
     let text = match ext.as_str() {
-        "txt" | "md" => Some(read_plain(path)?),
-        "docx" => Some(extract_zip_xml(path, &["word/document.xml"], &["w:t"])?),
-        "pptx" => Some(extract_zip_xml_glob(path, "ppt/slides/slide", ".xml", &["a:t"])?),
-        "xlsx" => Some(extract_zip_xml(path, &["xl/sharedStrings.xml"], &["t"])?),
+        "txt" | "md" => Some(read_plain(path, bytes)?),
+        "docx" => Some(extract_zip_xml(path, bytes, &["word/document.xml"], &["w:t"])?),
+        "pptx" => Some(extract_zip_xml_glob(path, bytes, "ppt/slides/slide", ".xml", &["a:t"])?),
+        "xlsx" => Some(extract_zip_xml(path, bytes, &["xl/sharedStrings.xml"], &["t"])?),
         #[cfg(feature = "pdf-analyze")]
         "pdf" => extract_pdf_text(path).ok(),
         _ => None,
@@ -45,7 +51,14 @@ fn truncate_to_max(mut t: String) -> String {
     t
 }
 
-fn read_plain(path: &Path) -> Result<String> {
+fn read_plain(path: &Path, bytes: Option<&[u8]>) -> Result<String> {
+    if let Some(b) = bytes {
+        // Lossy decode keeps the existing semantics — `read_to_string` would
+        // reject invalid UTF-8 with an error, and a single bad byte in a 1 MB
+        // text file shouldn't sink the whole extraction. The keyword extractor
+        // and FTS5 snippets can handle U+FFFD replacement chars fine.
+        return Ok(String::from_utf8_lossy(b).into_owned());
+    }
     let p = crate::util::path_safety::to_extended_length(path);
     std::fs::read_to_string(&p).with_context(|| format!("read text {}", p.display()))
 }
@@ -58,7 +71,13 @@ fn extract_pdf_text(path: &Path) -> Result<String> {
     use pdfium_render::prelude::Pdfium;
 
     let p = crate::util::path_safety::to_extended_length(path);
-    let pdfium = Pdfium::default();
+    // Pdfium::default() unwraps the bind result and panics on a missing
+    // pdfium.dll — taking the entire engine down per OS LoadLibrary error
+    // 126. Bind explicitly so a missing/broken DLL becomes a per-file Err
+    // that the caller (extract() above) silently turns into "no PDF text".
+    let bindings = Pdfium::bind_to_system_library()
+        .map_err(|e| anyhow::anyhow!("pdfium bind: {e}"))?;
+    let pdfium = Pdfium::new(bindings);
     let doc = pdfium
         .load_pdf_from_file(&p, None)
         .with_context(|| format!("pdfium load {}", path.display()))?;
@@ -78,11 +97,29 @@ fn extract_pdf_text(path: &Path) -> Result<String> {
 }
 
 /// Pull text out of named members in a zip archive.
-fn extract_zip_xml(path: &Path, members: &[&str], target_elems: &[&str]) -> Result<String> {
-    let p = crate::util::path_safety::to_extended_length(path);
-    let file = std::fs::File::open(&p)?;
+fn extract_zip_xml(
+    path: &Path,
+    bytes: Option<&[u8]>,
+    members: &[&str],
+    target_elems: &[&str],
+) -> Result<String> {
+    if let Some(b) = bytes {
+        extract_zip_xml_inner(Cursor::new(b), path, members, target_elems)
+    } else {
+        let p = crate::util::path_safety::to_extended_length(path);
+        let file = std::fs::File::open(&p)?;
+        extract_zip_xml_inner(file, path, members, target_elems)
+    }
+}
+
+fn extract_zip_xml_inner<R: Read + Seek>(
+    reader: R,
+    path: &Path,
+    members: &[&str],
+    target_elems: &[&str],
+) -> Result<String> {
     let mut zip =
-        zip::ZipArchive::new(file).with_context(|| format!("zip open {}", path.display()))?;
+        zip::ZipArchive::new(reader).with_context(|| format!("zip open {}", path.display()))?;
     let mut out = String::new();
     for member in members {
         let mut entry = match zip.by_name(member) {
@@ -107,14 +144,29 @@ fn extract_zip_xml(path: &Path, members: &[&str], target_elems: &[&str]) -> Resu
 /// are visited in sorted (slide) order.
 fn extract_zip_xml_glob(
     path: &Path,
+    bytes: Option<&[u8]>,
     prefix: &str,
     suffix: &str,
     target_elems: &[&str],
 ) -> Result<String> {
-    let p = crate::util::path_safety::to_extended_length(path);
-    let file = std::fs::File::open(&p)?;
+    if let Some(b) = bytes {
+        extract_zip_xml_glob_inner(Cursor::new(b), path, prefix, suffix, target_elems)
+    } else {
+        let p = crate::util::path_safety::to_extended_length(path);
+        let file = std::fs::File::open(&p)?;
+        extract_zip_xml_glob_inner(file, path, prefix, suffix, target_elems)
+    }
+}
+
+fn extract_zip_xml_glob_inner<R: Read + Seek>(
+    reader: R,
+    path: &Path,
+    prefix: &str,
+    suffix: &str,
+    target_elems: &[&str],
+) -> Result<String> {
     let mut zip =
-        zip::ZipArchive::new(file).with_context(|| format!("zip open {}", path.display()))?;
+        zip::ZipArchive::new(reader).with_context(|| format!("zip open {}", path.display()))?;
     let mut names: Vec<String> = zip.file_names().map(String::from).collect();
     names.sort();
     let mut out = String::new();
@@ -171,11 +223,9 @@ fn xml_text_runs(xml: &str, target_elems: &[&str]) -> String {
                     out.push(' ');
                 }
             }
-            Ok(Event::Text(t)) => {
-                if depth > 0 {
-                    if let Ok(s) = t.unescape() {
-                        out.push_str(&s);
-                    }
+            Ok(Event::Text(t)) if depth > 0 => {
+                if let Ok(s) = t.unescape() {
+                    out.push_str(&s);
                 }
             }
             Ok(Event::Eof) | Err(_) => break,
@@ -209,7 +259,7 @@ mod tests {
     #[test]
     fn extract_text_file_passes_through() {
         let p = tmp_with(".txt", b"hello world");
-        let t = extract(&p).unwrap().unwrap();
+        let t = extract(&p, None).unwrap().unwrap();
         assert_eq!(t, "hello world");
         let _ = std::fs::remove_file(&p);
     }
@@ -217,7 +267,7 @@ mod tests {
     #[test]
     fn extract_markdown_keeps_words() {
         let p = tmp_with(".md", b"# Heading\n\nBody text with **bold** parts.");
-        let t = extract(&p).unwrap().unwrap();
+        let t = extract(&p, None).unwrap().unwrap();
         assert!(t.contains("Body"));
         let _ = std::fs::remove_file(&p);
     }
@@ -225,8 +275,42 @@ mod tests {
     #[test]
     fn extract_unsupported_extension_yields_none() {
         let p = tmp_with(".jpg", b"fake");
-        let t = extract(&p).unwrap();
+        let t = extract(&p, None).unwrap();
         assert!(t.is_none());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn extract_text_bytes_equivalent_to_path() {
+        let body = b"hello bytes path equivalence";
+        let p = tmp_with(".txt", body);
+        let via_path = extract(&p, None).unwrap().unwrap();
+        let via_bytes = extract(&p, Some(body)).unwrap().unwrap();
+        assert_eq!(via_path, via_bytes);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn extract_zip_bytes_equivalent_to_path() {
+        // Minimal docx-shaped zip in memory: one entry word/document.xml with a
+        // <w:t> run. Skip the test if zip writing fails (extreme env weirdness).
+        let mut buf = Vec::new();
+        {
+            use std::io::Write;
+            let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            zw.start_file::<_, ()>(
+                "word/document.xml",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            zw.write_all(b"<root><w:t>hello docx</w:t></root>").unwrap();
+            zw.finish().unwrap();
+        }
+        let p = tmp_with(".docx", &buf);
+        let via_path = extract(&p, None).unwrap().unwrap();
+        let via_bytes = extract(&p, Some(&buf)).unwrap().unwrap();
+        assert_eq!(via_path, via_bytes);
+        assert!(via_bytes.contains("hello docx"));
         let _ = std::fs::remove_file(&p);
     }
 
