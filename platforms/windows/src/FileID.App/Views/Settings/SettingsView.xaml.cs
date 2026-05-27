@@ -30,10 +30,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         Svc.PropertyChanged += OnInstallerChanged;
         Svc.Clip.PropertyChanged += OnSlotChanged;
         Svc.Arcface.PropertyChanged += OnSlotChanged;
-        // Settings has no VLM card today (DeepAnalyze tab owns the VLM
-        // surface). Subscribe anyway so a future card or an indirect
-        // x:Bind path picks up VLM state without an asymmetric gap.
-        Svc.Vlm.PropertyChanged += OnSlotChanged;
+        Svc.DeepVlm.PropertyChanged += OnSlotChanged;
         Unloaded += (_, _) =>
         {
             _unloaded = true;
@@ -41,7 +38,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             Svc.PropertyChanged -= OnInstallerChanged;
             Svc.Clip.PropertyChanged -= OnSlotChanged;
             Svc.Arcface.PropertyChanged -= OnSlotChanged;
-            Svc.Vlm.PropertyChanged -= OnSlotChanged;
+            Svc.DeepVlm.PropertyChanged -= OnSlotChanged;
         };
         Loaded += (_, _) =>
         {
@@ -208,15 +205,15 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
                 Svc.Clip.Fraction = 1.0;
             });
         }
-        // VLM has 4 alternative weights — any one sentinel marks it installed.
+        // Deep Analyze VLM has 3 alternative weights — any one sentinel marks it installed.
         if ((SentinelExists("qwen2_5_vl_3b") || SentinelExists("qwen2_5_vl_7b")
-             || SentinelExists("smolvlm") || SentinelExists("gemma_3_4b"))
-            && Svc.Vlm.Status != Services.ModelInstallStatus.Installed)
+             || SentinelExists("gemma_3_4b"))
+            && Svc.DeepVlm.Status != Services.ModelInstallStatus.Installed)
         {
             DispatcherQueue.TryEnqueue(() =>
             {
-                Svc.Vlm.Status = Services.ModelInstallStatus.Installed;
-                Svc.Vlm.Fraction = 1.0;
+                Svc.DeepVlm.Status = Services.ModelInstallStatus.Installed;
+                Svc.DeepVlm.Fraction = 1.0;
             });
         }
     }
@@ -304,7 +301,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         {
             var s = AppViewModel.Instance.Settings;
             CleanupAutoTagToggle.IsOn = s.CleanupAutoTagKept;
-            AutoTagWithAiToggle.IsOn = s.AutoChainDeepAnalyze;
             // Inverted: AppSettings stores "Disable…" but the UI shows
             // "Auto-install on" (truthy = enabled).
             AutoInstallCudaToggle.IsOn = !s.DisableAutoInstallCuda;
@@ -333,15 +329,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             if (_initializingToggles) return;
             var s = AppViewModel.Instance.Settings;
             s.CleanupAutoTagKept = CleanupAutoTagToggle.IsOn;
-            s.Save();
-        });
-
-    private void OnAutoTagWithAiToggled(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnAutoTagWithAiToggled), () =>
-        {
-            if (_initializingToggles) return;
-            var s = AppViewModel.Instance.Settings;
-            s.AutoChainDeepAnalyze = AutoTagWithAiToggle.IsOn;
             s.Save();
         });
 

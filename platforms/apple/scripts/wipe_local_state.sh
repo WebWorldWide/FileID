@@ -18,7 +18,7 @@
 # With --purge-models also wipes:
 #   - ~/Documents/huggingface/                 (multi-GB MLX VLM
 #                                              weights — Qwen, Gemma,
-#                                              SmolVLM, PaliGemma)
+#                                              PaliGemma)
 #   - ~/.cache/huggingface/                    (system HF cache,
 #                                              touched by some libs)
 #   - ~/Library/Caches/huggingface/            (alternative HF cache)

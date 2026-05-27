@@ -15,7 +15,7 @@ This file is the cross-platform source of truth for what FileID asks for and whe
 | Face embedding | ArcFace iResNet50 / MobileFace (ONNX via CoreML EP) | ArcFace iResNet50 / MobileFace (ONNX via DirectML / CUDA / CPU EP) | Same weights, same model — embeddings are byte-cross-compatible. Person clustering DBs round-trip across platforms. |
 | OCR | Apple Vision `VNRecognizeTextRequest` (fast tier) | Windows.Media.Ocr (built-in WinRT) default; PaddleOCR ONNX opt-in | Built-in OCR is fast + free + multilingual on both. |
 | Image classification | _(dropped)_ | _(dropped)_ | Superseded by CLIP semantic similarity on both platforms. |
-| Vision-language models (Deep Analyze) | MLX: Qwen 3 VL · Gemma 3 · SmolVLM 2 · PaliGemma | llama.cpp: Qwen 2.5-VL · Gemma 3 · SmolVLM · MiniCPM-V (PaliGemma substitute) | MLX is Apple-Silicon-only; llama.cpp covers Windows on every GPU. Curated lineup per platform to use the best-supported quants. |
+| Vision-language models (Deep Analyze) | MLX: Qwen 3 VL · Gemma 3 · PaliGemma | llama.cpp: Qwen 2.5-VL · Gemma 3 · MiniCPM-V (PaliGemma substitute) | MLX is Apple-Silicon-only; llama.cpp covers Windows on every GPU. Curated lineup per platform to use the best-supported quants. |
 
 ## Embedders + OCR — model registry
 
@@ -64,7 +64,7 @@ Files live under each platform's models directory. Downloads triggered by the we
 | License | MIT (Microsoft Florence-2) |
 | Windows layout | `%LOCALAPPDATA%\FileID\Models\florence2\{vision_encoder,embed_tokens,encoder_model,decoder_model_merged}.onnx` + `tokenizer.json` + `config.json` |
 | Approx size | ~445 MB total (vision + embed + encoder + decoder + tokenizer) |
-| Role | **Phrase-grounded object detection** (`<OD>` / `<CAPTION_TO_PHRASE_GROUNDING>`) — the one capability not covered by the rest of the stack (SmolVLM / Qwen2.5-VL / Gemma 3 cover captioning + tags; Windows.Media.Ocr covers OCR). |
+| Role | **Phrase-grounded object detection** (`<OD>` / `<CAPTION_TO_PHRASE_GROUNDING>`) — the one capability not covered by the rest of the stack (Qwen2.5-VL / Gemma 3 cover captioning + tags; Windows.Media.Ocr covers OCR). |
 | Status | Registry arm + `models::florence2` skeleton. **Inference is Phase 7b**: 4 ORT sessions + a Rust autoregressive generation loop + the `tokenizers` crate for the BART tokenizer + a `modelKind: "florence2_base"` Deep-Analyze backend. Build out when grounded OD becomes a concrete product need. |
 
 ### ArcFace iResNet50 (default ≥ 16 GB hardware)
@@ -118,7 +118,6 @@ Files live under each platform's models directory. Downloads triggered by the we
 | **Qwen 2.5-VL 3B** | ~2.5 GB | ~6 GB | Recommended for 8–16 GB machines and Snapdragon WoA | [Qwen/Qwen2.5-VL-3B-Instruct-GGUF](https://huggingface.co/Qwen) — pinned commit, GGUF + mmproj |
 | **Qwen 2.5-VL 7B** | ~5 GB | ~12 GB | Recommended for ≥ 16 GB + dGPU | same family |
 | **Gemma 3 4B (vision)** | ~3 GB | ~8 GB | Alternative captioner, different prose style | [google/gemma-3-4b](https://huggingface.co/google/gemma-3-4b-it) GGUF |
-| **SmolVLM** | ~1 GB | ~3 GB | Tiny / battery-conscious / WoA fallback | [HuggingFaceTB/SmolVLM-Instruct](https://huggingface.co/HuggingFaceTB/SmolVLM-Instruct) |
 | **MiniCPM-V 2.6** | ~5.5 GB | ~14 GB | PaliGemma substitute | [openbmb/MiniCPM-V-2_6](https://huggingface.co/openbmb/MiniCPM-V-2_6) GGUF |
 
 (Exact pinned commits + SHA256s are recorded in the platform-specific installer scripts; that's where the wire URLs live, so the doc isn't a SHA copy-pasta target.)
@@ -131,7 +130,6 @@ Files live under each platform's models directory. Downloads triggered by the we
 | Qwen 2.5-VL 3B | swift-transformers HF cache | Compact alt |
 | Gemma 3 4B | swift-transformers HF cache | |
 | Gemma 3 12B | swift-transformers HF cache | High RAM only |
-| SmolVLM 2 | swift-transformers HF cache | |
 | PaliGemma 3B | swift-transformers HF cache | macOS only — replaced by MiniCPM-V on Windows |
 
 ## VLM storage

@@ -1,7 +1,7 @@
 // Deep Analyze — VLM-powered captioning + smart-rename.
 //
 // Pipeline:
-//   1. Pick a model (Qwen2.5-VL 3B / 7B / Gemma 3 4B / SmolVLM).
+//   1. Pick a model (Qwen2.5-VL 3B / 7B / Gemma 3 4B).
 //   2. Load via llama.cpp (Vulkan / CUDA / DirectML / CPU backend by EP).
 //   3. Per file: render the image / extract a video keyframe / pdfium
 //      first-page render → resize to model context → caption + smart name.
@@ -18,7 +18,6 @@ pub enum VlmModelKind {
     QwenVl3B,
     QwenVl7B,
     Gemma3_4B,
-    SmolVlm,
 }
 
 #[allow(dead_code)]
@@ -28,16 +27,14 @@ impl VlmModelKind {
             VlmModelKind::QwenVl3B => "qwen2.5-vl-3b",
             VlmModelKind::QwenVl7B => "qwen2.5-vl-7b",
             VlmModelKind::Gemma3_4B => "gemma-3-4b",
-            VlmModelKind::SmolVlm => "smolvlm",
         }
     }
 
     pub fn human_name(self) -> &'static str {
         match self {
-            VlmModelKind::QwenVl3B => "Qwen2.5-VL 3B",
-            VlmModelKind::QwenVl7B => "Qwen2.5-VL 7B (recommended)",
+            VlmModelKind::QwenVl3B => "Qwen2.5-VL 3B (recommended)",
+            VlmModelKind::QwenVl7B => "Qwen2.5-VL 7B",
             VlmModelKind::Gemma3_4B => "Gemma 3 4B",
-            VlmModelKind::SmolVlm => "SmolVLM 500M",
         }
     }
 
@@ -48,7 +45,6 @@ impl VlmModelKind {
             VlmModelKind::QwenVl3B => 1900,
             VlmModelKind::QwenVl7B => 4500,
             VlmModelKind::Gemma3_4B => 2500,
-            VlmModelKind::SmolVlm => 700,
         }
     }
 
@@ -58,7 +54,6 @@ impl VlmModelKind {
             VlmModelKind::QwenVl3B => 3500,
             VlmModelKind::QwenVl7B => 7500,
             VlmModelKind::Gemma3_4B => 4500,
-            VlmModelKind::SmolVlm => 900,
         }
     }
 }
@@ -533,7 +528,7 @@ fn sanitize_proposed_name(raw: &str) -> String {
     }
 }
 
-/// Generic, low-information tokens SmolVLM sometimes emits despite the prompt.
+/// Generic, low-information tokens VLMs sometimes emit despite the prompt.
 /// A tag is dropped if any of its words is one of these — they describe the
 /// medium, not the content, and read as noise as a Library chip ("has location"
 /// used to be the worst offender; that one is no longer emitted at all).
@@ -669,7 +664,6 @@ mod tests {
             VlmModelKind::QwenVl3B,
             VlmModelKind::QwenVl7B,
             VlmModelKind::Gemma3_4B,
-            VlmModelKind::SmolVlm,
         ];
         let mut seen = std::collections::HashSet::new();
         for k in kinds {
@@ -679,8 +673,8 @@ mod tests {
 
     #[test]
     fn size_estimates_increase_with_capability() {
-        assert!(VlmModelKind::SmolVlm.approx_size_mb() < VlmModelKind::QwenVl3B.approx_size_mb());
         assert!(VlmModelKind::QwenVl3B.approx_size_mb() < VlmModelKind::QwenVl7B.approx_size_mb());
+        assert!(VlmModelKind::Gemma3_4B.approx_size_mb() > VlmModelKind::QwenVl3B.approx_size_mb());
     }
 
     #[cfg(feature = "pdf-analyze")]

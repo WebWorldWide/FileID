@@ -30,8 +30,8 @@ pub const RENAME_PROMPT: &str = "Suggest a 3 to 5 word lowercase filename for th
 /// `deep_analyze::parse_vlm_tags` (which caps at 2 and drops generic tokens)
 /// into individual `source='vlm'` tags shown as Library chips. A real
 /// vision-language model names what's actually in the image; the prompt is
-/// deliberately strict (concrete nouns, no meta words) because SmolVLM
-/// otherwise drifts toward vague labels like "photo" / "object".
+/// deliberately strict (concrete nouns, no meta words) because smaller VLMs
+/// otherwise drift toward vague labels like "photo" / "object".
 pub const TAG_PROMPT: &str = "Give 1 or 2 specific lowercase tags naming the main subject of this image (for example: golden retriever, mountain lake, birthday cake, sushi platter). Use concrete nouns. Do not use generic words like photo, image, picture, object, thing, scene, background, location, or text. Comma-separated, no sentences, no numbering.";
 
 #[derive(Debug)]

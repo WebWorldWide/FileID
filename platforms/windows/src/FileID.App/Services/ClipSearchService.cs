@@ -162,7 +162,7 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
         try
         {
             var result = await tcs.Task.ConfigureAwait(false);
-            // Empty embedding = CLIP disabled engine-side (replaced by SmolVLM) —
+            // Empty embedding = CLIP disabled engine-side —
             // treat as null so SearchAsync falls back to FTS5, no error banner.
             if (result is { Length: 0 }) { LastSearchError = null; return null; }
             // Successful round-trip — clear any stale error banner.

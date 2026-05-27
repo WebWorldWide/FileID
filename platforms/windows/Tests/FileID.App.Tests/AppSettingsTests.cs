@@ -34,11 +34,8 @@ public class AppSettingsTests
         Assert.False(s.DisableAutoInstallCuda);
         Assert.False(s.DisableAutoInstallVulkanRuntime);
         Assert.False(s.DisableAutoInstallCudnn);
-        Assert.False(s.DisableAutoInstallSmolVlm);
-        // Qwen is the default Deep Analyze model in v3.
         Assert.Equal("qwen2_5_vl_3b", s.SelectedVlmModelKind);
-        // Fresh installs start at the current schema (v3).
-        Assert.Equal(3, s.SchemaVersion);
+        Assert.Equal(4, s.SchemaVersion);
     }
 
     [Fact]
@@ -145,7 +142,7 @@ public class AppSettingsTests
         Assert.NotNull(decoded);
         Assert.Equal("library", decoded!.ActiveTab);
         Assert.True(decoded.SidebarVisible);
-        // "{}" carries no schemaVersion → property default (current schema, v3).
-        Assert.Equal(3, decoded.SchemaVersion);
+        // "{}" carries no schemaVersion → property default (current schema, v4).
+        Assert.Equal(4, decoded.SchemaVersion);
     }
 }

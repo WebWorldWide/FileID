@@ -4,6 +4,35 @@
 
 ---
 
+## V16.29 — SmolVLM removed, tag-quality fixes, sidebar + Deep Analyze (2026-05-27)
+
+**Landed (clippy + test green; dotnet build/test/format clean).** Response to user-reported
+issues: image/video/audio tag chips were "year only"; SmolVLM cruft to remove; navbar
+toggle no-op; Deep Analyze model list missing Gemma.
+
+**Acceptance criteria** (user-run on hardware):
+- Re-scan a folder of mixed kinds. Engine log shows `[TAGGING] scene_summary` lines per
+  image / video with `scene_emit_count >= 1` and `max_score >= 0.15`. Image / video cards
+  in the Library show scene chips (mountain / portrait / etc.), not just year.
+- Audio cards (including ID3-less voice memos) show a duration chip (`12 min`, `1 h 05 min`).
+- Click the title-bar hamburger toggle — sidebar collapses to zero width and re-expands cleanly.
+- Deep Analyze tab shows three cards: Qwen 2.5-VL 3B (recommended), Qwen 2.5-VL 7B, Gemma 3
+  4B. Each card's "Installed" badge reflects on-disk weight presence accurately.
+- No SmolVLM card anywhere; no SmolVLM auto-install at engine-ready; settings.json's
+  `selectedVlmModelKind = "smolvlm"` (if any) auto-migrates to `qwen2_5_vl_3b` on launch.
+
+**Deferred to follow-ups (not in V16.29)**:
+- **Scene vocabulary expansion** (`scene_vocab.rs:54-86`): the curated 50-label set may be too
+  narrow for the user's library. Expanding requires regenerating `scene_embeddings_precomputed.rs`
+  offline via the CLIP text encoder (~21 s build + checked-in matrix). If the diagnostic shows
+  `scene_emit_count = 0` on many images even at threshold 0.15, expand the vocab.
+- **Tile drop-shadow animation** (from V16.28 plan): still pending. Per-tile
+  `Composition.DropShadow` with `ItemsRepeater` recycle cleanup.
+- **ReadStore FTS5 v8 migration** (from V16.28 plan): non-sargable `LIKE '%x%'` branches in
+  `SearchAsync` still force full table scans on large libraries.
+- **macOS smolvlm-related session-log cleanup**: historical NEXT.md / STATE.md / DECISIONS.md
+  entries reference SmolVLM as the canonical tagger; left intact per append-only convention.
+
 ## V16.28 — OCR overflow defense, thumb-cache LRU index, bulk-select batching, tile hover (2026-05-26)
 
 **Landed (engine clippy `-D warnings` + test green at 212/0; dotnet build clean; app tests 102/0).**

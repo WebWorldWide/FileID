@@ -51,8 +51,8 @@
                            Fill="{ThemeResource ControlStrokeColorDefaultBrush}"
                            Opacity="0.3" />
 
-                <!-- CLIP — semantic search. (Tagging is SmolVLM; CLIP only
-                     powers free-text image search now.) -->
+                <!-- CLIP — powers free-text semantic image search AND
+                     scan-time zero-shot scene tagging. -->
                 <Grid Padding="0,4">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="28" />
@@ -183,73 +183,6 @@
                                 Content="{x:Bind ButtonLabel(Svc.Arcface.Status), Mode=OneWay}"
                                 MinWidth="86"
                                 Visibility="{x:Bind ShowActionButton(Svc.Arcface.Status), Mode=OneWay}" />
-                    </Grid>
-                </Grid>
-
-                <!-- SmolVLM — image auto-tagging (small/fast background tagger). -->
-                <Grid Padding="0,4">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="28" />
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-                    <FontIcon Grid.Column="0"
-                              Glyph="{x:Bind GlyphFor(Svc.Vlm.Status), Mode=OneWay}"
-                              Foreground="{x:Bind IconBrushFor(Svc.Vlm.Status), Mode=OneWay}"
-                              FontSize="22"
-                              VerticalAlignment="Top" />
-                    <StackPanel Grid.Column="1" Spacing="4" Margin="12,0,0,0" VerticalAlignment="Center">
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="0"
-                                       Text="{x:Bind VlmTaggerTitle(Svc.Vlm.DisplayLabel), Mode=OneWay}"
-                                       Style="{StaticResource BodyStrongTextBlockStyle}" />
-                            <TextBlock Grid.Column="1"
-                                       Text="{x:Bind VlmSize(Svc.Vlm.ApproxBytes), Mode=OneWay}"
-                                       Margin="12,0,0,0"
-                                       Style="{StaticResource CaptionTextBlockStyle}"
-                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                        </Grid>
-                        <TextBlock Text="Writes 1–2 descriptive tags per image during the first scan. Small and fast — runs in the background."
-                                   Style="{StaticResource CaptionTextBlockStyle}"
-                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                   TextWrapping="Wrap" />
-                        <ProgressBar Maximum="1"
-                                     Value="{x:Bind Svc.Vlm.Fraction, Mode=OneWay}"
-                                     IsIndeterminate="{x:Bind IsStarting(Svc.Vlm.Status, Svc.Vlm.Fraction), Mode=OneWay}"
-                                     Foreground="{StaticResource GoldBrush}"
-                                     Visibility="{x:Bind VisibleIfDownloading(Svc.Vlm.Status), Mode=OneWay}" />
-                        <TextBlock FontFamily="Consolas"
-                                   FontSize="11"
-                                   Text="{x:Bind ProgressLabel(Svc.Vlm.Message, Svc.Vlm.Fraction, Svc.Vlm.BytesDone, Svc.Vlm.TotalBytes), Mode=OneWay}"
-                                   Visibility="{x:Bind VisibleIfDownloading(Svc.Vlm.Status), Mode=OneWay}"
-                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   TextWrapping="Wrap" />
-                        <TextBlock FontFamily="Consolas"
-                                   FontSize="11"
-                                   Text="{x:Bind RateEtaLabel(Svc.Vlm.BytesPerSecond, Svc.Vlm.EtaSeconds), Mode=OneWay}"
-                                   Visibility="{x:Bind ShowRateEta(Svc.Vlm.Status, Svc.Vlm.BytesPerSecond), Mode=OneWay}"
-                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   TextWrapping="Wrap" />
-                        <TextBlock Text="{x:Bind ErrorLabel(Svc.Vlm.LastError), Mode=OneWay}"
-                                   Style="{StaticResource CaptionTextBlockStyle}"
-                                   Foreground="{ThemeResource SystemFillColorCriticalBrush}"
-                                   Visibility="{x:Bind VisibleIfFailed(Svc.Vlm.Status), Mode=OneWay}"
-                                   TextWrapping="Wrap" />
-                    </StackPanel>
-                    <Grid Grid.Column="2" Margin="14,0,0,0" VerticalAlignment="Top">
-                        <TextBlock Text="Installed"
-                                   Foreground="{ThemeResource SystemFillColorSuccessBrush}"
-                                   Style="{StaticResource CaptionTextBlockStyle}"
-                                   VerticalAlignment="Center"
-                                   Visibility="{x:Bind VisibleIfInstalled(Svc.Vlm.Status), Mode=OneWay}" />
-                        <Button Click="OnVlmActionClicked"
-                                Content="{x:Bind ButtonLabel(Svc.Vlm.Status), Mode=OneWay}"
-                                MinWidth="86"
-                                Visibility="{x:Bind ShowActionButton(Svc.Vlm.Status), Mode=OneWay}" />
                     </Grid>
                 </Grid>
 

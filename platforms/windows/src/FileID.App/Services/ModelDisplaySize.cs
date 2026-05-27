@@ -28,7 +28,6 @@ internal static class ModelDisplaySize
             // so divide by 1_000_000 for the displayed value.
             ["qwen2_5_vl_3b"] = (2_300 + 870),         // ≈ 3170
             ["qwen2_5_vl_7b"] = (4_700 + 1_400),       // = 6100
-            ["smolvlm"] = (540 + 200),            // = 740
             ["gemma_3_4b"] = (2_500 + 851),          // = 3351
             ["arcface"] = (174 + 17),             // ≈ 191 (matches registry sums)
             ["mobileclip_s2"] = 143,

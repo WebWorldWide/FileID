@@ -449,7 +449,6 @@ Each model has its own cfg in `models/vlm_registry.rs`:
 - [ ] Qwen 2.5-VL 3B (recommended for 8–16 GB and Snapdragon WoA)
 - [ ] Qwen 2.5-VL 7B (recommended for ≥16 GB + dGPU)
 - [ ] Gemma 3 4B vision (alt captioner)
-- [ ] SmolVLM (tiny / battery-conscious / WoA fallback)
 - [ ] MiniCPM-V 2.6 (PaliGemma substitute)
 Each cfg: HF repo, file list, total bytes, RAM estimate, recommended GPU memory, prompt templates.
 

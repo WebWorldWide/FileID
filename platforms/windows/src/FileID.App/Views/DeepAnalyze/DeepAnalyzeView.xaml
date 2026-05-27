@@ -169,30 +169,30 @@
                     </Border>
 
                     <Border Grid.Column="2"
-                            x:Name="SmolVlmCard"
+                            x:Name="GemmaCard"
                             CornerRadius="12"
                             Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                             BorderThickness="1"
                             Padding="18"
-                            Tag="smolvlm"
+                            Tag="gemma_3_4b"
                             Tapped="OnModelCardTapped">
                         <StackPanel Spacing="6">
-                            <TextBlock Text="SmolVLM 500M" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                            <TextBlock Text="≈700 MB disk · 0.9 GB RAM · CPU-friendly"
+                            <TextBlock Text="Gemma 3 4B" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <TextBlock Text="≈2.5 GB disk · 4.5 GB RAM · balanced"
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            <TextBlock x:Name="SmolVlmStatus"
+                            <TextBlock x:Name="GemmaStatus"
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource AiBrush}" />
-                            <ProgressBar x:Name="SmolVlmProgress"
+                            <ProgressBar x:Name="GemmaProgress"
                                          Value="0" Maximum="1"
                                          Visibility="Collapsed"
                                          Foreground="{ThemeResource GoldBrush}" />
                             <Button Content="Install"
-                                    x:Name="SmolVlmInstallButton"
+                                    x:Name="GemmaInstallButton"
                                     Click="OnInstallModelClicked"
-                                    Tag="smolvlm"
+                                    Tag="gemma_3_4b"
                                     Margin="0,4,0,0" />
                         </StackPanel>
                     </Border>

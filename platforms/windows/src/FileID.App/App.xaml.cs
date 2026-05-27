@@ -153,12 +153,10 @@ public partial class App : Application
             try { LlamaRuntimeAutoInstaller.Hook(); }
             catch (System.Exception ex) { Trace($"LlamaRuntimeAutoInstaller.Hook failed (non-fatal): {ex.Message}"); }
 
-            // SmolVlmAutoInstaller removed: model downloads are now strictly
-            // user-initiated from the welcome screen / Settings → AI Models —
-            // no silent ~700 MB background fetch at engine-ready. The first-scan
-            // auto-tag chain still runs once SmolVLM is present: it's gated on
-            // the weights being on disk and re-fires via WireVlmInstallWatch the
-            // moment the user finishes installing it.
+            // SmolVLM removed (V16.29): scan-time scene tags come from CLIP
+            // zero-shot. The optional higher-quality VLM (Qwen / Gemma) is
+            // installed manually from the Deep Analyze tab — no silent
+            // multi-GB background fetch at engine-ready.
 
             // ClassifierAutoInstaller removed: scan-time scene tags now come
             // from CLIP zero-shot (reusing the already-required MobileCLIP

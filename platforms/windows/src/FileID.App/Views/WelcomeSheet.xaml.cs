@@ -241,9 +241,6 @@ public sealed partial class WelcomeSheet : UserControl
     /// (3B ↔ 7B) updates the row text without a page reload.</summary>
     internal string VlmTitle(string displayLabel) => $"Deep Analyze ({displayLabel})";
 
-    /// <summary>SmolVLM tagging row title — e.g. "Auto-tagging (SmolVLM 500M)".</summary>
-    internal string VlmTaggerTitle(string displayLabel) => $"Auto-tagging ({displayLabel})";
-
     internal string VlmSize(ulong approxBytes)
     {
         const double GB = 1024.0 * 1024.0 * 1024.0;
@@ -293,12 +290,6 @@ public sealed partial class WelcomeSheet : UserControl
     {
         DebugLog.Info("[INSTALL] ArcFace per-row button clicked.");
         HandleAction(Svc.Arcface);
-    }
-
-    private void OnVlmActionClicked(object sender, RoutedEventArgs e)
-    {
-        DebugLog.Info("[INSTALL] SmolVLM (tagging) per-row button clicked.");
-        HandleAction(Svc.Vlm);
     }
 
     private void OnDeepVlmActionClicked(object sender, RoutedEventArgs e)

@@ -103,7 +103,7 @@ public class IpcCommandTests
     {
         // Older clients omit tagsOnly; it must decode as false (serde default
         // on the Rust side, defaulted record param on the C# side).
-        const string json = """{"id":"a","payload":{"deepAnalyzeAll":{"modelKind":"smolvlm","skipExisting":false}}}""";
+        const string json = """{"id":"a","payload":{"deepAnalyzeAll":{"modelKind":"qwen2_5_vl_3b","skipExisting":false}}}""";
         var rt = IpcCoder.Decode<IpcCommand>(json);
         var p = Assert.IsType<DeepAnalyzeAllCommand>(rt.Payload);
         Assert.False(p.TagsOnly);

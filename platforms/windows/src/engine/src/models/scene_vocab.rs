@@ -117,15 +117,15 @@ pub static PROMPT_TEMPLATES: &[&str] = &[
 /// scored ~0.99 even when its true cosine was mediocre, so every file got a
 /// confident WRONG tag. That was the "10% accurate / worthless" report.
 ///
-/// 0.18 is the tuned floor for MobileCLIP-S2; this is the primary accuracy
-/// lever. It was 0.24, which filtered out almost everything — the user's cards
-/// showed only the year. CLIP is now just an INSTANT PLACEHOLDER that the
-/// background SmolVLM auto-tag pass supersedes (ReadStore orders source='vlm'
-/// ahead of source='auto'), so we bias toward recall: better to show a few
-/// approximate scene chips during the scan than a blank card. Force a re-tag
-/// and inspect the persisted `tags.score` (the cosine) to tune: raise it to
-/// drop weak/wrong tags, lower it for more recall.
-pub const SCENE_COSINE_THRESHOLD: f32 = 0.18;
+/// 0.15 is the tuned floor for MobileCLIP-S2; this is the primary accuracy
+/// lever. History: 0.24 filtered out almost everything → 0.18 surfaced some
+/// chips but many images still came back with no scene tag (year-only).
+/// 0.15 biases harder toward recall — CLIP scene tags are now the canonical
+/// auto-tagger (no VLM auto-tag pass behind them), so an approximate chip
+/// beats a blank chip. Force a re-tag and inspect persisted `tags.score`
+/// (the raw cosine) to tune: raise to drop weak/wrong tags, lower for more
+/// recall.
+pub const SCENE_COSINE_THRESHOLD: f32 = 0.15;
 
 /// Max scene tags emitted per file. macOS Vision surfaces a handful of
 /// labels per image; the Library card shows the top 2, the rest are
@@ -133,17 +133,16 @@ pub const SCENE_COSINE_THRESHOLD: f32 = 0.18;
 pub const SCENE_TOP_K: usize = 4;
 
 /// Master switch for CLIP (MobileCLIP-S2). When true, the scan computes a
-/// per-file image embedding (stored in `clip_embeddings`) that powers the
-/// Library's free-text **semantic search** ("a dog at the beach"). When false,
-/// CLIP does no work at all — no model load, no embedding — and search degrades
-/// to FTS5 keyword/tag matching over filenames + OCR + SmolVLM tags. Independent
-/// of tagging: SmolVLM is always the tagger (`source='vlm'`); see below.
+/// per-file image embedding (stored in `clip_embeddings`) that powers both
+/// the Library's free-text semantic search ("a dog at the beach") AND the
+/// zero-shot scene tags below. When false, no embedding is computed and
+/// search degrades to FTS5 keyword/tag matching over filenames + OCR.
 pub const ENABLE_CLIP: bool = true;
 
-/// Whether the scan ALSO emits CLIP zero-shot scene tags (`source='auto'`).
-/// OFF — SmolVLM is the sole tagger; CLIP runs ONLY for the semantic-search
-/// embedding above. (When on, requires ENABLE_CLIP and builds the ~21 s
-/// scene-label matrix at first launch.)
+/// Whether the scan emits CLIP zero-shot scene tags (`source='auto'`).
+/// ON by default — these chips are the canonical auto-tagger for image and
+/// video files. Deep Analyze (Qwen / Gemma, `source='vlm'`) is opt-in and
+/// supersedes when present. Requires ENABLE_CLIP.
 pub const ENABLE_CLIP_SCENE_TAGS: bool = true;
 
 /// Prompts text-encoded per ONNX batch when building the label matrix.

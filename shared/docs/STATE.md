@@ -8,6 +8,91 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-05-27 — V16.29 SmolVLM removal, tag-quality diagnostic + threshold + audio duration, sidebar + Deep Analyze fixes
+
+Targeted response to a user-reported triple: (1) tag chips on images/videos/audio "still
+suck" — only the year shows; (2) "remove all SmolVLM stuff"; (3) navbar toggle doesn't
+collapse + Deep Analyze tab doesn't show downloaded models.
+
+**Engine (Rust)**:
+- **SmolVLM dropped**: `VlmModelKind::SmolVlm` enum arm gone in `pipeline/deep_analyze.rs`;
+  registry arm in `models/registry.rs` removed; `model_kinds_have_unique_ids` test updated to
+  the three remaining kinds (Qwen 3B / 7B, Gemma 3 4B); `size_estimates_increase_with_capability`
+  rewritten to compare without SmolVLM's tier. CLIP scene tags become the canonical auto-tagger
+  (the comment in `scene_vocab.rs` that called CLIP a "placeholder" is now factually accurate;
+  the const docstrings updated to reflect that).
+- **Tag-quality diagnostic** (`pipeline/tagging.rs:1244-1290`): `[TAGGING] scene_summary` info
+  line per image/video with `scene_emit_count` + `max_score`, and a separate `scene_skipped`
+  line when either the labeler or embedding is missing. Gives the user a way to grep the log
+  and diagnose why their image cards came back year-only.
+- **CLIP scene threshold tuned** (`scene_vocab.rs:128`): `SCENE_COSINE_THRESHOLD` 0.18 → 0.15.
+  History on this lever in the file: 0.24 filtered everything → 0.18 showed some chips →
+  0.15 biases harder toward recall now that scene tags are the *canonical* auto-tagger.
+- **Audio duration chip** (`pipeline/audio_meta.rs`): symphonia exposes `n_frames` +
+  `sample_rate` on the default track; emit a "12 min" / "1 h 05 min" / "30 sec" chip even when
+  there's no ID3 / Vorbis metadata. Voice memos (`Evernote 20130505 211937.wav` and the like)
+  now have a useful chip beyond the year fallback.
+
+**Windows app (C#)**:
+- **SmolVLM removed end-to-end**: `ModelInstallerService.Vlm` slot deleted (single VLM concept
+  now — `DeepVlm`); `VlmSentinelIds` deleted; `UpdateVlmRecommendation` deleted; `_vlmModelKind`
+  field deleted; switch arms in `SlotFor` + `SlotForErrorPath` cleaned. CudaAutoInstaller drops
+  the SmolVLM-gated CUDA-defer; downloads run when NVIDIA + engine ready (the 8-concurrent HTTP
+  semaphore in the downloader handles contention). EngineClient's post-scan VLM auto-advance
+  chain (`AutoTriggerDeepAnalyzeAsync`, `WireVlmInstallWatch`, `OnVlmSlotStatusChanged`,
+  `SmolVlmWeightsPresent`) removed — CLIP scene tags are emitted inline during the scan, so no
+  separate background tagging pass is needed.
+- **DeepAnalyzeView**: SmolVLM card → Gemma 3 4B card (third slot was previously dead UI for
+  users who installed Gemma; the model-kind sentinel was tracked but no card existed). All
+  card subscriptions + tap routing switched to the `DeepVlm` slot (which already tracked
+  Qwen / Gemma installs).
+- **WelcomeSheet**: SmolVLM-tagger row removed; the 4-row layout is now CLIP · ArcFace ·
+  Qwen Deep Analyze · GPU pack. CLIP comment updated to acknowledge it powers both semantic
+  search AND scan-time scene tags.
+- **AppSettings v3 → v4**: `DisableAutoInstallSmolVlm` property dropped; `AutoChainDeepAnalyze`
+  property dropped (post-scan VLM auto-chain is gone). `AllowedVlmKinds` no longer contains
+  `"smolvlm"`. Schema migration v3 → v4 flips any leftover `SelectedVlmModelKind = "smolvlm"`
+  to `qwen2_5_vl_3b` with a log line. Tests in `AppSettingsTests` updated (schema 3 → 4, the
+  `DisableAutoInstallSmolVlm` assertion removed).
+- **Settings view**: "Tag automatically with AI after scans" toggle removed (the underlying
+  AutoChainDeepAnalyze setting is gone). Sentinel-based VLM-installed migration switched to
+  DeepVlm slot + drops smolvlm from the sentinel-id list.
+- **Sidebar collapse fix** (`MainWindow.xaml.cs::ApplySidebarVisibility`): `SidebarColumn`
+  XAML defines `MinWidth="240" MaxWidth="320"`; setting `Width = 0` to collapse was being
+  silently clamped to 240px by MinWidth. Now clear `MinWidth = 0` BEFORE `Width = 0` on
+  collapse, and restore `MinWidth = 240` BEFORE `Width = 260` on expand.
+
+**macOS app**:
+- `AIModelKind.smolvlm` enum case dropped from `apple/shared/.../AIModels.swift`; switch arms
+  exhaustiveness preserved everywhere; `safeDefaultFor(ramGB:)` fallback now Qwen2.5-VL 3B.
+  Engine-side `DeepAnalyze.swift::vlmConfig` + `gpuCacheBudgetMB` arms removed. Package.swift
+  comment + CLAUDE.md model table + `wipe_local_state.sh` doc updated.
+
+**Docs**:
+- Current-state docs (ARCHITECTURE.md, MODELS.md, README.md, both CLAUDE.md, PHASES.md) lose
+  SmolVLM from the model lineup tables and prose.
+- Historical entries in DECISIONS.md, NEXT.md, STATE.md left intact — they document the V16.X
+  architecture as it was at the time, per the append-only convention.
+
+### Build/test (local, in-agent)
+- `cargo clippy --all-targets -- -D warnings` clean.
+- `cargo test --lib` → **212 passed, 0 failed**.
+- `dotnet build` → 0 warnings, 0 errors.
+- `dotnet format FileID.sln --verify-no-changes` → clean (pre-push gate per V16.28 memory).
+- `dotnet test FileID.App.Tests` → **101 passed, 0 failed** (V16.28 was 102; -1 for the
+  SmolVLM InlineData entry in WelcomeSheetModelSizeTests).
+- `dotnet test FileID.IpcSchema.Tests` → **31 passed, 0 failed**.
+
+### On-hardware verify (gated on user)
+- Rescan a folder of mixed kinds. Grep engine log for `[TAGGING] scene_summary` — every image
+  should have `scene_emit_count >= 1` (with threshold 0.15 most photos clear it). Cards should
+  show scene chips, not just year. If you still see year-only, check `scene_skipped` lines —
+  they'll tell us whether the embedding or labeler is missing.
+- Audio cards should show a duration chip (`12 min`, `1 h 05 min`) even on voice memos.
+- Click the title-bar hamburger — the sidebar should collapse all the way to zero width.
+- Deep Analyze tab now shows three cards: Qwen 3B (recommended), Qwen 7B, Gemma 3 4B. Install
+  any of them; the card should flip to "Installed" once the download lands.
+
 ## 2026-05-26 — V16.28 hardening pass: OCR overflow, thumbnail-cache LRU, bulk-select batching, tile hover (Windows)
 
 Targeted security/perf/parity pass on top of V16.27. No new features; the goal was to land concrete

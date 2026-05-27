@@ -93,7 +93,7 @@ pub(crate) async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQ
     let query_id = payload.query_id.clone();
 
     // CLIP is disabled (scene_vocab::ENABLE_CLIP) — emit an empty embedding so
-    // the search box falls back to FTS5 (over SmolVLM tags + filenames + OCR)
+    // the search box falls back to FTS5 (over VLM tags + filenames + OCR)
     // without a 5 s timeout. No model load.
     if !crate::models::scene_vocab::ENABLE_CLIP {
         sink.send(IpcEvent::now(EventPayload::ClipTextEmbedding(Wrap::new(

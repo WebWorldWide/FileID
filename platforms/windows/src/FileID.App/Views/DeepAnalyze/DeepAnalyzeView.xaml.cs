@@ -39,7 +39,7 @@ public sealed partial class DeepAnalyzeView : UserControl
     private void OnUnloadedHandler(object sender, RoutedEventArgs e)
     {
         _unloaded = true;
-        ModelInstallerService.Instance.Vlm.PropertyChanged -= OnInstallerChanged;
+        ModelInstallerService.Instance.DeepVlm.PropertyChanged -= OnInstallerChanged;
         EngineClient.Instance.PropertyChanged -= OnEngineChanged;
         SelectionRegistry.Instance.PropertyChanged -= OnSelectionRegistryChanged;
         Loaded -= OnLoadedHandler;
@@ -48,7 +48,7 @@ public sealed partial class DeepAnalyzeView : UserControl
 
     private void OnLoadedHandler(object sender, RoutedEventArgs e)
     {
-        ModelInstallerService.Instance.Vlm.PropertyChanged += OnInstallerChanged;
+        ModelInstallerService.Instance.DeepVlm.PropertyChanged += OnInstallerChanged;
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         SelectionRegistry.Instance.PropertyChanged += OnSelectionRegistryChanged;
         SyncCards();
@@ -171,15 +171,14 @@ public sealed partial class DeepAnalyzeView : UserControl
 
     private void SyncCards()
     {
-        var slot = ModelInstallerService.Instance.Vlm;
+        var slot = ModelInstallerService.Instance.DeepVlm;
         // Each card reflects whether ITS model's weights are actually on disk —
-        // NOT the shared "any VLM installed" slot. Before this, once SmolVLM
-        // auto-installed all three cards showed "Installed", and picking Qwen
-        // (whose weights aren't downloaded) failed every file in the engine with
-        // "VLM weights not installed". Per-model disk state keeps the picker honest.
+        // not the shared "any VLM installed" slot, otherwise installing one model
+        // makes the other cards mis-report as installed and Deep Analyze fails
+        // every file with "VLM weights not installed".
         ApplyVlmCard(QwenSmallStatus, QwenSmallProgress, QwenSmallInstallButton, "qwen2_5_vl_3b", slot);
         ApplyVlmCard(QwenLargeStatus, QwenLargeProgress, QwenLargeInstallButton, "qwen2_5_vl_7b", slot);
-        ApplyVlmCard(SmolVlmStatus, SmolVlmProgress, SmolVlmInstallButton, "smolvlm", slot);
+        ApplyVlmCard(GemmaStatus, GemmaProgress, GemmaInstallButton, "gemma_3_4b", slot);
         HighlightActiveCard();
     }
 
@@ -239,10 +238,10 @@ public sealed partial class DeepAnalyzeView : UserControl
         var gold = (Brush)Application.Current.Resources["GoldBrush"];
         QwenSmallCard.BorderBrush = _activeModel == "qwen2_5_vl_3b" ? gold : idle;
         QwenLargeCard.BorderBrush = _activeModel == "qwen2_5_vl_7b" ? gold : idle;
-        SmolVlmCard.BorderBrush = _activeModel == "smolvlm" ? gold : idle;
+        GemmaCard.BorderBrush = _activeModel == "gemma_3_4b" ? gold : idle;
         QwenSmallCard.BorderThickness = _activeModel == "qwen2_5_vl_3b" ? new Thickness(2) : new Thickness(1);
         QwenLargeCard.BorderThickness = _activeModel == "qwen2_5_vl_7b" ? new Thickness(2) : new Thickness(1);
-        SmolVlmCard.BorderThickness = _activeModel == "smolvlm" ? new Thickness(2) : new Thickness(1);
+        GemmaCard.BorderThickness = _activeModel == "gemma_3_4b" ? new Thickness(2) : new Thickness(1);
     }
 
     private void UpdateActiveModelLabel()
@@ -250,8 +249,8 @@ public sealed partial class DeepAnalyzeView : UserControl
         ActiveModelText.Text = _activeModel switch
         {
             "qwen2_5_vl_7b" => "Active model: Qwen 2.5-VL 7B (best quality)",
-            "smolvlm" => "Active model: SmolVLM 500M (fastest)",
-            _ => "Active model: Qwen 2.5-VL 3B (balanced)",
+            "gemma_3_4b" => "Active model: Gemma 3 4B (balanced)",
+            _ => "Active model: Qwen 2.5-VL 3B (recommended)",
         };
     }
 
@@ -533,7 +532,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             // THIS card. The engine's progress events carry only model_kind, and
             // this direct-prewarm path doesn't go through ModelInstallerService
             // (which is where CurrentModelKind would otherwise be set).
-            ModelInstallerService.Instance.Vlm.CurrentModelKind = modelId;
+            ModelInstallerService.Instance.DeepVlm.CurrentModelKind = modelId;
             SyncCards();
             await EngineClient.Instance.PrewarmModelAsync(modelId);
         }

@@ -90,11 +90,11 @@ Performance target: ≥ 140 files/s on M1 Pro (macOS) or comparable mid-tier x64
 - Apple Vision (face rects + quality + OCR)
 - CoreML (MobileCLIP image, CLIP text)
 - ONNX Runtime + CoreML EP (ArcFace face embedder)
-- MLX (VLMs for Deep Analyze: Qwen, Gemma, SmolVLM, PaliGemma)
+- MLX (VLMs for Deep Analyze: Qwen, Gemma, PaliGemma)
 
 ### Windows
 - ONNX Runtime with auto-detected EP (CUDA / OpenVINO / DirectML / QNN / CPU) — see GPU acceleration strategy below
-- llama.cpp (VLMs: Qwen2.5-VL, Gemma 3, SmolVLM, MiniCPM-V) with backend auto-pick (CUDA / Vulkan / DirectML / CPU)
+- llama.cpp (VLMs: Qwen2.5-VL, Gemma 3, MiniCPM-V) with backend auto-pick (CUDA / Vulkan / DirectML / CPU)
 - SCRFD ONNX (face detection — landmarks → solve PnP for pose)
 - Windows.Media.Ocr (built-in WinRT OCR; PaddleOCR ONNX as opt-in)
 - pdfium-render, Media Foundation (PDF + video)

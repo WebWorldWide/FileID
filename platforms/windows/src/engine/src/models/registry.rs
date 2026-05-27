@@ -216,35 +216,12 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                     FileEntry {
                         // ggml-org's Gemma repo names the projector
                         // generically as `mmproj-model-f16.gguf` (no
-                        // per-model suffix), unlike Qwen / SmolVLM.
+                        // per-model suffix), unlike Qwen.
                         url: "https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF/resolve/main/mmproj-model-f16.gguf"
                             .to_string(),
                         dest: dir.join("mmproj.gguf"),
                         sha256: None,
                         approx_bytes: 851_251_104,
-                    },
-                ],
-            })
-        }
-        "smolvlm" => {
-            let dir = models_root.join("vlm").join("smolvlm");
-            LookupResult::Found(Model {
-                id: "smolvlm",
-                display_name: "SmolVLM",
-                files: vec![
-                    FileEntry {
-                        url: "https://huggingface.co/ggml-org/SmolVLM-500M-Instruct-GGUF/resolve/main/SmolVLM-500M-Instruct-Q8_0.gguf"
-                            .to_string(),
-                        dest: dir.join("model.gguf"),
-                        sha256: None,
-                        approx_bytes: 540_000_000,
-                    },
-                    FileEntry {
-                        url: "https://huggingface.co/ggml-org/SmolVLM-500M-Instruct-GGUF/resolve/main/mmproj-SmolVLM-500M-Instruct-f16.gguf"
-                            .to_string(),
-                        dest: dir.join("mmproj.gguf"),
-                        sha256: None,
-                        approx_bytes: 200_000_000,
                     },
                 ],
             })

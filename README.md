@@ -96,7 +96,7 @@ Detailed instructions: [Build from source](#build-from-source).
 | **Library** | FTS5 search over filenames + OCR. Semantic CLIP search ("a dog at the beach"). Thumbnail grid + preview sheet. |
 | **People** | Face clusters from ArcFace embeddings. Drag to merge. Name a cluster once and Deep Analyze captions use real names. |
 | **Cleanup** | Duplicate groups by perceptual hash. Trashed files stay recoverable. |
-| **Deep Analyze** | Local vision-language model (Qwen 2.5-VL · Gemma 3 · SmolVLM · MiniCPM-V) writes a caption + smart filename per image, PDF, video keyframe, or doc thumbnail. |
+| **Deep Analyze** | Local vision-language model (Qwen 2.5-VL · Gemma 3 · MiniCPM-V) writes a caption + smart filename per image, PDF, video keyframe, or doc thumbnail. |
 | **Restructure** | Folder reorganization with a Sankey flow diagram. Apply as shortcuts (reversible), then convert to real moves when you're happy. |
 | **Settings** | Model downloads, GPU acceleration picker, engine info, logs, privacy. |
 
@@ -343,7 +343,7 @@ DirectML covers every Windows GPU vendor in one shipped backend. Performance Pac
 | Face detect | Vision (`VNDetectFaceRectangles`) | SCRFD (Buffalo bundle ONNX) |
 | Face embed | ArcFace (CoreML EP) | ArcFace (DirectML/CUDA EP) |
 | OCR | `VNRecognizeText` | `Windows.Media.Ocr` (built-in WinRT) |
-| VLM (Deep Analyze) | MLX (Qwen, Gemma, SmolVLM, PaliGemma) | llama.cpp + GGUF (Vulkan/CUDA/DirectML/CPU backends) |
+| VLM (Deep Analyze) | MLX (Qwen, Gemma, PaliGemma) | llama.cpp + GGUF (Vulkan/CUDA/DirectML/CPU backends) |
 | PDF | PDFKit | pdfium-render |
 | Video frame | AVAssetImageGenerator | Media Foundation `IMFSourceReader` |
 
@@ -370,7 +370,7 @@ User data lives outside the install dir so an uninstall doesn't wipe it. Use Set
 | `%LOCALAPPDATA%\FileID\fileid.sqlite` | `~/Library/Application Support/FileID/fileid.sqlite` | Main library DB (WAL mode) |
 | `%LOCALAPPDATA%\FileID\logs\` | `~/Library/Logs/FileID/` | Engine + app logs (local-only, daily rotation) |
 | `%LOCALAPPDATA%\FileID\Models\` | `~/Library/Application Support/FileID/Models/` | ONNX/CoreML weights |
-| `%LOCALAPPDATA%\FileID\Models\HuggingFace\` | same parent | VLM weights (Qwen, Gemma, SmolVLM, MiniCPM-V) |
+| `%LOCALAPPDATA%\FileID\Models\HuggingFace\` | same parent | VLM weights (Qwen, Gemma, MiniCPM-V) |
 | `%LOCALAPPDATA%\FileID\thumbs.cache\` | same parent | Thumbnail cache |
 | `%LOCALAPPDATA%\FileID\face_crops\` | same parent | Face crop JPEGs for People view |
 | `%LOCALAPPDATA%\FileID\settings.json` | same parent | Per-user settings (GPU EP override, etc.) |

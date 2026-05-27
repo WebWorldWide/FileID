@@ -8,7 +8,6 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
     case qwen3VL4B       = "qwen3_vl_4b"
     case gemma3_4B       = "gemma3_4b"
     case gemma3_12B      = "gemma3_12b"
-    case smolvlm         = "smolvlm"
     case paligemma3B     = "paligemma_3b"
 
     public var displayName: String {
@@ -17,7 +16,6 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
         case .qwen3VL4B:    return "Qwen3-VL 4B (4-bit)"
         case .gemma3_4B:    return "Gemma 3 4B (QAT 4-bit)"
         case .gemma3_12B:   return "Gemma 3 12B (QAT 4-bit)"
-        case .smolvlm:      return "SmolVLM Instruct (4-bit)"
         case .paligemma3B:  return "PaliGemma 3B (8-bit)"
         }
     }
@@ -28,7 +26,6 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
         case .qwen3VL4B:    return "Newer architecture. Better OCR + reasoning than Qwen2.5."
         case .gemma3_4B:    return "Google's open model. Strong on grounded VQA."
         case .gemma3_12B:   return "Highest quality. Heavy: ~9 GB resident, ~3× slower."
-        case .smolvlm:      return "Tiniest + fastest. Use when battery / RAM matter."
         case .paligemma3B:  return "Strong on grounding, OCR, and visual question answering."
         }
     }
@@ -39,7 +36,6 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
         case .qwen3VL4B:    return "lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit"
         case .gemma3_4B:    return "mlx-community/gemma-3-4b-it-qat-4bit"
         case .gemma3_12B:   return "mlx-community/gemma-3-12b-it-qat-4bit"
-        case .smolvlm:      return "mlx-community/SmolVLM-Instruct-4bit"
         case .paligemma3B:  return "mlx-community/paligemma-3b-mix-448-8bit"
         }
     }
@@ -50,7 +46,6 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
         case .qwen3VL4B:    return 3_500_000_000
         case .gemma3_4B:    return 3_300_000_000
         case .gemma3_12B:   return 7_500_000_000
-        case .smolvlm:      return 600_000_000
         case .paligemma3B:  return 3_300_000_000
         }
     }
@@ -61,7 +56,6 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
         case .qwen3VL4B:    return 5.0
         case .gemma3_4B:    return 4.5
         case .gemma3_12B:   return 9.0
-        case .smolvlm:      return 1.5
         case .paligemma3B:  return 4.0
         }
     }
@@ -73,14 +67,13 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
         case .qwen3VL4B:    return 2.0
         case .gemma3_4B:    return 1.7
         case .gemma3_12B:   return 5.0
-        case .smolvlm:      return 0.7
         case .paligemma3B:  return 1.6
         }
     }
 
     public var licenseName: String {
         switch self {
-        case .qwen2VL3B, .qwen3VL4B, .smolvlm:      return "Apache License 2.0"
+        case .qwen2VL3B, .qwen3VL4B:                return "Apache License 2.0"
         case .gemma3_4B, .gemma3_12B, .paligemma3B: return "Gemma Terms of Use"
         }
     }
@@ -89,8 +82,7 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
     public static func recommendedFor(ramGB: Double) -> [AIModelKind] {
         if ramGB >= 32       { return [.gemma3_12B, .qwen3VL4B, .qwen2VL3B] }
         else if ramGB >= 16  { return [.qwen3VL4B, .qwen2VL3B, .gemma3_4B] }
-        else if ramGB >= 8   { return [.qwen2VL3B, .smolvlm, .paligemma3B] }
-        else                 { return [.smolvlm] }
+        else                 { return [.qwen2VL3B, .gemma3_4B, .paligemma3B] }
     }
 
     /// Reserves ~8 GB for system + scan engine + DB cache. A model that
@@ -101,9 +93,9 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
         return ramBudgetGB <= headroom
     }
 
-    /// First recommendation that fits, falling back to SmolVLM.
+    /// First recommendation that fits, falling back to Qwen2.5-VL 3B.
     public static func safeDefaultFor(ramGB: Double) -> AIModelKind {
-        recommendedFor(ramGB: ramGB).first { $0.fits(ramGB: ramGB) } ?? .smolvlm
+        recommendedFor(ramGB: ramGB).first { $0.fits(ramGB: ramGB) } ?? .qwen2VL3B
     }
 }
 

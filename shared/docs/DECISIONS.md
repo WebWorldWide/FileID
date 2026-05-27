@@ -7,6 +7,50 @@
 
 ---
 
+## 2026-05-27 — SmolVLM removed; CLIP scene tags become the canonical auto-tagger
+
+**Context**: V16.11 → V16.27 had SmolVLM as the canonical scan-time tagger (the "tagging =
+SmolVLM, Deep Analyze = Qwen" split documented in earlier DECISIONS entries). User-reported
+that image / video / audio chips were uniformly weak — only the file year was showing — and
+asked to "remove all SmolVLM stuff." That removed the architectural fallback that previously
+masked CLIP scene tagging issues: post-V16.27 scans relied on a deferred SmolVLM background
+pass to overwrite the placeholder CLIP tags, so any failure mode in the CLIP path (threshold
+filtering, missing labeler) was hidden as long as SmolVLM eventually ran.
+
+**Decision**: drop SmolVLM end-to-end (Rust enum, registry, C# UI cards, welcome row, install
+service slot, post-scan auto-advance chain, AppSettings field, macOS enum case). CLIP scene
+tags are now the *canonical* auto-tagger; lower the threshold (0.18 → 0.15) to bias toward
+recall; add a `[TAGGING] scene_summary` info-level log line per file so the next "year-only"
+report has runtime data behind it. Deep Analyze (Qwen / Gemma) remains opt-in and writes
+`source='vlm'` tags that ReadStore already prioritizes above `source='auto'`.
+
+**Reasoning**:
+1. **Two taggers was always strictly worse than one well-tuned tagger**: the placeholder
+   pattern meant CLIP tag tuning got perpetually deferred — "SmolVLM will fix it." With no
+   SmolVLM, CLIP has to be good enough on its own, which forced a real look at the threshold
+   and the diagnostic.
+2. **No silent multi-GB downloads on first run**. SmolVLM auto-installed ~700 MB at engine
+   ready (per the V15.4 / V16.27 history). Removing it (and the broader auto-installer chain
+   in `App.xaml.cs`) leaves model downloads strictly user-initiated from the welcome screen
+   / Deep Analyze tab.
+3. **Scene tags require nothing the user didn't already opt into**: CLIP image weights are
+   already a required model for semantic search; the scene matrix is precomputed in-binary
+   (`scene_embeddings_precomputed.rs`), so there's no second model to install for tagging.
+
+**Alternatives considered**:
+- **Hide the SmolVLM UI but keep the engine-side support**: leaves dead code paths and
+  doesn't materially help the tagging issue.
+- **Replace SmolVLM with Qwen as the canonical background tagger**: Qwen is multi-GB and
+  much slower; bad UX for "background tagging." Keep Qwen as the opt-in Deep Analyze model.
+- **Keep the placeholder/superseder design with a smaller VLM substitute**: no other
+  publicly-available llama.cpp-compatible tiny VLM (~500 MB) matches SmolVLM's niche. Better
+  to commit to CLIP scene tags being good enough.
+
+**Migration**: AppSettings schema v3 → v4. Any `selectedVlmModelKind = "smolvlm"` on disk
+flips to `"qwen2_5_vl_3b"`. The `disableAutoInstallSmolVlm` and `autoChainDeepAnalyze` fields
+are removed from the AppSettings DTO; JSON deserialization tolerates the unknown legacy
+fields silently (forward-compat test asserts this).
+
 ## 2026-05-26 — ThumbnailDiskCache: in-memory LRU index, no on-disk persistence
 
 **Context**: V16.28 replaced the periodic `Directory.EnumerateFiles("*.bin", AllDirectories)`

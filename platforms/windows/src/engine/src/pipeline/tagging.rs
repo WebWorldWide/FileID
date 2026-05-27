@@ -190,7 +190,8 @@ pub struct TaggedFile {
     /// `tags` table by DBWriter with source = `"auto"` and the score in
     /// `tags.score`; the Library UI reads them via ReadStore and renders the
     /// top-by-score as TagChip rows. (Descriptive content tags come from the
-    /// SmolVLM Deep-Analyze pass as `source='vlm'`.)
+    /// optional Deep-Analyze VLM pass as `source='vlm'`, when the user installs
+    /// a Qwen / Gemma model.)
     pub tags: Vec<(String, Option<f32>)>,
 }
 
@@ -320,9 +321,10 @@ impl ModelStack {
             .map(|s| !(s == "0" || s.eq_ignore_ascii_case("false")))
             .unwrap_or(true);
 
-        // The scene labeler (and its ~21 s matrix build) is only needed to emit
-        // scan-time scene tags — off by default, since SmolVLM is the tagger. The
-        // per-file MobileCLIP embedding for semantic search does NOT need it.
+        // The scene labeler matrix is loaded from precomputed embeddings
+        // (scene_embeddings_precomputed.rs) and is the canonical auto-tagger.
+        // The per-file MobileCLIP embedding for semantic search uses the same
+        // image encoder; if ENABLE_CLIP_SCENE_TAGS is off, the labeler is skipped.
         let scene_labeler = if crate::models::scene_vocab::ENABLE_CLIP
             && crate::models::scene_vocab::ENABLE_CLIP_SCENE_TAGS
         {
@@ -1242,6 +1244,7 @@ async fn process_file_predecoded(
                 // Gated by ENABLE_CLIP_SCENE_TAGS — flip that const to false to
                 // drop CLIP scan-time tagging and rely solely on VLM tags.
                 if crate::models::scene_vocab::ENABLE_CLIP_SCENE_TAGS {
+                    let redacted = crate::platform::redact_path_for_log(&file.path);
                     if let (Some(labeler), Some(emb)) = (&models.scene_labeler, &tagged.clip_embedding) {
                         let scene_started = Instant::now();
                         let scored = labeler.score(
@@ -1249,7 +1252,8 @@ async fn process_file_predecoded(
                             crate::models::scene_vocab::SCENE_COSINE_THRESHOLD,
                             crate::models::scene_vocab::SCENE_TOP_K,
                         );
-                        let redacted = crate::platform::redact_path_for_log(&file.path);
+                        let scene_emit_count = scored.len();
+                        let max_score = scored.first().map(|(_, s)| *s).unwrap_or(0.0);
                         for (idx, score) in scored {
                             let label = labeler.label(idx);
                             tracing::debug!(
@@ -1261,7 +1265,29 @@ async fn process_file_predecoded(
                             );
                             tagged.tags.push((label.to_string(), Some(score)));
                         }
+                        // V16.29: one-line per-file summary at info level so a user
+                        // who sees "only year" chips on images can grep the engine
+                        // log to confirm whether scene tags are being emitted vs
+                        // gated out.
+                        tracing::info!(
+                            target: "FileIDEngine::tagging",
+                            path = %redacted,
+                            scene_emit_count,
+                            max_score,
+                            "[TAGGING] scene_summary"
+                        );
                         perf_trace("scene_tags_done", &file.path, scene_started.elapsed().as_secs_f64() * 1000.0);
+                    } else if matches!(file.kind, FileKind::Image | FileKind::Video) {
+                        // Embedding or labeler missing — log so the cause is visible
+                        // without attaching a debugger. Skipped for non-visual kinds
+                        // (audio / doc) which legitimately have no CLIP path.
+                        tracing::info!(
+                            target: "FileIDEngine::tagging",
+                            path = %redacted,
+                            has_embedding = tagged.clip_embedding.is_some(),
+                            has_labeler = models.scene_labeler.is_some(),
+                            "[TAGGING] scene_skipped"
+                        );
                     }
                 }
 
@@ -1286,8 +1312,8 @@ async fn process_file_predecoded(
     }
 
     // Enriched extras — derive Year + camera family from the signals we
-    // already have. Cheap (no inference) and gives a baseline of useful chips
-    // even before the SmolVLM tag pass lands. (Aspect and the generic "Has
+    // already have. Cheap (no inference) and fills the chip row when CLIP
+    // scene tags didn't clear the threshold. (Aspect and the generic "Has
     // Faces/Text/Location" capability tags were removed — see
     // push_enriched_extras.) Mirrors macOS `Tagging.swift::extraTags`.
     push_enriched_extras(&mut tagged);
@@ -1362,7 +1388,8 @@ fn should_run_ocr(path: &std::path::Path, tagged: &TaggedFile, _size_bytes: u64)
 /// - Camera family is the human-friendly brand (`"iPhone"`, `"Canon"`).
 /// - Orientation (`"Wide"`/`"Tall"`/`"Square"`) and the generic capability
 ///   tags (`"Has Faces"`/`"Has Text"`/`"Has Location"`) are intentionally NOT
-///   emitted — they read as noise; descriptive content comes from SmolVLM.
+///   emitted — they read as noise; descriptive content comes from CLIP scene
+///   tags (and, when installed, the optional Deep-Analyze VLM pass).
 fn push_enriched_extras(tagged: &mut TaggedFile) {
     // Order matters: the Library card's `TopTwoTags` slice takes the first
     // two tags it sees. Classifier output (when installed) appears first
@@ -1377,7 +1404,7 @@ fn push_enriched_extras(tagged: &mut TaggedFile) {
     // The generic capability tags (Has Faces / Has Text / Has Location) used to
     // be emitted here too, but they read as content tags in the Library while
     // describing a capability rather than the image — and "Has Location" in
-    // particular crowded out the descriptive SmolVLM tags. The underlying
+    // particular crowded out the descriptive scene tags. The underlying
     // signals still live in their own DB columns / filter facets (has_faces,
     // has_text, location_*); they're just no longer surfaced as tag chips.
     //

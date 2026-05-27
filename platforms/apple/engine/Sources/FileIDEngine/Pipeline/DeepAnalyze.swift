@@ -1,4 +1,4 @@
-// Local VLM inference (Qwen / Gemma / SmolVLM / PaliGemma) via MLX.
+// Local VLM inference (Qwen / Gemma / PaliGemma) via MLX.
 // Caches the loaded ModelContainer across calls so a batch pass
 // doesn't re-load weights per file; switching models in Settings
 // costs ~10s on M1 to load the new container.
@@ -74,7 +74,6 @@ public actor DeepAnalyze {
         case .qwen3VL4B:    return VLMRegistry.qwen3VL4BInstruct4Bit
         case .gemma3_4B:    return VLMRegistry.gemma3_4B_qat_4bit
         case .gemma3_12B:   return VLMRegistry.gemma3_12B_qat_4bit
-        case .smolvlm:      return VLMRegistry.smolvlminstruct4bit
         case .paligemma3B:  return VLMRegistry.paligemma3bMix448_8bit
         }
     }
@@ -84,7 +83,6 @@ public actor DeepAnalyze {
         case .gemma3_12B:                       return 8_192
         case .qwen3VL4B, .gemma3_4B,
              .paligemma3B, .qwen2VL3B:          return 3_072
-        case .smolvlm:                          return 1_024
         }
     }
 

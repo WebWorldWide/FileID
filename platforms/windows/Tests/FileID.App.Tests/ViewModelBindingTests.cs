@@ -116,7 +116,6 @@ public class WelcomeSheetModelSizeTests
     [Theory]
     [InlineData("qwen2_5_vl_3b", 3170)]    // 2300+870 MB (sum of registry approx_bytes)
     [InlineData("qwen2_5_vl_7b", 6100)]    // 4700+1400 MB
-    [InlineData("smolvlm",       740)]     // 540+200 MB
     [InlineData("gemma_3_4b",    3351)]    // 2500+851 MB
     [InlineData("mobileclip_s2", 143)]
     [InlineData("clip_text",     256)]     // 254+1+1 MB
@@ -231,7 +230,7 @@ public class DeepAnalyzeStreamingTests
             Total: 5,
             EtaSeconds: 30.0,
             CurrentPath: "/p.jpg",
-            ModelKind: "smolvlm",
+            ModelKind: "qwen2_5_vl_3b",
             CurrentCaption: null);
         Assert.Null(evt.CurrentCaption);
     }

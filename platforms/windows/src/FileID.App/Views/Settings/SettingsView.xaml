@@ -111,8 +111,8 @@
                         </Grid>
                     </Grid>
 
-                    <!-- MobileCLIP-S2 — powers free-text semantic image search.
-                         (Tagging is SmolVLM; CLIP no longer emits scene tags.) -->
+                    <!-- MobileCLIP-S2 — powers free-text semantic image search
+                         AND scan-time zero-shot scene tagging. -->
                     <Grid ColumnSpacing="12" Padding="14,12" CornerRadius="10"
                           Background="{ThemeResource SubtleFillColorTertiaryBrush}">
                         <Grid.ColumnDefinitions>
@@ -176,7 +176,7 @@
                     <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                TextWrapping="Wrap"
-                               Text="VLM downloads (Qwen 2.5-VL · Gemma 3 · SmolVLM) live on the Deep Analyze tab."/>
+                               Text="Optional Deep Analyze VLMs (Qwen 2.5-VL · Gemma 3) live on the Deep Analyze tab."/>
                 </StackPanel>
             </Border>
 
@@ -504,11 +504,7 @@
                 </StackPanel>
             </Expander>
 
-            <!-- Cleanup. Mirrors macOS Settings' single "Cleanup" toggle, plus
-                 the one Windows control for the AI auto-tag pass: SmolVLM runs
-                 in the background after a scan to refine tags, and this is the
-                 single switch to enable/disable it. The other Windows-only
-                 People/Restructure toggles stay removed for macOS parity. -->
+            <!-- Cleanup. Mirrors macOS Settings' single "Cleanup" toggle. -->
             <Border CornerRadius="12"
                     Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
@@ -522,12 +518,6 @@
                                   OffContent="Don't change tags on the keeper"
                                   OnContent="Add a 'kept' tag to the keeper"
                                   Toggled="OnCleanupAutoTagToggled" />
-
-                    <ToggleSwitch x:Name="AutoTagWithAiToggle"
-                                  Header="Tag automatically with AI after scans"
-                                  OffContent="Off — files aren't tagged (tag manually from Deep Analyze)"
-                                  OnContent="On — SmolVLM tags every file in the background"
-                                  Toggled="OnAutoTagWithAiToggled" />
                 </StackPanel>
             </Border>
 

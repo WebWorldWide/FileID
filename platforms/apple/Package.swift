@@ -46,8 +46,8 @@ let package = Package(
         ),
 
         // Engine CLI. Single binary, owns the scan pipeline + Deep Analyze
-        // (VLM inference via MLX). MLXVLM brings the Qwen / Gemma / SmolVLM
-        // / PaliGemma model factory; downloaded weights are cached in
+        // (VLM inference via MLX). MLXVLM brings the Qwen / Gemma /
+        // PaliGemma model factory; downloaded weights are cached in
         // `~/Documents/huggingface/models/<repo>/` by MLX itself.
         //
         // V15.2.1: language mode .v5 + targeted upcoming features. Strict

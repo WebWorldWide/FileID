@@ -123,7 +123,7 @@ public sealed partial class MainWindow : Window
         DebugLog.Info("[INSTALL] MaybeShowWelcomeSheetAsync called.");
         ModelInstallerService.Instance.Refresh();
         var svc = ModelInstallerService.Instance;
-        DebugLog.Info($"[INSTALL] sentinel state: clip={svc.Clip.Status} arcface={svc.Arcface.Status} vlm={svc.Vlm.Status}");
+        DebugLog.Info($"[INSTALL] sentinel state: clip={svc.Clip.Status} arcface={svc.Arcface.Status} deep_vlm={svc.DeepVlm.Status}");
 
         // Mirror macOS shouldShowWelcome() (FileIDApp.swift:64-72): show
         // the sheet on first launch (welcomeSheetSeen == false) OR any
@@ -509,6 +509,10 @@ public sealed partial class MainWindow : Window
         var visible = AppViewModel.Instance.SidebarVisible;
         if (visible)
         {
+            // Restore MinWidth FIRST so the Width=260 assignment isn't clamped by
+            // the collapsed (MinWidth=0) state. See the collapse branch below for
+            // the full rationale.
+            SidebarColumn.MinWidth = 240;
             SidebarColumn.Width = new GridLength(260);
             SidebarHost.Visibility = Visibility.Visible;
             // Hamburger on transparent — "open sidebar is here, you can hide it."
@@ -519,6 +523,10 @@ public sealed partial class MainWindow : Window
         }
         else
         {
+            // MinWidth=240 (from XAML) overrides Width=0 silently — without
+            // clearing MinWidth FIRST, the column stays at 240px and the
+            // sidebar toggle no-ops visually. Reset on expand above.
+            SidebarColumn.MinWidth = 0;
             SidebarColumn.Width = new GridLength(0);
             SidebarHost.Visibility = Visibility.Collapsed;
             // Right-chevron on gold — unambiguous "click here to bring the
