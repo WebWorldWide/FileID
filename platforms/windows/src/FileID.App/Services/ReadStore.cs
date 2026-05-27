@@ -1,4 +1,4 @@
-// ReadStore — app-side read-only SQLite access.
+﻿// ReadStore — app-side read-only SQLite access.
 //
 // The engine owns the writer connection (rusqlite, single-threaded by
 // design — see platforms/apple/CLAUDE.md and engine/src/db/mod.rs). The
@@ -290,7 +290,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
         try
         {
             if (_connection == null) return Array.Empty<FileRow>();
-            
+
             // 1. Get seed embedding
             float[]? seedVec = null;
             using (var cmd = _connection.CreateCommand())
@@ -321,7 +321,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
                     var fid = reader.GetInt64(0);
                     var blob = (byte[])reader.GetValue(1);
                     float score = DotProduct(seedVec, blob);
-                    
+
                     if (heap.Count < limit)
                     {
                         heap.Enqueue(fid, score);

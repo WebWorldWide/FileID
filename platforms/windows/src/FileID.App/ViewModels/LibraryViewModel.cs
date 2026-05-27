@@ -1,4 +1,4 @@
-// LibraryViewModel — backs the Library tab grid + search bar.
+﻿// LibraryViewModel — backs the Library tab grid + search bar.
 
 using System;
 using System.Collections.Generic;

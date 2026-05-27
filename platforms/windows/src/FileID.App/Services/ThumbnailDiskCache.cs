@@ -1,4 +1,4 @@
-// ThumbnailDiskCache — persistent on-disk LRU cache for decoded
+﻿// ThumbnailDiskCache — persistent on-disk LRU cache for decoded
 // thumbnails. Survives app restarts so a rescan of a 50K-tile library
 // doesn't re-render every thumbnail from scratch.
 //

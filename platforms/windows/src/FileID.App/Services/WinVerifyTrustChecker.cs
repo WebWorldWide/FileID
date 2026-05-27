@@ -1,4 +1,4 @@
-// WinVerifyTrustChecker — Authenticode integrity check on the engine binary.
+﻿// WinVerifyTrustChecker — Authenticode integrity check on the engine binary.
 //
 //'s SecCode/SecStaticCode validation. On
 // every spawn, the app verifies that FileIDEngine.exe's Authenticode chain

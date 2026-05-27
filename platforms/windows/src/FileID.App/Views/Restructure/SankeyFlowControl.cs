@@ -1,4 +1,4 @@
-// SankeyFlowControl — pure-XAML Sankey diagram (no Win2D dep).
+﻿// SankeyFlowControl — pure-XAML Sankey diagram (no Win2D dep).
 //
 // Renders source-folder → category
 // flows with cubic-bezier ribbons whose thickness is proportional to

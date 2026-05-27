@@ -1,4 +1,4 @@
-// SettingsView code-behind.
+﻿// SettingsView code-behind.
 
 using System;
 using System.ComponentModel;

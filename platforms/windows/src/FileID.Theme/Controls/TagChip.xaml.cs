@@ -1,4 +1,4 @@
-// TagChip — code-behind for the small auto-tag chip Library cards show
+﻿// TagChip — code-behind for the small auto-tag chip Library cards show
 // below the filename. Visual spec mirrors macOS LibraryView.swift:729-744
 // (`Color.secondary.opacity(0.10)` fill + secondary foreground, 11 pt
 // Medium, 5×2 padding, 4 px corner radius). One DependencyProperty —
