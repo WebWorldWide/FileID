@@ -44,7 +44,13 @@ pub struct RamPlusTagger {
     session: Session,
     /// Index-aligned with the model's logits; `tags[i]` is the label for output i.
     tags: Vec<String>,
+    /// Global fallback cutoff (DEFAULT_THRESHOLD or the FILEID_RAMPLUS_THRESHOLD
+    /// env override). Used for any class lacking a per-class threshold.
     threshold: f32,
+    /// Optional per-class cutoffs (index-aligned with `tags`), loaded from the
+    /// `ram_plus_thresholds.txt` sidecar. `None` → use the global `threshold`
+    /// for every class.
+    per_class_threshold: Option<Vec<f32>>,
     max_tags: usize,
 }
 
@@ -89,16 +95,47 @@ impl RamPlusTagger {
             .commit_from_file(onnx)
             .context("ORT session commit (RAM++)")?;
 
-        let threshold = std::env::var("FILEID_RAMPLUS_THRESHOLD")
+        // A set FILEID_RAMPLUS_THRESHOLD forces a single global cutoff (per-class
+        // disabled — handy for threshold sweeps). Otherwise load the per-class
+        // sidecar (`ram_plus_thresholds.txt`, written next to the tag list by the
+        // export) when present + length-matched; missing/mismatched → global.
+        let env_threshold = std::env::var("FILEID_RAMPLUS_THRESHOLD")
             .ok()
             .and_then(|s| s.parse::<f32>().ok())
-            .filter(|t| (0.0..=1.0).contains(t))
-            .unwrap_or(DEFAULT_THRESHOLD);
+            .filter(|t| (0.0..=1.0).contains(t));
+        let per_class_threshold = if env_threshold.is_some() {
+            None
+        } else {
+            let thr_path = tag_list.with_file_name("ram_plus_thresholds.txt");
+            match std::fs::read_to_string(&thr_path) {
+                Ok(s) => {
+                    let v: Vec<f32> = s
+                        .lines()
+                        .filter_map(|l| l.trim().parse::<f32>().ok())
+                        .collect();
+                    if v.len() == tags.len() {
+                        tracing::info!(model = "RAM++", count = v.len(), "per-class thresholds loaded");
+                        Some(v)
+                    } else {
+                        tracing::warn!(
+                            model = "RAM++",
+                            got = v.len(),
+                            want = tags.len(),
+                            "threshold sidecar count mismatch; using global cutoff"
+                        );
+                        None
+                    }
+                }
+                Err(_) => None,
+            }
+        };
+        let threshold = env_threshold.unwrap_or(DEFAULT_THRESHOLD);
 
         let mut model = Self {
             session,
             tags,
             threshold,
+            per_class_threshold,
             max_tags: DEFAULT_MAX_TAGS,
         };
 
@@ -161,7 +198,12 @@ impl RamPlusTagger {
             .enumerate()
             .filter_map(|(i, &z)| {
                 let p = sigmoid(z);
-                (p >= self.threshold).then_some((i, p))
+                let cut = self
+                    .per_class_threshold
+                    .as_ref()
+                    .map(|t| t[i])
+                    .unwrap_or(self.threshold);
+                (p >= cut).then_some((i, p))
             })
             .collect();
         // Highest confidence first; truncate to the per-file cap.

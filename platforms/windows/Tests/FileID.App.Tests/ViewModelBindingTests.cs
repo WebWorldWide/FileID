@@ -115,7 +115,7 @@ public class WelcomeSheetModelSizeTests
 {
     [Theory]
     [InlineData("mistral_small_3_2", 15178)] // 14300+878 MB
-    [InlineData("ram_plus", 450)]            // RAM++ ONNX (fp16)
+    [InlineData("ram_plus", 926)]            // RAM++ ONNX fp16 ~882 MB + sidecars
     [InlineData("qwen2_5_vl_7b", 6100)]    // 4700+1400 MB
     [InlineData("gemma_3_4b",    3351)]    // 2500+851 MB
     [InlineData("mobileclip_s2", 143)]

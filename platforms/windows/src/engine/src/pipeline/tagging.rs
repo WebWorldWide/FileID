@@ -269,7 +269,8 @@ const MODEL_POOL_SIZE: usize = 4;
 /// %USERPROFILE%\Pictures: total dedicated VRAM peaked at ~2.6 GB from a
 /// ~1.65 GB idle baseline, i.e. ~940 MB attributed to the engine. Raised from
 /// 1500 to 2000 MB when RAM++ joined the per-slot model set (Swin-L @384 fp16
-/// adds ~450 MB residency), preserving a safety margin for DirectML allocator
+/// adds ~882 MB resident weights + inference intermediates), preserving a
+/// safety margin for DirectML allocator
 /// fragmentation under longer-running scans. On a 6 GB card the gate now
 /// clamps the ArcFace/SCRFD/RAM++ pools to 2.
 const VRAM_PER_POOL_INSTANCE_MB: u64 = 2000;

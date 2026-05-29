@@ -30,8 +30,8 @@ internal static class ModelDisplaySize
             ["gemma_3_4b"] = (2_500 + 851),          // = 3351
             // Mistral-Small-3.2-24B Q4_K_M (~14.3 GB) + mmproj (~878 MB).
             ["mistral_small_3_2"] = (14_300 + 878),    // = 15178
-            // RAM++ ONNX (Swin-L @384, fp16).
-            ["ram_plus"] = 450,
+            // RAM++ ONNX (Swin-L @384, fp16) ~882 MB + tiny tag/threshold sidecars.
+            ["ram_plus"] = 926,
             ["arcface"] = (174 + 17),             // ≈ 191 (matches registry sums)
             ["mobileclip_s2"] = 143,
             ["clip_text"] = (254 + 1 + 1),          // ≈ 256 with vocab + merges

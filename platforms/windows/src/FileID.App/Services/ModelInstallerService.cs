@@ -128,7 +128,8 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             installAction: () => PrewarmAsync("arcface_default"));
         RamPlus = new ModelSlot(
             displayLabel: "RAM++ image tagger",
-            approxBytes: 450UL * 1024 * 1024,
+            // ~882 MB fp16 ONNX (bakes the frozen tag-description embeddings in).
+            approxBytes: 925_600_000UL,
             installAction: () => PrewarmAsync("ram_plus"));
         DeepVlm = new ModelSlot(
             displayLabel: "Qwen2.5-VL 7B",
@@ -427,14 +428,15 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
 
     private void RecomputeAggregates()
     {
+        // RAM++ is the primary in-scan tagger and is now hosted on
+        // Web-World-Wide/ram-plus-onnx (WS5 upload landed), so it gates
+        // onboarding completion alongside CLIP/ArcFace/DeepVlm. (If RAM++ is
+        // ever missing at runtime, tagging still degrades to CLIP scene-tags.)
         AllInstalled =
             Clip.Status == ModelInstallStatus.Installed
             && Arcface.Status == ModelInstallStatus.Installed
+            && RamPlus.Status == ModelInstallStatus.Installed
             && DeepVlm.Status == ModelInstallStatus.Installed;
-        // NOTE: RAM++ is deliberately NOT a gate on AllInstalled yet — its
-        // self-hosted ONNX (Web-World-Wide/ram-plus-onnx) is not uploaded, so
-        // requiring it would 404 onboarding. Once the ONNX is live (WS5), add:
-        //     && RamPlus.Status == ModelInstallStatus.Installed
         IsBusy =
             Clip.Status == ModelInstallStatus.Downloading
             || Arcface.Status == ModelInstallStatus.Downloading

@@ -157,7 +157,9 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
         // ONNX export exists and the engine consumes ONNX. Gated behind the
         // "model missing → CLIP scene-tag fallback" path in tagging.rs, so a
         // not-yet-uploaded repo can't regress scanning (zero-regression).
-        // WS4 adds a third file (`ram_plus_thresholds.txt`, per-class cutoffs).
+        // Third file `ram_plus_thresholds.txt` carries per-class sigmoid
+        // cutoffs (ram_plus.rs applies them per class; falls back to a global
+        // cutoff if absent/mismatched).
         "ram_plus" | "ram-plus" => {
             let dir = models_root.join("ram_plus");
             LookupResult::Found(Model {
@@ -169,14 +171,23 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                             .to_string(),
                         dest: dir.join("ram_plus.onnx"),
                         sha256: None,
-                        approx_bytes: 450_000_000,
+                        // fp16 export is ~882 MB: RAM++ bakes the 4585×51 frozen
+                        // tag-description embeddings into the graph as constants.
+                        approx_bytes: 925_600_000,
                     },
                     FileEntry {
                         url: "https://huggingface.co/Web-World-Wide/ram-plus-onnx/resolve/main/ram_plus_tags.txt"
                             .to_string(),
                         dest: dir.join("ram_plus_tags.txt"),
                         sha256: None,
-                        approx_bytes: 80_000,
+                        approx_bytes: 47_000,
+                    },
+                    FileEntry {
+                        url: "https://huggingface.co/Web-World-Wide/ram-plus-onnx/resolve/main/ram_plus_thresholds.txt"
+                            .to_string(),
+                        dest: dir.join("ram_plus_thresholds.txt"),
+                        sha256: None,
+                        approx_bytes: 46_000,
                     },
                 ],
             })
