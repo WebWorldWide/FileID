@@ -245,6 +245,11 @@ pub struct ModelStack {
     /// document's extracted text so the library can do semantic search beyond
     /// FTS5 keyword match. Optional: missing model → no embedding emitted.
     pub bge_text: Option<Mutex<BgeText>>,
+    /// RAM++ multi-label image tagger pool (the PRIMARY in-scan tagger).
+    /// Optional: a missing ONNX (e.g. the self-hosted HF repo not yet
+    /// populated) → tagging falls back to the CLIP zero-shot `scene_labeler`,
+    /// so there is zero regression when RAM++ isn't installed.
+    pub ram_plus: Option<Vec<Mutex<crate::models::ram_plus::RamPlusTagger>>>,
 }
 
 /// Aspirational pool size — actual cap is `min(this, vram_cap, worker_count)`
@@ -262,10 +267,12 @@ const MODEL_POOL_SIZE: usize = 4;
 ///
 /// Measured on RTX 2060 6 GB during a scan against ~40 JPEGs in
 /// %USERPROFILE%\Pictures: total dedicated VRAM peaked at ~2.6 GB from a
-/// ~1.65 GB idle baseline, i.e. ~940 MB attributed to the engine. Keeping
-/// the ceiling at 1500 MB preserves a ~560 MB safety margin for DirectML
-/// allocator fragmentation under longer-running scans.
-const VRAM_PER_POOL_INSTANCE_MB: u64 = 1500;
+/// ~1.65 GB idle baseline, i.e. ~940 MB attributed to the engine. Raised from
+/// 1500 to 2000 MB when RAM++ joined the per-slot model set (Swin-L @384 fp16
+/// adds ~450 MB residency), preserving a safety margin for DirectML allocator
+/// fragmentation under longer-running scans. On a 6 GB card the gate now
+/// clamps the ArcFace/SCRFD/RAM++ pools to 2.
+const VRAM_PER_POOL_INSTANCE_MB: u64 = 2000;
 
 /// Always-reserved VRAM headroom (Windows desktop compositor + other
 /// apps). Subtracted from the dedicated total before dividing by
@@ -399,7 +406,25 @@ impl ModelStack {
             }
         };
 
-        Self { arcface, scrfd, mobileclip_pool, mobileclip_batch, scene_labeler, bge_text }
+        // RAM++ multi-label tagger pool — the primary in-scan tagger. Loaded
+        // like the other pooled models; a missing ONNX (e.g. the HF repo not
+        // yet populated) yields None and tagging falls back to CLIP scene-tags
+        // (zero regression). The tag-list path is captured into the loader
+        // closure since `load_pool` passes only the resolved ONNX path.
+        let ram_plus = match crate::models::ram_plus::default_tags_path() {
+            Ok(tags_path) => load_pool(
+                "RAM++",
+                pool_size,
+                crate::models::ram_plus::default_onnx_path(),
+                move |p| crate::models::ram_plus::RamPlusTagger::load(p, tags_path.clone()),
+            ),
+            Err(err) => {
+                tracing::warn!(model = "RAM++", ?err, "tag-list path unresolved; tagging falls back to CLIP scene-tags");
+                None
+            }
+        };
+
+        Self { arcface, scrfd, mobileclip_pool, mobileclip_batch, scene_labeler, bge_text, ram_plus }
     }
 
     #[allow(dead_code)]
@@ -411,6 +436,7 @@ impl ModelStack {
             mobileclip_batch: None,
             scene_labeler: None,
             bge_text: None,
+            ram_plus: None,
         }
     }
 }
@@ -1230,6 +1256,63 @@ async fn process_file_predecoded(
                 }
                 }
 
+                // RAM++ multi-label tagging — the PRIMARY in-scan tagger. One
+                // Swin-L forward pass on the same GPU/NPU EP chain as faces;
+                // its 4585-tag vocabulary supersedes the CLIP zero-shot scene
+                // labeler (gated below on `!ram_plus_ran`). Runs AFTER the
+                // MobileCLIP embed so semantic-search embeddings are always
+                // computed regardless of which tagger is active. Shares the
+                // `vision_sem` GPU budget; device-removed → cancel the scan.
+                let mut ram_plus_ran = false;
+                if !coord.is_gpu_dead() {
+                    if let Some(ram_pool) = &models.ram_plus {
+                        let permit = vision_sem.acquire().await;
+                        if permit.is_ok() {
+                            let ram_started = Instant::now();
+                            let ram_mu = &ram_pool[worker_idx % ram_pool.len()];
+                            let tag_result = {
+                                let mut r = ram_mu.lock();
+                                r.tag(&rgb, w, h)
+                            };
+                            match tag_result {
+                                Ok(tags) => {
+                                    let redacted = crate::platform::redact_path_for_log(&file.path);
+                                    let ram_emit_count = tags.len();
+                                    let max_score = tags.first().map(|(_, s)| *s).unwrap_or(0.0);
+                                    for (label, score) in tags {
+                                        tracing::debug!(
+                                            target: "FileIDEngine::tagging",
+                                            path = %redacted,
+                                            label,
+                                            score,
+                                            "[TAGGING] ram_plus"
+                                        );
+                                        tagged.tags.push((label, Some(score)));
+                                    }
+                                    tracing::info!(
+                                        target: "FileIDEngine::tagging",
+                                        path = %redacted,
+                                        ram_emit_count,
+                                        max_score,
+                                        "[TAGGING] ram_plus_summary"
+                                    );
+                                    ram_plus_ran = true;
+                                }
+                                Err(err) => {
+                                    if error_has_device_removed_marker(&err) {
+                                        if coord.mark_gpu_dead() {
+                                            tracing::error!(?err, "[GPU-TDR] RAM++ device-removed; cancelling scan");
+                                        }
+                                    } else {
+                                        tracing::warn!(?err, "RAM++ tag failed");
+                                    }
+                                }
+                            }
+                            perf_trace("ram_plus_done", &file.path, ram_started.elapsed().as_secs_f64() * 1000.0);
+                        }
+                    }
+                }
+
                 // Scene tags — CLIP zero-shot. Scores the MobileCLIP image
                 // embedding computed just above against the scene-label
                 // matrix: a tiny CPU mat-vec + softmax, NOT a GPU inference,
@@ -1243,7 +1326,11 @@ async fn process_file_predecoded(
                 // text model not installed) or the embedding is missing.
                 // Gated by ENABLE_CLIP_SCENE_TAGS — flip that const to false to
                 // drop CLIP scan-time tagging and rely solely on VLM tags.
-                if crate::models::scene_vocab::ENABLE_CLIP_SCENE_TAGS {
+                // CLIP zero-shot scene tags are the FALLBACK tagger — only run
+                // when RAM++ didn't (not installed / device-dead / errored), so
+                // a RAM++-tagged file isn't double-tagged with noisier CLIP
+                // scene guesses.
+                if !ram_plus_ran && crate::models::scene_vocab::ENABLE_CLIP_SCENE_TAGS {
                     let redacted = crate::platform::redact_path_for_log(&file.path);
                     if let (Some(labeler), Some(emb)) = (&models.scene_labeler, &tagged.clip_embedding) {
                         let scene_started = Instant::now();

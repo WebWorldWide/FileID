@@ -151,6 +151,37 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
             })
         }
 
+        // ── RAM++ (Recognize Anything Plus) — the universal in-scan image
+        // tagger. Apache-2.0 ONNX (Swin-Large @384px, 4585-tag vocabulary),
+        // self-hosted at Web-World-Wide/ram-plus-onnx because no first-party
+        // ONNX export exists and the engine consumes ONNX. Gated behind the
+        // "model missing → CLIP scene-tag fallback" path in tagging.rs, so a
+        // not-yet-uploaded repo can't regress scanning (zero-regression).
+        // WS4 adds a third file (`ram_plus_thresholds.txt`, per-class cutoffs).
+        "ram_plus" | "ram-plus" => {
+            let dir = models_root.join("ram_plus");
+            LookupResult::Found(Model {
+                id: "ram_plus",
+                display_name: "RAM++ image tagger",
+                files: vec![
+                    FileEntry {
+                        url: "https://huggingface.co/Web-World-Wide/ram-plus-onnx/resolve/main/ram_plus.onnx"
+                            .to_string(),
+                        dest: dir.join("ram_plus.onnx"),
+                        sha256: None,
+                        approx_bytes: 450_000_000,
+                    },
+                    FileEntry {
+                        url: "https://huggingface.co/Web-World-Wide/ram-plus-onnx/resolve/main/ram_plus_tags.txt"
+                            .to_string(),
+                        dest: dir.join("ram_plus_tags.txt"),
+                        sha256: None,
+                        approx_bytes: 80_000,
+                    },
+                ],
+            })
+        }
+
         // ── VLMs (Deep Analyze). Pulled as GGUF + mmproj pairs from
         // the official llama.cpp-friendly mirrors. Subprocess runner
         // (`vlm::VlmRunner`) finds them at canonical paths.

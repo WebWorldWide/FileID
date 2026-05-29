@@ -23,6 +23,7 @@ pub mod bge_text;
 pub mod clip_text;
 pub mod clip_tokenizer;
 pub mod mobileclip;
+pub mod ram_plus;
 pub mod registry;
 pub mod runtime;
 pub mod florence2;
