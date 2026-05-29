@@ -1,7 +1,7 @@
 // Deep Analyze — VLM-powered captioning + smart-rename.
 //
 // Pipeline:
-//   1. Pick a model (Qwen2.5-VL 3B / 7B / Gemma 3 4B).
+//   1. Pick a model (Qwen2.5-VL 7B / Gemma 3 4B / Mistral-Small 3.2).
 //   2. Load via llama.cpp (Vulkan / CUDA / DirectML / CPU backend by EP).
 //   3. Per file: render the image / extract a video keyframe / pdfium
 //      first-page render → resize to model context → caption + smart name.
@@ -15,26 +15,26 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum VlmModelKind {
-    QwenVl3B,
     QwenVl7B,
     Gemma3_4B,
+    MistralSmall3_2,
 }
 
 #[allow(dead_code)]
 impl VlmModelKind {
     pub fn id(self) -> &'static str {
         match self {
-            VlmModelKind::QwenVl3B => "qwen2.5-vl-3b",
             VlmModelKind::QwenVl7B => "qwen2.5-vl-7b",
             VlmModelKind::Gemma3_4B => "gemma-3-4b",
+            VlmModelKind::MistralSmall3_2 => "mistral-small-3.2",
         }
     }
 
     pub fn human_name(self) -> &'static str {
         match self {
-            VlmModelKind::QwenVl3B => "Qwen2.5-VL 3B (recommended)",
-            VlmModelKind::QwenVl7B => "Qwen2.5-VL 7B",
+            VlmModelKind::QwenVl7B => "Qwen2.5-VL 7B (recommended)",
             VlmModelKind::Gemma3_4B => "Gemma 3 4B",
+            VlmModelKind::MistralSmall3_2 => "Mistral-Small 3.2",
         }
     }
 
@@ -42,18 +42,19 @@ impl VlmModelKind {
     /// Drives the install-disk-budget warning in the model picker UI.
     pub fn approx_size_mb(self) -> u32 {
         match self {
-            VlmModelKind::QwenVl3B => 1900,
             VlmModelKind::QwenVl7B => 4500,
             VlmModelKind::Gemma3_4B => 2500,
+            // Mistral-Small-3.2-24B Q4_K_M (~14.3 GB) + mmproj (~878 MB).
+            VlmModelKind::MistralSmall3_2 => 15178,
         }
     }
 
     /// Approximate runtime VRAM/RAM ceiling in MB at Q4_K_M.
     pub fn approx_ram_mb(self) -> u32 {
         match self {
-            VlmModelKind::QwenVl3B => 3500,
             VlmModelKind::QwenVl7B => 7500,
             VlmModelKind::Gemma3_4B => 4500,
+            VlmModelKind::MistralSmall3_2 => 16000,
         }
     }
 }
@@ -661,9 +662,9 @@ mod tests {
     #[test]
     fn model_kinds_have_unique_ids() {
         let kinds = [
-            VlmModelKind::QwenVl3B,
             VlmModelKind::QwenVl7B,
             VlmModelKind::Gemma3_4B,
+            VlmModelKind::MistralSmall3_2,
         ];
         let mut seen = std::collections::HashSet::new();
         for k in kinds {
@@ -673,8 +674,8 @@ mod tests {
 
     #[test]
     fn size_estimates_increase_with_capability() {
-        assert!(VlmModelKind::QwenVl3B.approx_size_mb() < VlmModelKind::QwenVl7B.approx_size_mb());
-        assert!(VlmModelKind::Gemma3_4B.approx_size_mb() > VlmModelKind::QwenVl3B.approx_size_mb());
+        assert!(VlmModelKind::Gemma3_4B.approx_size_mb() < VlmModelKind::QwenVl7B.approx_size_mb());
+        assert!(VlmModelKind::MistralSmall3_2.approx_size_mb() > VlmModelKind::QwenVl7B.approx_size_mb());
     }
 
     #[cfg(feature = "pdf-analyze")]

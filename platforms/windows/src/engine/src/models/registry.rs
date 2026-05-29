@@ -185,25 +185,28 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
         // ── VLMs (Deep Analyze). Pulled as GGUF + mmproj pairs from
         // the official llama.cpp-friendly mirrors. Subprocess runner
         // (`vlm::VlmRunner`) finds them at canonical paths.
-        "qwen2.5-vl-3b" | "qwen2_5_vl_3b" => {
-            let dir = models_root.join("vlm").join("qwen2.5-vl-3b");
+        // Mistral-Small-3.2-24B (Apache-2.0) — the max-quality Deep Analyze
+        // VLM, replacing the non-commercial Qwen2.5-VL-3B (Qwen Research
+        // License). Multimodal GGUF + mmproj from bartowski's quant repo.
+        "mistral-small-3.2" | "mistral_small_3_2" => {
+            let dir = models_root.join("vlm").join("mistral-small-3.2");
             LookupResult::Found(Model {
-                id: "qwen2_5_vl_3b",
-                display_name: "Qwen2.5-VL 3B",
+                id: "mistral_small_3_2",
+                display_name: "Mistral-Small 3.2",
                 files: vec![
                     FileEntry {
-                        url: "https://huggingface.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF/resolve/main/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf"
+                        url: "https://huggingface.co/bartowski/mistralai_Mistral-Small-3.2-24B-Instruct-2506-GGUF/resolve/main/mistralai_Mistral-Small-3.2-24B-Instruct-2506-Q4_K_M.gguf"
                             .to_string(),
                         dest: dir.join("model.gguf"),
                         sha256: None,
-                        approx_bytes: 2_300_000_000,
+                        approx_bytes: 14_300_000_000,
                     },
                     FileEntry {
-                        url: "https://huggingface.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF/resolve/main/mmproj-Qwen2.5-VL-3B-Instruct-f16.gguf"
+                        url: "https://huggingface.co/bartowski/mistralai_Mistral-Small-3.2-24B-Instruct-2506-GGUF/resolve/main/mmproj-mistralai_Mistral-Small-3.2-24B-Instruct-2506-f16.gguf"
                             .to_string(),
                         dest: dir.join("mmproj.gguf"),
                         sha256: None,
-                        approx_bytes: 870_000_000,
+                        approx_bytes: 878_000_000,
                     },
                 ],
             })
