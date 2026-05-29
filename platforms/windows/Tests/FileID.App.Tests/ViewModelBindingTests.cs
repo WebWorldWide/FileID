@@ -114,7 +114,8 @@ public class FaceCardPathTests
 public class WelcomeSheetModelSizeTests
 {
     [Theory]
-    [InlineData("qwen2_5_vl_3b", 3170)]    // 2300+870 MB (sum of registry approx_bytes)
+    [InlineData("mistral_small_3_2", 15178)] // 14300+878 MB
+    [InlineData("ram_plus", 450)]            // RAM++ ONNX (fp16)
     [InlineData("qwen2_5_vl_7b", 6100)]    // 4700+1400 MB
     [InlineData("gemma_3_4b",    3351)]    // 2500+851 MB
     [InlineData("mobileclip_s2", 143)]
@@ -212,10 +213,10 @@ public class DeepAnalyzeStreamingTests
             Total: 1,
             EtaSeconds: null,
             CurrentPath: "C:/photos/dog.jpg",
-            ModelKind: "qwen2_5_vl_3b",
+            ModelKind: "qwen2_5_vl_7b",
             CurrentCaption: "A dog sits");
         Assert.Equal("A dog sits", evt.CurrentCaption);
-        Assert.Equal("qwen2_5_vl_3b", evt.ModelKind);
+        Assert.Equal("qwen2_5_vl_7b", evt.ModelKind);
         Assert.Equal(1UL, evt.Total);
     }
 
@@ -230,7 +231,7 @@ public class DeepAnalyzeStreamingTests
             Total: 5,
             EtaSeconds: 30.0,
             CurrentPath: "/p.jpg",
-            ModelKind: "qwen2_5_vl_3b",
+            ModelKind: "qwen2_5_vl_7b",
             CurrentCaption: null);
         Assert.Null(evt.CurrentCaption);
     }
@@ -242,7 +243,7 @@ public class DeepAnalyzeStreamingTests
             FileId: 1L,
             Description: "A dog sits on a couch.",
             ProposedName: "dog-on-couch",
-            ModelKind: "qwen2_5_vl_3b");
+            ModelKind: "qwen2_5_vl_7b");
         Assert.Equal("A dog sits on a couch.", evt.Description);
         Assert.Equal("dog-on-couch", evt.ProposedName);
         Assert.Equal(1L, evt.FileId);

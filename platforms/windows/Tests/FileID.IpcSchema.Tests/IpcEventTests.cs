@@ -85,7 +85,7 @@ public class IpcEventTests
     public void DeepAnalyzeFileDone_PreservesFileIDCasing()
     {
         var ev = IpcEvent.Now(new DeepAnalyzeFileDoneEvent(
-            new DeepAnalyzeFileDone(99, "a cat on a couch", "cat_couch.jpg", "qwen2_5_vl_3b")));
+            new DeepAnalyzeFileDone(99, "a cat on a couch", "cat_couch.jpg", "qwen2_5_vl_7b")));
         var json = IpcCoder.Encode(ev);
 
         Assert.Contains("\"fileID\":99", json);
@@ -285,7 +285,7 @@ public class IpcEventTests
             Total: 10,
             EtaSeconds: 42.5,
             CurrentPath: @"C:\photos\dog.jpg",
-            ModelKind: "qwen2_5_vl_3b",
+            ModelKind: "qwen2_5_vl_7b",
             CurrentCaption: "A dog sits on");
         var ev = IpcEvent.Now(new DeepAnalyzeProgressEvent(prog));
         var json = IpcCoder.Encode(ev);
@@ -305,7 +305,7 @@ public class IpcEventTests
         // Pre-inference progress events (`processed=idx, current_path=path`)
         // don't have caption text yet — Rust emits None → key omitted.
         const string engineWire = """
-            {"t":"2026-05-13T12:00:00+00:00","payload":{"deepAnalyzeProgress":{"_0":{"processed":1,"total":10,"modelKind":"qwen2_5_vl_3b"}}}}
+            {"t":"2026-05-13T12:00:00+00:00","payload":{"deepAnalyzeProgress":{"_0":{"processed":1,"total":10,"modelKind":"qwen2_5_vl_7b"}}}}
             """;
         var rt = IpcCoder.Decode<IpcEvent>(engineWire.Trim());
         var got = Assert.IsType<DeepAnalyzeProgressEvent>(rt.Payload).Progress;

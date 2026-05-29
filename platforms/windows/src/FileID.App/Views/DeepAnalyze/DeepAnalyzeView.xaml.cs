@@ -20,7 +20,7 @@ namespace FileID.Views.DeepAnalyze;
 
 public sealed partial class DeepAnalyzeView : UserControl
 {
-    private string _activeModel = "qwen2_5_vl_3b";
+    private string _activeModel = "qwen2_5_vl_7b";
     private string _captionAccumulator = string.Empty;
     private bool _unloaded;
 
@@ -29,7 +29,7 @@ public sealed partial class DeepAnalyzeView : UserControl
         InitializeComponent();
         // Restore the user's last VLM choice so the auto-chain after
         // face clustering and a manual Analyze All both use the same
-        // weights the user last picked. Falls back to qwen2_5_vl_3b.
+        // weights the user last picked. Falls back to qwen2_5_vl_7b.
         try { _activeModel = AppSettings.Load().SelectedVlmModelKind; }
         catch { /* keep default */ }
         Loaded += OnLoadedHandler;
@@ -176,7 +176,7 @@ public sealed partial class DeepAnalyzeView : UserControl
         // not the shared "any VLM installed" slot, otherwise installing one model
         // makes the other cards mis-report as installed and Deep Analyze fails
         // every file with "VLM weights not installed".
-        ApplyVlmCard(QwenSmallStatus, QwenSmallProgress, QwenSmallInstallButton, "qwen2_5_vl_3b", slot);
+        ApplyVlmCard(MistralStatus, MistralProgress, MistralInstallButton, "mistral_small_3_2", slot);
         ApplyVlmCard(QwenLargeStatus, QwenLargeProgress, QwenLargeInstallButton, "qwen2_5_vl_7b", slot);
         ApplyVlmCard(GemmaStatus, GemmaProgress, GemmaInstallButton, "gemma_3_4b", slot);
         HighlightActiveCard();
@@ -236,10 +236,10 @@ public sealed partial class DeepAnalyzeView : UserControl
     {
         var idle = (Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"];
         var gold = (Brush)Application.Current.Resources["GoldBrush"];
-        QwenSmallCard.BorderBrush = _activeModel == "qwen2_5_vl_3b" ? gold : idle;
+        MistralCard.BorderBrush = _activeModel == "mistral_small_3_2" ? gold : idle;
         QwenLargeCard.BorderBrush = _activeModel == "qwen2_5_vl_7b" ? gold : idle;
         GemmaCard.BorderBrush = _activeModel == "gemma_3_4b" ? gold : idle;
-        QwenSmallCard.BorderThickness = _activeModel == "qwen2_5_vl_3b" ? new Thickness(2) : new Thickness(1);
+        MistralCard.BorderThickness = _activeModel == "mistral_small_3_2" ? new Thickness(2) : new Thickness(1);
         QwenLargeCard.BorderThickness = _activeModel == "qwen2_5_vl_7b" ? new Thickness(2) : new Thickness(1);
         GemmaCard.BorderThickness = _activeModel == "gemma_3_4b" ? new Thickness(2) : new Thickness(1);
     }
@@ -250,7 +250,8 @@ public sealed partial class DeepAnalyzeView : UserControl
         {
             "qwen2_5_vl_7b" => "Active model: Qwen 2.5-VL 7B (best quality)",
             "gemma_3_4b" => "Active model: Gemma 3 4B (balanced)",
-            _ => "Active model: Qwen 2.5-VL 3B (recommended)",
+            "mistral_small_3_2" => "Active model: Mistral-Small 3.2 (max quality)",
+            _ => "Active model: Qwen 2.5-VL 7B (best quality)",
         };
     }
 

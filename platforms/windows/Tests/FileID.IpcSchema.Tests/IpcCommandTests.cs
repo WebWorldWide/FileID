@@ -74,7 +74,7 @@ public class IpcCommandTests
     {
         // Field name on the wire is "fileID" (matches Swift Codable's
         // synthesis for `fileID: Int64`). Lower-case "fileId" is wrong.
-        var cmd = new IpcCommand("d", new DeepAnalyzeFileCommand(12345, "qwen2_5_vl_3b"));
+        var cmd = new IpcCommand("d", new DeepAnalyzeFileCommand(12345, "qwen2_5_vl_7b"));
         var json = IpcCoder.Encode(cmd);
         Assert.Contains("\"fileID\":12345", json);
         Assert.DoesNotContain("\"fileId\"", json);
@@ -82,7 +82,7 @@ public class IpcCommandTests
         var rt = IpcCoder.Decode<IpcCommand>(json);
         var p = Assert.IsType<DeepAnalyzeFileCommand>(rt.Payload);
         Assert.Equal(12345, p.FileId);
-        Assert.Equal("qwen2_5_vl_3b", p.ModelKind);
+        Assert.Equal("qwen2_5_vl_7b", p.ModelKind);
     }
 
     [Fact]
@@ -103,7 +103,7 @@ public class IpcCommandTests
     {
         // Older clients omit tagsOnly; it must decode as false (serde default
         // on the Rust side, defaulted record param on the C# side).
-        const string json = """{"id":"a","payload":{"deepAnalyzeAll":{"modelKind":"qwen2_5_vl_3b","skipExisting":false}}}""";
+        const string json = """{"id":"a","payload":{"deepAnalyzeAll":{"modelKind":"qwen2_5_vl_7b","skipExisting":false}}}""";
         var rt = IpcCoder.Decode<IpcCommand>(json);
         var p = Assert.IsType<DeepAnalyzeAllCommand>(rt.Payload);
         Assert.False(p.TagsOnly);
