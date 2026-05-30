@@ -4,29 +4,31 @@
 
 ---
 
-## Butler-grade restructure overhaul — 4-phase build (2026-05-30)
+## Butler-grade restructure overhaul — status (2026-05-30)
 
-Design + research locked in [`RESTRUCTURE.md`](RESTRUCTURE.md) (cited deep-research
-synthesis). The current flat rule cascade is replaced incrementally:
+Design in [`RESTRUCTURE.md`](RESTRUCTURE.md). **P1–P4 built + headless-verified on
+Windows; macOS mirror written but unverified.** Remaining, highest-value first:
 
-- **P1 — engine: semantic + learn-your-style classify.** New module: fuse CLIP +
-  RAM++ tags + time (per-block L2 → weight/√dim → concat) → cluster (reuse the
-  `identity_clustering` density algorithm — no new deps) → assign each cluster to
-  the nearest EXISTING folder prototype (mean-embedding centroid) with a confidence
-  margin, else propose a new tag-named group; noise → Unsorted. Unit-tested; the
-  rule cascade stays as fallback when embeddings are absent. *Acceptance:* on
-  `G:\TrueNAS`, proposed folders are content-aware (an event/trip group), not just
-  `Photos/Year/Month`, and files matching a good existing folder route there.
-- **P2 — VLM naming.** Cluster profile (top distinctive tags + 3-5 representatives)
-  → Qwen2.5-VL label-then-reason (constrained decoding, temp 0) → hierarchy via
-  label-then-group → dedup (cosine ≥ 0.5) + cache by cluster signature.
-- **P3 — confidence tiers + corrections.** 3-band routing (auto ≥ 0.95 / suggest
-  0.70-0.95 / ask < 0.70) gated by action risk; command-journal undo; per-category
-  accuracy track record; learn-from-corrections centroid updates; earned autonomy.
-- **P4 — visualization.** Win2D Sankey upgrade (barycentre ordering,
-  destination-color links, Okabe-Ito palette, hover path-highlight, drill-down) +
-  before/after side-by-side tree + content/date/people weight sliders.
-- **macOS** mirrors each phase after Windows lands.
+1. **On-hardware butler verification** (needs `G:\TrueNAS`). Build the WinUI app,
+   open Restructure, confirm: proposed folders are content-aware (an event/trip
+   group, not just `Photos/Year/Month`); files matching a good existing folder route
+   there; confidence bands + reasons read sensibly; the "What to apply" tiers + the
+   Okabe-Ito/"Other" Sankey render correctly. Tune the provisional confidence
+   thresholds (`restructure_semantic.rs` `AUTO_*`/`*_COHESION`/`MIN_MARGIN`) and the
+   fusion weights against real results.
+2. **macOS butler build** (needs a Mac). `swift build` + `swift test` the ported
+   `RestructureSemantic.swift`, then wire the app-side UI per
+   `platforms/apple/MACOS_BUTLER_NOTES.md` (reason display, confidence→Keep/Tidy/
+   Reorganize mapping, Okabe-Ito Sankey).
+3. **P2 live local-VLM naming (deferred enrichment).** Replace the c-TF-IDF group
+   name with a Qwen2.5-VL label-then-reason on the cluster profile (distinctive tags
+   + 3-5 medoid representatives), constrained decoding, cache by cluster signature —
+   run as a background pass (charging/idle), not in the interactive plan, since each
+   `llama-mtmd-cli` call reloads the model.
+4. **Learn-from-corrections + earned autonomy (P3 follow-on).** Update folder
+   centroids + thresholds on accept/reject; per-category accuracy track record;
+   promote a category a tier only after a streak. Calibrate the bands to *measured*
+   accuracy (today's cosine thresholds are provisional).
 
 ---
 

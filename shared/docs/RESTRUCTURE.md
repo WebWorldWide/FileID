@@ -92,11 +92,15 @@ Make the Sankey world-class:
 
 ## Phased implementation plan
 
-- **P1 — engine: semantic + learn-your-style classify.** New `restructure` path: fuse signals → cluster (reuse `identity_clustering`) → folder-prototype assignment with confidence/abstain → heuristic group names (top distinctive tags) as a placeholder. Pure Rust, unit-tested. Biggest de-bland/de-loose win.
-- **P2 — VLM naming.** Cluster-profile → Qwen2.5-VL label-then-reason (constrained), hierarchy via label-then-group, dedup + cache. Reuses the Deep Analyze VLM runner.
-- **P3 — confidence tiers + corrections.** 3-band routing, action-risk gating, command-journal undo, per-category accuracy, learn-from-corrections centroid updates, earned-autonomy promotions.
-- **P4 — visualization.** Win2D Sankey upgrade (barycentre, destination-color, Okabe-Ito, hover path highlight, drill-down) + before/after tree; weight sliders.
-- **macOS** mirrors each phase (the engine logic is shared in spirit; Swift port follows).
+Status as of 2026-05-30: **P1–P4 built + headless-verified on Windows; macOS mirror written
+(unverified — needs a Mac build). On-hardware butler-quality verification + threshold tuning
+pending.** See `STATE.md` / `NEXT.md`.
+
+- **P1 — engine: semantic + learn-your-style classify. ✅ Done (Windows).** `pipeline/restructure_semantic.rs`: fuse signals → cluster (reuses `identity_clustering`) → folder-prototype assignment with confidence/abstain. Pure Rust, unit-tested; rule cascade is the fallback.
+- **P2 — naming. ◑ Partial.** c-TF-IDF distinctive-term group naming is live (the always-on de-bland win). Live local-VLM naming (Qwen2.5-VL label-then-reason, constrained, cached) is **deferred to a background pass** — a per-call `llama-mtmd-cli` subprocess reloads the model, too slow for an interactive plan. The cluster-profile inputs (distinctive terms + representatives) are the drop-in.
+- **P3 — confidence tiers. ✅ Done (Windows); ◑ corrections pending.** 3-band routing (auto/review/ask) from folder-match strength + top-1−top-2 margin + cohesion, plain-language reasons, selective apply (holds "ask" back). Bands are provisional cosine thresholds — calibrate to *measured* accuracy. Learn-from-corrections + earned-autonomy promotions + command-journal undo are the follow-on.
+- **P4 — visualization. ◑ Partial.** Sankey gained the Okabe-Ito CVD-safe palette + an "Other" long-tail node (no silent drop); barycentre ordering + hover highlight + drill-down already existed. Win2D upgrade, before/after tree, and weight sliders remain.
+- **macOS — ◑ Written, unverified.** `RestructureSemantic.swift` mirrors the engine; `proposeAll` + IPC carry confidence/reason; app-side UI wiring is documented in `platforms/apple/MACOS_BUTLER_NOTES.md`.
 
 ## Sources
 
