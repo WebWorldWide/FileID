@@ -35,10 +35,17 @@ const INPUT_SIZE: u32 = 384;
 /// `ram_plus_thresholds.txt` sidecar (model.class_threshold) that supersedes
 /// this when present.
 const DEFAULT_THRESHOLD: f32 = 0.68;
-/// Cap RAM++'s own emissions a little below the scan pipeline's 16-tag total
-/// cap, so Year/camera-family/OCR-doc extras always keep a few slots in the
-/// combined per-file set (content tags are pushed first, then the extras).
-const DEFAULT_MAX_TAGS: usize = 12;
+/// Cap RAM++'s own emissions well below the scan pipeline's 16-tag total cap.
+/// Biased to precision (8, not 12): only the most-confident content tags survive,
+/// so Library cards read clean and Year/camera/OCR extras keep slots. Lowered
+/// from 12 — users reported tag sets feeling "loose" (too many weak labels).
+const DEFAULT_MAX_TAGS: usize = 8;
+
+/// Hard precision floor under the per-class thresholds. RAM++'s exported
+/// `class_threshold`s are F1-balanced; a few common classes calibrate quite low,
+/// which surfaces weak tags. Clamping the effective cutoff up to this floor
+/// trades a little recall for noticeably cleaner, higher-confidence tags.
+const PRECISION_FLOOR: f32 = 0.5;
 
 /// RAM++ vocab tags that describe the medium rather than the content — the file
 /// already *is* a photo, and faces are surfaced by the People tab — so they read
@@ -216,7 +223,8 @@ impl RamPlusTagger {
                     .per_class_threshold
                     .as_ref()
                     .map(|t| t[i])
-                    .unwrap_or(self.threshold);
+                    .unwrap_or(self.threshold)
+                    .max(PRECISION_FLOOR);
                 (p >= cut).then_some((i, p))
             })
             .collect();
