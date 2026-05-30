@@ -15,6 +15,24 @@ use crate::pipeline::restructure::{self, classify, FileForClassify, FolderClassi
 use crate::pipeline::restructure_apply::RestructureApply;
 use crate::pipeline::restructure_semantic;
 
+/// Files + per-file person names for restructure planning. Person names come
+/// from a deduped, ordered correlated subquery — NOT
+/// `GROUP_CONCAT(DISTINCT p.name, char(31))`, which SQLite rejects at run with
+/// "DISTINCT aggregates must have exactly one argument". `names` (column 8) is a
+/// char(31)-separated list; the row reader takes the first.
+const PLAN_FILES_SQL: &str = "SELECT
+   f.id, f.path_text, f.kind, f.modified_at, f.created_at,
+   f.location_lat, f.location_lon, f.has_text,
+   (SELECT GROUP_CONCAT(name, char(31))
+      FROM (SELECT DISTINCT p.name
+              FROM persons p
+              JOIN face_prints fp ON fp.person_id = p.id
+             WHERE fp.file_id = f.id
+               AND p.name IS NOT NULL AND p.name <> ''
+             ORDER BY p.name)) AS names
+ FROM files f
+ WHERE f.failed = 0";
+
 /// Walk the `files` table for the picked library root, classify each file,
 /// and emit a `restructurePlan` event with the proposed moves + per-category
 /// counts. The app's Restructure tab consumes this to render the Sankey +
@@ -29,17 +47,7 @@ pub(crate) async fn handle_plan_restructure(
     let files: Vec<FileForClassify> =
         match tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<FileForClassify>> {
             let conn = db.lock();
-            let mut stmt = conn.prepare(
-                "SELECT
-                   f.id, f.path_text, f.kind, f.modified_at, f.created_at,
-                   f.location_lat, f.location_lon, f.has_text,
-                   GROUP_CONCAT(DISTINCT p.name, char(31)) AS names
-                 FROM files f
-                 LEFT JOIN face_prints fp ON fp.file_id = f.id
-                 LEFT JOIN persons p ON p.id = fp.person_id AND p.name IS NOT NULL AND p.name != ''
-                 WHERE f.failed = 0
-                 GROUP BY f.id"
-            )?;
+            let mut stmt = conn.prepare(PLAN_FILES_SQL)?;
             let rows = stmt.query_map([], |row| {
                 let kind_str: String = row.get(2)?;
                 let kind = match kind_str.as_str() {
@@ -279,5 +287,52 @@ pub(crate) async fn handle_apply_restructure(
         Err(err) => {
             tracing::warn!(?err, "applyRestructure spawn_blocking failed");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    /// The planner SQL must prepare AND run — the old
+    /// `GROUP_CONCAT(DISTINCT name, char(31))` form prepared but failed at run
+    /// with "DISTINCT aggregates must have exactly one argument". This also pins
+    /// the dedup, char(31) separator, failed-row exclusion, and NULL-when-no-faces
+    /// behavior the row reader depends on.
+    #[test]
+    fn plan_files_sql_runs_and_dedupes_person_names() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE files(
+                 id INTEGER PRIMARY KEY, path_text TEXT, kind TEXT,
+                 modified_at REAL, created_at REAL,
+                 location_lat REAL, location_lon REAL,
+                 has_text INTEGER, failed INTEGER DEFAULT 0);
+             CREATE TABLE persons(id INTEGER PRIMARY KEY, name TEXT);
+             CREATE TABLE face_prints(file_id INTEGER, person_id INTEGER);
+             INSERT INTO files(id,path_text,kind,failed) VALUES
+                 (1,'/a.jpg','image',0),(2,'/b.jpg','image',0),(3,'/c.jpg','image',1);
+             INSERT INTO persons(id,name) VALUES (1,'Bob'),(2,'Alice');
+             INSERT INTO face_prints(file_id,person_id) VALUES (1,1),(1,1),(1,2);",
+        )
+        .unwrap();
+
+        let mut stmt = conn.prepare(PLAN_FILES_SQL).expect("planner SQL prepares");
+        let mut rows: Vec<(i64, Option<String>)> = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(8)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        rows.sort_by_key(|(id, _)| *id);
+
+        // failed=1 (file 3) is excluded; file 1 dedupes Bob+Bob+Alice into two
+        // names joined by char(31); file 2 has no faces → NULL. Compare as a set
+        // (SQLite doesn't guarantee aggregate order across versions).
+        assert_eq!(rows.len(), 2);
+        let mut names: Vec<&str> = rows[0].1.as_deref().unwrap().split('\u{1f}').collect();
+        names.sort_unstable();
+        assert_eq!(names, ["Alice", "Bob"]);
+        assert_eq!(rows[1].1, None);
     }
 }

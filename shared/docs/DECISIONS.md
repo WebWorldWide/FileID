@@ -2449,3 +2449,46 @@ These already live in `FileID.Theme/Theme.xaml` as `SpringResponseStandard` / `S
   unknown_model message; app routes unknown_model / models_dir_unavailable to the install
   slot as "engine out of date — reinstall/rebuild"). Same outcome, no schema/build
   plumbing. The real fix for the live toast is a clean engine rebuild (stale binary).
+
+
+## 2026-05-30 — Scan/Cleanup UX: app-side monotonic phase, RAM++ sidecar, Cleanup exact dupes (A-D)
+
+- **Processing-flicker fix lives in the app, not the engine.** The engine legitimately runs
+  discovery + tagging concurrently and emits a `ProgressEvent` per batch from each, so the
+  *phase* genuinely oscillates on the wire. Rather than serialize the engine pipeline (a real
+  throughput cost) or throttle harder (masks it, adds latency), the app clamps the *displayed*
+  phase monotonically (`_shownPhaseRank`/`PhaseRank` in `EngineClient.Apply`): a ProgressEvent
+  may only advance it, never regress. `PhaseChangedEvent`/`ScanComplete` remain authoritative
+  and re-sync the latch (terminal Cancelled/Failed rank above the progression so a late
+  interleaved ProgressEvent can't clamp them away). One change fixes label + icon + pipeline dot.
+- **RAM++ junk-tag suppression is a no-rebuild sidecar; precision floor raised + env-tunable.**
+  Tuning the suppress set was a `cargo build` per iteration (compile-time const). Added
+  `ram_plus_suppress.txt` next to the tag list (same pattern as the existing
+  `ram_plus_thresholds.txt`), merged case-insensitively with the const — so killing a bad tag is
+  a text edit + rescan. The const keeps the built-in defaults (now incl. `"catch"`, a frequent
+  content-free false-positive that fired on dogs/bears/sports alike). Default precision floor
+  raised 0.5->0.62 (bias precision over recall per the "tags too generic" report) and made
+  env-overridable (`FILEID_RAMPLUS_PRECISION_FLOOR`) so the floor can be swept without a rebuild.
+  The borrow checker forced `is_suppressed` to be a free fn taking `&suppress_extra` (the tag()
+  closure holds a `&mut self.session` via `outputs` until end-of-fn, so a `&self` method there is
+  an E0502 — bind disjoint fields as locals instead).
+- **restructure DISTINCT crash: deduped correlated subquery, not Rust-side dedup.** `GROUP_CONCAT(
+  DISTINCT p.name, char(31))` is invalid SQLite (separator arg illegal under DISTINCT) and threw
+  at *run* (prepare succeeded — hence no compile/test catch before). Chose a correlated subquery
+  `GROUP_CONCAT(name, char(31)) FROM (SELECT DISTINCT p.name … ORDER BY p.name)` over keeping the
+  LEFT JOIN + de-duping names in Rust: it keeps the dedup in one place (SQL), drops the now-
+  unnecessary `GROUP BY f.id`, and is pinned by a unit test that *runs* the query on an in-memory
+  DB. Extracted to a `PLAN_FILES_SQL` const so the test and the handler share the exact bytes.
+- **Cleanup switched from perceptual (phash) to exact (content_hash) — a deliberate macOS
+  divergence.** The user asked for "1:1 bit identical" dupes; the Windows Cleanup grouped by phash
+  with Hamming<=4 fuzzy clustering (visually-similar, O(n^2), capped at 5000). Replaced with exact
+  `content_hash` (BLAKE3 <=16 MB, else head+tail+size composite; migration v8) + `size_bytes`
+  grouping, O(n). This is byte-identical, not visually-similar, and **diverges from the macOS
+  reference (which still uses phash)** — accepted because it's the explicit user requirement;
+  flagged for a macOS follow-up. The missing Cleanup previews were a *symptom*: phash clustering
+  formed no/empty groups, so there were no tiles for the (sound) `ThumbnailService` path to fill;
+  real byte-dupe groups restore them. Equality is "virtually certain identical" (full hash only
+  <=16 MB); a true byte-compare on hash collision is a noted future hardening, not shipped here.
+- **gold "Faces" badge removed from Library (preview pill + tile overlay + detail row); Text/OCR
+  badge kept.** Also a macOS divergence (the badge exists on macOS) — Windows-first per this
+  session's pattern; mirror-or-accept tracked in NEXT.

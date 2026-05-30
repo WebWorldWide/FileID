@@ -146,7 +146,6 @@ public sealed partial class FilePreviewSheet : UserControl
         // current" button can target it without LibraryView wiring.
         FileID.Services.SelectionRegistry.Instance.PreviewedFileId =
             fileId > 0 ? fileId : null;
-        FacesBadge.Visibility = hasFaces ? Visibility.Visible : Visibility.Collapsed;
         TextBadge.Visibility = hasText ? Visibility.Visible : Visibility.Collapsed;
 
         TagInput.Text = string.Empty;
@@ -440,7 +439,6 @@ public sealed partial class FilePreviewSheet : UserControl
             var dt = DateTimeOffset.FromUnixTimeMilliseconds((long)(modifiedAt.Value * 1000)).LocalDateTime;
             AddMetadataRow("Modified", dt.ToString("g"));
         }
-        if (FacesBadge.Visibility == Visibility.Visible) AddMetadataRow("Faces", "Detected");
         if (TextBadge.Visibility == Visibility.Visible) AddMetadataRow("Text", "Detected (OCR)");
     }
 

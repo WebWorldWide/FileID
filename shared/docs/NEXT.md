@@ -2,6 +2,26 @@
 
 Branch `windows-e2e-correctness` (P1+P2+P4 committed, building green).
 
+**UPDATE 2026-05-30 (later 2):** items 2 (P3) and 3 (P5) below are DONE (committed). A second
+Scan/Cleanup UX batch also landed headless on this branch — Processing-flicker monotonic-phase
+fix; RAM++ suppress sidecar + `FILEID_RAMPLUS_PRECISION_FLOOR` (floor 0.5->0.62) + `"catch"` +
+`sample_corpus.ps1`/`tag_report.py` tuning harness; gold Faces-badge removal; restructure
+`GROUP_CONCAT(DISTINCT …)` SQL crash fix; Cleanup `phash`->`content_hash` exact dupes. Engine
+232/232 + clippy clean; app build + 34/34 + 102/102 GREEN. Item 4 (App.Tests headless) is
+RESOLVED — both test projects pass headless. **Remaining now:**
+- **On-hardware (RTX 2060 / `G:\TrueNAS`):** (a) scan the 33k folder — phase holds steady on
+  "Tagging", no flip-back; (b) `sample_corpus.ps1 -Corpus G:\TrueNAS\photos -Count 100` then the
+  iterate.ps1 + `tag_report.py` loop until "catch" is gone and no dog->bear, editing
+  `ram_plus_suppress.txt` / the precision-floor env; (c) Restructure tab renders with no
+  "Couldn't read files table" toast; (d) Cleanup shows byte-identical groups WITH thumbnails,
+  near-but-not-identical images NOT grouped.
+- **macOS parity follow-ups (needs a Mac):** Faces badge removal + Cleanup exact-dupe (vs phash)
+  both diverge from the macOS reference — mirror or consciously accept the divergence.
+- Optional P3 status-card polish (per-model not-yet-analyzed counts + ETA, RAM-fit badge).
+- Merge `windows-e2e-correctness` -> `main` once on-hardware signs off + GitHub CI is green.
+
+--- original resume list (items 2/3/4 now superseded above) ---
+
 1. Rebuild the engine to clear the live `ram_plus` toast:
    `platforms\windows\build\build-all.ps1 -Clean -Run` (the running FileIDEngine.exe
    is stale; the source registry already has ram_plus).

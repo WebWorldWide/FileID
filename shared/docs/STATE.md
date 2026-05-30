@@ -8,6 +8,51 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-05-30 (later 2) — Scan/Cleanup UX pass: flicker + RAM++ tags + Faces badge + restructure SQL + exact dupes
+
+Same branch `windows-e2e-correctness`. Second batch of reported Windows issues (Processing
+sidebar, tag quality, the gold Faces badge, a DISTINCT crash, Cleanup semantics). All
+headless-verified; on-hardware + macOS parity follow-ups remain.
+
+- **A — Processing sidebar flicker — FIXED.** Discovery + tagging `ProgressEvent`s interleave,
+  and `EngineClient.Apply` set `Phase` on every one, so the phase label / `PhaseIcon` /
+  pipeline dot flipped Discovering<->Tagging several times a second. Added a monotonic
+  phase-rank latch (`_shownPhaseRank` + `PhaseRank()`): a ProgressEvent may only ADVANCE the
+  shown phase, never regress; `PhaseChangedEvent` / `ScanCompleteEvent` stay authoritative and
+  re-sync the latch; reset on StartScan / ClearPhaseAndError / ResetForWipe /
+  SetOptimisticScanningPhase. Fixes every consumer with one change.
+- **B — RAM++ tag quality — knobs + tuning loop landed (empirical tuning is on-hardware).**
+  `models/ram_plus.rs`: new `ram_plus_suppress.txt` sidecar (one tag/line, case-insensitive,
+  merged with the built-in const — no rebuild to extend; `#` comments + blanks skipped); added
+  `"catch"` to the built-in suppress set; raised the precision floor 0.5->0.62 and made it
+  env-overridable (`FILEID_RAMPLUS_PRECISION_FLOOR`, mirrors `FILEID_RAMPLUS_THRESHOLD`). New
+  harness: `build/sample_corpus.ps1` (fixed N-photo sample) + `build/tag_report.py` (frequency
+  + mean-score histogram + lowest-confidence-accepted list). The "lock in until perfect" loop
+  runs against `G:\TrueNAS` (on-hardware).
+- **C — gold "Faces" badge removed.** FilePreviewSheet (the pill + its two code-behind refs +
+  the "Faces: Detected" metadata row) and the LibraryView tile face overlay. Text/OCR badge
+  kept. Diverges from macOS (still shows it) -> macOS follow-up (DECISIONS/NEXT).
+- **D1 — restructure "DISTINCT aggregates must have exactly one argument" crash — FIXED.**
+  `commands/restructure.rs` used `GROUP_CONCAT(DISTINCT p.name, char(31))`, which SQLite rejects
+  at run (separator arg illegal under DISTINCT) -> the Restructure planner threw "Couldn't read
+  files table" (a GLOBAL toast, so it read like a Cleanup error). Replaced with a deduped+ordered
+  correlated subquery, extracted to a `PLAN_FILES_SQL` const + a unit test that prepares AND runs
+  it (the old form prepared but failed at run).
+- **D3/D2 — Cleanup = 1:1 bit-identical + previews — FIXED.** `CleanupViewModel` grouped by
+  `phash` with Hamming<=4 fuzzy clustering (perceptual near-dupes, not byte-identical; empty
+  groups -> nothing to preview). Switched to exact `content_hash` (BLAKE3/composite BLOB, hex)
+  + `size_bytes` grouping, O(n) dictionary, dropped the union-find. `DuplicateGroup.PerceptualHash`
+  -> `ContentHash`; CleanupView.xaml `Tag` + refresh tooltip updated. Real byte-dupes now populate
+  groups, so the existing `ThumbnailService` previews render. Diverges from macOS (phash) ->
+  macOS follow-up. Caveat: `content_hash` is full BLAKE3 only <=16 MB (else head+tail+size
+  composite) — equality + matching size is "virtually certain identical"; a true byte-compare on
+  collision is a possible future hardening.
+- **Verified headless:** engine `cargo clippy --all-targets -- -D warnings` exit 0, `cargo test
+  --lib` 232/232 (incl. new restructure-SQL + suppress-sidecar tests); app `dotnet build` x64
+  GREEN (0 warn / 0 err), FileID.IpcSchema.Tests 34/34, FileID.App.Tests 102/102. On-hardware
+  (flicker hold-steady, RAM++ tuning to clean tags, Cleanup byte-dupe groups + thumbnails,
+  Restructure tab no-toast) still to run on the RTX 2060 / `G:\TrueNAS`.
+
 ## 2026-05-30 — Windows end-to-end correctness pass (P1–P5 landed; UI polish + on-hardware remain)
 
 Branch `windows-e2e-correctness`. Fixing the reported Windows issues: `ram_plus`

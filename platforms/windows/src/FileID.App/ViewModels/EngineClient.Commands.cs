@@ -87,6 +87,7 @@ internal sealed partial class EngineClient
     public Task StartScanAsync(string rootPath, string? rootDisplay = null, bool rescan = false)
     {
         _scanStartedAt = DateTime.UtcNow;
+        _shownPhaseRank = -1;
         return SendCommandAsync(new StartScanCommand(rootPath, rootDisplay, rescan));
     }
 
@@ -99,6 +100,7 @@ internal sealed partial class EngineClient
         Phase = null;
         LastError = null;
         LastWarning = null;
+        _shownPhaseRank = -1;
     }
 
     /// <summary>full UI-state reset for the wipe-and-rescan flow.
@@ -120,6 +122,7 @@ internal sealed partial class EngineClient
         LastScanDuration = TimeSpan.Zero;
         _scanStartedAt = null;
         IsPaused = false;
+        _shownPhaseRank = -1;
     }
 
     private static bool IsNonFatalWarningKind(string? kind) => kind switch
@@ -142,6 +145,7 @@ internal sealed partial class EngineClient
     /// real phase transition takes over immediately afterwards.</summary>
     public void SetOptimisticScanningPhase()
     {
+        _shownPhaseRank = -1;
         Phase = ScanPhase.Discovering;
         LastError = null;
     }

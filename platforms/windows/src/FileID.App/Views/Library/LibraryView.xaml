@@ -398,12 +398,6 @@
                                 <Border Padding="4,2"
                                         CornerRadius="4"
                                         Background="{ThemeResource TileScrimBrush}"
-                                        Visibility="{x:Bind HasFaces, Converter={StaticResource BoolToVisibility}}">
-                                    <FontIcon Glyph="&#xE77B;" FontSize="12" Foreground="{ThemeResource GoldBrush}" />
-                                </Border>
-                                <Border Padding="4,2"
-                                        CornerRadius="4"
-                                        Background="{ThemeResource TileScrimBrush}"
                                         Visibility="{x:Bind HasText, Converter={StaticResource BoolToVisibility}}">
                                     <FontIcon Glyph="&#xE8C1;" FontSize="12" Foreground="{ThemeResource AiBrush}" />
                                 </Border>

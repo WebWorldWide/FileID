@@ -96,6 +96,30 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     // throttle (rare; user-visible).
     private DateTime _lastProgressEmit = DateTime.MinValue;
     private ScanPhase? _lastProgressPhase;
+
+    // Highest phase rank shown during the current scan. Discovery and tagging
+    // run concurrently, so their ProgressEvents interleave; without this the
+    // displayed Phase — and the sidebar label/icon/pipeline dot bound to it —
+    // flicker Discovering<->Tagging several times a second. A ProgressEvent may
+    // only ADVANCE the displayed phase, never regress it within a scan. The
+    // authoritative PhaseChangedEvent still sets Phase directly and re-syncs
+    // this latch. Reset to -1 at each scan start (see EngineClient.Commands.cs).
+    private int _shownPhaseRank = -1;
+
+    private static int PhaseRank(ScanPhase phase) => phase switch
+    {
+        ScanPhase.Idle => 0,
+        ScanPhase.Discovering => 1,
+        ScanPhase.Tagging => 2,
+        ScanPhase.PostScan => 3,
+        ScanPhase.Completed => 4,
+        // Terminal states sit above the progression so a late interleaved
+        // ProgressEvent can never clamp them away once PhaseChanged has synced
+        // the latch to them.
+        ScanPhase.Cancelled => 5,
+        ScanPhase.Failed => 5,
+        _ => 0,
+    };
     private static readonly TimeSpan ProgressThrottle = TimeSpan.FromMilliseconds(100); // 10 Hz
 
     // throttled diagnostic counter for inbound progress events.
@@ -861,10 +885,24 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                             _lastProgressEmit = nowProg;
                             _lastProgressPhase = p.Progress.Phase;
                         }
-                        Phase = p.Progress.Phase;
+                        // Monotonic clamp: discovery + tagging ProgressEvents
+                        // interleave, so only let the displayed phase advance,
+                        // never regress, within a scan. Stops the sidebar phase
+                        // label/icon/dot flickering Discovering<->Tagging.
+                        // (PhaseChangedEvent below is authoritative.)
+                        var progRank = PhaseRank(p.Progress.Phase);
+                        if (progRank >= _shownPhaseRank)
+                        {
+                            _shownPhaseRank = progRank;
+                            Phase = p.Progress.Phase;
+                        }
                         break;
                     case PhaseChangedEvent pc:
                         Phase = pc.Phase;
+                        // Authoritative phase boundary — sync the monotonic latch
+                        // so a late interleaved ProgressEvent can't pull the
+                        // displayed phase back below it.
+                        _shownPhaseRank = PhaseRank(pc.Phase);
                         // On cancel, also clear the in-flight tracking state.
                         // The sidebar's CompletedPanel binds to LastScanDuration
                         // + LastProgress; without this clear the prior-scan
@@ -891,6 +929,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         break;
                     case ScanCompleteEvent:
                         Phase = ScanPhase.Completed;
+                        _shownPhaseRank = PhaseRank(ScanPhase.Completed);
                         IsPaused = false;
                         if (_scanStartedAt.HasValue)
                         {

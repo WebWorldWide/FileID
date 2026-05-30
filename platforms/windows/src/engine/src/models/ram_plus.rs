@@ -13,6 +13,7 @@
 // the contract (input "image" [1,3,384,384] f32, output "logits" [1,4585]) and
 // the ImageNet constants below MUST stay in sync with that script.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -45,17 +46,53 @@ const DEFAULT_MAX_TAGS: usize = 8;
 /// `class_threshold`s are F1-balanced; a few common classes calibrate quite low,
 /// which surfaces weak tags. Clamping the effective cutoff up to this floor
 /// trades a little recall for noticeably cleaner, higher-confidence tags.
-const PRECISION_FLOOR: f32 = 0.5;
+/// Raised from 0.5 → users reported generic/wrong tags ("catch", dog→bear);
+/// overridable per-run via FILEID_RAMPLUS_PRECISION_FLOOR for threshold sweeps.
+const DEFAULT_PRECISION_FLOOR: f32 = 0.62;
 
 /// RAM++ vocab tags that describe the medium rather than the content — the file
 /// already *is* a photo, and faces are surfaced by the People tab — so they read
 /// as noise on a Library card. Filtered from the emitted set; the underlying
-/// signals still live in their own columns (`has_faces`, file kind).
+/// signals still live in their own columns (`has_faces`, file kind). "catch" is
+/// a frequent low-content false-positive (it fires on dogs, bears, and sports
+/// shots alike). Extend WITHOUT a rebuild via the `ram_plus_suppress.txt`
+/// sidecar (one tag per line, next to the tag list), merged case-insensitively.
 const SUPPRESSED_TAGS: &[&str] =
-    &["image", "photo", "photograph", "photography", "picture", "face"];
+    &["image", "photo", "photograph", "photography", "picture", "face", "catch"];
 
-fn is_suppressed(tag: &str) -> bool {
-    SUPPRESSED_TAGS.contains(&tag)
+/// Built-in suppress check (case-insensitive). [`is_suppressed`] also folds in
+/// the per-instance sidecar set.
+fn is_suppressed_builtin(tag: &str) -> bool {
+    SUPPRESSED_TAGS.iter().any(|s| s.eq_ignore_ascii_case(tag))
+}
+
+/// Suppressed = built-in set OR the sidecar set, both case-insensitive. Free
+/// (not a method) so the hot tag() closure can borrow `suppress_extra` as a
+/// disjoint field while `self.session` is mutably borrowed by `outputs`.
+fn is_suppressed(tag: &str, extra: &HashSet<String>) -> bool {
+    is_suppressed_builtin(tag) || extra.contains(&tag.to_ascii_lowercase())
+}
+
+/// Read the optional `ram_plus_suppress.txt` sidecar next to the tag list: one
+/// tag per line, lowercased; blank lines and `#` comments ignored. Missing file
+/// → empty set (built-in suppression only). No rebuild needed to edit it.
+fn load_suppress_sidecar(tag_list: &Path) -> HashSet<String> {
+    let path = tag_list.with_file_name("ram_plus_suppress.txt");
+    match std::fs::read_to_string(&path) {
+        Ok(s) => {
+            let set: HashSet<String> = s
+                .lines()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .map(|l| l.to_ascii_lowercase())
+                .collect();
+            if !set.is_empty() {
+                tracing::info!(model = "RAM++", count = set.len(), "suppress sidecar loaded");
+            }
+            set
+        }
+        Err(_) => HashSet::new(),
+    }
 }
 
 pub struct RamPlusTagger {
@@ -69,6 +106,12 @@ pub struct RamPlusTagger {
     /// `ram_plus_thresholds.txt` sidecar. `None` → use the global `threshold`
     /// for every class.
     per_class_threshold: Option<Vec<f32>>,
+    /// Effective floor under the per-class/global cutoffs (DEFAULT_PRECISION_FLOOR
+    /// or the FILEID_RAMPLUS_PRECISION_FLOOR env override).
+    precision_floor: f32,
+    /// Extra suppressed tags from the `ram_plus_suppress.txt` sidecar (lowercased),
+    /// merged with the built-in SUPPRESSED_TAGS at tag time.
+    suppress_extra: HashSet<String>,
     max_tags: usize,
 }
 
@@ -149,11 +192,20 @@ impl RamPlusTagger {
         };
         let threshold = env_threshold.unwrap_or(DEFAULT_THRESHOLD);
 
+        let precision_floor = std::env::var("FILEID_RAMPLUS_PRECISION_FLOOR")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .filter(|t| (0.0..=1.0).contains(t))
+            .unwrap_or(DEFAULT_PRECISION_FLOOR);
+        let suppress_extra = load_suppress_sidecar(tag_list);
+
         let mut model = Self {
             session,
             tags,
             threshold,
             per_class_threshold,
+            precision_floor,
+            suppress_extra,
             max_tags: DEFAULT_MAX_TAGS,
         };
 
@@ -211,20 +263,26 @@ impl RamPlusTagger {
                 self.tags.len()
             );
         }
+        // Bind the fields the closure needs as locals: `outputs` holds a mutable
+        // borrow of `self.session` until it drops, so the closure must touch
+        // disjoint fields only — a `&self` method call here is an E0502.
+        let tags = &self.tags;
+        let suppress_extra = &self.suppress_extra;
+        let per_class = self.per_class_threshold.as_ref();
+        let threshold = self.threshold;
+        let precision_floor = self.precision_floor;
         let mut hits: Vec<(usize, f32)> = logits
             .iter()
             .enumerate()
             .filter_map(|(i, &z)| {
-                if is_suppressed(&self.tags[i]) {
+                if is_suppressed(&tags[i], suppress_extra) {
                     return None;
                 }
                 let p = sigmoid(z);
-                let cut = self
-                    .per_class_threshold
-                    .as_ref()
+                let cut = per_class
                     .map(|t| t[i])
-                    .unwrap_or(self.threshold)
-                    .max(PRECISION_FLOOR);
+                    .unwrap_or(threshold)
+                    .max(precision_floor);
                 (p >= cut).then_some((i, p))
             })
             .collect();
@@ -299,13 +357,35 @@ mod tests {
 
     #[test]
     fn generic_medium_tags_are_suppressed() {
-        // Image-medium words + the People-redundant "face" are filtered; real
-        // content tags pass through.
-        assert!(is_suppressed("photo"));
-        assert!(is_suppressed("image"));
-        assert!(is_suppressed("face"));
-        assert!(!is_suppressed("graduation"));
-        assert!(!is_suppressed("mountain"));
-        assert!(!is_suppressed("person"));
+        // Image-medium words + the People-redundant "face" + the noisy "catch"
+        // are filtered (case-insensitively); real content tags pass through.
+        assert!(is_suppressed_builtin("photo"));
+        assert!(is_suppressed_builtin("image"));
+        assert!(is_suppressed_builtin("face"));
+        assert!(is_suppressed_builtin("catch"));
+        assert!(is_suppressed_builtin("Photo"));
+        assert!(is_suppressed_builtin("CATCH"));
+        assert!(!is_suppressed_builtin("graduation"));
+        assert!(!is_suppressed_builtin("mountain"));
+        assert!(!is_suppressed_builtin("person"));
+    }
+
+    #[test]
+    fn suppress_sidecar_parses_lowercases_and_skips_comments() {
+        let dir = std::env::temp_dir().join(format!("fileid_rp_suppress_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tag_list = dir.join("ram_plus_tags.txt");
+        std::fs::write(&tag_list, "dog\ncat\n").unwrap();
+        std::fs::write(
+            dir.join("ram_plus_suppress.txt"),
+            "# a comment\nBokeh\n  blur  \n\nCATCH\n",
+        )
+        .unwrap();
+        let set = load_suppress_sidecar(&tag_list);
+        assert!(set.contains("bokeh"));
+        assert!(set.contains("blur"));
+        assert!(set.contains("catch"));
+        assert_eq!(set.len(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

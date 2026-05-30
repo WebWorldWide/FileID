@@ -1,9 +1,11 @@
-﻿// CleanupViewModel — backs the Cleanup tab duplicate groups list.
+// CleanupViewModel — backs the Cleanup tab duplicate groups list.
 //
-// Groups files by matching `phash` (perceptual hash, 64-bit) to find
-// near-duplicate images. Each group lets the user mark one keeper and
-// trash the others (engine `trashFiles` IPC command, parallel
-// IFileOperation::DeleteItem with FOF_ALLOWUNDO).
+// Groups files by exact `content_hash` (BLAKE3 for files <=16 MB, else a
+// head+tail+size composite; migration v8) so each group is byte-for-byte
+// identical, not merely visually similar. An identical size_bytes is required
+// too as a cheap guard. Each group lets the user mark one keeper and trash the
+// others (engine `trashFiles` IPC command, parallel IFileOperation::DeleteItem
+// with FOF_ALLOWUNDO).
 
 using System;
 using System.Collections.Generic;
@@ -94,76 +96,55 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         }.ToString();
         using var conn = new SqliteConnection(connString);
         conn.Open();
-        // Group files by exact phash match. Fuzzy matching via Hamming
-        // distance ≤ 4 bits (64-bit popcount on XOR of hash pairs) is a
-        // future extension.
+        // Pull every file with a content hash and group by EXACT equality —
+        // identical content_hash AND size_bytes is byte-for-byte identical (1:1
+        // duplicates), not just visually similar. content_hash is a BLOB
+        // (BLAKE3 / composite, migration v8); read it as bytes and hex-encode
+        // for a stable dictionary key. Grouping is O(n) via a dictionary, so
+        // there's no per-pair scan and no candidate cap.
         using var cmd = conn.CreateCommand();
-        // Pull every image with a phash, then group:
-        //   1. Exact-phash matches (cheap — straight equality).
-        //   2. Near-matches via Hamming distance ≤ 4 bits (fuzzy).
-        // The fuzzy pass is O(n²) on the in-memory candidate list but
-        // we cap at 5000 phashes so worst-case 12.5M XOR-popcounts → ~100ms.
         cmd.CommandText = """
-            SELECT id, path_text, size_bytes, phash
+            SELECT id, path_text, size_bytes, content_hash
             FROM files
-            WHERE phash IS NOT NULL AND kind = 'image'
-            ORDER BY phash
-            LIMIT 5000
+            WHERE content_hash IS NOT NULL AND failed = 0
             """;
-        var rawMembers = new List<(long Id, string Path, long Size, long Phash)>(2048);
+        var rawMembers = new List<(long Id, string Path, long Size, string Hash)>(2048);
         using (var reader = cmd.ExecuteReader())
         {
             while (reader.Read())
             {
                 ct.ThrowIfCancellationRequested();
-                rawMembers.Add((reader.GetInt64(0), reader.GetString(1), reader.GetInt64(2), reader.GetInt64(3)));
+                var hashBytes = (byte[])reader[3];
+                if (hashBytes is null || hashBytes.Length == 0) continue;
+                var hashHex = Convert.ToHexString(hashBytes);
+                rawMembers.Add((reader.GetInt64(0), reader.GetString(1), reader.GetInt64(2), hashHex));
             }
         }
 
-        var groups = new List<DuplicateGroup>();
-        // Use a union-find structure over indices to merge near-matches
-        // into clusters. Two phashes belong to the same cluster if their
-        // popcount(XOR) ≤ FuzzyThreshold.
-        const int FuzzyThreshold = 4;
-        int n = rawMembers.Count;
-        var parent = new int[n];
-        for (int i = 0; i < n; i++) parent[i] = i;
-        int Find(int x) { while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
-        void Union(int a, int b) { int ra = Find(a), rb = Find(b); if (ra != rb) parent[ra] = rb; }
-
-        for (int i = 0; i < n; i++)
+        // Group by composite key (content_hash + size): identical content AND
+        // size means byte-for-byte identical. O(n) via a dictionary.
+        var byHash = new Dictionary<string, List<int>>(rawMembers.Count);
+        for (int i = 0; i < rawMembers.Count; i++)
         {
             ct.ThrowIfCancellationRequested();
-            for (int j = i + 1; j < n; j++)
-            {
-                long xor = rawMembers[i].Phash ^ rawMembers[j].Phash;
-                if (System.Numerics.BitOperations.PopCount((ulong)xor) <= FuzzyThreshold)
-                {
-                    Union(i, j);
-                }
-            }
-        }
-
-        var byRoot = new Dictionary<int, List<int>>();
-        for (int i = 0; i < n; i++)
-        {
-            int r = Find(i);
-            if (!byRoot.TryGetValue(r, out var list)) { list = new List<int>(); byRoot[r] = list; }
+            var key = rawMembers[i].Hash + ":" + rawMembers[i].Size.ToString();
+            if (!byHash.TryGetValue(key, out var list)) { list = new List<int>(); byHash[key] = list; }
             list.Add(i);
         }
 
-        foreach (var (_, indices) in byRoot)
+        var groups = new List<DuplicateGroup>();
+        foreach (var (_, indices) in byHash)
         {
             if (indices.Count < 2) continue;
-            // Pick the largest file as default keeper (best resolution
-            // typically). User can re-pick in the UI.
-            indices.Sort((a, b) => rawMembers[b].Size.CompareTo(rawMembers[a].Size));
-            var phash = rawMembers[indices[0]].Phash;
-            // shared GroupName for the keeper RadioButton so
-            // mutual exclusion within a duplicate group works. Hex
-            // representation of the perceptual hash uniquely identifies
-            // the group across the whole tab.
-            var groupKey = $"dup-{phash:X16}";
+            // All members share identical bytes (and size); order by path for a
+            // stable display and keep the first as the default keeper. The user
+            // can re-pick in the UI.
+            indices.Sort((a, b) => string.CompareOrdinal(rawMembers[a].Path, rawMembers[b].Path));
+            var hash = rawMembers[indices[0]].Hash;
+            // shared GroupName for the keeper RadioButton so mutual exclusion
+            // within a duplicate group works. The content hash uniquely
+            // identifies the group across the whole tab.
+            var groupKey = $"dup-{hash}";
             var members = new List<DuplicateMember>(indices.Count);
             for (int k = 0; k < indices.Count; k++)
             {
@@ -180,7 +161,7 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
             }
             groups.Add(new DuplicateGroup
             {
-                PerceptualHash = phash,
+                ContentHash = hash,
                 Members = members,
             });
         }
@@ -209,7 +190,9 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
 
 internal sealed class DuplicateGroup : INotifyPropertyChanged
 {
-    public required long PerceptualHash { get; init; }
+    /// <summary>The shared content hash (BLAKE3 / composite, hex) of every
+    /// member — the group's identity. Bound as the keeper RadioButton's Tag.</summary>
+    public required string ContentHash { get; init; }
     public required IReadOnlyList<DuplicateMember> Members { get; init; }
     public int MemberCount => Members.Count;
 
@@ -231,8 +214,12 @@ internal sealed class DuplicateGroup : INotifyPropertyChanged
 
     public string Caption =>
         IsSkipped
-            ? $"{MemberCount} duplicates · phash {PerceptualHash:X16} · SKIPPED"
-            : $"{MemberCount} duplicates · phash {PerceptualHash:X16}";
+            ? $"{MemberCount} identical copies · {ShortHash} · SKIPPED"
+            : $"{MemberCount} identical copies · {ShortHash}";
+
+    /// <summary>First 12 chars of the content hash for a compact caption.</summary>
+    private string ShortHash =>
+        ContentHash.Length > 12 ? ContentHash[..12] : ContentHash;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 }
@@ -247,7 +234,7 @@ internal sealed class DuplicateMember : INotifyPropertyChanged
     /// <summary>shared per-group key for the keeper RadioButton's
     /// GroupName. Was previously bound to `Path` per member, which made
     /// mutual exclusion impossible (each member had its own group). Set
-    /// to the parent group's perceptual hash hex string at construction.</summary>
+    /// to the parent group's content hash at construction.</summary>
     public required string GroupKey { get; init; }
 
     public string SizeDisplay
