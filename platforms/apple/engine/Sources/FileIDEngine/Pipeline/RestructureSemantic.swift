@@ -280,7 +280,9 @@ public enum RestructureSemantic {
         let scored = inCluster.map { (term, c) -> (String, Float) in
             let tf = Float(c) / size
             let df = Float(globalFreq[term] ?? 1)
-            return (term, tf * max(0, log(total / df)))
+            // log takes Double; compute the idf in Double then narrow.
+            let idf = Float(max(0, log(Double(total / df))))
+            return (term, tf * idf)
         }
         return scored
             .filter { $0.1 > 0 }
@@ -326,7 +328,7 @@ public enum RestructureSemantic {
     private static func titleCase(_ s: String) -> String {
         s.split(separator: " ").map { word -> String in
             guard let first = word.first else { return "" }
-            return first.uppercased() + word.dropFirst()
+            return first.uppercased() + String(word.dropFirst())
         }.joined(separator: " ")
     }
 }

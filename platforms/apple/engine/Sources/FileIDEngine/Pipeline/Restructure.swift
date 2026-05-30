@@ -102,7 +102,7 @@ public enum Restructure {
             for row in erows {
                 let id: Int64 = row["file_id"] ?? 0
                 if let data: Data = row["embedding"], !data.isEmpty, data.count % 4 == 0 {
-                    embeddings[id] = floatsLE(data)
+                    embeddings[id] = Self.floatsLE(data)
                 }
             }
             // Content tags for distinctive-term naming + fusion.
