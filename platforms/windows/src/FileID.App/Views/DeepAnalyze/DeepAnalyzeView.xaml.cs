@@ -122,11 +122,14 @@ public sealed partial class DeepAnalyzeView : UserControl
             {
                 NamePeopleGateBanner.Visibility = Visibility.Visible;
                 NamePeopleGateText.Text = unnamed == 1
-                    ? "1 face cluster doesn't have a name yet. Name it for sharper captions."
-                    : $"{unnamed} face clusters don't have names yet. Name them for sharper captions.";
-                AnalyzeAllButton.IsEnabled = false;
-                ToolTipService.SetToolTip(AnalyzeAllButton,
-                    "Name unnamed people first so smart-name proposals can use their names.");
+                    ? "1 face cluster isn't named yet. Naming it first gives sharper captions — or analyze now and name later."
+                    : $"{unnamed} face clusters aren't named yet. Naming them first gives sharper captions — or analyze now and name later.";
+                // Advisory, NOT blocking — mirrors the macOS two-path banner: the
+                // user can name people via the banner button OR run Deep Analyze
+                // now. (Previously this hard-disabled Analyze All, which stranded
+                // anyone who didn't want to name clusters first.)
+                AnalyzeAllButton.IsEnabled = true;
+                ToolTipService.SetToolTip(AnalyzeAllButton, null);
             }
             else
             {
