@@ -8,7 +8,19 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
-## 2026-05-30 (later 3) — On-hardware verify + macOS lockstep + RAM++ lock-in + consolidate to main
+## 2026-05-30 (later 3) — On-hardware verify + macOS lockstep + RAM++ lock-in + consolidate to main (CI GREEN)
+
+**Final: all three GitHub CI workflows green on `main`@784cc7b** — Windows engine ✓,
+Windows app (.NET) ✓, macOS app ✓. The consolidation merge first tripped two real
+failures, both fixed forward: (1) macOS `FaceAlign.swift` had a latent closure-arity bug
+(a `(Float,Float,Float)->Float` closure called on a tuple — Swift dropped tuple-splat
+years ago; never compiled, only surfaced when macOS CI built the lockstep branch for the
+first time) → closure now takes the tuple; (2) `CleanupViewModel.cs` was written UTF-8
+*without* BOM, failing the `dotnet format --verify-no-changes` CHARSET gate (my headless
+gate ran build+test but not format) → re-encoded with BOM, format gate now passes locally
++ in CI. Lesson recorded: add `dotnet format` to the headless gate; macOS Swift only gets
+real verification from macOS CI, so merge-then-watch is the loop.
+
 
 Closed out the scan/cleanup batch: on-hardware test on the RTX 2060, ported the safe fixes to
 macOS, tuned RAM++ to "locked in," and consolidated all work onto `main` (branches removed).
