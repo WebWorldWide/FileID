@@ -216,6 +216,8 @@ pub(crate) async fn handle_plan_restructure(
                     destination: m.destination.to_string_lossy().to_string(),
                     category: m.category,
                     tier,
+                    confidence: m.confidence.as_str().to_string(),
+                    reason: m.reason,
                 }
             })
             .collect(),

@@ -5,6 +5,7 @@
 
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Linq;
 using FileID.IpcSchema;
 using FileID.Services;
 using FileID.ViewModels;
@@ -213,26 +214,78 @@ public sealed partial class RestructureView : UserControl
         // isn't present; the UI derives the tiers from move counts vs
         // total-file counts.
         ComputeAndShowClassifier(plan);
+        ShowConfidenceTiers(plan);
 
-        var hasWork = moveCount > 0;
-        ApplySymlinkButton.IsEnabled = hasWork;
-        ApplyMovesButton.IsEnabled = hasWork;
-        ApplyStatusText.Text = hasWork
-            ? $"Ready to apply {moveCount:N0} moves into '{plan.LibraryRoot}'."
-            : "Nothing to apply.";
-
-        // update ApplyBar selection summary + step chips + primary
-        // button label to reflect the plan count. macOS reference at
-        // platforms/apple/.../RestructureApplyBar.swift.
-        ApplyBarSelectedCount.Text = moveCount.ToString("N0");
+        // ApplyBar totals reflect the plan; the selected subset (which the
+        // confidence-tier toggles drive) is computed in UpdateSelection.
+        // macOS reference: platforms/apple/.../RestructureApplyBar.swift.
         ApplyBarTotalCount.Text = moveCount.ToString("N0");
-        ApplyBarHint.Text = hasWork
+        ApplyBarHint.Text = moveCount > 0
             ? "Originals stay put — applying creates shortcuts you can review."
             : "Generate a plan to enable Apply.";
+        UpdateSelection();
+    }
+
+    /// <summary>
+    /// Populate + show the butler confidence tiers (auto / review / ask).
+    /// Hidden when the engine didn't stamp confidences (older build); the
+    /// apply path then falls back to applying every move.
+    /// </summary>
+    private void ShowConfidenceTiers(RestructurePlan plan)
+    {
+        int auto = 0, review = 0, ask = 0;
+        foreach (var m in plan.Moves)
+        {
+            switch (m.Confidence)
+            {
+                case "auto": auto++; break;
+                case "ask": ask++; break;
+                default: review++; break; // "review" or empty/unknown
+            }
+        }
+        bool stamped = plan.Moves.Count > 0 && plan.Moves.Any(m => !string.IsNullOrEmpty(m.Confidence));
+        ConfidenceStrip.Visibility = stamped ? Visibility.Visible : Visibility.Collapsed;
+        AutoTierCount.Text = auto.ToString("N0");
+        ReviewTierCount.Text = review.ToString("N0");
+        AskTierCount.Text = ask.ToString("N0");
+        // Butler default: auto-file the sure ones + review the medium; hold "ask".
+        AutoTierToggle.IsChecked = true;
+        ReviewTierToggle.IsChecked = true;
+        AskTierToggle.IsChecked = false;
+    }
+
+    private bool ConfidenceStripActive => ConfidenceStrip.Visibility == Visibility.Visible;
+
+    private bool IsBandSelected(string? confidence) => confidence switch
+    {
+        "auto" => AutoTierToggle.IsChecked == true,
+        "ask" => AskTierToggle.IsChecked == true,
+        _ => ReviewTierToggle.IsChecked == true, // "review" or empty/unknown
+    };
+
+    private System.Collections.Generic.List<RestructureMove> SelectedMoves(RestructurePlan plan)
+        => plan.Moves.Where(m => IsBandSelected(m.Confidence)).ToList();
+
+    private void OnTierToggle(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnTierToggle), UpdateSelection);
+
+    /// <summary>Recompute the apply subset from the tier toggles, then refresh
+    /// the ApplyBar count, primary-button label, and enabled state.</summary>
+    private void UpdateSelection()
+    {
+        var plan = EngineClient.Instance.LastRestructurePlan;
+        if (plan is null) return;
+        int selected = ConfidenceStripActive ? SelectedMoves(plan).Count : plan.Moves.Count;
+        bool hasWork = selected > 0;
+        ApplySymlinkButton.IsEnabled = hasWork;
+        ApplyMovesButton.IsEnabled = hasWork;
+        ApplyBarSelectedCount.Text = selected.ToString("N0");
         ApplySymlinkButtonText.Text = hasWork
-            ? $"Apply as shortcuts ({moveCount:N0})"
+            ? $"Apply as shortcuts ({selected:N0})"
             : "Apply as shortcuts";
-        // Step chip 1 fills only when we actually have something to apply.
+        ApplyStatusText.Text = hasWork
+            ? $"Ready to apply {selected:N0} of {plan.Moves.Count:N0} into '{plan.LibraryRoot}'."
+            : "Select at least one tier to apply.";
         StepChip1Bg.Background = hasWork
             ? (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["GoldBrush"]
             : new Microsoft.UI.Xaml.Media.SolidColorBrush(
@@ -324,9 +377,12 @@ public sealed partial class RestructureView : UserControl
     {
         var plan = EngineClient.Instance.LastRestructurePlan;
         if (plan is null || plan.Moves.Count == 0) return;
+        System.Collections.Generic.IReadOnlyList<RestructureMove> moves =
+            ConfidenceStripActive ? SelectedMoves(plan) : plan.Moves;
+        if (moves.Count == 0) return;
         ApplyStatusText.Text = useSymlinks
-            ? $"Creating {plan.Moves.Count:N0} symlinks…"
-            : $"Moving {plan.Moves.Count:N0} files…";
-        await EngineClient.Instance.ApplyRestructureAsync(plan.LibraryRoot, plan.Moves, useSymlinks);
+            ? $"Creating {moves.Count:N0} symlinks…"
+            : $"Moving {moves.Count:N0} files…";
+        await EngineClient.Instance.ApplyRestructureAsync(plan.LibraryRoot, moves, useSymlinks);
     }
 }

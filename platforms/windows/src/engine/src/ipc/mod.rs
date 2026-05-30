@@ -240,6 +240,13 @@ pub struct RestructureMove {
     /// engines; the app falls back to its local heuristic when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
+    /// Butler confidence band — "auto" / "review" / "ask" (RESTRUCTURE.md §6).
+    /// Drives the app's auto-file / review / ask grouping. Empty on older engines.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub confidence: String,
+    /// Plain-language "why filed here" shown in the drill-down. None when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -980,6 +987,8 @@ mod tests {
                     destination: r"C:\Users\adam\Pictures\Photos\2024\01\IMG_0001.jpg".into(),
                     category: "Photos/2024/01".into(),
                     tier: Some("Anchor".into()),
+                    confidence: "auto".into(),
+                    reason: Some("Photo from 2024".into()),
                 }],
                 use_symlinks: false,
             }),

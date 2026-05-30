@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::identity_clustering::{self, Hyperparameters, Neighbor};
-use super::restructure::ProposedMove;
+use super::restructure::{Confidence, ProposedMove};
 
 /// Per-file signals. `clip` is the L2-normalized 512-d CLIP image embedding;
 /// callers only pass files that have one (images), so it is never empty here.
@@ -43,6 +43,17 @@ const TAG_VOCAB_CAP: usize = 256;
 /// prototype centroid to route the cluster there (learn-your-style). Below
 /// this, propose a new group. Provisional — calibrate on a labeled library.
 const FOLDER_MATCH_COS: f32 = 0.55;
+
+/// Confidence-band thresholds (RESTRUCTURE.md §6). A cluster auto-files only
+/// when it matches an existing folder strongly *and* unambiguously, or forms a
+/// tight, substantial new group. Provisional — calibrate to measured
+/// per-category accuracy on a labeled library before promoting any category to
+/// standing auto-file.
+const AUTO_FOLDER_COS: f32 = 0.72;
+const AUTO_COHESION: f32 = 0.62;
+const REVIEW_COHESION: f32 = 0.50;
+const MIN_MARGIN: f32 = 0.05;
+const AUTO_MIN_MEMBERS: usize = 4;
 
 /// Density-clustering hyperparameters for *files* (looser than faces: a
 /// semantic group is broader than one identity). Provisional.
@@ -105,7 +116,8 @@ pub fn semantic_classify(
     if files.is_empty() {
         return Vec::new();
     }
-    let vocab = build_tag_vocab(files, TAG_VOCAB_CAP);
+    let global_freq = tag_frequencies(files);
+    let vocab = vocab_from_freq(&global_freq, TAG_VOCAB_CAP);
     let fused: Vec<Vec<f32>> = files.iter().map(|f| fuse(f, &vocab)).collect();
     let cluster_ids = cluster(&fused);
 
@@ -132,24 +144,51 @@ pub fn semantic_classify(
             Some(c) => c,
             None => continue,
         };
+        // How tightly the cluster's members hug their centroid (mean cosine) —
+        // the core "are these really alike?" confidence signal.
+        let coh = cohesion(&member_clip, &centroid);
 
-        // Learn-your-style: route to the nearest confident existing folder…
-        let (dest_dir, category) = match nearest_folder(&centroid, prototypes) {
-            Some((proto, sim)) if sim >= FOLDER_MATCH_COS => {
-                let name = proto
-                    .path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("Folder")
-                    .to_string();
-                (proto.path.clone(), name)
-            }
-            // …otherwise a new group named from the cluster's distinctive tags.
-            _ => {
-                let name = group_name(members, files, &vocab);
-                (library_root.join(&name), name)
-            }
-        };
+        let (dest_dir, category, confidence, reason) =
+            match nearest_two_folders(&centroid, prototypes) {
+                // Learn-your-style: route to the nearest confident existing
+                // folder. Auto-file only when the match is strong *and*
+                // unambiguous (clear margin over the runner-up) on a tight
+                // cluster; otherwise surface for one-click review.
+                Some((proto, sim, runner_up)) if sim >= FOLDER_MATCH_COS => {
+                    let name = folder_display_name(&proto.path);
+                    let confidence = if sim >= AUTO_FOLDER_COS
+                        && coh >= REVIEW_COHESION
+                        && (sim - runner_up) >= MIN_MARGIN
+                    {
+                        Confidence::Auto
+                    } else {
+                        Confidence::Review
+                    };
+                    let reason =
+                        format!("Matches your '{name}' folder ({:.0}% alike)", sim * 100.0);
+                    (proto.path.clone(), name, confidence, reason)
+                }
+                // Otherwise a new group, named from the cluster's most
+                // *distinctive* tags (c-TF-IDF), tiered by how tight + large it is.
+                _ => {
+                    let terms = distinctive_terms(members, files, &global_freq);
+                    let name = group_name_from_terms(&terms);
+                    let confidence = if coh >= AUTO_COHESION && members.len() >= AUTO_MIN_MEMBERS {
+                        Confidence::Auto
+                    } else if coh >= REVIEW_COHESION {
+                        Confidence::Review
+                    } else {
+                        Confidence::Ask
+                    };
+                    let reason = if terms.is_empty() {
+                        format!("{} files that look alike", members.len())
+                    } else {
+                        let shown: Vec<String> = terms.iter().take(3).map(|t| title_case(t)).collect();
+                        format!("{} files sharing {}", members.len(), shown.join(", "))
+                    };
+                    (library_root.join(&name), name, confidence, reason)
+                }
+            };
 
         for &i in members {
             let file = &files[i];
@@ -159,6 +198,8 @@ pub fn semantic_classify(
                 source: file.source.clone(),
                 destination: dest,
                 category: category.clone(),
+                confidence,
+                reason: Some(reason.clone()),
             });
         }
     }
@@ -168,23 +209,34 @@ pub fn semantic_classify(
 
 // ── Fusion ────────────────────────────────────────────────────────────────
 
-/// Top-`cap` tags by frequency → index map. Common tags carry grouping signal.
-fn build_tag_vocab(files: &[SemanticFile], cap: usize) -> HashMap<String, usize> {
-    let mut freq: HashMap<&str, usize> = HashMap::new();
+/// Global tag frequency across all files — drives both the vocab cap and the
+/// c-TF-IDF inverse-document weighting in [`distinctive_terms`].
+fn tag_frequencies(files: &[SemanticFile]) -> HashMap<String, usize> {
+    let mut freq: HashMap<String, usize> = HashMap::new();
     for f in files {
         for t in &f.tags {
-            *freq.entry(t.as_str()).or_insert(0) += 1;
+            *freq.entry(t.clone()).or_insert(0) += 1;
         }
     }
-    let mut ranked: Vec<(&str, usize)> = freq.into_iter().collect();
+    freq
+}
+
+/// Top-`cap` tags by frequency → index map. Common tags carry grouping signal.
+fn vocab_from_freq(freq: &HashMap<String, usize>, cap: usize) -> HashMap<String, usize> {
+    let mut ranked: Vec<(&String, &usize)> = freq.iter().collect();
     // Frequency desc, then name for determinism.
-    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    ranked.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
     ranked
         .into_iter()
         .take(cap)
         .enumerate()
-        .map(|(i, (t, _))| (t.to_string(), i))
+        .map(|(i, (t, _))| (t.clone(), i))
         .collect()
+}
+
+#[cfg(test)]
+fn build_tag_vocab(files: &[SemanticFile], cap: usize) -> HashMap<String, usize> {
+    vocab_from_freq(&tag_frequencies(files), cap)
 }
 
 /// Fuse one file: per-block L2-normalize, scale by weight, concatenate, then
@@ -266,31 +318,88 @@ fn cluster(fused: &[Vec<f32>]) -> Vec<usize> {
 
 // ── Learn-your-style assignment ─────────────────────────────────────────────
 
-fn nearest_folder<'a>(
-    centroid: &[f32],
-    prototypes: &'a [FolderPrototype],
-) -> Option<(&'a FolderPrototype, f32)> {
-    prototypes
-        .iter()
-        .map(|p| (p, dot(centroid, &p.centroid)))
-        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+/// Mean cosine of a cluster's members to its centroid — cluster tightness.
+/// Members and `centroid` are unit vectors, so dot == cosine.
+fn cohesion(member_clip: &[&[f32]], centroid: &[f32]) -> f32 {
+    if member_clip.is_empty() {
+        return 0.0;
+    }
+    let sum: f32 = member_clip.iter().map(|c| dot(c, centroid)).sum();
+    sum / member_clip.len() as f32
 }
 
-/// Name a new group from its most distinctive tags (those common *in* the
-/// cluster but rarer overall) — a cheap stand-in until VLM naming (Phase 2).
-fn group_name(members: &[usize], files: &[SemanticFile], vocab: &HashMap<String, usize>) -> String {
+/// Nearest folder prototype to `centroid`, plus the runner-up similarity so the
+/// caller can gate on the top-1−top-2 margin (abstain when two folders fit
+/// almost equally — RESTRUCTURE.md §4).
+fn nearest_two_folders<'a>(
+    centroid: &[f32],
+    prototypes: &'a [FolderPrototype],
+) -> Option<(&'a FolderPrototype, f32, f32)> {
+    let mut best: Option<(&FolderPrototype, f32)> = None;
+    let mut runner_up = 0.0f32;
+    for p in prototypes {
+        let sim = dot(centroid, &p.centroid);
+        match best {
+            Some((_, bs)) if sim > bs => {
+                runner_up = bs;
+                best = Some((p, sim));
+            }
+            Some(_) => runner_up = runner_up.max(sim),
+            None => best = Some((p, sim)),
+        }
+    }
+    best.map(|(p, sim)| (p, sim, runner_up))
+}
+
+fn folder_display_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Folder")
+        .to_string()
+}
+
+/// A cluster's most *distinctive* tags by c-TF-IDF: frequent inside the cluster
+/// but rare across the whole library. This makes a name specific ("Beach Trip")
+/// instead of bland ("Photos") — RESTRUCTURE.md §5 calls distinctive terms the
+/// single highest-impact naming input. Ubiquitous tags (in every file → idf 0)
+/// drop out on their own.
+fn distinctive_terms<'a>(
+    members: &[usize],
+    files: &'a [SemanticFile],
+    global_freq: &HashMap<String, usize>,
+) -> Vec<&'a str> {
     let mut in_cluster: HashMap<&str, usize> = HashMap::new();
     for &i in members {
         for t in &files[i].tags {
-            if vocab.contains_key(t) {
-                *in_cluster.entry(t.as_str()).or_insert(0) += 1;
-            }
+            *in_cluster.entry(t.as_str()).or_insert(0) += 1;
         }
     }
-    let mut ranked: Vec<(&str, usize)> = in_cluster.into_iter().collect();
-    // Most-frequent-in-cluster first; name from the top 1-2.
-    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-    let parts: Vec<String> = ranked.iter().take(2).map(|(t, _)| title_case(t)).collect();
+    let size = members.len().max(1) as f32;
+    let total = files.len().max(1) as f32;
+    let mut scored: Vec<(&str, f32)> = in_cluster
+        .into_iter()
+        .map(|(t, c)| {
+            let tf = c as f32 / size;
+            let df = *global_freq.get(t).unwrap_or(&1) as f32;
+            (t, tf * (total / df).ln().max(0.0))
+        })
+        .collect();
+    // Score desc, then name for determinism; drop zero-score (ubiquitous) tags.
+    scored.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(b.0))
+    });
+    scored
+        .into_iter()
+        .filter(|(_, s)| *s > 0.0)
+        .map(|(t, _)| t)
+        .collect()
+}
+
+/// Title-case the top 1-2 distinctive terms into a folder name.
+fn group_name_from_terms(terms: &[&str]) -> String {
+    let parts: Vec<String> = terms.iter().take(2).map(|t| title_case(t)).collect();
     if parts.is_empty() {
         "Unsorted".to_string()
     } else {
@@ -416,5 +525,38 @@ mod tests {
         let protos = folder_prototypes(&files, 2);
         assert_eq!(protos.len(), 1, "only folder A has >= 2 files");
         assert!(protos[0].path.ends_with("A"));
+    }
+
+    #[test]
+    fn distinctive_naming_drops_ubiquitous_tags() {
+        // "photo" tags every file (idf → 0, dropped); the rarer tags name groups.
+        let mut files = Vec::new();
+        for i in 0..6 {
+            files.push(file(i, &format!("a/t{i}.jpg"), vec![1.0, 0.0, 0.0], &["photo", "tree"]));
+        }
+        for i in 0..4 {
+            files.push(file(100 + i, &format!("a/s{i}.jpg"), vec![0.0, 1.0, 0.0], &["photo", "sunset", "beach"]));
+        }
+        let cats: std::collections::HashSet<_> = semantic_classify(&files, &[], Path::new("/lib"))
+            .into_iter()
+            .map(|m| m.category)
+            .collect();
+        assert!(cats.iter().any(|c| c.contains("Beach") || c.contains("Sunset")), "got {cats:?}");
+        assert!(!cats.iter().any(|c| c == "Photo"), "ubiquitous 'photo' must not name a group: {cats:?}");
+    }
+
+    #[test]
+    fn tight_match_to_existing_folder_auto_files_with_reason() {
+        let files: Vec<SemanticFile> = (0..5)
+            .map(|i| file(i, &format!("inbox/d{i}.jpg"), vec![1.0, 0.0, 0.0], &["dog"]))
+            .collect();
+        let protos = vec![FolderPrototype {
+            path: PathBuf::from("/lib/Dogs"),
+            centroid: unit(vec![1.0, 0.0, 0.0]),
+        }];
+        let moves = semantic_classify(&files, &protos, Path::new("/lib"));
+        assert!(!moves.is_empty());
+        assert!(moves.iter().all(|m| m.confidence == Confidence::Auto), "exact match should auto-file");
+        assert!(moves.iter().all(|m| m.reason.as_deref().unwrap_or("").contains("Dogs")));
     }
 }

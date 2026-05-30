@@ -19,6 +19,37 @@ pub struct ProposedMove {
     /// Logical category that drove the destination — surfaced in the
     /// Sankey ribbon hover tooltip.
     pub category: String,
+    /// Butler confidence band (RESTRUCTURE.md §6): drives auto-file / review /
+    /// ask routing in the UI.
+    pub confidence: Confidence,
+    /// Plain-language "why filed here" (RESTRUCTURE.md §6 trust mechanics).
+    pub reason: Option<String>,
+}
+
+/// Three-band autonomy tier for a single proposed move.
+///
+/// - **Auto**   = high confidence; safe to auto-file (still fully reversible).
+/// - **Review** = medium; show for one-click confirm.
+/// - **Ask**    = low; hold and ask, or leave in place.
+///
+/// Orthogonal to [`FolderClassification`] (which scores a *source folder's*
+/// homogeneity); this scores a *single move's* placement certainty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Confidence {
+    Auto,
+    #[default]
+    Review,
+    Ask,
+}
+
+impl Confidence {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Confidence::Auto => "auto",
+            Confidence::Review => "review",
+            Confidence::Ask => "ask",
+        }
+    }
 }
 
 /// Three-tier folder classification.
@@ -124,29 +155,41 @@ pub fn classify(
         let (y, m) = year_month(ts);
         let mname = month_name(m);
 
-        let (dest, category) = if let Some(ref name) = f.person_name {
+        let (dest, category, confidence, reason) = if let Some(ref name) = f.person_name {
             let safe = sanitize_path_component(name);
             (library_root.join("People").join(&safe).join(format!("{y}")),
-             format!("People/{safe}"))
+             format!("People/{safe}"),
+             Confidence::Auto,
+             format!("Named person: {safe}"))
         } else if let (Some(lat), Some(lon)) = (f.location_lat, f.location_lon) {
             let lat_b = (lat * 2.0).round() / 2.0;
             let lon_b = (lon * 2.0).round() / 2.0;
             let bucket = format!("{lat_b:.1}_{lon_b:.1}");
             (library_root.join("Places").join(&bucket).join(format!("{y}")),
-             format!("Places/{bucket}"))
+             format!("Places/{bucket}"),
+             Confidence::Review,
+             "Taken at a shared location".to_string())
         } else if f.has_text || matches!(f.kind, FileKind::Pdf | FileKind::Doc) {
             (library_root.join("Documents").join(format!("{y}")),
-             "document".to_string())
+             "document".to_string(),
+             Confidence::Review,
+             format!("Document from {y}"))
         } else if matches!(f.kind, FileKind::Image) {
             (library_root.join("Photos").join(format!("{y}")).join(&mname),
-             "photo".to_string())
+             "photo".to_string(),
+             Confidence::Review,
+             format!("Photo from {mname} {y}"))
         } else if matches!(f.kind, FileKind::Video) {
             (library_root.join("Videos").join(format!("{y}")),
-             "video".to_string())
+             "video".to_string(),
+             Confidence::Review,
+             format!("Video from {y}"))
         } else if matches!(f.kind, FileKind::Audio) {
-            (library_root.join("Audio"), "audio".to_string())
+            (library_root.join("Audio"), "audio".to_string(),
+             Confidence::Review, "Audio file".to_string())
         } else {
-            (library_root.join("Misc"), "misc".to_string())
+            (library_root.join("Misc"), "misc".to_string(),
+             Confidence::Ask, "No strong signal — left for you to decide".to_string())
         };
 
         out.push(ProposedMove {
@@ -154,6 +197,8 @@ pub fn classify(
             source: f.source.clone(),
             destination: dest.join(f.source.file_name().unwrap_or_default()),
             category,
+            confidence,
+            reason: Some(reason),
         });
     }
     out
@@ -327,11 +372,15 @@ mod tests {
 
     #[test]
     fn category_counts_summed_and_sorted() {
-        let moves = vec![
-            ProposedMove { file_id: 1, source: PathBuf::new(), destination: PathBuf::new(), category: "photo".into() },
-            ProposedMove { file_id: 2, source: PathBuf::new(), destination: PathBuf::new(), category: "photo".into() },
-            ProposedMove { file_id: 3, source: PathBuf::new(), destination: PathBuf::new(), category: "video".into() },
-        ];
+        let mv = |id: i64, category: &str| ProposedMove {
+            file_id: id,
+            source: PathBuf::new(),
+            destination: PathBuf::new(),
+            category: category.into(),
+            confidence: Confidence::default(),
+            reason: None,
+        };
+        let moves = vec![mv(1, "photo"), mv(2, "photo"), mv(3, "video")];
         let cats = category_counts(&moves);
         assert_eq!(cats[0].category, "photo");
         assert_eq!(cats[0].count, 2);

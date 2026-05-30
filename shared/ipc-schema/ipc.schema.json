@@ -138,7 +138,9 @@
                   "source": { "type": "string" },
                   "destination": { "type": "string" },
                   "category": { "type": "string" },
-                  "tier": { "type": ["string", "null"] }
+                  "tier": { "type": ["string", "null"] },
+                  "confidence": { "type": "string" },
+                  "reason": { "type": ["string", "null"] }
                 }
               } },
               "useSymlinks": { "type": "boolean" }
@@ -607,7 +609,9 @@
                   "source":      { "type": "string" },
                   "destination": { "type": "string" },
                   "category":    { "type": "string" },
-                  "tier":        { "type": ["string", "null"], "description": "V14.9 A7: per-move tier — Anchor / Mixed / Junk." }
+                  "tier":        { "type": ["string", "null"], "description": "V14.9 A7: per-move tier — Anchor / Mixed / Junk." },
+                  "confidence":  { "type": "string", "description": "Butler confidence band — auto / review / ask (RESTRUCTURE.md §6). Empty on older engines." },
+                  "reason":      { "type": ["string", "null"], "description": "Plain-language 'why filed here', shown in the drill-down." }
                 }
               } },
               "categoryCounts":        { "type": "array", "items": { "type": "object", "additionalProperties": false,
