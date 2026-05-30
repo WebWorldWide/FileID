@@ -1,4 +1,4 @@
-## 2026-05-30 — Windows end-to-end correctness pass (P1+P2+P4 landed; P3/P5 pending)
+## 2026-05-30 — Windows end-to-end correctness pass (P1–P5 landed; UI polish + on-hardware remain)
 
 Branch `windows-e2e-correctness`. Fixing the reported Windows issues: `ram_plus`
 startup toast, wrong download modal, out-of-date Deep Analyze, "Wipe partially
@@ -25,12 +25,22 @@ failed", Settings cleanup.
   RamPlus; RAM++ downloaded invisibly). Now Face="YuNet + SFace" (Apache-2.0),
   CLIP="ViT-B/32", + new RAM++ row bound to ModelInstallerService.RamPlus; sizes
   bound to the slots.
-- **P3 — Deep Analyze macOS parity — PENDING.** Correct 3 VLM cards already; needs
-  status card (active model/total/not-yet-analyzed/ETA), RAM-fit badge, two-path
-  naming banner, "Smart names -> Review and apply" card. DeepAnalyzeView.xaml(.cs).
-- **P5 — Settings macOS parity — PENDING.** Reorder to Cleanup -> model cards ->
-  Advanced disclosure; fold GPU/Performance/NVIDIA into Advanced; add Logs buttons,
-  collection stats, engine Restart/Stop. SettingsView.xaml(.cs).
+- **P3 — Deep Analyze naming gate — FIXED (committed).** The gate hard-disabled
+  "Analyze All" whenever any face cluster was unnamed; now advisory (macOS two-path):
+  the banner suggests naming for sharper captions, but the user can analyze now and
+  name later. Optional deferred polish (NEXT): status card with per-model
+  not-yet-analyzed counts + ETA, RAM-fit badge, "Smart names -> Review and apply" card.
+- **P5 — Settings model cards — FIXED (committed).** Same stale strings as the welcome
+  modal: "ArcFace + SCRFD / ~120 MB" -> "Face models (YuNet + SFace) / ~39 MB";
+  "MobileCLIP-S2 / ~210 MB" -> "CLIP ViT-B/32 / ~220 MB"; + new RAM++ card bound to
+  Svc.RamPlus (Tag="ram_plus" routed through SlotFor). Settings already had logs
+  access, recent scans, engine info, performance/NVIDIA, storage, and About — a full
+  macOS-style Advanced-disclosure reorg was scoped out as high-risk cosmetic churn
+  for this correctness pass (NEXT).
+- **Verified headless:** engine `cargo check` + `cargo clippy --all-targets -D
+  warnings` + `cargo test` GREEN; app `dotnet build` (x64) GREEN; FileID.IpcSchema.Tests
+  34/34 (incl. new WipeLibraryIpcTests for the wipeLibrary/libraryWiped round-trip);
+  FileID.App.Tests 102/102. Branch is 5 commits ahead of main, working tree clean.
 
 Verified headless: engine cargo check + clippy (-D warnings) + cargo test GREEN;
 app dotnet build (x64) GREEN; FileID.IpcSchema.Tests GREEN (covers the new
