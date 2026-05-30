@@ -1,4 +1,4 @@
-// CleanupViewModel — backs the Cleanup tab duplicate groups list.
+﻿// CleanupViewModel — backs the Cleanup tab duplicate groups list.
 //
 // Groups files by exact `content_hash` (BLAKE3 for files <=16 MB, else a
 // head+tail+size composite; migration v8) so each group is byte-for-byte

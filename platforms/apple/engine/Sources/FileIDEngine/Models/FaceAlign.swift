@@ -137,7 +137,7 @@ enum FaceAlign {
         let p10 = sample(x0 + 1, y0)
         let p01 = sample(x0, y0 + 1)
         let p11 = sample(x0 + 1, y0 + 1)
-        func lerp(_ c: (Float, Float, Float) -> Float) -> UInt8 {
+        func lerp(_ c: ((Float, Float, Float)) -> Float) -> UInt8 {
             let top = c(p00) * (1 - fx) + c(p10) * fx
             let bot = c(p01) * (1 - fx) + c(p11) * fx
             return UInt8(min(max((top * (1 - fy) + bot * fy).rounded(), 0), 255))
