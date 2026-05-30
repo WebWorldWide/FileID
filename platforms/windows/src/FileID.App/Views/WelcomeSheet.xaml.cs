@@ -292,6 +292,12 @@ public sealed partial class WelcomeSheet : UserControl
         HandleAction(Svc.Arcface);
     }
 
+    private void OnRamPlusActionClicked(object sender, RoutedEventArgs e)
+    {
+        DebugLog.Info("[INSTALL] RAM++ per-row button clicked.");
+        HandleAction(Svc.RamPlus);
+    }
+
     private void OnDeepVlmActionClicked(object sender, RoutedEventArgs e)
     {
         DebugLog.Info("[INSTALL] Deep Analyze (Qwen) per-row button clicked.");

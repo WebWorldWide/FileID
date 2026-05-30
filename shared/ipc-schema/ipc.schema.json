@@ -230,7 +230,9 @@
               "sourcePersonID": { "type": "integer" },
               "destinationPersonID": { "type": "integer" },
               "faceIDsToRevert": { "type": "array", "items": { "type": "integer" } }
-            } } } }
+            } } } },
+
+        { "type": "object", "required": ["wipeLibrary"], "additionalProperties": false, "properties": { "wipeLibrary": { "type": "object", "additionalProperties": false, "description": "Truncate all learned library state (tags, faces, captions, embeddings) in-process on the engine's writer connection — no file deletion, so it never races the OS file-lock. Replies with a libraryWiped event." } } }
       ]
     },
 
@@ -292,7 +294,8 @@
               }
             }
           }
-        }
+        },
+        { "type": "object", "required": ["libraryWiped"], "additionalProperties": false, "properties": { "libraryWiped": { "$ref": "#/$defs/SinglePositional/LibraryWiped" } } }
       ]
     },
 
@@ -724,6 +727,24 @@
                   "destinationMemberCount":  { "type": "integer", "minimum": 0 }
                 }
               } }
+            }
+          }
+        }
+      },
+
+      "LibraryWiped": {
+        "description": "Reply to wipeLibrary. ok=true when every table was truncated; message carries the error on failure so the app can fall back to its own wipe path.",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["_0"],
+        "properties": {
+          "_0": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["ok"],
+            "properties": {
+              "ok":      { "type": "boolean" },
+              "message": { "type": ["string", "null"] }
             }
           }
         }
