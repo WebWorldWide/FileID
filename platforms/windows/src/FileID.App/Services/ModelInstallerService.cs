@@ -110,7 +110,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     private ModelInstallerService()
     {
         Clip = new ModelSlot(
-            displayLabel: "MobileCLIP-S2",
+            displayLabel: "CLIP ViT-B/32",
             approxBytes: 220UL * 1024 * 1024,
             // Install both halves of CLIP: the image encoder (mobileclip_s2)
             // and the text encoder (clip_text). The engine's pre-scan check

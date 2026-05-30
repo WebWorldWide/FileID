@@ -179,6 +179,14 @@ impl SceneLabeler {
         SCENE_LABELS[idx]
     }
 
+    /// Read-only view of the prompt-ensembled label matrix (one L2-normalized
+    /// row per `SCENE_LABELS` entry). Used by the offline matrix-regeneration
+    /// harness (`examples/gen_scene_matrix.rs`); not referenced at runtime.
+    #[allow(dead_code)]
+    pub fn matrix(&self) -> &[Vec<f32>] {
+        &self.matrix
+    }
+
     /// Build the label matrix from an already-loaded CLIP text encoder.
     /// Embeds every label×template prompt (batched), averages each label's
     /// template embeddings, and L2-renormalizes.

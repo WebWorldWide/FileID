@@ -105,13 +105,17 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
             let dir = models_root.join("mobileclip");
             LookupResult::Found(Model {
                 id: "mobileclip_s2",
-                display_name: "MobileCLIP image encoder",
+                display_name: "CLIP ViT-B/32 image encoder",
                 files: vec![FileEntry {
-                    url: "https://huggingface.co/Xenova/mobileclip_s2/resolve/main/onnx/vision_model.onnx"
+                    // OpenAI/OpenCLIP ViT-B/32 (MIT) replaces Apple's MobileCLIP-S2
+                    // (research-only license). Same 512-d output; commercial-clean.
+                    // model_kind/dest kept as `mobileclip_s2` to avoid churning the
+                    // sentinel + C# slot wiring (the id is now just a stable key).
+                    url: "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/vision_model.onnx"
                         .to_string(),
                     dest: dir.join("mobileclip_s2_image.onnx"),
                     sha256: None,
-                    approx_bytes: 143_020_962,
+                    approx_bytes: 351_685_709,
                 }],
             })
         }
@@ -127,11 +131,14 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                 display_name: "CLIP text encoder",
                 files: vec![
                     FileEntry {
-                        url: "https://huggingface.co/Xenova/mobileclip_s2/resolve/main/onnx/text_model.onnx"
+                        // OpenAI/OpenCLIP ViT-B/32 text encoder (MIT). input_ids-only;
+                        // 512-d. Pairs with the openai/clip-vit-base-patch32 BPE
+                        // vocab+merges below (unchanged — they are ViT-B/32's tokenizer).
+                        url: "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/text_model.onnx"
                             .to_string(),
                         dest: dir.join("clip_text.onnx"),
                         sha256: None,
-                        approx_bytes: 253_894_023,
+                        approx_bytes: 254_058_553,
                     },
                     FileEntry {
                         url: "https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/vocab.json"

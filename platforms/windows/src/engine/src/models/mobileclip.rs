@@ -15,8 +15,12 @@ use ort::value::Tensor;
 
 use super::runtime::{classify_inference_error, configure_session_builder, execution_providers_for_chain, priority_chain, RuntimeProbe};
 
-const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
-const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
+// OpenAI CLIP normalization (ViT-B/32) — differs from ImageNet; using ImageNet
+// stats on a CLIP model measurably degrades the embeddings.
+#[allow(clippy::excessive_precision)]
+const CLIP_MEAN: [f32; 3] = [0.48145466, 0.4578275, 0.40821073];
+#[allow(clippy::excessive_precision)]
+const CLIP_STD: [f32; 3] = [0.26862954, 0.26130258, 0.27577711];
 
 pub struct MobileClipImage {
     session: Session,
@@ -47,9 +51,9 @@ impl MobileClipImage {
             .context("ORT session commit (MobileCLIP image)")?;
         // Warmup with a zero 256×256 frame so first-call kernel compile
         // happens during load.
-        let mut model = Self { session, input_size: 256 };
+        let mut model = Self { session, input_size: 224 };
         let warmup_started = std::time::Instant::now();
-        let _ = model.embed(&[0u8; 3 * 256 * 256])?;
+        let _ = model.embed(&[0u8; 3 * 224 * 224])?;
         tracing::info!(
             model = "MobileCLIP image",
             warmup_ms = warmup_started.elapsed().as_millis() as u64,
@@ -80,9 +84,9 @@ impl MobileClipImage {
                 let r = rgb_256[i] as f32 / 255.0;
                 let g = rgb_256[i + 1] as f32 / 255.0;
                 let b = rgb_256[i + 2] as f32 / 255.0;
-                chw[[0, 0, y, x]] = (r - IMAGENET_MEAN[0]) / IMAGENET_STD[0];
-                chw[[0, 1, y, x]] = (g - IMAGENET_MEAN[1]) / IMAGENET_STD[1];
-                chw[[0, 2, y, x]] = (b - IMAGENET_MEAN[2]) / IMAGENET_STD[2];
+                chw[[0, 0, y, x]] = (r - CLIP_MEAN[0]) / CLIP_STD[0];
+                chw[[0, 1, y, x]] = (g - CLIP_MEAN[1]) / CLIP_STD[1];
+                chw[[0, 2, y, x]] = (b - CLIP_MEAN[2]) / CLIP_STD[2];
             }
         }
 
@@ -146,9 +150,9 @@ impl MobileClipImage {
                     let r = rgb[i] as f32 / 255.0;
                     let g = rgb[i + 1] as f32 / 255.0;
                     let bch = rgb[i + 2] as f32 / 255.0;
-                    chw[[b, 0, y, x]] = (r - IMAGENET_MEAN[0]) / IMAGENET_STD[0];
-                    chw[[b, 1, y, x]] = (g - IMAGENET_MEAN[1]) / IMAGENET_STD[1];
-                    chw[[b, 2, y, x]] = (bch - IMAGENET_MEAN[2]) / IMAGENET_STD[2];
+                    chw[[b, 0, y, x]] = (r - CLIP_MEAN[0]) / CLIP_STD[0];
+                    chw[[b, 1, y, x]] = (g - CLIP_MEAN[1]) / CLIP_STD[1];
+                    chw[[b, 2, y, x]] = (bch - CLIP_MEAN[2]) / CLIP_STD[2];
                 }
             }
         }

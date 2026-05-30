@@ -1213,7 +1213,7 @@ async fn process_file_predecoded(
                     let clip_started = Instant::now();
                     if permit.is_ok() {
                         let clip_mu = &clip_pool[worker_idx % clip_pool.len()];
-                        let resized = resize_rgb_nearest(&rgb, w as usize, h as usize, 256, 256);
+                        let resized = resize_rgb_nearest(&rgb, w as usize, h as usize, 224, 224);
                         let embed_result = {
                             let mut c = clip_mu.lock();
                             c.embed(&resized)
@@ -1238,7 +1238,7 @@ async fn process_file_predecoded(
                     // Opt-in batch path: workers submit to coordinator,
                     // get batched embedding back via oneshot.
                     let clip_started = Instant::now();
-                    let resized = resize_rgb_nearest(&rgb, w as usize, h as usize, 256, 256);
+                    let resized = resize_rgb_nearest(&rgb, w as usize, h as usize, 224, 224);
                     match clip_coord.embed(resized).await {
                         Ok(emb) => tagged.clip_embedding = Some(emb),
                         Err(err) => {
