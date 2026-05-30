@@ -482,7 +482,22 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             var raw = reader.GetString(7);
             if (!string.IsNullOrEmpty(raw))
             {
-                tags = raw.Split('|', StringSplitOptions.RemoveEmptyEntries);
+                // Drop generic/medium RAM++ tags that read as noise on a card
+                // (mirrors ram_plus.rs SUPPRESSED_TAGS) so libraries scanned
+                // before the engine-side filter don't surface them. The file
+                // *is* a photo; faces are surfaced by the People tab.
+                var parts = raw.Split('|', StringSplitOptions.RemoveEmptyEntries);
+                var kept = new System.Collections.Generic.List<string>(parts.Length);
+                foreach (var p in parts)
+                {
+                    var lower = p.Trim().ToLowerInvariant();
+                    if (lower is "image" or "photo" or "photograph" or "photography" or "picture" or "face")
+                    {
+                        continue;
+                    }
+                    kept.Add(p);
+                }
+                tags = kept;
             }
         }
         // Optional 9th column: vlm_proposed_name (smart-rename
