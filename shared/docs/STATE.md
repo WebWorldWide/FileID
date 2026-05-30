@@ -23,19 +23,23 @@ redesign from [`RESTRUCTURE.md`](RESTRUCTURE.md) end-to-end and rewrites the dev
   surfaced over IPC + a "What to apply" tier strip (selective apply that holds "ask" back) +
   a drill-down confidence pill + reason. **P4:** Sankey gets the Okabe-Ito CVD-safe palette +
   an "Other" long-tail node (no silent drop).
-- **macOS mirror (unverified — needs a Mac build).** `RestructureSemantic.swift` ports the
-  engine faithfully (reuses `IdentityClustering`); `proposeAll` runs it + stamps
-  confidence/reason; IPC `RestructureMove` gains confidence/reason; parity tests added.
-  App-side UI wiring + Sankey palette documented in `platforms/apple/MACOS_BUTLER_NOTES.md`.
+- **macOS mirror — engine port CI-verified; app-side UI pending.** `RestructureSemantic.swift`
+  ports the engine faithfully (reuses `IdentityClustering`); `proposeAll` runs it + stamps
+  confidence/reason; IPC `RestructureMove` gains confidence/reason. The macOS CI
+  (`swift build --product FileIDEngine/FileID` + `swift test`) compiled the port and passed the
+  new parity tests. The app-side UI wiring (reason display, confidence→Keep/Tidy/Reorganize
+  mapping, Okabe-Ito Sankey) remains — documented in `platforms/apple/MACOS_BUTLER_NOTES.md`.
 - **Docs rewritten from scratch** against verified source: all three `CLAUDE.md` +
   SHIP/PRIVACY/SECURITY/CONTRIBUTING/TESTING/COVERAGE/SYMBOLS/VISUAL-LANGUAGE/BUGS. Honest
   findings surfaced: model-download SHA256 is wired but inert (every `registry.rs` entry is
   `sha256: None`) — now the top open hardening item; the old "Phase 8 coverage gate" was fictional.
 - **Condense pass** (engine, behavior-preserving): match-arm merges, if/else→match,
   loop→iterator, push-loop→`extend`.
-- **Verified headless throughout**: clippy `-D warnings`, 230 engine tests, `dotnet build`/`test`
-  (133), `dotnet format`. **Not yet** verified on-hardware (butler plan quality on `G:\TrueNAS`)
-  or on a Mac (Swift).
+- **Verified**: clippy `-D warnings`, 230 engine tests, `dotnet build`/`test` (133), `dotnet
+  format` (headless), **and all three GitHub workflows green on `main`** — Windows engine,
+  Windows app, and macOS (which compiled the Swift port + ran the parity tests). **Not yet**
+  verified on-hardware (butler plan quality on `G:\TrueNAS`); the macOS *app-side UI* wiring is
+  the remaining Swift work.
 
 ## 2026-05-30 — Accuracy tightening + UI fixes + docs refresh + butler-restructure research/design
 

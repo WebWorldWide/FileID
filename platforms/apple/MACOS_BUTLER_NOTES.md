@@ -1,12 +1,12 @@
 # macOS butler-restructure mirror — build + wire on a Mac
 
 Mirrors the Windows butler redesign (`shared/docs/RESTRUCTURE.md`, Windows commits
-`124ab1c` + `f135c41`) into the Swift engine. **Written in the Windows dev env, so
-it is unverified — it needs `swift build` + `swift test` on a Mac.** The pure
-algorithm is a line-by-line port of the Rust that passes its unit tests, but
-nothing here has been compiled by Swift.
+`124ab1c` + `f135c41`) into the Swift engine. **The engine port is CI-verified** —
+the macOS GitHub workflow (`swift build --product FileIDEngine/FileID` + `swift test`)
+compiles it and passes the new parity tests. What still needs a Mac is the **app-side
+UI wiring** (the SwiftUI Restructure view + Sankey), below.
 
-## What landed (engine — done, unverified)
+## What landed (engine — done, CI-verified)
 
 - **`engine/Sources/FileIDEngine/Pipeline/RestructureSemantic.swift`** (new) —
   faithful Swift port of `restructure_semantic.rs`: signal fusion (CLIP 0.70 /
