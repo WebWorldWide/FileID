@@ -8,6 +8,40 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-05-29 — Commercial-clean (Apache-2.0) model stack + RAM++ primary tagger (Windows; on-hardware verified)
+
+Branch `windows-ramplus-adopt` (off `main`/V16.29). Adopts **RAM++** as the primary in-scan
+tagger and replaces every non-commercial weight with an Apache/MIT one, so the app ships
+license-clean under a new root **Apache-2.0 `LICENSE`**. See DECISIONS 2026-05-29 for the why.
+
+**Engine (Rust)** — 6 commits:
+- **RAM++** (`models/ram_plus.rs`): Swin-L @384, 4585-tag ONNX (fp16, self-hosted
+  `Web-World-Wide/ram-plus-onnx`), per-class thresholds, `FILEID_RAMPLUS_THRESHOLD` override.
+  Primary tagger in `pipeline/tagging.rs`; CLIP scene tags gated to fallback. VRAM pool budget
+  1500→2000 MB.
+- **Faces** (`models/{yunet,sface,face_align}.rs`): YuNet (MIT) detect + SFace (Apache, **128-d**)
+  embed + 5-pt similarity alignment to the 112×112 template. `arcface.rs` removed; `scrfd.rs`
+  kept as reference. v12 migration wipes face tables. Cluster bands calibrated on-hardware
+  (pass1 0.66 / pass3_min_mean 0.60, set in the measured gap between genuine clusters ~0.85+ and
+  chained blobs ~0.50) — largest cluster on a 1475-face set cut 90%→7%, known single identity (27
+  studio portraits) stays one cluster at mean cohesion 0.93.
+- **CLIP** → OpenAI ViT-B/32 (MIT), 512-d (schema unchanged); scene-embedding matrix regenerated.
+- **VLM**: Qwen-3B (research-only) dropped → Qwen-7B (Apache) recommended + Mistral-Small-3.2.
+- `registry.rs` arms repointed (ids/sentinels kept as stable keys → no install/gate churn).
+
+**App (C#)**: AppSettings v5 migration (default 7B, allowed-VLM allowlist), RAM++ installer
+slot, "Face models (YuNet + SFace)" label, display sizes. `dotnet build`/`test`/`format` clean.
+
+**Verify**: clippy `-D warnings` clean; **217 engine tests + app tests green**. **On hardware
+(RTX 2060, DirectML EP) against `G:\TrueNAS`** via the new `build/iterate.ps1` + `scan_assertions.py`
+harness: faces detect+embed (128-d/512-byte prints), single-person (27/27→1) and multi-person
+(11→4, recurring subject grouped) clustering correct, RAM++ tags specific + accurate, HEIC
+decodes + tags, all models bind the GPU. Bounded stability soak (2000 files) run.
+
+**Open**: macOS lockstep (WS-MAC, Swift not yet written); rename-heal collapses coexisting
+exact-duplicate files (pre-existing, see NEXT.md); throughput re-baseline (DirectML ~6–7 files/s;
+CUDA Pack = 3–5× path); SFace cluster-band calibration on labeled faces.
+
 ## 2026-05-27 — V16.29 SmolVLM removal, tag-quality diagnostic + threshold + audio duration, sidebar + Deep Analyze fixes
 
 Targeted response to a user-reported triple: (1) tag chips on images/videos/audio "still

@@ -7,6 +7,64 @@
 
 ---
 
+## 2026-05-29 — Commercial-clean (Apache-2.0) model stack + RAM++ adopted as primary tagger
+
+**Context**: A license audit found that three core, always-installed weights were **not**
+commercially redistributable: the InsightFace face stack (ArcFace `w600k_r50` + SCRFD, via
+`immich-app/buffalo_l`, "non-commercial research only"), Apple **MobileCLIP-S2** (ML Research
+license — weights research-only), and **Qwen2.5-VL-3B** (Qwen Research license). The user
+chose to keep FileID fully open-source **and** preserve every future monetization path, so the
+project adopts **Apache-2.0** (root `LICENSE`) and replaces all non-commercial weights on both
+platforms in lockstep. Separately, the user reversed the 2026-05-22 "no self-hosting" call to
+adopt **RAM++** (Recognize Anything Plus) as the primary tagger.
+
+**Decision**:
+- **License**: project is **Apache-2.0**. Default/recommended weights are all Apache/MIT.
+- **Faces**: ArcFace/SCRFD → **SFace (Apache-2.0) + YuNet (MIT)** from OpenCV Zoo. Embedding
+  dimension drops **512-d → 128-d**; a v12 migration wipes `face_prints`/`persons`/
+  `face_verifications` so prints re-derive cleanly. 5-point similarity alignment to the
+  ArcFace 112×112 template is shared cross-platform so embeddings agree. macOS keeps Apple
+  Vision for detection, swaps ArcFace→SFace for embedding.
+- **CLIP**: MobileCLIP-S2 → **OpenAI/OpenCLIP ViT-B/32 (MIT)**, 512-d (schema unchanged),
+  reuses the existing BPE tokenizer. `model_kind`/dest kept as `mobileclip_s2` as a stable key.
+- **Tagger**: **RAM++** (Apache-2.0, Swin-L @384, 4585 tags) self-hosted at
+  `Web-World-Wide/ram-plus-onnx` (the one self-hosted model — no upstream ONNX exists; SHA-pinned,
+  unmodified). When installed it is the primary tagger; CLIP zero-shot scene tags are the
+  fallback. Per-class thresholds (`ram_plus_thresholds.txt`) ship alongside for precision.
+- **VLM ladder**: drop Qwen-3B; **Qwen2.5-VL-7B** (Apache) recommended default, **Gemma-3-4B**
+  optional (Gemma Terms — commercially usable, terms surfaced at install), **Mistral-Small-3.2**
+  (Apache) max-quality.
+
+**Three baked-in choices (flippable)**: (1) RAM++ primary, CLIP fallback — *not* both merged
+(favors precision); (2) VLM ladder 7B→Gemma→Mistral; (3) keep Gemma-3-4B despite its non-Apache
+(but commercially-permissive) terms rather than a pure-Apache 7B+Mistral ladder.
+
+**Reasoning**: Apache-2.0 is permissive OSS that also permits commercial use, so open-sourcing
+costs no future optionality. ViT-B/32 is 512-d/ANE-friendly → perf-neutral on macOS and a
+schema no-op. SFace at 128-d is lighter than ArcFace; the one-time face-table wipe is acceptable
+because prints are derived, not authored. RAM++ trades throughput (Swin-L is heavier than CLIP)
+for materially better, *specific* tags — validated on a real corpus (senior portraits →
+`graduation`/`gown`/`backdrop`; a yard shoot → `lawn`/`mower`/`tripod`).
+
+**Verified on hardware (RTX 2060, DirectML)**: faces detect + embed (128-d, 512-byte prints),
+HEIC decodes + tags, RAM++ tags are specific + accurate, all models bind a GPU EP. Throughput on
+DirectML is ~7–9 files/s (RAM++ Swin-L-bound); the CUDA Pack is the 3–5× fast path. **Face
+clustering required on-hardware calibration**: at the initial SFace bands, a 1475-face library
+over-merged catastrophically (1339 faces chained into one cluster, mean cohesion 0.40). Anchoring
+on the measured gap between genuine clusters (a known single identity = 27 studio portraits
+clustered at mean cohesion 0.93) and chained blobs (~0.50), the bands were retuned (Pass-1 cores
+at 0.66; Pass-3 2-means split floor at 0.60, inside that gap) — cutting the largest cluster to 7%
+(103 faces, mean 0.66) while the known identity stays one cluster. Values are provisional (fail
+safe toward mergeable over-split); the residual is that Pass 1 is single-linkage (chains on huge
+libraries — real fix is mutual-kNN/density edges) + labeled fine-tuning. **Separate finding
+(orthogonal, pre-existing)**: rename-heal in `dbwriter.rs` re-binds on content-identity without
+checking the old path still exists, so coexisting byte-identical duplicates collapse onto one row
+— tracked in `NEXT.md` (needs macOS parity); not introduced by this change.
+
+**Alternatives considered**: SigLIP2 (Apache, stronger search) rejected for its 768-d schema
+change + macOS perf cost; running RAM++ *and* CLIP merged for recall rejected in favor of
+precision; EdgeFace/jina-clip-v2/nomic-embed-vision rejected (all CC-BY-NC).
+
 ## 2026-05-27 — SmolVLM removed; CLIP scene tags become the canonical auto-tagger
 
 **Context**: V16.11 → V16.27 had SmolVLM as the canonical scan-time tagger (the "tagging =

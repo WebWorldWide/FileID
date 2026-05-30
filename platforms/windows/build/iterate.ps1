@@ -126,6 +126,10 @@ $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError = $true
 $psi.CreateNoWindow = $true
 $psi.Environment["FILEID_LOG"] = "info"
+# Force the bundled ORT 1.22 beside the engine — System32 ships a stale 1.17
+# that the default DLL search order (System32 first) would otherwise bind,
+# panicking our ort 2.0.0-rc.10 crate. Belt-and-suspenders with colocation.
+$psi.Environment["ORT_DYLIB_PATH"] = Join-Path (Split-Path $EnginePath) "onnxruntime.dll"
 # V14.9-X: do NOT set FILEID_MODEL_POOL_SIZE here. V14.9-W's pool=6
 # wedged the DirectML driver and locked the entire system requiring a
 # hard reboot. Pool sizing is now VRAM-budgeted inside the engine and
@@ -283,10 +287,25 @@ foreach ($m in $telemetryMarkers) {
 }
 Assert "[A11] privacy gate - zero telemetry strings in engine binary" ($hits.Count -eq 0) "(found: $($hits -join ', '))"
 
+# A12: model-swap DB assertions — RAM++/CLIP tag content + SFace 128-d
+# (512-byte) face embeddings, which reject stale 512-d/2048-byte ArcFace data.
+$pyExe = $null
+foreach ($cand in @('python', 'py')) {
+    if (Get-Command $cand -ErrorAction SilentlyContinue) { $pyExe = $cand; break }
+}
+if ($pyExe) {
+    if (-not $env:ASSERT_MIN_FILES) { $env:ASSERT_MIN_FILES = "1" }
+    & $pyExe (Join-Path $ScriptDir "scan_assertions.py") $dbPath
+    Assert "[A12] DB content: RAM++ tags + SFace 128-d embeddings" ($LASTEXITCODE -eq 0)
+}
+else {
+    Warn "python not found on PATH; skipping [A12] DB content assertions"
+}
+
 # --- 6. Summary -------------------------------------------------------
 Write-Host ""
 if ($failures -eq 0) {
-    Write-Host "All 11 assertions PASSED" -ForegroundColor Green
+    Write-Host "All assertions PASSED" -ForegroundColor Green
     Write-Host "  throughput: $([int]$throughput) files/sec" -ForegroundColor DarkGreen
     Write-Host "  peak RAM:   $peakResidentMB MB" -ForegroundColor DarkGreen
     Write-Host "  scan time:  $([int]$scanElapsed.TotalSeconds)s" -ForegroundColor DarkGreen

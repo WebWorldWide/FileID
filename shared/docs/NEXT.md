@@ -4,6 +4,54 @@
 
 ---
 
+## Post commercial-clean merge (2026-05-29) — priorities, in order
+
+The `windows-ramplus-adopt` work (RAM++ + Apache-2.0 commercial-clean stack) is verified on
+hardware and merged. Remaining, highest-value first:
+
+1. **Rename-heal collapses coexisting exact-duplicate files** (correctness, cross-platform).
+   `pipeline/dbwriter.rs` rename-heal re-binds an existing row to a new path whenever a file's
+   `content_hash` (or `file_ref`) matches — **without checking the old path still exists on
+   disk**. For a true move that's correct; but when two byte-identical files coexist (e.g.
+   `IMG_1558.HEIC` + `IMG_1558(1).HEIC`), the second steals the first's row, so only one of the
+   two appears in the library and the Cleanup tab can't surface the exact-dup group. Not data
+   loss (files stay on disk). **Fix**: only heal when the prior path no longer exists (stat it)
+   or the USN journal recorded a rename; otherwise insert a distinct row and let phash dedup
+   handle it. *Acceptance*: scanning a folder with N byte-identical pairs yields 2N file rows;
+   Cleanup shows the dup group. Mirror the fix in macOS `Database`/dbwriter for parity.
+
+2. **WS-MAC — macOS lockstep** (Swift written here, user builds/verifies on Mac). Mirror the
+   Windows swap into `platforms/apple/`: RAM++ tagger (CoreML or ORT CoreML EP), ArcFace→SFace
+   (128-d) embedding with Apple Vision detection, MobileCLIP-S2→ViT-B/32 (`.mlpackage`),
+   regenerate the scene-embedding table, VLM ladder (drop Qwen-3B). Must match the v12 migration
+   identifier + the 5-point alignment transform exactly. *Acceptance*: macOS ≥140 files/s held;
+   person clusters within tolerance; semantic search quality unchanged; **a face DB written on
+   one platform round-trips on the other** (the 128-d lockstep goal).
+
+3. **Throughput re-baseline + CUDA Pack for ORT.** DirectML on the RTX 2060 measured ~6–7
+   files/s (RAM++ Swin-L-bound). Host the ORT CUDA EP DLLs (`onnxruntime_providers_cuda.dll` +
+   deps) so NVIDIA users get the 3–5× path (cuDNN 9.5 is already installed; only the ORT CUDA
+   provider is missing). Evaluate batched RAM++ inference (current `tag()` is one image/run) for
+   GPU utilization. *Acceptance*: SHIP.md Appendix W NVIDIA row re-measured with RAM++ enabled.
+
+4. **SFace clustering — single-linkage Pass-1 fix + labeled fine-tuning.** The
+   `identity_clustering.rs` bands were calibrated on-hardware (pass1 0.66 / pass2 0.54 / margin
+   0.10 / pass3_min_mean 0.60 / max_splits 7), exploiting the measured gap between genuine clusters
+   (~0.85+ mean cohesion — 27 studio portraits → 1 cluster, median 0.93) and chained blobs (~0.50).
+   This cut the largest cluster on a 1475-face set from 90% (1339 faces, mean 0.40) to 7% (103,
+   mean 0.66) with no over-split of the known identity. Two remaining items: (a) **Pass 1 is
+   single-linkage connected-components** — it still chains different people through bridge faces on
+   very large libraries; the structural fix is mutual-kNN or density-gated edges, not a higher
+   threshold (which would start over-splitting genuine identities). (b) **Fine-tune against labeled
+   faces** — current values fail safe toward over-split (478/1475 singletons on the backup subset;
+   mergeable in the UI), but the precision/recall optimum needs ground truth. *Acceptance*:
+   largest-cluster contamination + identity recall on a hand-labeled subset of `G:\TrueNAS` within
+   target.
+
+5. **WS9 hardening (handoff — needs your hardware/creds)**: per-vendor verification on
+   AMD/Intel/Snapdragon; Authenticode **EV-cert** procurement + signing; WiX MSI + Burn bundle
+   packaging. Also: full-corpus (26k) soak for VRAM/TDR over a sustained run.
+
 ## V16.29 — SmolVLM removed, tag-quality fixes, sidebar + Deep Analyze (2026-05-27)
 
 **Landed (clippy + test green; dotnet build/test/format clean).** Response to user-reported
