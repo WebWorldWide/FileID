@@ -66,31 +66,31 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
         // ("arcface_default" is what `WelcomeSheet` sends today;
         // `arcface_iresnet50` / `arcface_mobileface` are reserved for
         // future per-architecture choice in Settings).
-        "arcface" | "arcface_default" | "arcface_iresnet50" | "arcface_mobileface" | "arcface_scrfd" => {
-            let arcface_dir = models_root.join("arcface");
-            let scrfd_dir = models_root.join("scrfd");
+        // Commercial-clean faces: YuNet detection (MIT) + SFace recognition
+        // (Apache-2.0, 128-d) from OpenCV Zoo's official HF mirrors — replacing
+        // the non-commercial InsightFace Buffalo-L (SCRFD + ArcFace). The
+        // model_kind aliases + id "arcface" are kept so the C# install slot,
+        // sentinel, and pre-scan gate are unchanged (Approach A).
+        "arcface" | "arcface_default" | "arcface_iresnet50" | "arcface_mobileface" | "arcface_scrfd" | "yunet_sface" => {
+            let yunet_dir = models_root.join("yunet");
+            let sface_dir = models_root.join("sface");
             LookupResult::Found(Model {
                 id: "arcface",
-                display_name: "Face recognition",
+                display_name: "Face detection + recognition",
                 files: vec![
-                    // Immich's Buffalo-L repo lives under per-task subdirs
-                    // (recognition/, detection/) with each subdir's ONNX
-                    // named `model.onnx`. The remote path differs from the
-                    // local filename — keep the local filenames the
-                    // tagging stack expects.
                     FileEntry {
-                        url: "https://huggingface.co/immich-app/buffalo_l/resolve/main/recognition/model.onnx"
+                        url: "https://huggingface.co/opencv/face_detection_yunet/resolve/main/face_detection_yunet_2023mar.onnx"
                             .to_string(),
-                        dest: arcface_dir.join("w600k_r50.onnx"),
+                        dest: yunet_dir.join("face_detection_yunet_2023mar.onnx"),
                         sha256: None,
-                        approx_bytes: 174_383_860,
+                        approx_bytes: 232_589,
                     },
                     FileEntry {
-                        url: "https://huggingface.co/immich-app/buffalo_l/resolve/main/detection/model.onnx"
+                        url: "https://huggingface.co/opencv/face_recognition_sface/resolve/main/face_recognition_sface_2021dec.onnx"
                             .to_string(),
-                        dest: scrfd_dir.join("scrfd_10g_bnkps.onnx"),
+                        dest: sface_dir.join("face_recognition_sface_2021dec.onnx"),
                         sha256: None,
-                        approx_bytes: 16_923_827,
+                        approx_bytes: 38_696_353,
                     },
                 ],
             })
@@ -105,13 +105,17 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
             let dir = models_root.join("mobileclip");
             LookupResult::Found(Model {
                 id: "mobileclip_s2",
-                display_name: "MobileCLIP image encoder",
+                display_name: "CLIP ViT-B/32 image encoder",
                 files: vec![FileEntry {
-                    url: "https://huggingface.co/Xenova/mobileclip_s2/resolve/main/onnx/vision_model.onnx"
+                    // OpenAI/OpenCLIP ViT-B/32 (MIT) replaces Apple's MobileCLIP-S2
+                    // (research-only license). Same 512-d output; commercial-clean.
+                    // model_kind/dest kept as `mobileclip_s2` to avoid churning the
+                    // sentinel + C# slot wiring (the id is now just a stable key).
+                    url: "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/vision_model.onnx"
                         .to_string(),
                     dest: dir.join("mobileclip_s2_image.onnx"),
                     sha256: None,
-                    approx_bytes: 143_020_962,
+                    approx_bytes: 351_685_709,
                 }],
             })
         }
@@ -127,11 +131,14 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                 display_name: "CLIP text encoder",
                 files: vec![
                     FileEntry {
-                        url: "https://huggingface.co/Xenova/mobileclip_s2/resolve/main/onnx/text_model.onnx"
+                        // OpenAI/OpenCLIP ViT-B/32 text encoder (MIT). input_ids-only;
+                        // 512-d. Pairs with the openai/clip-vit-base-patch32 BPE
+                        // vocab+merges below (unchanged — they are ViT-B/32's tokenizer).
+                        url: "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/text_model.onnx"
                             .to_string(),
                         dest: dir.join("clip_text.onnx"),
                         sha256: None,
-                        approx_bytes: 253_894_023,
+                        approx_bytes: 254_058_553,
                     },
                     FileEntry {
                         url: "https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/vocab.json"
@@ -151,28 +158,73 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
             })
         }
 
+        // ── RAM++ (Recognize Anything Plus) — the universal in-scan image
+        // tagger. Apache-2.0 ONNX (Swin-Large @384px, 4585-tag vocabulary),
+        // self-hosted at Web-World-Wide/ram-plus-onnx because no first-party
+        // ONNX export exists and the engine consumes ONNX. Gated behind the
+        // "model missing → CLIP scene-tag fallback" path in tagging.rs, so a
+        // not-yet-uploaded repo can't regress scanning (zero-regression).
+        // Third file `ram_plus_thresholds.txt` carries per-class sigmoid
+        // cutoffs (ram_plus.rs applies them per class; falls back to a global
+        // cutoff if absent/mismatched).
+        "ram_plus" | "ram-plus" => {
+            let dir = models_root.join("ram_plus");
+            LookupResult::Found(Model {
+                id: "ram_plus",
+                display_name: "RAM++ image tagger",
+                files: vec![
+                    FileEntry {
+                        url: "https://huggingface.co/Web-World-Wide/ram-plus-onnx/resolve/main/ram_plus.onnx"
+                            .to_string(),
+                        dest: dir.join("ram_plus.onnx"),
+                        sha256: None,
+                        // fp16 export is ~882 MB: RAM++ bakes the 4585×51 frozen
+                        // tag-description embeddings into the graph as constants.
+                        approx_bytes: 925_600_000,
+                    },
+                    FileEntry {
+                        url: "https://huggingface.co/Web-World-Wide/ram-plus-onnx/resolve/main/ram_plus_tags.txt"
+                            .to_string(),
+                        dest: dir.join("ram_plus_tags.txt"),
+                        sha256: None,
+                        approx_bytes: 47_000,
+                    },
+                    FileEntry {
+                        url: "https://huggingface.co/Web-World-Wide/ram-plus-onnx/resolve/main/ram_plus_thresholds.txt"
+                            .to_string(),
+                        dest: dir.join("ram_plus_thresholds.txt"),
+                        sha256: None,
+                        approx_bytes: 46_000,
+                    },
+                ],
+            })
+        }
+
         // ── VLMs (Deep Analyze). Pulled as GGUF + mmproj pairs from
         // the official llama.cpp-friendly mirrors. Subprocess runner
         // (`vlm::VlmRunner`) finds them at canonical paths.
-        "qwen2.5-vl-3b" | "qwen2_5_vl_3b" => {
-            let dir = models_root.join("vlm").join("qwen2.5-vl-3b");
+        // Mistral-Small-3.2-24B (Apache-2.0) — the max-quality Deep Analyze
+        // VLM, replacing the non-commercial Qwen2.5-VL-3B (Qwen Research
+        // License). Multimodal GGUF + mmproj from bartowski's quant repo.
+        "mistral-small-3.2" | "mistral_small_3_2" => {
+            let dir = models_root.join("vlm").join("mistral-small-3.2");
             LookupResult::Found(Model {
-                id: "qwen2_5_vl_3b",
-                display_name: "Qwen2.5-VL 3B",
+                id: "mistral_small_3_2",
+                display_name: "Mistral-Small 3.2",
                 files: vec![
                     FileEntry {
-                        url: "https://huggingface.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF/resolve/main/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf"
+                        url: "https://huggingface.co/bartowski/mistralai_Mistral-Small-3.2-24B-Instruct-2506-GGUF/resolve/main/mistralai_Mistral-Small-3.2-24B-Instruct-2506-Q4_K_M.gguf"
                             .to_string(),
                         dest: dir.join("model.gguf"),
                         sha256: None,
-                        approx_bytes: 2_300_000_000,
+                        approx_bytes: 14_300_000_000,
                     },
                     FileEntry {
-                        url: "https://huggingface.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF/resolve/main/mmproj-Qwen2.5-VL-3B-Instruct-f16.gguf"
+                        url: "https://huggingface.co/bartowski/mistralai_Mistral-Small-3.2-24B-Instruct-2506-GGUF/resolve/main/mmproj-mistralai_Mistral-Small-3.2-24B-Instruct-2506-f16.gguf"
                             .to_string(),
                         dest: dir.join("mmproj.gguf"),
                         sha256: None,
-                        approx_bytes: 870_000_000,
+                        approx_bytes: 878_000_000,
                     },
                 ],
             })

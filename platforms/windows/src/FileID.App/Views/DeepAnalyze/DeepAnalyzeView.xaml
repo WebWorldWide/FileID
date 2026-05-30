@@ -94,30 +94,30 @@
                     </Grid.ColumnDefinitions>
 
                     <Border Grid.Column="0"
-                            x:Name="QwenSmallCard"
+                            x:Name="MistralCard"
                             CornerRadius="12"
                             Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                             BorderThickness="1"
                             Padding="18"
-                            Tag="qwen2_5_vl_3b"
+                            Tag="mistral_small_3_2"
                             Tapped="OnModelCardTapped">
                         <StackPanel Spacing="6">
-                            <TextBlock Text="Qwen 2.5-VL 3B" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                            <TextBlock Text="≈2 GB disk · 3.5 GB RAM · fast"
+                            <TextBlock Text="Mistral-Small 3.2" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <TextBlock Text="≈15 GB disk · 16 GB RAM · max quality"
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            <TextBlock x:Name="QwenSmallStatus"
+                            <TextBlock x:Name="MistralStatus"
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource AiBrush}" />
-                            <ProgressBar x:Name="QwenSmallProgress"
+                            <ProgressBar x:Name="MistralProgress"
                                          Value="0" Maximum="1"
                                          Visibility="Collapsed"
                                          Foreground="{ThemeResource GoldBrush}" />
                             <Button Content="Install"
-                                    x:Name="QwenSmallInstallButton"
+                                    x:Name="MistralInstallButton"
                                     Click="OnInstallModelClicked"
-                                    Tag="qwen2_5_vl_3b"
+                                    Tag="mistral_small_3_2"
                                     Margin="0,4,0,0" />
                         </StackPanel>
                     </Border>
@@ -211,7 +211,7 @@
                     <TextBlock x:Name="ActiveModelText"
                                Style="{StaticResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                               Text="Active model: Qwen 2.5-VL 3B" />
+                               Text="Active model: Qwen 2.5-VL 7B (best quality)" />
                     <!-- Horizontal scroll so this action row never clips its
                          right-hand controls (Propose renames / Cancel) on a
                          narrow / laptop window. Mirrors the PeopleView +

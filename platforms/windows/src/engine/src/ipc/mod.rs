@@ -953,14 +953,14 @@ mod tests {
             CommandPayload::RunFaceClustering(Empty {}),
             CommandPayload::DeepAnalyzeFile(DeepAnalyzeFilePayload {
                 file_id: 42,
-                model_kind: "qwen2_5_vl_3b".into(),
+                model_kind: "qwen2_5_vl_7b".into(),
             }),
             CommandPayload::DeepAnalyzeFolder(DeepAnalyzeFolderPayload {
                 path_prefix: r"C:\Users\adam\Pictures\2024".into(),
-                model_kind: "qwen2_5_vl_3b".into(),
+                model_kind: "qwen2_5_vl_7b".into(),
             }),
             CommandPayload::DeepAnalyzeAll(DeepAnalyzeAllPayload {
-                model_kind: "qwen2_5_vl_3b".into(),
+                model_kind: "qwen2_5_vl_7b".into(),
                 skip_existing: true,
                 tags_only: true,
             }),

@@ -206,8 +206,8 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             });
         }
         // Deep Analyze VLM has 3 alternative weights — any one sentinel marks it installed.
-        if ((SentinelExists("qwen2_5_vl_3b") || SentinelExists("qwen2_5_vl_7b")
-             || SentinelExists("gemma_3_4b"))
+        if ((SentinelExists("qwen2_5_vl_7b") || SentinelExists("gemma_3_4b")
+             || SentinelExists("mistral_small_3_2"))
             && Svc.DeepVlm.Status != Services.ModelInstallStatus.Installed)
         {
             DispatcherQueue.TryEnqueue(() =>

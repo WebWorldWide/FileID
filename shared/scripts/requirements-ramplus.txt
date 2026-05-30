@@ -1,0 +1,30 @@
+# Pinned, known-good Python deps for the RAM++ → ONNX export
+# (shared/scripts/export_ram_plus_onnx.py).
+#
+# WHY pinned: the `recognize-anything` package (the `ram` module) declares NONE
+# of its dependencies and only works with the OLDER timm/transformers it was
+# written against. Installing "latest everything" fails — modern transformers
+# moved `apply_chunking_to_forward` out of `modeling_utils`, and timm 1.0 removed
+# the `timm.models.layers` shim `ram` imports. This set is the combo that
+# actually imports + builds + exports the model. It lives in an ISOLATED venv
+# (setup-dev creates `.venv-ramplus/`) so it can't clash with anything else.
+#
+# CPU torch is fine — export is a one-time, seconds-long forward pass.
+# If an import STILL fails, the export script now prints the real error; adjust
+# the offending pin here and re-run.
+
+torch==2.4.1
+torchvision==0.19.1
+numpy==1.26.4
+pillow
+
+# RAM++ model deps (the ones `recognize-anything` forgets to pull):
+timm==0.9.16            # keeps the `timm.models.layers` shim ram imports (gone in 1.0)
+transformers==4.25.1    # still exposes apply_chunking_to_forward via modeling_utils; pulls a compatible huggingface_hub/tokenizers
+fairscale==0.4.4        # ram/models/bert.py imports checkpoint_wrapper at module load
+scipy==1.13.1           # ram/models/swin_transformer.py imports scipy.interpolate (undeclared by recognize-anything; numpy-1.26-compatible pin)
+
+# ONNX export + fp16 conversion + validation:
+onnx
+onnxruntime
+onnxconverter-common

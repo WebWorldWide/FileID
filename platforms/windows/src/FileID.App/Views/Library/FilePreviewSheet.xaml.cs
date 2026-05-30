@@ -674,7 +674,7 @@ public sealed partial class FilePreviewSheet : UserControl
         try
         {
             AnalyzeButton.IsEnabled = false;
-            await ViewModels.EngineClient.Instance.DeepAnalyzeFileAsync(FileId, "qwen2_5_vl_3b");
+            await ViewModels.EngineClient.Instance.DeepAnalyzeFileAsync(FileId, Services.AppSettings.Load().SelectedVlmModelKind);
         }
         catch (Exception ex)
         {

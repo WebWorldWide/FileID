@@ -26,11 +26,14 @@ internal static class ModelDisplaySize
             // (2_300_000_000 + 870_000_000) / 1_048_576 ≈ 3023 MB
             // The spec uses decimal MB (1e6); registry numbers are decimal too,
             // so divide by 1_000_000 for the displayed value.
-            ["qwen2_5_vl_3b"] = (2_300 + 870),         // ≈ 3170
             ["qwen2_5_vl_7b"] = (4_700 + 1_400),       // = 6100
             ["gemma_3_4b"] = (2_500 + 851),          // = 3351
-            ["arcface"] = (174 + 17),             // ≈ 191 (matches registry sums)
-            ["mobileclip_s2"] = 143,
+            // Mistral-Small-3.2-24B Q4_K_M (~14.3 GB) + mmproj (~878 MB).
+            ["mistral_small_3_2"] = (14_300 + 878),    // = 15178
+            // RAM++ ONNX (Swin-L @384, fp16) ~882 MB + tiny tag/threshold sidecars.
+            ["ram_plus"] = 926,
+            ["arcface"] = 37,                     // YuNet (~0.2 MB) + SFace (~37 MB)
+            ["mobileclip_s2"] = 352,        // CLIP ViT-B/32 vision ONNX (~335 MB, MIT)
             ["clip_text"] = (254 + 1 + 1),          // ≈ 256 with vocab + merges
             ["cudnn_runtime_x64"] = 430,
         };

@@ -41,13 +41,29 @@ pub struct Hyperparameters {
 
 impl Default for Hyperparameters {
     fn default() -> Self {
+        // SFace (128-d) defaults, calibrated on-hardware against G:\TrueNAS.
+        // Two empirical anchors drove these: (1) a known single identity
+        // (27 studio portraits) clusters with cosine-to-centroid 0.88–0.95
+        // (median 0.93) — so GENUINE same-person SFace cosines are very high,
+        // far above OpenCV's 0.363 verification EER; (2) Pass 1 is single-
+        // linkage connected-components, which chains different people through
+        // bridge faces (a 1475-face run at pass1=0.42 collapsed 1339 into one
+        // blob of mean cohesion ~0.40). The fix exploits the wide gap between
+        // genuine clusters (~0.85+ mean) and chained blobs (~0.50 mean):
+        // keep Pass-1 cores tight (0.66, above most cross-identity false
+        // matches), and set the Pass-3 split floor IN that gap (0.60) so the
+        // 2-means refinement shreds any non-tight cluster while leaving real
+        // identities whole. Fails toward over-split (mergeable in the UI), not
+        // the un-fixable over-merge. PROVISIONAL — single-linkage Pass 1 still
+        // chains on very large libraries; the real fix is mutual-kNN / density
+        // edges (see NEXT.md). Final calibration on a labeled library.
         Self {
-            pass1_cosine: 0.55,
-            pass2_cosine: 0.45,
-            pass2_margin: 0.05,
-            pass3_variance_threshold: 0.05,
-            pass3_min_mean_cosine: 0.50,
-            pass3_max_splits: 3,
+            pass1_cosine: 0.66,
+            pass2_cosine: 0.54,
+            pass2_margin: 0.10,
+            pass3_variance_threshold: 0.04,
+            pass3_min_mean_cosine: 0.60,
+            pass3_max_splits: 7,
             k_nn: 10,
         }
     }
