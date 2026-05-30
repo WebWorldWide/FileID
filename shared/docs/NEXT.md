@@ -4,6 +4,32 @@
 
 ---
 
+## Butler-grade restructure overhaul — 4-phase build (2026-05-30)
+
+Design + research locked in [`RESTRUCTURE.md`](RESTRUCTURE.md) (cited deep-research
+synthesis). The current flat rule cascade is replaced incrementally:
+
+- **P1 — engine: semantic + learn-your-style classify.** New module: fuse CLIP +
+  RAM++ tags + time (per-block L2 → weight/√dim → concat) → cluster (reuse the
+  `identity_clustering` density algorithm — no new deps) → assign each cluster to
+  the nearest EXISTING folder prototype (mean-embedding centroid) with a confidence
+  margin, else propose a new tag-named group; noise → Unsorted. Unit-tested; the
+  rule cascade stays as fallback when embeddings are absent. *Acceptance:* on
+  `G:\TrueNAS`, proposed folders are content-aware (an event/trip group), not just
+  `Photos/Year/Month`, and files matching a good existing folder route there.
+- **P2 — VLM naming.** Cluster profile (top distinctive tags + 3-5 representatives)
+  → Qwen2.5-VL label-then-reason (constrained decoding, temp 0) → hierarchy via
+  label-then-group → dedup (cosine ≥ 0.5) + cache by cluster signature.
+- **P3 — confidence tiers + corrections.** 3-band routing (auto ≥ 0.95 / suggest
+  0.70-0.95 / ask < 0.70) gated by action risk; command-journal undo; per-category
+  accuracy track record; learn-from-corrections centroid updates; earned autonomy.
+- **P4 — visualization.** Win2D Sankey upgrade (barycentre ordering,
+  destination-color links, Okabe-Ito palette, hover path-highlight, drill-down) +
+  before/after side-by-side tree + content/date/people weight sliders.
+- **macOS** mirrors each phase after Windows lands.
+
+---
+
 ## Post commercial-clean merge (2026-05-29) — priorities, in order
 
 The `windows-ramplus-adopt` work (RAM++ + Apache-2.0 commercial-clean stack) is verified on

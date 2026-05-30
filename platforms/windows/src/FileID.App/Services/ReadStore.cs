@@ -482,7 +482,22 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             var raw = reader.GetString(7);
             if (!string.IsNullOrEmpty(raw))
             {
-                tags = raw.Split('|', StringSplitOptions.RemoveEmptyEntries);
+                // Drop generic/medium RAM++ tags that read as noise on a card
+                // (mirrors ram_plus.rs SUPPRESSED_TAGS) so libraries scanned
+                // before the engine-side filter don't surface them. The file
+                // *is* a photo; faces are surfaced by the People tab.
+                var parts = raw.Split('|', StringSplitOptions.RemoveEmptyEntries);
+                var kept = new System.Collections.Generic.List<string>(parts.Length);
+                foreach (var p in parts)
+                {
+                    var lower = p.Trim().ToLowerInvariant();
+                    if (lower is "image" or "photo" or "photograph" or "photography" or "picture" or "face")
+                    {
+                        continue;
+                    }
+                    kept.Add(p);
+                }
+                tags = kept;
             }
         }
         // Optional 9th column: vlm_proposed_name (smart-rename
@@ -558,20 +573,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
         for (; i < qSpan.Length; i++)
         {
             acc += qSpan[i] * blobFloats[i];
-        }
-        return acc;
-    }
-
-    // Legacy per-element loop kept for reference / debugging. Not used.
-    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1859", Justification = "Reference impl")]
-    private static float DotProductScalar(float[] q, byte[] blob)
-    {
-        if (blob.Length != q.Length * 4) return 0f;
-        float acc = 0f;
-        for (int i = 0; i < q.Length; i++)
-        {
-            float v = BitConverter.ToSingle(blob, i * 4);
-            acc += q[i] * v;
         }
         return acc;
     }

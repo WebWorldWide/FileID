@@ -8,6 +8,33 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-05-30 — Accuracy tightening + UI fixes + docs refresh + butler-restructure research/design
+
+On `polish-docs-ui-tests` (off the merged commercial-clean `main`).
+
+- **Accuracy (precision bias).** RAM++ `max_tags` 12→8 + a 0.5 precision floor under
+  the per-class thresholds — validated on `G:\TrueNAS` (345→243 tags on 27 photos,
+  cleaner, still accurate). Deep Analyze CAPTION/RENAME prompts sharpened for
+  specificity (decoding already greedy). RAM++ generic-tag suppress-list
+  ("face"/"image"/"photo"/…) in the engine + a read-side filter in `ReadStore`
+  (legacy DBs need no re-scan).
+- **UI.** Root-caused the spurious "faces" chip to RAM++'s 4585-vocab (not C#) and
+  fixed it. Sidebar toggle is correct end-to-end on current main (V16.29 fix present +
+  wired); added a null-guard for the startup/teardown race. Preview path diagnosed
+  sound + bounded (the one full-file-read fallback documented, not blindly rewritten).
+- **Docs.** README, `platforms/windows/CLAUDE.md`, `ARCHITECTURE.md` refreshed for the
+  commercial-clean stack (RAM++ / ViT-B/32 / YuNet+SFace / Qwen-7B; v1–v12; Apache-2.0).
+- **Cleanup + tests.** Removed the unused `DotProductScalar`; +7 engine tests (RAM++
+  suppress, registry URL/alias/sentinel invariants, SFace normalize). clippy `-D
+  warnings` + 224 engine tests + app tests green; dotnet format clean.
+- **Butler restructure.** 5-angle cited deep-research synthesized into
+  [`RESTRUCTURE.md`](RESTRUCTURE.md) — cluster-then-name, learn-your-style folder
+  prototypes (Dropbox Smart Move pattern), 3-tier confidence, augmented Sankey. 4-phase
+  build plan in `NEXT.md`; **P1 (semantic + style engine) is the next build.**
+- **Deferred (documented, own pass):** the `Scrfd` reference removal (tested/silenced),
+  a comprehensive comment-condense pass, the butler build (P1–P4), and the macOS mirror
+  of the faces-tag fix + accuracy tuning.
+
 ## 2026-05-29 — Commercial-clean (Apache-2.0) model stack + RAM++ primary tagger (Windows; on-hardware verified)
 
 Branch `windows-ramplus-adopt` (off `main`/V16.29). Adopts **RAM++** as the primary in-scan

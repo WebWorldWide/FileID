@@ -35,10 +35,28 @@ const INPUT_SIZE: u32 = 384;
 /// `ram_plus_thresholds.txt` sidecar (model.class_threshold) that supersedes
 /// this when present.
 const DEFAULT_THRESHOLD: f32 = 0.68;
-/// Cap RAM++'s own emissions a little below the scan pipeline's 16-tag total
-/// cap, so Year/camera-family/OCR-doc extras always keep a few slots in the
-/// combined per-file set (content tags are pushed first, then the extras).
-const DEFAULT_MAX_TAGS: usize = 12;
+/// Cap RAM++'s own emissions well below the scan pipeline's 16-tag total cap.
+/// Biased to precision (8, not 12): only the most-confident content tags survive,
+/// so Library cards read clean and Year/camera/OCR extras keep slots. Lowered
+/// from 12 — users reported tag sets feeling "loose" (too many weak labels).
+const DEFAULT_MAX_TAGS: usize = 8;
+
+/// Hard precision floor under the per-class thresholds. RAM++'s exported
+/// `class_threshold`s are F1-balanced; a few common classes calibrate quite low,
+/// which surfaces weak tags. Clamping the effective cutoff up to this floor
+/// trades a little recall for noticeably cleaner, higher-confidence tags.
+const PRECISION_FLOOR: f32 = 0.5;
+
+/// RAM++ vocab tags that describe the medium rather than the content — the file
+/// already *is* a photo, and faces are surfaced by the People tab — so they read
+/// as noise on a Library card. Filtered from the emitted set; the underlying
+/// signals still live in their own columns (`has_faces`, file kind).
+const SUPPRESSED_TAGS: &[&str] =
+    &["image", "photo", "photograph", "photography", "picture", "face"];
+
+fn is_suppressed(tag: &str) -> bool {
+    SUPPRESSED_TAGS.contains(&tag)
+}
 
 pub struct RamPlusTagger {
     session: Session,
@@ -197,12 +215,16 @@ impl RamPlusTagger {
             .iter()
             .enumerate()
             .filter_map(|(i, &z)| {
+                if is_suppressed(&self.tags[i]) {
+                    return None;
+                }
                 let p = sigmoid(z);
                 let cut = self
                     .per_class_threshold
                     .as_ref()
                     .map(|t| t[i])
-                    .unwrap_or(self.threshold);
+                    .unwrap_or(self.threshold)
+                    .max(PRECISION_FLOOR);
                 (p >= cut).then_some((i, p))
             })
             .collect();
@@ -273,5 +295,17 @@ mod tests {
         assert!(sigmoid(-10.0) < 0.01);
         assert!((sigmoid(0.0) - 0.5).abs() < 1e-6);
         assert!(sigmoid(10.0) > 0.99);
+    }
+
+    #[test]
+    fn generic_medium_tags_are_suppressed() {
+        // Image-medium words + the People-redundant "face" are filtered; real
+        // content tags pass through.
+        assert!(is_suppressed("photo"));
+        assert!(is_suppressed("image"));
+        assert!(is_suppressed("face"));
+        assert!(!is_suppressed("graduation"));
+        assert!(!is_suppressed("mountain"));
+        assert!(!is_suppressed("person"));
     }
 }

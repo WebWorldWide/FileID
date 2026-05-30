@@ -117,3 +117,24 @@ pub fn default_weights_path() -> Result<PathBuf> {
         "face_recognition_sface_2021dec",
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn l2_normalize_gives_unit_norm() {
+        let mut v = vec![3.0_f32, 4.0]; // norm 5 → 0.6, 0.8
+        l2_normalize(&mut v);
+        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-5, "norm = {norm}");
+        assert!((v[0] - 0.6).abs() < 1e-5 && (v[1] - 0.8).abs() < 1e-5);
+    }
+
+    #[test]
+    fn l2_normalize_zero_vector_is_finite() {
+        let mut v = vec![0.0_f32; 4];
+        l2_normalize(&mut v); // guarded by max(1e-8) — must not produce NaN/Inf
+        assert!(v.iter().all(|x| x.is_finite()));
+    }
+}
