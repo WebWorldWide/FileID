@@ -59,24 +59,32 @@ public enum Restructure {
         }
         let loaded = try await database.pool.read {
             db -> (rows: [Source], embeddings: [Int64: [Float]], tags: [Int64: [String]]) in
-            // LEFT JOIN persons via face_prints to get any named-person
-            // strings on each file. We GROUP_CONCAT names, then split
-            // back in Swift (avoids a per-file second query).
+            // Per-file named-person strings, then split back in Swift
+            // (avoids a per-file second query).
             //
-            // Separator is the ASCII unit-separator (\u{1F}). Comma
-            // would silently shred names like "Smith, John" into two
-            // fragments and emit an incorrect bucket — `\u{1F}` never
-            // appears in a person name so the round-trip is lossless.
+            // Names come from a deduped, ordered correlated subquery — NOT
+            // `GROUP_CONCAT(DISTINCT p.name, char(31))`, which SQLite rejects
+            // at run with "DISTINCT aggregates must have exactly one argument"
+            // (the separator arg is illegal under DISTINCT). The old form
+            // prepared but threw at execution, crashing the Restructure plan.
+            //
+            // Separator is the ASCII unit-separator (\u{1F}). Comma would
+            // silently shred names like "Smith, John" into two fragments and
+            // emit an incorrect bucket — `\u{1F}` never appears in a person
+            // name so the round-trip is lossless.
             let r = try GRDB.Row.fetchAll(db, sql: """
                 SELECT
                   f.id, f.path_text, f.kind, f.created_at, f.modified_at,
                   f.location_lat, f.location_lon, f.has_text, f.vlm_proposed_name,
-                  GROUP_CONCAT(DISTINCT p.name, char(31)) AS names
+                  (SELECT GROUP_CONCAT(name, char(31))
+                     FROM (SELECT DISTINCT p.name
+                             FROM persons p
+                             JOIN face_prints fp ON fp.person_id = p.id
+                            WHERE fp.file_id = f.id
+                              AND p.name IS NOT NULL AND p.name <> ''
+                            ORDER BY p.name)) AS names
                 FROM files f
-                LEFT JOIN face_prints fp ON fp.file_id = f.id
-                LEFT JOIN persons p ON p.id = fp.person_id
                 WHERE f.failed = 0
-                GROUP BY f.id
                 """)
             let rows = r.map { row in
                 Source(

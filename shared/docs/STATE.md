@@ -8,6 +8,34 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-05-30 (later 3) — On-hardware verify + macOS lockstep + RAM++ lock-in + consolidate to main
+
+Closed out the scan/cleanup batch: on-hardware test on the RTX 2060, ported the safe fixes to
+macOS, tuned RAM++ to "locked in," and consolidated all work onto `main` (branches removed).
+
+- **On-hardware (RTX 2060, 100-photo sample from `G:\TrueNAS\Users`, seed 42).** Built via
+  `sample_corpus.ps1`; scanned with the release engine; the test **backed up and restored the
+  user's 24,305-file working library** around the run (RESTORE_OK + independently re-confirmed
+  24305 rows / 167.5 MB). Results: 100/100 tagged, 0 failed, 974 tags; **`content_hash` set on
+  100/100** (Cleanup exact-dupes path is live); **restructure planner SQL ran with no
+  DISTINCT error** (D1 verified on real data); tag set **clean — no "catch", no animal
+  misclassification**, high-confidence content tags (boy 0.94, child 0.94, basketball 0.97).
+- **RAM++ locked in.** The floor raise (0.5→0.62) cut weak tags; the remaining "too generic"
+  offenders on the sample were posture/clothing fillers (stand 47×, pose 20×, wear, lay, sit),
+  so those + `catch` are now in the built-in `SUPPRESSED_TAGS` (unit-tested, case-insensitive),
+  on top of the no-rebuild `ram_plus_suppress.txt` sidecar. `cargo test --lib` green.
+- **macOS lockstep (unverified-until-Mac, per apple/CLAUDE.md).** Ported the two mechanical,
+  obviously-correct fixes: the identical `GROUP_CONCAT(DISTINCT …)` crash in `Restructure.swift`
+  → deduped correlated subquery; Faces-badge removal in `LibraryView.swift` (tile + detail row).
+  Consciously NOT ported (documented in DECISIONS): RAM++ tuning (macOS uses Apple Vision, no
+  RAM++), Cleanup exact-dupes (macOS engine writes only phash; `content_hash` has no writer +
+  BLAKE3 needs a dep), and the phase clamp (macOS `ScanCoordinator` is already one-way).
+- **Consolidated to `main`.** Merged `windows-e2e-correctness` (this whole session) and the
+  standing `macos-lockstep` branch (commercial-clean SFace/ViT-B/32 swap) into `main`, then
+  removed every other branch so only `main` remains. Final headless build green (engine
+  clippy+test, app build + both test projects). STATE/NEXT/DECISIONS updated to record the
+  on-hardware verify, the macOS lockstep ports, and the consolidation.
+
 ## 2026-05-30 (later 2) — Scan/Cleanup UX pass: flicker + RAM++ tags + Faces badge + restructure SQL + exact dupes
 
 Same branch `windows-e2e-correctness`. Second batch of reported Windows issues (Processing

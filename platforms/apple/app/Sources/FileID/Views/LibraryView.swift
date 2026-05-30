@@ -837,14 +837,10 @@ struct FileTile: View {
                 .background(Capsule().fill(kindColor.opacity(0.95)))
                 .padding(6)
 
-            // Faces / OCR-text / Finder-tag indicators top-right.
+            // OCR-text / Finder-tag indicators top-right. (The "Faces"
+            // badge was removed for Windows/macOS lockstep — faces surface
+            // in the People tab; the badge read as noise on a Library tile.)
             VStack(spacing: 4) {
-                if row.hasFaces {
-                    Image(systemName: "person.crop.circle.fill")
-                        .font(.system(size: 14))
-                        .foregroundStyle(.white, .black.opacity(0.6))
-                        .help("Faces detected")
-                }
                 if row.hasText {
                     Image(systemName: "text.viewfinder")
                         .font(.system(size: 13))
@@ -1028,7 +1024,6 @@ private struct FilePreviewSheet: View {
                                 if let lat = file.locationLat, let lon = file.locationLon {
                                     row("GPS", String(format: "%.5f, %.5f", lat, lon))
                                 }
-                                if file.hasFaces { row("Faces", "Detected") }
                                 if file.hasText  { row("Text",  "Detected (OCR)") }
                                 if let phash = file.phash {
                                     row("pHash", String(phash, radix: 16))

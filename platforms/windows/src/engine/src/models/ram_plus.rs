@@ -50,15 +50,24 @@ const DEFAULT_MAX_TAGS: usize = 8;
 /// overridable per-run via FILEID_RAMPLUS_PRECISION_FLOOR for threshold sweeps.
 const DEFAULT_PRECISION_FLOOR: f32 = 0.62;
 
-/// RAM++ vocab tags that describe the medium rather than the content — the file
-/// already *is* a photo, and faces are surfaced by the People tab — so they read
-/// as noise on a Library card. Filtered from the emitted set; the underlying
-/// signals still live in their own columns (`has_faces`, file kind). "catch" is
-/// a frequent low-content false-positive (it fires on dogs, bears, and sports
-/// shots alike). Extend WITHOUT a rebuild via the `ram_plus_suppress.txt`
-/// sidecar (one tag per line, next to the tag list), merged case-insensitively.
-const SUPPRESSED_TAGS: &[&str] =
-    &["image", "photo", "photograph", "photography", "picture", "face", "catch"];
+/// RAM++ vocab tags that read as noise on a Library card and get filtered from
+/// the emitted set. Three families:
+///   - medium words (`image`/`photo`/…): the file already *is* a photo.
+///   - `face`: faces are surfaced by the People tab (the underlying signal still
+///     lives in `has_faces`).
+///   - `catch` + posture/clothing-state fillers (`stand`/`sit`/`lay`/`pose`/
+///     `wear`): content-free labels that fire on nearly every human photo and
+///     add no search/organization value. "catch" was also a frequent
+///     false-positive (it fired on dogs, bears, and sports shots alike); the
+///     posture fillers were the dominant "tags feel too generic" offenders on a
+///     real 100-photo family-library sample (stand 47×, pose 20×, …).
+///
+/// Extend WITHOUT a rebuild via the `ram_plus_suppress.txt` sidecar (one tag per
+/// line, next to the tag list), merged case-insensitively.
+const SUPPRESSED_TAGS: &[&str] = &[
+    "image", "photo", "photograph", "photography", "picture", "face", "catch",
+    "stand", "sit", "lay", "pose", "wear",
+];
 
 /// Built-in suppress check (case-insensitive). [`is_suppressed`] also folds in
 /// the per-instance sidecar set.
@@ -365,9 +374,18 @@ mod tests {
         assert!(is_suppressed_builtin("catch"));
         assert!(is_suppressed_builtin("Photo"));
         assert!(is_suppressed_builtin("CATCH"));
+        // Posture / clothing-state fillers (the "too generic" offenders).
+        assert!(is_suppressed_builtin("stand"));
+        assert!(is_suppressed_builtin("sit"));
+        assert!(is_suppressed_builtin("lay"));
+        assert!(is_suppressed_builtin("pose"));
+        assert!(is_suppressed_builtin("wear"));
+        // Content words + emotion/activity tags survive.
         assert!(!is_suppressed_builtin("graduation"));
         assert!(!is_suppressed_builtin("mountain"));
         assert!(!is_suppressed_builtin("person"));
+        assert!(!is_suppressed_builtin("smile"));
+        assert!(!is_suppressed_builtin("play"));
     }
 
     #[test]

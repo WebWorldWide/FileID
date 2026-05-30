@@ -2492,3 +2492,33 @@ These already live in `FileID.Theme/Theme.xaml` as `SpringResponseStandard` / `S
 - **gold "Faces" badge removed from Library (preview pill + tile overlay + detail row); Text/OCR
   badge kept.** Also a macOS divergence (the badge exists on macOS) — Windows-first per this
   session's pattern; mirror-or-accept tracked in NEXT.
+
+## 2026-05-30 — macOS lockstep of the Windows scan/cleanup fixes + RAM++ posture-tag lock-in
+
+The user asked for macOS/Windows lockstep + an on-hardware RAM++ "lock in." Per
+`platforms/apple/CLAUDE.md`, Swift can't be built in the Windows dev env, so the macOS edits are
+**unverified until a Mac build**; only the obviously-correct, mechanical fixes were ported.
+
+- **RAM++ locked in against real data.** A 100-photo RTX 2060 scan (`G:\TrueNAS\Users`, seed 42)
+  confirmed the 0.5→0.62 floor killed weak tags (no "catch", no animal misclassification, content
+  tags at 0.88–0.97). The residual "too generic" offenders were posture/clothing-state fillers
+  (stand 47×, pose 20×, wear, lay, sit), so those joined `catch` in the built-in `SUPPRESSED_TAGS`
+  (unit-tested, case-insensitive) — on top of the no-rebuild `ram_plus_suppress.txt` sidecar for
+  further per-user tuning. Emotion/activity words (smile, play, birthday) were deliberately *kept*
+  — they carry real organizational signal.
+- **macOS ports (mechanical, low-risk):** the restructure `GROUP_CONCAT(DISTINCT …, char(31))`
+  crash — macOS `Restructure.swift` had the identical illegal SQL (the prior investigation wrongly
+  called it "safe"); now the same deduped correlated subquery — and Faces-badge removal from
+  `LibraryView.swift` (tile overlay + "Faces: Detected" row).
+- **NOT ported, by design:** (a) RAM++ tag tuning — macOS has no RAM++ (Apple Vision
+  `VNClassifyImageRequest`, 0.30 floor, top-8); the suppress sidecar + precision floor apply only
+  once RAM++ lands on macOS. (b) Cleanup exact dupes — the macOS engine writes only `phash`;
+  `content_hash` is a NULL schema-parity column with no writer, and BLAKE3 isn't in CryptoKit (a
+  new dep needs sign-off). Switching now would show zero groups, so macOS Cleanup stays phash.
+  (c) The monotonic phase clamp — unnecessary on macOS: `ScanCoordinator.setTotal` forces a
+  one-way discovering→tagging transition, so the phase can't oscillate.
+- **Consolidation:** merged `windows-e2e-correctness` (this session) and the standing
+  `macos-lockstep` branch (commercial-clean SFace + 5-pt alignment, OpenCLIP ViT-B/32, VLM ladder,
+  v12 migration) into `main`, then deleted every other local branch so only `main` remains. The
+  fully-merged `claude/*` and feature branches were redundant with `main`; nothing unique was lost
+  (each verified `git rev-list --count main..<branch> == 0` before deletion).

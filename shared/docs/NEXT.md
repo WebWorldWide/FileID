@@ -9,16 +9,23 @@ fix; RAM++ suppress sidecar + `FILEID_RAMPLUS_PRECISION_FLOOR` (floor 0.5->0.62)
 `GROUP_CONCAT(DISTINCT …)` SQL crash fix; Cleanup `phash`->`content_hash` exact dupes. Engine
 232/232 + clippy clean; app build + 34/34 + 102/102 GREEN. Item 4 (App.Tests headless) is
 RESOLVED — both test projects pass headless. **Remaining now:**
-- **On-hardware (RTX 2060 / `G:\TrueNAS`):** (a) scan the 33k folder — phase holds steady on
-  "Tagging", no flip-back; (b) `sample_corpus.ps1 -Corpus G:\TrueNAS\photos -Count 100` then the
-  iterate.ps1 + `tag_report.py` loop until "catch" is gone and no dog->bear, editing
-  `ram_plus_suppress.txt` / the precision-floor env; (c) Restructure tab renders with no
-  "Couldn't read files table" toast; (d) Cleanup shows byte-identical groups WITH thumbnails,
-  near-but-not-identical images NOT grouped.
-- **macOS parity follow-ups (needs a Mac):** Faces badge removal + Cleanup exact-dupe (vs phash)
-  both diverge from the macOS reference — mirror or consciously accept the divergence.
+- **On-hardware headless DONE (2026-05-30, later 3):** 100-photo RTX 2060 scan verified
+  content_hash 100/100, restructure SQL runs (no DISTINCT error), tags clean (no catch / no
+  dog→bear), library backed-up+restored. RAM++ locked in (posture fillers + catch suppressed).
+  **Remaining = live-GUI-only checks a human must eyeball in the running WinUI app** (the
+  headless engine path can't drive the renderer): (a) Processing sidebar holds steady on
+  "Tagging" with no flicker during a big scan; (b) Cleanup shows byte-identical groups WITH
+  thumbnails rendering; (c) Restructure tab Sankey renders with no "Couldn't read files table"
+  toast. Run `build-all.ps1 -Run` and look.
+- **All work merged to `main`; only `main` remains** (other branches removed this pass).
+- **macOS: build on a Mac to verify the lockstep edits** (`Restructure.swift` SQL fix +
+  `LibraryView.swift` Faces-badge removal) compile, plus the merged `macos-lockstep` model swap
+  (`bash run.sh` / `swift build` + `swift test`). All macOS Swift is unverified-until-Mac.
+- **macOS RAM++ + content_hash (deferred, needs a Mac + decisions):** macOS still tags via Apple
+  Vision and dedupes via phash. To reach true lockstep, port RAM++ to macOS (then the suppress
+  sidecar + precision floor apply) and have the macOS engine write `content_hash` (needs a
+  BLAKE3 dep decision) before switching macOS Cleanup to exact dupes.
 - Optional P3 status-card polish (per-model not-yet-analyzed counts + ETA, RAM-fit badge).
-- Merge `windows-e2e-correctness` -> `main` once on-hardware signs off + GitHub CI is green.
 
 --- original resume list (items 2/3/4 now superseded above) ---
 
