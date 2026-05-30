@@ -52,28 +52,6 @@ failed", Settings cleanup.
   34/34 (incl. new WipeLibraryIpcTests for the wipeLibrary/libraryWiped round-trip);
   FileID.App.Tests 102/102. Branch is 5 commits ahead of main, working tree clean.
 
-Verified headless: engine cargo check + clippy (-D warnings) + cargo test GREEN;
-app dotnet build (x64) GREEN; FileID.IpcSchema.Tests GREEN (covers the new
-wipeLibrary/libraryWiped round-trip). Full-solution dotnet test shows a
-FileID.App.Tests failure — outside the standard gate (build-all.ps1 -RunTests runs
-only IpcSchema.Tests) and those tests touch EngineClient whose ctor requires a UI
-thread, so they cannot run in a headless host (pre-existing/environmental; confirm
-on hardware).
-
-Tooling note: the agent file/log read channel intermittently corrupted/elided
-output this session; Edit + build exit codes stayed reliable. P3/P5 deferred to
-avoid blind, unverifiable XAML edits.
-
-# FileID — State
-
-> Snapshot of what's working and where we left off. Update at the end of every working session.
->
-> **How to read this file:** newest entry at the top. Each entry is a one-day-or-one-release summary of what landed. For *why* a decision was made, see [`DECISIONS.md`](DECISIONS.md). For *what's next*, see [`NEXT.md`](NEXT.md). For *user-visible release notes*, see [`/CHANGELOG.md`](../../CHANGELOG.md).
->
-> Older entries below V15.0 are historical context — load-bearing for archaeology, not for current state. Skim if you want the journey; skip if you want the destination.
->
-> **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
-
 ## 2026-05-30 (later) — Butler restructure built (P1–P4) + macOS mirror + docs rewrite + condense
 
 On `butler-overhaul` (off the merged commercial-clean `main`). Implements the butler
