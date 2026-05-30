@@ -1,27 +1,33 @@
-// CLIP text encoder — produces a 512-d embedding from a search query
-// in the same space as the image embeddings stored in `clip_embeddings`.
-// Cosine over the two vectors gives semantic search.
+// CLIP text encoder — query-time semantic search. Tokenize a string via
+// CLIPTokenizer (OpenAI BPE), run the OpenCLIP ViT-B/32 text ONNX through
+// ONNX Runtime, L2-normalize, return 512 floats in the same space as the
+// image embeddings in `clip_embeddings`. Cosine over the two gives search.
 //
-// Pairs with CLIPTokenizer (BPE → token IDs) and the CoreML .mlpackage
-// installed by CLIPModelInstaller. Without the model, isReady returns
-// false and the search bar falls back to keyword matching.
+// Commercial-clean: ViT-B/32 (MIT) ONNX via ORT replaces Apple's MobileCLIP-S2
+// CoreML text model (research-only). Input contract MUST match the Windows
+// engine's `models/clip_text.rs` exactly — input_ids as int64, shape [1, 77],
+// zero-padded, truncated to 77 — or the text embedding lands in a different
+// space than the ViT-B/32 image embeddings and search breaks.
 import Foundation
-import CoreML
 import FileIDShared
+import OnnxRuntimeBindings
 
 public final class CLIPTextEncoder: @unchecked Sendable {
 
     public static let shared = CLIPTextEncoder()
 
     private let lock = NSLock()
-    private var model: MLModel?
-    private var loadedURL: URL?
+    private var env: ORTEnv?
+    private var session: ORTSession?
+    private var inputName: String?
+
+    private static let contextLen = 77
 
     private init() {}
 
     public var isReady: Bool {
         lock.lock(); defer { lock.unlock() }
-        return model != nil
+        return session != nil
     }
 
     /// Standard install location — beside the other AI models.
@@ -30,14 +36,15 @@ public final class CLIPTextEncoder: @unchecked Sendable {
     }
 
     public static var defaultModelURL: URL {
-        defaultDirectory.appendingPathComponent("clip_text.mlpackage")
+        defaultDirectory.appendingPathComponent("clip_text.onnx")
     }
 
-    /// Load the CoreML text encoder + the BPE tokenizer's vocabulary.
-    /// Returns true iff both pieces are present and loaded successfully.
+    /// Load the ViT-B/32 text ONNX + the BPE tokenizer's vocabulary. Returns
+    /// true iff both are present and loaded successfully.
     @discardableResult
     public func load() -> Bool {
         lock.lock(); defer { lock.unlock() }
+        if session != nil { return true }
         let dir = Self.defaultDirectory
         guard FileManager.default.fileExists(atPath: dir.path) else { return false }
         guard CLIPTokenizer.shared.loadVocabulary(modelDirectory: dir) else {
@@ -46,16 +53,18 @@ public final class CLIPTextEncoder: @unchecked Sendable {
         }
         let modelURL = Self.defaultModelURL
         guard FileManager.default.fileExists(atPath: modelURL.path) else {
-            NSLog("FileID CLIP text: clip_text.mlpackage not found at %@", redactPathForLog(modelURL.path))
+            NSLog("FileID CLIP text: clip_text.onnx not found at %@", redactPathForLog(modelURL.path))
             return false
         }
         do {
-            let compiled = try MLModel.compileModel(at: modelURL)
-            let config = MLModelConfiguration()
-            config.computeUnits = .all
-            model = try MLModel(contentsOf: compiled, configuration: config)
-            loadedURL = modelURL
-            NSLog("FileID CLIP text: loaded from %@", redactPathForLog(modelURL.path))
+            let env = try self.env ?? ORTEnv(loggingLevel: ORTLoggingLevel.warning)
+            let opts = try ORTSessionOptions()
+            try? opts.appendCoreMLExecutionProvider(with: ORTCoreMLExecutionProviderOptions())
+            let session = try ORTSession(env: env, modelPath: modelURL.path, sessionOptions: opts)
+            self.env = env
+            self.session = session
+            self.inputName = try session.inputNames().first
+            NSLog("FileID CLIP text: loaded ViT-B/32 ONNX from %@", redactPathForLog(modelURL.path))
             return true
         } catch {
             NSLog("FileID CLIP text load failed: %@", "\(error)")
@@ -64,47 +73,43 @@ public final class CLIPTextEncoder: @unchecked Sendable {
     }
 
     /// Embed a free-text query into the CLIP image-embedding space.
-    /// Returns nil if the model or tokenizer isn't ready, or if the
-    /// inference fails. Result is L2-normalized so cosine search just
-    /// uses dot product downstream.
+    /// L2-normalized; nil if the model/tokenizer isn't ready or inference fails.
     public func embedText(_ query: String) -> [Float]? {
+        guard load() else { return nil }
         guard let tokens = CLIPTokenizer.shared.encode(query) else { return nil }
-        lock.lock(); let m = model; lock.unlock()
-        guard let m else { return nil }
+        lock.lock(); let s = session; let name = inputName; lock.unlock()
+        guard let s, let name else { return nil }
 
-        // The model expects a 1×77 Int32 input named "input_ids" (or
-        // similar — exact name depends on the conversion script).
-        // Build an MLMultiArray of shape [1, contextLength].
-        let ctx = NSNumber(value: tokens.count)
-        guard let arr = try? MLMultiArray(shape: [1, ctx], dataType: .int32) else {
-            return nil
-        }
-        for i in 0..<tokens.count {
-            arr[i] = NSNumber(value: tokens[i])
-        }
-        let inputName = m.modelDescription.inputDescriptionsByName.keys.first ?? "input_ids"
-        let input: MLDictionaryFeatureProvider
+        // int64 input_ids, [1, 77], zero-padded — matches clip_text.rs.
+        var ids = [Int64](repeating: 0, count: Self.contextLen)
+        for (i, t) in tokens.prefix(Self.contextLen).enumerated() { ids[i] = Int64(t) }
+
         do {
-            input = try MLDictionaryFeatureProvider(dictionary: [inputName: arr])
-        } catch { return nil }
-
-        guard let pred = try? m.prediction(from: input) else { return nil }
-        // Output is the CLIP text embedding — usually named "text_embeds"
-        // or just the single output. Take the first multiarray and
-        // flatten + L2-normalize.
-        guard let outName = m.modelDescription.outputDescriptionsByName.keys.first,
-              let out = pred.featureValue(for: outName)?.multiArrayValue else {
+            let nsData = ids.withUnsafeBufferPointer { buf in
+                NSMutableData(bytes: buf.baseAddress, length: buf.count * MemoryLayout<Int64>.stride)
+            }
+            let value = try ORTValue(tensorData: nsData, elementType: .int64,
+                                     shape: [1, NSNumber(value: Self.contextLen)])
+            let outputs = try s.run(withInputs: [name: value],
+                                    outputNames: Set(try s.outputNames()),
+                                    runOptions: nil)
+            guard let first = outputs.values.first else { return nil }
+            let data = try first.tensorData() as Data
+            let count = data.count / MemoryLayout<Float>.stride
+            guard count > 0 else { return nil }
+            var vec = [Float](repeating: 0, count: count)
+            data.withUnsafeBytes { raw in
+                let src = raw.baseAddress!.assumingMemoryBound(to: Float.self)
+                for i in 0..<count { vec[i] = src[i] }
+            }
+            var norm: Float = 0
+            for x in vec { norm += x * x }
+            let invN = Float(1) / max(.leastNonzeroMagnitude, norm.squareRoot())
+            for i in 0..<count { vec[i] *= invN }
+            return vec
+        } catch {
+            NSLog("FileID CLIP text inference failed: %@", "\(error)")
             return nil
         }
-        var vec = [Float](repeating: 0, count: out.count)
-        for i in 0..<out.count {
-            vec[i] = out[i].floatValue
-        }
-        // L2 normalize.
-        var norm: Float = 0
-        for x in vec { norm += x * x }
-        let invN = Float(1) / max(.leastNonzeroMagnitude, norm.squareRoot())
-        for i in 0..<vec.count { vec[i] *= invN }
-        return vec
     }
 }
