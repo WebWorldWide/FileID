@@ -90,7 +90,12 @@ let package = Package(
             name: "FileID",
             dependencies: [
                 "FileIDShared",
-                .product(name: "GRDB", package: "GRDB.swift")
+                .product(name: "GRDB", package: "GRDB.swift"),
+                // CLIP text encoder (semantic search) now runs the OpenCLIP
+                // ViT-B/32 ONNX via ONNX Runtime — the same engine the faces +
+                // image-CLIP paths use — replacing the research-only MobileCLIP-S2
+                // CoreML text model. See CLIPTextEncoder.
+                .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager")
             ],
             path: "app/Sources/FileID",
             swiftSettings: [.swiftLanguageMode(.v5)]

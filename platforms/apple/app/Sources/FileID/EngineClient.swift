@@ -330,8 +330,9 @@ public final class EngineClient {
                        self.lastTerminalEventAt == stamp {
                         if self.deepAnalyzeAvailable {
                             self.autoPilotStage = .captioning
-                            let activeKind = UserDefaults.standard.string(forKey: "deepAnalyzeActiveModel")
-                                ?? AIModelKind.qwen2VL3B.rawValue
+                            let activeKind = AIModelKind.migrated(
+                                rawValue: UserDefaults.standard.string(forKey: "deepAnalyzeActiveModel") ?? ""
+                            ).rawValue
                             self.deepAnalyzeAll(modelKind: activeKind, skipExisting: true)
                         } else {
                             self.autoPilotStage = .ready

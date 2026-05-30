@@ -250,8 +250,12 @@ public final class ArcFaceService: @unchecked Sendable {
         var planes = [Float](repeating: 0, count: pixelCount * 3)
         // Channel order: 0=R, 1=G, 2=B (RGBX in source). Plane stride =
         // pixelCount; spatial stride = 1.
-        let bias: Float = -1.0
-        let scale: Float = 1.0 / 127.5
+        // SFace takes RAW [0,255] RGB — the ONNX bakes its own (x-127.5)/128
+        // normalization internally, unlike ArcFace's (px-127.5)/127.5. So feed
+        // the pixels straight through (scale 1, bias 0). Matches the Windows
+        // sface.rs input contract so embeddings line up.
+        let bias: Float = 0.0
+        let scale: Float = 1.0
         for i in 0..<pixelCount {
             let r = Float(rgba[i * 4 + 0])
             let g = Float(rgba[i * 4 + 1])

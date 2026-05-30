@@ -1,137 +1,137 @@
-// CLIP image-encoder service. Loads Apple's MobileCLIP-S2 CoreML
-// model from ~/Library/Application Support/FileID/Models/, runs
-// 256×256 BGRA buffers through it, returns L2-normalized 512-d
-// float vectors.
+// CLIP image-encoder service. Commercial-clean: loads OpenAI/OpenCLIP
+// ViT-B/32 (MIT) as ONNX and runs it via ONNX Runtime + CoreML EP — the
+// same path `ArcFaceService` uses. Replaces Apple's MobileCLIP-S2 CoreML
+// model (research-only license). Input is 224×224 RGB with CLIP mean/std
+// normalization (matches the Windows engine's `models/mobileclip.rs`);
+// output is an L2-normalized 512-d float vector — unchanged dimension, so
+// the `clip_embeddings` schema and all cosine comparisons stay the same.
 //
-// Double-checked locking on load: without it, N concurrent first
-// callers would race in compileAndLoad and thrash the ANE with
-// parallel ~100 MB MLModel(contentsOf:) compiles. Tagging pre-warms
-// at scan start so the lock is never contended in production.
-//
-// `@unchecked Sendable`: locks guard internals. The Tagging stage
-// caps embed() concurrency to ~2 in-flight via AsyncSemaphore —
-// flooding from 14 workers thrashes the ANE.
+// `@unchecked Sendable`: locks guard internals. `inferenceSem` bounds ANE
+// concurrency at 4 (flooding from 14 workers thrashes the ANE).
 import Foundation
-import CoreML
+import CoreGraphics
 import FileIDShared
+import OnnxRuntimeBindings
 
 public final class MobileCLIPService: @unchecked Sendable {
     public static let shared = MobileCLIPService()
 
     private let lock = NSLock()
     private let imageLoadLock = NSLock()
-    private var imageModel: MLModel?
+    private var env: ORTEnv?
+    private var session: ORTSession?
+    private var inputName: String?
     private var isImageLoaded = false
-
-    // ANE concurrency bound. CoreML serializes ANE access internally, but
-    // queueing too many simultaneous predictions causes thrash and latency
-    // spikes. Iteration 2 (perf harness) showed ANE underutilized at 2;
-    // bumped to 4. CoreML's internal queue still serializes when ANE saturates,
-    // but lets the app submit faster so handoff isn't a stall.
-    // DispatchSemaphore (sync) is fine here because embedImage is called from
-    // GCD dispatch blocks (Tagging.visionQueue) which CAN be blocked briefly.
     private let inferenceSem = DispatchSemaphore(value: 4)
+
+    // CLIP (OpenAI) preprocessing constants — identical to the Windows engine.
+    private static let inputSize = 224
+    private static let mean: [Float] = [0.481_454_66, 0.457_827_5, 0.408_210_73]
+    private static let std: [Float] = [0.268_629_54, 0.261_302_58, 0.275_777_11]
 
     private init() {}
 
     // MARK: - Loading
 
-    /// Where v1 (and now v2) downloads MobileCLIP-S2 image weights to.
-    /// If the user has already downloaded via v1, we reuse the same files.
+    /// ViT-B/32 vision encoder ONNX path. Kept under the existing
+    /// `mobileclip_image` directory so we don't churn the install layout;
+    /// the file is now the OpenCLIP ViT-B/32 vision model.
     public static var defaultImageModelURL: URL {
-        let base = FileManager.default
+        FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first!
             .appendingPathComponent("FileID/Models/mobileclip_image", isDirectory: true)
-        return base.appendingPathComponent("mobileclip_s2_image.mlpackage")
+            .appendingPathComponent("clip_vitb32_image.onnx")
     }
 
-    /// Returns true if the model file is on disk and (after) successfully loaded.
-    /// Returns false if the user hasn't downloaded the model yet — callers
-    /// should silently degrade (no embedding) rather than failing the file.
+    /// Returns true if the ONNX is on disk and successfully loaded. Returns
+    /// false if the user hasn't downloaded it yet — callers degrade silently.
     @discardableResult
     public func loadImageEncoder(at url: URL? = nil) -> Bool {
-        // Fast path — already loaded.
         lock.lock()
-        if isImageLoaded, imageModel != nil { lock.unlock(); return true }
+        if isImageLoaded, session != nil { lock.unlock(); return true }
         lock.unlock()
 
-        // Slow path — serialize. Only one thread compiles; later threads
-        // discover the fast path on their next attempt.
         imageLoadLock.lock()
         defer { imageLoadLock.unlock() }
-        // Re-check under load lock — another thread may have finished while
-        // we were waiting.
         lock.lock()
-        if isImageLoaded, imageModel != nil { lock.unlock(); return true }
+        if isImageLoaded, session != nil { lock.unlock(); return true }
         lock.unlock()
 
         let modelURL = url ?? Self.defaultImageModelURL
-        let safeModelPath = redactPathForLog(modelURL.path)
+        let safe = redactPathForLog(modelURL.path)
         guard FileManager.default.fileExists(atPath: modelURL.path) else {
-            JSONLog.shared.warn(ev: "clip_model_missing", path: safeModelPath,
-                                error: "MobileCLIP-S2 image weights not downloaded; embeddings disabled")
+            JSONLog.shared.warn(ev: "clip_model_missing", path: safe,
+                                error: "CLIP ViT-B/32 image ONNX not downloaded; embeddings disabled")
             return false
         }
-        let config = MLModelConfiguration()
-        config.computeUnits = .all
-        // .mlpackage needs explicit compile → .mlmodelc; the implicit
-        // path inside MLModel(contentsOf:) is unreliable under
-        // sandboxing because /tmp may not be writable.
-        let model: MLModel
         do {
-            let compiledURL = try MLModel.compileModel(at: modelURL)
-            model = try MLModel(contentsOf: compiledURL, configuration: config)
+            let env = try self.env ?? ORTEnv(loggingLevel: ORTLoggingLevel.warning)
+            let opts = try ORTSessionOptions()
+            // CoreML EP for ANE acceleration; ORT falls back to CPU if it
+            // can't place a node. Mirrors ArcFaceService's posture.
+            try? opts.appendCoreMLExecutionProvider(with: ORTCoreMLExecutionProviderOptions())
+            let session = try ORTSession(env: env, modelPath: modelURL.path, sessionOptions: opts)
+            let name = try session.inputNames().first
+            lock.lock()
+            self.env = env
+            self.session = session
+            self.inputName = name
+            self.isImageLoaded = true
+            lock.unlock()
+            JSONLog.shared.info(ev: "clip_model_loaded", path: safe)
+            return true
         } catch {
-            JSONLog.shared.error(ev: "clip_model_load_failed", path: safeModelPath,
-                                 error: "\(error)")
+            JSONLog.shared.error(ev: "clip_model_load_failed", path: safe, error: "\(error)")
             return false
         }
-        lock.lock()
-        imageModel = model
-        isImageLoaded = true
-        lock.unlock()
-        JSONLog.shared.info(ev: "clip_model_loaded", path: safeModelPath)
-        return true
     }
 
     public var isReady: Bool {
         lock.lock(); defer { lock.unlock() }
-        return isImageLoaded && imageModel != nil
+        return isImageLoaded && session != nil
     }
 
     // MARK: - Inference
 
     /// Returns an L2-normalized 512-d image embedding, or nil if the model
-    /// isn't loaded / inference failed. Concurrency is bounded internally by
-    /// `inferenceSem` (2 in-flight) — call freely from any context.
+    /// isn't loaded / inference failed.
     public func embedImage(_ cgImage: CGImage) -> [Float]? {
         guard loadImageEncoder() else { return nil }
-        lock.lock(); let model = imageModel; lock.unlock()
-        guard let model else { return nil }
-        guard let pixelBuffer = cgImageToPixelBuffer(cgImage, size: 256) else { return nil }
-        guard let input = try? MLDictionaryFeatureProvider(dictionary: ["image": pixelBuffer]) else {
-            return nil
-        }
+        lock.lock(); let s = session; let name = inputName; lock.unlock()
+        guard let s, let name else { return nil }
+        guard let tensor = makeNCHWTensor(cgImage) else { return nil }
 
-        // Bound ANE concurrency. Without this, 14 workers all calling
-        // model.prediction() simultaneously causes throughput to collapse
-        // (the v1 Batch 17/18 lesson, repeated).
         inferenceSem.wait()
         defer { inferenceSem.signal() }
 
-        guard let pred = try? model.prediction(from: input),
-              let arr = firstMultiArray(in: pred) else { return nil }
-        guard arr.count > 0 else { return nil }
-        var out = [Float](repeating: 0, count: arr.count)
-        for i in 0..<arr.count { out[i] = arr[i].floatValue }
-        return normalize(out)
+        do {
+            let nsData = tensor.withUnsafeBufferPointer { buf -> NSMutableData in
+                NSMutableData(bytes: buf.baseAddress, length: buf.count * MemoryLayout<Float>.stride)
+            }
+            let side = Self.inputSize as NSNumber
+            let value = try ORTValue(tensorData: nsData, elementType: .float,
+                                     shape: [1, 3, side, side])
+            let outputs = try s.run(withInputs: [name: value],
+                                    outputNames: Set(try s.outputNames()),
+                                    runOptions: nil)
+            guard let first = outputs.values.first else { return nil }
+            let outData = try first.tensorData() as Data
+            let count = outData.count / MemoryLayout<Float>.stride
+            guard count > 0 else { return nil }
+            var out = [Float](repeating: 0, count: count)
+            outData.withUnsafeBytes { raw in
+                let src = raw.baseAddress!.assumingMemoryBound(to: Float.self)
+                for i in 0..<count { out[i] = src[i] }
+            }
+            return normalize(out)
+        } catch {
+            JSONLog.shared.error(ev: "clip_inference_failed", error: "\(error)")
+            return nil
+        }
     }
 
-    /// Pre-warm the model + ANE pipeline by running one inference on a tiny
-    /// dummy image. Called from `runScan` BEFORE the worker pool starts so
-    /// the first 14 concurrent requests don't all race the same first-load
-    /// slow path. Safe to call multiple times — fast-paths after first warm.
+    /// Pre-warm the model + ANE pipeline. Call before the worker pool starts.
     public func preWarm() {
         guard loadImageEncoder() else { return }
         let cs = CGColorSpaceCreateDeviceRGB()
@@ -143,18 +143,14 @@ public final class MobileCLIPService: @unchecked Sendable {
         let started = CFAbsoluteTimeGetCurrent()
         _ = embedImage(img)
         let ms = (CFAbsoluteTimeGetCurrent() - started) * 1000
-        JSONLog.shared.info(ev: "clip_prewarmed",
-                            extra: ["ms": AnyCodable(ms)])
+        JSONLog.shared.info(ev: "clip_prewarmed", extra: ["ms": AnyCodable(ms)])
     }
 
-    /// Convert an embedding to the BLOB format the DBWriter inserts:
-    /// raw little-endian Float32 bytes (length = dims * 4).
+    /// Raw little-endian Float32 bytes (length = dims * 4).
     public static func embeddingToBlob(_ vec: [Float]) -> Data {
         vec.withUnsafeBufferPointer { Data(buffer: $0) }
     }
 
-    /// Inverse of `embeddingToBlob` — used by the read-side query path (M4)
-    /// when computing similarity from blobs.
     public static func blobToEmbedding(_ data: Data) -> [Float] {
         let count = data.count / MemoryLayout<Float>.stride
         return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> [Float] in
@@ -165,13 +161,6 @@ public final class MobileCLIPService: @unchecked Sendable {
 
     // MARK: - Internals
 
-    private func firstMultiArray(in provider: MLFeatureProvider) -> MLMultiArray? {
-        for name in provider.featureNames {
-            if let v = provider.featureValue(for: name)?.multiArrayValue { return v }
-        }
-        return nil
-    }
-
     private func normalize(_ v: [Float]) -> [Float] {
         var sum: Float = 0
         for x in v { sum += x * x }
@@ -180,28 +169,33 @@ public final class MobileCLIPService: @unchecked Sendable {
         return v.map { $0 / norm }
     }
 
-    private func cgImageToPixelBuffer(_ cgImage: CGImage, size: Int) -> CVPixelBuffer? {
-        var pb: CVPixelBuffer?
-        let attrs: [CFString: Any] = [
-            kCVPixelBufferCGImageCompatibilityKey: true,
-            kCVPixelBufferCGBitmapContextCompatibilityKey: true
-        ]
-        let status = CVPixelBufferCreate(
-            nil, size, size, kCVPixelFormatType_32BGRA,
-            attrs as CFDictionary, &pb
-        )
-        guard status == kCVReturnSuccess, let buffer = pb else { return nil }
-        CVPixelBufferLockBaseAddress(buffer, [])
-        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
-        guard let ctx = CGContext(
-            data: CVPixelBufferGetBaseAddress(buffer),
-            width: size, height: size,
-            bitsPerComponent: 8,
-            bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
-        ) else { return nil }
-        ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: size, height: size))
-        return buffer
+    /// Resize to 224×224 RGB and pack CLIP-normalized Float32 NCHW
+    /// ([1, 3, 224, 224], C-major). Normalization: (px/255 − mean) / std.
+    private func makeNCHWTensor(_ src: CGImage) -> [Float]? {
+        let side = Self.inputSize
+        let bytesPerRow = side * 4
+        var rgba = [UInt8](repeating: 0, count: side * side * 4)
+        let cs = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = rgba.withUnsafeMutableBufferPointer({ buf -> CGContext? in
+            CGContext(data: buf.baseAddress, width: side, height: side,
+                      bitsPerComponent: 8, bytesPerRow: bytesPerRow, space: cs,
+                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+                          | CGBitmapInfo.byteOrder32Big.rawValue)
+        }) else { return nil }
+        ctx.interpolationQuality = .high
+        ctx.draw(src, in: CGRect(x: 0, y: 0, width: side, height: side))
+
+        let pixelCount = side * side
+        var planes = [Float](repeating: 0, count: pixelCount * 3)
+        let mean = Self.mean, std = Self.std
+        for i in 0..<pixelCount {
+            let r = Float(rgba[i * 4 + 0]) / 255.0
+            let g = Float(rgba[i * 4 + 1]) / 255.0
+            let b = Float(rgba[i * 4 + 2]) / 255.0
+            planes[0 * pixelCount + i] = (r - mean[0]) / std[0]
+            planes[1 * pixelCount + i] = (g - mean[1]) / std[1]
+            planes[2 * pixelCount + i] = (b - mean[2]) / std[2]
+        }
+        return planes
     }
 }

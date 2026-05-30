@@ -70,19 +70,25 @@ public actor DeepAnalyze {
     /// Map AIModelKind → MLX ModelConfiguration.
     nonisolated static func vlmConfig(for kind: AIModelKind) -> ModelConfiguration {
         switch kind {
-        case .qwen2VL3B:    return VLMRegistry.qwen2_5VL3BInstruct4Bit
-        case .qwen3VL4B:    return VLMRegistry.qwen3VL4BInstruct4Bit
-        case .gemma3_4B:    return VLMRegistry.gemma3_4B_qat_4bit
-        case .gemma3_12B:   return VLMRegistry.gemma3_12B_qat_4bit
-        case .paligemma3B:  return VLMRegistry.paligemma3bMix448_8bit
+        // Qwen2.5-VL 7B shares the registered 3B's architecture, so a repo-id
+        // ModelConfiguration resolves it. Mistral-Small-3.2 is mapped by repo
+        // id too; if this MLX-VLM build lacks its architecture, `ensureLoaded`
+        // surfaces a load error rather than crashing (verify on-device).
+        case .qwen2VL7B:      return ModelConfiguration(id: kind.sourceRepo)
+        case .qwen3VL4B:      return VLMRegistry.qwen3VL4BInstruct4Bit
+        case .gemma3_4B:      return VLMRegistry.gemma3_4B_qat_4bit
+        case .gemma3_12B:     return VLMRegistry.gemma3_12B_qat_4bit
+        case .mistralSmall32: return ModelConfiguration(id: kind.sourceRepo)
+        case .paligemma3B:    return VLMRegistry.paligemma3bMix448_8bit
         }
     }
 
     nonisolated static func gpuCacheBudgetMB(for kind: AIModelKind) -> Int {
         switch kind {
-        case .gemma3_12B:                       return 8_192
+        case .gemma3_12B, .mistralSmall32:      return 8_192
+        case .qwen2VL7B:                        return 4_096
         case .qwen3VL4B, .gemma3_4B,
-             .paligemma3B, .qwen2VL3B:          return 3_072
+             .paligemma3B:                      return 3_072
         }
     }
 

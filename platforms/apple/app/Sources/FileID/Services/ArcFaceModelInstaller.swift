@@ -20,8 +20,7 @@ public final class ArcFaceModelInstaller {
     }
 
     public private(set) var status: [FaceEmbedderKind: Status] = [
-        .arcfaceIResNet50:  .unknown,
-        .arcfaceMobileFace: .unknown,
+        .sface: .unknown,
     ]
 
     private var tasks: [FaceEmbedderKind: Task<Void, Never>] = [:]
@@ -36,10 +35,10 @@ public final class ArcFaceModelInstaller {
         let base = "https://huggingface.co"
         let path: String
         switch kind {
-        case .arcfaceIResNet50:
-            path = "/immich-app/buffalo_l/resolve/main/recognition/model.onnx"
-        case .arcfaceMobileFace:
-            path = "/immich-app/buffalo_s/resolve/main/recognition/model.onnx"
+        case .sface:
+            // OpenCV Zoo SFace (Apache-2.0) — commercial-clean replacement for
+            // the non-commercial InsightFace ArcFace (immich-app/buffalo_*).
+            path = "/opencv/face_recognition_sface/resolve/main/face_recognition_sface_2021dec.onnx"
         }
         return URL(string: "\(base)\(path)")
     }

@@ -214,7 +214,7 @@ struct CLIPSemanticSearchCard: View {
         GlassCard {
             VStack(alignment: .leading, spacing: 10) {
                 Text("AI Models — semantic search (CLIP)").font(.headline)
-                Text("Type natural-language searches like \"sunset at the beach\" and FileID ranks every photo by visual relevance. Uses MobileCLIP-S2 — runs entirely on your Mac.")
+                Text("Type natural-language searches like \"sunset at the beach\" and FileID ranks every photo by visual relevance. Uses OpenCLIP ViT-B/32 — runs entirely on your Mac.")
                     .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
@@ -222,12 +222,12 @@ struct CLIPSemanticSearchCard: View {
 
                 // Per-file install state.
                 fileStatusRow(
-                    name: "MobileCLIP-S2 (image)",
+                    name: "CLIP ViT-B/32 (image)",
                     url: CLIPModelInstaller.modelsRoot
-                        .appendingPathComponent("mobileclip_image/mobileclip_s2_image.mlpackage")
+                        .appendingPathComponent("mobileclip_image/clip_vitb32_image.onnx")
                 )
                 fileStatusRow(
-                    name: "MobileCLIP-S2 (text)",
+                    name: "CLIP ViT-B/32 (text)",
                     url: CLIPTextEncoder.defaultModelURL
                 )
                 fileStatusRow(

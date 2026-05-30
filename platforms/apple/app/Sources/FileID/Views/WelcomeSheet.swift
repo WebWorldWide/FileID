@@ -38,7 +38,7 @@ struct WelcomeSheet: View {
             Divider().opacity(0.3)
 
             modelRow(
-                title: "Semantic search (MobileCLIP-S2)",
+                title: "Semantic search (CLIP ViT-B/32)",
                 detail: "Type queries like \"sunset at the beach\" — FileID ranks every photo by visual relevance.",
                 size: "~210 MB",
                 installed: clipInstalled,
