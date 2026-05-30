@@ -68,15 +68,24 @@ public struct RestructureMove: Codable, Sendable {
     public let source: String
     public let destination: String
     public let category: String
+    /// Source-folder tier — "Anchor" / "Mixed" / "Junk".
     public let tier: String?
+    /// Butler confidence band — "auto" / "review" / "ask" (RESTRUCTURE.md §6).
+    /// Empty when the engine didn't stamp one.
+    public let confidence: String
+    /// Plain-language "why filed here", shown in the drill-down.
+    public let reason: String?
 
     public init(fileID: Int64, source: String, destination: String,
-                category: String, tier: String? = nil) {
+                category: String, tier: String? = nil,
+                confidence: String = "", reason: String? = nil) {
         self.fileID = fileID
         self.source = source
         self.destination = destination
         self.category = category
         self.tier = tier
+        self.confidence = confidence
+        self.reason = reason
     }
 }
 
