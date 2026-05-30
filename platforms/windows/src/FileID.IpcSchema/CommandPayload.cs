@@ -71,7 +71,12 @@ public sealed record RestructureMove(
     /// <summary>Engine-authoritative per-move tier (Anchor / Mixed / Junk).
     /// Null on plans from older engine builds — callers should fall back to
     /// a local heuristic in that case.</summary>
-    string? Tier = null);
+    string? Tier = null,
+    /// <summary>Butler confidence band — "auto" / "review" / "ask"
+    /// (RESTRUCTURE.md §6). Empty on older engines.</summary>
+    string Confidence = "",
+    /// <summary>Plain-language "why filed here", shown in the drill-down.</summary>
+    string? Reason = null);
 
 public sealed record ApplyTagsCommand(
     System.Collections.Generic.IReadOnlyList<long> FileIds,

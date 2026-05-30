@@ -8,6 +8,35 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-05-30 (later) — Butler restructure built (P1–P4) + macOS mirror + docs rewrite + condense
+
+On `butler-overhaul` (off the merged commercial-clean `main`). Implements the butler
+redesign from [`RESTRUCTURE.md`](RESTRUCTURE.md) end-to-end and rewrites the dev/docs surface.
+
+- **Butler engine (Windows; verified: clippy `-D` + 230 tests).** `pipeline/restructure_semantic.rs`
+  (P1): CLIP+tags+time fusion → density cluster (reuses `identity_clustering`) →
+  learn-your-style folder prototypes → proposed moves, wired into `commands/restructure.rs`
+  with a rule-cascade fallback. **P2:** c-TF-IDF distinctive-term group naming (live
+  local-VLM naming deferred to a background pass — a per-call llama subprocess is too slow
+  for an interactive plan). **P3:** per-move confidence bands (auto/review/ask) from
+  folder-match strength + top-1−top-2 margin + cohesion, plus a plain-language reason;
+  surfaced over IPC + a "What to apply" tier strip (selective apply that holds "ask" back) +
+  a drill-down confidence pill + reason. **P4:** Sankey gets the Okabe-Ito CVD-safe palette +
+  an "Other" long-tail node (no silent drop).
+- **macOS mirror (unverified — needs a Mac build).** `RestructureSemantic.swift` ports the
+  engine faithfully (reuses `IdentityClustering`); `proposeAll` runs it + stamps
+  confidence/reason; IPC `RestructureMove` gains confidence/reason; parity tests added.
+  App-side UI wiring + Sankey palette documented in `platforms/apple/MACOS_BUTLER_NOTES.md`.
+- **Docs rewritten from scratch** against verified source: all three `CLAUDE.md` +
+  SHIP/PRIVACY/SECURITY/CONTRIBUTING/TESTING/COVERAGE/SYMBOLS/VISUAL-LANGUAGE/BUGS. Honest
+  findings surfaced: model-download SHA256 is wired but inert (every `registry.rs` entry is
+  `sha256: None`) — now the top open hardening item; the old "Phase 8 coverage gate" was fictional.
+- **Condense pass** (engine, behavior-preserving): match-arm merges, if/else→match,
+  loop→iterator, push-loop→`extend`.
+- **Verified headless throughout**: clippy `-D warnings`, 230 engine tests, `dotnet build`/`test`
+  (133), `dotnet format`. **Not yet** verified on-hardware (butler plan quality on `G:\TrueNAS`)
+  or on a Mac (Swift).
+
 ## 2026-05-30 — Accuracy tightening + UI fixes + docs refresh + butler-restructure research/design
 
 On `polish-docs-ui-tests` (off the merged commercial-clean `main`).

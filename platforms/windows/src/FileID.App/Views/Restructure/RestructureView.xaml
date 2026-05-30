@@ -195,6 +195,50 @@
                                 </StackPanel>
                             </Border>
                         </Grid>
+                        <!-- Butler confidence tiers (RESTRUCTURE.md §6): auto-file
+                             the sure moves, one-click review the medium ones, hold
+                             the unsure. Toggling a chip includes/excludes that tier
+                             from Apply — the default holds the "ask" tier back. -->
+                        <StackPanel x:Name="ConfidenceStrip" Visibility="Collapsed" Spacing="6" Margin="0,4,0,0">
+                            <TextBlock Text="What to apply"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <ToggleButton x:Name="AutoTierToggle" IsChecked="True" Click="OnTierToggle"
+                                              Padding="14,8" CornerRadius="8"
+                                              ToolTipService.ToolTip="High-confidence placements — safe to auto-file (still fully reversible).">
+                                    <StackPanel Spacing="0">
+                                        <StackPanel Orientation="Horizontal" Spacing="6">
+                                            <Ellipse Width="8" Height="8" Fill="#6CC24A" VerticalAlignment="Center"/>
+                                            <TextBlock x:Name="AutoTierCount" Text="0" FontWeight="Bold"/>
+                                        </StackPanel>
+                                        <TextBlock Text="Auto-file" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                                    </StackPanel>
+                                </ToggleButton>
+                                <ToggleButton x:Name="ReviewTierToggle" IsChecked="True" Click="OnTierToggle"
+                                              Padding="14,8" CornerRadius="8"
+                                              ToolTipService.ToolTip="Medium confidence — worth a one-click look before applying.">
+                                    <StackPanel Spacing="0">
+                                        <StackPanel Orientation="Horizontal" Spacing="6">
+                                            <Ellipse Width="8" Height="8" Fill="#FFCC00" VerticalAlignment="Center"/>
+                                            <TextBlock x:Name="ReviewTierCount" Text="0" FontWeight="Bold"/>
+                                        </StackPanel>
+                                        <TextBlock Text="Review" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                                    </StackPanel>
+                                </ToggleButton>
+                                <ToggleButton x:Name="AskTierToggle" IsChecked="False" Click="OnTierToggle"
+                                              Padding="14,8" CornerRadius="8"
+                                              ToolTipService.ToolTip="Low confidence — held back by default; include to apply these too.">
+                                    <StackPanel Spacing="0">
+                                        <StackPanel Orientation="Horizontal" Spacing="6">
+                                            <Ellipse Width="8" Height="8" Fill="#F5B74D" VerticalAlignment="Center"/>
+                                            <TextBlock x:Name="AskTierCount" Text="0" FontWeight="Bold"/>
+                                        </StackPanel>
+                                        <TextBlock Text="Hold" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                                    </StackPanel>
+                                </ToggleButton>
+                            </StackPanel>
+                        </StackPanel>
                         <Button x:Name="GeneratePlanButton"
                                 Content="Generate plan"
                                 Click="OnPlanClicked"

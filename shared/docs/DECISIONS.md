@@ -7,6 +7,39 @@
 
 ---
 
+## 2026-05-30 — Butler restructure: cluster-then-name, confidence bands, deferred VLM naming
+
+**Context**: The flat rule cascade (Person→Place→Doc→Year) ignored CLIP/tags/clusters and
+felt bland + loose. A cited deep-research pass (`RESTRUCTURE.md`) recommended a cluster-then-name
+architecture. Decisions made building it:
+
+- **Math finds structure; names come from signal — not an LLM clustering pass.** Geometric
+  density clustering (reusing `identity_clustering`, no new deps) on fused CLIP+tags+time
+  vectors discovers groups; we never ask an LLM to cluster tens of thousands of files (doesn't
+  scale on-device). Learn-your-style routes each cluster to the nearest existing folder
+  prototype (Dropbox "Smart Move" / Nearest-Class-Mean) before proposing a new group.
+- **c-TF-IDF naming now; live VLM naming deferred to a background pass.** Group names use
+  distinctive terms (frequent in-cluster, rare globally) — the always-on de-bland win, fully
+  testable. The VLM (Qwen2.5-VL) was *not* wired into the interactive plan: `llama-mtmd-cli`
+  spawns a fresh subprocess and reloads the model per call (image-mandatory), so naming N
+  clusters synchronously would add tens of seconds and can't be verified headlessly. It belongs
+  as deferred idle/charging enrichment (RESTRUCTURE.md §3), with the cluster profile as the
+  drop-in input.
+- **Confidence is a separate axis from folder tier.** Added a per-move `confidence` band
+  (auto/review/ask) alongside the existing `tier` (Anchor/Mixed/Junk = source-folder
+  homogeneity). Bands derive from folder-match strength + top-1−top-2 margin (abstain on
+  ambiguity) + cluster cohesion. Thresholds are **provisional cosine cutoffs**, explicitly to be
+  calibrated to *measured* per-category accuracy before any standing auto-file — not shipped as
+  calibrated. The app holds the "ask" tier out of the default apply set.
+- **Sankey: augment, don't replace.** Kept the existing pure-XAML Sankey (barycentre ordering,
+  hover, drill-down already present); added the Okabe-Ito CVD-safe palette for destination
+  categories (brand hues stay chrome-only) and an "Other" long-tail node so capping at the top-N
+  never silently drops flows.
+- **macOS mirrors the engine logic, written unverified.** Per the established "I write Swift,
+  the user builds on Mac" model — `RestructureSemantic.swift` is a faithful port; the app-side
+  UI wiring is documented, not blind-edited, because macOS uses a different (Keep/Tidy/Reorganize)
+  restructure UX that needs a design pass on a Mac.
+
 ## 2026-05-29 — Commercial-clean (Apache-2.0) model stack + RAM++ adopted as primary tagger
 
 **Context**: A license audit found that three core, always-installed weights were **not**

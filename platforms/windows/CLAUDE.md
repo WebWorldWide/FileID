@@ -1,102 +1,85 @@
 # FileID — Windows platform
 
-Windows 10/11 (x64 + ARM64 / Snapdragon WoA) port of the macOS FileID app. 1:1 feature parity with macOS, native Windows UI, native Windows performance.
+Windows 10/11 (x64 + ARM64 / Snapdragon WoA) build of FileID. 1:1 feature parity with the macOS reference, native Windows UI, native Windows performance.
 
-This file covers the Windows code under `platforms/windows/`. For the macOS reference see `platforms/apple/CLAUDE.md`. For cross-platform contracts see `shared/`.
+Covers `platforms/windows/`. For the macOS reference see `platforms/apple/CLAUDE.md`; for cross-platform contracts + principles see the root `CLAUDE.md` and `shared/`.
 
 ## Stack
 
-- **Engine**: Rust (`fileid-engine`), single-binary release `.exe` with LTO. Talks newline-delimited JSON over stdio. Owns the SQLite WAL DB, scan pipeline, ML inference.
-- **App**: WinUI 3 (Windows App SDK 1.6+, .NET 8/9, C#, XAML), unpackaged desktop app. Self-contained `dotnet publish` so users don't need .NET installed.
-- **Distribution**: WiX Toolset v4 → `FileID-x64.msi` and `FileID-arm64.msi`. Authenticode-signed.
+- **Engine** — Rust (`fileid-engine`), single release `.exe` (LTO). Newline-delimited JSON over stdio; owns the SQLite WAL DB, scan pipeline, and ML inference (ONNX Runtime + llama.cpp).
+- **App** — WinUI 3 (Windows App SDK 1.6+, .NET 8, C#/XAML), unpackaged desktop. Self-contained `dotnet publish` — users don't install .NET.
+- **Distribution** — WiX v4 → `FileID-x64.msi` / `FileID-arm64.msi`, wrapped in a Burn bundle (`FileIDSetup.exe`); Authenticode-signed.
 
 ## Layout
 
 ```
 platforms/windows/
-├── FileID.sln                        # .NET solution (added in Phase 1)
+├── FileID.sln
 ├── src/
-│   ├── FileID.App/                   # WinUI 3 desktop app — Phase 1
-│   ├── FileID.Theme/                 # GlassCard, LavaLamp, motion primitives — Phase 1
-│   ├── FileID.IpcSchema/             # C# DTOs mirroring shared/ipc-schema/ipc.schema.json — Phase 1
-│   └── engine/                       # Rust crate (this is where Phase 0 lives)
-│       ├── Cargo.toml
-│       ├── rust-toolchain.toml       # pin Rust 1.78, both Windows targets
-│       ├── .cargo/config.toml        # AVX2/FMA on x64, NEON/dotprod on arm64
+│   ├── FileID.App/        # WinUI 3 desktop app (C# + XAML)
+│   ├── FileID.Theme/      # GlassCard, LavaLamp, Sankey, motion primitives
+│   ├── FileID.IpcSchema/  # C# DTOs mirroring shared/ipc-schema/ipc.schema.json
+│   └── engine/            # Rust crate
 │       └── src/
-│           ├── main.rs               # entrypoint; stdio loop + parent-pid watchdog + WAL checkpoint
-│           ├── ipc/                  # IpcCommand / IpcEvent + sink (newline-delimited JSON over stdout)
-│           ├── db/                   # rusqlite + bundled SQLite + FTS5; v1–v7 migrations byte-faithful with GRDB
-│           ├── paths.rs              # %LOCALAPPDATA%/FileID/{logs,Models,thumbs,...}
-│           ├── platform.rs           # parent-pid watchdog, worker_cap, memory probe, SleepGuard
-│           ├── pipeline/             # discovery, tagging, dbwriter, face_clustering, deep_analyze, restructure (Phase 1+)
-│           ├── models/               # ORT EP picker, YuNet + SFace faces, RAM++ tagger, CLIP ViT-B/32 + text, llama.cpp wrapper
-│           └── shell/                # IFileOperation, Windows.Media.Ocr, IThumbnailProvider, ... (Phase 1+)
-├── installer/                        # WiX v4 .wixproj — Phase 4
-├── build/
-│   ├── build.ps1                     # x64 dev build (Phase 0 ships this)
-│   ├── build-arm64.ps1               # ARM64 cross-compile (Phase 0)
-│   ├── publish.ps1                   # release publish + sign + WiX (Phase 4)
-│   └── iterate.ps1                   # regression harness — port of platforms/apple/scripts/iterate.sh (Phase 4)
-└── Tests/
+│           ├── main.rs        # stdio loop + parent-PID watchdog + WAL checkpoint
+│           ├── ipc/           # IpcCommand / IpcEvent + newline-JSON sink
+│           ├── db/            # rusqlite + bundled SQLite + FTS5; v1–v12 migrations, GRDB-faithful
+│           ├── pipeline/      # discovery, tagging, dbwriter, face/identity clustering,
+│           │                  #   deep_analyze, restructure (+ restructure_semantic = butler)
+│           ├── models/        # ORT EP picker, RAM++, CLIP ViT-B/32 + text, YuNet + SFace, llama.cpp
+│           └── shell/         # IFileOperation, Windows.Media.Ocr, IThumbnailProvider, …
+├── installer/    # WiX v4 MSI + Burn bundle
+├── build/        # build-all.ps1, publish-bundle.ps1, iterate.ps1 (+ scan_assertions.py)
+└── Tests/        # xUnit: FileID.App.Tests, FileID.IpcSchema.Tests
 ```
 
-## Build (Phase 0)
+## Build
 
 ```powershell
-# From repo root or platforms/windows/
-pwsh platforms/windows/build/build.ps1                 # x64
-pwsh platforms/windows/build/build.ps1 -RunTests        # x64 + cargo test
-pwsh platforms/windows/build/build-arm64.ps1            # arm64 (cross-compile)
+# Dev build + run (from repo root). Use Windows PowerShell 5.1 or pwsh 7.
+.\platforms\windows\build\build-all.ps1                 # incremental engine + app
+.\platforms\windows\build\build-all.ps1 -Clean -Run      # clean rebuild then launch
+.\platforms\windows\build\build-all.ps1 -WipeDbOnly      # fresh scan, keep models
+.\platforms\windows\build\publish-bundle.ps1 -SkipSign   # release MSIs + FileIDSetup.exe
 ```
 
-Outputs `FileIDEngine.exe` under `platforms/windows/dist/<arch>/FileID/`. The WinUI 3 app builds via `FileID.sln` (`dotnet build`).
+Self-verify headlessly (this is the dev-env loop): from `src/engine`, `cargo clippy --all-targets -- -D warnings` + `cargo test`; for the app, `dotnet build` / `dotnet test` / `dotnet format --verify-no-changes` on `FileID.sln`. On-hardware: `build\iterate.ps1 -Corpus <path>` drives a full scan + cluster + assertions against the RTX 2060 / `G:\TrueNAS`.
 
-## Current status (V16.21)
+## Current status
 
-The "Phase 0 / Phase 1" split that earlier versions of this file described is historical. As of V16.21 the engine and the WinUI 3 app are both built and feature-rich; current work is hardening + on-hardware verification (see `shared/docs/STATE.md`).
+Engine and app are both feature-complete across the six tabs. The commercial-clean / Apache-2.0 model stack is merged to `main` and CI-green, on-hardware verified (RTX 2060, DirectML):
+- **Tagging:** RAM++ (Swin-L @384, 4585-tag ONNX) primary, per-class thresholds + generic-tag suppress-list; CLIP zero-shot scene tags are the fallback.
+- **Search:** CLIP ViT-B/32 (512-d image + text).
+- **Faces:** YuNet detect + SFace embed (128-d) + 5-point alignment; density clustering.
+- **Deep Analyze (opt-in):** llama.cpp VLMs — Qwen2.5-VL 7B (default) / Gemma 3 / Mistral-Small-3.2.
+- EP auto-select (CUDA / TensorRT / DirectML / OpenVINO / QNN / CPU); NVIDIA without the CUDA pack runs DirectML. Windows.Media.Ocr; pdfium; Media Foundation. Parent-PID watchdog; WAL checkpoint; local-only tracing.
 
-Shipped:
-- Rust engine: full scan pipeline (discovery / tagging / dbwriter); ONNX Runtime ML inference — **RAM++** (Apache-2.0, primary 4585-tag auto-tagger; CLIP zero-shot scene tags are the fallback), **YuNet** (MIT) detect + **SFace** (Apache-2.0, 128-d) embed faces with 5-point alignment, **CLIP ViT-B/32** (MIT) image+text — with EP auto-select (CUDA / TensorRT / DirectML / OpenVINO / QNN / CPU) + discrete-GPU pinning + TDR (`DXGI_ERROR_DEVICE_REMOVED`) hardening; Windows.Media.Ocr; llama.cpp-subprocess VLMs (Qwen2.5-VL 7B / Gemma 3 / Mistral-Small-3.2, all commercial-clean) for opt-in Deep Analyze; face clustering; restructure / cleanup; v1–v12 migrations; HuggingFace model downloader; parent-PID watchdog; WAL checkpoint; structured local-only tracing. Project is **Apache-2.0** — every default weight is Apache/MIT.
-- WinUI 3 app: Library, People, Cleanup, Deep Analyze, Restructure, Settings, onboarding + welcome model installer; talks to the engine over newline-delimited JSON (`EngineClient`).
-- Canonical IPC schema (`shared/ipc-schema/ipc.schema.json`) mirrored to C# (`FileID.IpcSchema`) + Rust (`ipc/generated.rs`).
-- Build scripts (x64 + ARM64 cross-compile); GitHub Actions CI matrix (`windows-latest` x64 + `windows-11-arm` ARM64 + arm64-cross) with a privacy gate that scans the shipped binary for telemetry-related strings.
+In progress / not done: butler restructure P2–P4 (VLM group naming, confidence tiers, Win2D Sankey upgrade — see `shared/docs/RESTRUCTURE.md`); Authenticode EV signing; per-vendor (AMD/Intel/Snapdragon NPU) on-hardware verification; ORT CUDA Performance Pack hosting.
 
-In progress / not yet complete:
-- WiX MSI packaging + Authenticode signing (`build/publish.ps1`).
-- On-hardware verification across GPU/NPU vendors (see `shared/docs/SHIP.md`).
-- Intel OpenVINO + Snapdragon QNN Performance Packs (hosting pending).
+## Conventions — Rust engine
 
-## Conventions (Rust engine)
+- **Edition 2021, MSRV 1.90** (toolchain pinned in `rust-toolchain.toml`, both Windows targets).
+- **No new dependencies without asking.** Locked set in `Cargo.toml`; new crates need a `DECISIONS.md` justification.
+- **No telemetry.** The only network call site is `engine/src/downloader.rs` (HuggingFace fetch). CI grep-gates the binary for telemetry strings.
+- **Path redaction.** `redact_path_for_log(path)` before any `tracing::*!()` that includes a user path.
+- **Default to no comments** — only a non-obvious *why* (workaround, invariant, perf pitfall).
+- **Sync mirrors for cancellation.** Hot loops check `AtomicBool::load(Relaxed)` instead of `await`-ing the coordinator (no per-file actor hop).
+- **Single-writer DB.** The engine owns the only writer connection; reads fan out via fresh read-only connections.
+- **Migrations are append-only** and byte-faithful with macOS GRDB — never edit a committed migration; add `vN+1`.
 
-- **Edition 2021, MSRV 1.90** (floor 1.88; toolchain pinned in `rust-toolchain.toml`).
-- **No new dependencies without asking.** Locked set in `Cargo.toml`. New crates require justification in `shared/docs/DECISIONS.md`.
-- **No telemetry, ever.** The only network call site is `engine/src/downloader.rs` (HuggingFace model fetch). CI grep-gates the binary for telemetry-related strings as a release blocker.
-- **Path redaction in logs.** Use `redact_path_for_log(path)` (Phase 1+) before any `tracing::*!()` that includes a user file path.
-- **Default to no comments.** Add only when the WHY is non-obvious (workaround, subtle invariant, performance pitfall).
-- **Sync mirrors for cancellation.** Hot loops use `AtomicBool::load(Relaxed)` for cancellation checks instead of `await`-ing into the ScanCoordinator (matches macOS pattern, avoids per-file actor hops).
-- **Single-writer DB.** Engine owns the only writer connection; all writes serialize through it. Reads can fan out via fresh read-only connections.
+## Conventions — WinUI 3 app
 
-## Conventions (WinUI 3 app — Phase 1+)
-
-- **WinUI 3 unpackaged desktop app.** No MSIX, no Microsoft Store, no `Package.appxmanifest`. Standard `<UseWinUI>true</UseWinUI>` csproj.
-- **Self-contained .NET publish.** Users do not install .NET — runtime is bundled.
-- **Forced dark mode.** `RequestedTheme = Dark`, plus `dwmapi DwmSetWindowAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE, 1)` for the title bar.
-- **Mica + Acrylic via Composition.** `MicaController` for the window backdrop, `DesktopAcrylicController` for GlassCard. Real DWM-rendered, not a software approximation.
-- **Springs via `SpringScalarNaturalMotionAnimation`.** Map SwiftUI `.spring(response:dampingFraction:)` 1:1: set `Period = response`, `DampingRatio = dampingFraction`. No math port.
-- **Custom canvas via Win2D.** LavaLampBackground, SankeyFlowControl, IridescentBorder all Win2D-rendered. Pause when occluded.
-- **No third-party UI libraries** beyond Windows App SDK + Win2D (community toolkit only if a strong justification lands in `DECISIONS.md`).
-- **Every `EngineClient.PropertyChanged` handler is wrapped in `DebugLog.SafeRun`** and logs an `[ENGINE-SUB:ClassName] {PropertyName}` debug line after its property filter. The handler nominally runs on the UI thread (because `Apply()` is dispatched there), but treat that as untrusted: post any XAML writes through `DispatcherQueue.TryEnqueue` and don't construct `DispatcherObject`-derived types (BitmapImage, SolidColorBrush, etc.) on a thread you didn't capture. A naked handler that touches a DispatcherObject is a native fast-fail in waiting (V15.2 ThumbnailService, V15.2.1 ModelSlot, V15.4 SidebarQueueList — three bugs of the same shape). The SafeRun wrap + `[APPLY:N] enter/exit` tracing in `EngineClient.Apply` are the diagnostic pair that surfaces the next variant; do not strip them.
-- **Cache UI-thread-affined resources at ctor time**, not on each event. `SidebarPipelineProgress` previously allocated four `SolidColorBrush` instances on every `LastProgress` event (10 Hz during a scan) and re-evaluated three `Application.Current.Resources` lookups. Cache in fields populated from the ctor instead.
-- **Never imperatively mutate a XAML parent's `Children` mid-event-burst.** `SidebarQueueList` used to nuke `JobsRepeater.ItemsSource` and rebuild a sibling on every QueueState event; under burst load this raced with the layout pass and fast-failed the renderer. Pattern: own a stable container (created lazily once), and only mutate that container's `Children`. The parent's child list never changes after first sync.
+- **Unpackaged desktop app.** No MSIX / Store / `Package.appxmanifest`. Self-contained .NET publish (runtime bundled).
+- **Forced dark mode** (`RequestedTheme = Dark` + `DwmSetWindowAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE)`). **Mica window backdrop** (`MicaController`, falling back to `DesktopAcrylicController` when Mica is unsupported); GlassCard surfaces render a XAML `AcrylicBrush` in their template — real DWM materials, not a fake.
+- **Springs via `SpringScalarNaturalMotionAnimation`** — map SwiftUI `.spring(response:dampingFraction:)` 1:1 (`Period = response`, `DampingRatio = dampingFraction`).
+- **Custom rendering**: LavaLampBackground via `Microsoft.UI.Composition`, the Restructure Sankey via pure-XAML `Path`/Bézier geometry, IridescentBorder via Win2D (`CanvasSweepGradient`); pause when occluded. **No third-party UI libraries** beyond Windows App SDK + Win2D.
+- **Every `EngineClient.PropertyChanged` handler is wrapped in `DebugLog.SafeRun`** and logs an `[ENGINE-SUB:ClassName] {PropertyName}` line after its filter. The handler nominally runs on the UI thread (because `Apply()` is dispatched there), but treat that as untrusted: post XAML writes through `DispatcherQueue.TryEnqueue` and never construct `DispatcherObject`-derived types (BitmapImage, SolidColorBrush, …) on a thread you didn't capture. A naked handler that touches a DispatcherObject is a native fast-fail in waiting (V15.2 ThumbnailService, V15.2.1 ModelSlot, V15.4 SidebarQueueList — three bugs of the same shape). The SafeRun wrap + `[APPLY:N] enter/exit` tracing in `EngineClient.Apply` are the diagnostic pair that surfaces the next variant — **do not strip them**.
+- **Cache UI-thread-affined resources at ctor time**, not per event (`SidebarPipelineProgress` once allocated four `SolidColorBrush` per `LastProgress` at 10 Hz — cache in fields instead).
+- **Never imperatively mutate a XAML parent's `Children` mid-event-burst.** Own a stable container created once and mutate only its `Children`; rebuilding a sibling per event races the layout pass and fast-fails the renderer (V15.4 `SidebarQueueList`).
 
 ## Working principles
 
-- User runs the build. `cargo check` / `cargo build` passing isn't proof of correctness — verify on real Windows hardware (and ARM64 hardware for arm64 builds).
-- Update `shared/docs/STATE.md` (latest entry on top) and `shared/docs/NEXT.md` after meaningful work.
-- Append to `shared/docs/DECISIONS.md` for non-obvious calls — cross-platform.
-- Preserve the user's favorite touches: LavaLampBackground (visual), gold #FFCC00 (palette), the springs-everywhere motion language. The Windows port is a port, not a reinterpretation.
-
-## Persistence files
-
-See root `CLAUDE.md` and `shared/docs/`. The Windows port doesn't introduce its own persistence files; it appends to the shared ones.
+- `cargo check`/`build` passing is not proof of correctness — self-verify with clippy + tests headlessly, then confirm the runtime/GPU path on real Windows hardware (and ARM64 hardware for arm64).
+- Land on a branch, then merge to `main` and confirm both GitHub workflows are green.
+- Keep `STATE.md` (newest on top) + `NEXT.md` current; append non-obvious calls to `DECISIONS.md`.
+- The Windows app is a port, not a reinterpretation — preserve LavaLampBackground, the gold `#FFCC00` palette, and the springs-everywhere motion.

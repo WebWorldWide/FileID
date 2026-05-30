@@ -67,11 +67,18 @@ public sealed class SankeyFlowControl : Control
         DefaultStyleKey = typeof(SankeyFlowControl);
 
         _sourceBrush = ResolveBrush("GoldBrush", Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00));
+        // Okabe-Ito colour-blind-safe categorical palette (RESTRUCTURE.md §7):
+        // distinct destination-category hues legible across all CVD types.
+        // Brand gold/lavender/cyan/pink stay chrome-only (source rects, shell).
         var categoryColors = new[]
         {
-            ResolveColor("AiBrush",      Color.FromArgb(0xFF, 0xB1, 0x9B, 0xCE)),
-            ResolveColor("InfoBrush",    Color.FromArgb(0xFF, 0xA0, 0xE2, 0xEA)),
-            ResolveColor("DelightBrush", Color.FromArgb(0xFF, 0xF2, 0xA6, 0xC0)),
+            Color.FromArgb(0xFF, 0xE6, 0x9F, 0x00), // orange
+            Color.FromArgb(0xFF, 0x56, 0xB4, 0xE9), // sky blue
+            Color.FromArgb(0xFF, 0x00, 0x9E, 0x73), // bluish green
+            Color.FromArgb(0xFF, 0xF0, 0xE4, 0x42), // yellow
+            Color.FromArgb(0xFF, 0x00, 0x72, 0xB2), // blue
+            Color.FromArgb(0xFF, 0xD5, 0x5E, 0x00), // vermillion
+            Color.FromArgb(0xFF, 0xCC, 0x79, 0xA7), // reddish purple
         };
         _ribbonIdleBrushes = new Brush[categoryColors.Length];
         _ribbonHoverBrushes = new Brush[categoryColors.Length];
@@ -137,13 +144,34 @@ public sealed class SankeyFlowControl : Control
             return parts.Length > 1 ? parts[0] : "(root)";
         }
 
-        var rawSourceGroups = moves.GroupBy(SourceOf)
+        // Cap each column at MaxNodes; fold the long tail into a single "Other"
+        // node rather than silently dropping it (RESTRUCTURE.md §7).
+        const int MaxNodes = 12;
+        const string OtherKey = "Other";
+
+        var distinctSources = moves.Select(SourceOf).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+        var topSources = moves.GroupBy(SourceOf).OrderByDescending(g => g.Count())
+            .Take(MaxNodes - 1).Select(g => g.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        string SourceBucket(RestructureMove m)
+        {
+            var s = SourceOf(m);
+            return distinctSources > MaxNodes && !topSources.Contains(s) ? OtherKey : s;
+        }
+
+        var distinctCats = moves.Select(m => m.Category).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+        var topCats = moves.GroupBy(m => m.Category).OrderByDescending(g => g.Count())
+            .Take(MaxNodes - 1).Select(g => g.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        string CategoryBucket(RestructureMove m)
+        {
+            var c = m.Category;
+            return distinctCats > MaxNodes && !topCats.Contains(c) ? OtherKey : c;
+        }
+
+        var rawSourceGroups = moves.GroupBy(SourceBucket)
                                    .OrderByDescending(g => g.Count())
-                                   .Take(12)
                                    .ToList();
-        var rawCategoryGroups = moves.GroupBy(m => m.Category)
+        var rawCategoryGroups = moves.GroupBy(CategoryBucket)
                                      .OrderByDescending(g => g.Count())
-                                     .Take(12)
                                      .ToList();
 
         var sourceList = rawSourceGroups.Select(g => g.Key).ToList();
@@ -160,7 +188,7 @@ public sealed class SankeyFlowControl : Control
                 for (int sIdx = 0; sIdx < sourceList.Count; sIdx++)
                 {
                     var srcName = sourceList[sIdx];
-                    var flow = moves.Count(m => SourceOf(m) == srcName && m.Category == cat);
+                    var flow = moves.Count(m => SourceBucket(m) == srcName && CategoryBucket(m) == cat);
                     if (flow > 0)
                     {
                         weightedSum += sIdx * flow;
@@ -179,7 +207,7 @@ public sealed class SankeyFlowControl : Control
                 for (int cIdx = 0; cIdx < categoryList.Count; cIdx++)
                 {
                     var catName = categoryList[cIdx];
-                    var flow = moves.Count(m => SourceOf(m) == src && m.Category == catName);
+                    var flow = moves.Count(m => SourceBucket(m) == src && CategoryBucket(m) == catName);
                     if (flow > 0)
                     {
                         weightedSum += cIdx * flow;
@@ -245,7 +273,7 @@ public sealed class SankeyFlowControl : Control
             for (int c = 0; c < byCategory.Count; c++)
             {
                 var cat = byCategory[c];
-                var pairCount = src.Count(m => m.Category == cat.Key);
+                var pairCount = src.Count(m => CategoryBucket(m) == cat.Key);
                 if (pairCount == 0) continue;
 
                 var srcPos = srcYs[src.Key];
@@ -479,12 +507,5 @@ public sealed class SankeyFlowControl : Control
     {
         if (Application.Current?.Resources[key] is Brush b) return b;
         return new SolidColorBrush(fallback);
-    }
-
-    private static Color ResolveColor(string key, Color fallback)
-    {
-        if (Application.Current?.Resources[key] is SolidColorBrush b) return b.Color;
-        if (Application.Current?.Resources[key] is Color c) return c;
-        return fallback;
     }
 }
