@@ -41,12 +41,15 @@ pub struct Hyperparameters {
 
 impl Default for Hyperparameters {
     fn default() -> Self {
+        // SFace (128-d) defaults, anchored on OpenCV's 0.363 same-identity
+        // cosine (genuine pairs sit lower than ArcFace's old 512-d). PROVISIONAL
+        // — calibrate the cosine bands against a labeled library.
         Self {
-            pass1_cosine: 0.55,
-            pass2_cosine: 0.45,
+            pass1_cosine: 0.42,
+            pass2_cosine: 0.34,
             pass2_margin: 0.05,
             pass3_variance_threshold: 0.05,
-            pass3_min_mean_cosine: 0.50,
+            pass3_min_mean_cosine: 0.36,
             pass3_max_splits: 3,
             k_nn: 10,
         }

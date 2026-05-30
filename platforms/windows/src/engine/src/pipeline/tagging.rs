@@ -43,7 +43,7 @@ fn perf_trace(stage: &str, path: &std::path::Path, elapsed_ms: f64) {
 
 use crate::coordinator::ScanCoordinator;
 use crate::models::runtime::error_has_device_removed_marker;
-use crate::models::{arcface::ArcFace, bge_text::BgeText, mobileclip::MobileClipImage, scene_vocab::SceneLabeler, scrfd::{self, Scrfd}};
+use crate::models::{bge_text::BgeText, face_align, mobileclip::MobileClipImage, scene_vocab::SceneLabeler, scrfd, sface::SFace, yunet::YuNet};
 use crate::pipeline::batch_clip::ClipBatchCoordinator;
 use crate::pipeline::discovery::{DiscoveredFile, FileKind};
 use crate::shell;
@@ -221,8 +221,11 @@ pub struct DetectedFace {
 /// against the GPU's command queue. Pool size capped at MODEL_POOL_SIZE
 /// to keep VRAM bounded.
 pub struct ModelStack {
-    pub arcface: Option<Vec<Mutex<ArcFace>>>,
-    pub scrfd: Option<Vec<Mutex<Scrfd>>>,
+    // Commercial-clean face models: YuNet (detect, MIT) + SFace (embed, Apache,
+    // 128-d). Field names are legacy (`scrfd`/`arcface`) to keep the pipeline
+    // call sites unchanged; the types are the new MIT/Apache models.
+    pub arcface: Option<Vec<Mutex<SFace>>>,
+    pub scrfd: Option<Vec<Mutex<YuNet>>>,
     /// MobileCLIP has two paths (the default is chosen in `load_default`):
     /// - `mobileclip_batch` (DEFAULT) — single Session behind
     ///   `ClipBatchCoordinator`, fed batched (N,3,256,256) tensors. On a 6 GB
@@ -310,10 +313,8 @@ impl ModelStack {
     /// run inference in parallel without serializing on a single Mutex.
     pub fn load_default(worker_count: usize) -> Self {
         let pool_size = resolve_pool_size(worker_count);
-        let arcface = load_pool("ArcFace", pool_size, crate::models::arcface::default_weights_path(), |p| {
-            ArcFace::load(p)
-        });
-        let scrfd = load_pool("SCRFD", pool_size, scrfd::default_weights_path(), Scrfd::load);
+        let arcface = load_pool("SFace", pool_size, crate::models::sface::default_weights_path(), SFace::load);
+        let scrfd = load_pool("YuNet", pool_size, crate::models::yunet::default_weights_path(), YuNet::load);
 
         // Batch path is the default. Rationale: the VRAM clamp drops the pool
         // to ~1-3 Sessions on a 6 GB card, and the separate CLIP_CONCURRENCY=2
@@ -1156,7 +1157,12 @@ async fn process_file_predecoded(
                                         (det.bbox[2] - det.bbox[0]).max(0.0),
                                         (det.bbox[3] - det.bbox[1]).max(0.0),
                                     ];
-                                    if let Some(crop) = crop_and_resize_face(&rgb, w, h, &bbox_xywh) {
+                                    // Aligned 112×112 (5-pt similarity → ArcFace
+                                    // template) for SFace; fall back to a plain bbox
+                                    // crop if the landmark fit is degenerate.
+                                    let crop = face_align::align_112(&rgb, w, h, &det.landmarks)
+                                        .or_else(|| crop_and_resize_face(&rgb, w, h, &bbox_xywh));
+                                    if let Some(crop) = crop {
                                         let embed_result = {
                                             let mut a = arcface_mu.lock();
                                             a.embed(&crop)
@@ -1178,11 +1184,11 @@ async fn process_file_predecoded(
                                             Err(err) => {
                                                 if error_has_device_removed_marker(&err) {
                                                     if coord.mark_gpu_dead() {
-                                                        tracing::error!(?err, "[GPU-TDR] ArcFace device-removed; cancelling scan");
+                                                        tracing::error!(?err, "[GPU-TDR] SFace device-removed; cancelling scan");
                                                     }
                                                     break;
                                                 }
-                                                tracing::warn!(?err, "ArcFace embed failed");
+                                                tracing::warn!(?err, "SFace embed failed");
                                             }
                                         }
                                     }

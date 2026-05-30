@@ -123,8 +123,8 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
                 await PrewarmAsync("clip_text").ConfigureAwait(false);
             });
         Arcface = new ModelSlot(
-            displayLabel: "ArcFace MobileFace",
-            approxBytes: 14UL * 1024 * 1024,
+            displayLabel: "Face models (YuNet + SFace)",
+            approxBytes: 39UL * 1024 * 1024,
             installAction: () => PrewarmAsync("arcface_default"));
         RamPlus = new ModelSlot(
             displayLabel: "RAM++ image tagger",

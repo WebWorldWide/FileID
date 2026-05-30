@@ -7,7 +7,7 @@
 //!   v1_core_tables, v2_clip_embeddings, v3_deep_analyze,
 //!   v4_face_verifications, v5_person_naming_structured,
 //!   v6_arcface_embeddings, v7_identity_anchors, v8_content_identity,
-//!   v9_usn_state, v10_doc_text, v11_text_embeddings
+//!   v9_usn_state, v10_doc_text, v11_text_embeddings, v12_face_model_reset
 //!
 //! Migrations are append-only. NEVER edit a registered migration once
 //! committed; add a new vN+1 migration instead.
@@ -36,8 +36,23 @@ fn registry() -> Vec<(&'static str, &'static str)> {
         ("v9_usn_state",                V9_USN_STATE),
         ("v10_doc_text",                V10_DOC_TEXT),
         ("v11_text_embeddings",         V11_TEXT_EMBEDDINGS),
+        ("v12_face_model_reset",        V12_FACE_MODEL_RESET),
     ]
 }
+
+/// v12: commercial-clean face-model swap (ArcFace 512-d → SFace 128-d). The
+/// stored face embeddings are a different model AND dimension, so mixing them in
+/// a clustering run is invalid. The user chose a clean reset over name-preserving
+/// re-attach: wipe the face graph (verifications + prints + persons); the next
+/// scan re-detects (YuNet), re-embeds (SFace), and re-clusters from scratch.
+/// File/image rows are untouched. Children deleted before parents (FK-safe).
+/// NOTE: macOS must register an identical `v12_face_model_reset` identifier with
+/// equivalent SQL for cross-platform DB parity.
+const V12_FACE_MODEL_RESET: &str = "
+DELETE FROM face_verifications;
+DELETE FROM face_prints;
+DELETE FROM persons;
+";
 
 /// Apply every registered migration that hasn't been applied yet, in
 /// registration order, each in its own transaction.
@@ -302,11 +317,11 @@ mod tests {
         }
         apply(&conn).expect("migrations apply");
 
-        // grdb_migrations has 11 rows.
+        // grdb_migrations has 12 rows.
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 11, "expected 11 applied migrations");
+        assert_eq!(n, 12, "expected 12 applied migrations");
 
         // Spot-check schema cardinals: files has 23 columns including v3
         // additions (vlm_*) and v8 additions (content_hash, file_ref);
@@ -357,7 +372,7 @@ mod tests {
         apply(&conn).unwrap();
         apply(&conn).unwrap(); // second run is a no-op
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 11);
+        assert_eq!(n, 12);
     }
 
     /// V10 added the `doc_text` + `doc_fts` (FTS5) pair, mirroring `ocr_text`

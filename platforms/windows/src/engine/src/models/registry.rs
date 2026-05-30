@@ -66,31 +66,31 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
         // ("arcface_default" is what `WelcomeSheet` sends today;
         // `arcface_iresnet50` / `arcface_mobileface` are reserved for
         // future per-architecture choice in Settings).
-        "arcface" | "arcface_default" | "arcface_iresnet50" | "arcface_mobileface" | "arcface_scrfd" => {
-            let arcface_dir = models_root.join("arcface");
-            let scrfd_dir = models_root.join("scrfd");
+        // Commercial-clean faces: YuNet detection (MIT) + SFace recognition
+        // (Apache-2.0, 128-d) from OpenCV Zoo's official HF mirrors — replacing
+        // the non-commercial InsightFace Buffalo-L (SCRFD + ArcFace). The
+        // model_kind aliases + id "arcface" are kept so the C# install slot,
+        // sentinel, and pre-scan gate are unchanged (Approach A).
+        "arcface" | "arcface_default" | "arcface_iresnet50" | "arcface_mobileface" | "arcface_scrfd" | "yunet_sface" => {
+            let yunet_dir = models_root.join("yunet");
+            let sface_dir = models_root.join("sface");
             LookupResult::Found(Model {
                 id: "arcface",
-                display_name: "Face recognition",
+                display_name: "Face detection + recognition",
                 files: vec![
-                    // Immich's Buffalo-L repo lives under per-task subdirs
-                    // (recognition/, detection/) with each subdir's ONNX
-                    // named `model.onnx`. The remote path differs from the
-                    // local filename — keep the local filenames the
-                    // tagging stack expects.
                     FileEntry {
-                        url: "https://huggingface.co/immich-app/buffalo_l/resolve/main/recognition/model.onnx"
+                        url: "https://huggingface.co/opencv/face_detection_yunet/resolve/main/face_detection_yunet_2023mar.onnx"
                             .to_string(),
-                        dest: arcface_dir.join("w600k_r50.onnx"),
+                        dest: yunet_dir.join("face_detection_yunet_2023mar.onnx"),
                         sha256: None,
-                        approx_bytes: 174_383_860,
+                        approx_bytes: 232_589,
                     },
                     FileEntry {
-                        url: "https://huggingface.co/immich-app/buffalo_l/resolve/main/detection/model.onnx"
+                        url: "https://huggingface.co/opencv/face_recognition_sface/resolve/main/face_recognition_sface_2021dec.onnx"
                             .to_string(),
-                        dest: scrfd_dir.join("scrfd_10g_bnkps.onnx"),
+                        dest: sface_dir.join("face_recognition_sface_2021dec.onnx"),
                         sha256: None,
-                        approx_bytes: 16_923_827,
+                        approx_bytes: 38_696_353,
                     },
                 ],
             })

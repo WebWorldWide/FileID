@@ -14,13 +14,16 @@
 
 use std::collections::HashMap;
 
-/// Cosine threshold for "definitely same person". High enough that false
-/// positives are vanishingly rare on ArcFace's 512-d unit hypersphere.
-pub const COS_HIGH: f32 = 0.70;
+/// Cosine threshold for "definitely same person". Tuned for SFace's 128-d
+/// embeddings — OpenCV's published same-identity cosine for SFace is 0.363, so
+/// genuine pairs sit lower than ArcFace's old 512-d distribution. PROVISIONAL:
+/// anchored on the OpenCV reference; calibrate against a labeled library.
+pub const COS_HIGH: f32 = 0.50;
 
-/// Cosine threshold for "definitely different person". The 0.45..=0.70
-/// band is the uncertain range that routes through VLM verification.
-pub const COS_LOW: f32 = 0.45;
+/// Cosine threshold for "definitely different person". The 0.32..=0.50 band is
+/// the uncertain range that routes through VLM verification. SFace default
+/// (provisional — calibrate with labeled faces).
+pub const COS_LOW: f32 = 0.32;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -233,9 +236,9 @@ mod tests {
 
     #[test]
     fn uncertain_band_pairs_collected() {
-        // ~0.55 cosine via small angle.
+        // ~0.40 cosine — inside the SFace uncertain band (COS_LOW..COS_HIGH).
         let a = unit(&[1.0, 0.0]);
-        let b = unit(&[0.55, 0.835]); // dot ≈ 0.55
+        let b = unit(&[0.40, 0.9165]); // dot ≈ 0.40
         let faces = vec![row(1, 1, a, 0.9), row(2, 2, b, 0.9)];
         let pairs = uncertain_pairs(&faces);
         assert_eq!(pairs.len(), 1);
