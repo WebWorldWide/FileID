@@ -1001,6 +1001,16 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         dialog.Resources["ContentDialogMaxHeight"] = 1100.0;
         sheet.RequestClose += (_, _) => { try { dialog.Hide(); } catch { /* swallow */ } };
 
+        // The ContentDialog — not the sheet — owns keyboard focus once shown, so
+        // the sheet's own PreviewKeyDown never fires (arrow keys + Space were
+        // dead). Intercept on the dialog's tunneling Preview pass: handledEventsToo
+        // so the XY-focus engine can't swallow the arrows first, and tunneling
+        // reaches the dialog (an ancestor) BEFORE a focused Button consumes Space.
+        dialog.AddHandler(
+            Microsoft.UI.Xaml.UIElement.PreviewKeyDownEvent,
+            new Microsoft.UI.Xaml.Input.KeyEventHandler((_, ev) => sheet.HandleKeyDown(ev)),
+            handledEventsToo: true);
+
         try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
     }
 

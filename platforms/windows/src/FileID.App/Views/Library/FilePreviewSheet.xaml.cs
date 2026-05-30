@@ -91,30 +91,63 @@ public sealed partial class FilePreviewSheet : UserControl
     }
 
     private void OnPreviewKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+        => HandleKeyDown(e);
+
+    /// <summary>Arrow-key sibling nav + Space play/pause + Esc close. Public
+    /// because the host wires it on the ContentDialog via
+    /// AddHandler(PreviewKeyDownEvent, …, handledEventsToo:true): once the
+    /// dialog is shown IT owns keyboard focus (not this UserControl), so the
+    /// sheet's own PreviewKeyDown never fires. The dialog is an ancestor of the
+    /// focused element, so its tunneling Preview pass reaches us BEFORE a focused
+    /// Button consumes Space — letting us intercept it for play/pause.</summary>
+    internal void HandleKeyDown(Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
     {
-        // While typing in the tag box, let Left/Right move the text cursor.
-        if (e.Key is Windows.System.VirtualKey.Left or Windows.System.VirtualKey.Right)
-        {
-            var focused = XamlRoot is null
-                ? null
-                : Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(XamlRoot);
-            if (focused is TextBox) return;
-        }
+        if (e.Handled) return;
+        // While typing in the tag box, let Left/Right/Space act as text input.
+        var focused = XamlRoot is null
+            ? null
+            : Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(XamlRoot);
+        bool typing = focused is TextBox;
         switch (e.Key)
         {
             case Windows.System.VirtualKey.Left:
+                if (typing) return;
                 NavigateSibling(-1);
                 e.Handled = true;
                 break;
             case Windows.System.VirtualKey.Right:
+                if (typing) return;
                 NavigateSibling(+1);
                 e.Handled = true;
+                break;
+            case Windows.System.VirtualKey.Space:
+                // Space starts/pauses video+audio (the file loads paused —
+                // AutoPlay=False). Only when a media surface is up; otherwise let
+                // Space fall through (e.g. activating a focused button).
+                if (typing) return;
+                if (TryTogglePlayback()) e.Handled = true;
                 break;
             case Windows.System.VirtualKey.Escape:
                 RaiseClose();
                 e.Handled = true;
                 break;
         }
+    }
+
+    /// <summary>Toggle the MediaPlayerElement between play and pause. Returns
+    /// false when no media surface is active (caller lets the key pass through).
+    /// The MediaPlayer is created lazily when Source is set, so it exists by the
+    /// time a video/audio preview is visible.</summary>
+    private bool TryTogglePlayback()
+    {
+        if (PreviewMedia.Visibility != Visibility.Visible) return false;
+        var mp = PreviewMedia.MediaPlayer;
+        if (mp is null) return false;
+        if (mp.PlaybackSession.PlaybackState == Windows.Media.Playback.MediaPlaybackState.Playing)
+            mp.Pause();
+        else
+            mp.Play();
+        return true;
     }
 
     private void OnPrevClicked(object sender, RoutedEventArgs e) => NavigateSibling(-1);

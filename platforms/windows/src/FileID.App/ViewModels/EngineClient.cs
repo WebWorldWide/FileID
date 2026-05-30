@@ -869,14 +869,27 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         _failureWindowStart = DateTime.MinValue;
                         break;
                     case ProgressEvent p:
-                        // Throttle to 10 Hz. The engine emits a Progress per
-                        // discovery/tagging batch; on a fast scan that's 100+
-                        // events/s, each rebuilding the sidebar progress bar +
-                        // labels via x:Bind. 10 Hz is plenty for human
-                        // perception and keeps the UI thread idle. The phase
-                        // transition itself (Discovering → Tagging → Completed)
-                        // is captured by PhaseChangedEvent which is NOT
-                        // throttled — it fires once per phase boundary.
+                        // Discovery + tagging emit ProgressEvents CONCURRENTLY
+                        // during the pipeline overlap (discovery still walking
+                        // while tagging workers consume). A late Discovering event
+                        // carries processed=0, eta=None, fps=0 and its own memory
+                        // reading; letting it replace LastProgress after Tagging
+                        // started made the sidebar's Tagged / ETA / Memory flicker
+                        // (N→0→N, real→"computing"→real, two RSS readings
+                        // alternating). Gate the WHOLE event on a monotonic phase
+                        // rank: drop any ProgressEvent whose phase is below the
+                        // latch, so LastProgress only ever holds one phase's stats
+                        // at a time. Tagging events carry the LIVE discovered count
+                        // (scan_session.rs), so "Discovered" keeps climbing from
+                        // them through the overlap. Equal-or-higher rank advances
+                        // the latch; the authoritative PhaseChangedEvent below also
+                        // syncs it.
+                        var progRank = PhaseRank(p.Progress.Phase);
+                        if (progRank < _shownPhaseRank) break;
+                        _shownPhaseRank = progRank;
+                        // Throttle the heavy LastProgress-bound sidebar repaint to
+                        // 10 Hz; a phase boundary bypasses the throttle so the
+                        // Discovering→Tagging stat handoff is immediate (no blip).
                         var nowProg = DateTime.UtcNow;
                         if (nowProg - _lastProgressEmit >= ProgressThrottle
                             || p.Progress.Phase != _lastProgressPhase)
@@ -885,17 +898,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                             _lastProgressEmit = nowProg;
                             _lastProgressPhase = p.Progress.Phase;
                         }
-                        // Monotonic clamp: discovery + tagging ProgressEvents
-                        // interleave, so only let the displayed phase advance,
-                        // never regress, within a scan. Stops the sidebar phase
-                        // label/icon/dot flickering Discovering<->Tagging.
-                        // (PhaseChangedEvent below is authoritative.)
-                        var progRank = PhaseRank(p.Progress.Phase);
-                        if (progRank >= _shownPhaseRank)
-                        {
-                            _shownPhaseRank = progRank;
-                            Phase = p.Progress.Phase;
-                        }
+                        Phase = p.Progress.Phase;
                         break;
                     case PhaseChangedEvent pc:
                         Phase = pc.Phase;
