@@ -8,6 +8,37 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-05-30 (later 4) — Processing-stat flicker + preview arrow/Space keys (Windows runtime bugs)
+
+Three bugs the user hit in the running WinUI app:
+
+- **Tagged / Memory / ETA erratic during a scan — FIXED.** The earlier "later 2" fix
+  clamped only the phase *label*; the *stats* still flickered. Root cause: the engine
+  emits `ScanProgress` from TWO concurrent sources during the discovery↔tagging pipeline
+  overlap — the discovery ticker (`scan_session.rs:240`: processed=0, eta=None, fps=0,
+  its own RSS read) and the tagging emitter (`:400`: live processed/eta/fps). `EngineClient.Apply`
+  replaced `LastProgress` wholesale on each, so the sidebar bounced N→0→N / real→"computing"→real
+  / two RSS readings. Fix: gate the WHOLE `ProgressEvent` on the monotonic phase rank —
+  drop any event whose phase is below the latch, so `LastProgress` only holds one phase's
+  stats at a time. Tagging events carry the LIVE `discovered` count (`scan_session.rs:404`),
+  so "Discovered" keeps climbing through the overlap.
+- **Arrow keys dead on the preview sheet — FIXED.** The sheet is hosted in a `ContentDialog`,
+  which owns keyboard focus once shown, so the sheet's own `PreviewKeyDown` never fired.
+  Fix: the host wires the handler on the DIALOG via `AddHandler(PreviewKeyDownEvent, …,
+  handledEventsToo:true)` — tunneling reaches the dialog (ancestor of the focused element)
+  before focus-nav or a focused button can eat the key.
+- **Space starts/pauses video+audio — ADDED.** Files load paused (`AutoPlay=False`); Space
+  now toggles `PreviewMedia.MediaPlayer` play/pause via the same handler (guarded so typing
+  in the tag box still types a space).
+- **macOS lockstep: nothing to port — verified, not assumed.** The macOS engine has exactly
+  ONE `ScanProgress` construction site (`FileIDEngineMain.swift:606 emitProgress()`) built
+  from a single `cur` session snapshot, so the Windows dual-emitter race structurally can't
+  occur there. The arrow/Space fixes are WinUI-`ContentDialog`-focus-specific (SwiftUI has no
+  analog). All three fixes are legitimately Windows-only.
+- **Verified headless:** `dotnet build` x64 0/0, `dotnet format --verify-no-changes` 0,
+  IpcSchema 34/34, App.Tests 102/102. (Live-GUI confirmation — flicker gone, keys live — is
+  the user's to eyeball; the headless engine path can't drive the renderer.)
+
 ## 2026-05-30 (later 3) — On-hardware verify + macOS lockstep + RAM++ lock-in + consolidate to main (CI GREEN)
 
 **Final: all three GitHub CI workflows green on `main`@784cc7b** — Windows engine ✓,
