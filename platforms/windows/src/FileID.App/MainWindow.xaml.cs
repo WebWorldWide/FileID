@@ -506,6 +506,12 @@ public sealed partial class MainWindow : Window
 
     private void ApplySidebarVisibility()
     {
+        // Guard the ctor-time call + any post-teardown PropertyChanged: the
+        // named elements are only live between InitializeComponent and Close.
+        if (SidebarColumn is null || SidebarHost is null || SidebarToggleButton is null)
+        {
+            return;
+        }
         var visible = AppViewModel.Instance.SidebarVisible;
         if (visible)
         {

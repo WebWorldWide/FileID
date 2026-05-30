@@ -93,20 +93,20 @@ Detailed instructions: [Build from source](#build-from-source).
 
 | Tab | What it does |
 | --- | --- |
-| **Library** | FTS5 search over filenames + OCR. Semantic CLIP search ("a dog at the beach"). Thumbnail grid + preview sheet. |
-| **People** | Face clusters from ArcFace embeddings. Drag to merge. Name a cluster once and Deep Analyze captions use real names. |
+| **Library** | FTS5 search over filenames + OCR. Semantic CLIP search ("a dog at the beach"). RAM++ auto-tags every image with specific labels. Thumbnail grid + preview sheet. |
+| **People** | Face clusters from on-device SFace embeddings. Drag to merge. Name a cluster once and Deep Analyze captions use real names. |
 | **Cleanup** | Duplicate groups by perceptual hash. Trashed files stay recoverable. |
-| **Deep Analyze** | Local vision-language model (Qwen 2.5-VL · Gemma 3 · MiniCPM-V) writes a caption + smart filename per image, PDF, video keyframe, or doc thumbnail. |
+| **Deep Analyze** | Local vision-language model (Qwen2.5-VL 7B · Gemma 3 · Mistral-Small-3.2) writes a caption + smart filename per image, PDF, video keyframe, or doc thumbnail. |
 | **Restructure** | Folder reorganization with a Sankey flow diagram. Apply as shortcuts (reversible), then convert to real moves when you're happy. |
 | **Settings** | Model downloads, GPU acceleration picker, engine info, logs, privacy. |
 
 ### Platform status
 
-macOS is the canonical reference and ships every tab end-to-end. The Windows port is feature-complete on the six tabs (Library / People / Cleanup / Deep Analyze / Restructure / Settings) and the first-run Welcome sheet — engine + IPC schema + scan pipeline + UI all wired. Release build is warning-free across both Rust and .NET; on-hardware GPU verification is ongoing. Database migrations v1–v7 are byte-faithful with macOS GRDB, so a library scanned on one platform opens on the other. Linux is deferred to Phase 5 — the Rust engine builds standalone today, but the UI port (Avalonia or GTK4) hasn't started. See `shared/docs/SHIP.md` for the per-phase breakdown.
+macOS is the canonical reference and ships every tab end-to-end. The Windows port is feature-complete on the six tabs (Library / People / Cleanup / Deep Analyze / Restructure / Settings) and the first-run Welcome sheet — engine + IPC schema + scan pipeline + UI all wired. Release build is warning-free across both Rust and .NET; on-hardware GPU verification is ongoing. Database migrations v1–v12 are byte-faithful with macOS GRDB, so a library scanned on one platform opens on the other. Every default model is permissively licensed (Apache-2.0 / MIT) — the project is commercial-clean. Linux is deferred to Phase 5 — the Rust engine builds standalone today, but the UI port (Avalonia or GTK4) hasn't started. See `shared/docs/SHIP.md` for the per-phase breakdown.
 
 ### First launch
 
-On first launch the **Welcome sheet** offers to install the on-device models: MobileCLIP-S2 (~210 MB, semantic search), ArcFace + SCRFD (~190 MB, face clustering), and a VLM for Deep Analyze (Qwen 2.5-VL 3B ~3 GB recommended, or pick a smaller one). Each model downloads directly from its upstream HuggingFace repo — FileID never redistributes weights. You can defer with "Skip for now" and install later from Settings → AI Models.
+On first launch the **Welcome sheet** offers to install the on-device models: RAM++ (~882 MB, the image auto-tagger), CLIP ViT-B/32 (~335 MB, semantic search), YuNet + SFace (~39 MB, face detection + clustering), and a VLM for Deep Analyze (Qwen2.5-VL 7B recommended). Every default model is permissively licensed (Apache-2.0 / MIT) and downloads directly from its upstream HuggingFace repo — FileID never redistributes weights. You can defer with "Skip for now" and install later from Settings → AI Models.
 
 ---
 
@@ -336,14 +336,17 @@ DirectML covers every Windows GPU vendor in one shipped backend. Performance Pac
 
 ### ML stack
 
+All default weights are permissively licensed (Apache-2.0 / MIT). The Windows column is live; macOS is adopting the same stack (rows marked *lockstep pending* — see [`shared/docs/MODELS.md`](shared/docs/MODELS.md)).
+
 | Capability | macOS | Windows |
 | --- | --- | --- |
-| Image embedding | MobileCLIP-S2 (CoreML) | MobileCLIP-S2 (ONNX, byte-compatible embeddings — DBs migrate cleanly) |
-| Text embedding | OpenAI CLIP text (CoreML) | OpenAI CLIP text (ONNX) + BPE tokenizer port |
-| Face detect | Vision (`VNDetectFaceRectangles`) | SCRFD (Buffalo bundle ONNX) |
-| Face embed | ArcFace (CoreML EP) | ArcFace (DirectML/CUDA EP) |
+| Image tagging | RAM++ *(lockstep pending)* | **RAM++ Swin-L @384** (ONNX, Apache-2.0) — 4585-tag auto-tagger |
+| Image embedding | CLIP ViT-B/32 *(lockstep pending)* | **CLIP ViT-B/32** (ONNX, MIT) — 512-d, byte-compatible |
+| Text embedding | OpenAI CLIP text | OpenAI CLIP text (ONNX) + BPE tokenizer port |
+| Face detect | Vision (`VNDetectFaceRectangles`) | **YuNet** (ONNX, MIT) |
+| Face embed | SFace *(lockstep pending)* | **SFace** (ONNX, Apache-2.0, DirectML/CUDA EP) — 128-d |
 | OCR | `VNRecognizeText` | `Windows.Media.Ocr` (built-in WinRT) |
-| VLM (Deep Analyze) | MLX (Qwen, Gemma, PaliGemma) | llama.cpp + GGUF (Vulkan/CUDA/DirectML/CPU backends) |
+| VLM (Deep Analyze) | MLX (Qwen 7B · Gemma) | llama.cpp + GGUF — Qwen2.5-VL 7B · Gemma 3 · Mistral-Small-3.2 |
 | PDF | PDFKit | pdfium-render |
 | Video frame | AVAssetImageGenerator | Media Foundation `IMFSourceReader` |
 
@@ -355,7 +358,7 @@ Three GitHub Actions workflows run on every push + PR. All three must stay green
 
 | Workflow | What it runs | Matrix |
 | --- | --- | --- |
-| [`windows-engine.yml`](.github/workflows/windows-engine.yml) | `cargo fmt`, functional-only clippy, `cargo audit`, `cargo build --release`, `cargo test`, startup smoke (engine emits `ready` + executes a `verifyCudaPack` reprobe), telemetry-string privacy gate | x64 (`windows-latest`) · arm64-native (`windows-11-arm`) · arm64-cross |
+| [`windows-engine.yml`](.github/workflows/windows-engine.yml) | `cargo fmt`, `clippy --all-targets -D warnings`, `cargo deny` (license + advisory), source-URL allowlist scan, `cargo build --release`, `cargo test`, startup smoke (engine emits `ready` + executes a `verifyCudaPack` reprobe), telemetry-string privacy gate | x64 (`windows-latest`) · arm64-native (`windows-11-arm`) · arm64-cross |
 | [`windows-app.yml`](.github/workflows/windows-app.yml) | NuGet restore (locked), `dotnet build` Debug + Release for the WinUI 3 app, IpcSchema xUnit tests | x64 + arm64 (`windows-latest`) |
 | [`macos.yml`](.github/workflows/macos.yml) | SwiftPM resolve + cache, `swift build -c release` for engine + app, `swift test` (Shared + Engine tests), binary smoke, telemetry-string privacy gate | `macos-15` |
 
@@ -422,7 +425,7 @@ Cross-platform principles live in the root [`CLAUDE.md`](CLAUDE.md).
 
 ## License
 
-TBD. App code is yours to keep / re-license. Model weights remain governed by their upstream licenses.
+**Apache-2.0** — see [`LICENSE`](LICENSE). Every default model weight is permissively licensed (Apache-2.0 / MIT), so the project is free to be open-sourced *and* commercialized — no non-commercial weights in the shipped feature set. FileID downloads model weights at runtime and never redistributes them; they remain governed by their upstream licenses.
 
 ---
 

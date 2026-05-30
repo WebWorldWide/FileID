@@ -40,6 +40,17 @@ const DEFAULT_THRESHOLD: f32 = 0.68;
 /// combined per-file set (content tags are pushed first, then the extras).
 const DEFAULT_MAX_TAGS: usize = 12;
 
+/// RAM++ vocab tags that describe the medium rather than the content — the file
+/// already *is* a photo, and faces are surfaced by the People tab — so they read
+/// as noise on a Library card. Filtered from the emitted set; the underlying
+/// signals still live in their own columns (`has_faces`, file kind).
+const SUPPRESSED_TAGS: &[&str] =
+    &["image", "photo", "photograph", "photography", "picture", "face"];
+
+fn is_suppressed(tag: &str) -> bool {
+    SUPPRESSED_TAGS.contains(&tag)
+}
+
 pub struct RamPlusTagger {
     session: Session,
     /// Index-aligned with the model's logits; `tags[i]` is the label for output i.
@@ -197,6 +208,9 @@ impl RamPlusTagger {
             .iter()
             .enumerate()
             .filter_map(|(i, &z)| {
+                if is_suppressed(&self.tags[i]) {
+                    return None;
+                }
                 let p = sigmoid(z);
                 let cut = self
                     .per_class_threshold
@@ -273,5 +287,17 @@ mod tests {
         assert!(sigmoid(-10.0) < 0.01);
         assert!((sigmoid(0.0) - 0.5).abs() < 1e-6);
         assert!(sigmoid(10.0) > 0.99);
+    }
+
+    #[test]
+    fn generic_medium_tags_are_suppressed() {
+        // Image-medium words + the People-redundant "face" are filtered; real
+        // content tags pass through.
+        assert!(is_suppressed("photo"));
+        assert!(is_suppressed("image"));
+        assert!(is_suppressed("face"));
+        assert!(!is_suppressed("graduation"));
+        assert!(!is_suppressed("mountain"));
+        assert!(!is_suppressed("person"));
     }
 }

@@ -562,20 +562,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
         return acc;
     }
 
-    // Legacy per-element loop kept for reference / debugging. Not used.
-    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1859", Justification = "Reference impl")]
-    private static float DotProductScalar(float[] q, byte[] blob)
-    {
-        if (blob.Length != q.Length * 4) return 0f;
-        float acc = 0f;
-        for (int i = 0; i < q.Length; i++)
-        {
-            float v = BitConverter.ToSingle(blob, i * 4);
-            acc += q[i] * v;
-        }
-        return acc;
-    }
-
     public ValueTask DisposeAsync()
     {
         Dispose();

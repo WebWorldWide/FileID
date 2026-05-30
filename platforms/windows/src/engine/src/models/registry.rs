@@ -480,3 +480,60 @@ pub fn sentinel_path(model: &Model) -> Option<PathBuf> {
     let root = paths::models_dir().ok()?;
     Some(root.join(".sentinels").join(format!("{}.installed", model.id)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every artifact URL must be on huggingface.co — the engine's only egress
+    /// (the privacy posture CI's source-URL allowlist also enforces). Only
+    /// asserts on kinds that resolve, so guessing a wrong kind here can't
+    /// false-fail.
+    #[test]
+    fn all_model_urls_are_huggingface() {
+        let kinds = [
+            "ram_plus", "mobileclip_s2", "clip_text", "bge_text", "arcface",
+            "florence2", "qwen2_5_vl_7b", "gemma_3_4b", "mistral_small_3_2",
+        ];
+        for kind in kinds {
+            if let LookupResult::Found(m) = lookup_full(kind) {
+                for f in &m.files {
+                    assert!(
+                        f.url.starts_with("https://huggingface.co/"),
+                        "{kind} URL not on huggingface.co: {}",
+                        f.url
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn face_aliases_resolve_to_one_model() {
+        for alias in ["arcface", "arcface_default", "yunet_sface"] {
+            match lookup_full(alias) {
+                LookupResult::Found(m) => assert_eq!(m.id, "arcface", "alias {alias}"),
+                LookupResult::Unknown => panic!("face alias {alias} did not resolve"),
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_kind_is_unknown() {
+        assert!(matches!(
+            lookup_full("definitely_not_a_model_kind"),
+            LookupResult::Unknown
+        ));
+    }
+
+    #[test]
+    fn sentinel_path_lives_under_sentinels_dir() {
+        if let LookupResult::Found(m) = lookup_full("ram_plus") {
+            if let Some(p) = sentinel_path(&m) {
+                let s = p.to_string_lossy();
+                assert!(s.contains(".sentinels"), "sentinel not under .sentinels: {s}");
+                assert!(s.ends_with("ram_plus.installed"), "unexpected sentinel: {s}");
+            }
+        }
+    }
+}
