@@ -50,17 +50,18 @@ Likely first errors to iterate on:
    Until wired, faces use bbox-resize, which won't match the Windows-aligned
    embeddings the cluster thresholds were calibrated against.
 
-2. **CLIP MobileCLIP-S2 → OpenAI ViT-B/32 (both 512-d).** `MobileCLIPService` +
-   `CLIPTextEncoder` are native CoreML today. Cleanest lockstep = reuse Windows'
-   exact ONNX via ONNX Runtime (macOS already links `OnnxRuntimeBindings` — copy
-   `ArcFaceService`'s `ORTEnv`/`ORTSession` load pattern). Image encoder: 224×224,
-   CLIP mean/std normalization (match `windows/.../models/mobileclip.rs`). Text
-   encoder: `input_ids` only; the OpenAI BPE tokenizer is already present.
-   `CLIPModelInstaller` URLs → `huggingface.co/Xenova/clip-vit-base-patch32`
-   `onnx/{vision_model,text_model}.onnx`. 512-d → **no `clip_embeddings` schema
-   change.** macOS computes the query-time text embedding live (no precomputed
-   scene matrix), so nothing to regenerate. **This swap is required for macOS to
-   be commercial-clean — MobileCLIP-S2 weights are research-only.**
+2. **CLIP → ViT-B/32 — DONE (commit `8aef43d`).** `MobileCLIPService` +
+   `CLIPTextEncoder` now load the OpenCLIP ViT-B/32 ONNX via ORT (image 224×224
+   CLIP mean/std; text `input_ids` int64 [1,77] zero-padded — matches
+   `windows/.../clip_text.rs`); `onnxruntime` added to the app target; installer
+   + Settings/Welcome UI updated; 512-d so no `clip_embeddings` schema change.
+   **With faces + CLIP + VLM done, macOS ships zero research-only models —
+   commercial-clean achieved.** Build-iterate spots: the ORT
+   `ORTSessionOptions`/`appendCoreMLExecutionProvider` API surface, the ViT-B/32
+   input/output tensor names, and that `CLIPTokenizer` emits the same
+   BOS/EOS-wrapped tokens as the Windows `clip_tokenizer`. Also update/remove the
+   now-superseded offline scripts (`scripts/install_clip_models.sh`,
+   `scripts/build_clip_text_encoder.py`).
 
 3. **RAM++ primary tagger.** New `RamPlusService.swift` mirroring
    `ArcFaceService`'s ORT pattern: load `ram_plus.onnx` (384×384, ImageNet
