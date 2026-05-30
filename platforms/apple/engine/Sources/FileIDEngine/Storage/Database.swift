@@ -323,6 +323,18 @@ public final class Database: @unchecked Sendable {
                 """)
         }
 
+        // v12: face-model reset for the commercial-clean swap. SFace (128-d)
+        // replaces ArcFace (512-d); the old `arcface_embedding` blobs are
+        // dimensionally incomparable, so wipe all face state and let the next
+        // scan re-detect + re-embed with SFace. Child→parent delete order keeps
+        // the face_prints.person_id FK happy. Mirrors the Windows
+        // "v12_face_model_reset" migration so both platforms reset in lockstep.
+        m.registerMigration("v12_face_model_reset") { db in
+            try db.execute(sql: "DELETE FROM face_verifications")
+            try db.execute(sql: "DELETE FROM face_prints")
+            try db.execute(sql: "DELETE FROM persons")
+        }
+
         return m
     }
 
