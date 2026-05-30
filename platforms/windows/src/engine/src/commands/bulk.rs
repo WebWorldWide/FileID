@@ -512,11 +512,7 @@ pub(crate) async fn handle_find_merge_suggestions(
                 .collect()
         };
         let cos = |a: &[f32], b: &[f32]| -> f32 {
-            let mut acc = 0.0;
-            for i in 0..a.len().min(b.len()) {
-                acc += a[i] * b[i];
-            }
-            acc
+            a.iter().zip(b).map(|(x, y)| x * y).sum()
         };
 
         let mut verified_different: std::collections::HashSet<(i64, i64)> =

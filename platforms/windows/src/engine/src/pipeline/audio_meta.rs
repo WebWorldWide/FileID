@@ -123,10 +123,10 @@ fn push_metadata(out: &mut Vec<(String, Option<f32>)>, rev: &symphonia::core::me
             continue;
         }
         let label = match tag.std_key {
-            Some(StandardTagKey::Artist | StandardTagKey::AlbumArtist) => value,
-            Some(StandardTagKey::Album) => value,
-            Some(StandardTagKey::TrackTitle) => value,
-            Some(StandardTagKey::Genre) => value,
+            Some(
+                StandardTagKey::Artist | StandardTagKey::AlbumArtist | StandardTagKey::Album
+                | StandardTagKey::TrackTitle | StandardTagKey::Genre,
+            ) => value,
             Some(StandardTagKey::Date | StandardTagKey::OriginalDate) => {
                 // Keep only the year (first 4 digits) so different date formats
                 // collapse to a single tag (mm/dd/yyyy, yyyy-mm-dd, yyyy).

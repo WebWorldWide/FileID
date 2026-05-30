@@ -495,16 +495,11 @@ fn sanitize_proposed_name(raw: &str) -> String {
     let lowered = trimmed.to_lowercase();
     let cleaned: String = lowered
         .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c
-            } else if c == '-' || c == '_' {
-                c
-            } else if c.is_whitespace() {
-                '-'
-            } else {
-                ' '
-            }
+        .map(|c| match c {
+            c if c.is_ascii_alphanumeric() => c,
+            '-' | '_' => c,
+            c if c.is_whitespace() => '-',
+            _ => ' ',
         })
         .collect();
     let collapsed = cleaned

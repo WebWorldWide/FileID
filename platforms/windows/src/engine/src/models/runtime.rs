@@ -383,12 +383,7 @@ fn has_any_dll(dir: &PathBuf) -> bool {
     std::fs::read_dir(dir)
         .map(|rd| {
             rd.flatten().any(|entry| {
-                entry
-                    .path()
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.eq_ignore_ascii_case("dll"))
-                    .unwrap_or(false)
+                entry.path().extension().is_some_and(|s| s.eq_ignore_ascii_case("dll"))
             })
         })
         .unwrap_or(false)

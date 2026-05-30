@@ -1060,9 +1060,7 @@ async fn process_file_predecoded(
     // Audio metadata (Phase 5): artist/album/title/genre/year, surfaced as
     // tag chips so the user can filter their library by these facts. Each
     // tag carries score=None — these are facts, not model probabilities.
-    for (label, score) in audio_tags {
-        tagged.tags.push((label, score));
-    }
+    tagged.tags.extend(audio_tags);
 
     // SEC/perf: once the GPU is marked dead (TDR or device-removed),
     // skip the whole ML pipeline for the rest of this process lifetime.
