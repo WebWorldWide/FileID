@@ -12,3 +12,4 @@ pub(crate) mod restructure;
 pub(crate) mod scan;
 pub(crate) mod trash;
 pub(crate) mod trash_log;
+pub(crate) mod wipe;

@@ -152,6 +152,13 @@ pub enum CommandPayload {
     /// re-creates the source person row + reassigns the faces.
     #[serde(rename = "revertMerge")]
     RevertMerge(RevertMergePayload),
+
+    /// Wipe all learned library state (tags, faces, captions, embeddings)
+    /// in-process on the engine's writer connection, then reply `libraryWiped`.
+    /// The app uses this instead of deleting `fileid.sqlite` itself, which
+    /// races the OS file-lock the engine still holds just after process exit.
+    #[serde(rename = "wipeLibrary")]
+    WipeLibrary(Empty),
 }
 
 /// Empty object — `{}`. Serde encodes a unit struct as `null`, which is wrong;
@@ -449,6 +456,10 @@ pub enum EventPayload {
     /// details about why a negative probe came back negative.
     #[serde(rename = "hardwareReprobed")]
     HardwareReprobed(Wrap<HardwareReprobed>),
+
+    /// Reply to `wipeLibrary`: the engine truncated all user tables in-process.
+    #[serde(rename = "libraryWiped")]
+    LibraryWiped(Wrap<LibraryWiped>),
 }
 
 /// Wraps a single positional value in `{"_0": ...}` to match Swift Codable
@@ -834,6 +845,17 @@ pub struct BulkActionResult {
     pub succeeded: u32,
     pub failed: u32,
     pub messages: Vec<BulkActionItem>,
+}
+
+/// Reply to `wipeLibrary`. `ok` is true when every table was truncated; on
+/// failure `message` carries the error so the app can fall back to its own
+/// stop→delete→restart wipe path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryWiped {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

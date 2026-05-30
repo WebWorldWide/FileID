@@ -85,3 +85,63 @@ pub fn checkpoint_truncate(conn: &Connection) -> Result<()> {
     }
     Ok(())
 }
+
+/// Wipe every row of user data while keeping the schema + migration ledger
+/// intact. Runs on the engine's writer connection — the single owner of the
+/// DB handle — so "wipe library" never races the OS file-lock the way the app
+/// deleting `fileid.sqlite` right after the engine exits does.
+///
+/// Tables are discovered from `sqlite_master`, so a future migration that adds
+/// a table is wiped automatically (no hard-coded list to drift). FTS5 virtual
+/// tables are emptied with the `'delete-all'` command; their shadow tables are
+/// skipped (deleting from them directly corrupts the index). `grdb_migrations`
+/// is preserved so the schema version survives the wipe.
+pub fn wipe_all(conn: &Connection) -> Result<()> {
+    // FTS5 virtual tables (emptied via the special command, never row-by-row).
+    let virtual_tables: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT name FROM sqlite_master \
+             WHERE type='table' AND sql LIKE 'CREATE VIRTUAL TABLE%'",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+    // A plain table is an FTS5 shadow table when its name is `<vtab>_<suffix>`.
+    let is_shadow = |name: &str| virtual_tables.iter().any(|v| name.starts_with(&format!("{v}_")));
+    // Real data tables: CREATE TABLE, not sqlite internal, not the migration
+    // ledger, not an FTS shadow table.
+    let data_tables: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT name FROM sqlite_master \
+             WHERE type='table' AND sql LIKE 'CREATE TABLE%' \
+               AND name NOT LIKE 'sqlite_%' AND name <> 'grdb_migrations'",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.filter_map(|r| r.ok()).filter(|n| !is_shadow(n)).collect()
+    };
+
+    // FK off so DELETE order across parent/child tables is irrelevant (must be
+    // toggled outside a transaction; it's a no-op inside one).
+    conn.execute_batch("PRAGMA foreign_keys = OFF")?;
+    let tx = conn.unchecked_transaction()?;
+    for t in &data_tables {
+        tx.execute_batch(&format!("DELETE FROM \"{t}\""))
+            .with_context(|| format!("wiping table {t}"))?;
+    }
+    for v in &virtual_tables {
+        tx.execute_batch(&format!("INSERT INTO \"{v}\"(\"{v}\") VALUES('delete-all')"))
+            .with_context(|| format!("resetting FTS table {v}"))?;
+    }
+    // Reset AUTOINCREMENT so the next scan starts at id 1 again. Only present
+    // when an AUTOINCREMENT table exists (it does); guard anyway.
+    let _ = tx.execute_batch("DELETE FROM sqlite_sequence");
+    tx.commit().context("committing wipe")?;
+    conn.execute_batch("PRAGMA foreign_keys = ON")?;
+
+    // Shrink the on-disk file: collapse the WAL, then reclaim freed pages.
+    // Both best-effort — an ephemeral reader holding a lock makes VACUUM
+    // SQLITE_BUSY, which is harmless (space reclaims on a later run).
+    let _ = checkpoint_truncate(conn);
+    let _ = conn.execute_batch("VACUUM");
+    Ok(())
+}

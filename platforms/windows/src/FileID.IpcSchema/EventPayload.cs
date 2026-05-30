@@ -47,6 +47,7 @@ public sealed record MergeSuggestionsEvent(MergeSuggestions Suggestions) : Event
 /// fresh hardware probe + optional diagnostics text for the Settings →
 /// Performance "Verify install" affordance.</summary>
 public sealed record HardwareReprobedEvent(HardwareReprobed Result) : EventPayload;
+public sealed record LibraryWipedEvent(LibraryWiped Result) : EventPayload;
 
 public sealed class EventPayloadJsonConverter : JsonConverter<EventPayload>
 {
@@ -90,6 +91,7 @@ public sealed class EventPayloadJsonConverter : JsonConverter<EventPayload>
             "clipTextEmbedding" => new ClipTextEmbeddingEvent(ReadWrapped<ClipTextEmbedding>(ref reader, options)),
             "mergeSuggestions" => new MergeSuggestionsEvent(ReadWrapped<MergeSuggestions>(ref reader, options)),
             "hardwareReprobed" => new HardwareReprobedEvent(ReadWrapped<HardwareReprobed>(ref reader, options)),
+            "libraryWiped" => new LibraryWipedEvent(ReadWrapped<LibraryWiped>(ref reader, options)),
             _ => throw new JsonException($"EventPayload: unknown variant '{variant}'"),
         };
 
@@ -127,6 +129,7 @@ public sealed class EventPayloadJsonConverter : JsonConverter<EventPayload>
             case ClipTextEmbeddingEvent v: WriteWrapped(writer, "clipTextEmbedding", v.Embedding, options); break;
             case MergeSuggestionsEvent v: WriteWrapped(writer, "mergeSuggestions", v.Suggestions, options); break;
             case HardwareReprobedEvent v: WriteWrapped(writer, "hardwareReprobed", v.Result, options); break;
+            case LibraryWipedEvent v: WriteWrapped(writer, "libraryWiped", v.Result, options); break;
             default:
                 throw new JsonException($"EventPayload: unknown C# type {value.GetType().FullName}");
         }

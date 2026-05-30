@@ -92,14 +92,35 @@ pub(crate) async fn handle_prewarm_model(
         set: in_flight,
     };
 
+    // Distinguish "the engine can't resolve its models dir" (a storage/env
+    // misconfig that makes `lookup_full` return Unknown for EVERY kind) from a
+    // genuinely unregistered kind — otherwise the unknown-kind message below
+    // would mislead the user into thinking the model itself is the problem.
+    if let Err(err) = crate::paths::models_dir() {
+        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+            kind: "models_dir_unavailable".into(),
+            message: format!(
+                "FileID couldn't resolve its models folder, so '{model_kind}' \
+                 can't be installed: {err}. Check that the %LOCALAPPDATA% (or \
+                 %USERPROFILE%) environment variable is set."
+            ),
+            path: None,
+            model_kind: Some(model_kind.clone()),
+        }))))
+        .await;
+        tracing::warn!(model_kind = %model_kind, outcome = "models_dir_unavailable", "[PREWARM] exiting");
+        return;
+    }
+
     let model = match registry::lookup_full(&model_kind) {
         LookupResult::Found(m) => m,
         LookupResult::Unknown => {
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                 kind: "unknown_model".into(),
                 message: format!(
-                    "Model '{model_kind}' is not registered. \
-                     Add it to engine/src/models/registry.rs."
+                    "This FileID engine doesn't recognize the model '{model_kind}'. \
+                     The engine is most likely older than the app — reinstall or \
+                     rebuild FileID so the app and engine match, then try again."
                 ),
                 path: None,
                 model_kind: Some(model_kind.clone()),

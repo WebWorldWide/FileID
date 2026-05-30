@@ -188,6 +188,34 @@ public sealed partial class SidebarFolderHeader : UserControl
             DebugLog.Warn("[WIPE] ResetForWipe threw (non-fatal): " + ex.Message);
         }
 
+        // Preferred path: ask the running engine to wipe in-process. It owns
+        // the only SQLite handle, so truncating tables there can't hit the
+        // "file in use by another process" race the app-side delete did — no
+        // shutdown/restart. On success we go straight to a fresh rescan.
+        if (EngineClient.Instance.State == EngineClient.LifecycleState.Ready)
+        {
+            try
+            {
+                DebugLog.Info("[WIPE] engine-side wipeLibrary");
+                var wipeResult = await EngineClient.Instance.WipeLibraryAndWaitAsync(TimeSpan.FromSeconds(30));
+                if (wipeResult.Ok)
+                {
+                    DebugLog.Info("[WIPE] engine confirmed libraryWiped; rescanning");
+                    await TriggerRescanAsync();
+                    return;
+                }
+                DebugLog.Warn("[WIPE] engine wipe ok=false: " + (wipeResult.Message ?? "(no message)") + " — using fallback");
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn("[WIPE] engine-side wipe failed; using fallback: " + ex.Message);
+            }
+        }
+        else
+        {
+            DebugLog.Info($"[WIPE] engine not Ready (state={EngineClient.Instance.State}); using fallback wipe");
+        }
+
         DebugLog.Info("[WIPE] stage 2: shutdown engine");
         try
         {
@@ -270,6 +298,41 @@ public sealed partial class SidebarFolderHeader : UserControl
                 "If a scan still surfaces old data, close FileID, delete " +
                 "%LOCALAPPDATA%\\FileID\\fileid.sqlite manually, and relaunch.");
         }
+        else
+        {
+            // Fallback wipe succeeded — honor "+ rescan" once the freshly
+            // respawned engine reaches Ready.
+            await TriggerRescanAsync(waitForReady: true);
+        }
+    }
+
+    /// <summary>Kick a fresh rescan of the current library folder after a wipe
+    /// so "Wipe library + rescan" actually rescans. <paramref name="waitForReady"/>
+    /// is used by the fallback path, which has just respawned the engine and
+    /// must wait for it to reach Ready before sending startScan.</summary>
+    private static async Task TriggerRescanAsync(bool waitForReady = false)
+    {
+        var vm = AppViewModel.Instance;
+        var folder = vm.FolderPath;
+        if (string.IsNullOrEmpty(folder))
+        {
+            DebugLog.Info("[WIPE] no folder set; skipping rescan");
+            return;
+        }
+        try
+        {
+            if (waitForReady)
+            {
+                await EngineClient.Instance.WaitForReadyAsync(TimeSpan.FromSeconds(30));
+            }
+            EngineClient.Instance.SetOptimisticScanningPhase();
+            await EngineClient.Instance.StartScanAsync(folder, vm.FolderDisplay, rescan: true);
+            DebugLog.Info("[WIPE] rescan started");
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("[WIPE] rescan trigger threw: " + ex.Message);
+        }
     }
 
     // Windows can hold a FILE_OBJECT live for a few hundred ms after the
@@ -278,16 +341,25 @@ public sealed partial class SidebarFolderHeader : UserControl
     // the caller's try/catch (which surfaces the user-visible error dialog).
     private static async Task TryDeleteWithRetryAsync(string path)
     {
-        for (int attempt = 0; attempt < 3; attempt++)
+        // The engine-side wipeLibrary path avoids the post-exit FILE_OBJECT
+        // race entirely; this retry only backstops the fallback delete.
+        // Exponential backoff (~3 s total) gives the kernel ample time to
+        // release the handle before the IOException propagates to the caller.
+        const int maxAttempts = 6;
+        for (int attempt = 0; attempt < maxAttempts; attempt++)
         {
             try
             {
                 if (System.IO.File.Exists(path)) System.IO.File.Delete(path);
                 return;
             }
-            catch (System.IO.IOException) when (attempt < 2)
+            catch (System.IO.IOException) when (attempt < maxAttempts - 1)
             {
-                await Task.Delay(200);
+                await Task.Delay(100 * (1 << attempt));
+            }
+            catch (UnauthorizedAccessException) when (attempt < maxAttempts - 1)
+            {
+                await Task.Delay(100 * (1 << attempt));
             }
         }
     }

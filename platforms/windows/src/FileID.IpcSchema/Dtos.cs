@@ -206,3 +206,7 @@ public sealed record QueuedJob(
     JobCategory Category,
     string Title,
     double? EtaSeconds);
+
+/// <summary>Reply to wipeLibrary. Ok is true when the engine truncated every
+/// table in-process; Message carries the error when it couldn't.</summary>
+public sealed record LibraryWiped(bool Ok, string? Message = null);

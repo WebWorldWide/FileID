@@ -270,6 +270,49 @@ internal sealed partial class EngineClient
     }
     public Task RunFaceClusteringAsync() => SendCommandAsync(new RunFaceClusteringCommand());
 
+    /// <summary>Fire-and-forget wipeLibrary command (no wait for the reply).</summary>
+    public Task WipeLibraryAsync() => SendCommandAsync(new WipeLibraryCommand());
+
+    /// <summary>Send wipeLibrary and await the engine's libraryWiped reply.
+    /// The engine truncates every table on its single writer connection, so
+    /// this needs no shutdown/restart and can't race the OS file-lock the way
+    /// deleting fileid.sqlite from the app process does. Throws TimeoutException
+    /// if no reply lands within <paramref name="timeout"/>.</summary>
+    public async Task<LibraryWiped> WipeLibraryAndWaitAsync(TimeSpan timeout, CancellationToken ct = default)
+    {
+        var tcs = new TaskCompletionSource<LibraryWiped>(TaskCreationOptions.RunContinuationsAsynchronously);
+        PropertyChangedEventHandler? handler = null;
+        handler = (_, e) =>
+        {
+            if (e.PropertyName == nameof(LastLibraryWiped) && LastLibraryWiped is { } r)
+            {
+                PropertyChanged -= handler;
+                tcs.TrySetResult(r);
+            }
+        };
+        // Reset first so a second identical wipe still raises PropertyChanged
+        // (records compare by value; an equal reply wouldn't re-fire Set()).
+        LastLibraryWiped = null;
+        PropertyChanged += handler;
+        try
+        {
+            await WipeLibraryAsync().ConfigureAwait(false);
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(timeout);
+            using var reg = cts.Token.Register(() =>
+            {
+                PropertyChanged -= handler;
+                tcs.TrySetException(new TimeoutException(
+                    $"Engine did not confirm wipeLibrary within {timeout.TotalSeconds:0}s."));
+            });
+            return await tcs.Task.ConfigureAwait(false);
+        }
+        finally
+        {
+            PropertyChanged -= handler;
+        }
+    }
+
     /// <summary>tell the engine to re-probe CUDA/cuDNN
     /// availability. Engine replies with a <c>hardwareReprobed</c> event
     /// which lands on <see cref="LastHardwareReprobe"/>. Used by

@@ -638,6 +638,17 @@ async fn handle_line(
                 commands::face_clustering::handle_run_face_clustering(sink_c, db_c).await;
             });
         }
+        CommandPayload::WipeLibrary(_) => {
+            let Some(db) = db else {
+                emit_db_unavailable(sink, "wipeLibrary").await;
+                return;
+            };
+            let sink_c = sink.clone();
+            let db_c = db.clone();
+            tokio::spawn(async move {
+                commands::wipe::handle_wipe_library(sink_c, db_c).await;
+            });
+        }
     }
 }
 

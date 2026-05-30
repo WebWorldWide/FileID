@@ -124,6 +124,8 @@ public sealed record RevertMergeCommand(
     long DestinationPersonId,
     System.Collections.Generic.IReadOnlyList<long> FaceIdsToRevert) : CommandPayload;
 
+public sealed record WipeLibraryCommand : CommandPayload;
+
 /// <summary>
 /// Reads/writes the externally-tagged shape Swift's Codable produces.
 /// One key, value is the body object (or `{}` for empty-payload variants).
@@ -170,6 +172,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             "restoreFromTrash" => JsonSerializer.Deserialize<RestoreFromTrashCommand>(ref reader, options) ?? throw new JsonException("restoreFromTrash: null body"),
             "revertMerge" => JsonSerializer.Deserialize<RevertMergeCommand>(ref reader, options) ?? throw new JsonException("revertMerge: null body"),
 
+            "wipeLibrary" => Empty<WipeLibraryCommand>(ref reader),
             "pauseScan" => Empty<PauseScanCommand>(ref reader),
             "resumeScan" => Empty<ResumeScanCommand>(ref reader),
             "cancelScan" => Empty<CancelScanCommand>(ref reader),
@@ -224,6 +227,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             case EmbedImageQueryCommand c: WriteVariant(writer, "embedImageQuery", c, options); break;
             case RestoreFromTrashCommand c: WriteVariant(writer, "restoreFromTrash", c, options); break;
             case RevertMergeCommand c: WriteVariant(writer, "revertMerge", c, options); break;
+            case WipeLibraryCommand: WriteEmpty(writer, "wipeLibrary"); break;
             default:
                 throw new JsonException($"CommandPayload: unknown C# type {value.GetType().FullName}");
         }

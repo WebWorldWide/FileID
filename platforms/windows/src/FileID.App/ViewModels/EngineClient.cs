@@ -255,6 +255,15 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         private set => Set(ref _lastHardwareReprobe, value);
     }
 
+    /// <summary>Result of the most recent engine-side wipeLibrary. The wipe
+    /// flow (SidebarFolderHeader) waits on this via WipeLibraryAndWaitAsync.</summary>
+    private LibraryWiped? _lastLibraryWiped;
+    public LibraryWiped? LastLibraryWiped
+    {
+        get => _lastLibraryWiped;
+        set => Set(ref _lastLibraryWiped, value);
+    }
+
     private DeepAnalyzeStarting? _deepAnalyzeStarting;
     public DeepAnalyzeStarting? DeepAnalyzeStarting
     {
@@ -992,6 +1001,9 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                                 prevInfo.PhysicalMemoryGB,
                                 hw);
                         }
+                        break;
+                    case LibraryWipedEvent lw:
+                        LastLibraryWiped = lw.Result;
                         break;
                 }
             }

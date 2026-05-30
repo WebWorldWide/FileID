@@ -780,6 +780,13 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             kind == "model_download_failed"
             || kind == "zip_extract_failed"
             || kind == "pack_not_available"
+            // A stale engine that doesn't know a model_kind, or one that can't
+            // resolve its models dir, stamps the originating model id on the
+            // error. Route both to the install slot so the welcome row flips to
+            // Failed with the engine's actionable message instead of spinning
+            // forever behind a raw red toast.
+            || kind == "unknown_model"
+            || kind == "models_dir_unavailable"
             || kind.StartsWith("prewarm_", StringComparison.OrdinalIgnoreCase);
         if (!isInstallError) return;
 
