@@ -50,7 +50,7 @@ failed", Settings cleanup.
 - **Verified headless:** engine `cargo check` + `cargo clippy --all-targets -D
   warnings` + `cargo test` GREEN; app `dotnet build` (x64) GREEN; FileID.IpcSchema.Tests
   34/34 (incl. new WipeLibraryIpcTests for the wipeLibrary/libraryWiped round-trip);
-  FileID.App.Tests 102/102. Branch is 5 commits ahead of main, working tree clean.
+  FileID.App.Tests 102/102. All on branch `windows-e2e-correctness`, working tree clean.
 
 ## 2026-05-30 (later) — Butler restructure built (P1–P4) + macOS mirror + docs rewrite + condense
 
