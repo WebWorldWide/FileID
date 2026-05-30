@@ -1,3 +1,49 @@
+## 2026-05-30 — Windows end-to-end correctness pass (P1+P2+P4 landed; P3/P5 pending)
+
+Branch `windows-e2e-correctness`. Fixing the reported Windows issues: `ram_plus`
+startup toast, wrong download modal, out-of-date Deep Analyze, "Wipe partially
+failed", Settings cleanup.
+
+- **P1 — `ram_plus` "not registered" toast — FIXED (committed).** Root cause: a
+  STALE `FileIDEngine.exe` (running engine predates commit 674da1d which added the
+  ram_plus registry arm); the current app sends prewarm("ram_plus") and the old
+  engine returns Unknown. Code: prewarm.rs emits user-facing text + a distinct
+  `models_dir_unavailable` kind; ModelInstallerService routes `unknown_model` /
+  `models_dir_unavailable` to the install slot as "engine out of date — reinstall/
+  rebuild". The LIVE toast clears only after a clean engine rebuild
+  (build-all.ps1 -Clean -Run). Leaner guard than a build-stamp handshake (DECISIONS).
+- **P4 — "Wipe partially failed" DB lock — FIXED (committed).** Cross-process race:
+  app deleted fileid.sqlite right after engine exit (3x200ms retry too short). Fix:
+  new `wipeLibrary` IPC — engine (sole DB owner) truncates all tables in-process via
+  db::wipe_all (sqlite_master-driven, FTS5-safe, preserves grdb_migrations) + clears
+  face_crops/thumbs + WAL checkpoint, replies `libraryWiped`; no file deletion.
+  SidebarFolderHeader prefers it + auto-rescans; legacy delete path kept as fallback
+  with exponential backoff. Schema + Rust ipc/mod.rs + C# DTOs/converters updated.
+- **P2 — wrong download modal — FIXED (committed).** WelcomeSheet showed the old
+  non-commercial models (ArcFace MobileFace/~13MB/InsightFace, MobileCLIP-S2) and
+  had NO RAM++ row (onboarding could never reach AllInstalled, which gates on
+  RamPlus; RAM++ downloaded invisibly). Now Face="YuNet + SFace" (Apache-2.0),
+  CLIP="ViT-B/32", + new RAM++ row bound to ModelInstallerService.RamPlus; sizes
+  bound to the slots.
+- **P3 — Deep Analyze macOS parity — PENDING.** Correct 3 VLM cards already; needs
+  status card (active model/total/not-yet-analyzed/ETA), RAM-fit badge, two-path
+  naming banner, "Smart names -> Review and apply" card. DeepAnalyzeView.xaml(.cs).
+- **P5 — Settings macOS parity — PENDING.** Reorder to Cleanup -> model cards ->
+  Advanced disclosure; fold GPU/Performance/NVIDIA into Advanced; add Logs buttons,
+  collection stats, engine Restart/Stop. SettingsView.xaml(.cs).
+
+Verified headless: engine cargo check + clippy (-D warnings) + cargo test GREEN;
+app dotnet build (x64) GREEN; FileID.IpcSchema.Tests GREEN (covers the new
+wipeLibrary/libraryWiped round-trip). Full-solution dotnet test shows a
+FileID.App.Tests failure — outside the standard gate (build-all.ps1 -RunTests runs
+only IpcSchema.Tests) and those tests touch EngineClient whose ctor requires a UI
+thread, so they cannot run in a headless host (pre-existing/environmental; confirm
+on hardware).
+
+Tooling note: the agent file/log read channel intermittently corrupted/elided
+output this session; Edit + build exit codes stayed reliable. P3/P5 deferred to
+avoid blind, unverifiable XAML edits.
+
 # FileID — State
 
 > Snapshot of what's working and where we left off. Update at the end of every working session.

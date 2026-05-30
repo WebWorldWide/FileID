@@ -2432,3 +2432,20 @@ These already live in `FileID.Theme/Theme.xaml` as `SpringResponseStandard` / `S
 **Alternatives considered.** (a) Replace with a single check using `OpenAt2` + `RESOLVE_NO_SYMLINKS` — only available on Linux, not Win32. (b) Move the file via a sandboxed worker process — over-engineered for a desktop app. (c) Accept the TOCTOU window — rejected; the cost of the second check is negligible.
 
 **Consequence.** Restructure apply is now slightly slower (~microseconds per move). The wire contract (`applyRestructure` IPC) is unchanged.
+
+
+## 2026-05-30 — Windows wipe + stale-engine guard (P1/P4)
+
+- Engine-side `wipeLibrary` over app-side file delete. "Wipe partially failed" was a
+  cross-process race (app deleted fileid.sqlite right after engine exit; Windows holds
+  the FILE_OBJECT ~100-200ms, retry window only ~600ms). Rather than just lengthen the
+  retry, the engine — the single DB-handle owner — now truncates every user table
+  in-process (no file deletion -> no cross-process handle race). Table list discovered
+  from sqlite_master (future-migration-proof); FTS5 reset via 'delete-all'; grdb_migrations
+  preserved. App keeps stop->delete->restart only as a fallback when the engine is down.
+- `ram_plus` guard: react to `unknown_model` instead of a build-stamp handshake. The
+  approved plan proposed an app<->engine version handshake (build.rs git stamp +
+  engineBuild IPC field); we shipped a leaner equivalent (engine emits a user-facing
+  unknown_model message; app routes unknown_model / models_dir_unavailable to the install
+  slot as "engine out of date — reinstall/rebuild"). Same outcome, no schema/build
+  plumbing. The real fix for the live toast is a clean engine rebuild (stale binary).

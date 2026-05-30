@@ -1,3 +1,30 @@
+# NEXT — Windows end-to-end correctness (resume here)
+
+Branch `windows-e2e-correctness` (P1+P2+P4 committed, building green).
+
+1. Rebuild the engine to clear the live `ram_plus` toast:
+   `platforms\windows\build\build-all.ps1 -Clean -Run` (the running FileIDEngine.exe
+   is stale; the source registry already has ram_plus).
+2. P3 — Deep Analyze -> macOS parity. DeepAnalyzeView.xaml(.cs): status card
+   (active model / total / not-yet-analyzed-by-this-model / ETA from a per-model
+   seconds-per-image estimate); RAM-fit badge (EngineClient.Instance.Info.
+   PhysicalMemoryGB vs the card RAM need); two-path naming banner (Go to People OR
+   "Skip - analyze without names" -> DeepAnalyzeAllAsync); "Smart names -> Review
+   and apply" card. Mirror apple/.../Views/DeepAnalyzeViews.swift; counts via ReadStore.
+3. P5 — Settings -> macOS parity. SettingsView.xaml(.cs): reorder to Cleanup ->
+   model cards by function -> a single Advanced disclosure; move GPU/Performance/
+   NVIDIA into Advanced; add Logs buttons (AppPaths.LogsDir), collection stats in
+   Storage (ReadStore), engine Restart/Stop (EngineClient.RestartAsync/ShutdownAsync).
+   Keep About. Mirror apple/.../Views/SettingsView.swift.
+4. Triage FileID.App.Tests headless failure (EngineClient ctor needs a UI thread;
+   likely environmental — confirm on hardware or exclude from the headless gate).
+5. On-hardware (RTX 2060 / G:\TrueNAS) via build\iterate.ps1: wipe+rescan has no
+   "Wipe partially failed"; welcome modal shows all 5 rows and reaches all-installed;
+   tagging/search/faces accuracy + >=140 files/s.
+6. Merge windows-e2e-correctness -> main once P3/P5 land + CI green.
+
+--- (previous NEXT.md content) ---
+
 # Next Up
 
 > Top priorities, in order. Each has explicit acceptance criteria.
