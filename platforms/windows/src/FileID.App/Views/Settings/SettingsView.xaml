@@ -4,7 +4,8 @@
     Performance Pack downloader, system info.
 
  Hosts five panels:
-      1. Models — install / re-install ArcFace, MobileCLIP, OCR
+      1. Local AI — install / re-install the face models (YuNet + SFace),
+         CLIP ViT-B/32, and RAM++ auto-tagger
       2. Engine — version, PID, worker cap, "open log folder"
       3. Performance — GPU EP picker + Performance Pack downloader
       4. Storage — DB path, thumbs cache, model cache
@@ -59,9 +60,9 @@
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                         <StackPanel Grid.Column="0" Spacing="2">
-                            <TextBlock Text="ArcFace + SCRFD"
+                            <TextBlock Text="Face models (YuNet + SFace)"
                                        Style="{StaticResource BodyStrongTextBlockStyle}"/>
-                            <TextBlock Text="Face detection + identity embedding (~120 MB)"
+                            <TextBlock Text="Face detection (YuNet) + recognition (SFace), Apache-2.0"
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
                             <ProgressBar Maximum="1"
@@ -91,7 +92,7 @@
                                        TextWrapping="Wrap"/>
                         </StackPanel>
                         <TextBlock Grid.Column="1"
-                                   Text="120 MB"
+                                   Text="~39 MB"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                    VerticalAlignment="Center"
@@ -107,11 +108,11 @@
                                     Click="OnInstallModelClicked"
                                     MinWidth="86"
                                     Visibility="{x:Bind ShowActionButton(Svc.Arcface.Status), Mode=OneWay}"
-                                    AutomationProperties.Name="Install ArcFace + SCRFD"/>
+                                    AutomationProperties.Name="Install face models (YuNet + SFace)"/>
                         </Grid>
                     </Grid>
 
-                    <!-- MobileCLIP-S2 — powers free-text semantic image search
+                    <!-- CLIP ViT-B/32 — powers free-text semantic image search
                          AND scan-time zero-shot scene tagging. -->
                     <Grid ColumnSpacing="12" Padding="14,12" CornerRadius="10"
                           Background="{ThemeResource SubtleFillColorTertiaryBrush}">
@@ -121,9 +122,9 @@
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                         <StackPanel Grid.Column="0" Spacing="2">
-                            <TextBlock Text="MobileCLIP-S2"
+                            <TextBlock Text="CLIP ViT-B/32"
                                        Style="{StaticResource BodyStrongTextBlockStyle}"/>
-                            <TextBlock Text="Semantic image search (~210 MB) — 'a dog at the beach'"
+                            <TextBlock Text="Semantic image search — 'a dog at the beach'"
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
                             <ProgressBar Maximum="1"
@@ -153,7 +154,7 @@
                                        TextWrapping="Wrap"/>
                         </StackPanel>
                         <TextBlock Grid.Column="1"
-                                   Text="210 MB"
+                                   Text="~220 MB"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                    VerticalAlignment="Center"
@@ -169,14 +170,77 @@
                                     Click="OnInstallModelClicked"
                                     MinWidth="86"
                                     Visibility="{x:Bind ShowActionButton(Svc.Clip.Status), Mode=OneWay}"
-                                    AutomationProperties.Name="Install MobileCLIP-S2"/>
+                                    AutomationProperties.Name="Install CLIP ViT-B/32"/>
+                        </Grid>
+                    </Grid>
+
+                    <!-- RAM++ auto-tagger. Primary in-scan tagger (4,585-concept
+                         multi-label ONNX); binds to Svc.RamPlus like the other
+                         cards so install state stays consistent with Welcome. -->
+                    <Grid ColumnSpacing="12" Padding="14,12" CornerRadius="10"
+                          Background="{ThemeResource SubtleFillColorTertiaryBrush}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Spacing="2">
+                            <TextBlock Text="RAM++ auto-tagger"
+                                       Style="{StaticResource BodyStrongTextBlockStyle}"/>
+                            <TextBlock Text="Tags every image with thousands of everyday concepts (Apache-2.0)"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                            <ProgressBar Maximum="1"
+                                         Value="{x:Bind Svc.RamPlus.Fraction, Mode=OneWay}"
+                                         IsIndeterminate="{x:Bind IsStarting(Svc.RamPlus.Status, Svc.RamPlus.Fraction), Mode=OneWay}"
+                                         Foreground="{StaticResource GoldBrush}"
+                                         Visibility="{x:Bind VisibleIfDownloading(Svc.RamPlus.Status), Mode=OneWay}"
+                                         Margin="0,4,0,0"
+                                         Height="4"/>
+                            <TextBlock FontFamily="Consolas"
+                                       FontSize="11"
+                                       Text="{x:Bind ProgressLabel(Svc.RamPlus.Message, Svc.RamPlus.Fraction, Svc.RamPlus.BytesDone, Svc.RamPlus.TotalBytes), Mode=OneWay}"
+                                       Visibility="{x:Bind VisibleIfDownloading(Svc.RamPlus.Status), Mode=OneWay}"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                       Margin="0,2,0,0"
+                                       TextWrapping="Wrap"/>
+                            <TextBlock FontFamily="Consolas"
+                                       FontSize="11"
+                                       Text="{x:Bind RateEtaLabel(Svc.RamPlus.BytesPerSecond, Svc.RamPlus.EtaSeconds), Mode=OneWay}"
+                                       Visibility="{x:Bind ShowRateEta(Svc.RamPlus.Status, Svc.RamPlus.BytesPerSecond), Mode=OneWay}"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                       TextWrapping="Wrap"/>
+                            <TextBlock Text="{x:Bind ErrorLabel(Svc.RamPlus.LastError), Mode=OneWay}"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                                       Visibility="{x:Bind VisibleIfFailed(Svc.RamPlus.Status), Mode=OneWay}"
+                                       TextWrapping="Wrap"/>
+                        </StackPanel>
+                        <TextBlock Grid.Column="1"
+                                   Text="~882 MB"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   VerticalAlignment="Center"
+                                   Margin="0,0,8,0"/>
+                        <Grid Grid.Column="2" VerticalAlignment="Center">
+                            <TextBlock Text="✓ Installed"
+                                       Foreground="{ThemeResource SystemFillColorSuccessBrush}"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       VerticalAlignment="Center"
+                                       Visibility="{x:Bind VisibleIfInstalled(Svc.RamPlus.Status), Mode=OneWay}"/>
+                            <Button Content="{x:Bind ButtonLabel(Svc.RamPlus.Status), Mode=OneWay}"
+                                    Tag="ram_plus"
+                                    Click="OnInstallModelClicked"
+                                    MinWidth="86"
+                                    Visibility="{x:Bind ShowActionButton(Svc.RamPlus.Status), Mode=OneWay}"
+                                    AutomationProperties.Name="Install RAM++ auto-tagger"/>
                         </Grid>
                     </Grid>
 
                     <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                TextWrapping="Wrap"
-                               Text="Optional Deep Analyze VLMs (Qwen 2.5-VL · Gemma 3) live on the Deep Analyze tab."/>
+                               Text="Optional Deep Analyze VLMs (Qwen 2.5-VL · Gemma 3 · Mistral-Small 3.2) live on the Deep Analyze tab."/>
                 </StackPanel>
             </Border>
 
