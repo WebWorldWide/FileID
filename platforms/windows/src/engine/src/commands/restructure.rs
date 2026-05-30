@@ -13,6 +13,7 @@ use crate::ipc::{
 use crate::pipeline::discovery::FileKind;
 use crate::pipeline::restructure::{self, classify, FileForClassify, FolderClassification};
 use crate::pipeline::restructure_apply::RestructureApply;
+use crate::pipeline::restructure_semantic;
 
 /// Walk the `files` table for the picked library root, classify each file,
 /// and emit a `restructurePlan` event with the proposed moves + per-category
@@ -24,6 +25,7 @@ pub(crate) async fn handle_plan_restructure(
     payload: ipc::PlanRestructurePayload,
 ) {
     let library_root = payload.library_root.clone();
+    let db_for_semantic = std::sync::Arc::clone(&db);
     let files: Vec<FileForClassify> =
         match tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<FileForClassify>> {
             let conn = db.lock();
@@ -95,7 +97,80 @@ pub(crate) async fn handle_plan_restructure(
         };
 
     let library_root_path = std::path::Path::new(&library_root);
-    let proposed = classify(&files, library_root_path);
+
+    // Butler P1: semantic + learn-your-style classification for image files that
+    // have a CLIP embedding; everything else (and density-clustering noise)
+    // falls back to the rule cascade. See pipeline/restructure_semantic.rs.
+    let signals = tokio::task::spawn_blocking(
+        move || -> rusqlite::Result<(
+            std::collections::HashMap<i64, Vec<f32>>,
+            std::collections::HashMap<i64, Vec<String>>,
+        )> {
+            let conn = db_for_semantic.lock();
+            let mut embeddings = std::collections::HashMap::new();
+            let mut stmt = conn.prepare(
+                "SELECT ce.file_id, ce.embedding FROM clip_embeddings ce
+                 JOIN files f ON f.id = ce.file_id
+                 WHERE f.failed = 0 AND f.kind = 'image'",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?;
+            for r in rows {
+                let (id, blob) = r?;
+                if !blob.is_empty() && blob.len() % 4 == 0 {
+                    let v = blob
+                        .chunks_exact(4)
+                        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .collect();
+                    embeddings.insert(id, v);
+                }
+            }
+            let mut tags: std::collections::HashMap<i64, Vec<String>> =
+                std::collections::HashMap::new();
+            let mut tstmt =
+                conn.prepare("SELECT file_id, tag FROM tags WHERE source IN ('auto','vlm','user')")?;
+            let trows =
+                tstmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?;
+            for r in trows {
+                let (id, tag) = r?;
+                tags.entry(id).or_default().push(tag);
+            }
+            Ok((embeddings, tags))
+        },
+    )
+    .await;
+    let (embeddings, tags_map) = match signals {
+        Ok(Ok(v)) => v,
+        _ => (std::collections::HashMap::new(), std::collections::HashMap::new()),
+    };
+
+    let semantic_files: Vec<restructure_semantic::SemanticFile> = files
+        .iter()
+        .filter(|f| matches!(f.kind, FileKind::Image))
+        .filter_map(|f| {
+            embeddings.get(&f.file_id).map(|clip| restructure_semantic::SemanticFile {
+                file_id: f.file_id,
+                source: f.source.clone(),
+                clip: clip.clone(),
+                tags: tags_map.get(&f.file_id).cloned().unwrap_or_default(),
+                time_unix: f.created_unix.unwrap_or(f.modified_unix),
+            })
+        })
+        .collect();
+
+    let proposed = if semantic_files.len() >= 2 {
+        let protos = restructure_semantic::folder_prototypes(&semantic_files, 4);
+        let moves = restructure_semantic::semantic_classify(&semantic_files, &protos, library_root_path);
+        let moved: std::collections::HashSet<i64> = moves.iter().map(|m| m.file_id).collect();
+        let rule_files: Vec<FileForClassify> =
+            files.iter().filter(|f| !moved.contains(&f.file_id)).cloned().collect();
+        let mut out = moves;
+        out.extend(classify(&rule_files, library_root_path));
+        out
+    } else {
+        classify(&files, library_root_path)
+    };
     let category_summary = restructure::category_counts(&proposed);
 
     // Engine-authoritative folder classification.
