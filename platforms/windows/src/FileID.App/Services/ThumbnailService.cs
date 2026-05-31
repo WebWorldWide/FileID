@@ -172,6 +172,23 @@ internal sealed class ThumbnailService : IDisposable
         ".tif", ".tiff", ".heic", ".heif", ".avif", ".ico", ".jfif",
     };
 
+    /// <summary>Audio extensions whose album art comes ONLY from the in-process
+    /// shell IThumbnailProvider chain. That native code runs inside our process
+    /// (no DllHost/COM-surrogate isolation like Explorer), so a flaky audio
+    /// codec/art handler that fast-fails takes the whole app down with NO
+    /// managed exception. The 2026-05-30 ~2h-scan crash died exactly here:
+    /// app.log stops mid-burst extracting .mp3 album art (clean_exit=false,
+    /// native RaiseFailFastException). We skip the shell call for these and
+    /// render the placeholder instead — a previously disk-cached cover still
+    /// shows (the L2 read runs first). Diverges from macOS (QLThumbnailGenerator
+    /// runs OUT of process there, so it's safe). Revisit once a WER LocalDump
+    /// confirms the faulting provider.</summary>
+    private static readonly HashSet<string> AudioExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".mp3", ".m4a", ".aac", ".flac", ".wav", ".ogg", ".oga", ".opus",
+        ".wma", ".aiff", ".aif", ".alac", ".ape", ".mka", ".m4b",
+    };
+
     private static async Task<BitmapImage?> RenderAsync(
         string path,
         double? modifiedAt,
@@ -208,9 +225,21 @@ internal sealed class ThumbnailService : IDisposable
         }
         DebugLog.Debug($"[THUMB] L2_MISS file={path}");
 
+        var ext = Path.GetExtension(path);
+
+        // Audio: do NOT invoke the in-process shell provider (see
+        // AudioExtensions). A previously-cached cover already returned above via
+        // the L2 disk read; with no cache we render the placeholder rather than
+        // risk a native fast-fail in an audio art handler.
+        if (AudioExtensions.Contains(ext))
+        {
+            DebugLog.Debug($"[THUMB] AUDIO_SHELL_SKIP file={path} ext={ext}");
+            Interlocked.Increment(ref _renderedFailed);
+            return null;
+        }
+
         // 1) Shell IThumbnailProvider chain — same one Explorer / Photos
         //    use. Office / RAW / HEIC / etc. all work through this path.
-        var ext = Path.GetExtension(path);
         var isKnownImage = ImageExtensions.Contains(ext);
         try
         {
