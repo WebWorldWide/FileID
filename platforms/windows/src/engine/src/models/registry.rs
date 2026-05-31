@@ -335,6 +335,35 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
             })
         }
 
+        // ── ONNX Runtime CUDA Performance Pack. pyke's `download-binaries`
+        // ships only the base onnxruntime.dll + onnxruntime_providers_shared.dll
+        // (DirectML/CPU), NOT onnxruntime_providers_cuda.dll — so the CUDA EP
+        // can't bind and NVIDIA falls through to DirectML (~3-5x slower). This
+        // pack is Microsoft's official ORT GPU build, which bundles the matched
+        // onnxruntime.dll + onnxruntime_providers_cuda.dll + providers_shared.
+        // VERSION MUST MATCH the pyke ort-sys build (1.22.0 — read off the
+        // shipped onnxruntime.dll ProductVersion); a mismatch silently fails to
+        // bind. ORT is MIT and Microsoft hosts it on github.com (CI-allowlisted),
+        // so no HF hosting needed. cudart/cublas come from the llama.cpp-cuda
+        // pack (CUDA 12.4) or the system CUDA toolkit; cuDNN auto-installs.
+        // The zip extracts to packs/cuda/onnxruntime-win-x64-gpu-1.22.0/lib/*.dll;
+        // main.rs registers packs/cuda for DLL search AND pins ORT_DYLIB_PATH to
+        // the pack's onnxruntime.dll so the provider binds against the same build.
+        "ort_cuda_x64" => {
+            let dir = models_root.join("packs").join("cuda");
+            LookupResult::Found(Model {
+                id: "ort_cuda_x64",
+                display_name: "ONNX Runtime CUDA pack",
+                files: vec![FileEntry {
+                    url: "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-x64-gpu-1.22.0.zip"
+                        .to_string(),
+                    dest: dir.join("ort-cuda.zip"),
+                    sha256: None,
+                    approx_bytes: 312_700_000,
+                }],
+            })
+        }
+
         // ── llama.cpp CUDA runtime ZIP. Same extract-in-place flow as
         // the Vulkan sibling above, but installed into a separate dir
         // (`llama.cpp-cuda`) so both runtimes can coexist. Auto-installed

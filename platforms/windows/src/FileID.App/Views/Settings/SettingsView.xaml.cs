@@ -178,7 +178,9 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             InstallCudaLlamaButton.IsEnabled = false;
             CudaLlamaStatusText.Text = "✓ CUDA llama.cpp installed. Deep Analyze will use it on next run.";
         }
-        if (SentinelExists("cudnn_runtime_x64"))
+        // Gate on the ORT CUDA provider (the pack that actually enables the
+        // CUDA EP); cuDNN alone never flipped scanning off DirectML.
+        if (SentinelExists("ort_cuda_x64"))
         {
             InstallCudnnButton.Content = "Installed";
             InstallCudnnButton.IsEnabled = false;
@@ -291,8 +293,8 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         {
             var ep = (hw?.ExecutionProvider ?? "").ToLowerInvariant();
             CudnnStatusText.Text = ep == "cuda"
-                ? "✓ CUDA execution provider is active. Scanning uses cuDNN."
-                : "Install NVIDIA cuDNN to unlock the CUDA execution provider for scanning (10-15% faster than DirectML on RTX-class GPUs). FileID can't redistribute cuDNN — get it from NVIDIA's developer site.";
+                ? "✓ CUDA execution provider is active — scanning runs on the CUDA EP."
+                : "Install the CUDA pack to unlock the CUDA execution provider for scanning (~3-5x faster than DirectML on RTX-class GPUs). One click fetches the ONNX Runtime CUDA provider + cuDNN.";
         }
     }
 
@@ -782,12 +784,14 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
-    /// <summary>In-app cuDNN install. PrewarmModelAsync asks the engine to
-    /// fetch the cuDNN redist (~430 MB) from NVIDIA's CDN, extract it
-    /// under Models/cudnn/, and call register_dll_dirs_under so the ORT
-    /// CUDA EP can load it on next engine restart. After completion the
-    /// user hits "Verify install" (or restarts the engine) to flip the
-    /// scanning pipeline from DirectML to CUDA EP.</summary>
+    /// <summary>In-app CUDA pack install. Fetches the ONNX Runtime CUDA provider
+    /// (onnxruntime_providers_cuda.dll, ~313 MB from Microsoft's GitHub release —
+    /// the piece pyke's binaries omit, so the thing that actually enables the
+    /// CUDA EP) plus the cuDNN redist (~430 MB from NVIDIA's CDN). The engine
+    /// extracts both under Models/, registers their DLL dirs, and pins
+    /// ORT_DYLIB_PATH to the matched GPU runtime. After completion the user hits
+    /// "Verify install" (or restarts the engine) to flip scanning from DirectML
+    /// to the CUDA EP (~3-5x faster).</summary>
     private async void OnInstallCudnnClicked(object sender, RoutedEventArgs e)
     {
         if (sender is not Button button) return;
@@ -796,14 +800,15 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         {
             button.IsEnabled = false;
             button.Content = "Installing…";
-            CudnnStatusText.Text = "Downloading cuDNN (~430 MB) from NVIDIA's CDN…";
+            CudnnStatusText.Text = "Downloading CUDA pack (~745 MB): ORT CUDA provider + cuDNN…";
+            await EngineClient.Instance.PrewarmModelAsync("ort_cuda_x64");
             await EngineClient.Instance.PrewarmModelAsync("cudnn_runtime_x64");
             button.Content = "Installed";
-            CudnnStatusText.Text = "✓ cuDNN installed. Click \"Verify install\" or restart FileID to switch scanning to the CUDA EP.";
+            CudnnStatusText.Text = "✓ CUDA pack installed. Click \"Verify install\" or restart FileID to switch scanning to the CUDA EP.";
         }
         catch (Exception ex)
         {
-            DebugLog.Warn($"Install cuDNN failed: {ex.Message}");
+            DebugLog.Warn($"Install CUDA pack failed: {ex.Message}");
             button.Content = originalContent;
             button.IsEnabled = true;
             CudnnStatusText.Text = $"Install failed: {ex.Message}";

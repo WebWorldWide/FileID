@@ -48,10 +48,14 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     // RAM++ — the in-scan multi-label tagger. Single-sentinel "any-of".
     private static readonly string[] RamPlusSentinelIds = { "ram_plus" };
     // one-button GPU acceleration pack on the welcome sheet.
-    // The engine's `cudnn_runtime_x64` registry arm covers NVIDIA. Other
-    // vendors stay no-op (DirectML is bundled with ORT and is the
-    // production path on AMD/Intel/Qualcomm).
-    private static readonly string[] AcceleratorSentinelIds = { "cudnn_runtime_x64" };
+    // NVIDIA gets the full CUDA EP: ort_cuda_x64 (the ONNX Runtime CUDA
+    // provider DLL — the thing that actually flips inference off DirectML) plus
+    // cudnn_runtime_x64. The PROVIDER is the completion gate: cuDNN alone never
+    // enabled CUDA, so a legacy cuDNN-only install must still read as
+    // NotInstalled and prompt for the provider. Other vendors stay no-op
+    // (DirectML is bundled with ORT and is the production path on AMD/Intel/
+    // Qualcomm).
+    private static readonly string[] AcceleratorSentinelIds = { "ort_cuda_x64" };
 
     /// <summary>Time the engine has to reach Ready before an Install
     /// click gives up and surfaces "Engine not ready" to the user.</summary>
@@ -148,8 +152,19 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         // shows "Detecting GPU…" so the user knows it's waiting.
         Accelerator = new ModelSlot(
             displayLabel: "GPU Acceleration Pack",
-            approxBytes: 430UL * 1024 * 1024,
-            installAction: () => PrewarmAsync("cudnn_runtime_x64"));
+            // ORT CUDA provider (~313 MB) + cuDNN (~430 MB). cudart/cublas come
+            // from the llama.cpp-cuda pack / system toolkit.
+            approxBytes: 745UL * 1024 * 1024,
+            // Install the ORT CUDA provider AND cuDNN. Sequential so per-row
+            // progress stays sane (mirrors the CLIP two-halves pattern); a
+            // prewarm short-circuits at the engine if the files + sentinel are
+            // already on disk. The engine's cuda_provider_present() check +
+            // ORT_DYLIB_PATH pinning light up the CUDA EP once the provider lands.
+            installAction: async () =>
+            {
+                await PrewarmAsync("ort_cuda_x64").ConfigureAwait(false);
+                await PrewarmAsync("cudnn_runtime_x64").ConfigureAwait(false);
+            });
         Accelerator.Message = "Detecting GPU…";
 
         Clip.PropertyChanged += OnSlotPropertyChanged;
@@ -175,7 +190,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         if (Accelerator.Status == ModelInstallStatus.Installed
             && SentinelExistsForAnyOf(AcceleratorSentinelIds))
         {
-            Accelerator.Message = "cuDNN active — ~15% faster scanning enabled.";
+            Accelerator.Message = "CUDA active — full GPU acceleration (up to 3-5x faster scanning).";
             return;
         }
         var vendor = (gpuVendor ?? string.Empty).ToLowerInvariant();
@@ -183,7 +198,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         {
             case "nvidia":
                 Accelerator.DisplayLabel = "GPU Acceleration Pack (NVIDIA)";
-                Accelerator.Message = "Unlocks ~15% faster scanning on NVIDIA GPUs (~430 MB).";
+                Accelerator.Message = "Unlocks the CUDA execution provider — up to 3-5x faster ML inference vs DirectML (~745 MB).";
                 if (Accelerator.Status != ModelInstallStatus.Downloading
                     && Accelerator.Status != ModelInstallStatus.Installed)
                 {
@@ -648,7 +663,8 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             case "ram_plus":
             case "ram-plus":
                 return RamPlus;
-            // cuDNN routes to the welcome-sheet Accelerator slot.
+            // The CUDA provider pack + cuDNN both route to the Accelerator slot.
+            case "ort_cuda_x64":
             case "cudnn_runtime_x64":
                 return Accelerator;
             default:

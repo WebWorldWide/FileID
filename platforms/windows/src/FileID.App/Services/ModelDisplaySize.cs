@@ -36,5 +36,7 @@ internal static class ModelDisplaySize
             ["mobileclip_s2"] = 352,        // CLIP ViT-B/32 vision ONNX (~335 MB, MIT)
             ["clip_text"] = (254 + 1 + 1),          // ≈ 256 with vocab + merges
             ["cudnn_runtime_x64"] = 430,
+            // ONNX Runtime CUDA provider pack (onnxruntime-win-x64-gpu zip).
+            ["ort_cuda_x64"] = 313,
         };
 }

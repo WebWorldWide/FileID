@@ -111,6 +111,25 @@ async fn async_main() -> Result<()> {
         // The archive extracts a versioned dir containing bin/, so register the
         // parent — register_dll_dirs_under walks subdirs for DLLs.
         let _ = platform::register_dll_dirs_under(&models_dir.join("cudnn"));
+
+        // CUDA Performance Pack: pyke's `download-binaries` ships only the
+        // base onnxruntime.dll + onnxruntime_providers_shared.dll — NOT
+        // onnxruntime_providers_cuda.dll — so the CUDA EP can't bind and we
+        // fall through to DirectML (~3-5x slower). The pack supplies a COMPLETE
+        // matched ORT-GPU runtime; point ORT's load-dynamic loader at the
+        // pack's onnxruntime.dll via ORT_DYLIB_PATH so the CUDA provider binds
+        // against the SAME ORT build (mismatched base vs provider = silent
+        // fallback or crash). Guarded on file presence + no pre-existing
+        // override, so it's INERT until a pack is installed — zero effect on
+        // the current DirectML path. Must run before the first ORT session.
+        if std::env::var_os("ORT_DYLIB_PATH").is_none() {
+            if let Some(dll) =
+                platform::find_file_under(&models_dir.join("packs").join("cuda"), "onnxruntime.dll", 4)
+            {
+                tracing::info!(path = %dll.display(), "[EP] CUDA pack present; pinning ORT_DYLIB_PATH to matched GPU runtime");
+                std::env::set_var("ORT_DYLIB_PATH", &dll);
+            }
+        }
     }
 
     // If a system-wide NVIDIA CUDA Toolkit + cuDNN is present, register the

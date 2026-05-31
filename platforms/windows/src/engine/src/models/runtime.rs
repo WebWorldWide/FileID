@@ -71,7 +71,7 @@ impl RuntimeProbe {
     /// — `RuntimeProbe::detect()` is safe to call repeatedly.
     pub fn detect() -> Self {
         let (vendor, adapter_name, adapter_index) = probe_gpu_vendor();
-        let cuda_pack_present = pack_present("cuda");
+        let cuda_pack_present = cuda_provider_present();
         let openvino_pack_present = pack_present("openvino");
         let qnn_pack_present = pack_present("qnn");
         let provider = pick_provider(
@@ -89,9 +89,11 @@ impl RuntimeProbe {
             static EMITTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
             EMITTED.get_or_init(|| {
                 tracing::info!(
-                    "perf: NVIDIA GPU detected but CUDA Performance Pack not installed; \
-                     using DirectML (~3-5x slower for ML inference). \
-                     Install via Settings → Models → CUDA Pack for full throughput."
+                    "perf: NVIDIA GPU detected but the CUDA Performance Pack \
+                     (onnxruntime_providers_cuda.dll) isn't installed — ML inference \
+                     is on DirectML (~3-5x slower). Install the CUDA pack via \
+                     Settings → Models → GPU acceleration to enable the ONNX Runtime \
+                     CUDA EP. cuDNN auto-installs; the CUDA toolkit supplies cudart/cublas."
                 );
             });
         }
@@ -377,6 +379,25 @@ fn pack_present(name: &str) -> bool {
         return false;
     }
     has_any_dll(&pack_dir)
+}
+
+/// CUDA is usable only if ORT's own CUDA provider DLL is on disk. pyke's
+/// `download-binaries` ships the base `onnxruntime.dll` + `providers_shared`
+/// but NOT `onnxruntime_providers_cuda.dll`, so it must come from an installed
+/// CUDA Performance Pack (the pack extracts into a versioned subdir, hence the
+/// walk). This is stricter than `pack_present("cuda")` — a stray unrelated DLL
+/// in the pack dir must not make us advertise CUDA and skip DirectML's
+/// discrete-adapter `device_id` pinning.
+fn cuda_provider_present() -> bool {
+    let Ok(root) = crate::paths::models_dir() else {
+        return false;
+    };
+    crate::platform::find_file_under(
+        &root.join("packs").join("cuda"),
+        "onnxruntime_providers_cuda.dll",
+        4,
+    )
+    .is_some()
 }
 
 fn has_any_dll(dir: &PathBuf) -> bool {

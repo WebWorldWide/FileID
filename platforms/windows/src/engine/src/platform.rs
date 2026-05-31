@@ -911,6 +911,41 @@ pub fn register_dll_dirs_under(_root: &std::path::Path) -> Vec<std::path::PathBu
     Vec::new()
 }
 
+/// Find the first file named `filename` (case-insensitive) anywhere under
+/// `root`, up to `max_depth` levels deep. Used to locate a Performance Pack's
+/// `onnxruntime.dll` (it extracts into a versioned `.../lib/` subdir) so
+/// `ORT_DYLIB_PATH` can be pinned to the matched GPU runtime. Returns None if
+/// `root` doesn't exist or the file isn't found — callers treat that as "no
+/// pack installed" and leave ORT on its default (pyke) base.
+pub fn find_file_under(root: &std::path::Path, filename: &str, max_depth: usize) -> Option<std::path::PathBuf> {
+    if !root.is_dir() {
+        return None;
+    }
+    let rd = std::fs::read_dir(root).ok()?;
+    let mut subdirs: Vec<std::path::PathBuf> = Vec::new();
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            subdirs.push(path);
+        } else if path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .is_some_and(|f| f.eq_ignore_ascii_case(filename))
+        {
+            return Some(path);
+        }
+    }
+    if max_depth == 0 {
+        return None;
+    }
+    for sub in subdirs {
+        if let Some(found) = find_file_under(&sub, filename, max_depth - 1) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 /// Returns the primary (largest-VRAM) non-software adapter's
 /// `DedicatedVideoMemory` in MB. None if DXGI enumeration fails or no
 /// physical adapter is present. Used to gate the ML Session pool —
