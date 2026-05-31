@@ -61,13 +61,14 @@ pub(crate) fn extract(path: &Path, bytes: Option<&[u8]>) -> Vec<(String, Option<
     let mut format = probed.format;
     let mut out: Vec<(String, Option<f32>)> = Vec::new();
 
-    // Duration chip — present even when there's no ID3/Vorbis metadata
-    // (voice memos, raw wav). Computed from the default track's n_frames /
-    // sample_rate. Emitted FIRST so it ends up before lower-priority chips
-    // when MAX_TAGS truncates a metadata-rich file.
-    if let Some(label) = duration_label(format.as_ref()) {
-        out.push((label, None));
-    }
+    // NOTE: duration is intentionally NOT emitted as a tag. A length like
+    // "3 sec" / "1 min" describes a capability, not content, and on a real
+    // library it dominated the chip row as pure noise (top tag-report run:
+    // thousands of "N sec" tags at score 0.000). This mirrors the earlier
+    // refinement that dropped "Has Faces"/"Has Text"/aspect tags for the same
+    // reason — metadata facts belong in columns/facets, not the tag stream.
+    // `duration_label` is kept (module-level allow(dead_code)) for a future
+    // duration facet/column.
 
     // Some formats (FLAC, Vorbis, M4A) carry metadata on the FormatReader;
     // others (MP3 with ID3v2) carry it on the probe's MetadataLog. Read
