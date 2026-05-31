@@ -8,6 +8,39 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-05-30 (later 5) — Crash + grid arrow keys + tag noise + CUDA pack (branch `windows-scan-fixes`)
+
+Four user-reported issues from a real ~2h scan of a 24k+ library on `G:\TrueNAS`. All
+headless-verified (engine clippy+232 tests; app build+format+102 tests). On-branch, not yet merged.
+
+- **>1h crash — DIAGNOSED + MITIGATED.** Engine was innocent (`engine.jsonl`: clean shutdown
+  after the app closed the pipe). The APP died by **native fast-fail** (`last-session.txt`
+  clean_exit=false, ran 22:58→01:00 ≈ 2h; nothing logged despite full UnhandledException/AppDomain
+  handlers). Died on the UI thread mid-burst extracting `.mp3` album art via the **in-process shell
+  IThumbnailProvider** — shell providers run in-proc, so a flaky audio art handler fast-faults the
+  whole app. Fix: `ThumbnailService` skips the shell provider for audio exts (after the L2 disk read,
+  so cached covers still show). `build/enable-crash-dumps.ps1` arms WER full-dump capture for the
+  next repro to confirm. Diverges from macOS (QLThumbnailGenerator is out-of-process).
+- **Arrow keys — IMPLEMENTED.** The Library grid is an `ItemsRepeater` (no built-in keyboard nav;
+  9dd7785 only fixed the preview sheet). Added a focus cursor over `ViewModel.Items`: arrows (±1 / ±row),
+  Home/End, PageUp/Down, Shift+arrows extend, Enter opens preview, Space toggles select — wired on
+  `GridScroller` tunneling PreviewKeyDown (handledEventsToo) so the ScrollViewer can't eat arrows first.
+- **Tag accuracy — DIAGNOSED + duration noise removed.** `tag_report.py` on the real 32,899-file DB:
+  RAM++ content tags are solid (child 0.95, cake 0.97, birthday cake 0.985). Noise was score-0.000
+  enrichment. Removed audio/video **duration** tags (`3 sec`/`1 min` — metadata, not content). `iPhone`
+  (camera) + `Year_*` KEPT per user (useful filter facets). Weak generics (huddle 0.70, floor 0.795)
+  left for optional on-hardware floor tuning.
+- **Perf 3-5x — ROOT-CAUSED + CUDA pack built (NOT yet on-hardware verified).** Real [STATS]:
+  ~1,273 ms/file (~5 files/s); engine log: "NVIDIA … CUDA pack not installed; using DirectML
+  (~3-5x slower)". Cause: pyke ort's binaries ship base onnxruntime.dll + providers_shared but NOT
+  `onnxruntime_providers_cuda.dll`, so the EP chain falls through to DirectML. Built the **CUDA
+  Performance Pack**: registry `ort_cuda_x64` = Microsoft's onnxruntime-win-x64-gpu-**1.22.0** zip
+  (MIT, github.com, version matched to the shipped onnxruntime.dll), `ORT_DYLIB_PATH` pinned to the
+  pack's matched runtime (inert until installed), provider-specific detection, Accelerator slot +
+  Settings install the provider+cuDNN. cudart/cublas already present (llama.cpp-cuda pack); cuDNN
+  auto-installs. **The RTX 2060 must confirm the EP binds + the 3-5x — see NEXT.md.** All-vendor:
+  AMD/Intel/Snapdragon keep DirectML (production path); OpenVINO/QNN packs follow the same pattern.
+
 ## 2026-05-30 (later 4) — Processing-stat flicker + preview arrow/Space keys (Windows runtime bugs)
 
 Three bugs the user hit in the running WinUI app:

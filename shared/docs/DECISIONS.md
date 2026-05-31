@@ -7,6 +7,42 @@
 
 ---
 
+## 2026-05-30 — CUDA Performance Pack: matched ORT-GPU build + ORT_DYLIB_PATH, not a provider-only drop
+
+**Context**: NVIDIA scans ran on DirectML (~5 files/s) despite the EP chain preferring CUDA. Root
+cause: pyke `ort`'s `download-binaries` ships only `onnxruntime.dll` + `onnxruntime_providers_shared.dll`
+(no `onnxruntime_providers_cuda.dll`), so CUDA can't bind and falls through to DirectML — the engine's
+own log quantifies it as ~3-5x slower.
+
+- **Ship the COMPLETE matched ORT-GPU runtime, pinned via `ORT_DYLIB_PATH` — not a provider-only DLL
+  dropped next to pyke's base.** The CUDA provider DLL is ABI-bound to its exact ORT build; mixing
+  Microsoft's provider with pyke's base risks a silent no-bind or crash. So the `ort_cuda_x64` pack is
+  Microsoft's full `onnxruntime-win-x64-gpu-1.22.0.zip`, and `main.rs` sets `ORT_DYLIB_PATH` to the
+  pack's `onnxruntime.dll` so the provider binds against the same build. **Version MUST match the pyke
+  ort-sys build** (read off the shipped `onnxruntime.dll` ProductVersion — 1.22.0); a bump requires
+  re-pinning both. Guarded on file presence → inert until installed (zero risk to the DirectML path).
+- **Host on github.com, not HF.** ONNX Runtime is MIT and Microsoft publishes the GPU zip on GitHub
+  (already in the CI source-URL allowlist), so no HF hosting is needed for CUDA. cudart/cublas come
+  from the existing `llama_runtime_cuda_x64` pack (CUDA 12.4); cuDNN auto-installs. (OpenVINO is
+  Apache-2.0 and would host on HF; QNN is proprietary/device-provided.)
+- **Provider presence, not "any DLL", gates CUDA.** `cuda_provider_present()` checks specifically for
+  `onnxruntime_providers_cuda.dll` so a stray DLL can't make us advertise CUDA and skip DirectML's
+  discrete-adapter `device_id` pin. The app's Accelerator/Settings "installed" state likewise gates on
+  the provider (`ort_cuda_x64`), since cuDNN alone never enabled the EP.
+
+## 2026-05-30 — Audio thumbnails skip the in-process shell provider (crash mitigation)
+
+**Context**: A ~2h scan crashed the WinUI app by **native fast-fail** (no managed exception) on the UI
+thread while extracting `.mp3` album art. Windows shell `IThumbnailProvider`s run **in-process**, so a
+flaky audio art handler fast-faults the whole app — uncatchable by managed handlers.
+
+**Decision**: `ThumbnailService` skips the shell provider for audio extensions (after the L2 disk-cache
+read, so previously-cached covers still render). Removes the exact in-proc native surface that crashed.
+Diverges from macOS (QLThumbnailGenerator runs out-of-process, so it's safe there). Pending a WER
+LocalDump from a repro to confirm the faulting provider; `build/enable-crash-dumps.ps1` arms capture.
+Also dropped audio/video **duration** strings (`3 sec`/`1 min`) from the tag stream — metadata, not
+content (same reasoning that earlier dropped Has-Faces/Has-Text/aspect tags); `iPhone`/`Year_*` kept.
+
 ## 2026-05-30 — Butler restructure: cluster-then-name, confidence bands, deferred VLM naming
 
 **Context**: The flat rule cascade (Person→Place→Doc→Year) ignored CLIP/tags/clusters and

@@ -1,3 +1,39 @@
+# NEXT — Windows (resume here)
+
+## 2026-05-30 (later 5) — On-hardware verification for branch `windows-scan-fixes`
+
+Four fixes landed headless-green on branch `windows-scan-fixes` (crash mitigation, grid arrow
+keys, duration-tag removal, CUDA Performance Pack). **These need the RTX 2060 + live WinUI app:**
+
+1. **CUDA pack — THE 3-5x test (highest value).** Build+run from the branch
+   (`build-all.ps1 -Clean -Run`). In Settings → Performance (or the Welcome GPU Acceleration Pack),
+   click install — it fetches `ort_cuda_x64` (Microsoft ORT-GPU 1.22.0, ~313 MB) + cuDNN, extracts to
+   `Models/packs/cuda/`. **Restart the engine.** Confirm `engine.jsonl` shows the CUDA EP bound (no
+   "using DirectML" line; `hardware.ExecutionProvider == "cuda"`) and `[EP] … pinning ORT_DYLIB_PATH`.
+   Then scan the 100-photo sample and compare `[STATS] total_us` / files-per-second vs the ~5 files/s
+   DirectML baseline — target 3-5x. **Risk to check:** if the EP silently stays on DirectML, the
+   provider DLL version didn't match — verify `Models/packs/cuda/**/onnxruntime.dll` ProductVersion ==
+   the pyke base (1.22.0). If cudart/cublas missing, ensure the `llama_runtime_cuda_x64` pack is installed.
+2. **Crash repro + dump.** Run `build/enable-crash-dumps.ps1` (elevates) → WER full dumps for
+   FileID.exe. Do a long scan + scroll an audio folder. Expected: no crash now (audio shell-thumb
+   skipped). If it still crashes, grab the newest `.dmp` from `%LOCALAPPDATA%\FileID\crashdumps` for
+   the native stack to confirm the faulting provider.
+3. **Arrow keys — eyeball.** In the Library grid: arrows move the selected tile, Up/Down by a row,
+   Home/End, PageUp/Down, Shift+arrows extend, Enter opens preview, Space toggles. Confirm the preview
+   sheet keys (9dd7785) still work.
+4. **Tags — eyeball + optional tune.** Confirm no more `3 sec`/`1 min` duration chips; `iPhone`/`Year`
+   still present. Optional: `tag_report.py` → if `huddle`/`floor`/`animal` still read noisy, bump
+   `FILEID_RAMPLUS_PRECISION_FLOOR` (~0.70) or extend `ram_plus_suppress.txt`, rescan, diff.
+5. **All-vendor follow-on (per "all platforms and hardware"):** OpenVINO (Intel, Apache-2.0 — host on
+   HF) and QNN (Snapdragon — device-provided, proprietary) EP packs follow the identical `packs/<ep>`
+   pattern; the EP chain already builds them. Add per-vendor install slots + host the provider DLLs.
+   AMD/Intel/Snapdragon already run DirectML (functional baseline); macOS uses CoreML/MLX (accelerated).
+   Then on-hardware verify each vendor.
+6. **Merge `windows-scan-fixes` → main** once the RTX 2060 confirms (esp. the CUDA EP binds), and
+   watch both GitHub workflows.
+
+---
+
 # NEXT — Windows end-to-end correctness (resume here)
 
 Branch `windows-e2e-correctness` (P1+P2+P4 committed, building green).
