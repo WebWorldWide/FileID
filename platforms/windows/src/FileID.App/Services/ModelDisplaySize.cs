@@ -38,5 +38,7 @@ internal static class ModelDisplaySize
             ["cudnn_runtime_x64"] = 430,
             // ONNX Runtime CUDA provider pack (onnxruntime-win-x64-gpu zip).
             ["ort_cuda_x64"] = 313,
+            // ONNX Runtime OpenVINO pack (Intel; ORT-OpenVINO build + OV runtime).
+            ["ort_openvino_x64"] = 120,
         };
 }

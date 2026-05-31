@@ -22,6 +22,13 @@ namespace FileID.Services;
 internal static class CudaAutoInstaller
 {
     private const string ModelKind = "llama_runtime_cuda_x64";
+    // ONNX Runtime CUDA provider pack + cuDNN — flips the SCAN pipeline (RAM++,
+    // CLIP, faces) off DirectML onto the CUDA EP (~3-5x). Separate from the
+    // llama.cpp CUDA runtime above (that's the Deep Analyze VLM backend).
+    private const string OrtCudaKind = "ort_cuda_x64";
+    private const string CudnnKind = "cudnn_runtime_x64";
+    // ONNX Runtime OpenVINO provider pack — Intel's scan-pipeline accelerator.
+    private const string OpenVinoKind = "ort_openvino_x64";
 
     /// <summary>Set after the first attempt in a process so engine respawns
     /// don't re-fire. Bool is enough — the engine itself dedupes via its
@@ -74,14 +81,27 @@ internal static class CudaAutoInstaller
                 return;
             }
             var vendor = (hw.GpuVendor ?? string.Empty).ToLowerInvariant();
+            if (vendor == "intel")
+            {
+                // Intel: the OpenVINO EP (Apache-2.0) is the accelerated scan
+                // path. No llama CUDA runtime applies on Intel.
+                TryInstallOpenVinoPack();
+                return;
+            }
             if (vendor != "nvidia")
             {
-                // Different vendor — don't attempt; leave s_attempted set so
-                // we don't keep re-checking on every PropertyChanged.
+                // AMD / Snapdragon / none — DirectML is the path; nothing to
+                // fetch. (Snapdragon's QNN SDK is proprietary, so we never host
+                // it.) Leave s_attempted set so we don't re-check every event.
                 return;
             }
 
-            // Opt-out.
+            // First: the ORT CUDA provider pack (the scan-pipeline accelerator).
+            // Independent of the llama.cpp CUDA runtime below — own toggle, own
+            // sentinel — so a box that already has llama-cuda still gets the EP.
+            TryInstallOrtCudaPack();
+
+            // Opt-out (the llama.cpp CUDA runtime for Deep Analyze).
             try
             {
                 var settings = AppSettings.Load();
@@ -156,5 +176,101 @@ internal static class CudaAutoInstaller
         {
             DebugLog.Warn("[CUDA-AUTO] TryStart threw: " + ex.Message);
         }
+    }
+
+    /// <summary>Silently install the ONNX Runtime CUDA provider pack + cuDNN on
+    /// NVIDIA so the SCAN pipeline runs on the CUDA EP (~3-5x vs DirectML)
+    /// without the user hunting for a Settings button — mirrors the
+    /// "the right backend is just there" philosophy. Gated by
+    /// <c>DisableAutoInstallCudnn</c>; own sentinel so it fires independently of
+    /// the llama.cpp CUDA runtime. Safe to auto-enable: the engine's ep_guard
+    /// reverts to DirectML if the CUDA bind ever crashes.</summary>
+    private static void TryInstallOrtCudaPack()
+    {
+        try
+        {
+            if (AppSettings.Load().DisableAutoInstallCudnn) return;
+        }
+        catch { /* fall through and try anyway */ }
+
+        try
+        {
+            // The engine writes this sentinel after the provider pack lands; it
+            // (not a DLL scan) is the authoritative "installed" signal.
+            var sentinel = Path.Combine(AppPaths.ModelsDir, ".sentinels", $"{OrtCudaKind}.installed");
+            if (File.Exists(sentinel))
+            {
+                DebugLog.Info("[CUDA-AUTO] ORT CUDA provider pack already installed; skipping.");
+                return;
+            }
+        }
+        catch { /* if the FS check fails, the engine's own short-circuit catches it */ }
+
+        DebugLog.Info("[CUDA-AUTO] NVIDIA detected + no ORT CUDA pack — silently installing CUDA provider + cuDNN.");
+        var task = Task.Run(async () =>
+        {
+            try
+            {
+                // cuDNN first, provider last: the provider (ort_cuda_x64) is the
+                // "installed" gate (see ModelInstallerService), and finishing it
+                // last keeps the Accelerator slot's status accurate. Each
+                // PrewarmModelAsync just dispatches the IPC; the engine dedupes
+                // and short-circuits if the files + sentinel already exist.
+                await EngineClient.Instance.PrewarmModelAsync(CudnnKind).ConfigureAwait(false);
+                await EngineClient.Instance.PrewarmModelAsync(OrtCudaKind).ConfigureAwait(false);
+                DebugLog.Info("[CUDA-AUTO] ORT CUDA provider + cuDNN prewarm dispatched.");
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn("[CUDA-AUTO] ORT CUDA pack install failed: " + ex.Message);
+            }
+        });
+        _ = task.ContinueWith(
+            t => DebugLog.Error("[CUDA-AUTO] ORT CUDA worker faulted: " + t.Exception),
+            System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted);
+    }
+
+    /// <summary>Silently install the ONNX Runtime OpenVINO pack on Intel so the
+    /// scan pipeline runs on the OpenVINO EP instead of DirectML. Apache-2.0,
+    /// so commercial-clean to redistribute. Gated by
+    /// <c>DisableAutoInstallOpenVino</c>; own sentinel. Safe to auto-enable:
+    /// ep_guard reverts to DirectML if the OpenVINO bind crashes, and if the
+    /// pack artifact isn't hosted yet the download 404s gracefully and Intel
+    /// stays on DirectML.</summary>
+    private static void TryInstallOpenVinoPack()
+    {
+        try
+        {
+            if (AppSettings.Load().DisableAutoInstallOpenVino) return;
+        }
+        catch { /* fall through and try anyway */ }
+
+        try
+        {
+            var sentinel = Path.Combine(AppPaths.ModelsDir, ".sentinels", $"{OpenVinoKind}.installed");
+            if (File.Exists(sentinel))
+            {
+                DebugLog.Info("[CUDA-AUTO] ORT OpenVINO pack already installed; skipping.");
+                return;
+            }
+        }
+        catch { /* engine short-circuit catches it */ }
+
+        DebugLog.Info("[CUDA-AUTO] Intel detected + no OpenVINO pack — silently installing OpenVINO EP.");
+        var task = Task.Run(async () =>
+        {
+            try
+            {
+                await EngineClient.Instance.PrewarmModelAsync(OpenVinoKind).ConfigureAwait(false);
+                DebugLog.Info("[CUDA-AUTO] ORT OpenVINO prewarm dispatched.");
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn("[CUDA-AUTO] ORT OpenVINO pack install failed: " + ex.Message);
+            }
+        });
+        _ = task.ContinueWith(
+            t => DebugLog.Error("[CUDA-AUTO] OpenVINO worker faulted: " + t.Exception),
+            System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted);
     }
 }

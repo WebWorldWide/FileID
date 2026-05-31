@@ -55,7 +55,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     // NotInstalled and prompt for the provider. Other vendors stay no-op
     // (DirectML is bundled with ORT and is the production path on AMD/Intel/
     // Qualcomm).
-    private static readonly string[] AcceleratorSentinelIds = { "ort_cuda_x64" };
+    private static readonly string[] AcceleratorSentinelIds = { "ort_cuda_x64", "ort_openvino_x64" };
 
     /// <summary>Time the engine has to reach Ready before an Install
     /// click gives up and surfaces "Engine not ready" to the user.</summary>
@@ -194,7 +194,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         if (Accelerator.Status == ModelInstallStatus.Installed
             && SentinelExistsForAnyOf(AcceleratorSentinelIds))
         {
-            Accelerator.Message = "CUDA active — full GPU acceleration (up to 3-5x faster scanning).";
+            Accelerator.Message = "GPU acceleration active — scanning runs on your GPU's native execution provider (up to 3-5x faster than DirectML).";
             return;
         }
         var vendor = (gpuVendor ?? string.Empty).ToLowerInvariant();
@@ -217,13 +217,19 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
                 break;
             case "intel":
                 Accelerator.DisplayLabel = "GPU Acceleration (Intel)";
-                Accelerator.Message = "DirectML is already optimal for your Intel GPU — no install needed.";
+                // OpenVINO (Apache-2.0) auto-installs on Intel when the pack is
+                // available; DirectML runs meanwhile. Pseudo-Installed so no
+                // failing manual button appears before the pack is hosted.
+                Accelerator.Message = "Intel GPU — running on DirectML; OpenVINO acceleration auto-installs when available.";
                 Accelerator.Status = ModelInstallStatus.Installed;
                 Accelerator.Fraction = 1.0;
                 break;
             case "qualcomm":
                 Accelerator.DisplayLabel = "GPU Acceleration (Snapdragon)";
-                Accelerator.Message = "DirectML + QNN already optimal for your Snapdragon GPU.";
+                // QNN's SDK is proprietary (can't redistribute under commercial-
+                // clean), so we never host it — the NPU is used only if the
+                // device already provides QNN; otherwise DirectML.
+                Accelerator.Message = "Snapdragon — DirectML active; the Hexagon NPU (QNN) is used automatically if your device provides it.";
                 Accelerator.Status = ModelInstallStatus.Installed;
                 Accelerator.Fraction = 1.0;
                 break;
@@ -667,9 +673,11 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             case "ram_plus":
             case "ram-plus":
                 return RamPlus;
-            // The CUDA provider pack + cuDNN both route to the Accelerator slot.
+            // The CUDA provider pack + cuDNN (NVIDIA) and the OpenVINO pack
+            // (Intel) all route to the single Accelerator slot.
             case "ort_cuda_x64":
             case "cudnn_runtime_x64":
+            case "ort_openvino_x64":
                 return Accelerator;
             default:
                 return null;

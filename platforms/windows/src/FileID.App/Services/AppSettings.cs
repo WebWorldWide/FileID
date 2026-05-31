@@ -94,6 +94,14 @@ internal sealed class AppSettings
     /// + cuDNN if they prefer the BYO path.</summary>
     public bool DisableAutoInstallCudnn { get; set; } = false;
 
+    /// <summary>Default false (auto-install enabled). On engine-ready AND Intel
+    /// hardware, the ONNX Runtime OpenVINO pack (Apache-2.0) is fetched so the
+    /// scan pipeline runs on the OpenVINO EP instead of DirectML. True disables.
+    /// (Snapdragon's QNN is NOT auto-installed — the QNN SDK is proprietary and
+    /// can't be redistributed under the project's commercial-clean rule; QNN is
+    /// used only if the device already provides it.)</summary>
+    public bool DisableAutoInstallOpenVino { get; set; } = false;
+
     /// <summary>Persisted Deep Analyze VLM model — the model the Deep Analyze
     /// tab uses for full caption + smart-rename + tags. Auto-tagging during
     /// scans uses RAM++ (CLIP scene tags as fallback); this is the opt-in
