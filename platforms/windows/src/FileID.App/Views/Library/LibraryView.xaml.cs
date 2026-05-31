@@ -47,6 +47,13 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<UIElement, object> _enteredTiles = new();
     private static readonly object _enteredMarker = new();
 
+    // Keyboard-navigation cursor into ViewModel.Items. -1 until the first
+    // arrow key or tile click establishes it. Drives single-select movement
+    // (arrows), range-extend (Shift+arrows), Enter (open preview), Space
+    // (toggle select). The selection highlight doubles as the focus cue.
+    private int _focusedIndex = -1;
+    private Microsoft.UI.Xaml.Input.KeyEventHandler? _gridKeyHandler;
+
     public LibraryView()
     {
         var paths = AppPaths.DbPath;
@@ -63,6 +70,14 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         ViewModel.Items.CollectionChanged += OnItemsCollectionChanged;
         UndoStack.Instance.PropertyChanged += OnUndoStackChanged;
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
+
+        // Arrow-key navigation for the tile grid. ItemsRepeater has NO built-in
+        // keyboard nav (unlike GridView), so we drive it ourselves. Wire on the
+        // tunneling Preview pass with handledEventsToo — same reason the preview
+        // sheet does (9dd7785): the ScrollViewer's own OnKeyDown would otherwise
+        // eat arrows as scroll before our bubbling handler sees them.
+        _gridKeyHandler = new Microsoft.UI.Xaml.Input.KeyEventHandler(OnGridPreviewKeyDown);
+        GridScroller.AddHandler(UIElement.PreviewKeyDownEvent, _gridKeyHandler, handledEventsToo: true);
 
         Loaded += async (_, _) =>
         {
@@ -292,6 +307,11 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             cts.Dispose();
         }
         _inflight.Clear();
+        if (_gridKeyHandler is not null)
+        {
+            try { GridScroller.RemoveHandler(UIElement.PreviewKeyDownEvent, _gridKeyHandler); } catch { /* swallow */ }
+            _gridKeyHandler = null;
+        }
         // Step 2: dispose ViewModel FIRST. See the method-level remark
         // above for why the order is load-bearing.
         try { ViewModel.Dispose(); } catch { /* swallow */ }
@@ -732,6 +752,11 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         {
             if (sender is not FrameworkElement el || el.DataContext is not FileTile tile) return;
 
+            // Keep the keyboard cursor in sync with the click and route focus to
+            // the grid so arrow keys continue from here without an extra Tab.
+            _focusedIndex = ViewModel.Items.IndexOf(tile);
+            try { GridScroller.Focus(FocusState.Programmatic); } catch { /* swallow */ }
+
             var ctrl = Microsoft.UI.Input.InputKeyboardSource
                 .GetKeyStateForCurrentThread(VirtualKey.Control)
                 .HasFlag(CoreVirtualKeyStates.Down);
@@ -788,6 +813,159 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             _ => $"{count} files selected",
         };
         SelectionBar.Visibility = count > 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    // Arrow-key navigation over the ItemsRepeater grid. Wired on GridScroller's
+    // tunneling PreviewKeyDown (handledEventsToo) so it preempts the
+    // ScrollViewer's built-in arrow-scroll.
+    private void OnGridPreviewKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnGridPreviewKeyDown), () =>
+        {
+            int count = ViewModel.Items.Count;
+            if (count == 0) return;
+
+            int cur = _focusedIndex >= 0 ? Math.Min(_focusedIndex, count - 1) : 0;
+            int last = count - 1;
+
+            switch (e.Key)
+            {
+                case VirtualKey.Enter:
+                    OpenPreviewAt(cur);
+                    e.Handled = true;
+                    return;
+                case VirtualKey.Space:
+                    ToggleSelectAt(cur);
+                    e.Handled = true;
+                    return;
+            }
+
+            // First navigation key just lands the cursor on the first tile.
+            if (_focusedIndex < 0 &&
+                e.Key is VirtualKey.Left or VirtualKey.Right or VirtualKey.Up
+                    or VirtualKey.Down or VirtualKey.Home or VirtualKey.End
+                    or VirtualKey.PageUp or VirtualKey.PageDown)
+            {
+                MoveFocusTo(0, extend: false);
+                e.Handled = true;
+                return;
+            }
+
+            int cols = ColumnsPerRow();
+            int page = cols * Math.Max(1, VisibleRows());
+            int target;
+            switch (e.Key)
+            {
+                case VirtualKey.Left: target = cur - 1; break;
+                case VirtualKey.Right: target = cur + 1; break;
+                case VirtualKey.Up: target = cur - cols; break;
+                case VirtualKey.Down: target = cur + cols; break;
+                case VirtualKey.Home: target = 0; break;
+                case VirtualKey.End: target = last; break;
+                case VirtualKey.PageUp: target = cur - page; break;
+                case VirtualKey.PageDown: target = cur + page; break;
+                default: return;
+            }
+
+            var shift = Microsoft.UI.Input.InputKeyboardSource
+                .GetKeyStateForCurrentThread(VirtualKey.Shift)
+                .HasFlag(CoreVirtualKeyStates.Down);
+            MoveFocusTo(target, extend: shift);
+            e.Handled = true;
+        });
+
+    // Columns the UniformGridLayout currently shows. MinItemWidth=180 +
+    // MinColumnSpacing=12 (LibraryView.xaml); ItemsStretch=Fill widens cells
+    // but the column COUNT is governed by the minimum width.
+    private int ColumnsPerRow()
+    {
+        double avail = GridScroller.ViewportWidth;
+        if (avail <= 0) avail = Repeater.ActualWidth;
+        const double minItemWidth = 180, colSpacing = 12;
+        int cols = (int)Math.Floor((avail + colSpacing) / (minItemWidth + colSpacing));
+        return Math.Max(1, cols);
+    }
+
+    // Rows visible in the viewport, for PageUp/PageDown. MinItemHeight=248 +
+    // MinRowSpacing=12.
+    private int VisibleRows()
+    {
+        const double rowHeight = 248 + 12;
+        int rows = (int)Math.Floor(GridScroller.ViewportHeight / rowHeight);
+        return Math.Max(1, rows);
+    }
+
+    private void MoveFocusTo(int target, bool extend)
+    {
+        int count = ViewModel.Items.Count;
+        if (count == 0) return;
+        target = Math.Clamp(target, 0, count - 1);
+
+        if (extend && _lastClickedTile is not null)
+        {
+            int anchor = ViewModel.Items.IndexOf(_lastClickedTile);
+            if (anchor >= 0)
+            {
+                int lo = Math.Min(anchor, target);
+                int hi = Math.Max(anchor, target);
+                using (ViewModel.BulkSelectionScope())
+                {
+                    foreach (var t in ViewModel.Items) t.IsSelected = false;
+                    for (int i = lo; i <= hi; i++) ViewModel.Items[i].IsSelected = true;
+                }
+            }
+        }
+        else
+        {
+            var tile = ViewModel.Items[target];
+            using (ViewModel.BulkSelectionScope())
+            {
+                foreach (var t in ViewModel.Items) t.IsSelected = false;
+                tile.IsSelected = true;
+            }
+            // The anchor follows a plain move (matches click); Shift+move keeps it.
+            _lastClickedTile = tile;
+        }
+
+        _focusedIndex = target;
+        BringIndexIntoView(target);
+        UpdateSelectionBar();
+    }
+
+    // Realize + scroll the target tile into view. Realization can race a
+    // mid-scan Reset, so it's defensive.
+    private void BringIndexIntoView(int index)
+    {
+        try
+        {
+            if (Repeater.TryGetElement(index) is FrameworkElement existing)
+            {
+                existing.StartBringIntoView();
+                return;
+            }
+            if (Repeater.GetOrCreateElement(index) is FrameworkElement created)
+            {
+                created.UpdateLayout();
+                created.StartBringIntoView();
+            }
+        }
+        catch { /* realization raced a refresh — non-fatal */ }
+    }
+
+    private async void OpenPreviewAt(int index)
+        => await DebugLog.SafeRunAsync(nameof(OpenPreviewAt), async () =>
+        {
+            if (index < 0 || index >= ViewModel.Items.Count) return;
+            await OpenPreview(ViewModel.Items[index], index);
+        });
+
+    private void ToggleSelectAt(int index)
+    {
+        if (index < 0 || index >= ViewModel.Items.Count) return;
+        var tile = ViewModel.Items[index];
+        tile.IsSelected = !tile.IsSelected;
+        _focusedIndex = index;
+        _lastClickedTile = tile;
+        UpdateSelectionBar();
     }
 
     private async void OnTagSelectedClicked(object sender, RoutedEventArgs e)
@@ -976,7 +1154,14 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             if (ViewModel.Items[i].Path == path) { tile = ViewModel.Items[i]; tileIndex = i; break; }
         }
         if (tile is null) return;
+        await OpenPreview(tile, tileIndex);
+    }
 
+    // Shared preview-open path — used by double-tap and by keyboard Enter
+    // (OnGridPreviewKeyDown). Opens the FilePreviewSheet modal for the given
+    // tile, freezing the sibling list at open time.
+    private async System.Threading.Tasks.Task OpenPreview(FileTile tile, int tileIndex)
+    {
         // Snapshot siblings so a live BatchSummary refresh mid-preview
         // can't reorder under our feet (matches macOS frozen previewSiblings).
         var siblings = ViewModel.Items.ToList();

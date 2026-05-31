@@ -229,8 +229,12 @@
             </Button>
         </Grid>
 
-        <!-- Grid of tiles. -->
-        <ScrollViewer Grid.Row="4"
+        <!-- Grid of tiles. IsTabStop so Tab can land focus on the grid and
+             arrow-key navigation (OnGridPreviewKeyDown) takes over; a tile
+             click also routes focus here. -->
+        <ScrollViewer x:Name="GridScroller"
+                      Grid.Row="4"
+                      IsTabStop="True"
                       VerticalScrollBarVisibility="Auto"
                       HorizontalScrollBarVisibility="Disabled"
                       ZoomMode="Disabled">
