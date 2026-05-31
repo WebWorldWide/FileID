@@ -102,6 +102,9 @@ pub(crate) async fn emit_ready(sink: &Sink) {
 /// string when the pack is absent. Lets the Settings → Performance card
 /// flip to ✓ without an engine restart after the user installs cuDNN.
 pub(crate) async fn handle_verify_cuda_pack(sink: &Sink) {
+    // Verifying is the user's "try the GPU EP again" action — clear any
+    // crash-disable so the next engine launch re-attempts the CUDA bind.
+    crate::models::ep_guard::reenable();
     let hardware = build_hardware_info();
     let diagnostics = crate::models::runtime::probe_cuda_pack().diagnostics;
     tracing::info!(

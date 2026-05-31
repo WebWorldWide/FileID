@@ -136,12 +136,20 @@ pub(crate) async fn handle_start_scan(
     // first build (scene_vocab.rs), so later launches load in a few seconds;
     // 120 s still catches a genuinely hung or corrupt model file.
     let models_worker_count = platform::default_worker_cap() as usize;
-    let models = match tokio::time::timeout(
+    // EP crash-safety: arm a breadcrumb around the first ORT session bind (this
+    // is where a bad GPU pack DLL crashes the process). If we get past the
+    // `.await` at all — success, Rust error, or timeout — the process survived,
+    // so disarm; only a hard native crash leaves the breadcrumb for the next
+    // launch's ep_guard to disable the EP. See models::ep_guard.
+    let active_ep = models::runtime::active_provider();
+    models::ep_guard::arm(active_ep.as_str());
+    let load_result = tokio::time::timeout(
         Duration::from_secs(120),
         tokio::task::spawn_blocking(move || ModelStack::load_default(models_worker_count)),
     )
-    .await
-    {
+    .await;
+    models::ep_guard::disarm();
+    let models = match load_result {
         Ok(Ok(m)) => Arc::new(m),
         Ok(Err(err)) => {
             tracing::error!(?err, "model stack load panicked");

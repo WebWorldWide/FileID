@@ -95,6 +95,14 @@ async fn async_main() -> Result<()> {
         tracing::info!("[VRAM] no dedicated GPU detected; ML pool will run at minimum");
     }
 
+    // EP crash-safety gate: if the previous run died while binding a GPU
+    // execution provider (a bad/mismatched pack DLL), disable that EP now so
+    // this run falls back to DirectML instead of crash-looping. Must run
+    // before the ORT_DYLIB_PATH pin below and before the first ML session.
+    if let Some(ep) = models::ep_guard::resolve_poison_at_startup() {
+        tracing::warn!(ep = %ep, "[EP-GUARD] execution provider disabled after a prior crash; using DirectML until re-enabled");
+    }
+
     // Replay AddDllDirectory for any Performance Packs already extracted from
     // a prior install. Packs land in %LOCALAPPDATA%\FileID\Models\packs\<vendor>\
     // and the llama.cpp runtime lands in Models\llama.cpp\. After SEC-3 locked
@@ -112,22 +120,25 @@ async fn async_main() -> Result<()> {
         // parent — register_dll_dirs_under walks subdirs for DLLs.
         let _ = platform::register_dll_dirs_under(&models_dir.join("cudnn"));
 
-        // CUDA Performance Pack: pyke's `download-binaries` ships only the
-        // base onnxruntime.dll + onnxruntime_providers_shared.dll — NOT
-        // onnxruntime_providers_cuda.dll — so the CUDA EP can't bind and we
-        // fall through to DirectML (~3-5x slower). The pack supplies a COMPLETE
-        // matched ORT-GPU runtime; point ORT's load-dynamic loader at the
-        // pack's onnxruntime.dll via ORT_DYLIB_PATH so the CUDA provider binds
-        // against the SAME ORT build (mismatched base vs provider = silent
-        // fallback or crash). Guarded on file presence + no pre-existing
-        // override, so it's INERT until a pack is installed — zero effect on
-        // the current DirectML path. Must run before the first ORT session.
+        // Accelerator pack: pyke's `download-binaries` ships only the base
+        // onnxruntime.dll + onnxruntime_providers_shared.dll (DirectML/CPU) —
+        // NOT the vendor provider DLL (onnxruntime_providers_{cuda,openvino}.dll)
+        // — so the vendor EP can't bind and we fall through to DirectML
+        // (~3-5x slower). The pack supplies a COMPLETE matched ORT runtime for
+        // this GPU's vendor (NVIDIA→cuda, Intel→openvino); pin ORT's
+        // load-dynamic loader at the pack's onnxruntime.dll so the provider
+        // binds against the SAME ORT build (mismatched base vs provider =
+        // silent fallback or crash). Guarded on file presence + no pre-existing
+        // override + not crash-disabled (ep_guard) → INERT until a matching
+        // pack is installed. Must run before the first ORT session.
         if std::env::var_os("ORT_DYLIB_PATH").is_none() {
-            if let Some(dll) =
-                platform::find_file_under(&models_dir.join("packs").join("cuda"), "onnxruntime.dll", 4)
-            {
-                tracing::info!(path = %dll.display(), "[EP] CUDA pack present; pinning ORT_DYLIB_PATH to matched GPU runtime");
-                std::env::set_var("ORT_DYLIB_PATH", &dll);
+            if let Some((ep, pack_dir)) = models::runtime::active_pack_dir() {
+                if !models::ep_guard::is_disabled(ep) {
+                    if let Some(dll) = platform::find_file_under(&pack_dir, "onnxruntime.dll", 4) {
+                        tracing::info!(ep, path = %dll.display(), "[EP] accelerator pack present; pinning ORT_DYLIB_PATH to matched runtime");
+                        std::env::set_var("ORT_DYLIB_PATH", &dll);
+                    }
+                }
             }
         }
     }

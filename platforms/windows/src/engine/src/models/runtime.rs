@@ -71,8 +71,11 @@ impl RuntimeProbe {
     /// — `RuntimeProbe::detect()` is safe to call repeatedly.
     pub fn detect() -> Self {
         let (vendor, adapter_name, adapter_index) = probe_gpu_vendor();
-        let cuda_pack_present = cuda_provider_present();
-        let openvino_pack_present = pack_present("openvino");
+        // A pack EP that crashed during bind on the prior run is treated as
+        // absent until the user re-enables it (ep_guard), so we transparently
+        // fall through to DirectML instead of crash-looping.
+        let cuda_pack_present = cuda_provider_present() && !crate::models::ep_guard::is_disabled("cuda");
+        let openvino_pack_present = pack_present("openvino") && !crate::models::ep_guard::is_disabled("openvino");
         let qnn_pack_present = pack_present("qnn");
         let provider = pick_provider(
             vendor,
@@ -398,6 +401,24 @@ fn cuda_provider_present() -> bool {
         4,
     )
     .is_some()
+}
+
+/// The accelerator pack directory for the detected GPU vendor, if that vendor
+/// uses a pack-backed ORT execution provider: NVIDIA → `packs/cuda`,
+/// Intel → `packs/openvino`. Returned as `(ep_name, dir)` where `ep_name` is
+/// also the `ep_guard` key. `main.rs` pins `ORT_DYLIB_PATH` to this pack's
+/// `onnxruntime.dll` so the vendor's provider DLL binds against the *same* ORT
+/// build pyke's base lacks. AMD/Qualcomm/None use DirectML/CPU — no pinned
+/// runtime, so this returns None.
+pub fn active_pack_dir() -> Option<(&'static str, PathBuf)> {
+    let root = crate::paths::models_dir().ok()?;
+    let (vendor, _, _) = probe_gpu_vendor();
+    let ep = match vendor {
+        GpuVendor::Nvidia => "cuda",
+        GpuVendor::Intel => "openvino",
+        _ => return None,
+    };
+    Some((ep, root.join("packs").join(ep)))
 }
 
 fn has_any_dll(dir: &PathBuf) -> bool {

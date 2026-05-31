@@ -21,6 +21,7 @@
 pub mod bge_text;
 pub mod clip_text;
 pub mod clip_tokenizer;
+pub mod ep_guard;
 pub mod mobileclip;
 pub mod ram_plus;
 pub mod registry;

@@ -92,6 +92,12 @@ pub(crate) async fn handle_prewarm_model(
         set: in_flight,
     };
 
+    // (Re)installing a GPU EP pack is an explicit "try this EP again" — clear
+    // any prior crash-disable (ep_guard) so the next launch re-attempts the bind.
+    if matches!(model_kind.as_str(), "ort_cuda_x64" | "ort_openvino_x64") {
+        crate::models::ep_guard::reenable();
+    }
+
     // Distinguish "the engine can't resolve its models dir" (a storage/env
     // misconfig that makes `lookup_full` return Unknown for EVERY kind) from a
     // genuinely unregistered kind — otherwise the unknown-kind message below

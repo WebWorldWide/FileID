@@ -310,9 +310,9 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
         // ── cuDNN for Windows (CUDA 12 line). Public NVIDIA-hosted CDN —
         // same channel NVIDIA's own developer site points at and the
         // redistributable URL the cuDNN docs publish. Auto-installed on
-        // NVIDIA hardware by `CudnnAutoInstaller.cs` so the ORT CUDA EP
-        // has the cuDNN DLLs on its loader path (10-15% scanning throughput
-        // win on RTX-class). Engine startup calls
+        // NVIDIA hardware alongside the ORT CUDA provider by
+        // `CudaAutoInstaller.cs::TryInstallOrtCudaPack` so the ORT CUDA EP
+        // has the cuDNN DLLs on its loader path. Engine startup calls
         // `register_dll_dirs_under(&models_dir.join("cudnn"))` so the
         // LoadLibrary policy can find the DLLs after extraction.
         "cudnn_runtime_x64" => {
@@ -360,6 +360,34 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                     dest: dir.join("ort-cuda.zip"),
                     sha256: None,
                     approx_bytes: 312_700_000,
+                }],
+            })
+        }
+
+        // ── ONNX Runtime OpenVINO Performance Pack (Intel GPUs/NPUs). Intel's
+        // accelerated path; OpenVINO is Apache-2.0 so it's commercial-clean to
+        // redistribute. Like the CUDA pack, pyke's base ORT lacks the OpenVINO
+        // provider — this pack supplies a matched ORT 1.22.0 build (compiled
+        // --use_openvino) + the Intel OpenVINO runtime DLLs. main.rs pins
+        // ORT_DYLIB_PATH to its onnxruntime.dll on Intel GPUs; ep_guard reverts
+        // to DirectML if the bind crashes.
+        // HANDOFF: the artifact must be assembled + uploaded to the URL below
+        // (repackage `Microsoft.ML.OnnxRuntime.OpenVino` 1.22.0 + the OpenVINO
+        // runtime into a zip that extracts onnxruntime.dll +
+        // onnxruntime_providers_openvino.dll + openvino*.dll under packs/openvino/).
+        // Until then the auto-install 404s gracefully and Intel stays on
+        // DirectML. UNVERIFIED — needs Intel hardware to confirm the bind + perf.
+        "ort_openvino_x64" => {
+            let dir = models_root.join("packs").join("openvino");
+            LookupResult::Found(Model {
+                id: "ort_openvino_x64",
+                display_name: "ONNX Runtime OpenVINO pack",
+                files: vec![FileEntry {
+                    url: "https://huggingface.co/Web-World-Wide/fileid-ort-openvino/resolve/main/ort-openvino-win-x64-1.22.0.zip"
+                        .to_string(),
+                    dest: dir.join("ort-openvino.zip"),
+                    sha256: None,
+                    approx_bytes: 120_000_000,
                 }],
             })
         }
