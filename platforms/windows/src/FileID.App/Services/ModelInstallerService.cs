@@ -155,15 +155,19 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             // ORT CUDA provider (~313 MB) + cuDNN (~430 MB). cudart/cublas come
             // from the llama.cpp-cuda pack / system toolkit.
             approxBytes: 745UL * 1024 * 1024,
-            // Install the ORT CUDA provider AND cuDNN. Sequential so per-row
-            // progress stays sane (mirrors the CLIP two-halves pattern); a
-            // prewarm short-circuits at the engine if the files + sentinel are
-            // already on disk. The engine's cuda_provider_present() check +
-            // ORT_DYLIB_PATH pinning light up the CUDA EP once the provider lands.
+            // Install cuDNN AND the ORT CUDA provider. The provider
+            // (ort_cuda_x64) goes LAST because it's the completion gate
+            // (AcceleratorSentinelIds): finishing it last means its 100% is the
+            // final event, so the slot lands cleanly on Installed instead of
+            // flickering Installed→Downloading→Installed, and a cuDNN failure
+            // can't leave the slot wrongly "Installed". A prewarm short-circuits
+            // at the engine if files + sentinel are already on disk. The engine's
+            // cuda_provider_present() + ORT_DYLIB_PATH pinning light up the CUDA
+            // EP once the provider lands.
             installAction: async () =>
             {
-                await PrewarmAsync("ort_cuda_x64").ConfigureAwait(false);
                 await PrewarmAsync("cudnn_runtime_x64").ConfigureAwait(false);
+                await PrewarmAsync("ort_cuda_x64").ConfigureAwait(false);
             });
         Accelerator.Message = "Detecting GPU…";
 

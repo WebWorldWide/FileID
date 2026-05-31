@@ -575,11 +575,15 @@ pub fn probe_cuda_pack() -> CudaPackProbe {
             )),
         };
     }
-    if !has_any_dll(&pack_dir) {
+    // Match the detection gate (`cuda_provider_present`): the pack extracts
+    // the provider into a versioned subdir, so walk for the specific DLL rather
+    // than a non-recursive "any dll at the top level" check (which would
+    // mis-report a correctly-installed pack).
+    if crate::platform::find_file_under(&pack_dir, "onnxruntime_providers_cuda.dll", 4).is_none() {
         return CudaPackProbe {
             diagnostics: Some(format!(
-                "CUDA pack directory exists at {} but contains no DLLs. \
-                 Try reinstalling from Settings → Performance.",
+                "CUDA pack directory exists at {} but onnxruntime_providers_cuda.dll \
+                 wasn't found. Try reinstalling from Settings → Performance.",
                 pack_dir.display()
             )),
         };

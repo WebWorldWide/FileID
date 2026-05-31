@@ -800,9 +800,11 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         {
             button.IsEnabled = false;
             button.Content = "Installing…";
-            CudnnStatusText.Text = "Downloading CUDA pack (~745 MB): ORT CUDA provider + cuDNN…";
-            await EngineClient.Instance.PrewarmModelAsync("ort_cuda_x64");
+            CudnnStatusText.Text = "Downloading CUDA pack (~745 MB): cuDNN + ORT CUDA provider…";
+            // Provider last — it's the "installed" gate; finishing it last keeps
+            // the status accurate (see ModelInstallerService.Accelerator).
             await EngineClient.Instance.PrewarmModelAsync("cudnn_runtime_x64");
+            await EngineClient.Instance.PrewarmModelAsync("ort_cuda_x64");
             button.Content = "Installed";
             CudnnStatusText.Text = "✓ CUDA pack installed. Click \"Verify install\" or restart FileID to switch scanning to the CUDA EP.";
         }
