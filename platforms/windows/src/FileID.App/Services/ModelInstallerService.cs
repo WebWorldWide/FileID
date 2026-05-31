@@ -495,7 +495,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         {
             Accelerator.Status = ModelInstallStatus.Installed;
             Accelerator.Fraction = 1.0;
-            Accelerator.Message = "cuDNN active — ~15% faster scanning enabled.";
+            Accelerator.Message = "GPU acceleration active — scanning runs on your GPU's native execution provider.";
             AcceleratorIsRealInstall = true;
         }
         RecomputeAggregates();
@@ -832,6 +832,16 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         if (slot is null)
         {
             DebugLog.Warn($"[INSTALL] engine error '{kind}' has no routable slot (modelKind={error.ModelKind ?? "<null>"}, path={error.Path ?? "<null>"})");
+            return;
+        }
+        // OpenVINO is an OPTIONAL Intel accelerator that auto-installs in the
+        // background, and its pack may not be hosted yet (404) — DirectML is the
+        // always-fine fallback. Don't alarm the user with a red Failed card;
+        // log and leave the Accelerator slot on its DirectML (pseudo-Installed)
+        // state. (CUDA, by contrast, is hosted + user-installed, so it surfaces.)
+        if (string.Equals(error.ModelKind, "ort_openvino_x64", StringComparison.OrdinalIgnoreCase))
+        {
+            DebugLog.Info($"[INSTALL] OpenVINO pack unavailable ({kind}); staying on DirectML. {error.Message}");
             return;
         }
         DebugLog.Info($"[INSTALL] engine error → {slot.DisplayLabel}.Fail(): {error.Message}");

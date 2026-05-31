@@ -548,9 +548,13 @@ mod tests {
     /// false-fail.
     #[test]
     fn all_model_urls_are_huggingface() {
+        // NOTE: the runtime/EP packs are intentionally NOT all on HF — cuDNN is
+        // on NVIDIA's CDN, llama + ort_cuda are on github (all CI-allowlisted).
+        // ort_openvino IS on HF, so it belongs here for real coverage.
         let kinds = [
             "ram_plus", "mobileclip_s2", "clip_text", "bge_text", "arcface",
             "florence2", "qwen2_5_vl_7b", "gemma_3_4b", "mistral_small_3_2",
+            "ort_openvino_x64",
         ];
         for kind in kinds {
             if let LookupResult::Found(m) = lookup_full(kind) {
