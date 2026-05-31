@@ -5,7 +5,15 @@
 Auto-install + crash-safety landed headless-green. Remaining = hosting + on-hardware:
 
 1. **CUDA auto-install on the RTX 2060 (highest value).** Clean launch on NVIDIA → `CudaAutoInstaller` auto-fetches cuDNN + `ort_cuda_x64` → restart → `engine.jsonl` shows `ExecutionProvider == "cuda"` + files/s up 3-5×. Then test the **B1 gate**: corrupt `Models/packs/cuda/**/onnxruntime.dll`, relaunch+scan → next launch must log `[EP-GUARD]` and run DirectML (no crash loop). Re-enable via Settings → Performance → "Verify install".
-2. **OpenVINO artifact (Intel) — the one real handoff.** Assemble a zip that extracts `onnxruntime.dll` + `onnxruntime_providers_openvino.dll` + `openvino*.dll` under `packs/openvino/` (repackage `Microsoft.ML.OnnxRuntime.OpenVino` **1.22.0** + the Intel OpenVINO runtime; must match the pyke ORT 1.22.0 ABI). Upload to `https://huggingface.co/Web-World-Wide/fileid-ort-openvino/resolve/main/ort-openvino-win-x64-1.22.0.zip` (the registry URL). Then verify on an Intel GPU: auto-install fires, `ExecutionProvider == "openvino"`, B1 fallback works. Until uploaded, Intel auto-install 404s gracefully → DirectML (no regression). Then flip the Intel Accelerator Settings card from pseudo-Installed to an installable manual path.
+2. **OpenVINO (Intel) — assembled + hosted; verify on Intel HW.** The pack
+   (`ort-openvino-win-x64-1.22.0.zip`, ORT 1.22 + OpenVINO 2025.1) is uploaded to
+   `huggingface.co/Web-World-Wide/OpenVINO` and the registry points at it. On an Intel GPU box:
+   confirm `CudaAutoInstaller` (Intel branch) auto-fetches it, `engine.jsonl` shows
+   `ExecutionProvider == "openvino"`, files/s improves vs DirectML, and the B1 fallback works
+   (corrupt the pack → reverts to DirectML, no crash). Then flip the Intel Accelerator Settings card
+   from pseudo-Installed to an installable manual path. If the bind fails (likely cause: the raw
+   DLL-load needs `plugins.xml`/an env tweak the pip package set up differently), iterate the pack
+   contents — ep_guard keeps it safe meanwhile.
 3. **QNN/Snapdragon:** deliberately no hosted pack (proprietary). If a Snapdragon WoA device is available, confirm the chain uses device-provided QNN when present, else DirectML.
 4. **Merge `windows-allvendor-accel` → main**, both Windows workflows green. (vLLM: decided — keep llama.cpp, no work.)
 

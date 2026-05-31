@@ -8,6 +8,19 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-05-31 (later) — OpenVINO pack assembled + hosted on HF (merged, CI-green)
+
+The B3 OpenVINO handoff is DONE. Assembled `ort-openvino-win-x64-1.22.0.zip` verbatim from the
+official PyPI wheels `onnxruntime-openvino==1.22.0` + `openvino==2025.1.0` (ORT 1.22 + OpenVINO
+provider + the matched OV 2025.1 runtime DLLs + a `plugins.xml` + bundled MIT/Apache-2.0 license
+texts), uploaded to `huggingface.co/Web-World-Wide/OpenVINO` (model card documents provenance +
+license). `registry.rs` `ort_openvino_x64` now points at the real repo (was the
+`fileid-ort-openvino` placeholder), ~40 MB download. Verified the hosted zip round-trips and
+`onnxruntime.dll` is a valid PE @ ProductVersion 1.22.0 with the OpenVINO provider + Intel GPU
+plugin present. Commercial-clean (MIT + Apache-2.0; no proprietary bits). Merged to main
+(`4d201bd`), both Windows workflows green. **Only remaining OpenVINO gap: bind + perf verification
+on a real Intel GPU** (none in the dev env) — safe regardless via ep_guard.
+
 ## 2026-05-31 — All-vendor HW acceleration auto-install + vLLM decision (branch `windows-allvendor-accel`)
 
 Builds on the merged CUDA pack. Headless-verified (engine clippy+tests; app build+format+tests). On-branch.
