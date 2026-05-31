@@ -214,8 +214,12 @@ public final class ArcFaceService: @unchecked Sendable {
 
     public static func blobToEmbedding(_ data: Data) -> [Float] {
         let count = data.count / MemoryLayout<Float>.stride
+        // S8: an empty/corrupt blob makes `baseAddress` nil; force-unwrapping it
+        // would crash the engine. Bail to an empty vector (callers treat a
+        // zero-length embedding as "no embedding").
+        guard count > 0 else { return [] }
         return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> [Float] in
-            let base = raw.baseAddress!.assumingMemoryBound(to: Float.self)
+            guard let base = raw.baseAddress?.assumingMemoryBound(to: Float.self) else { return [] }
             return Array(UnsafeBufferPointer(start: base, count: count))
         }
     }

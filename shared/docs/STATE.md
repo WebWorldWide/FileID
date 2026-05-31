@@ -8,6 +8,17 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-05-31 (audit hardening) — ETA fix + data-loss/crash fixes + security + perf/quality (branch `phase0-critical-fixes`, NOT merged)
+
+A workflow audit (81 agents: parity + ETA design + adversarially-verified bug/security/perf hunt) drove a multi-phase pass. **All landed work is headless-verified** (engine `clippy -D warnings` + 242 tests incl. 11 new; app build + `dotnet format` + IpcSchema 34/34 + App 102/102). macOS edits are written-for-Mac (unverified-until-build). Staged on the branch, not committed/merged until requested.
+
+- **Phase 0 — critical data-loss + crash fixes (engine, 7 new tests).** B1 rename-heal no longer collapses coexisting byte-identical copies (heal only on `file_ref` move or hash-match-with-old-path-gone). B3 restructure drops `MOVEFILE_REPLACE_EXISTING` + uniquifies colliding dests. B2 clustering modal-dim filter (no panic on legacy/corrupt embeddings). B4/B5/S6/S7 restructure stale-plan revalidation + corrected atomicity comment + durable recovery sidecar + source containment. B6 `ep_guard` arms the override-aware EP (`runtime::armed_provider`). B7 removed `panic="abort"`. C1/C2/C4 doc-extract zip-bomb caps + trash-log 1024-cap.
+- **Phase 1 — the broken ETA (engine + Windows app + macOS, 2 new tests).** Root cause fixed: ETA divides remaining by a rolling wall-clock EMA, not the per-batch DB-flush rate ("13s for an hour" gone). Windows UI shows the active-stage-labeled ETA ("Tagging — 48m left", "Counting files…"). macOS **B8** rolling-rate reset per session. *Decision:* no IPC `stages[]` array — a scan has 2 live stages; faces/captions are separate jobs with their own ETAs (see DECISIONS).
+- **Phase 2 — security.** S9/S12 path redaction in logs; S4 bounded C# stdout framing (1 MiB + resync); S5 bounded Swift IPC buffer; S8 macOS `blobToEmbedding` empty-guards. S2 verify-or-bail is wired but inert (all `registry.rs` `sha256: None`) — activation = fetch+hash artifacts (network step). S1 macOS in-process unzip deferred to Mac.
+- **Phase 3 — perf (engine).** P2 Deep Analyze CLI VLM now passes `-ngl 99` (was CPU-only → 5–20× on GPU runtimes, quality-neutral). P4 OpenVINO `AUTO:GPU,CPU` device pin. P16 sargable BINARY-range rescan/deep-analyze prefix seeks (was non-sargable `LIKE 'root%'`; +1 new test). P3 EP-aware vision/CLIP concurrency (rises to pool size on CUDA/TensorRT; no-op on 6 GB by design; DirectML keeps the TDR floor).
+- **Phase 4 — quality.** P18 widen merge-suggestion band (dedicated `MERGE_SUGGEST_COS_HIGH=0.66`, additive). P17 mutual-kNN Pass-1 gated behind `FILEID_FACE_MUTUAL_KNN` (default off, on-hardware A/B). P22 already env-tunable.
+- **Deferred (verification-gated), specced in NEXT.md:** S2 hash population + S1 macOS unzip; P1 batch RAM++ (ONNX re-export, Python/HF); CUDA-bind 3–5× verify on the RTX 2060; P19/P20/P21 quality tuning; macOS parity EG1–EG5 (RAM++ port, FaceAlign wiring, content-hash rebind, SFace contract cleanup, doc-text/BGE); Windows UI parity UG1–UG5 (Deep Analyze status card, RAM-fit gating, Settings); P12/P13 ANN search index.
+
 ## 2026-05-31 (later) — OpenVINO pack assembled + hosted on HF (merged, CI-green)
 
 The B3 OpenVINO handoff is DONE. Assembled `ort-openvino-win-x64-1.22.0.zip` verbatim from the

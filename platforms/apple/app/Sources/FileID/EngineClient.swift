@@ -210,6 +210,10 @@ public final class EngineClient {
             _ = handle.availableData
         }
         let stderrBuffer = MutexBox(Data())
+        // S5: mirror the engine's 1 MiB MAX_FRAME_BYTES guard so a wedged or
+        // compromised engine that never emits a newline can't grow this buffer
+        // without bound and OOM the app.
+        let maxFrameBytes = 1024 * 1024
         errPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             if data.isEmpty {
@@ -227,6 +231,13 @@ public final class EngineClient {
                     let line = buf.subdata(in: buf.startIndex..<nl)
                     buf.removeSubrange(buf.startIndex...nl)
                     if !line.isEmpty { out.append(line) }
+                }
+                // S5: a partial frame past the cap (no newline yet) means the
+                // engine is emitting garbage — drop it and resync to the next
+                // newline rather than buffering unbounded.
+                if buf.count > maxFrameBytes {
+                    Self.debug("ENGINE: oversize IPC frame (\(buf.count) bytes, no newline) — discarding")
+                    buf.removeAll(keepingCapacity: false)
                 }
                 return out
             }

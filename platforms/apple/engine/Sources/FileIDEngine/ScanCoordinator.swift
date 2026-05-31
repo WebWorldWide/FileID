@@ -82,6 +82,11 @@ public actor ScanCoordinator {
         Self.setPauseMirror(false)
         lastProcessedSnapshot = 0
         lastSnapshotAt = Date()
+        // B8: the engine runs many scans in one process, so the rolling rate
+        // MUST reset per session — otherwise scan #2+ seeds its EMA from scan
+        // #1's stale rate (the `== 0 ? instant : EMA` branch below takes the
+        // EMA path immediately) and shows a wrong ETA until the average decays.
+        rollingFilesPerSecond = 0
         return s
     }
 

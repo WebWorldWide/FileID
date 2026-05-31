@@ -1,5 +1,32 @@
 # NEXT — Windows (resume here)
 
+## 2026-05-31 (audit hardening) — verification-gated follow-ups (branch `phase0-critical-fixes`)
+
+The audit-driven hardening pass (Phases 0–4, see STATE.md) landed headless-verified on `phase0-critical-fixes`. These remain, grouped by what each needs. Branch is NOT merged — review/merge first, or continue on it.
+
+**Needs the RTX 2060 / `G:\TrueNAS` (on-hardware):**
+1. **CUDA-bind 3–5× (highest perf value).** Clean NVIDIA launch → `CudaAutoInstaller` fetches cuDNN + `ort_cuda_x64` → restart → confirm `engine.jsonl` `ExecutionProvider == "cuda"` + files/s up 3–5×. Then test the **B6/ep_guard** gate: set `gpuExecutionProviderOverride="cuda"`, corrupt `Models/packs/cuda/**/onnxruntime.dll`, relaunch → must log `[EP-GUARD]`, run DirectML, no crash loop (B6 now arms the override-aware EP).
+2. **P3 pool retune for CUDA.** On 6 GB, the VRAM clamp keeps the pool ~2 so P3's EP-aware caps are a no-op. Measure real CUDA per-session VRAM during a scan and add a CUDA-specific `VRAM_PER_POOL_INSTANCE_MB` (DirectML's 2000 MB is allocator-conservative) so the pool — and thus the now-EP-aware semaphore — can grow. `tagging.rs`.
+3. **P17 mutual-kNN A/B.** Run a People-tab cluster with `FILEID_FACE_MUTUAL_KNN=1` vs default on a hand-labeled subset; compare largest-cluster contamination + identity recall. Promote to default only if it cuts chaining without hurting recall.
+4. **P19/P22 quality sweeps.** P19: gate low-quality faces out of Pass-1 *seeding* (`face_clustering.rs` load query has no `face_quality` floor; reuse `validate_face_geometry`'s score) — measure recall. P22: sweep `FILEID_RAMPLUS_PRECISION_FLOOR` below 0.62 (the floor clamps per-class thresholds *upward*, overriding RAM++'s F1 calibration) and diff tag precision/recall.
+5. **ETA sanity (live GUI).** A real scan: tagging ETA tracks ~files/s (no "13s"), "Counting files…" during discovery, the five-dot strip advances. Restructure a folder of same-basename files → both survive (B3).
+
+**Needs network / artifact access (release step):**
+6. **S2 — populate SHA256 (HIGH security).** The verify-or-bail path is wired (`downloader.rs:282-308,509-514`) but every `registry.rs` entry is `sha256: None`. Fetch each pinned artifact (esp. the *code-executing* zips: llama.cpp b9254, cudart, cuDNN, ORT-CUDA/OpenVINO packs), `sha256sum`, record in `MODELS.md`, set `sha256: Some(...)`. A mismatch then bails before extract/run.
+7. **P1 — batch RAM++ (headline perf).** Re-export `ram_plus.onnx` with a dynamic batch axis (`shared/scripts/export_ram_plus_onnx.py:263` is `dynamic_axes=None`; fall back to a fixed batch of 4 + padding if the Swin dynamic export trips Concat), re-host + SHA-pin (ties to #6), then add a RAM++ batch coordinator mirroring `batch_clip.rs`. ~2–4× on the heaviest in-scan GPU op.
+
+**Needs a Mac (`swift build`/`swift test`, written-for-Mac edits already staged + specs):**
+8. **macOS B8/S5/S8** (staged): verify the ScanCoordinator rate reset, the bounded IPC buffer, and the `blobToEmbedding` guards compile + behave.
+9. **EG2/B9–B11 — wire FaceAlign (highest macOS quality gap).** `FaceAlign.align112` is a faithful port but has *zero callsites*; macOS embeds unaligned 15%-padded bbox crops, diverging from the shared calibrated thresholds. Add `VNDetectFaceLandmarksRequest` to `VisionWorker` (it supersedes the rectangles request — don't run both), map the 5 ArcFace points, **convert Vision normalized bottom-left → absolute top-left pixels** (the error-prone step — verify against a known image on a Mac), persist them, then call `FaceAlign.align112(source:landmarks:)` before `ArcFaceService.embed` in `FaceClustering.extractOneFile`. Do NOT blind-ship the coordinate math — it silently degrades embeddings if wrong.
+10. **EG3/B12 — SFace contract cleanup** (low risk): `ArcFaceService.swift` still documents "512-d ArcFace" though it runs 128-d SFace (`AIModels.swift` embeddingDim=128); fix the docs, drop the ArcFace-iResNet50/MobileFace user copy in `FaceClustering.swift:60-63`, and assert `output.count == 128` so a wrong model fails loudly.
+11. **EG4 — content-hash rename/move rebind on macOS.** v8 columns exist but nothing writes them; add a BLAKE3 helper (same ≤16 MB-full / head+tail+size composite), capture in discovery, write + rebind in `DBWriter`, and **mirror B1's old-path-gone guard**. Decision: BLAKE3 dep (a SHA-256 fallback breaks cross-platform hash equality — prefer a BLAKE3 impl).
+12. **EG1 — port RAM++ tagging to macOS** (largest): `RamPlusService.swift` (ORT + CoreML EP), 384² ImageNet norm, per-class sigmoid → top-8, gate Vision/CLIP-scene to fallback. EG5/C3 — port `doc_extract` + a BGE-small ORT service to fill the dormant `doc_text/doc_fts/text_embeddings` tables.
+13. **macOS S1 — replace `/usr/bin/unzip`** with an in-process extractor mirroring Windows `util/zip.rs` (enclosed-name + canonicalize + `starts_with`, per-entry/total caps, skip symlinks). `CLIPModelInstaller.swift:367-402`.
+
+**Headless-buildable Windows UI parity (pick up anytime):**
+14. **UG2 RAM-fit gating** (safety): disable a VLM card whose RAM budget > machine RAM (`EngineInfo.physicalMemoryGB`) + "Needs N GB (you have M)" badge — prevents OOM-kill. **UG1** Deep Analyze status card (active model / total / not-analyzed / ETA / RAM badge). **UG3/4/5** Settings: general Restart/Stop-engine buttons, Open-scan-log/Open-app-log, storage stat rows. Mirror macOS `DeepAnalyzeViews.swift`/`SettingsView.swift`.
+15. **P12/P13 ANN search index** (perf, big): engine-side `semanticSearch`/`similarFiles` IPC owning a cached HNSW (reuse `util/hnsw_index.rs`) with brute-force fallback < ~5 K vectors (exact below threshold = no quality loss). Replaces the per-query full `clip_embeddings` scan in `ReadStore.cs`. **P14** FTS keystroke split (recall-flagged — needs a labeled query set), **P20** Cleanup near-dup phash tier (bucket to avoid O(n²); brings Windows toward macOS), **P21** box-average dHash (do on BOTH platforms in lockstep or not at all).
+
 ## 2026-05-31 — All-vendor acceleration (branch `windows-allvendor-accel`)
 
 Auto-install + crash-safety landed headless-green. Remaining = hosting + on-hardware:

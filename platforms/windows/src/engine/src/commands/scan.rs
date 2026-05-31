@@ -141,8 +141,11 @@ pub(crate) async fn handle_start_scan(
     // `.await` at all — success, Rust error, or timeout — the process survived,
     // so disarm; only a hard native crash leaves the breadcrumb for the next
     // launch's ep_guard to disable the EP. See models::ep_guard.
-    let active_ep = models::runtime::active_provider();
-    models::ep_guard::arm(active_ep.as_str());
+    // Arm the override-aware EP that will actually attempt the first native
+    // GPU bind (honors gpuExecutionProviderOverride), not the auto-detected
+    // active_provider() which ignores the override — see runtime::armed_provider.
+    let armed_ep = models::runtime::armed_provider();
+    models::ep_guard::arm(armed_ep.as_str());
     let load_result = tokio::time::timeout(
         Duration::from_secs(120),
         tokio::task::spawn_blocking(move || ModelStack::load_default(models_worker_count)),
@@ -234,7 +237,7 @@ pub(crate) async fn handle_start_scan(
     *scan_state_release.lock() = None;
 
     if let Err(err) = outcome {
-        tracing::warn!(?err, root = %root.display(), "scan failed");
+        tracing::warn!(?err, root = %platform::redact_path_for_log(&root), "scan failed");
         sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
             ScanPhase::Failed,
         ))))

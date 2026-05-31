@@ -25,6 +25,15 @@ pub const COS_HIGH: f32 = 0.50;
 /// (provisional — calibrate with labeled faces).
 pub const COS_LOW: f32 = 0.32;
 
+/// P18: upper bound for surfacing MERGE suggestions in the People tab — just
+/// below the clusterer's Pass-1 core threshold (0.66). Two clusters whose
+/// anchors sit in COS_LOW..0.66 didn't auto-merge (below Pass-1) yet are close
+/// enough to likely be the same person; COS_HIGH (0.50) sat below the
+/// clusterer's own Pass-2 (0.54)/Pass-1 (0.66) bands, so over-split same-person
+/// pairs never surfaced as suggestions. Distinct from COS_HIGH so the
+/// (VLM-verifier) uncertain band is unaffected.
+pub const MERGE_SUGGEST_COS_HIGH: f32 = 0.66;
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct FaceRow {

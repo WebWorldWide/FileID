@@ -171,27 +171,48 @@ impl ScanSession {
             let total_files: i64 = conn
                 .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
                 .unwrap_or(0);
+            let lo = root_prefix.trim_end_matches(['\\', '/']).to_string();
+            // P16: a BINARY range seek (`>= lo AND < hi`) is sargable on the
+            // implicit UNIQUE index on path_text, unlike `LIKE 'lo%'` (which is
+            // non-sargable because LIKE defaults to case-insensitive and forces
+            // a full table scan). Stored paths derive from THIS root so they
+            // share its exact casing; the skip set is an optimization that fails
+            // safe (a miss just re-scans the file).
+            let hi = prefix_upper_bound(&lo);
             let prefix_match: i64 = {
-                let like = format!("{}%", root_prefix.trim_end_matches(['\\', '/']));
-                conn.query_row(
-                    "SELECT COUNT(*) FROM files WHERE path_text LIKE ?1",
-                    rusqlite::params![like],
-                    |r| r.get(0),
-                )
+                match &hi {
+                    Some(hi) => conn.query_row(
+                        "SELECT COUNT(*) FROM files WHERE path_text >= ?1 AND path_text < ?2",
+                        rusqlite::params![lo, hi],
+                        |r| r.get(0),
+                    ),
+                    None => conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0)),
+                }
                 .unwrap_or(0)
             };
             // failed=0 excludes prior failures (they must retry every scan).
             // modified_at IS NULL rows fall out automatically: NULL comparisons
             // are NULL → treated as false in WHERE, so the row is omitted from
             // the skip set and gets reprocessed.
-            if let Ok(mut stmt) = conn.prepare(
+            let select_sql = if hi.is_some() {
                 "SELECT path_text FROM files \
-                 WHERE path_text LIKE ?1 \
+                 WHERE path_text >= ?1 AND path_text < ?2 \
                  AND failed = 0 \
                  AND scanned_at >= modified_at"
-            ) {
-                let like = format!("{}%", root_prefix.trim_end_matches(['\\', '/']));
-                if let Ok(rows) = stmt.query_map(rusqlite::params![like], |r| r.get::<_, String>(0)) {
+            } else {
+                "SELECT path_text FROM files \
+                 WHERE failed = 0 \
+                 AND scanned_at >= modified_at"
+            };
+            if let Ok(mut stmt) = conn.prepare(select_sql) {
+                // One closure literal shared across both arms — two separate
+                // closures are distinct types and `match` can't unify them.
+                let row_to_string = |r: &rusqlite::Row| r.get::<_, String>(0);
+                let rows = match &hi {
+                    Some(hi) => stmt.query_map(rusqlite::params![lo, hi], row_to_string),
+                    None => stmt.query_map([], row_to_string),
+                };
+                if let Ok(rows) = rows {
                     for p in rows.flatten() {
                         set.insert(std::path::PathBuf::from(p));
                     }
@@ -201,7 +222,7 @@ impl ScanSession {
                 already_current = set.len(),
                 files_total = total_files,
                 files_under_root = prefix_match,
-                root = %root_prefix,
+                root = %crate::platform::redact_path_for_log(&root_prefix),
                 "[SCAN] preloaded skip set for incremental rescan"
             );
             std::sync::Arc::new(set)
@@ -394,14 +415,51 @@ impl ScanSession {
 struct ProgressState {
     last_emit: Instant,
     last_total: u64,
+    // Rolling throughput for the ETA, measured from the processed-count delta
+    // over REAL wall-clock time between emits. This replaces the per-batch
+    // `files_in_batch / flush_wall` rate, which measured only the DB-INSERT
+    // speed (hundreds–thousands of files/s) and produced absurd ETAs — e.g.
+    // "13s" for an hour of actual work. EMA-smoothed, mirroring the macOS
+    // ScanCoordinator (0.7 old / 0.3 new).
+    rate_anchor: Instant,
+    rate_anchor_total: u64,
+    rolling_fps: f64,
 }
 
 impl ProgressState {
     fn new() -> Self {
+        let now = Instant::now();
         Self {
-            last_emit: Instant::now() - Duration::from_secs(60),
+            // -60 s forces the first batch callback past the throttle so the
+            // sidebar fills immediately; the rate anchor below uses the real
+            // `now` so the first measured interval is honest.
+            last_emit: now - Duration::from_secs(60),
             last_total: 0,
+            rate_anchor: now,
+            rate_anchor_total: 0,
+            rolling_fps: 0.0,
         }
+    }
+
+    /// Fold a new processed-count sample into the rolling files/sec and return
+    /// it. Re-samples only after `MIN_RATE_DT` so a burst of file-triggered
+    /// emits a few ms apart can't divide by a near-zero interval; between
+    /// re-samples it returns the last rolling value unchanged.
+    fn observe_rate(&mut self, processed_total: u64, now: Instant) -> f64 {
+        const MIN_RATE_DT: f64 = 0.5;
+        let dt = now.duration_since(self.rate_anchor).as_secs_f64();
+        if dt >= MIN_RATE_DT {
+            let delta = processed_total.saturating_sub(self.rate_anchor_total) as f64;
+            let instant = delta / dt;
+            self.rolling_fps = if self.rolling_fps <= 0.0 {
+                instant
+            } else {
+                0.7 * self.rolling_fps + 0.3 * instant
+            };
+            self.rate_anchor = now;
+            self.rate_anchor_total = processed_total;
+        }
+        self.rolling_fps
     }
 }
 
@@ -428,6 +486,28 @@ fn emit_batch_summary(sink: &Sink, stats: &BatchStats) {
     let _ = sink.try_send(IpcEvent::now(EventPayload::BatchSummary(Wrap::new(summary))));
 }
 
+/// Exclusive upper bound for a sargable prefix range: `prefix` with its last
+/// Unicode scalar incremented, so `path_text >= prefix AND path_text < upper`
+/// selects exactly the rows `LIKE 'prefix%'` would (BINARY collation). Returns
+/// None when no finite bound exists (empty prefix, or an all-`char::MAX` tail)
+/// — callers then match the whole table.
+pub(crate) fn prefix_upper_bound(prefix: &str) -> Option<String> {
+    let mut chars: Vec<char> = prefix.chars().collect();
+    while let Some(last) = chars.pop() {
+        let mut cp = last as u32 + 1;
+        // Jump the UTF-16 surrogate gap — those code points aren't scalars.
+        if (0xD800..=0xDFFF).contains(&cp) {
+            cp = 0xE000;
+        }
+        if let Some(next) = char::from_u32(cp) {
+            chars.push(next);
+            return Some(chars.iter().collect());
+        }
+        // cp > 0x10FFFF (last was char::MAX) — carry into the previous char.
+    }
+    None
+}
+
 const PROGRESS_THROTTLE_MS: u128 = 100;
 const PROGRESS_THROTTLE_FILES: u64 = 1000;
 
@@ -448,23 +528,27 @@ fn maybe_emit_progress(
     if !should_emit {
         return;
     }
-    {
+    // Fold the new sample into the rolling wall-clock throughput under one lock.
+    let fps = {
         let mut st = state.lock();
         st.last_emit = now;
         st.last_total = stats.processed_total;
-    }
+        st.observe_rate(stats.processed_total, now)
+    };
     // Progress payload fields:
     //   total            = discovered file count (from Discovery's atomic
     //                      counter; persisted through tagging so the
     //                      progress bar shows correct fill, not 100%).
-    //   eta_seconds      = (total - processed) / files_per_second when
-    //                      both are known; None during ramp-up.
+    //   files_per_second = the ROLLING wall-clock rate (real end-to-end
+    //                      throughput), NOT the per-batch DB-flush rate.
+    //   eta_seconds      = (total - processed) / rolling_fps when known;
+    //                      None during ramp-up (first ~0.5 s, or total==0).
     //   failed           = cumulative failed-file count from DBWriter.
     //   resident_mb      = process RSS via Win32 GetProcessMemoryInfo.
     let total = discovered_total.max(stats.processed_total);
     let remaining = total.saturating_sub(stats.processed_total);
-    let eta_seconds = if stats.files_per_second > 0.5 && remaining > 0 {
-        Some(remaining as f64 / stats.files_per_second)
+    let eta_seconds = if fps > 0.01 && remaining > 0 && total > 0 {
+        Some(remaining as f64 / fps)
     } else {
         None
     };
@@ -475,7 +559,7 @@ fn maybe_emit_progress(
         discovered: discovered_total,
         processed: stats.processed_total,
         failed: stats.failed_total,
-        files_per_second: stats.files_per_second,
+        files_per_second: fps,
         eta_seconds,
         resident_mb: crate::platform::process_memory_mb(),
         available_mb: 0,
@@ -484,5 +568,70 @@ fn maybe_emit_progress(
     // files, so dropping is rare in practice — and the next emit (≤100ms
     // later) brings the UI back in sync.
     let _ = sink.try_send(IpcEvent::now(EventPayload::Progress(Wrap::new(progress))));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rolling fps must measure real wall-clock throughput, not the
+    /// per-batch DB-flush rate — the regression that produced "13s" ETAs for
+    /// an hour of work.
+    #[test]
+    fn rolling_fps_measures_wallclock_throughput() {
+        let mut st = ProgressState::new();
+        let t0 = Instant::now();
+        st.rate_anchor = t0;
+        st.rate_anchor_total = 0;
+        st.rolling_fps = 0.0;
+
+        // 5 files in the first second → ~5 files/s (the real pipeline rate),
+        // NOT the thousands/s a DB-flush measurement reports.
+        let fps1 = st.observe_rate(5, t0 + Duration::from_secs(1));
+        assert!((fps1 - 5.0).abs() < 0.01, "first-interval rate should be 5/s, got {fps1}");
+
+        // Sustained 5/s → EMA stays ~5.
+        let fps2 = st.observe_rate(10, t0 + Duration::from_secs(2));
+        assert!((fps2 - 5.0).abs() < 0.01, "sustained rate ~5/s, got {fps2}");
+
+        // An ETA built on this rate is hours for tens of thousands remaining,
+        // not 13 seconds — proving the bug is gone.
+        let eta = 18_000.0_f64 / fps2;
+        assert!(eta > 3000.0, "eta should be ~hours ({eta}s)");
+    }
+
+    /// P16: the prefix upper bound must select exactly the rows `LIKE
+    /// 'prefix%'` would under BINARY collation — i.e. lo <= x < hi iff x starts
+    /// with prefix.
+    #[test]
+    fn prefix_upper_bound_brackets_the_prefix() {
+        let lo = r"C:\Users\a\Photos";
+        let hi = prefix_upper_bound(lo).unwrap();
+        assert!(lo < hi.as_str(), "lo must sort before hi");
+        // A child path is inside [lo, hi).
+        let child = r"C:\Users\a\Photos\2024\img.jpg";
+        assert!(lo <= child && child < hi.as_str());
+        // A sibling that merely shares a shorter prefix is outside.
+        let sibling = r"C:\Users\a\Pictures\x.jpg";
+        assert!(!(lo <= sibling && sibling < hi.as_str()));
+        // Empty prefix → no finite bound.
+        assert_eq!(prefix_upper_bound(""), None);
+        // Simple increment.
+        assert_eq!(prefix_upper_bound("abc").as_deref(), Some("abd"));
+    }
+
+    /// Two emits closer than MIN_RATE_DT must not re-divide and spike the rate.
+    #[test]
+    fn rolling_fps_holds_between_rapid_samples() {
+        let mut st = ProgressState::new();
+        let t0 = Instant::now();
+        st.rate_anchor = t0;
+        st.rate_anchor_total = 0;
+        st.rolling_fps = 0.0;
+
+        let _ = st.observe_rate(10, t0 + Duration::from_secs(1)); // seeds ~10/s
+        let held = st.observe_rate(1000, t0 + Duration::from_millis(1100)); // only +0.1 s
+        assert!(held < 50.0, "a rapid sample (<0.5s) must not spike the rate, got {held}");
+    }
 }
 

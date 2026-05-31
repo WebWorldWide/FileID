@@ -13,6 +13,14 @@ use anyhow::{Context, Result};
 /// extraction + a useful FTS5 snippet without bloating the DB on huge docs.
 pub(crate) const MAX_TEXT_BYTES: usize = 256 * 1024;
 
+/// C1: hard cap on the RAW bytes decompressed from any single zip member
+/// (Office files are zips). Generous enough for legitimate XML markup overhead
+/// (a 256 KB-text slide carries far less than this), but bounds a zip bomb —
+/// a member that decompresses to gigabytes must never be fully materialized.
+/// Enforced both via the member's declared uncompressed size AND a hard
+/// `take()` on the reader (defends against a lying header).
+const MAX_MEMBER_BYTES: u64 = 16 * 1024 * 1024;
+
 /// Extract text from `path` based on extension. Returns `Ok(None)` when the
 /// extension is recognised-as-doc-but-unsupported (e.g. `.doc` legacy OLE)
 /// AND when the extension isn't a document at all — callers treat both as
@@ -59,8 +67,17 @@ fn read_plain(path: &Path, bytes: Option<&[u8]>) -> Result<String> {
         // and FTS5 snippets can handle U+FFFD replacement chars fine.
         return Ok(String::from_utf8_lossy(b).into_owned());
     }
+    // C4: read at most MAX_TEXT_BYTES (+ a small margin) instead of slurping
+    // the whole file and truncating afterward — a multi-GB .txt/.md must not
+    // be fully materialized just to keep 256 KB. Lossy decode matches the
+    // bytes=Some path above.
     let p = crate::util::path_safety::to_extended_length(path);
-    std::fs::read_to_string(&p).with_context(|| format!("read text {}", p.display()))
+    let file = std::fs::File::open(&p).with_context(|| format!("open text {}", p.display()))?;
+    let mut buf = Vec::with_capacity(MAX_TEXT_BYTES.min(64 * 1024));
+    file.take(MAX_TEXT_BYTES as u64 + 4)
+        .read_to_end(&mut buf)
+        .with_context(|| format!("read text {}", p.display()))?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// PDF text extraction via the same `pdfium-render` binding `deep_analyze`
@@ -126,8 +143,10 @@ fn extract_zip_xml_inner<R: Read + Seek>(
             Ok(e) => e,
             Err(_) => continue,
         };
-        let mut xml = String::new();
-        let _ = entry.read_to_string(&mut xml);
+        let xml = match read_member_bounded(&mut entry) {
+            Some(x) => x,
+            None => continue,
+        };
         if !out.is_empty() {
             out.push('\n');
         }
@@ -137,6 +156,18 @@ fn extract_zip_xml_inner<R: Read + Seek>(
         }
     }
     Ok(out)
+}
+
+/// Read a single zip member into a String, hard-bounded by `MAX_MEMBER_BYTES`
+/// so a zip bomb (a member that decompresses to gigabytes) can never be fully
+/// materialized — `take()` stops after the cap of DECOMPRESSED output. Lossy
+/// UTF-8 (the bytes=Some / read_plain paths already are).
+fn read_member_bounded(entry: impl Read) -> Option<String> {
+    let mut buf = Vec::new();
+    if entry.take(MAX_MEMBER_BYTES).read_to_end(&mut buf).is_err() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// Pull text out of every member whose name starts with `prefix` and ends
@@ -175,8 +206,10 @@ fn extract_zip_xml_glob_inner<R: Read + Seek>(
             Ok(e) => e,
             Err(_) => continue,
         };
-        let mut xml = String::new();
-        let _ = entry.read_to_string(&mut xml);
+        let xml = match read_member_bounded(&mut entry) {
+            Some(x) => x,
+            None => continue,
+        };
         if !out.is_empty() {
             out.push('\n');
         }

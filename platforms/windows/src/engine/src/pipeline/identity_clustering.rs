@@ -132,16 +132,52 @@ where
     }
 
     // ── Pass 1: connected components above pass1_cosine ───────────
+    // Single-linkage (default) unions i with every kNN hit above the
+    // threshold — one high-cosine "bridge" face can chain two identities into
+    // one mega-cluster (documented above). FILEID_FACE_MUTUAL_KNN=1 switches to
+    // MUTUAL-kNN: an edge i—j is kept only when each is in the other's
+    // above-threshold neighborhood, which breaks single-bridge chains at the
+    // cost of failing toward over-split (UI-mergeable, the safe direction — and
+    // Pass 3's 2-means split is unchanged). Gated default-off pending
+    // on-hardware calibration on a labeled library (see NEXT.md).
+    let mutual_knn = std::env::var("FILEID_FACE_MUTUAL_KNN")
+        .ok()
+        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
     let mut uf = UnionFind::new(n);
-    for i in 0..n {
-        for hit in searcher(i) {
-            if hit.idx == i || hit.idx >= n {
-                continue;
+    if mutual_knn {
+        let mut directed: std::collections::HashSet<(usize, usize)> =
+            std::collections::HashSet::new();
+        let mut candidates: Vec<(usize, usize)> = Vec::new();
+        for i in 0..n {
+            for hit in searcher(i) {
+                if hit.idx == i || hit.idx >= n {
+                    continue;
+                }
+                if hit.similarity < params.pass1_cosine {
+                    continue;
+                }
+                directed.insert((i, hit.idx));
+                candidates.push((i, hit.idx));
             }
-            if hit.similarity < params.pass1_cosine {
-                continue;
+        }
+        for (i, j) in candidates {
+            // Union only mutual edges (j also lists i above threshold).
+            if directed.contains(&(j, i)) {
+                uf.union(i, j);
             }
-            uf.union(i, hit.idx);
+        }
+    } else {
+        for i in 0..n {
+            for hit in searcher(i) {
+                if hit.idx == i || hit.idx >= n {
+                    continue;
+                }
+                if hit.similarity < params.pass1_cosine {
+                    continue;
+                }
+                uf.union(i, hit.idx);
+            }
         }
     }
     let mut root_members: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -244,7 +280,12 @@ fn centroid_normalized(indices: &[usize], embeddings: &[Vec<f32>], dim: usize) -
     let mut sum = vec![0f32; dim];
     for &i in indices {
         let v = &embeddings[i];
-        for d in 0..dim {
+        // Callers guarantee uniform dim (the face loader filters to the modal
+        // dimension; restructure passes one CLIP space). The `.min` is a
+        // release-safe backstop so a stray short vector can never index out of
+        // bounds and panic here.
+        debug_assert_eq!(v.len(), dim, "centroid_normalized: embedding dim mismatch");
+        for d in 0..dim.min(v.len()) {
             sum[d] += v[d];
         }
     }

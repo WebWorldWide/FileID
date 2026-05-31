@@ -53,6 +53,32 @@ pub(crate) async fn handle_run_face_clustering(
             }
         }
 
+        // All face embeddings must share one dimensionality (SFace = 128). A
+        // mixed/corrupt set — e.g. legacy 512-d ArcFace rows left over from
+        // before the commercial-clean swap, or a truncated blob — would make
+        // the clusterer index out of bounds and panic, aborting the whole run
+        // (and, pre-B7, the engine). Keep only the dominant dimension so one
+        // stray row can neither crash clustering nor hijack the dim by loading
+        // first.
+        {
+            let mut dim_counts: HashMap<usize, usize> = HashMap::new();
+            for f in &faces {
+                *dim_counts.entry(f.embedding.len()).or_insert(0) += 1;
+            }
+            if let Some((&modal_dim, _)) = dim_counts.iter().max_by_key(|&(_, c)| *c) {
+                let before = faces.len();
+                faces.retain(|f| f.embedding.len() == modal_dim);
+                let dropped = before - faces.len();
+                if dropped > 0 {
+                    tracing::warn!(
+                        modal_dim,
+                        dropped,
+                        "[CLUSTER] dropped faces with off-dimension embeddings"
+                    );
+                }
+            }
+        }
+
         let face_count = faces.len() as u64;
         let (assignments, anchors) = cluster(&faces);
 

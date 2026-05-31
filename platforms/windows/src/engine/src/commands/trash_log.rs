@@ -28,6 +28,12 @@ pub(crate) struct TrashLogItem {
     pub(crate) recycle_bin_id: Option<String>,
 }
 
+/// The append-only log is trimmed to the last `MAX_ENTRIES` lines so it can't
+/// grow without bound over a long-lived install (the module doc promises this
+/// cap). Trimming drops whole oldest lines verbatim — retained lines keep
+/// their HMAC, so `read_batch` still verifies them.
+const MAX_ENTRIES: usize = 1024;
+
 pub(crate) fn append(entry: &TrashLogEntry) -> anyhow::Result<()> {
     let path = paths::trash_log_path()?;
     if let Some(parent) = path.parent() {
@@ -38,14 +44,44 @@ pub(crate) fn append(entry: &TrashLogEntry) -> anyhow::Result<()> {
     // entry can't get it accepted by restoreFromTrash. Entry format is
     // `{json}\t{hex_hmac}`.
     let mac = hmac::hmac_sha256_hex(&hmac::log_hmac_key()?, json.as_bytes());
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)?;
-    writeln!(file, "{json}\t{mac}")?;
-    // Force flush so a crash immediately after delete-to-trash doesn't lose
-    // the log entry (which would orphan the Recycle Bin items).
-    file.sync_all()?;
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        writeln!(file, "{json}\t{mac}")?;
+        // Force flush so a crash immediately after delete-to-trash doesn't lose
+        // the log entry (which would orphan the Recycle Bin items).
+        file.sync_all()?;
+    }
+    // Enforce the documented cap. Best-effort: a trim failure must not fail the
+    // delete (the entry is already durably appended above).
+    trim_to_cap(&path).ok();
+    Ok(())
+}
+
+/// Keep only the last `MAX_ENTRIES` non-empty lines, atomically (temp + rename).
+fn trim_to_cap(path: &std::path::Path) -> anyhow::Result<()> {
+    let raw = std::fs::read_to_string(path)?;
+    let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.len() <= MAX_ENTRIES {
+        return Ok(());
+    }
+    let keep = &lines[lines.len() - MAX_ENTRIES..];
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("trash_log.json");
+    let tmp = path.with_file_name(format!("{file_name}.tmp"));
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        for l in keep {
+            writeln!(f, "{l}")?;
+        }
+        f.sync_all()?;
+    }
+    // std::fs::rename replaces atomically on Windows (MoveFileEx REPLACE).
+    std::fs::rename(&tmp, path)?;
     Ok(())
 }
 

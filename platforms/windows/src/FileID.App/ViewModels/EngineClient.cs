@@ -29,6 +29,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Reactive.Subjects;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Threading;
 using FileID.IpcSchema;
 using FileID.Services;
@@ -50,6 +51,14 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     private readonly DispatcherQueue _ui;
     private readonly Subject<IpcEvent> _events = new();
     private readonly object _writeLock = new();
+
+    // S4: bounded engine-stdout framing. Mirrors the engine's 1 MiB
+    // MAX_FRAME_BYTES guard so a wedged/compromised engine that never emits a
+    // newline can't grow an unbounded read buffer and OOM the UI process.
+    private const int MaxFrameChars = 1024 * 1024;
+    private readonly StringBuilder _stdoutBuffer = new();
+    private readonly char[] _stdoutChunk = new char[16 * 1024];
+    private bool _stdoutResyncing;
 
     private Process? _process;
     private CancellationTokenSource? _readCts;
@@ -533,8 +542,67 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         }
     }
 
+    /// <summary>S4: read one newline-delimited engine frame, bounded to
+    /// <see cref="MaxFrameChars"/>. A frame that exceeds the cap before a
+    /// newline arrives is discarded and we resync to the next newline, so a
+    /// never-terminating line can't OOM the UI. Returns null at EOF. State is
+    /// the per-loop <c>_stdoutBuffer</c>/<c>_stdoutResyncing</c> fields (one
+    /// stdout loop runs at a time; reset at loop entry).</summary>
+    private async Task<string?> ReadBoundedFrameAsync(StreamReader reader, CancellationToken ct)
+    {
+        while (true)
+        {
+            // Emit a completed frame if the buffer already holds a newline.
+            int nl = -1;
+            for (int i = 0; i < _stdoutBuffer.Length; i++)
+            {
+                if (_stdoutBuffer[i] == '\n') { nl = i; break; }
+            }
+            if (nl >= 0)
+            {
+                string frame = _stdoutBuffer.ToString(0, nl);
+                _stdoutBuffer.Remove(0, nl + 1);
+                if (_stdoutResyncing)
+                {
+                    // This frame is the tail of an oversize line — drop it and
+                    // resume normal framing from the next one.
+                    _stdoutResyncing = false;
+                    continue;
+                }
+                if (frame.Length > 0 && frame[^1] == '\r') frame = frame[..^1];
+                return frame;
+            }
+            // No newline yet: if the buffer crossed the cap, the engine is
+            // emitting an oversize/garbage frame. Drop it and resync.
+            if (_stdoutBuffer.Length > MaxFrameChars)
+            {
+                DebugLog.Warn($"Engine emitted an oversize IPC frame (> {MaxFrameChars} chars); discarding and resyncing.");
+                _stdoutBuffer.Clear();
+                _stdoutResyncing = true;
+            }
+            int read = await reader.ReadAsync(_stdoutChunk.AsMemory(), ct).ConfigureAwait(false);
+            if (read == 0)
+            {
+                // EOF. Surface a trailing partial frame, unless we were mid-resync.
+                if (!_stdoutResyncing && _stdoutBuffer.Length > 0)
+                {
+                    string tail = _stdoutBuffer.ToString();
+                    _stdoutBuffer.Clear();
+                    if (tail.Length > 0 && tail[^1] == '\r') tail = tail[..^1];
+                    return tail;
+                }
+                return null;
+            }
+            _stdoutBuffer.Append(_stdoutChunk, 0, read);
+        }
+    }
+
     private async Task StdoutLoopAsync(StreamReader reader, CancellationToken ct)
     {
+        // Reset the bounded-framing state for this loop instance (a respawn
+        // starts a fresh loop; stale leftover bytes must not carry over).
+        _stdoutBuffer.Clear();
+        _stdoutResyncing = false;
         // No stdout idle watchdog: it killed healthy idle engines (e.g.
         // after auto-install of llama runtimes the engine sits quietly
         // waiting for the user — 5 min
@@ -554,7 +622,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             string? line;
             try
             {
-                line = await reader.ReadLineAsync(ct).ConfigureAwait(false);
+                line = await ReadBoundedFrameAsync(reader, ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) { return; }
             catch (Exception ex)

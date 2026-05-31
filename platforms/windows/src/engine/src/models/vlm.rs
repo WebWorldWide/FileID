@@ -194,6 +194,13 @@ pub async fn caption(
         }
         // Don't print the prompt back at us; we only want the completion.
         cmd.arg("--no-display-prompt");
+        // P2: offload all layers to the GPU, mirroring the persistent server
+        // (vlm_server.rs). Modern llama.cpp defaults to 0 GPU layers, so without
+        // this the per-file CLI path ran the entire VLM decode + vision
+        // projector on the CPU — many-fold slower. Quality-neutral (same
+        // weights/prompt/sampling); a no-op on a CPU-only llama.cpp build, and
+        // on a small-VRAM card llama.cpp spills the overflow layers back to CPU.
+        cmd.arg("-ngl").arg("99");
         // Pin to the discrete GPU on hybrid iGPU+dGPU systems (no-op otherwise).
         if let Some(dev) = discrete_gpu_device(&runner.binary).await {
             cmd.arg("--device").arg(dev);

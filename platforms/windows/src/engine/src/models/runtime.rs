@@ -240,10 +240,17 @@ pub fn execution_providers_for_chain(
         match ep {
             ExecutionProvider::Cuda => out.push(CUDAExecutionProvider::default().build()),
             ExecutionProvider::TensorRt => out.push(TensorRTExecutionProvider::default().build()),
-            // Intel: GPU/CPU today. The NPU device hint
-            // (`with_device_type("NPU")`) + INT8 model variants land in
-            // Phase 6 alongside NPU detection.
-            ExecutionProvider::OpenVino => out.push(OpenVINOExecutionProvider::default().build()),
+            // P4: pin the OpenVINO device to AUTO:GPU,CPU so Intel boxes target
+            // the GPU (or NPU once detected) and only fall back to the OpenVINO
+            // CPU plugin when no accelerator binds — instead of OpenVINO's
+            // default possibly landing on CPU silently. AUTO keeps a safe
+            // fallback if the GPU plugin is unavailable. (Explicit NPU hint +
+            // INT8 variants land in Phase 6 alongside NPU detection.)
+            ExecutionProvider::OpenVino => out.push(
+                OpenVINOExecutionProvider::default()
+                    .with_device_type("AUTO:GPU,CPU")
+                    .build(),
+            ),
             ExecutionProvider::DirectMl => {
                 // Pin DirectML to the discrete adapter on hybrid iGPU+dGPU
                 // boxes. DirectML's `device_id` is the DXGI adapter index —
@@ -284,6 +291,39 @@ pub fn execution_providers_for_chain(
 pub fn active_provider() -> ExecutionProvider {
     static CELL: std::sync::OnceLock<ExecutionProvider> = std::sync::OnceLock::new();
     *CELL.get_or_init(|| RuntimeProbe::detect().provider)
+}
+
+/// The execution provider whose first native session-bind the EP crash gate
+/// (`ep_guard`) must protect. Unlike [`active_provider`] (which is derived from
+/// `pick_provider` and ignores the user override), this honors
+/// `gpuExecutionProviderOverride` by walking the SAME override-aware
+/// `priority_chain` the model wrappers bind from, and returns the first
+/// *guarded* EP (`cuda`/`openvino`) that is actually reachable for a real
+/// native bind (pack present and not crash-disabled — the same predicate
+/// `RuntimeProbe::detect` uses, since a disable un-pins `ORT_DYLIB_PATH`). When
+/// no guarded EP will bind it returns `active_provider()` so `ep_guard::arm`
+/// no-ops on DirectML/CPU. Without this, a user who forces `cuda`/`openvino` on
+/// a box whose auto-detected provider is DirectML armed the wrong (unguarded)
+/// EP, so a crash during that forced GPU bind left no breadcrumb and the engine
+/// crash-looped instead of reverting to DirectML (B6).
+pub fn armed_provider() -> ExecutionProvider {
+    let probe = RuntimeProbe::detect();
+    for ep in priority_chain(probe.vendor) {
+        match ep {
+            ExecutionProvider::Cuda
+                if cuda_provider_present() && !crate::models::ep_guard::is_disabled("cuda") =>
+            {
+                return ExecutionProvider::Cuda;
+            }
+            ExecutionProvider::OpenVino
+                if pack_present("openvino") && !crate::models::ep_guard::is_disabled("openvino") =>
+            {
+                return ExecutionProvider::OpenVino;
+            }
+            _ => {}
+        }
+    }
+    active_provider()
 }
 
 /// Apply execution-provider-specific session tuning that would otherwise be

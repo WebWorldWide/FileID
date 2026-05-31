@@ -307,6 +307,34 @@ fn resolve_pool_size(worker_count: usize) -> usize {
     cap.max(1).min(worker_count.max(1))
 }
 
+/// EP-aware vision-inference concurrency. DirectML keeps the explicit TDR floor
+/// (`VISION_CONCURRENCY`): past the 2 s deadline Windows removes the GPU device.
+/// CUDA/TensorRT have no TDR ceiling, so concurrency rises to the (VRAM-clamped)
+/// pool size — every loaded Session can run at once instead of being artificially
+/// throttled below the pool. Other EPs stay at the conservative floor until
+/// measured. NOTE: on a small-VRAM card the pool itself clamps to ~2, so this is
+/// a no-op there; the win is on larger CUDA cards. Growing the pool on a 6 GB
+/// CUDA card needs a CUDA-specific `VRAM_PER_POOL_INSTANCE_MB` retune measured on
+/// hardware (DirectML's estimate is allocator-conservative) — tracked separately.
+fn ep_vision_concurrency(ep: crate::models::runtime::ExecutionProvider, pool_size: usize) -> usize {
+    use crate::models::runtime::ExecutionProvider as Ep;
+    match ep {
+        Ep::Cuda | Ep::TensorRt => pool_size.max(VISION_CONCURRENCY),
+        _ => VISION_CONCURRENCY,
+    }
+}
+
+/// EP-aware CLIP-embed concurrency (governs the opt-in `FILEID_CLIP_USE_BATCH=0`
+/// pool path; the default batch coordinator uses one Session and ignores this).
+/// Same EP rationale as [`ep_vision_concurrency`].
+fn ep_clip_concurrency(ep: crate::models::runtime::ExecutionProvider, pool_size: usize) -> usize {
+    use crate::models::runtime::ExecutionProvider as Ep;
+    match ep {
+        Ep::Cuda | Ep::TensorRt => pool_size.max(CLIP_CONCURRENCY),
+        _ => CLIP_CONCURRENCY,
+    }
+}
+
 impl ModelStack {
     /// Load whatever model files are installed at the canonical paths.
     /// Each present model gets loaded `pool_size` times so workers can
@@ -564,8 +592,23 @@ impl Tagger {
         drop(raw_rx);
         drop(predecoded_tx);
 
-        let vision_sem = Arc::new(Semaphore::new(VISION_CONCURRENCY));
-        let clip_sem = Arc::new(Semaphore::new(CLIP_CONCURRENCY));
+        // P3: derive the GPU-inference concurrency caps from the active EP. On
+        // DirectML these stay at the TDR floor (4/2); on CUDA/TensorRT they rise
+        // to the VRAM-clamped pool size so the semaphore doesn't throttle below
+        // the number of loaded Sessions.
+        let active_ep = crate::models::runtime::active_provider();
+        let ep_pool_size = resolve_pool_size(self.worker_count);
+        let vision_cap = ep_vision_concurrency(active_ep, ep_pool_size);
+        let clip_cap = ep_clip_concurrency(active_ep, ep_pool_size);
+        tracing::info!(
+            ep = active_ep.as_str(),
+            pool_size = ep_pool_size,
+            vision_cap,
+            clip_cap,
+            "[TAGGING] EP-aware inference concurrency caps"
+        );
+        let vision_sem = Arc::new(Semaphore::new(vision_cap));
+        let clip_sem = Arc::new(Semaphore::new(clip_cap));
 
         for worker_idx in 0..self.worker_count {
             let rx = predecoded_rx.clone();
