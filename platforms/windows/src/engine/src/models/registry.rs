@@ -367,27 +367,27 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
         // ── ONNX Runtime OpenVINO Performance Pack (Intel GPUs/NPUs). Intel's
         // accelerated path; OpenVINO is Apache-2.0 so it's commercial-clean to
         // redistribute. Like the CUDA pack, pyke's base ORT lacks the OpenVINO
-        // provider — this pack supplies a matched ORT 1.22.0 build (compiled
-        // --use_openvino) + the Intel OpenVINO runtime DLLs. main.rs pins
+        // provider — this pack supplies a matched ORT 1.22.0 build + the Intel
+        // OpenVINO 2025.1 runtime DLLs, assembled verbatim from the official
+        // PyPI wheels `onnxruntime-openvino==1.22.0` + `openvino==2025.1.0`
+        // (license texts bundled inside the zip: ORT MIT + OpenVINO Apache-2.0).
+        // The zip extracts onnxruntime.dll + onnxruntime_providers_openvino.dll
+        // + openvino*.dll + plugins.xml under packs/openvino/; main.rs pins
         // ORT_DYLIB_PATH to its onnxruntime.dll on Intel GPUs; ep_guard reverts
-        // to DirectML if the bind crashes.
-        // HANDOFF: the artifact must be assembled + uploaded to the URL below
-        // (repackage `Microsoft.ML.OnnxRuntime.OpenVino` 1.22.0 + the OpenVINO
-        // runtime into a zip that extracts onnxruntime.dll +
-        // onnxruntime_providers_openvino.dll + openvino*.dll under packs/openvino/).
-        // Until then the auto-install 404s gracefully and Intel stays on
-        // DirectML. UNVERIFIED — needs Intel hardware to confirm the bind + perf.
+        // to DirectML if the bind crashes. UNVERIFIED on Intel hardware (no
+        // Intel GPU in the dev env) — but assembled from the canonical wheels
+        // and safe behind ep_guard. Hosted on HF (CI-allowlisted).
         "ort_openvino_x64" => {
             let dir = models_root.join("packs").join("openvino");
             LookupResult::Found(Model {
                 id: "ort_openvino_x64",
                 display_name: "ONNX Runtime OpenVINO pack",
                 files: vec![FileEntry {
-                    url: "https://huggingface.co/Web-World-Wide/fileid-ort-openvino/resolve/main/ort-openvino-win-x64-1.22.0.zip"
+                    url: "https://huggingface.co/Web-World-Wide/OpenVINO/resolve/main/ort-openvino-win-x64-1.22.0.zip"
                         .to_string(),
                     dest: dir.join("ort-openvino.zip"),
                     sha256: None,
-                    approx_bytes: 120_000_000,
+                    approx_bytes: 41_300_000,
                 }],
             })
         }
