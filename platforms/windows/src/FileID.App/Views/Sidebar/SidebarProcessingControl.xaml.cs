@@ -465,9 +465,19 @@ public sealed partial class SidebarProcessingControl : UserControl
             StatFailures.Text = prog.Failed.ToString("N0");
             StatFailures.Foreground = prog.Failed > 0 ? FailedTextBrush : _statDefaultBrush;
 
-            EtaText.Text = prog.EtaSeconds is { } eta && eta > 0
-                ? "ETA: " + FormatDuration(eta)
-                : "ETA: computing...";
+            // Per-step ETA: attribute the estimate to the ACTIVE pipeline
+            // stage rather than showing a bare number. During discovery the
+            // total is unknowable (counting the files IS the work), so we never
+            // fabricate an ETA there — that was the class of wrong number the
+            // engine used to emit. The People/Captions stages are separate jobs
+            // that surface their own ETA when they run.
+            EtaText.Text = phase switch
+            {
+                ScanPhase.Discovering => "Counting files…",
+                _ when prog.EtaSeconds is { } eta && eta > 0 =>
+                    $"{StageLabel(phase)} — {FormatDuration(eta)} left",
+                _ => $"{StageLabel(phase)} — estimating…",
+            };
         }
         else if (isCompleted && prog is not null)
         {
@@ -504,6 +514,14 @@ public sealed partial class SidebarProcessingControl : UserControl
             }
         }
     }
+
+    private static string StageLabel(ScanPhase? phase) => phase switch
+    {
+        ScanPhase.Discovering => "Counting",
+        ScanPhase.Tagging => "Tagging",
+        ScanPhase.PostScan => "Finishing up",
+        _ => "Working",
+    };
 
     private static string FormatDuration(double seconds)
     {

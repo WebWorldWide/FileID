@@ -237,22 +237,27 @@ impl DbWriter {
                 // have neither identity (no heal possible).
                 if f.file_ref.is_some() || f.content_hash.is_some() {
                     let ch_bytes = f.content_hash.as_ref().map(|h| h.as_slice());
-                    let healed_id: Option<i64> = heal_lookup_stmt
+                    let healed: Option<(i64, String, bool)> = heal_lookup_stmt
                         .query_row(
                             params![f.file_ref, ch_bytes, path_text.as_ref()],
-                            |r| r.get(0),
+                            |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)),
                         )
                         .optional()
                         .with_context(|| format!("rename-heal lookup for {}", path_text))?;
-                    if let Some(id) = healed_id {
-                        heal_update_stmt
-                            .execute(params![path_text, path_hash, id])
-                            .with_context(|| format!("rename-heal update for {}", path_text))?;
-                        tracing::info!(
-                            id,
-                            new_path = %crate::platform::redact_path_for_log(&f.path),
-                            "[RENAME-HEAL] re-bound existing row to new path"
-                        );
+                    // Heal only a row whose identity genuinely MOVED — a
+                    // coexisting byte-identical COPY must not steal the
+                    // original's row (see `heal_candidate_moved`).
+                    if let Some((id, old_path, by_ref)) = healed {
+                        if heal_candidate_moved(by_ref, &old_path) {
+                            heal_update_stmt
+                                .execute(params![path_text, path_hash, id])
+                                .with_context(|| format!("rename-heal update for {}", path_text))?;
+                            tracing::info!(
+                                id,
+                                new_path = %crate::platform::redact_path_for_log(&f.path),
+                                "[RENAME-HEAL] re-bound existing row to new path"
+                            );
+                        }
                     }
                 }
 
@@ -536,9 +541,15 @@ const INSERT_FILE_RETURNING_ID_SQL: &str = r#"
 // Rename/move heal lookup (v8 identity). Find an existing row whose
 // `file_ref` (volume-local; the common rename case) or `content_hash`
 // (cross-volume) matches, but at a DIFFERENT path. NULL identity columns
-// never match — a row without identity can't be healed.
+// never match — a row without identity can't be healed. Also returns the
+// candidate's current `path_text` and a `by_ref` flag so the caller can
+// distinguish a true MOVE (file_ref reused only for the same file) from a
+// coexisting byte-identical COPY (two distinct files share a content_hash);
+// only the former may heal unconditionally — see the call site.
 const HEAL_LOOKUP_SQL: &str = r#"
-    SELECT id FROM files
+    SELECT id, path_text,
+           (?1 IS NOT NULL AND file_ref IS NOT NULL AND file_ref = ?1) AS by_ref
+    FROM files
     WHERE path_text != ?3
       AND (
           (file_ref IS NOT NULL AND file_ref = ?1)
@@ -556,6 +567,26 @@ const HEAL_UPDATE_SQL: &str = r#"
        SET path_text = ?1, path_hash = ?2
      WHERE id = ?3
 "#;
+
+/// Decide whether a heal candidate (an existing row matched by identity at a
+/// different path) genuinely MOVED, and may therefore re-bind to the new path.
+///
+/// A `file_ref` (NTFS MFT id) match is always a true rename/move — the volume
+/// reuses a ref only for the same file — so `by_ref` heals unconditionally.
+/// A `content_hash`-only match, however, also fires for a COEXISTING
+/// byte-identical COPY (two distinct files share one BLAKE3). Healing that
+/// would steal the original's row and, via `UPDATE OR REPLACE`, FK-cascade its
+/// tags/faces away — silent data loss. So a hash-only candidate may heal only
+/// when its previous path no longer exists on disk (a real move), never when
+/// it still does (a copy). `symlink_metadata` (not `metadata`) so a dangling
+/// symlink still counts as present and is not treated as a move.
+fn heal_candidate_moved(by_ref: bool, old_path: &str) -> bool {
+    by_ref
+        || std::fs::symlink_metadata(crate::util::path_safety::to_extended_length(
+            std::path::Path::new(old_path),
+        ))
+        .is_err()
+}
 
 const INSERT_CLIP_SQL: &str = r#"
     INSERT INTO clip_embeddings (file_id, embedding, model)
@@ -832,5 +863,214 @@ mod tests {
         let bytes = floats_to_le_bytes(&v);
         assert_eq!(bytes.len(), 2048);
         assert!(bytes.iter().all(|&b| b == 0));
+    }
+
+    // ---- B1 rename-heal data-loss regression --------------------------------
+
+    fn unique_tmp_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static CTR: AtomicU64 = AtomicU64::new(0);
+        let n = CTR.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "fileid_test_{}_{}_{}",
+            tag,
+            std::process::id(),
+            n
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Mirror of the heal+insert per-file body in `flush`, exercising the
+    /// real HEAL_LOOKUP_SQL / `heal_candidate_moved` / HEAL_UPDATE_SQL /
+    /// INSERT_FILE_RETURNING_ID_SQL so the B1 guard is under test end-to-end.
+    fn ingest_with_heal(conn: &Connection, f: &TaggedFile) -> i64 {
+        let path_text = f.path.to_string_lossy();
+        let path_hash = crate::util::path_safety::stable_path_hash(&path_text);
+        let extension = f
+            .path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if f.file_ref.is_some() || f.content_hash.is_some() {
+            let ch_bytes = f.content_hash.as_ref().map(|h| h.as_slice());
+            let healed: Option<(i64, String, bool)> = conn
+                .query_row(
+                    HEAL_LOOKUP_SQL,
+                    params![f.file_ref, ch_bytes, path_text.as_ref()],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)),
+                )
+                .optional()
+                .unwrap();
+            if let Some((id, old_path, by_ref)) = healed {
+                if heal_candidate_moved(by_ref, &old_path) {
+                    conn.execute(HEAL_UPDATE_SQL, params![path_text, path_hash, id])
+                        .unwrap();
+                }
+            }
+        }
+        conn.query_row(
+            INSERT_FILE_RETURNING_ID_SQL,
+            params![
+                path_text,
+                path_hash,
+                f.size_bytes as i64,
+                None::<f64>,
+                f.modified_unix,
+                f.scanned_unix,
+                f.kind.as_str(),
+                extension,
+                f.phash,
+                None::<f64>,
+                f.has_faces as i64,
+                f.has_text as i64,
+                f.camera_model,
+                f.location_lat,
+                f.location_lon,
+                f.failed as i64,
+                f.error_message,
+                f.content_hash.as_ref().map(|h| h.as_slice()),
+                f.file_ref,
+            ],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// The `by_ref` flag must be 1 only for a `file_ref` match and 0 (never
+    /// SQL NULL) for a content_hash-only match — even when the incoming
+    /// file_ref is NULL but the matched row has one.
+    #[test]
+    fn heal_lookup_flags_ref_match_but_not_hash_only() {
+        let conn = in_memory_db();
+        let mut a = fixture(r"C:\lib\old\IMG.jpg");
+        a.content_hash = Some([7u8; 32]);
+        a.file_ref = Some(0xABCD);
+        ingest_with_heal(&conn, &a);
+
+        let by_ref: bool = conn
+            .query_row(
+                HEAL_LOOKUP_SQL,
+                params![Some(0xABCDu64), Some([7u8; 32].as_slice()), r"C:\lib\new\IMG.jpg"],
+                |r| Ok(r.get::<_, i64>(2)? != 0),
+            )
+            .unwrap();
+        assert!(by_ref, "file_ref match must set by_ref");
+
+        // Incoming file_ref NULL, matched only via content_hash → by_ref = 0,
+        // and crucially not NULL (which would break r.get::<_, i64>).
+        let by_ref_none: bool = conn
+            .query_row(
+                HEAL_LOOKUP_SQL,
+                params![None::<u64>, Some([7u8; 32].as_slice()), r"C:\lib\new\IMG.jpg"],
+                |r| Ok(r.get::<_, i64>(2)? != 0),
+            )
+            .unwrap();
+        assert!(!by_ref_none, "content_hash-only match must clear by_ref");
+    }
+
+    /// B1 core: two byte-identical files that COEXIST (a copy, not a move)
+    /// must each get their own row. Before the fix the second file's
+    /// content_hash heal stole the first's row and dropped it from the
+    /// library.
+    #[test]
+    fn coexisting_byte_identical_copies_stay_distinct_rows() {
+        let dir = unique_tmp_dir("b1_copy");
+        let orig = dir.join("IMG_1558.HEIC");
+        std::fs::write(&orig, b"same-bytes").unwrap();
+        let copy = dir.join("IMG_1558(1).HEIC");
+        std::fs::write(&copy, b"same-bytes").unwrap();
+
+        let conn = in_memory_db();
+        let mut a = fixture(orig.to_str().unwrap());
+        a.content_hash = Some([0x11; 32]);
+        a.file_ref = Some(1001);
+        let id_a = ingest_with_heal(&conn, &a);
+
+        let mut b = fixture(copy.to_str().unwrap());
+        b.content_hash = Some([0x11; 32]); // identical bytes → identical hash
+        b.file_ref = Some(2002); // a DISTINCT on-disk file → distinct MFT ref
+        let id_b = ingest_with_heal(&conn, &b);
+
+        assert_ne!(id_a, id_b, "copy must not steal the original's row");
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2, "both coexisting byte-identical files must be catalogued");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// B1: a genuine MOVE (content_hash match, old path gone from disk) heals
+    /// to a single row, preserving the row id and its FK-linked tags.
+    #[test]
+    fn genuine_move_heals_and_preserves_fks() {
+        let dir = unique_tmp_dir("b1_move");
+        let new_path = dir.join("moved.jpg");
+        std::fs::write(&new_path, b"payload").unwrap();
+        // Old path is never created on disk → "gone" → a real move.
+        let old_path = dir.join("gone").join("orig.jpg");
+
+        let conn = in_memory_db();
+        let mut a = fixture(old_path.to_str().unwrap());
+        a.content_hash = Some([0x22; 32]);
+        a.file_ref = None; // cross-volume move: only content_hash identity
+        let id_a = ingest_with_heal(&conn, &a);
+        conn.execute(
+            "INSERT INTO tags (file_id, tag, source, score) VALUES (?1, 'cat', 'auto', 0.9)",
+            params![id_a],
+        )
+        .unwrap();
+
+        let mut b = fixture(new_path.to_str().unwrap());
+        b.content_hash = Some([0x22; 32]);
+        b.file_ref = None;
+        let id_b = ingest_with_heal(&conn, &b);
+
+        assert_eq!(id_a, id_b, "a real move must re-bind the SAME row id");
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "the moved file is one row, not two");
+        let tag_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tags WHERE file_id = ?1 AND tag = 'cat'",
+                params![id_b],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tag_count, 1, "FK-linked tag must survive the heal");
+        let healed_path: String = conn
+            .query_row("SELECT path_text FROM files WHERE id = ?1", params![id_b], |r| r.get(0))
+            .unwrap();
+        assert_eq!(healed_path, new_path.to_string_lossy());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// B1: a true rename detected via file_ref (NTFS MFT id) heals
+    /// unconditionally — even if a file still sits at the old path — because
+    /// a volume reuses a ref only for the same file.
+    #[test]
+    fn file_ref_match_heals_unconditionally() {
+        let dir = unique_tmp_dir("b1_ref");
+        let old_path = dir.join("before.png");
+        std::fs::write(&old_path, b"x").unwrap(); // old path STILL present
+        let new_path = dir.join("after.png");
+
+        let conn = in_memory_db();
+        let mut a = fixture(old_path.to_str().unwrap());
+        a.file_ref = Some(0xDEAD_BEEF);
+        let id_a = ingest_with_heal(&conn, &a);
+
+        let mut b = fixture(new_path.to_str().unwrap());
+        b.file_ref = Some(0xDEAD_BEEF); // same MFT ref → same file, renamed
+        let id_b = ingest_with_heal(&conn, &b);
+
+        assert_eq!(id_a, id_b, "file_ref match is a true rename → heal");
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

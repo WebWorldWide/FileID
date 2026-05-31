@@ -9,7 +9,7 @@ use crate::ipc::{
     self, sink::Sink, BulkActionItem, BulkActionResult, EngineError, EventPayload, IpcEvent,
     MergeSuggestion, MergeSuggestions, TagMode, Wrap,
 };
-use crate::pipeline::face_clustering::{COS_HIGH, COS_LOW};
+use crate::pipeline::face_clustering::{COS_LOW, MERGE_SUGGEST_COS_HIGH};
 
 use super::trash_log::{self, TrashLogEntry, TrashLogItem};
 
@@ -88,7 +88,7 @@ pub(crate) async fn handle_apply_tags(
                 let tags: Vec<String> = rows.filter_map(|r| r.ok()).collect();
                 if let Err(err) = crate::shell::tags::write_tags(std::path::Path::new(&path), &tags)
                 {
-                    tracing::warn!(?err, %path, "sidecar tag write failed");
+                    tracing::warn!(?err, path = %crate::platform::redact_path_for_log(&path), "sidecar tag write failed");
                 }
                 succeeded += 1;
                 messages.push(BulkActionItem {
@@ -546,7 +546,7 @@ pub(crate) async fn handle_find_merge_suggestions(
                     continue;
                 }
                 let s = cos(ea, eb);
-                if s >= COS_LOW && s < COS_HIGH {
+                if s >= COS_LOW && s < MERGE_SUGGEST_COS_HIGH {
                     pairs.push(MergeSuggestion {
                         source_person_id: pa,
                         destination_person_id: pb,

@@ -154,12 +154,18 @@ pub(crate) async fn handle_deep_analyze_folder(
     payload: ipc::DeepAnalyzeFolderPayload,
     cancel: Arc<AtomicBool>,
 ) {
-    let prefix = format!("{}%", payload.path_prefix);
-    let ids = match collect_file_ids(
-        &db,
-        "WHERE path_text LIKE ?1 AND kind IN ('image','video')",
-        &[&prefix],
-    ) {
+    // P16: sargable range seek on the path_text index instead of a
+    // non-sargable `LIKE 'prefix%'` full-table scan.
+    let lo = payload.path_prefix.clone();
+    let ids_result = match crate::scan_session::prefix_upper_bound(&lo) {
+        Some(hi) => collect_file_ids(
+            &db,
+            "WHERE path_text >= ?1 AND path_text < ?2 AND kind IN ('image','video')",
+            &[&lo, &hi],
+        ),
+        None => collect_file_ids(&db, "WHERE kind IN ('image','video')", &[]),
+    };
+    let ids = match ids_result {
         Ok(v) => v,
         Err(err) => {
             tracing::warn!(?err, "deep_analyze_folder query");
