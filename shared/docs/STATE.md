@@ -8,6 +8,17 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-05-31 — All-vendor HW acceleration auto-install + vLLM decision (branch `windows-allvendor-accel`)
+
+Builds on the merged CUDA pack. Headless-verified (engine clippy+tests; app build+format+tests). On-branch.
+
+- **vLLM vs llama.cpp — researched, KEEP llama.cpp.** vLLM is a server throughput engine (pre-allocates ~90% VRAM, NVIDIA/Linux-first, no Metal); FileID is single-user on-device on consumer GPUs (6 GB 2060) across Windows+macOS — llama.cpp's exact lane. No backend change. Full rationale + sources in DECISIONS.
+- **B1 — EP crash-safety gate (`models/ep_guard.rs`), the linchpin.** Arms a `packs/.ep_attempt` breadcrumb around the first ORT session bind (scan.rs), disarms on success; a stale breadcrumb at next startup (main.rs `resolve_poison_at_startup`) → the bind crashed → persistent `.ep_disabled`, fall back to DirectML until re-enable (Verify install / pack reinstall / override). `detect()` treats a disabled EP as absent. Bounds auto-enable risk to one crash → auto-revert.
+- **B2 — CUDA auto-install on NVIDIA.** `CudaAutoInstaller.TryInstallOrtCudaPack` now auto-fetches cuDNN + `ort_cuda_x64` (gated by the now-wired `DisableAutoInstallCudnn`), independent of the llama-cuda sentinel. Stale `CudnnAutoInstaller` comment fixed.
+- **B3 — OpenVINO framework (Intel), Apache-2.0.** `ort_openvino_x64` registry entry (HF `Web-World-Wide/fileid-ort-openvino`); `ORT_DYLIB_PATH` pin generalized to the detected vendor's pack via `runtime::active_pack_dir` (NVIDIA→cuda, Intel→openvino); `CudaAutoInstaller` Intel branch + `DisableAutoInstallOpenVino`; Accelerator sentinel/routing/size wired. **HANDOFF:** assemble + upload the OpenVINO ORT 1.22.0 artifact, then verify on Intel HW — until then the auto-install 404s gracefully and Intel stays on DirectML (B1-safe).
+- **B4 — QNN/Snapdragon: no hosted pack (proprietary SDK).** DirectML baseline; QNN used only if the device provides it. Settings copy updated.
+- **Still pending your RTX 2060:** confirm CUDA auto-installs + binds (`ExecutionProvider=="cuda"`, 3-5x), and that a forced bad bind reverts to DirectML via B1 instead of crash-looping.
+
 ## 2026-05-30 (later 5) — Crash + grid arrow keys + tag noise + CUDA pack (branch `windows-scan-fixes`)
 
 Four user-reported issues from a real ~2h scan of a 24k+ library on `G:\TrueNAS`. All

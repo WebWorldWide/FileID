@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-05-31 — All-vendor HW acceleration: auto-install behind a crash-safety gate; keep llama.cpp over vLLM
+
+**Context**: The user asked to auto-enable GPU acceleration on every vendor and to evaluate vLLM vs llama.cpp.
+
+- **Keep llama.cpp; do NOT adopt vLLM.** vLLM is a server/datacenter throughput engine (PagedAttention, continuous batching, pre-allocates ~90% VRAM, NVIDIA/Linux-first, no Metal). FileID is single-user on-device across Windows + macOS on consumer/low-VRAM GPUs (a 6 GB RTX 2060) — llama.cpp's lane (GGUF quant, CUDA/Vulkan/Metal/CPU, self-contained binary, runs a 7B VLM on 6 GB with CPU spill). FileID's VLM bottleneck is model-load + sequential UI, not throughput; the persistent `llama-server.exe` already captured the throughput win. vLLM would add a Python/server dependency and VRAM pressure for zero benefit, and can't serve macOS (MLX) at all. Revisit only if a server-side deployment ever appears.
+
+- **EP crash-safety gate (`models/ep_guard.rs`) makes auto-enabling unverified GPU EPs safe.** Auto-pinning a pack's ORT runtime + provider DLL (CUDA on the 2060, OpenVINO with no Intel hardware to test) risks a native crash at bind time. The gate arms a `packs/.ep_attempt` breadcrumb around the first ORT session and disarms on success; a stale breadcrumb at next startup → the bind crashed → promote to a persistent `.ep_disabled` and fall back to DirectML until the user re-enables (Settings "Verify install" / pack reinstall / explicit override). Worst case is **one** crash, then auto-revert — so we can ship auto-install before per-vendor on-hardware verification.
+
+- **No hosted QNN pack (Snapdragon).** Qualcomm's QNN SDK is proprietary; redistributing it conflicts with the commercial-clean / Apache-2.0 rule. Snapdragon stays on DirectML and uses the Hexagon NPU only if the device already provides `QnnHtp.dll` (the EP chain `Qnn → DirectMl` already does this). CUDA (MIT, Microsoft-hosted on github) and OpenVINO (Apache-2.0, HF-hosted) are the auto-installed packs; the OpenVINO artifact must be assembled + uploaded to `Web-World-Wide/fileid-ort-openvino` and verified on Intel hardware (handoff). The `ORT_DYLIB_PATH` pin is now vendor-parameterized (`runtime::active_pack_dir`): NVIDIA→packs/cuda, Intel→packs/openvino.
+
 ## 2026-05-30 — CUDA Performance Pack: matched ORT-GPU build + ORT_DYLIB_PATH, not a provider-only drop
 
 **Context**: NVIDIA scans ran on DirectML (~5 files/s) despite the EP chain preferring CUDA. Root

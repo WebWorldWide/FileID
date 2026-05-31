@@ -1,5 +1,14 @@
 # NEXT — Windows (resume here)
 
+## 2026-05-31 — All-vendor acceleration (branch `windows-allvendor-accel`)
+
+Auto-install + crash-safety landed headless-green. Remaining = hosting + on-hardware:
+
+1. **CUDA auto-install on the RTX 2060 (highest value).** Clean launch on NVIDIA → `CudaAutoInstaller` auto-fetches cuDNN + `ort_cuda_x64` → restart → `engine.jsonl` shows `ExecutionProvider == "cuda"` + files/s up 3-5×. Then test the **B1 gate**: corrupt `Models/packs/cuda/**/onnxruntime.dll`, relaunch+scan → next launch must log `[EP-GUARD]` and run DirectML (no crash loop). Re-enable via Settings → Performance → "Verify install".
+2. **OpenVINO artifact (Intel) — the one real handoff.** Assemble a zip that extracts `onnxruntime.dll` + `onnxruntime_providers_openvino.dll` + `openvino*.dll` under `packs/openvino/` (repackage `Microsoft.ML.OnnxRuntime.OpenVino` **1.22.0** + the Intel OpenVINO runtime; must match the pyke ORT 1.22.0 ABI). Upload to `https://huggingface.co/Web-World-Wide/fileid-ort-openvino/resolve/main/ort-openvino-win-x64-1.22.0.zip` (the registry URL). Then verify on an Intel GPU: auto-install fires, `ExecutionProvider == "openvino"`, B1 fallback works. Until uploaded, Intel auto-install 404s gracefully → DirectML (no regression). Then flip the Intel Accelerator Settings card from pseudo-Installed to an installable manual path.
+3. **QNN/Snapdragon:** deliberately no hosted pack (proprietary). If a Snapdragon WoA device is available, confirm the chain uses device-provided QNN when present, else DirectML.
+4. **Merge `windows-allvendor-accel` → main**, both Windows workflows green. (vLLM: decided — keep llama.cpp, no work.)
+
 ## 2026-05-30 (later 5) — On-hardware verification for branch `windows-scan-fixes`
 
 Four fixes landed headless-green on branch `windows-scan-fixes` (crash mitigation, grid arrow
