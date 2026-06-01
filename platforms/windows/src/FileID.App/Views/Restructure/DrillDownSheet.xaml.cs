@@ -57,6 +57,23 @@ public sealed partial class DrillDownSheet : UserControl
         Render(moves);
     }
 
+    /// <summary>Filter to the moves whose engine Tier maps to the given outcome
+    /// (Tidy = Mixed-tier, Reorganize = Junk-tier). Backs a recommendation card's
+    /// "See all N files" — mirrors macOS drillDownSheet(.outcome(...)).</summary>
+    internal void SetOutcomeFilter(RestructurePlan plan, FileID.ViewModels.RestructureOutcome outcome, string title)
+    {
+        HeaderText.Text = title;
+        var moves = new List<RestructureMove>();
+        foreach (var m in plan.Moves)
+        {
+            if (FileID.ViewModels.RestructureGrouping.OutcomeForTier(m.Tier) == outcome)
+            {
+                moves.Add(m);
+            }
+        }
+        Render(moves);
+    }
+
     private void Render(IList<RestructureMove> moves)
     {
         CountText.Text = $"{moves.Count} file{(moves.Count == 1 ? "" : "s")}";

@@ -2591,3 +2591,35 @@ The user asked for macOS/Windows lockstep + an on-hardware RAM++ "lock in." Per
   v12 migration) into `main`, then deleted every other local branch so only `main` remains. The
   fully-merged `claude/*` and feature branches were redundant with `main`; nothing unique was lost
   (each verified `git rev-list --count main..<branch> == 0` before deletion).
+
+## 2026-06-01 - Windows wipe reset + Restructure macOS-parity overhaul
+
+- **Wipe = no rescan + reset-to-first-run, keep models.** "Wipe + Rescan" looked broken because
+  `RunWipeAsync` always re-scanned after wiping, repopulating the library instantly. Dropped the
+  rescan; on success the app clears the selected folder (`AppViewModel.FolderPath = null` -> nulls
+  `LastFolderPath`/`LastFolderDisplay`, sidebar returns to the empty picker) so it lands in a
+  fresh-install state. Downloaded models under `Models/` are deliberately kept (not library state,
+  multi-GB to refetch) - the user chose "reset to a totally clean state, keep models." The
+  engine-side `db::wipe_all` + face/thumb cache clears are unchanged.
+- **Restructure overhaul is pure app-side.** The Windows engine plan already carried everything the
+  macOS UI needs (`RestructureMove.Tier/Confidence/Reason`, `FolderClassifications`), so the "more
+  like macOS" overhaul touched no engine/IPC/Rust - only WinUI. Tier -> outcome: Mixed->Tidy,
+  Junk->Reorganize, Anchor->Keep (shared `RestructureGrouping.OutcomeForTier`, unit-tested,
+  replaces the mapping that had been duplicated in the view + DrillDownSheet).
+- **Inlined the stat hero + hover into the view; one tinted DataTemplate, no selector.** The plan
+  considered a separate `RestructureStatHero` control + `RestructureHoverBus` + a per-outcome
+  `DataTemplateSelector`. Inlining the three hero tiles + hover handling into `RestructureView`
+  removed cross-control plumbing (less fast-fail surface), and exposing the tint/glyph from
+  `RestructureRecommendationVm` (brushes built lazily in getters, evaluated by x:Bind on the UI
+  thread - the `MergeSuggestionVm` BitmapImage precedent) collapsed three near-identical templates
+  into one. Recommendation + file rows are ItemsRepeater + DataTemplate over observable VMs with
+  `Click` handlers resolving `DataContext` (the `SuggestedMergesSheet` crash-safe pattern), never
+  imperative children.
+- **Deep-Analyze nudge gated on caption fraction.** The Restructure banner switched from "name your
+  people" (-> People tab) to macOS's "Run Deep Analyze" (-> `DeepAnalyzeAllAsync`), shown when
+  < 40% of `files` rows have a non-empty `vlm_description`. A wrong/missing column degrades to
+  total=0 -> banner hidden (never a crash).
+- **Encoding:** new `.cs`/`.xaml` files are CRLF + UTF-8 BOM to satisfy the app `dotnet format`
+  gate; glyphs come from int code points / XML `&#xHEX;` entities, never embedded private-use-area
+  characters (which the editor tooling silently dropped). The Tests project is not format-gated -
+  its existing files are LF/no-BOM - so the new test file's encoding is cosmetic there.
