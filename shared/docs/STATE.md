@@ -8,6 +8,17 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-05-31 (later) — Windows: Suggested-merges crash fixed + faces/merge audit (merged to `main`)
+
+User report: opening **People → Suggested merges** hard-crashes the app. Root-caused + fixed, then audited the whole faces/merge path. Headless-green: solution `dotnet build` 0/0, `FileID.App.Tests` 102 + `FileID.IpcSchema.Tests` 34 passed, `dotnet format --verify` exit 0; engine `cargo clippy -D warnings` clean, `cargo test` 242 passed, `cargo fmt --check` clean. Merged to `main`; the win-installs work (`d9a0bf4`) is intentionally NOT included — it stays on its own branch, still gated on hardware verification. GUI runtime still needs the RTX 2060 (see NEXT.md).
+
+1. **The crash (P0).** `SuggestedMergesSheet` built each row imperatively in `Render()` — which runs in a raw `DispatcherQueue.TryEnqueue` callback with no try/catch — and indexed *theme-dictionary* brushes via `Application.Current.Resources["TextFillColorSecondaryBrush"]`/`["SubtleFillColorTertiaryBrush"]` (throws `KeyNotFoundException`; the XAML correctly uses `{ThemeResource}` for exactly these), plus rebuilt full `UIElement` subtrees as ItemsRepeater items per engine event (the V15.4 layout-pass fast-fail shape). Replaced with a `DataTemplate` over a new `MergeSuggestionVm` (mirrors `PersonCluster.AnchorImage`: lazy/cached `BitmapImage`, `DecodePixelWidth=80`), `{ThemeResource}` resolved natively, `_unloaded` guard. Both crash mechanisms gone.
+2. **Merge hardening (P1, engine).** `handle_merge_clusters` now guards `source==dest` (was: delete the person row while its faces still point at it → orphaned faces) and recomputes the destination `representative_face_id` (highest-quality embedded face) instead of leaving it stale.
+3. **"Different people" via IPC + survives re-cluster (P1).** Was a direct app-side `ReadWrite` SQLite write (violated single-writer; `SQLITE_BUSY` risk) keyed on `person_id` — which churns every re-cluster, so the verdict silently stopped suppressing. New `markPersonsDifferent` IPC command routes the write through the engine's single writer; migration **v13** adds `face_a`/`face_b` to `face_verifications` and the verdict + `findMergeSuggestions` filter now key on the *stable* anchor `face_prints.id` pair (legacy person-pair rows still honored). **macOS must mirror v13.**
+4. **Suggestion speed + freshness (P2).** `findMergeSuggestions` replaced two per-person correlated subqueries with a single rep-face JOIN. After a merge the sheet also resolves sibling rows referencing the merged-away person.
+
+Known gap (flagged, deferred): `revertMerge` has no UI caller and `handle_merge_clusters` records no merge history, so merges are effectively un-undoable — true undo needs a history record (out of scope for the crash fix).
+
 ## 2026-05-31 (audit hardening) — ETA fix + data-loss/crash fixes + security + perf/quality (merged to main, CI-green)
 
 A workflow audit (81 agents: parity + ETA design + adversarially-verified bug/security/perf hunt) drove a multi-phase pass. **All landed work is headless-verified** (engine `clippy -D warnings` + 242 tests incl. 11 new; app build + `dotnet format` + IpcSchema 34/34 + App 102/102). **Merged to `main` (PR #3 → `3b11713`); all three CI workflows green** — Windows engine (x64 + arm64-native + arm64-cross), Windows app (.NET, x64 + arm64), macOS app (SwiftPM build + test + smoke). The macOS edits (B8/S5/S8) thus got their first real verification on the macOS runner.

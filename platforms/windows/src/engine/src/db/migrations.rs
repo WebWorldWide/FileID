@@ -37,6 +37,7 @@ fn registry() -> Vec<(&'static str, &'static str)> {
         ("v10_doc_text",                V10_DOC_TEXT),
         ("v11_text_embeddings",         V11_TEXT_EMBEDDINGS),
         ("v12_face_model_reset",        V12_FACE_MODEL_RESET),
+        ("v13_face_verification_anchors", V13_FACE_VERIFICATION_ANCHORS),
     ]
 }
 
@@ -52,6 +53,21 @@ const V12_FACE_MODEL_RESET: &str = "
 DELETE FROM face_verifications;
 DELETE FROM face_prints;
 DELETE FROM persons;
+";
+
+/// v13: stable face-anchor keys for user "different people" verdicts. The
+/// face_verifications PK (person_a, person_b) churns on every re-cluster
+/// (persons are dropped + re-inserted with fresh rowids), so a person-keyed
+/// verdict silently stops suppressing a pair after the next clustering pass.
+/// Add nullable face_a/face_b columns holding the (min,max) anchor face_print
+/// ids — face_prints.id is stable across re-clustering — so
+/// findMergeSuggestions can filter on a key that survives. Existing rows keep
+/// NULL face ids and fall back to the legacy person-pair filter.
+/// NOTE: macOS must register an identical `v13_face_verification_anchors`
+/// identifier with equivalent SQL for cross-platform DB parity.
+const V13_FACE_VERIFICATION_ANCHORS: &str = "
+ALTER TABLE face_verifications ADD COLUMN face_a INTEGER;
+ALTER TABLE face_verifications ADD COLUMN face_b INTEGER;
 ";
 
 /// Apply every registered migration that hasn't been applied yet, in
@@ -317,11 +333,21 @@ mod tests {
         }
         apply(&conn).expect("migrations apply");
 
-        // grdb_migrations has 12 rows.
+        // grdb_migrations has 13 rows.
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 12, "expected 12 applied migrations");
+        assert_eq!(n, 13, "expected 13 applied migrations");
+
+        // v13 added face_a + face_b to face_verifications (stable anchor keys).
+        let verify_cols: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('face_verifications') WHERE name IN ('face_a', 'face_b')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(verify_cols, 2, "v13 must add face_a + face_b columns");
 
         // Spot-check schema cardinals: files has 23 columns including v3
         // additions (vlm_*) and v8 additions (content_hash, file_ref);
@@ -372,7 +398,7 @@ mod tests {
         apply(&conn).unwrap();
         apply(&conn).unwrap(); // second run is a no-op
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 12);
+        assert_eq!(n, 13);
     }
 
     /// V10 added the `doc_text` + `doc_fts` (FTS5) pair, mirroring `ocr_text`

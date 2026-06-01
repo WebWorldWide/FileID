@@ -281,3 +281,93 @@ internal sealed class PersonCluster : INotifyPropertyChanged
             ? $"Cluster {ClusterId} · {MemberCount} photo{(MemberCount == 1 ? string.Empty : "s")}"
             : $"{DisplayName} · {MemberCount}";
 }
+
+/// <summary>
+/// Backs one row of the Suggested-merges sheet. Wraps an IPC
+/// <see cref="FileID.IpcSchema.MergeSuggestion"/> and exposes display strings,
+/// the two anchor-face thumbnails (lazily built + cached on the UI thread,
+/// same pattern as <see cref="PersonCluster.AnchorImage"/>), and a resolved
+/// flag that dims the row + disables its buttons once the user has acted.
+///
+/// Rendering through this VM + a DataTemplate is deliberate: the template
+/// resolves {ThemeResource} brushes natively and the ItemsRepeater recycles
+/// containers, so the sheet never indexes theme brushes off
+/// Application.Resources (KeyNotFoundException) nor rebuilds sibling UIElement
+/// subtrees per engine event (layout-pass fast-fail) — the two crashes the
+/// prior imperative BuildRow path hit.
+/// </summary>
+internal sealed class MergeSuggestionVm : INotifyPropertyChanged
+{
+    public required FileID.IpcSchema.MergeSuggestion Model { get; init; }
+
+    public long SourcePersonId => Model.SourcePersonId;
+    public long DestinationPersonId => Model.DestinationPersonId;
+    public long SourceAnchorFaceId => Model.SourceAnchorFaceId;
+    public long DestinationAnchorFaceId => Model.DestinationAnchorFaceId;
+
+    public string Title =>
+        $"#{Model.SourcePersonId} ({Model.SourceMemberCount}) ↔ #{Model.DestinationPersonId} ({Model.DestinationMemberCount})";
+
+    public string SimilarityText => $"Similarity {Model.Similarity:F2}";
+
+    private Microsoft.UI.Xaml.Media.Imaging.BitmapImage? _sourceFaceImage;
+    private bool _sourceFaceResolved;
+    public Microsoft.UI.Xaml.Media.Imaging.BitmapImage? SourceFaceImage
+        => ResolveFace(Model.SourceAnchorFaceId, ref _sourceFaceImage, ref _sourceFaceResolved);
+
+    private Microsoft.UI.Xaml.Media.Imaging.BitmapImage? _destFaceImage;
+    private bool _destFaceResolved;
+    public Microsoft.UI.Xaml.Media.Imaging.BitmapImage? DestFaceImage
+        => ResolveFace(Model.DestinationAnchorFaceId, ref _destFaceImage, ref _destFaceResolved);
+
+    // Lazily build + cache the per-face JPEG. Constructed during x:Bind
+    // evaluation on the UI thread; File.Exists/try-guarded so a missing or
+    // corrupt crop degrades to the placeholder Border instead of throwing.
+    // DecodePixelWidth caps the decode at the 80px display size.
+    private static Microsoft.UI.Xaml.Media.Imaging.BitmapImage? ResolveFace(
+        long faceId,
+        ref Microsoft.UI.Xaml.Media.Imaging.BitmapImage? cache,
+        ref bool resolved)
+    {
+        if (resolved) return cache;
+        resolved = true;
+        if (faceId <= 0) return null;
+        try
+        {
+            var path = PersonCluster.BuildCropPath(faceId);
+            if (!System.IO.File.Exists(path)) return null;
+            cache = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage
+            {
+                DecodePixelWidth = 80,
+                UriSource = new Uri(path),
+            };
+            return cache;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private bool _isResolved;
+    /// <summary>True once the user has merged or marked-different this pair;
+    /// dims the row and disables both action buttons.</summary>
+    public bool IsResolved
+    {
+        get => _isResolved;
+        set
+        {
+            if (_isResolved == value) return;
+            _isResolved = value;
+            OnChanged(nameof(IsResolved));
+            OnChanged(nameof(RowOpacity));
+            OnChanged(nameof(ActionsEnabled));
+        }
+    }
+    public double RowOpacity => _isResolved ? 0.4 : 1.0;
+    public bool ActionsEnabled => !_isResolved;
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+    private void OnChanged(string name)
+        => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+}

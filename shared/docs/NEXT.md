@@ -1,5 +1,14 @@
 # NEXT — Windows (resume here)
 
+## 2026-05-31 (later) — On-hardware verify the Suggested-merges crash fix (merged to `main`)
+
+Headless-green (build 0/0, App 102 + IpcSchema 34, format exit 0, clippy clean, engine 242 tests, `cargo fmt --check` clean) and merged to `main`. On the RTX 2060, launch `build\build-all.ps1 -Clean -Run` and confirm:
+1. **No crash:** People → **Suggested merges** opens and renders pairs (side-by-side anchor crops + similarity %). Reopen repeatedly / while the engine emits events. Check `app.log` for `[ENGINE-SUB:SuggestedMergesSheet]` and the **absence** of a new `session-died-without-handler-*.txt` (the native-fast-fail breadcrumb).
+2. **Merge:** click Merge → the row dims, sibling rows referencing the merged-away person also dim, and the merged person is gone from the People grid after closing the sheet (`PeopleView` refreshes on dialog close).
+3. **"Different people" survives re-cluster:** click it → pair suppressed; re-run face clustering (People → refresh) → the same pair stays suppressed (proves the v13 stable anchor-face keying). A self-merge must not orphan faces.
+
+**macOS parity:** mirror migration `v13_face_verification_anchors` (ALTER `face_verifications` ADD `face_a`/`face_b` INTEGER) for cross-platform DB parity, and add the `markPersonsDifferent` IPC arm + handler. **Deferred (flagged):** wire `revertMerge` to the UI — it needs a merge-history record written in `handle_merge_clusters` (source person id + moved `face_prints` ids); without it merges are un-undoable.
+
 ## 2026-05-31 (audit hardening) — verification-gated follow-ups (branch `phase0-critical-fixes`)
 
 The audit-driven hardening pass (Phases 0–4, see STATE.md) landed headless-verified on `phase0-critical-fixes`. These remain, grouped by what each needs. Branch is NOT merged — review/merge first, or continue on it.

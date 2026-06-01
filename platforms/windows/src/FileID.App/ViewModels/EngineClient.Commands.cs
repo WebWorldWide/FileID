@@ -381,6 +381,9 @@ internal sealed partial class EngineClient
     public Task FindMergeSuggestionsAsync() =>
         SendCommandAsync(new FindMergeSuggestionsCommand());
 
+    public Task MarkPersonsDifferentAsync(long sourcePersonId, long destinationPersonId, long sourceAnchorFaceId, long destinationAnchorFaceId) =>
+        SendCommandAsync(new MarkPersonsDifferentCommand(sourcePersonId, destinationPersonId, sourceAnchorFaceId, destinationAnchorFaceId));
+
     public Task EmbedImageQueryAsync(long fileId, string queryId) =>
         SendCommandAsync(new EmbedImageQueryCommand(fileId, queryId));
 
