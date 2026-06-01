@@ -131,9 +131,9 @@ public sealed partial class SidebarFolderHeader : UserControl
             var dialog = new ContentDialog
             {
                 XamlRoot = XamlRoot,
-                Title = "Wipe library + rescan?",
-                Content = "This deletes everything FileID has learned about this folder — tags, face clusters, captions, smart names. The folder itself isn't touched. After wiping, FileID will rescan from scratch.\n\nThis can't be undone.",
-                PrimaryButtonText = "Wipe and rescan",
+                Title = "Wipe everything?",
+                Content = "This deletes everything FileID has learned — tags, face clusters, captions, smart names — and returns the app to a clean slate. Your actual files are never touched, and your downloaded AI models are kept.\n\nThis can't be undone.",
+                PrimaryButtonText = "Wipe",
                 CloseButtonText = "Cancel",
                 DefaultButton = ContentDialogButton.Close,
             };
@@ -200,8 +200,8 @@ public sealed partial class SidebarFolderHeader : UserControl
                 var wipeResult = await EngineClient.Instance.WipeLibraryAndWaitAsync(TimeSpan.FromSeconds(30));
                 if (wipeResult.Ok)
                 {
-                    DebugLog.Info("[WIPE] engine confirmed libraryWiped; rescanning");
-                    await TriggerRescanAsync();
+                    DebugLog.Info("[WIPE] engine confirmed libraryWiped");
+                    await FinishWipeAsync(success: true);
                     return;
                 }
                 DebugLog.Warn("[WIPE] engine wipe ok=false: " + (wipeResult.Message ?? "(no message)") + " — using fallback");
@@ -289,49 +289,37 @@ public sealed partial class SidebarFolderHeader : UserControl
             DebugLog.Warn("[WIPE] stage 4 (StartAsync) threw: " + ex);
         }
 
-        if (deleteError is not null)
+        await FinishWipeAsync(success: deleteError is null, failureDetail: deleteError);
+    }
+
+    /// <summary>Final step of a wipe: reset the app to its first-run clean
+    /// state and tell the user. We deliberately do NOT rescan — "Wipe" leaves
+    /// the library empty until the user picks a folder again. Clearing
+    /// FolderPath nulls LastFolderPath/LastFolderDisplay in settings and raises
+    /// HasFolder, which drives the sidebar back to the empty picker (the same
+    /// path "Clear folder" takes). Downloaded models under %LOCALAPPDATA%\FileID\
+    /// Models are intentionally kept — they're not library state and are
+    /// expensive to re-download.</summary>
+    private async Task FinishWipeAsync(bool success, string? failureDetail = null)
+    {
+        try { AppViewModel.Instance.FolderPath = null; }
+        catch (Exception ex) { DebugLog.Warn("[WIPE] clearing folder threw (non-fatal): " + ex.Message); }
+
+        if (success)
         {
+            DebugLog.Info("[WIPE] complete — reset to clean state");
             await ShowAlertAsync(
-                "Wipe partially failed",
-                $"Couldn't delete DB files: {deleteError}\n\n" +
-                "The engine has been restarted, but the old library state may still be present. " +
-                "If a scan still surfaces old data, close FileID, delete " +
-                "%LOCALAPPDATA%\\FileID\\fileid.sqlite manually, and relaunch.");
+                "Library wiped",
+                "FileID is back to a clean slate. Your files and downloaded models are untouched — pick a folder whenever you want to start a fresh scan.");
         }
         else
         {
-            // Fallback wipe succeeded — honor "+ rescan" once the freshly
-            // respawned engine reaches Ready.
-            await TriggerRescanAsync(waitForReady: true);
-        }
-    }
-
-    /// <summary>Kick a fresh rescan of the current library folder after a wipe
-    /// so "Wipe library + rescan" actually rescans. <paramref name="waitForReady"/>
-    /// is used by the fallback path, which has just respawned the engine and
-    /// must wait for it to reach Ready before sending startScan.</summary>
-    private static async Task TriggerRescanAsync(bool waitForReady = false)
-    {
-        var vm = AppViewModel.Instance;
-        var folder = vm.FolderPath;
-        if (string.IsNullOrEmpty(folder))
-        {
-            DebugLog.Info("[WIPE] no folder set; skipping rescan");
-            return;
-        }
-        try
-        {
-            if (waitForReady)
-            {
-                await EngineClient.Instance.WaitForReadyAsync(TimeSpan.FromSeconds(30));
-            }
-            EngineClient.Instance.SetOptimisticScanningPhase();
-            await EngineClient.Instance.StartScanAsync(folder, vm.FolderDisplay, rescan: true);
-            DebugLog.Info("[WIPE] rescan started");
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Warn("[WIPE] rescan trigger threw: " + ex.Message);
+            await ShowAlertAsync(
+                "Wipe partially failed",
+                $"Couldn't delete some database files: {failureDetail}\n\n" +
+                "The engine has been restarted and the folder cleared, but old library data may still be present. " +
+                "If a later scan surfaces old data, close FileID, delete " +
+                "%LOCALAPPDATA%\\FileID\\fileid.sqlite manually, and relaunch.");
         }
     }
 

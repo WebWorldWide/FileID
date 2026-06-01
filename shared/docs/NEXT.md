@@ -1,5 +1,13 @@
 # NEXT — Windows (resume here)
 
+## 2026-06-01 - On-hardware verify Wipe + Restructure overhaul (branch `windows/wipe-restructure-overhaul`)
+
+Headless-green (app build 0/0, format exit 0, App 108 + IpcSchema 34). The WinUI runtime path needs the RTX 2060 (`build\build-all.ps1 -Run`):
+
+1. **Wipe:** click Wipe -> confirm -> the library empties, **no rescan starts**, and the sidebar returns to the empty folder-picker (first-run state); `Models/` is preserved; a "Library wiped" confirmation shows. Re-pick a folder -> a fresh scan starts. Check the `[WIPE]` log stages; on a locked WAL the "Wipe partially failed" path must still restart the engine + clear the folder.
+2. **Restructure:** plan auto-loads; stat-hero numbers match the card headlines; the three Keep/Tidy/Reorganize cards render via ItemsRepeater; Review expands an inline file list (checkbox + "from X") with no native fast-fail; per-file + per-group skip keep the ApplyBar count == the applied set; "See all N files" opens the scoped DrillDownSheet; Apply-as-shortcuts applies exactly the selected set (`LastRestructureApplyResult.Applied == selected`); the Flow/Tree toggle swaps cleanly; the Staying-put expander opens; "Run Deep Analyze" starts a VLM pass and re-plans on completion; the nudge hides once >= 40% of files are captioned.
+3. **Crash-watch:** rapidly switch tabs while a plan / Deep Analyze is mid-flight; confirm no native fast-fail; `[ENGINE-SUB:RestructureView]` lines present and the `_unloaded` guards hold. Check `%LOCALAPPDATA%\FileID\logs\`.
+
 ## 2026-05-31 (later) — On-hardware verify the Suggested-merges crash fix (merged to `main`)
 
 Headless-green (build 0/0, App 102 + IpcSchema 34, format exit 0, clippy clean, engine 242 tests, `cargo fmt --check` clean) and merged to `main`. On the RTX 2060, launch `build\build-all.ps1 -Clean -Run` and confirm:

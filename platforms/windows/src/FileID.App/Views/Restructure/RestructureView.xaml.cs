@@ -1,28 +1,60 @@
-﻿// RestructureView code-behind. Wires Generate plan / Preview as symlinks /
-// Apply (move) buttons to the engine's planRestructure + applyRestructure
-// IPC. Subscribes to the EngineClient's LastRestructurePlan +
-// LastRestructureApplyResult observables to refresh the UI.
+﻿// RestructureView code-behind — recommendation-first + file-first reorg UI
+// (port of macOS RestructureView.swift). Reads EngineClient.LastRestructurePlan,
+// groups the moves by Tier into Keep / Tidy / Reorganize recommendation cards,
+// and drives a per-file + per-group selection model whose count is, by
+// construction, identical to the move set Apply sends to the engine.
+//
+// Crash-safety (platforms/windows/CLAUDE.md): the recommendation + file lists
+// are ItemsRepeater + DataTemplate over observable VMs (never imperative
+// children); the engine subscription is SafeRun-wrapped, posts XAML writes via
+// DispatcherQueue, logs [ENGINE-SUB:RestructureView], and is _unloaded-guarded;
+// tints resolve via VM brushes / {ThemeResource}, never a code-side theme lookup.
 
+using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
+using System.Threading.Tasks;
 using FileID.IpcSchema;
 using FileID.Services;
 using FileID.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 
 namespace FileID.Views.Restructure;
 
 public sealed partial class RestructureView : UserControl
 {
-    private readonly ObservableCollection<RestructureCategoryRow> _categoryRows = new();
+    private const int InlineFileCap = 30;
+
+    private readonly ObservableCollection<RestructureRecommendationVm> _recommendations = new();
+    private readonly Dictionary<long, RestructureFileRowVm> _allFileRows = new();
+    private readonly Dictionary<RestructureOutcome, List<RestructureFileRowVm>> _filesByOutcome = new();
+    private readonly Dictionary<RestructureOutcome, RestructureRecommendationVm> _recByOutcome = new();
+
     private bool _unloaded;
+    private bool _suppressRecompute;
+    private bool _deepAnalyzeHintDismissed;
+    private RestructureOutcome? _hovered;
+
+    // UI-thread brushes cached at ctor time (CLAUDE.md: never build brushes per
+    // event). Tile tints match RestructureRecommendationVm's outcome colors.
+    private readonly SolidColorBrush _keepBrush;
+    private readonly SolidColorBrush _tidyBrush;
+    private readonly SolidColorBrush _reorgBrush;
+    private readonly SolidColorBrush _idleTileStroke;
 
     public RestructureView()
     {
         InitializeComponent();
-        CategoryRepeater.ItemsSource = _categoryRows;
+        _keepBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(0xFF, 0x6C, 0xC2, 0x4A));
+        _tidyBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(0xFF, 0xFF, 0x9F, 0x45));
+        _reorgBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00));
+        _idleTileStroke = new SolidColorBrush(Windows.UI.Color.FromArgb(0x18, 0xFF, 0xFF, 0xFF));
+
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         Sankey.RibbonInvoked += OnSankeyRibbonInvoked;
         WireApplyBarHoverSprings();
@@ -35,12 +67,8 @@ public sealed partial class RestructureView : UserControl
         };
     }
 
-    // macOS parity (RestructureApplyBar.swift:114-117): the gold primary and
-    // outlined secondary apply buttons scale up to 1.02× on hover with a
-    // response: 0.28 / dampingFraction: 0.7 spring, gated by canApply.
-    // SpringEasing.AnimateScale wraps Composition SpringScalarNaturalMotionAnimation
-    // (Period=response, DampingRatio=dampingFraction) — the XAML comment at
-    // RestructureView.xaml:280-281 promises this; this wires it.
+    // macOS parity (RestructureApplyBar.swift): gold primary + outline secondary
+    // scale to 1.02x on hover with a response 0.28 / dampingFraction 0.7 spring.
     private void WireApplyBarHoverSprings()
     {
         const double SpringResponse = 0.28;
@@ -61,12 +89,10 @@ public sealed partial class RestructureView : UserControl
             FileID.Theme.Motion.SpringEasing.AnimateScale(ApplyMovesButton, 1.0f, SpringResponse, SpringDamping);
     }
 
-    // macOS parity (RestructureView.swift `.task`): the plan auto-generates on
-    // open — no manual "Generate plan" click. Render an already-computed plan if
-    // one exists (cached on the engine across tab switches); otherwise compute it
-    // now, provided a library folder has been scanned.
+    // macOS parity (RestructureView.swift `.task`): auto-generate the plan on
+    // open. Render a cached plan if the engine still has one; otherwise compute.
     private async void OnLoaded(object sender, RoutedEventArgs e)
-        => await Services.DebugLog.SafeRunAsync(nameof(OnLoaded), async () =>
+        => await DebugLog.SafeRunAsync(nameof(OnLoaded), async () =>
         {
             _ = RefreshDeepAnalyzeHintAsync();
             if (_unloaded) return;
@@ -81,62 +107,45 @@ public sealed partial class RestructureView : UserControl
                 PlanStatusText.Text = "Pick a library folder in the sidebar to plan a reorganization.";
                 return;
             }
-            PlanStatusText.Text = "Computing plan…";
+            PlanStatusText.Text = "Computing plan...";
             await EngineClient.Instance.PlanRestructureAsync(folder);
         });
 
-    // Shows the Deep Analyze hint banner when there are unnamed person
-    // clusters in the DB. Mirrors macOS RestructureView's "Name people
-    // first" affordance — restructure puts photos into People/<name>/
-    // folders, and unnamed clusters become "Person N", which the user
-    // usually wants to fix before applying.
-    private async System.Threading.Tasks.Task RefreshDeepAnalyzeHintAsync()
-    {
-        int unnamed = 0;
-        try
+    private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
+        => DebugLog.SafeRun("RestructureView.OnEngineChanged", () =>
         {
-            unnamed = await System.Threading.Tasks.Task.Run(() =>
+            if (_unloaded) return;
+            switch (e.PropertyName)
             {
-                try
-                {
-                    if (!System.IO.File.Exists(AppPaths.DbPath)) return 0;
-                    var conn = new Microsoft.Data.Sqlite.SqliteConnection(
-                        new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+                case nameof(EngineClient.LastRestructurePlan):
+                    DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
+                    DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncPlan(); });
+                    break;
+                case nameof(EngineClient.LastRestructureApplyResult):
+                    DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
+                    DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncApplyResult(); });
+                    break;
+                case nameof(EngineClient.DeepAnalyzeProgress):
+                    DispatcherQueue.TryEnqueue(() => { if (!_unloaded) UpdateDeepAnalyzeBanner(); });
+                    break;
+                case nameof(EngineClient.DeepAnalyzeComplete):
+                    {
+                        // macOS parity: re-plan when Deep Analyze finishes so the
+                        // People/<name> buckets reflect newly-captioned files.
+                        var folder = AppViewModel.Instance.FolderPath;
+                        DispatcherQueue.TryEnqueue(async () =>
                         {
-                            DataSource = AppPaths.DbPath,
-                            Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
-                        }.ToString());
-                    conn.Open();
-                    using var cmd = conn.CreateCommand();
-                    cmd.CommandText = "SELECT COUNT(*) FROM persons WHERE name IS NULL AND first_name IS NULL AND COALESCE(is_unknown, 0) = 0";
-                    var v = cmd.ExecuteScalar();
-                    return v is null ? 0 : System.Convert.ToInt32(v);
-                }
-                catch { return 0; }
-            }).ConfigureAwait(true);
-        }
-        catch { unnamed = 0; }
-
-        if (_unloaded) return;
-        // Defensive: the view may have unloaded between the await and this
-        // continuation, in which case the XAML element is already disposed.
-        // Wrap in try/catch so the async-void plumbing doesn't propagate the
-        // exception into the dispatcher loop (which would be a native fast-fail).
-        try
-        {
-            DeepAnalyzeHintBanner.Visibility = unnamed > 0 ? Visibility.Visible : Visibility.Collapsed;
-        }
-        catch (System.Exception ex)
-        {
-            DebugLog.Warn("RefreshDeepAnalyzeHint UI update threw (view unloaded?): " + ex.Message);
-        }
-    }
-
-    private void OnOpenPeopleHintClicked(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnOpenPeopleHintClicked), () =>
-        {
-            try { AppViewModel.Instance.ActiveTab = SidebarTab.People; }
-            catch (System.Exception ex) { DebugLog.Warn("Open People (hint) failed: " + ex.Message); }
+                            if (_unloaded) return;
+                            await RefreshDeepAnalyzeHintAsync();
+                            if (!string.IsNullOrEmpty(folder))
+                            {
+                                try { await EngineClient.Instance.PlanRestructureAsync(folder!); }
+                                catch (Exception ex) { DebugLog.Warn("Restructure auto-regen failed: " + ex.Message); }
+                            }
+                        });
+                    }
+                    break;
+            }
         });
 
     private async void OnSankeyRibbonInvoked(object? sender, (string Source, string Category) ribbon)
@@ -156,158 +165,404 @@ public sealed partial class RestructureView : UserControl
         try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
     }
 
-    private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
-        => Services.DebugLog.SafeRun("RestructureView.OnEngineChanged", () =>
-        {
-            if (_unloaded) return;
-            if (e.PropertyName == nameof(EngineClient.LastRestructurePlan))
-            {
-                Services.DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
-                DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncPlan(); });
-            }
-            else if (e.PropertyName == nameof(EngineClient.LastRestructureApplyResult))
-            {
-                Services.DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
-                DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncApplyResult(); });
-            }
-            else if (e.PropertyName == nameof(EngineClient.DeepAnalyzeComplete))
-            {
-                // macOS parity: re-generate when Deep Analyze finishes so the
-                // People/<name> buckets reflect newly-named clusters. Terminal
-                // event (fires once per batch) and only while this view is alive.
-                var folder = AppViewModel.Instance.FolderPath;
-                if (!string.IsNullOrEmpty(folder))
-                {
-                    DispatcherQueue.TryEnqueue(async () =>
-                    {
-                        if (_unloaded) return;
-                        try { await EngineClient.Instance.PlanRestructureAsync(folder!); }
-                        catch (System.Exception ex) { Services.DebugLog.Warn("Restructure auto-regen failed: " + ex.Message); }
-                    });
-                }
-            }
-        });
+    // ---- Plan rendering -------------------------------------------------
 
     private void SyncPlan()
     {
         var plan = EngineClient.Instance.LastRestructurePlan;
-        if (plan is null)
-        {
-            return;
-        }
-        _categoryRows.Clear();
-        foreach (var c in plan.CategoryCounts)
-        {
-            _categoryRows.Add(new RestructureCategoryRow { Category = c.Category, Count = c.Count });
-        }
-        var moveCount = plan.Moves.Count;
-        PlanStatusText.Text = moveCount == 0
-            ? "Plan ready: nothing to move (already organized!)."
-            : $"Plan ready: {moveCount:N0} files across {plan.CategoryCounts.Count} categories.";
-        CategoryListCard.Visibility = moveCount > 0 ? Visibility.Visible : Visibility.Collapsed;
-        SankeyCard.Visibility = moveCount > 0 ? Visibility.Visible : Visibility.Collapsed;
-        Sankey.SetPlan(plan);
-        TreeDiff.SetPlan(plan);
+        if (plan is null) return;
 
-        // Compute Anchor / Mixed / Junk classification from per-source-
-        // folder move ratios when the engine's authoritative classifier
-        // isn't present; the UI derives the tiers from move counts vs
-        // total-file counts.
-        ComputeAndShowClassifier(plan);
-        ShowConfidenceTiers(plan);
+        _allFileRows.Clear();
+        _filesByOutcome.Clear();
+        _recByOutcome.Clear();
+        _recommendations.Clear();
 
-        // ApplyBar totals reflect the plan; the selected subset (which the
-        // confidence-tier toggles drive) is computed in UpdateSelection.
-        // macOS reference: platforms/apple/.../RestructureApplyBar.swift.
-        ApplyBarTotalCount.Text = moveCount.ToString("N0");
-        ApplyBarHint.Text = moveCount > 0
-            ? "Originals stay put — applying creates shortcuts you can review."
-            : "Generate a plan to enable Apply.";
-        UpdateSelection();
-    }
-
-    /// <summary>
-    /// Populate + show the butler confidence tiers (auto / review / ask).
-    /// Hidden when the engine didn't stamp confidences (older build); the
-    /// apply path then falls back to applying every move.
-    /// </summary>
-    private void ShowConfidenceTiers(RestructurePlan plan)
-    {
-        int auto = 0, review = 0, ask = 0;
         foreach (var m in plan.Moves)
         {
-            switch (m.Confidence)
+            var outcome = RestructureGrouping.OutcomeForTier(m.Tier);
+            var row = new RestructureFileRowVm { Move = m, SelectionChanged = OnFileSelectionChanged };
+            _allFileRows[m.FileId] = row;
+            if (!_filesByOutcome.TryGetValue(outcome, out var list))
             {
-                case "auto": auto++; break;
-                case "ask": ask++; break;
-                default: review++; break; // "review" or empty/unknown
+                list = new List<RestructureFileRowVm>();
+                _filesByOutcome[outcome] = list;
             }
+            list.Add(row);
         }
-        bool stamped = plan.Moves.Count > 0 && plan.Moves.Any(m => !string.IsNullOrEmpty(m.Confidence));
-        ConfidenceStrip.Visibility = stamped ? Visibility.Visible : Visibility.Collapsed;
-        AutoTierCount.Text = auto.ToString("N0");
-        ReviewTierCount.Text = review.ToString("N0");
-        AskTierCount.Text = ask.ToString("N0");
-        // Butler default: auto-file the sure ones + review the medium; hold "ask".
-        AutoTierToggle.IsChecked = true;
-        ReviewTierToggle.IsChecked = true;
-        AskTierToggle.IsChecked = false;
+
+        int moveCount = plan.Moves.Count;
+        int keepFolders = (int)(plan.FolderClassifications?.AnchorFolders ?? 0);
+        int tidyFiles = CountOf(RestructureOutcome.Tidy);
+        int reorgFiles = CountOf(RestructureOutcome.Reorganize);
+        int tidyFolders = DistinctSourceFolders(RestructureOutcome.Tidy);
+        int reorgFolders = DistinctSourceFolders(RestructureOutcome.Reorganize);
+
+        if (keepFolders > 0)
+        {
+            AddRec(RestructureOutcome.Keep,
+                $"Keep {Count(keepFolders, "folder")} untouched",
+                "These folders already have clear names and matching contents - nothing about them changes.",
+                fileCount: 0, folderCount: keepFolders, informational: true);
+        }
+        if (tidyFiles > 0)
+        {
+            AddRec(RestructureOutcome.Tidy,
+                $"Tidy {Count(tidyFolders, "folder")} - move {Count(tidyFiles, "misplaced file")}",
+                "Mostly-organized folders with a few files that don't fit. The folder stays; the misplaced files move to where they belong.",
+                tidyFiles, tidyFolders, informational: false);
+        }
+        if (reorgFiles > 0)
+        {
+            AddRec(RestructureOutcome.Reorganize,
+                $"Reorganize {Count(reorgFolders, "folder")} - sort {Count(reorgFiles, "file")}",
+                "Folders with generic names like \"Untitled\" or \"Camera Roll\" - files sort into clear categories: People, Places, Documents, or Photos by year.",
+                reorgFiles, reorgFolders, informational: false);
+        }
+
+        KeepValue.Text = keepFolders.ToString("N0");
+        KeepHint.Text = keepFolders == 1 ? "folder kept intact" : "folders kept intact";
+        TidyValue.Text = tidyFiles.ToString("N0");
+        TidyHint.Text = tidyFolders == 1 ? "from 1 mixed folder" : $"from {tidyFolders:N0} mixed folders";
+        ReorgValue.Text = reorgFiles.ToString("N0");
+        ReorgHint.Text = reorgFolders == 1 ? "from 1 generic folder" : $"from {reorgFolders:N0} generic folders";
+
+        Sankey.SetPlan(plan);
+        TreeDiff.SetPlan(plan);
+        int srcCount = DistinctAllSourceFolders(plan);
+        int dstCount = plan.Moves.Select(m => m.Category).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+        SankeyHeroStat.Text = $"{srcCount} source{(srcCount == 1 ? "" : "s")} -> {dstCount} destination{(dstCount == 1 ? "" : "s")}";
+
+        bool hasContent = moveCount > 0 || keepFolders > 0;
+        bool hasMoves = moveCount > 0;
+        PlanStatusText.Text = moveCount == 0
+            ? "Your library is already organized - nothing to move."
+            : $"{moveCount:N0} files to reorganize across {plan.CategoryCounts.Count} categories.";
+        StatHero.Visibility = hasContent ? Visibility.Visible : Visibility.Collapsed;
+        ViewModeToggle.Visibility = hasMoves ? Visibility.Visible : Visibility.Collapsed;
+        UnifiedSurface.Visibility = hasMoves ? Visibility.Visible : Visibility.Collapsed;
+        NothingToMoveCard.Visibility = hasMoves ? Visibility.Collapsed : Visibility.Visible;
+        UpdateStayingPut(keepFolders);
+
+        ApplyBarTotalCount.Text = moveCount.ToString("N0");
+        RecomputeSelection();
     }
 
-    private bool ConfidenceStripActive => ConfidenceStrip.Visibility == Visibility.Visible;
-
-    private bool IsBandSelected(string? confidence) => confidence switch
+    private void AddRec(RestructureOutcome outcome, string headline, string body,
+                        int fileCount, int folderCount, bool informational)
     {
-        "auto" => AutoTierToggle.IsChecked == true,
-        "ask" => AskTierToggle.IsChecked == true,
-        _ => ReviewTierToggle.IsChecked == true, // "review" or empty/unknown
-    };
+        var vm = new RestructureRecommendationVm
+        {
+            Outcome = outcome,
+            Headline = headline,
+            BodyText = body,
+            FileCount = fileCount,
+            FolderCount = folderCount,
+            IsInformational = informational,
+            MatchedCount = informational ? 0 : CountOf(outcome),
+        };
+        if (!informational && _filesByOutcome.TryGetValue(outcome, out var files))
+        {
+            foreach (var f in files.Take(InlineFileCap)) vm.Files.Add(f);
+        }
+        _recommendations.Add(vm);
+        _recByOutcome[outcome] = vm;
+    }
 
-    private System.Collections.Generic.List<RestructureMove> SelectedMoves(RestructurePlan plan)
-        => plan.Moves.Where(m => IsBandSelected(m.Confidence)).ToList();
+    private int CountOf(RestructureOutcome outcome)
+        => _filesByOutcome.TryGetValue(outcome, out var list) ? list.Count : 0;
 
-    private void OnTierToggle(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnTierToggle), UpdateSelection);
+    private int DistinctSourceFolders(RestructureOutcome outcome)
+    {
+        if (!_filesByOutcome.TryGetValue(outcome, out var list)) return 0;
+        return list.Select(f => System.IO.Path.GetDirectoryName(f.Move.Source) ?? "")
+                   .Distinct(StringComparer.OrdinalIgnoreCase).Count();
+    }
 
-    /// <summary>Recompute the apply subset from the tier toggles, then refresh
-    /// the ApplyBar count, primary-button label, and enabled state.</summary>
-    private void UpdateSelection()
+    private static int DistinctAllSourceFolders(RestructurePlan plan)
+        => plan.Moves.Select(m => System.IO.Path.GetDirectoryName(m.Source) ?? "")
+                     .Distinct(StringComparer.OrdinalIgnoreCase).Count();
+
+    private void UpdateStayingPut(int keepFolders)
+    {
+        StayingPutCard.Visibility = keepFolders > 0 ? Visibility.Visible : Visibility.Collapsed;
+        StayingPutSubtitle.Text = keepFolders == 1 ? "1 folder kept intact" : $"{keepFolders:N0} folders kept intact";
+    }
+
+    // ---- Selection ------------------------------------------------------
+
+    private void OnFileSelectionChanged()
+    {
+        if (_suppressRecompute) return;
+        RecomputeSelection();
+    }
+
+    /// <summary>Recompute the apply count + button state from the per-file
+    /// IsSelected flags, and reconcile each card's approve state. The count and
+    /// the move set ApplyAsync sends both read the same _allFileRows, so they
+    /// can never diverge (the macOS toggleSkip invariant).</summary>
+    private void RecomputeSelection()
     {
         var plan = EngineClient.Instance.LastRestructurePlan;
-        if (plan is null) return;
-        int selected = ConfidenceStripActive ? SelectedMoves(plan).Count : plan.Moves.Count;
+        int total = plan?.Moves.Count ?? 0;
+        int selected = 0;
+        foreach (var kv in _filesByOutcome)
+        {
+            int s = 0;
+            foreach (var f in kv.Value) if (f.IsSelected) s++;
+            selected += s;
+            if (_recByOutcome.TryGetValue(kv.Key, out var rec) && !rec.IsInformational)
+            {
+                rec.IsApproved = s > 0;
+            }
+        }
+
         bool hasWork = selected > 0;
         ApplySymlinkButton.IsEnabled = hasWork;
         ApplyMovesButton.IsEnabled = hasWork;
         ApplyBarSelectedCount.Text = selected.ToString("N0");
-        ApplySymlinkButtonText.Text = hasWork
-            ? $"Apply as shortcuts ({selected:N0})"
-            : "Apply as shortcuts";
+        ApplySymlinkButtonText.Text = hasWork ? $"Apply as shortcuts ({selected:N0})" : "Apply as shortcuts";
         ApplyStatusText.Text = hasWork
-            ? $"Ready to apply {selected:N0} of {plan.Moves.Count:N0} into '{plan.LibraryRoot}'."
-            : "Select at least one tier to apply.";
+            ? $"Ready to apply {selected:N0} of {total:N0} into '{plan?.LibraryRoot}'."
+            : "Select at least one file to apply.";
+        ApplyBarHint.Text = total > 0
+            ? "Originals stay put - applying creates shortcuts you can review."
+            : "Generate a plan to enable Apply.";
         StepChip1Bg.Background = hasWork
-            ? (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["GoldBrush"]
-            : new Microsoft.UI.Xaml.Media.SolidColorBrush(
-                Windows.UI.Color.FromArgb(0x44, 0xFF, 0xCC, 0x00));
+            ? (Brush)Application.Current.Resources["GoldBrush"]
+            : new SolidColorBrush(Windows.UI.Color.FromArgb(0x44, 0xFF, 0xCC, 0x00));
     }
 
-    /// <summary>
-    /// Display engine-authoritative Anchor/Mixed/Junk counts from
-    /// `plan.FolderClassifications`. The engine always emits this in the
-    /// plan event; the engine is the single source of truth for these tiers.
-    /// </summary>
-    private void ComputeAndShowClassifier(RestructurePlan plan)
-    {
-        if (plan.Moves.Count == 0 || plan.FolderClassifications is not { } engineCounts)
+    private void OnFileCheckClicked(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnFileCheckClicked), () =>
         {
-            ClassifierStrip.Visibility = Visibility.Collapsed;
-            return;
+            if (sender is CheckBox cb && cb.DataContext is RestructureFileRowVm f)
+            {
+                f.IsSelected = cb.IsChecked == true;
+            }
+        });
+
+    private void OnRecReviewClicked(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnRecReviewClicked), () =>
+        {
+            if ((sender as FrameworkElement)?.DataContext is RestructureRecommendationVm vm)
+            {
+                vm.IsExpanded = !vm.IsExpanded;
+            }
+        });
+
+    private void OnRecApproveClicked(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnRecApproveClicked), () =>
+        {
+            if ((sender as FrameworkElement)?.DataContext is not RestructureRecommendationVm vm) return;
+            bool approve = !vm.IsApproved;
+            if (_filesByOutcome.TryGetValue(vm.Outcome, out var files))
+            {
+                _suppressRecompute = true;
+                foreach (var f in files) f.IsSelected = approve;
+                _suppressRecompute = false;
+            }
+            RecomputeSelection();
+        });
+
+    private async void OnSeeAllClicked(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not RestructureRecommendationVm vm) return;
+        var plan = EngineClient.Instance.LastRestructurePlan;
+        if (plan is null) return;
+        var title = vm.Outcome switch
+        {
+            RestructureOutcome.Tidy => "Tidying - files moving out of mixed folders",
+            RestructureOutcome.Reorganize => "Reorganizing - files leaving generic folders",
+            _ => "Files staying put",
+        };
+        var sheet = new DrillDownSheet();
+        sheet.SetOutcomeFilter(plan, vm.Outcome, title);
+        var dialog = new ContentDialog
+        {
+            XamlRoot = XamlRoot,
+            Title = "Files in this group",
+            Content = sheet,
+            CloseButtonText = "Done",
+            DefaultButton = ContentDialogButton.Close,
+        };
+        try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
+    }
+
+    // ---- Hover cross-highlight ------------------------------------------
+
+    private void OnKeepTileEntered(object sender, PointerRoutedEventArgs e) => SetHoveredOutcome(RestructureOutcome.Keep);
+    private void OnTidyTileEntered(object sender, PointerRoutedEventArgs e) => SetHoveredOutcome(RestructureOutcome.Tidy);
+    private void OnReorgTileEntered(object sender, PointerRoutedEventArgs e) => SetHoveredOutcome(RestructureOutcome.Reorganize);
+    private void OnTileExited(object sender, PointerRoutedEventArgs e) => SetHoveredOutcome(null);
+
+    private void OnRecPointerEntered(object sender, PointerRoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnRecPointerEntered), () =>
+        {
+            if ((sender as FrameworkElement)?.DataContext is RestructureRecommendationVm vm)
+                SetHoveredOutcome(vm.Outcome);
+        });
+
+    private void OnRecPointerExited(object sender, PointerRoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnRecPointerExited), () => SetHoveredOutcome(null));
+
+    private void SetHoveredOutcome(RestructureOutcome? outcome)
+    {
+        if (_hovered == outcome) return;
+        _hovered = outcome;
+        foreach (var rec in _recommendations)
+        {
+            rec.IsHighlighted = outcome != null && rec.Outcome == outcome.Value;
         }
-        AnchorCountText.Text = engineCounts.AnchorFolders.ToString("N0");
-        MixedCountText.Text = engineCounts.MixedFolders.ToString("N0");
-        JunkCountText.Text = engineCounts.JunkFolders.ToString("N0");
-        ClassifierStrip.Visibility = Visibility.Visible;
+        UpdateTileHighlight(KeepTile, RestructureOutcome.Keep, _keepBrush);
+        UpdateTileHighlight(TidyTile, RestructureOutcome.Tidy, _tidyBrush);
+        UpdateTileHighlight(ReorgTile, RestructureOutcome.Reorganize, _reorgBrush);
+    }
+
+    private void UpdateTileHighlight(Border tile, RestructureOutcome outcome, Brush tint)
+    {
+        bool active = _hovered == outcome;
+        tile.BorderBrush = active ? tint : _idleTileStroke;
+        FileID.Theme.Motion.SpringEasing.AnimateScale(tile, active ? 1.012f : 1.0f, 0.28, 0.7);
+    }
+
+    // ---- Flow / Tree toggle ---------------------------------------------
+
+    private void OnViewModeClicked(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnViewModeClicked), () =>
+        {
+            if (Sankey is null || TreeDiff is null || VisualizationHeader is null) return;
+            bool tree = ReferenceEquals(sender, TreeModeToggle);
+            FlowModeToggle.IsChecked = !tree;
+            TreeModeToggle.IsChecked = tree;
+            Sankey.Visibility = tree ? Visibility.Collapsed : Visibility.Visible;
+            TreeDiff.Visibility = tree ? Visibility.Visible : Visibility.Collapsed;
+            VisualizationHeader.Text = tree ? "Current vs proposed tree" : "Folder map";
+        });
+
+    // ---- Deep Analyze nudge ---------------------------------------------
+
+    private async Task RefreshDeepAnalyzeHintAsync()
+    {
+        if (EngineClient.Instance.DeepAnalyzeProgress != null) return; // running: handled by UpdateDeepAnalyzeBanner
+        int captioned = 0, total = 0;
+        try
+        {
+            (captioned, total) = await Task.Run(QueryCaptionedFraction).ConfigureAwait(true);
+        }
+        catch { /* keep zeros -> banner hidden */ }
+
+        if (_unloaded) return;
+        bool show = !_deepAnalyzeHintDismissed
+            && total > 0
+            && (double)captioned / total < 0.4
+            && EngineClient.Instance.DeepAnalyzeProgress == null;
+        try
+        {
+            DeepAnalyzeHintBanner.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("Deep Analyze hint update threw (view unloaded?): " + ex.Message);
+        }
+    }
+
+    private void UpdateDeepAnalyzeBanner()
+    {
+        if (EngineClient.Instance.DeepAnalyzeProgress != null)
+        {
+            DeepAnalyzeHintBanner.Visibility = Visibility.Visible;
+            DeepAnalyzeHintTitle.Text = "Deep Analyze running...";
+            DeepAnalyzeHintBody.Text = "Analyzing your library - proposals will sharpen as it runs.";
+            RunDeepAnalyzeButton.IsEnabled = false;
+        }
+        else
+        {
+            DeepAnalyzeHintTitle.Text = "Sharper proposals with Deep Analyze";
+            DeepAnalyzeHintBody.Text = "Deep Analyze reads the contents of each file - captions, OCR text, scene tags - so receipts go to Documents, screenshots to Photos, and people are recognized by name.";
+            RunDeepAnalyzeButton.IsEnabled = true;
+            _ = RefreshDeepAnalyzeHintAsync();
+        }
+    }
+
+    private static (int captioned, int total) QueryCaptionedFraction()
+    {
+        try
+        {
+            if (!System.IO.File.Exists(AppPaths.DbPath)) return (0, 0);
+            using var conn = new Microsoft.Data.Sqlite.SqliteConnection(
+                new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+                {
+                    DataSource = AppPaths.DbPath,
+                    Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
+                }.ToString());
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText =
+                "SELECT COUNT(*), " +
+                "SUM(CASE WHEN vlm_description IS NOT NULL AND vlm_description <> '' THEN 1 ELSE 0 END) " +
+                "FROM files";
+            using var reader = cmd.ExecuteReader();
+            if (reader.Read())
+            {
+                int total = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
+                int captioned = reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1));
+                return (captioned, total);
+            }
+            return (0, 0);
+        }
+        catch { return (0, 0); }
+    }
+
+    private async void OnRunDeepAnalyzeClicked(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnRunDeepAnalyzeClicked), async () =>
+        {
+            var model = AppSettings.Load().SelectedVlmModelKind;
+            DeepAnalyzeHintTitle.Text = "Deep Analyze running...";
+            DeepAnalyzeHintBody.Text = "Analyzing your library - proposals will sharpen as it runs.";
+            RunDeepAnalyzeButton.IsEnabled = false;
+            await EngineClient.Instance.DeepAnalyzeAllAsync(model, skipExisting: true);
+        });
+
+    private void OnDismissHintClicked(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnDismissHintClicked), () =>
+        {
+            _deepAnalyzeHintDismissed = true;
+            DeepAnalyzeHintBanner.Visibility = Visibility.Collapsed;
+        });
+
+    // ---- Plan / Apply ---------------------------------------------------
+
+    private async void OnPlanClicked(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnPlanClicked), async () =>
+        {
+            var folder = AppViewModel.Instance.FolderPath;
+            if (string.IsNullOrEmpty(folder))
+            {
+                PlanStatusText.Text = "Pick a library folder in the sidebar first.";
+                return;
+            }
+            PlanStatusText.Text = "Computing plan...";
+            await EngineClient.Instance.PlanRestructureAsync(folder);
+        });
+
+    private async void OnApplySymlinksClicked(object sender, RoutedEventArgs e) => await ApplyAsync(useSymlinks: true);
+
+    private async void OnApplyMovesClicked(object sender, RoutedEventArgs e) => await ApplyAsync(useSymlinks: false);
+
+    private async Task ApplyAsync(bool useSymlinks)
+    {
+        var plan = EngineClient.Instance.LastRestructurePlan;
+        if (plan is null || plan.Moves.Count == 0) return;
+        var sel = new List<RestructureMove>();
+        foreach (var m in plan.Moves)
+        {
+            if (_allFileRows.TryGetValue(m.FileId, out var row) && row.IsSelected) sel.Add(m);
+        }
+        if (sel.Count == 0) return;
+        ApplyStatusText.Text = useSymlinks
+            ? $"Creating {sel.Count:N0} symlinks..."
+            : $"Moving {sel.Count:N0} files...";
+        await EngineClient.Instance.ApplyRestructureAsync(plan.LibraryRoot, sel, useSymlinks);
     }
 
     private void SyncApplyResult()
@@ -322,67 +577,15 @@ public sealed partial class RestructureView : UserControl
         ApplyStatusText.Text = r.Failed == 0
             ? $"Applied {r.Applied:N0} moves successfully."
             : $"Applied {r.Applied:N0}, failed {r.Failed:N0}. Check %LOCALAPPDATA%\\FileID\\logs\\.";
-        // step chip 2 fills once an Apply has succeeded. Visual
-        // affordance that the two-step flow has advanced past "shortcuts".
         if (r.Failed == 0 && r.Applied > 0)
         {
-            StepChip2Bg.Background =
-                (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["GoldBrush"];
+            StepChip2Bg.Background = (Brush)Application.Current.Resources["GoldBrush"];
             StepChip2Bg.BorderThickness = new Thickness(0);
         }
     }
 
-    private void OnVisualizationModeChanged(object sender, SelectionChangedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnVisualizationModeChanged), () =>
-        {
-            // ComboBox SelectedIndex="0" raises SelectionChanged during
-            // InitializeComponent — before Sankey/TreeDiff/VisualizationHeader
-            // are realized — so the fields are null on that first fire. The
-            // XAML already encodes the index-0 state, so bail until they exist.
-            if (Sankey is null || TreeDiff is null || VisualizationHeader is null) return;
-            if (VisualizationModeCombo.SelectedItem is ComboBoxItem item && item.Tag is string mode)
-            {
-                var sankey = mode == "sankey";
-                Sankey.Visibility = sankey ? Visibility.Visible : Visibility.Collapsed;
-                TreeDiff.Visibility = sankey ? Visibility.Collapsed : Visibility.Visible;
-                VisualizationHeader.Text = sankey
-                    ? "Source folder → category flow"
-                    : "Current ↔ proposed folder tree";
-            }
-        });
+    // ---- Helpers --------------------------------------------------------
 
-    private async void OnPlanClicked(object sender, RoutedEventArgs e)
-    {
-        var folder = AppViewModel.Instance.FolderPath;
-        if (string.IsNullOrEmpty(folder))
-        {
-            PlanStatusText.Text = "Pick a library folder in the sidebar first.";
-            return;
-        }
-        PlanStatusText.Text = "Computing plan…";
-        await EngineClient.Instance.PlanRestructureAsync(folder);
-    }
-
-    private async void OnApplySymlinksClicked(object sender, RoutedEventArgs e)
-    {
-        await ApplyAsync(useSymlinks: true);
-    }
-
-    private async void OnApplyMovesClicked(object sender, RoutedEventArgs e)
-    {
-        await ApplyAsync(useSymlinks: false);
-    }
-
-    private async System.Threading.Tasks.Task ApplyAsync(bool useSymlinks)
-    {
-        var plan = EngineClient.Instance.LastRestructurePlan;
-        if (plan is null || plan.Moves.Count == 0) return;
-        System.Collections.Generic.IReadOnlyList<RestructureMove> moves =
-            ConfidenceStripActive ? SelectedMoves(plan) : plan.Moves;
-        if (moves.Count == 0) return;
-        ApplyStatusText.Text = useSymlinks
-            ? $"Creating {moves.Count:N0} symlinks…"
-            : $"Moving {moves.Count:N0} files…";
-        await EngineClient.Instance.ApplyRestructureAsync(plan.LibraryRoot, moves, useSymlinks);
-    }
+    private static string Count(int n, string noun)
+        => $"{n:N0} {noun}{(n == 1 ? "" : "s")}";
 }

@@ -7,7 +7,7 @@
     parent-path (secondary) + leaf-name (gold), plus three actions:
         • Change folder…    (Ctrl+O)
         • Clear folder
-        • Wipe library + rescan (destructive red, confirmation)
+        • Wipe (destructive red, confirmation, resets to a clean slate)
 
     The collapse/expand sidebar toggle lives in MainWindow as a global
     Ctrl+Shift+S accelerator + a button in this header for mouse users.
@@ -107,8 +107,9 @@
                     BorderThickness="1"
                     BorderBrush="{ThemeResource DestructiveBorderBrush}"
                     Background="{ThemeResource DestructiveBackgroundBrush}"
-                    CornerRadius="8">
-                <TextBlock Text="Wipe library + rescan"
+                    CornerRadius="8"
+                    ToolTipService.ToolTip="Delete everything FileID has learned and reset to a clean slate. Your files and downloaded models are kept.">
+                <TextBlock Text="Wipe"
                            Style="{StaticResource CaptionTextBlockStyle}"
                            Foreground="{ThemeResource DestructiveTextBrush}" />
             </Button>
