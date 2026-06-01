@@ -125,6 +125,13 @@ pub enum CommandPayload {
     #[serde(rename = "findMergeSuggestions")]
     FindMergeSuggestions(Empty),
 
+    /// Record a user "different people" verdict for a suggested pair so
+    /// findMergeSuggestions stops re-suggesting it. Routed through the
+    /// engine's single-writer DB connection (the app must never open its own
+    /// writer) and keyed on stable anchor face ids so it survives re-cluster.
+    #[serde(rename = "markPersonsDifferent")]
+    MarkPersonsDifferent(MarkPersonsDifferentPayload),
+
     /// Pull a file's stored CLIP image embedding from the DB and emit
     /// it via `clipTextEmbedding` (reusing the same channel — the app's
     /// SemanticSearchAsync doesn't care whether the seed is from text or
@@ -358,6 +365,18 @@ pub struct RenamePersonPayload {
 #[serde(rename_all = "camelCase")]
 pub struct MarkPersonsAsUnknownPayload {
     pub person_ids: Vec<i64>,
+}
+
+/// Payload for `markPersonsDifferent`. Carries both the (volatile) person ids
+/// and the (stable) anchor face ids from the suggestion so the engine persists
+/// a verdict key that survives re-clustering.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkPersonsDifferentPayload {
+    pub source_person_id: i64,
+    pub destination_person_id: i64,
+    pub source_anchor_face_id: i64,
+    pub destination_anchor_face_id: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1048,6 +1067,12 @@ mod tests {
                 person_ids: vec![1, 2],
             }),
             CommandPayload::FindMergeSuggestions(Empty {}),
+            CommandPayload::MarkPersonsDifferent(MarkPersonsDifferentPayload {
+                source_person_id: 1,
+                destination_person_id: 2,
+                source_anchor_face_id: 10,
+                destination_anchor_face_id: 20,
+            }),
             CommandPayload::EmbedImageQuery(EmbedImageQueryPayload {
                 file_id: 1,
                 query_id: "q-2".into(),

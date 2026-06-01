@@ -113,6 +113,15 @@ public sealed record MarkPersonsAsUnknownCommand(
 
 public sealed record FindMergeSuggestionsCommand : CommandPayload;
 
+/// <summary>Record a user "different people" verdict for a suggested pair so
+/// findMergeSuggestions stops re-suggesting it. Routed through the engine's
+/// single-writer DB connection; keyed on stable anchor face ids.</summary>
+public sealed record MarkPersonsDifferentCommand(
+    long SourcePersonId,
+    long DestinationPersonId,
+    long SourceAnchorFaceId,
+    long DestinationAnchorFaceId) : CommandPayload;
+
 public sealed record EmbedImageQueryCommand(
     long FileId,
     string QueryId) : CommandPayload;
@@ -167,6 +176,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             "embedTextQuery" => JsonSerializer.Deserialize<EmbedTextQueryCommand>(ref reader, options) ?? throw new JsonException("embedTextQuery: null body"),
             "renamePerson" => JsonSerializer.Deserialize<RenamePersonCommand>(ref reader, options) ?? throw new JsonException("renamePerson: null body"),
             "markPersonsAsUnknown" => JsonSerializer.Deserialize<MarkPersonsAsUnknownCommand>(ref reader, options) ?? throw new JsonException("markPersonsAsUnknown: null body"),
+            "markPersonsDifferent" => JsonSerializer.Deserialize<MarkPersonsDifferentCommand>(ref reader, options) ?? throw new JsonException("markPersonsDifferent: null body"),
             "findMergeSuggestions" => Empty<FindMergeSuggestionsCommand>(ref reader),
             "embedImageQuery" => JsonSerializer.Deserialize<EmbedImageQueryCommand>(ref reader, options) ?? throw new JsonException("embedImageQuery: null body"),
             "restoreFromTrash" => JsonSerializer.Deserialize<RestoreFromTrashCommand>(ref reader, options) ?? throw new JsonException("restoreFromTrash: null body"),
@@ -223,6 +233,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             case EmbedTextQueryCommand c: WriteVariant(writer, "embedTextQuery", c, options); break;
             case RenamePersonCommand c: WriteVariant(writer, "renamePerson", c, options); break;
             case MarkPersonsAsUnknownCommand c: WriteVariant(writer, "markPersonsAsUnknown", c, options); break;
+            case MarkPersonsDifferentCommand c: WriteVariant(writer, "markPersonsDifferent", c, options); break;
             case FindMergeSuggestionsCommand: WriteEmpty(writer, "findMergeSuggestions"); break;
             case EmbedImageQueryCommand c: WriteVariant(writer, "embedImageQuery", c, options); break;
             case RestoreFromTrashCommand c: WriteVariant(writer, "restoreFromTrash", c, options); break;

@@ -309,19 +309,46 @@ pub(crate) async fn handle_merge_clusters(
     payload: ipc::MergeClustersPayload,
 ) {
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<BulkActionResult> {
+        let src = payload.source_person_id;
+        let dst = payload.destination_person_id;
+        // Self-merge guard: moving a person's faces onto itself then deleting
+        // its row would orphan every face (person_id points at a deleted row).
+        // Return a no-op success so any caller passing src == dst is safe.
+        if src == dst {
+            return Ok(BulkActionResult {
+                action: "mergeClusters".into(),
+                succeeded: 1,
+                failed: 0,
+                messages: vec![BulkActionItem {
+                    file_id: None,
+                    ok: true,
+                    message: Some(format!("#{src} is already one cluster; nothing to merge")),
+                }],
+            });
+        }
         let conn = db.lock();
         let tx = conn.unchecked_transaction()?;
         let moved = tx.execute(
             "UPDATE face_prints SET person_id = ?1 WHERE person_id = ?2",
-            rusqlite::params![payload.destination_person_id, payload.source_person_id],
+            rusqlite::params![dst, src],
         )? as u32;
-        let _ = tx.execute(
-            "DELETE FROM persons WHERE id = ?1",
-            rusqlite::params![payload.source_person_id],
-        );
+        let _ = tx.execute("DELETE FROM persons WHERE id = ?1", rusqlite::params![src]);
+        // Recompute the destination's file_count AND representative_face_id
+        // (highest-quality embedded face now in the cluster) so the People
+        // card + suggestion anchor reflect the combined membership rather than
+        // a stale rep. COALESCE keeps the old rep if no embedded face survives.
         let _ = tx.execute(
             "UPDATE persons SET file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1) WHERE id = ?1",
-            rusqlite::params![payload.destination_person_id],
+            rusqlite::params![dst],
+        );
+        let _ = tx.execute(
+            "UPDATE persons SET representative_face_id = COALESCE(
+                 (SELECT fp.id FROM face_prints fp
+                  WHERE fp.person_id = ?1 AND fp.arcface_embedding IS NOT NULL
+                  ORDER BY COALESCE(fp.face_quality, 0) DESC LIMIT 1),
+                 representative_face_id)
+             WHERE id = ?1",
+            rusqlite::params![dst],
         );
         tx.commit()?;
         Ok(BulkActionResult {
@@ -331,11 +358,7 @@ pub(crate) async fn handle_merge_clusters(
             messages: vec![BulkActionItem {
                 file_id: None,
                 ok: true,
-                message: Some(format!(
-                    "moved {moved} face prints from #{src} into #{dst}",
-                    src = payload.source_person_id,
-                    dst = payload.destination_person_id,
-                )),
+                message: Some(format!("moved {moved} face prints from #{src} into #{dst}")),
             }],
         })
     })
@@ -472,6 +495,62 @@ pub(crate) async fn handle_mark_persons_as_unknown(
     emit_bulk_result(&sink, "markPersonsAsUnknown", result).await;
 }
 
+/// Record a user "different people" verdict for a suggested pair. Persists into
+/// face_verifications keyed on BOTH the person pair (PK, for compat + the VLM
+/// path) and the stable (min,max) anchor face_print pair (v13), so
+/// findMergeSuggestions keeps suppressing the pair across re-clustering. Routed
+/// here so the write goes through the engine's single-writer connection rather
+/// than a second app-side writer. Fire-and-forget: emits an Error event only on
+/// failure; the app updates its status text optimistically.
+pub(crate) async fn handle_mark_persons_different(
+    sink: Sink,
+    db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    payload: ipc::MarkPersonsDifferentPayload,
+) {
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let (pa, pb) = if payload.source_person_id <= payload.destination_person_id {
+            (payload.source_person_id, payload.destination_person_id)
+        } else {
+            (payload.destination_person_id, payload.source_person_id)
+        };
+        let (fa, fb) = if payload.source_anchor_face_id <= payload.destination_anchor_face_id {
+            (payload.source_anchor_face_id, payload.destination_anchor_face_id)
+        } else {
+            (payload.destination_anchor_face_id, payload.source_anchor_face_id)
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        let conn = db.lock();
+        conn.execute(
+            "INSERT OR REPLACE INTO face_verifications
+                (person_a, person_b, same_person, confidence, vlm_model, verified_at, face_a, face_b)
+             VALUES (?1, ?2, 0, 1.0, 'user-verified', ?3, ?4, ?5)",
+            rusqlite::params![pa, pb, now, fa, fb],
+        )?;
+        Ok(())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            tracing::warn!(?err, "mark_persons_different failed");
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "mark_persons_different_failed".into(),
+                message: format!("Mark different failed: {err}"),
+                path: None,
+                model_kind: None,
+            }))))
+            .await;
+        }
+        Err(err) => {
+            tracing::warn!(?err, "mark_persons_different spawn failed");
+        }
+    }
+}
+
 /// Find merge-candidate cluster pairs by ArcFace cosine similarity in the
 /// uncertain band (COS_LOW..COS_HIGH from face_clustering). Pairs already
 /// confirmed-different in face_verifications are filtered out so the
@@ -482,22 +561,24 @@ pub(crate) async fn handle_find_merge_suggestions(
 ) {
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<MergeSuggestions> {
         let conn = db.lock();
+        // One row per person via a JOIN to the representative face (its anchor
+        // embedding + id) plus a COUNT JOIN for member size — replaces the two
+        // per-person correlated subqueries the old query ran. representative_
+        // face_id is the cluster anchor (highest-quality embedded face), kept
+        // current by clustering + handle_merge_clusters.
         let mut stmt = conn.prepare(
-            "SELECT p.id, p.representative_face_id, COUNT(fp.id),
-                    (SELECT fp2.arcface_embedding FROM face_prints fp2
-                     WHERE fp2.person_id = p.id AND fp2.arcface_embedding IS NOT NULL
-                     ORDER BY COALESCE(fp2.face_quality, 0) DESC LIMIT 1) AS anchor_blob,
-                    (SELECT fp3.id FROM face_prints fp3
-                     WHERE fp3.person_id = p.id AND fp3.arcface_embedding IS NOT NULL
-                     ORDER BY COALESCE(fp3.face_quality, 0) DESC LIMIT 1) AS anchor_id
-             FROM persons p JOIN face_prints fp ON fp.person_id = p.id
+            "SELECT p.id, rep.id, COUNT(fpc.id), rep.arcface_embedding
+             FROM persons p
+             JOIN face_prints rep
+               ON rep.id = p.representative_face_id AND rep.arcface_embedding IS NOT NULL
+             JOIN face_prints fpc ON fpc.person_id = p.id
              GROUP BY p.id",
         )?;
         let rows: Vec<(i64, i64, i64, Vec<u8>)> = stmt
             .query_map([], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
-                    r.get::<_, i64>(4).unwrap_or(0),
+                    r.get::<_, i64>(1)?,
                     r.get::<_, i64>(2)?,
                     r.get::<_, Vec<u8>>(3).unwrap_or_default(),
                 ))
@@ -511,22 +592,37 @@ pub(crate) async fn handle_find_merge_suggestions(
                 .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                 .collect()
         };
-        let cos = |a: &[f32], b: &[f32]| -> f32 {
-            a.iter().zip(b).map(|(x, y)| x * y).sum()
-        };
+        let cos = |a: &[f32], b: &[f32]| -> f32 { a.iter().zip(b).map(|(x, y)| x * y).sum() };
 
-        let mut verified_different: std::collections::HashSet<(i64, i64)> =
+        // "Different people" verdicts. Person-keyed pairs cover legacy rows;
+        // face-anchor-keyed pairs (v13) survive re-clustering because
+        // face_prints ids are stable. A candidate is suppressed if EITHER key
+        // matches.
+        let mut verified_persons: std::collections::HashSet<(i64, i64)> =
             std::collections::HashSet::new();
-        if let Ok(mut vstmt) =
-            conn.prepare("SELECT person_a, person_b FROM face_verifications WHERE same_person = 0")
-        {
+        let mut verified_faces: std::collections::HashSet<(i64, i64)> =
+            std::collections::HashSet::new();
+        if let Ok(mut vstmt) = conn.prepare(
+            "SELECT person_a, person_b, face_a, face_b FROM face_verifications WHERE same_person = 0",
+        ) {
             let rs = vstmt
-                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, Option<i64>>(2)?,
+                        r.get::<_, Option<i64>>(3)?,
+                    ))
+                })
                 .ok();
             if let Some(rs) = rs {
-                for r in rs.flatten() {
-                    let (a, b) = if r.0 < r.1 { (r.0, r.1) } else { (r.1, r.0) };
-                    verified_different.insert((a, b));
+                for (pa, pb, fa, fb) in rs.flatten() {
+                    let pk = if pa < pb { (pa, pb) } else { (pb, pa) };
+                    verified_persons.insert(pk);
+                    if let (Some(fa), Some(fb)) = (fa, fb) {
+                        let fk = if fa < fb { (fa, fb) } else { (fb, fa) };
+                        verified_faces.insert(fk);
+                    }
                 }
             }
         }
@@ -541,8 +637,13 @@ pub(crate) async fn handle_find_merge_suggestions(
             for j in (i + 1)..embeddings.len() {
                 let (pa, anchor_a, count_a, ref ea) = embeddings[i];
                 let (pb, anchor_b, count_b, ref eb) = embeddings[j];
-                let key = if pa < pb { (pa, pb) } else { (pb, pa) };
-                if verified_different.contains(&key) {
+                let pk = if pa < pb { (pa, pb) } else { (pb, pa) };
+                let fk = if anchor_a < anchor_b {
+                    (anchor_a, anchor_b)
+                } else {
+                    (anchor_b, anchor_a)
+                };
+                if verified_persons.contains(&pk) || verified_faces.contains(&fk) {
                     continue;
                 }
                 let s = cos(ea, eb);

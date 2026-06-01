@@ -210,6 +210,16 @@
         { "type": "object", "required": ["findMergeSuggestions"], "additionalProperties": false,
           "properties": { "findMergeSuggestions": { "type": "object", "additionalProperties": false } } },
 
+        { "type": "object", "required": ["markPersonsDifferent"], "additionalProperties": false,
+          "properties": { "markPersonsDifferent": { "type": "object", "additionalProperties": false,
+            "required": ["sourcePersonID", "destinationPersonID", "sourceAnchorFaceID", "destinationAnchorFaceID"],
+            "properties": {
+              "sourcePersonID": { "type": "integer" },
+              "destinationPersonID": { "type": "integer" },
+              "sourceAnchorFaceID": { "type": "integer" },
+              "destinationAnchorFaceID": { "type": "integer" }
+            } } } },
+
         { "type": "object", "required": ["embedImageQuery"], "additionalProperties": false,
           "properties": { "embedImageQuery": { "type": "object", "additionalProperties": false,
             "required": ["fileID", "queryID"],

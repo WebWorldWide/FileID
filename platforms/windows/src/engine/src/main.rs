@@ -581,6 +581,17 @@ async fn handle_line(
                 commands::bulk::handle_find_merge_suggestions(sink_c, db_c).await;
             });
         }
+        CommandPayload::MarkPersonsDifferent(payload) => {
+            let Some(db) = db else {
+                emit_db_unavailable(sink, "markPersonsDifferent").await;
+                return;
+            };
+            let sink_c = sink.clone();
+            let db_c = db.clone();
+            tokio::spawn(async move {
+                commands::bulk::handle_mark_persons_different(sink_c, db_c, payload).await;
+            });
+        }
         CommandPayload::EmbedImageQuery(payload) => {
             let Some(db) = db else {
                 emit_db_unavailable(sink, "embedImageQuery").await;
