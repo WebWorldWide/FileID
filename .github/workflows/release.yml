@@ -1,0 +1,117 @@
+name: Release (Windows)
+
+# Tag-triggered CD: cut a signed FileID release (FileIDSetup.exe + the two MSIs).
+#
+# DORMANT until the Authenticode EV cert is procured and its SHA1 thumbprint is
+# stored as the FILEID_EV_THUMBPRINT repository secret — the single external
+# blocker (see shared/docs/SHIP.md). Until then a tagged push FAILS LOUDLY at the
+# signing gate rather than shipping unsigned binaries; use the workflow_dispatch
+# "dry_run" input to exercise the build path without a cert.
+#
+# FIRST-RELEASE NOTE: validate this end-to-end on the first real tagged release.
+# The WiX MSI + Burn bundle build and the ARM64 engine cross-compile run HERE for
+# the first time (the CI workflows build the app + engine but never the
+# installer), so first-release surprises — e.g. the runner needing the ARM64 MSVC
+# VC tools for the aarch64 cross-compile, or WiX v4 SDK restore — are expected and
+# get ironed out then. publish-bundle.ps1 fails loudly if a toolchain is missing.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build the bundle WITHOUT signing or publishing a release (cert-less pipeline test)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # required for `gh release create` + asset upload
+
+jobs:
+  windows-release:
+    name: Build + sign + publish Windows release
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: platforms/windows
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (1.90, x64 + arm64 targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90
+          targets: x86_64-pc-windows-msvc, aarch64-pc-windows-msvc
+
+      - name: Install .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Resolve signing mode
+        id: mode
+        shell: pwsh
+        env:
+          FILEID_EV_THUMBPRINT: ${{ secrets.FILEID_EV_THUMBPRINT }}
+        run: |
+          $dry = "${{ github.event.inputs.dry_run }}" -eq 'true'
+          $hasCert = -not [string]::IsNullOrWhiteSpace($env:FILEID_EV_THUMBPRINT)
+          if ($dry) {
+            Write-Host "Dry-run: building unsigned; no release will be published."
+            "sign=false"    | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "publish=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } elseif ($hasCert) {
+            Write-Host "EV cert present: signed release build."
+            "sign=true"    | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "publish=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } else {
+            Write-Host "::error::FILEID_EV_THUMBPRINT secret is not configured — cannot cut a SIGNED release. Procure the EV cert + set the secret (shared/docs/SHIP.md), or run via workflow_dispatch with dry_run=true to test the build path."
+            exit 1
+          }
+
+      - name: Build signed bundle
+        if: steps.mode.outputs.sign == 'true'
+        shell: pwsh
+        env:
+          CI_RELEASE: 'true'   # publish-bundle.ps1 forbids -SkipSign/-SkipPrivacyGate when set
+          FILEID_EV_THUMBPRINT: ${{ secrets.FILEID_EV_THUMBPRINT }}
+        run: ./build/publish-bundle.ps1 -SignThumbprint $env:FILEID_EV_THUMBPRINT
+
+      - name: Build unsigned bundle (dry-run only)
+        if: steps.mode.outputs.sign != 'true'
+        shell: pwsh
+        run: ./build/publish-bundle.ps1 -SkipSign
+
+      - name: Verify release artifacts exist
+        shell: pwsh
+        run: |
+          foreach ($f in @("FileIDSetup.exe", "FileID-x64.msi", "FileID-arm64.msi")) {
+            $p = Join-Path "dist/installer" $f
+            if (-not (Test-Path $p)) { Write-Host "::error::missing release artifact $p"; exit 1 }
+          }
+
+      - name: Verify Authenticode (signed release only)
+        if: steps.mode.outputs.sign == 'true'
+        shell: pwsh
+        run: |
+          foreach ($f in @("FileIDSetup.exe", "FileID-x64.msi", "FileID-arm64.msi")) {
+            $sig = Get-AuthenticodeSignature (Join-Path "dist/installer" $f)
+            if ($sig.Status -ne 'Valid') { Write-Host "::error::$f signature status is $($sig.Status)"; exit 1 }
+          }
+          Write-Host "All release artifacts signed + Valid."
+
+      - name: Create GitHub release
+        if: steps.mode.outputs.publish == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" `
+            --title "FileID ${{ github.ref_name }}" `
+            --generate-notes `
+            "dist/installer/FileIDSetup.exe" `
+            "dist/installer/FileID-x64.msi" `
+            "dist/installer/FileID-arm64.msi"
