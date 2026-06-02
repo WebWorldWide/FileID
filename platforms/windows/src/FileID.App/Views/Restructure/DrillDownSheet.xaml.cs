@@ -213,6 +213,10 @@ public sealed partial class DrillDownSheet : UserControl
         try
         {
             if (!File.Exists(path)) return;
+            // In-proc shell video/audio thumbnail providers can native-fast-fail the
+            // whole app. This path calls GetThumbnailAsync directly (bypasses
+            // ThumbnailService), so apply the same skip — single source of truth.
+            if (Services.ThumbnailService.SkipShellThumbnailForExtension(path)) return;
             var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(path);
             thumb = await file.GetThumbnailAsync(
                 Windows.Storage.FileProperties.ThumbnailMode.SingleItem, 128,

@@ -502,6 +502,11 @@ public sealed partial class DeepAnalyzeView : UserControl
         // the dispatcher before any await and do the construct + StreamImage.Source
         // set inside one TryEnqueue; null the source on failure (placeholder, not stale).
         if (_unloaded) return;
+        // In-proc shell video/audio thumbnail providers can native-fast-fail the
+        // whole app (no managed exception). This path calls GetThumbnailAsync
+        // directly, bypassing ThumbnailService, so it must apply the same skip —
+        // single source of truth in ThumbnailService.SkipShellThumbnailForExtension.
+        if (Services.ThumbnailService.SkipShellThumbnailForExtension(path)) return;
         var dispatcher = DispatcherQueue;
         Windows.Storage.FileProperties.StorageItemThumbnail? thumb = null;
         try
