@@ -135,6 +135,14 @@ public sealed record RevertMergeCommand(
 
 public sealed record WipeLibraryCommand : CommandPayload;
 
+/// <summary>Ask the engine to render a video keyframe out-of-process and
+/// return it as a base64 192px JPEG via the `thumbnailGenerated` event.
+/// <c>ModifiedAt</c> (file modified-unix time, f64 seconds) is echoed back so
+/// the app can write the result under its (path, modifiedAt) cache key.</summary>
+public sealed record GenerateVideoThumbnailCommand(
+    string Path,
+    double? ModifiedAt) : CommandPayload;
+
 /// <summary>
 /// Reads/writes the externally-tagged shape Swift's Codable produces.
 /// One key, value is the body object (or `{}` for empty-payload variants).
@@ -181,6 +189,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             "embedImageQuery" => JsonSerializer.Deserialize<EmbedImageQueryCommand>(ref reader, options) ?? throw new JsonException("embedImageQuery: null body"),
             "restoreFromTrash" => JsonSerializer.Deserialize<RestoreFromTrashCommand>(ref reader, options) ?? throw new JsonException("restoreFromTrash: null body"),
             "revertMerge" => JsonSerializer.Deserialize<RevertMergeCommand>(ref reader, options) ?? throw new JsonException("revertMerge: null body"),
+            "generateVideoThumbnail" => JsonSerializer.Deserialize<GenerateVideoThumbnailCommand>(ref reader, options) ?? throw new JsonException("generateVideoThumbnail: null body"),
 
             "wipeLibrary" => Empty<WipeLibraryCommand>(ref reader),
             "pauseScan" => Empty<PauseScanCommand>(ref reader),
@@ -238,6 +247,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             case EmbedImageQueryCommand c: WriteVariant(writer, "embedImageQuery", c, options); break;
             case RestoreFromTrashCommand c: WriteVariant(writer, "restoreFromTrash", c, options); break;
             case RevertMergeCommand c: WriteVariant(writer, "revertMerge", c, options); break;
+            case GenerateVideoThumbnailCommand c: WriteVariant(writer, "generateVideoThumbnail", c, options); break;
             case WipeLibraryCommand: WriteEmpty(writer, "wipeLibrary"); break;
             default:
                 throw new JsonException($"CommandPayload: unknown C# type {value.GetType().FullName}");

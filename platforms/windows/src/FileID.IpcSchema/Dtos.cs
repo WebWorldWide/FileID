@@ -210,3 +210,15 @@ public sealed record QueuedJob(
 /// <summary>Reply to wipeLibrary. Ok is true when the engine truncated every
 /// table in-process; Message carries the error when it couldn't.</summary>
 public sealed record LibraryWiped(bool Ok, string? Message = null);
+
+/// <summary>Payload of the `thumbnailGenerated` event. Engine renders a video
+/// keyframe out-of-process and returns it as a base64-encoded 192px JPEG
+/// (aspect-preserved, long side = 192). <c>ModifiedAt</c> is the file's
+/// modified-unix time (f64 seconds) and is REQUIRED end-to-end because the
+/// app's thumbnail cache key is (Path, ModifiedAt) — without it the written
+/// thumbnail is never found. <c>Bytes</c> is a base64 string, NOT a byte
+/// array.</summary>
+public sealed record ThumbnailGenerated(
+    string Path,
+    double? ModifiedAt,
+    string Bytes);

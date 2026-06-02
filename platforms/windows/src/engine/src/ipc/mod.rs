@@ -166,6 +166,14 @@ pub enum CommandPayload {
     /// races the OS file-lock the engine still holds just after process exit.
     #[serde(rename = "wipeLibrary")]
     WipeLibrary(Empty),
+
+    /// Generate a 192px JPEG thumbnail for a video on demand. The engine
+    /// extracts a 25%-duration keyframe, resizes it (long side = 192,
+    /// aspect-preserved), JPEG-encodes + base64-encodes it, and replies with a
+    /// `thumbnailGenerated` event. `modifiedAt` is the file's modified-unix
+    /// time, carried through so the app can key its thumbnail cache.
+    #[serde(rename = "generateVideoThumbnail")]
+    GenerateVideoThumbnail(GenerateVideoThumbnailPayload),
 }
 
 /// Empty object — `{}`. Serde encodes a unit struct as `null`, which is wrong;
@@ -331,6 +339,17 @@ pub struct EmbedImageQueryPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GenerateVideoThumbnailPayload {
+    pub path: String,
+    /// File's modified-unix time (f64 seconds). Echoed back on the reply so
+    /// the app can key its `(path, modifiedAt)` thumbnail cache. Optional so
+    /// callers that don't know it can omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_at: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RestoreFromTrashPayload {
     /// Identifier from the trash_log JSON (UUID emitted by trashFiles).
     pub batch_id: String,
@@ -479,6 +498,12 @@ pub enum EventPayload {
     /// Reply to `wipeLibrary`: the engine truncated all user tables in-process.
     #[serde(rename = "libraryWiped")]
     LibraryWiped(Wrap<LibraryWiped>),
+
+    /// Reply to `generateVideoThumbnail`: a base64-encoded 192px JPEG keyframe
+    /// for the requested video. `modifiedAt` is echoed back because the app's
+    /// thumbnail cache is keyed on `(path, modifiedAt)`.
+    #[serde(rename = "thumbnailGenerated")]
+    ThumbnailGenerated(Wrap<ThumbnailGenerated>),
 }
 
 /// Wraps a single positional value in `{"_0": ...}` to match Swift Codable
@@ -898,6 +923,19 @@ pub struct ClipTextEmbedding {
     pub embedding: Vec<f32>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThumbnailGenerated {
+    pub path: String,
+    /// File's modified-unix time (f64 seconds), echoed from the request so the
+    /// app can write the bytes under its `(path, modifiedAt)` cache key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_at: Option<f64>,
+    /// Base64-encoded 192px JPEG (aspect-preserved, long side = 192). A base64
+    /// string, NOT a number array.
+    pub bytes: String,
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1087,6 +1125,10 @@ mod tests {
                 face_ids_to_revert: vec![10, 11, 12],
             }),
             CommandPayload::WipeLibrary(Empty {}),
+            CommandPayload::GenerateVideoThumbnail(GenerateVideoThumbnailPayload {
+                path: r"C:\Users\adam\Videos\clip.mp4".into(),
+                modified_at: Some(1_700_000_000.0),
+            }),
         ];
 
         for payload in &cases {
@@ -1104,6 +1146,42 @@ mod tests {
                 "variant changed during round-trip:\n  original = {payload:?}\n  json     = {json}\n  parsed   = {:?}",
                 decoded.payload,
             );
+        }
+    }
+
+    /// The `thumbnailGenerated` event must serialize in the Wrap<T> `_0`-nested
+    /// camelCase shape, carry `modifiedAt` through, and round-trip without
+    /// losing its base64 string payload.
+    #[test]
+    fn thumbnail_generated_event_round_trips() {
+        let evt = IpcEvent::now(EventPayload::ThumbnailGenerated(Wrap::new(
+            ThumbnailGenerated {
+                path: r"C:\Users\adam\Videos\clip.mp4".into(),
+                modified_at: Some(1_700_000_000.0),
+                bytes: "/9j/4AAQSkZJRg==".into(),
+            },
+        )));
+        let v = serde_json::to_value(&evt).unwrap();
+        let inner = v
+            .get("payload")
+            .unwrap()
+            .get("thumbnailGenerated")
+            .unwrap()
+            .get("_0")
+            .unwrap();
+        assert_eq!(inner.get("path").unwrap(), r"C:\Users\adam\Videos\clip.mp4");
+        assert_eq!(inner.get("modifiedAt").unwrap(), 1_700_000_000.0);
+        assert!(inner.get("bytes").unwrap().is_string());
+
+        let json = serde_json::to_string(&evt).unwrap();
+        let decoded: IpcEvent = serde_json::from_str(&json).unwrap();
+        match decoded.payload {
+            EventPayload::ThumbnailGenerated(w) => {
+                assert_eq!(w.inner.path, r"C:\Users\adam\Videos\clip.mp4");
+                assert_eq!(w.inner.modified_at, Some(1_700_000_000.0));
+                assert_eq!(w.inner.bytes, "/9j/4AAQSkZJRg==");
+            }
+            other => panic!("expected ThumbnailGenerated, got {other:?}"),
         }
     }
 

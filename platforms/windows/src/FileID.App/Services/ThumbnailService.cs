@@ -15,10 +15,13 @@
 
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Threading.Channels;
+using FileID.IpcSchema;
+using FileID.ViewModels;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.UI.Xaml.Media.Imaging;
 
@@ -82,6 +85,27 @@ internal sealed class ThumbnailService : IDisposable
     /// startup/shutdown — causing a silent thread-affinity violation.</summary>
     private readonly Microsoft.UI.Dispatching.DispatcherQueue? _uiDispatcher;
 
+    /// <summary>VIDEO thumbnails are NOT produced in-process (the shell /
+    /// Media Foundation chain native-fast-fails the whole app — see
+    /// <see cref="VideoExtensions"/>). On an L1+L2 miss for a video we ask the
+    /// engine to extract a keyframe out-of-process and complete the tile when
+    /// the <c>thumbnailGenerated</c> event arrives. Three pieces of instance
+    /// state coordinate that round-trip:
+    ///   • <see cref="_pendingVideo"/> — CacheKey → the request's TCS, completed
+    ///     by the engine event (or the timeout) instead of being completed null
+    ///     in <see cref="DrainAsync"/>.
+    ///   • <see cref="_requestedVideo"/> — CacheKeys already asked-for this
+    ///     session, so a re-scroll over the same tile never re-sends the command
+    ///     (the engine extract is expensive). Cleared per key once the event
+    ///     lands so a later file-edit (new modifiedAt → new key) can re-request.
+    /// Both are guarded by <see cref="_videoLock"/> (the worker thread enqueues,
+    /// the engine-event handler on the UI thread completes — two threads).</summary>
+    private readonly Dictionary<string, TaskCompletionSource<BitmapImage?>> _pendingVideo = new();
+    private readonly HashSet<string> _requestedVideo = new();
+    private readonly object _videoLock = new();
+    private const int VideoThumbTimeoutMs = 20_000;
+    private volatile bool _disposed;
+
     public ThumbnailService()
     {
         // capture the UI dispatcher at ctor time. Service is
@@ -104,6 +128,11 @@ internal sealed class ThumbnailService : IDisposable
         _ = _worker.ContinueWith(
             t => DebugLog.Error("ThumbnailService worker faulted: " + t.Exception),
             TaskContinuationOptions.OnlyOnFaulted);
+        // Out-of-process video keyframes: the engine replies with a
+        // `thumbnailGenerated` event (surfaced as LastThumbnailGenerated). We
+        // L2-write it, decode it on the UI thread, and complete the tile's
+        // pending TCS. Detached in Dispose.
+        EngineClient.Instance.PropertyChanged += OnEngineClientChanged;
     }
 
     public Task<BitmapImage?> RequestAsync(string path, double? modifiedAt, CancellationToken ct)
@@ -150,14 +179,235 @@ internal sealed class ThumbnailService : IDisposable
                         Size = DecodedBytesPerEntry,
                         SlidingExpiration = TimeSpan.FromMinutes(15),
                     });
+                    req.Completion.TrySetResult(bmp);
                 }
-                req.Completion.TrySetResult(bmp);
+                else if (TryBeginVideoThumbnailRequest(req))
+                {
+                    // Video L1+L2 miss: RenderAsync returned null (we never invoke
+                    // the in-process shell chain for video — native fast-fail
+                    // hazard). The request is now PENDING on the engine's
+                    // out-of-process keyframe; do NOT complete it null here.
+                    // OnEngineClientChanged completes req.Completion when the
+                    // `thumbnailGenerated` event arrives, or the armed timeout
+                    // completes it null (placeholder) and unregisters it.
+                }
+                else
+                {
+                    req.Completion.TrySetResult(bmp);
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 DebugLog.Warn("ThumbnailService.DrainAsync: " + ex.Message);
                 req.Completion.TrySetResult(null);
             }
+        }
+    }
+
+    /// <summary>For a VIDEO file that missed L1+L2: register the request's TCS
+    /// as PENDING (so it stays unresolved until the engine event or the
+    /// timeout), dedupe per (path,modifiedAt) so the expensive out-of-process
+    /// extract is requested at most once per session, fire the
+    /// <c>generateVideoThumbnail</c> command fire-and-forget, and arm a timeout
+    /// that completes the tile null (placeholder) if no keyframe arrives.
+    /// Returns true when the request was taken over (caller must NOT complete
+    /// it); false for non-video, or when the service is disposed.</summary>
+    private bool TryBeginVideoThumbnailRequest(ThumbnailRequest req)
+    {
+        if (_disposed) return false;
+        if (!VideoExtensions.Contains(Path.GetExtension(req.Path))) return false;
+
+        var key = CacheKey(req.Path, req.ModifiedAt);
+        lock (_videoLock)
+        {
+            if (_disposed) return false;
+            // Already requested this session: a prior tile owns the engine
+            // round-trip. We still take over THIS request — park its TCS under
+            // the key. The event handler completes whichever TCS is registered;
+            // if one is already parked, this later request just gets null after
+            // its own timeout (the first tile's keyframe filled the caches, so a
+            // future RequestAsync L1-hits). Keep the most recent pending TCS.
+            _pendingVideo[key] = req.Completion;
+            bool firstRequest = _requestedVideo.Add(key);
+            if (firstRequest)
+            {
+                DebugLog.Debug($"[THUMB] VIDEO_ENGINE_REQUEST file={req.Path}");
+                _ = EngineClient.Instance.GenerateVideoThumbnailAsync(req.Path, req.ModifiedAt);
+            }
+            else
+            {
+                DebugLog.Debug($"[THUMB] VIDEO_ENGINE_DEDUP file={req.Path}");
+            }
+        }
+
+        // Timeout: if no keyframe lands in VideoThumbTimeoutMs, complete the
+        // tile null (placeholder) and unregister so the dictionary doesn't grow
+        // unbounded. The dedupe set intentionally KEEPS the key so we don't
+        // re-hammer the engine for a video it couldn't extract this session.
+        _ = ArmVideoTimeoutAsync(key, req.Completion);
+        return true;
+    }
+
+    private async Task ArmVideoTimeoutAsync(string key, TaskCompletionSource<BitmapImage?> tcs)
+    {
+        try
+        {
+            await Task.Delay(VideoThumbTimeoutMs, _cts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Service disposed mid-wait — release the pending tile so callers
+            // (and the awaiting RequestAsync) don't hang.
+            tcs.TrySetResult(null);
+            return;
+        }
+        lock (_videoLock)
+        {
+            // Only clear the dictionary entry if it's still THIS request's TCS;
+            // a newer request for the same key may have replaced it.
+            if (_pendingVideo.TryGetValue(key, out var current) && ReferenceEquals(current, tcs))
+            {
+                _pendingVideo.Remove(key);
+            }
+        }
+        if (tcs.TrySetResult(null))
+        {
+            DebugLog.Debug($"[THUMB] VIDEO_ENGINE_TIMEOUT key={key}");
+        }
+    }
+
+    private void OnEngineClientChanged(object? sender, PropertyChangedEventArgs e)
+        => DebugLog.SafeRun("ThumbnailService.OnEngineClientChanged", () =>
+        {
+            if (_disposed) return;
+            if (e.PropertyName != nameof(EngineClient.LastThumbnailGenerated)) return;
+            DebugLog.Debug($"[ENGINE-SUB:ThumbnailService] {e.PropertyName}");
+            var evt = EngineClient.Instance.LastThumbnailGenerated;
+            if (evt is null) return;
+
+            // Decode + cache + complete the tile, all on the UI thread:
+            // BitmapImage is a DispatcherObject (must be built on a thread we
+            // captured), and the byte-budgeted L1 _cache.Set lives next to it.
+            var dispatcher = _uiDispatcher
+                ?? FileID.App.HostWindow?.DispatcherQueue;
+            if (dispatcher is null)
+            {
+                DebugLog.Warn("ThumbnailService.OnEngineClientChanged: no UI dispatcher; dropping video keyframe.");
+                CompletePendingVideoNull(CacheKey(evt.Path, evt.ModifiedAt));
+                return;
+            }
+            if (!dispatcher.TryEnqueue(() => _ = ApplyVideoKeyframeAsync(evt)))
+            {
+                CompletePendingVideoNull(CacheKey(evt.Path, evt.ModifiedAt));
+            }
+        });
+
+    private async Task ApplyVideoKeyframeAsync(ThumbnailGenerated evt)
+    {
+        var key = CacheKey(evt.Path, evt.ModifiedAt);
+        await DebugLog.SafeRunAsync("ThumbnailService.ApplyVideoKeyframe", async () =>
+        {
+            if (_disposed)
+            {
+                CompletePendingVideoNull(key);
+                return;
+            }
+
+            byte[] bytes;
+            try
+            {
+                bytes = Convert.FromBase64String(evt.Bytes);
+            }
+            catch (FormatException ex)
+            {
+                DebugLog.Warn($"ThumbnailService video keyframe base64 decode ({evt.Path}): {ex.Message}");
+                CompletePendingVideoNull(key);
+                return;
+            }
+            if (bytes.Length == 0)
+            {
+                CompletePendingVideoNull(key);
+                return;
+            }
+
+            // Persist to L2 first so a later session / re-scroll L2-hits even if
+            // no tile is currently pending (another instance, or post-timeout).
+            _ = ThumbnailDiskCache.TryWriteAsync(evt.Path, evt.ModifiedAt, bytes);
+
+            // We're already on the UI dispatcher (TryEnqueue above), so the
+            // BitmapImage decode + SetSourceAsync is thread-affinity-safe.
+            var bmp = await DecodeOnThisThreadAsync(bytes, _cts.Token).ConfigureAwait(true);
+            if (bmp is null)
+            {
+                CompletePendingVideoNull(key);
+                return;
+            }
+
+            _cache.Set(key, bmp, new MemoryCacheEntryOptions
+            {
+                Size = DecodedBytesPerEntry,
+                SlidingExpiration = TimeSpan.FromMinutes(15),
+            });
+            DebugLog.Debug($"[THUMB] BITMAP_SET file={evt.Path} src=engine-video");
+
+            TaskCompletionSource<BitmapImage?>? pending;
+            lock (_videoLock)
+            {
+                // Robust: if no tile is pending (timed out, or another instance
+                // requested it) we still wrote the caches above — just return.
+                if (_pendingVideo.TryGetValue(key, out pending))
+                {
+                    _pendingVideo.Remove(key);
+                }
+            }
+            pending?.TrySetResult(bmp);
+        }).ConfigureAwait(true);
+    }
+
+    /// <summary>Complete + unregister the pending tile for a key with null
+    /// (placeholder). No-op when nothing is pending. Guarded by the lock.</summary>
+    private void CompletePendingVideoNull(string key)
+    {
+        TaskCompletionSource<BitmapImage?>? pending;
+        lock (_videoLock)
+        {
+            if (!_pendingVideo.TryGetValue(key, out pending)) return;
+            _pendingVideo.Remove(key);
+        }
+        pending?.TrySetResult(null);
+    }
+
+    /// <summary>Decode bytes into a BitmapImage on the CURRENT (UI) thread.
+    /// Caller MUST already be on the dispatcher (the engine-event handler
+    /// enqueues this). Mirrors ThumbnailDiskCache's eager InMemoryRandomAccessStream
+    /// + SetSourceAsync decode. Returns null on any decode failure.</summary>
+    private static async Task<BitmapImage?> DecodeOnThisThreadAsync(byte[] bytes, CancellationToken ct)
+    {
+        Windows.Storage.Streams.InMemoryRandomAccessStream? stream = null;
+        try
+        {
+            stream = new Windows.Storage.Streams.InMemoryRandomAccessStream();
+            using (var writer = new Windows.Storage.Streams.DataWriter(stream.GetOutputStreamAt(0)))
+            {
+                writer.WriteBytes(bytes);
+                await writer.StoreAsync().AsTask(ct);
+                await writer.FlushAsync().AsTask(ct);
+                writer.DetachStream();
+            }
+            stream.Seek(0);
+            var bmp = new BitmapImage { DecodePixelWidth = (int)ThumbnailRequestPx };
+            await bmp.SetSourceAsync(stream).AsTask(ct);
+            DebugLog.Debug($"[THUMB] DECODE_OK bytes={bytes.Length} src=engine-video");
+            return bmp;
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"[THUMB] DECODE_FAIL ex={ex.GetType().Name} msg={ex.Message} bytes={bytes.Length} src=engine-video");
+            return null;
+        }
+        finally
+        {
+            try { stream?.Dispose(); } catch { /* swallow */ }
         }
     }
 
@@ -472,6 +722,20 @@ internal sealed class ThumbnailService : IDisposable
 
     public void Dispose()
     {
+        _disposed = true;
+        try { EngineClient.Instance.PropertyChanged -= OnEngineClientChanged; } catch { /* swallow */ }
+        // Release any tiles still waiting on an engine video keyframe so the
+        // awaiting RequestAsync callers don't hang on shutdown. (_cts.Cancel
+        // below also faults the armed timeouts, which release their own TCS.)
+        List<TaskCompletionSource<BitmapImage?>> stranded;
+        lock (_videoLock)
+        {
+            stranded = new List<TaskCompletionSource<BitmapImage?>>(_pendingVideo.Values);
+            _pendingVideo.Clear();
+            _requestedVideo.Clear();
+        }
+        foreach (var tcs in stranded) { tcs.TrySetResult(null); }
+
         // Cancel + complete; do NOT Wait on the worker. The worker is a
         // daemon-style channel drainer — a 1 s Wait on the UI thread during
         // app shutdown was visibly hanging window close on slow disks. The
