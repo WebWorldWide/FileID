@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-02 — WS0 model-integrity: download-path hardening now, hash values + CI gate in WS-CD
+
+**Context**: The verify-or-bail path in `downloader.rs` is fully wired (both the simple and 12-way parallel paths re-hash on completion and bail on mismatch) and `prewarm.rs` already passes `expected_sha256: file.sha256.clone()` — but every `registry.rs` entry is `sha256: None`, so verification is inert (the S2 note, 2026-05-31). WS0 is split into machinery-now / values-later.
+
+- **Shipped now (headless-verifiable; real protection even with no hashes):** (1) a loose post-download **size-sanity check** (`check_size_plausible`) applied in both download paths before the atomic rename. `approx_bytes` is an estimate, so it rejects only an implausibly-small result (`actual < approx_bytes/4`) — which catches the common no-hash corruption (a truncated stream, or a few-KB HTML error / auth page standing in for a multi-GB model) while never false-rejecting a loose estimate. A failed check deletes the `.part` so it never becomes the destination. (2) a **`.part-N` orphan guard** in `download_range_with_retry`: a part file larger than its planned range is stale (leftover from a prior download of a different-sized remote file) and would corrupt the concatenation — discard + re-fetch, instead of the old behavior that treated an oversized part as "already done" and kept the bad bytes. `DownloadRequest` gains `expected_bytes`, wired from `approx_bytes`; 3 unit tests cover the size band.
+- **Deferred to WS-CD (the consolidated CI/CD phase) — and why:** populating the ~30 `registry.rs` `sha256` values + the CI gate that fails on any `sha256: None`. (a) The values require the real pinned artifacts — the canonical, fresh-download-matching hash for each LFS file is the `oid sha256:` in its HuggingFace LFS pointer (GET `…/resolve/<rev>/<path>` returns the pointer text for LFS blobs, raw bytes for small config/tokenizer files), so population is a network/release step, and the **CI gate enforcing non-`None`** is explicitly a WS-CD deliverable. (b) The RAM++ artifact isn't final — WS5's planned 384→256 re-export changes its hash, so pinning now would just be re-pinned later. Making verification *mandatory* (bail on `sha256: None`) is coupled to population (else nothing installs) and lands with the values in WS-CD.
+- **On-disk rot (a previously-installed file corrupting after install) is not yet covered** — the size/SHA checks guard the download path; a load-time re-verify + sentinel-clear is grouped with the hash gate in WS-CD (without pinned hashes a load-time check could only size-check, which is weak).
+
 ## 2026-06-01 — Full Windows audit: method + key calls (branch `audit-fixes-2026-06-01`)
 
 **Context**: A top-to-bottom audit of the entire Windows app (engine + WinUI), driven by multi-agent Workflow orchestration. Report: [`AUDIT-2026-06-01.md`](AUDIT-2026-06-01.md).
