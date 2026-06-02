@@ -557,17 +557,36 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     {
         var ids = ViewModel.SelectedClusterIds;
         if (ids.Count == 0) return;
+        // PersonCluster.ClusterId is int; engine wants long.
+        var longIds = new System.Collections.Generic.List<long>(ids.Count);
+        foreach (var id in ids) longIds.Add(id);
         try
         {
-            // PersonCluster.ClusterId is int; engine wants long.
-            var longIds = new System.Collections.Generic.List<long>(ids.Count);
-            foreach (var id in ids) longIds.Add(id);
-            await EngineClient.Instance.MarkPersonsAsUnknownAsync(longIds);
+            // Await the engine's bulkActionResult instead of fire-and-forget:
+            // a swallowed mark-as-unknown made the user think it happened, then
+            // the refresh re-showed the old state. Surface any failure and do
+            // NOT exit select mode / refresh so the user can retry.
+            var r = await EngineClient.Instance.WaitForBulkActionResultAsync(
+                "markPersonsAsUnknown",
+                () => EngineClient.Instance.MarkPersonsAsUnknownAsync(longIds),
+                TimeSpan.FromSeconds(30));
+            if (r.Failed > 0 || r.Succeeded == 0)
+            {
+                var detail = r.Messages.FirstOrDefault(m => m is not null && !m.Ok)?.Message
+                             ?? (r.Messages.Count > 0 ? r.Messages[0] : null)?.Message
+                             ?? "The engine did not confirm the change.";
+                await ShowAlertAsync("Mark as unknown failed",
+                    $"Couldn't mark {ids.Count} cluster{(ids.Count == 1 ? "" : "s")} as unknown — {detail}");
+                return;
+            }
             DebugLog.Info($"Marked {ids.Count} clusters as unknown");
         }
         catch (Exception ex)
         {
             DebugLog.Warn("BulkMarkUnknown IPC failed: " + ex.Message);
+            await ShowAlertAsync("Mark as unknown failed",
+                $"Couldn't mark {ids.Count} cluster{(ids.Count == 1 ? "" : "s")} as unknown — {SqliteErrorTranslator.Humanize(ex)}");
+            return;
         }
         ViewModel.IsSelectMode = false;
         BulkActionBar.Visibility = Visibility.Collapsed;

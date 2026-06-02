@@ -24,6 +24,16 @@ public sealed partial class DeepAnalyzeView : UserControl
     private string _captionAccumulator = string.Empty;
     private bool _unloaded;
 
+    // Warm-up watchdog: the engine emits DeepAnalyzeStarting (IsIndeterminate
+    // "Preparing…") BEFORE the first DeepAnalyzeProgress/stream token while the
+    // VLM loads (~5-30 s first run). If the load stalls there's no failure
+    // event, so the spinner would otherwise spin forever. This timer fires if
+    // no progress/stream token arrives in time; it's cancelled the moment any
+    // progress/last/complete lands or the view unloads. Runs on the UI thread
+    // (DispatcherQueueTimer.Tick), so touching XAML in the handler is safe.
+    private static readonly TimeSpan WarmupTimeout = TimeSpan.FromSeconds(45);
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _warmupTimer;
+
     public DeepAnalyzeView()
     {
         InitializeComponent();
@@ -39,6 +49,7 @@ public sealed partial class DeepAnalyzeView : UserControl
     private void OnUnloadedHandler(object sender, RoutedEventArgs e)
     {
         _unloaded = true;
+        CancelWarmupTimer();
         ModelInstallerService.Instance.DeepVlm.PropertyChanged -= OnInstallerChanged;
         EngineClient.Instance.PropertyChanged -= OnEngineChanged;
         SelectionRegistry.Instance.PropertyChanged -= OnSelectionRegistryChanged;
@@ -329,6 +340,13 @@ public sealed partial class DeepAnalyzeView : UserControl
 
         if (starting is null && prog is null && last is null && complete is null) return;
 
+        // Any real progress/result/terminal event proves the model loaded and
+        // tokens are flowing — disarm the warm-up watchdog so it can't false-fire.
+        if (prog is not null || last is not null || complete is not null)
+        {
+            CancelWarmupTimer();
+        }
+
         // starting-card pre-progress. Engine emits
         // DeepAnalyzeStarting with phase = Queued / Loading / Resolving
         // BEFORE the first DeepAnalyzeProgress event. Surface the phase
@@ -345,6 +363,10 @@ public sealed partial class DeepAnalyzeView : UserControl
             OverallProgress.Value = 0;
             OverallProgress.IsIndeterminate = true;
             OverallProgressText.Text = "Preparing…";
+            // Arm the warm-up watchdog so a stalled model load surfaces a
+            // dismissible error + reverts the optimistic UI instead of
+            // spinning "Preparing…" indefinitely.
+            ArmWarmupTimer();
         }
 
         if (prog is not null)
@@ -406,6 +428,58 @@ public sealed partial class DeepAnalyzeView : UserControl
             SyncProposedNamesPill();
         }
     }
+
+    // (Re)arm the warm-up watchdog. Always restarts the interval so a fresh
+    // DeepAnalyzeStarting (e.g. a re-queued run, or a phase transition still in
+    // the pre-progress window) gives the model the full WarmupTimeout to load.
+    private void ArmWarmupTimer()
+    {
+        if (_unloaded) return;
+        var dq = DispatcherQueue;
+        if (dq is null) return;
+        if (_warmupTimer is null)
+        {
+            _warmupTimer = dq.CreateTimer();
+            _warmupTimer.IsRepeating = false;
+            _warmupTimer.Tick += OnWarmupTimerTick;
+        }
+        _warmupTimer.Stop();
+        _warmupTimer.Interval = WarmupTimeout;
+        _warmupTimer.Start();
+    }
+
+    private void CancelWarmupTimer()
+    {
+        try { _warmupTimer?.Stop(); } catch { /* best-effort */ }
+    }
+
+    private void OnWarmupTimerTick(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
+        => DebugLog.SafeRun("DeepAnalyzeView.OnWarmupTimerTick", () =>
+        {
+            sender.Stop();
+            if (_unloaded) return;
+            // Only fire if we're still in the pre-progress warm-up window — if a
+            // progress/last/complete event already landed, CancelWarmupTimer was
+            // called and we shouldn't be here, but guard defensively.
+            var ec = EngineClient.Instance;
+            if (ec.DeepAnalyzeProgress is not null
+                || ec.DeepAnalyzeLast is not null
+                || ec.DeepAnalyzeComplete is not null)
+            {
+                return;
+            }
+            // Revert the optimistic UI so it doesn't look like a run is still in
+            // flight, then surface a dismissible, actionable error.
+            StreamCard.Visibility = Visibility.Collapsed;
+            OverallProgress.IsIndeterminate = false;
+            OverallProgress.Value = 0;
+            OverallProgressText.Text = string.Empty;
+            CancelButton.IsEnabled = false;
+            AnalyzeAllButton.IsEnabled = true;
+            SyncSelectionButtons();
+            _ = ShowAlertAsync("Model took too long to load",
+                "The Deep Analyze model didn't finish loading in time. Check the engine logs and try again.");
+        });
 
     /// <summary>smart-names pending-rename pill. Shows the
     /// running count of ProposedName values the engine has produced

@@ -36,7 +36,7 @@ public sealed partial class SidebarPipelineProgress : UserControl
     // Cache the SyncStage brushes once: it fires ~10 Hz during a scan, and
     // allocating four SolidColorBrushes (DispatcherObjects) per call churned the
     // UI thread. Built in the ctor (UI thread) since SolidColorBrush is UI-affined.
-    private SolidColorBrush? _goldBrush;
+    private Brush? _goldBrush;
     private SolidColorBrush? _fadedGold;
     private SolidColorBrush? _goldStroke;
     private Brush? _primaryText;
@@ -52,7 +52,7 @@ public sealed partial class SidebarPipelineProgress : UserControl
         BuildStages();
         // Ctor runs on UI thread; cache UI-thread-affined brushes here
         // so SyncStage never allocates during the scan-event burst.
-        _goldBrush = (SolidColorBrush)Application.Current.Resources["GoldBrush"];
+        _goldBrush = FileID.Services.ThemeHelper.GetBrushSafe("GoldBrush");
         _fadedGold = new SolidColorBrush(Color.FromArgb(0x99, 0xFF, 0xCC, 0x00));
         _goldStroke = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00));
         _primaryText = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorPrimaryBrush");

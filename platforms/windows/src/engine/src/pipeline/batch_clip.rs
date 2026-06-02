@@ -81,15 +81,24 @@ impl ClipBatchCoordinator {
         let batch_size = read_env_usize("FILEID_CLIP_BATCH_SIZE", DEFAULT_BATCH_SIZE).max(1);
         let batch_timeout_ms = read_env_usize("FILEID_CLIP_BATCH_TIMEOUT_MS", DEFAULT_BATCH_TIMEOUT_MS as usize) as u64;
         let (sender, receiver) = bounded::<ClipRequest>(REQUEST_CHANNEL_CAP);
-        std::thread::Builder::new()
+        // Don't panic mid-scan if the OS refuses a new thread (handle/memory
+        // pressure on a very large library). On failure the closure — and with
+        // it `receiver` — is dropped, disconnecting the channel; `embed()` then
+        // returns its graceful "channel closed" Err per request and the CLIP
+        // stage degrades (no per-file embeddings) instead of aborting the engine.
+        match std::thread::Builder::new()
             .name("fileid-clip-batch".to_string())
             .spawn(move || run_coordinator(&mut model, receiver, batch_size, batch_timeout_ms))
-            .expect("spawn fileid-clip-batch thread");
-        tracing::info!(
-            batch_size,
-            batch_timeout_ms,
-            "[CLIP-BATCH] coordinator spawned"
-        );
+        {
+            Ok(_) => tracing::info!(
+                batch_size,
+                batch_timeout_ms,
+                "[CLIP-BATCH] coordinator spawned"
+            ),
+            Err(e) => tracing::error!(
+                "[CLIP-BATCH] coordinator thread failed to spawn ({e}); CLIP embeddings disabled for this scan"
+            ),
+        }
         Arc::new(Self { sender })
     }
 
