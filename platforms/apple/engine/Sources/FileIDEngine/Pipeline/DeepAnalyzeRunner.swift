@@ -273,7 +273,7 @@ public enum DeepAnalyzeRunner {
                     description,
                     proposedName,
                     modelKey,
-                    Date().timeIntervalSinceReferenceDate,
+                    Date().timeIntervalSince1970,
                     fileID
                 ])
         }

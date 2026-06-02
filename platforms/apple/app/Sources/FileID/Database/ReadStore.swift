@@ -287,7 +287,7 @@ public final class ReadStore: @unchecked Sendable {
         return (try? q.read { db in
             try String.fetchAll(db, sql: """
                 SELECT tag FROM tags
-                WHERE file_id = ? AND source = 'vision'
+                WHERE file_id = ? AND source = 'auto'
                 ORDER BY rowid
                 LIMIT ?
                 """, arguments: [id, limit])
@@ -316,7 +316,7 @@ public final class ReadStore: @unchecked Sendable {
                            ) AS rowid_rank
                     FROM tags t
                     WHERE t.file_id IN (\(placeholders))
-                      AND t.source = 'vision'
+                      AND t.source = 'auto'
                 ) WHERE rowid_rank <= ?
                 """, arguments: StatementArguments(args + [limit]))
             var out: [Int64: [String]] = [:]
@@ -420,8 +420,8 @@ public final class ReadStore: @unchecked Sendable {
             return rows.map { r in
                 ScanSessionRow(
                     id: r["id"], rootPath: r["root_path"],
-                    startedAt: Date(timeIntervalSinceReferenceDate: r["started_at"]),
-                    completedAt: (r["completed_at"] as Double?).map { Date(timeIntervalSinceReferenceDate: $0) },
+                    startedAt: Date(timeIntervalSince1970: r["started_at"]),
+                    completedAt: (r["completed_at"] as Double?).map { Date(timeIntervalSince1970: $0) },
                     lastFileIndex: r["last_file_index"],
                     totalFiles: r["total_files"],
                     status: r["status"]
@@ -810,9 +810,9 @@ public final class ReadStore: @unchecked Sendable {
             id: r["id"],
             pathText: r["path_text"],
             sizeBytes: r["size_bytes"],
-            createdAt: (r["created_at"] as Double?).map { Date(timeIntervalSinceReferenceDate: $0) },
-            modifiedAt: (r["modified_at"] as Double?).map { Date(timeIntervalSinceReferenceDate: $0) },
-            scannedAt: Date(timeIntervalSinceReferenceDate: r["scanned_at"]),
+            createdAt: (r["created_at"] as Double?).map { Date(timeIntervalSince1970: $0) },
+            modifiedAt: (r["modified_at"] as Double?).map { Date(timeIntervalSince1970: $0) },
+            scannedAt: Date(timeIntervalSince1970: r["scanned_at"]),
             kind: r["kind"], extension: r["extension"],
             phash: r["phash"], aesthetic: r["aesthetic"],
             hasFaces: (r["has_faces"] as Int?? ?? 0) != 0,
@@ -824,7 +824,7 @@ public final class ReadStore: @unchecked Sendable {
             vlmDescription: r["vlm_description"],
             vlmProposedName: r["vlm_proposed_name"],
             vlmModel: r["vlm_model"],
-            vlmAnalyzedAt: (r["vlm_analyzed_at"] as Double?).map { Date(timeIntervalSinceReferenceDate: $0) }
+            vlmAnalyzedAt: (r["vlm_analyzed_at"] as Double?).map { Date(timeIntervalSince1970: $0) }
         )
     }
 

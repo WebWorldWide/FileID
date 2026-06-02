@@ -141,8 +141,8 @@ public final class ArcFaceService: @unchecked Sendable {
 
     // MARK: - Inference
 
-    /// Returns an L2-normalized 512-d embedding for the supplied face
-    /// crop. Returns nil if the model isn't loaded or inference failed.
+    /// Returns an L2-normalized 128-d (SFace) embedding for the supplied
+    /// face crop. Returns nil if the model isn't loaded or inference failed.
     public func embed(_ crop: CGImage) -> [Float]? {
         lock.lock()
         let s = session
@@ -180,6 +180,17 @@ public final class ArcFaceService: @unchecked Sendable {
                 let src = raw.baseAddress!.assumingMemoryBound(to: Float.self)
                 for i in 0..<count { floats[i] = src[i] }
             }
+            // SFace is a 128-d embedder; a wrong/quantized export with a
+            // different output width would silently mis-cluster and diverge
+            // from the cross-platform face DB (keyed on 128-d / 512-byte
+            // blobs). Bail rather than persist an off-dim vector — mirrors
+            // the Windows engine's sface.rs guard (ENG-69).
+            let expectedDim = FaceEmbedderKind.sface.embeddingDim
+            guard floats.count == expectedDim else {
+                JSONLog.shared.error(ev: "arcface_inference_failed",
+                                     error: "SFace produced a \(floats.count)-d embedding, expected \(expectedDim) (wrong or quantized model?)")
+                return nil
+            }
             return l2Normalize(floats)
         } catch {
             JSONLog.shared.error(ev: "arcface_inference_failed", error: "\(error)")
@@ -206,8 +217,8 @@ public final class ArcFaceService: @unchecked Sendable {
                                     "kind": AnyCodable(kind.rawValue)])
     }
 
-    /// Encode a 512-d float32 embedding as a raw little-endian blob for
-    /// the DB. Symmetric with `MobileCLIPService.embeddingToBlob`.
+    /// Encode a 128-d (SFace) float32 embedding as a raw little-endian
+    /// blob for the DB. Symmetric with `MobileCLIPService.embeddingToBlob`.
     public static func embeddingToBlob(_ vec: [Float]) -> Data {
         vec.withUnsafeBufferPointer { Data(buffer: $0) }
     }

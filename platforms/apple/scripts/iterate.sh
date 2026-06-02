@@ -123,9 +123,10 @@ if ! wait_for_event "ready" 15; then
 fi
 ok "engine ready"
 
-# IPCCommand.startScan(rootBookmark: Data, rootPathDisplay: String)
-# Swift Codable synthesizes named keys when associated values are named.
-ipc_send "{\"startScan\":{\"rootBookmark\":\"$BOOKMARK_B64\",\"rootPathDisplay\":\"$CORPUS\"}}"
+# IPCCommand.startScan(rootPath: String, rootDisplay: String?, rescan: Bool)
+# The app resolves the security-scoped bookmark to a path app-side; the engine
+# now takes the resolved rootPath directly.
+ipc_send "{\"startScan\":{\"rootPath\":\"$CORPUS\",\"rootDisplay\":\"$CORPUS\",\"rescan\":false}}"
 ok "startScan sent"
 
 if ! wait_for_event "scanComplete" 240; then
