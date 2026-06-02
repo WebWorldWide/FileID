@@ -351,7 +351,7 @@ public sealed partial class WelcomeSheet : UserControl
         // success.
         if (status == ModelInstallStatus.Installed && !isRealInstall)
         {
-            return (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"];
+            return FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorSecondaryBrush");
         }
         return IconBrushFor(status);
     }

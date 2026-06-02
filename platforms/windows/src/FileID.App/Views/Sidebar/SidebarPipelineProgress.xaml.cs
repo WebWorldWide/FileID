@@ -55,9 +55,9 @@ public sealed partial class SidebarPipelineProgress : UserControl
         _goldBrush = (SolidColorBrush)Application.Current.Resources["GoldBrush"];
         _fadedGold = new SolidColorBrush(Color.FromArgb(0x99, 0xFF, 0xCC, 0x00));
         _goldStroke = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00));
-        _primaryText = (Brush)Application.Current.Resources["TextFillColorPrimaryBrush"];
-        _secondaryText = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"];
-        _tertiaryText = (Brush)Application.Current.Resources["TextFillColorTertiaryBrush"];
+        _primaryText = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorPrimaryBrush");
+        _secondaryText = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorSecondaryBrush");
+        _tertiaryText = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorTertiaryBrush");
         _inactiveDot = InactiveDotBrush();
         _inactiveDotStroke = InactiveDotStrokeBrush();
         _inactiveConnector = InactiveConnectorBrush();
@@ -151,7 +151,7 @@ public sealed partial class SidebarPipelineProgress : UserControl
                 HorizontalAlignment = HorizontalAlignment.Center,
                 TextWrapping = TextWrapping.NoWrap,
                 TextTrimming = TextTrimming.None,
-                Foreground = (Brush)Application.Current.Resources["TextFillColorTertiaryBrush"],
+                Foreground = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorTertiaryBrush"),
             };
             cellStack.Children.Add(labelText);
             _labels[i] = labelText;

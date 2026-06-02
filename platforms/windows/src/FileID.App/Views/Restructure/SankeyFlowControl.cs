@@ -504,8 +504,5 @@ public sealed class SankeyFlowControl : Control
         => s.Length <= max ? s : string.Concat(s.AsSpan(0, max - 1), "…");
 
     private static Brush ResolveBrush(string key, Color fallback)
-    {
-        if (Application.Current?.Resources[key] is Brush b) return b;
-        return new SolidColorBrush(fallback);
-    }
+        => FileID.Services.ThemeHelper.GetBrushSafe(key, new SolidColorBrush(fallback));
 }
