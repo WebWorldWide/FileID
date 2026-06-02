@@ -8,6 +8,19 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-02 (later 3) — Production-hardening pass: 6 verified merges (plan `majestic-foraging-tome.md`)
+
+Drove the approved v1.0 production plan via file-disjoint Workflow fan-outs + verified per-workstream merges. Each workstream: headless gate matching CI exactly (engine `cargo clippy --all-targets -D warnings` / `fmt --check` / `test` from the engine dir for the pinned 1.90 toolchain; app `dotnet build` / `format --verify-no-changes` / `test`), then merge to `main`, branch deleted, untracked strays kept out of every commit. Six landed, all green:
+
+- **WS4 accessibility pt.1** (`7b2b799`) — 161 `AutomationProperties.Name/HelpText` across all six tabs + sidebar + sheets (8-agent fan-out, per-cell adversarial review). 28 WCAG-AA contrast flags deferred to WS7.
+- **WS2 silent-failure elimination** (`b98becb`) — 20 callsites surfaced via new `EngineClient.WaitForBulkActionResultAsync` (mirrors WipeLibraryAndWait) + `SqliteErrorTranslator` (DB/IO jargon → actionable copy): Cleanup trash (was fire-and-forget + unconditional refresh — failed deletes looked successful), Restructure plan/apply, DeepAnalyze, Bulk rename/tag, People merge + SuggestedMerges, Settings cancel, onboarding; ReadStore/ClipSearch errors consumed into `LibraryViewModel.ErrorMessage` (UI-thread-marshaled — covers the OpenAsync-throws path that skipped RefreshAsync).
+- **WS0 model download-integrity** (`51c3364`) — `check_size_plausible` (loose size-sanity in both download paths; catches truncation / HTML-error-page-as-model even with no pinned hash) + `.part-N` orphan guard (oversized stale part → discard, not "done") + 3 unit tests. Hash VALUES + the non-`None` CI gate deferred to WS-CD (need real artifacts; RAM++ hash not final until the WS5 256-export). Rationale in DECISIONS.md.
+- **WS3 pt.1 data-integrity** (`6c608f6`) — engine `db::quick_check` at writer open → `db_integrity_check_failed` EngineError with wipe+rescan guidance (was: silently proceed on a torn-page DB); RestructureView per-file selection persistence across nav (static `_deselectedFileIds` — was reset on every tab switch, silently discarding the user's include/exclude choices).
+- **WS1c sweep** (`ee8c680`) — 12 theme-brush (`TextFillColor*` / `SubtleFill*` / `CardStrokeColorDefault`) code-behind reads in imperative sheet-builds routed through `ThemeHelper.GetBrushSafe` — closes the remaining SuggestedMergesSheet `KeyNotFoundException` native-fast-fail shape. Framework styles + the custom GoldBrush (reliably present in the merged dictionary) left as-is.
+- **WS5 memory bound** (`2f0d6b9`) — L1 BitmapImage cache re-expressed as a real ~128 MB byte budget (was 5000 entries ≈ ~550 MB of decoded bitmaps; the old "~25 MB" comment counted the encoded size). Holds the 50K-scroll working set bounded; LRU evicts the coldest, a miss just re-decodes.
+
+**Remaining** (NEXT.md "(later 3)" has exact resume steps): WS1b out-of-proc video keyframe (restores video thumbnails — the crash itself is already fixed, this is feature-restore; IPC + engine + app); WS3 ProposeRenames (IPC-crossing) + resumable-scan (ship flag-gated, verify on hardware); WS4 per-monitor DPI + keyboard E2E test; WS7 polish + the 28 contrast flags; WS-CD (all CI/CD, the explicit final phase). Externally blocked: WS5 256-export (needs Py 3.11–3.13), WS6 macOS lockstep (needs a Mac), WS-CD EV cert.
+
 ## 2026-06-02 (later 2) — Scan-crash fix: in-proc shell VIDEO thumbnail provider fast-fail (merged to main)
 
 User hit a hard crash mid-scan on the real `G:\TrueNAS\Users` library (~8300 files in). Root-caused from the logs + an adversarial diagnosis workflow (19 agents, 15 candidates, 1 prime suspect, 12 dismissed) and fixed; headless-verified (app build 0/0 + tests + `dotnet format` clean).
