@@ -118,7 +118,7 @@ public sealed partial class DrillDownSheet : UserControl
         labelStack.Children.Add(new TextBlock
         {
             Text = Path.GetFileName(m.Source),
-            Style = (Style)Application.Current.Resources["BodyStrongTextBlockStyle"],
+            Style = FileID.Services.ThemeHelper.GetStyleSafe("BodyStrongTextBlockStyle")!,
             TextTrimming = TextTrimming.CharacterEllipsis,
         });
         // Plain-language "why filed here" (RESTRUCTURE.md §6 trust mechanic).
@@ -127,7 +127,7 @@ public sealed partial class DrillDownSheet : UserControl
             labelStack.Children.Add(new TextBlock
             {
                 Text = m.Reason,
-                Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
+                Style = FileID.Services.ThemeHelper.GetStyleSafe("CaptionTextBlockStyle")!,
                 Foreground = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorSecondaryBrush"),
                 TextWrapping = TextWrapping.Wrap,
             });
@@ -135,7 +135,7 @@ public sealed partial class DrillDownSheet : UserControl
         labelStack.Children.Add(new TextBlock
         {
             Text = $"{m.Source} → {m.Destination}",
-            Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
+            Style = FileID.Services.ThemeHelper.GetStyleSafe("CaptionTextBlockStyle")!,
             Foreground = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorTertiaryBrush"),
             TextTrimming = TextTrimming.CharacterEllipsis,
         });

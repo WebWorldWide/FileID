@@ -193,6 +193,18 @@ pub(crate) async fn handle_deep_analyze_folder(
         Ok(v) => v,
         Err(err) => {
             tracing::warn!(?err, "deep_analyze_folder query");
+            // Terminal Complete on the query failure so the UI clears the
+            // "Preparing…" card instead of stranding forever (#6).
+            sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
+                DeepAnalyzeComplete {
+                    processed: 0,
+                    failed: 1,
+                    total_seconds: 0.0,
+                    model_kind: payload.model_kind.clone(),
+                    cancelled: true,
+                },
+            ))))
+            .await;
             return;
         }
     };
@@ -210,6 +222,18 @@ pub(crate) async fn handle_deep_analyze_all(
         Ok(v) => v,
         Err(err) => {
             tracing::warn!(?err, "deep_analyze_all query");
+            // Terminal Complete on the query failure so the UI clears the
+            // "Preparing…" card instead of stranding forever (#6).
+            sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
+                DeepAnalyzeComplete {
+                    processed: 0,
+                    failed: 1,
+                    total_seconds: 0.0,
+                    model_kind: payload.model_kind.clone(),
+                    cancelled: true,
+                },
+            ))))
+            .await;
             return;
         }
     };

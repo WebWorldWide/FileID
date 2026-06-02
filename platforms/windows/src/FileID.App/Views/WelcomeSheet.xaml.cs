@@ -134,8 +134,11 @@ public sealed partial class WelcomeSheet : UserControl
         _ => GlyphCloud,
     };
 
-    private SolidColorBrush GoldBrushResolved =>
-        (SolidColorBrush)Application.Current.Resources["GoldBrush"];
+    private static readonly SolidColorBrush s_goldFallback =
+        new(Windows.UI.Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00));
+
+    private Brush GoldBrushResolved =>
+        FileID.Services.ThemeHelper.GetBrushSafe("GoldBrush", s_goldFallback);
 
     private static readonly SolidColorBrush GreenBrush =
         new(Windows.UI.Color.FromArgb(0xFF, 0x6B, 0xE0, 0x82));
@@ -420,7 +423,11 @@ public sealed partial class WelcomeSheet : UserControl
             if (!settings.WelcomeSheetSeen)
             {
                 settings.WelcomeSheetSeen = true;
-                settings.Save();
+                // Synchronous flush, not the debounced Save(): dismissing the
+                // sheet then closing the app within the ~200 ms debounce window
+                // would otherwise drop the write and re-show the sheet next
+                // launch. Mirrors MainWindow.OnClosed's SaveImmediately().
+                settings.SaveImmediately();
                 DebugLog.Info("[INSTALL] welcomeSheetSeen=true persisted to app-settings.json");
             }
         }

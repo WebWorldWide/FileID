@@ -58,8 +58,11 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     private static readonly string[] AcceleratorSentinelIds = { "ort_cuda_x64", "ort_openvino_x64" };
 
     /// <summary>Time the engine has to reach Ready before an Install
-    /// click gives up and surfaces "Engine not ready" to the user.</summary>
-    private static readonly TimeSpan WaitForReadyTimeout = TimeSpan.FromSeconds(30);
+    /// click gives up and surfaces "Engine not ready" to the user. Raised
+    /// 30 → 75 s: cold-start model loading on slow disks / ARM64 can still be
+    /// legitimately initializing well past 30 s, and failing that early left
+    /// only a Retry that immediately failed again.</summary>
+    private static readonly TimeSpan WaitForReadyTimeout = TimeSpan.FromSeconds(75);
 
     /// <summary>Time after which a Downloading slot with no progress
     /// events gets flipped to Failed. Mirrors macOS WelcomeSheet's
@@ -569,6 +572,15 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         try
         {
             await EngineClient.Instance.WaitForReadyAsync(WaitForReadyTimeout).ConfigureAwait(false);
+        }
+        catch (TimeoutException ex)
+        {
+            // A timeout means the engine is still spinning up (cold-start model
+            // load on a slow disk / ARM box), NOT that it crashed — tell the
+            // user to wait a moment and retry rather than implying a failure.
+            DebugLog.Warn($"[INSTALL] WaitForReadyAsync timed out for '{modelKind}': {ex.Message}");
+            slot.Fail("Engine still starting up — give it a moment, then retry.");
+            return;
         }
         catch (Exception ex)
         {

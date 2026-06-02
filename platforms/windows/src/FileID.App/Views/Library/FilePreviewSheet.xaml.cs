@@ -483,7 +483,7 @@ public sealed partial class FilePreviewSheet : UserControl
         var labelText = new TextBlock
         {
             Text = label,
-            Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
+            Style = FileID.Services.ThemeHelper.GetStyleSafe("CaptionTextBlockStyle")!,
             Foreground = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorSecondaryBrush"),
             VerticalAlignment = VerticalAlignment.Top,
         };
@@ -494,7 +494,7 @@ public sealed partial class FilePreviewSheet : UserControl
         var valueText = new TextBlock
         {
             Text = value,
-            Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
+            Style = FileID.Services.ThemeHelper.GetStyleSafe("CaptionTextBlockStyle")!,
             TextWrapping = wrap ? TextWrapping.Wrap : TextWrapping.NoWrap,
             TextTrimming = wrap ? TextTrimming.None : TextTrimming.CharacterEllipsis,
             IsTextSelectionEnabled = true,

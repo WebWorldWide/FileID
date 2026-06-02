@@ -302,6 +302,9 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         }
         if (ids.Count == 0)
         {
+            await ShowAlertAsync(
+                "Nothing to trash",
+                "Every file in the active groups is marked as a keeper (skipped groups are excluded), so there are no non-keepers to move to the Recycle Bin.");
             return;
         }
         var sizeDisplay = FormatSize(bytes);
@@ -445,6 +448,9 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         {
             if (grp.Members[i].IsKeeper) { currentIdx = i; break; }
         }
+        // No keeper marked (currentIdx == -1): start the cycle deterministically
+        // at index 0 instead of relying on the (-1 + 1) % count wrap coincidence.
+        if (currentIdx == -1) currentIdx = grp.Members.Count - 1;
         var nextIdx = (currentIdx + 1) % grp.Members.Count;
         for (int i = 0; i < grp.Members.Count; i++)
         {

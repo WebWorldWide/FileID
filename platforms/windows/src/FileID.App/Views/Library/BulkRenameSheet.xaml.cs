@@ -81,7 +81,7 @@ public sealed partial class BulkRenameSheet : UserControl
             Text = currentName,
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis,
-            Style = (Style)Application.Current.Resources["BodyStrongTextBlockStyle"],
+            Style = FileID.Services.ThemeHelper.GetStyleSafe("BodyStrongTextBlockStyle")!,
         };
 
         var proposed = new TextBox
