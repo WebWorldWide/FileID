@@ -88,6 +88,33 @@ pub struct DownloadRequest {
     pub destination: PathBuf,
     /// Optional SHA256 (lowercase hex) for integrity check on completion.
     pub expected_sha256: Option<String>,
+    /// Registry size estimate (`approx_bytes`) for a loose post-download size
+    /// sanity check — catches a truncated stream / HTML error page standing in
+    /// for a model even when no SHA256 is pinned. An estimate, so only an
+    /// implausibly-small result is rejected (see `check_size_plausible`).
+    pub expected_bytes: Option<u64>,
+}
+
+/// Loose post-download size sanity. `approx_bytes` in the registry is an
+/// ESTIMATE, so we reject only implausibly-small results: a truncated stream,
+/// an HTML error page, or an auth wall standing in for a multi-GB model are
+/// orders of magnitude off, not a few percent. A 4× floor never false-rejects
+/// a reasonable estimate but always catches a KB-for-GB substitution. (SHA256,
+/// when pinned, is the exact check; this guards the common no-hash case.)
+fn check_size_plausible(actual: u64, expected: Option<u64>, url: &str) -> Result<()> {
+    if let Some(expected) = expected {
+        if expected > 0 {
+            let floor = (expected / 4).max(1);
+            if actual < floor {
+                anyhow::bail!(
+                    "size sanity failed for {url}: got {actual} bytes, expected \
+                     ~{expected} (floor {floor}) — likely a truncated download or \
+                     an error page, not the model"
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Download a single file. The simple non-parallel path — used when
@@ -311,6 +338,14 @@ where
             }
         }
 
+        // Size sanity before the atomic rename — a too-small .part (truncation
+        // / error page) must never become the destination.
+        let actual_len = tokio::fs::metadata(&tmp).await.map(|m| m.len()).unwrap_or(0);
+        if let Err(e) = check_size_plausible(actual_len, request.expected_bytes, &request.url) {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(e);
+        }
+
         tokio::fs::rename(&tmp, &request.destination).await
             .with_context(|| format!("rename {} -> {}", tmp.display(), request.destination.display()))?;
 
@@ -517,6 +552,13 @@ where
         }
     }
 
+    // Size sanity before the atomic rename (mirrors download_simple).
+    let actual_len = tokio::fs::metadata(&combined).await.map(|m| m.len()).unwrap_or(0);
+    if let Err(e) = check_size_plausible(actual_len, request.expected_bytes, &request.url) {
+        let _ = tokio::fs::remove_file(&combined).await;
+        return Err(e);
+    }
+
     tokio::fs::rename(&combined, &request.destination).await
         .with_context(|| format!("rename {} -> {}", combined.display(), request.destination.display()))?;
 
@@ -604,10 +646,23 @@ async fn download_range_with_retry(
         }
 
         // Resumable: stat the part file. If it has bytes, append from there.
-        let existing_len = tokio::fs::metadata(part_path).await
+        let range_len = end - start + 1;
+        let mut existing_len = tokio::fs::metadata(part_path).await
             .map(|m| m.len()).unwrap_or(0);
+        // A part larger than its planned range is stale — leftover from a prior
+        // download of a different-sized remote file. Its bytes would corrupt the
+        // concat, so discard and re-fetch the range rather than the old behavior
+        // of treating an oversized part as "already done" (which kept bad bytes).
+        if existing_len > range_len {
+            tracing::warn!(
+                part = %part_path.display(), existing_len, range_len,
+                "discarding oversized stale part before resume"
+            );
+            let _ = tokio::fs::remove_file(part_path).await;
+            existing_len = 0;
+        }
         let cur_start = start + existing_len;
-        if cur_start > end { return Ok(()); } // already done
+        if cur_start > end { return Ok(()); } // exactly complete
 
         // Global HTTP concurrency cap — prevents three concurrent prewarms
         // × 12 range-GETs each from tripping HuggingFace's per-IP rate limit
@@ -669,4 +724,35 @@ async fn download_range_with_retry(
     }
 
     anyhow::bail!("range exhausted retries (start={start})");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_size_plausible;
+
+    #[test]
+    fn size_check_passes_when_no_estimate() {
+        assert!(check_size_plausible(0, None, "u").is_ok());
+        assert!(check_size_plausible(10, Some(0), "u").is_ok());
+    }
+
+    #[test]
+    fn size_check_passes_within_loose_band() {
+        // Exact, under, and over the estimate all pass — the estimate is loose.
+        assert!(check_size_plausible(1_000_000, Some(1_000_000), "u").is_ok());
+        assert!(check_size_plausible(800_000, Some(1_000_000), "u").is_ok());
+        assert!(check_size_plausible(5_000_000, Some(1_000_000), "u").is_ok());
+        // Just above the 4× floor passes.
+        assert!(check_size_plausible(260_000, Some(1_000_000), "u").is_ok());
+    }
+
+    #[test]
+    fn size_check_rejects_truncation_and_error_pages() {
+        // A few-KB HTML error page standing in for a ~900 MB model.
+        assert!(check_size_plausible(4_096, Some(925_600_000), "u").is_err());
+        // Truncated to well under the 4× floor.
+        assert!(check_size_plausible(100_000, Some(1_000_000), "u").is_err());
+        // Zero-byte result against a 38 MB expectation.
+        assert!(check_size_plausible(0, Some(38_696_353), "u").is_err());
+    }
 }

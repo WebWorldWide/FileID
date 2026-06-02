@@ -249,6 +249,7 @@ pub(crate) async fn handle_prewarm_model(
             url: file.url.clone(),
             destination: file.dest.clone(),
             expected_sha256: file.sha256.clone(),
+            expected_bytes: Some(file.approx_bytes),
         };
         let label_for_err = label.clone();
         let dest_for_err = file.dest.clone();
@@ -321,6 +322,7 @@ pub(crate) async fn handle_prewarm_model(
             url: file.url.clone(),
             destination: file.dest.clone(),
             expected_sha256: file.sha256.clone(),
+            expected_bytes: Some(file.approx_bytes),
         };
         if let Err(err) =
             download_parallel(http_client.clone(), req, cancel.clone(), progress_cb).await
