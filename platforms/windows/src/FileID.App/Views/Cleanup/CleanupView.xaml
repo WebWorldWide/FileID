@@ -25,7 +25,8 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <StackPanel Grid.Column="0" Spacing="4">
-                <TextBlock Text="Cleanup" Style="{StaticResource TitleTextBlockStyle}"/>
+                <TextBlock Text="Cleanup" Style="{StaticResource TitleTextBlockStyle}"
+                           AutomationProperties.HeadingLevel="Level1"/>
                 <TextBlock Text="Visually-similar files grouped by perceptual hash. Trashed items stay recoverable."
                            Style="{StaticResource BodyTextBlockStyle}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
@@ -36,6 +37,8 @@
                      they click. Updates whenever a keeper radio flips. -->
                 <TextBlock x:Name="HeaderStatsText"
                            Text="{x:Bind HeaderStats, Mode=OneWay}"
+                           AutomationProperties.Name="{x:Bind HeaderStats, Mode=OneWay}"
+                           AutomationProperties.HelpText="Duplicate cleanup summary"
                            FontSize="12"
                            Foreground="{ThemeResource GoldBrush}" />
             </StackPanel>
@@ -46,6 +49,8 @@
                           VerticalScrollBarVisibility="Disabled">
                 <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                     <Button Click="OnResetKeepersClicked"
+                            AutomationProperties.Name="Reset keepers"
+                            AutomationProperties.HelpText="Re-mark the first member of every group as keeper, clearing any user overrides."
                             ToolTipService.ToolTip="Re-mark the first member of every group as keeper, clearing any user overrides.">
                         <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                             <FontIcon FontSize="13" Glyph="&#xE7A7;" />
@@ -53,6 +58,8 @@
                         </StackPanel>
                     </Button>
                     <Button Click="OnTrashNonKeepersClicked"
+                            AutomationProperties.Name="Trash non-keepers"
+                            AutomationProperties.HelpText="Move every non-keeper duplicate to the Recycle Bin."
                             ToolTipService.ToolTip="Move every non-keeper duplicate to the Recycle Bin.">
                         <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                             <FontIcon FontSize="13" Glyph="&#xE74D;" />
@@ -60,6 +67,8 @@
                         </StackPanel>
                     </Button>
                     <Button Click="OnRefreshClicked"
+                            AutomationProperties.Name="Refresh duplicates"
+                            AutomationProperties.HelpText="Re-scan the database for byte-identical duplicate files."
                             ToolTipService.ToolTip="Re-scan the database for byte-identical duplicate files.">
                         <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                             <FontIcon FontSize="13" Glyph="&#xE72C;" />
@@ -85,6 +94,8 @@
                               BorderThickness="1"
                               Padding="16"
                               Tag="{x:Bind ContentHash}"
+                              AutomationProperties.Name="{x:Bind Caption, Mode=OneWay}"
+                              AutomationProperties.HelpText="Duplicate group. Right-click for keeper and trash actions."
                               RightTapped="OnGroupRightTapped">
                             <!-- Per-group right-click action menu.
                                  RightTapped seeds the current-group cache so
@@ -141,6 +152,7 @@
                             </Grid.ContextFlyout>
                             <StackPanel Spacing="6">
                                 <TextBlock Text="{x:Bind Caption, Mode=OneWay}"
+                                           AutomationProperties.HeadingLevel="Level2"
                                            Style="{StaticResource BodyStrongTextBlockStyle}"/>
                                 <!-- Horizontal strip of thumbnail tiles (macOS CopyTile
                                      parity). Thumbnails load lazily via the members
@@ -157,7 +169,9 @@
                                         </ItemsRepeater.Layout>
                                         <ItemsRepeater.ItemTemplate>
                                             <DataTemplate x:DataType="vm:DuplicateMember">
-                                                <StackPanel Width="140" Spacing="4" Padding="2">
+                                                <StackPanel Width="140" Spacing="4" Padding="2"
+                                                            AutomationProperties.Name="{x:Bind FileName}"
+                                                            AutomationProperties.HelpText="{x:Bind Path}">
                                                     <!-- Border clips the UniformToFill image to rounded corners. -->
                                                     <Border Width="132" Height="132"
                                                             CornerRadius="8"
@@ -186,6 +200,8 @@
                                                     <RadioButton GroupName="{x:Bind GroupKey, Mode=OneTime}"
                                                                  IsChecked="{x:Bind IsKeeper, Mode=TwoWay}"
                                                                  Content="Keep"
+                                                                 AutomationProperties.Name="{x:Bind FileName}"
+                                                                 AutomationProperties.HelpText="Keep this copy; trash the other duplicates in the group."
                                                                  HorizontalAlignment="Center" />
                                                 </StackPanel>
                                             </DataTemplate>
@@ -204,8 +220,10 @@
                     Spacing="12"
                     Visibility="{x:Bind FooterVisibility, Mode=OneWay}">
             <ProgressRing IsActive="{x:Bind ViewModel.IsLoading, Mode=OneWay}"
+                          AutomationProperties.Name="Scanning for duplicates"
                           Width="16" Height="16"/>
             <TextBlock Text="{x:Bind StatusText, Mode=OneWay}"
+                       AutomationProperties.Name="{x:Bind StatusText, Mode=OneWay}"
                        Style="{StaticResource CaptionTextBlockStyle}"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
         </StackPanel>

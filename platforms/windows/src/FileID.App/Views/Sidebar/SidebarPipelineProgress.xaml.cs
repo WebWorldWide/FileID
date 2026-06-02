@@ -31,6 +31,7 @@ public sealed partial class SidebarPipelineProgress : UserControl
     private readonly Rectangle?[] _leftConnectors = new Rectangle?[Stages.Length];
     private readonly Rectangle?[] _rightConnectors = new Rectangle?[Stages.Length];
     private readonly TextBlock[] _labels = new TextBlock[Stages.Length];
+    private readonly StackPanel[] _cells = new StackPanel[Stages.Length];
 
     // Cache the SyncStage brushes once: it fires ~10 Hz during a scan, and
     // allocating four SolidColorBrushes (DispatcherObjects) per call churned the
@@ -155,6 +156,11 @@ public sealed partial class SidebarPipelineProgress : UserControl
             cellStack.Children.Add(labelText);
             _labels[i] = labelText;
 
+            // Each stage cell announces its name + state to a screen reader;
+            // SyncStage refreshes the state suffix as the pipeline advances.
+            _cells[i] = cellStack;
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(cellStack, $"{label} stage");
+
             Grid.SetColumn(cellStack, i);
             StagesRow.Children.Add(cellStack);
         }
@@ -236,6 +242,11 @@ public sealed partial class SidebarPipelineProgress : UserControl
 
             // Label color: active → gold, filled → primary, else → tertiary.
             _labels[i].Foreground = active ? _goldBrush : (filled ? _primaryText : _tertiaryText);
+
+            // Refresh the screen-reader state suffix for this stage cell.
+            string state = active ? "in progress" : (filled ? "complete" : "pending");
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+                _cells[i], $"{Stages[i].Label} stage, {state}");
 
             // Connectors: a half is "filled" iff the dot it connects to AND
             // the dot it leads from are filled (or the half belongs to the

@@ -419,6 +419,8 @@ public sealed partial class SidebarProcessingControl : UserControl
 
         // FEAT-1: Pause/Resume label always reflects engine truth.
         PauseResumeText.Text = EngineClient.Instance.IsPaused ? "Resume" : "Pause";
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+            PauseResumeButton, EngineClient.Instance.IsPaused ? "Resume scan" : "Pause scan");
 
         if (isInFlight && prog is not null)
         {
@@ -464,6 +466,17 @@ public sealed partial class SidebarProcessingControl : UserControl
             StatMemory.Foreground = prog.ResidentMb > 1200 ? _memoryWarnBrush : _statDefaultBrush;
             StatFailures.Text = prog.Failed.ToString("N0");
             StatFailures.Foreground = prog.Failed > 0 ? FailedTextBrush : _statDefaultBrush;
+
+            // Screen-reader names combine label + value so each stat tile
+            // announces e.g. "Discovered: 1,240" rather than a bare label.
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+                DiscoveredStatBorder, $"Discovered: {StatDiscovered.Text}");
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+                TaggedStatBorder, $"Tagged: {StatTagged.Text}");
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+                MemoryStatBorder, $"Memory: {StatMemory.Text}");
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+                FailuresStatBorder, $"Failures: {StatFailures.Text}");
 
             // Per-step ETA: attribute the estimate to the ACTIVE pipeline
             // stage rather than showing a bare number. During discovery the

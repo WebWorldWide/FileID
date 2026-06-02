@@ -37,6 +37,7 @@ public sealed partial class EmptyStateView : UserControl
                 var v = (EmptyStateView)d;
                 var text = (string)e.NewValue;
                 v.ActionLabelText.Text = text;
+                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(v.ActionButton, text);
                 v.ActionButton.Visibility = string.IsNullOrEmpty(text) ? Visibility.Collapsed : Visibility.Visible;
             }));
 

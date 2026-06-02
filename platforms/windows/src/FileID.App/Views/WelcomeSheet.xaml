@@ -38,7 +38,8 @@
                 <!-- Header. macOS: VStack(spacing: 6) { title; body } -->
                 <StackPanel Spacing="6">
                     <TextBlock Text="Welcome to FileID"
-                               Style="{StaticResource TitleLargeTextBlockStyle}" />
+                               Style="{StaticResource TitleLargeTextBlockStyle}"
+                               AutomationProperties.HeadingLevel="Level1" />
                     <TextBlock Text="Install the AI models below to enable semantic search, face clustering, and Deep Analyze. Each model downloads once from HuggingFace and runs locally on your hardware."
                                Style="{StaticResource BodyTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
@@ -63,7 +64,8 @@
                               Glyph="{x:Bind GlyphFor(Svc.Clip.Status), Mode=OneWay}"
                               Foreground="{x:Bind IconBrushFor(Svc.Clip.Status), Mode=OneWay}"
                               FontSize="22"
-                              VerticalAlignment="Top" />
+                              VerticalAlignment="Top"
+                              AutomationProperties.AccessibilityView="Raw" />
                     <StackPanel Grid.Column="1" Spacing="4" Margin="12,0,0,0" VerticalAlignment="Center">
                         <Grid>
                             <Grid.ColumnDefinitions>
@@ -115,6 +117,7 @@
                         <Button Click="OnClipActionClicked"
                                 Content="{x:Bind ButtonLabel(Svc.Clip.Status), Mode=OneWay}"
                                 MinWidth="86"
+                                AutomationProperties.HelpText="Semantic search (CLIP) model"
                                 Visibility="{x:Bind ShowActionButton(Svc.Clip.Status), Mode=OneWay}" />
                     </Grid>
                 </Grid>
@@ -131,7 +134,8 @@
                               Glyph="{x:Bind GlyphFor(Svc.RamPlus.Status), Mode=OneWay}"
                               Foreground="{x:Bind IconBrushFor(Svc.RamPlus.Status), Mode=OneWay}"
                               FontSize="22"
-                              VerticalAlignment="Top" />
+                              VerticalAlignment="Top"
+                              AutomationProperties.AccessibilityView="Raw" />
                     <StackPanel Grid.Column="1" Spacing="4" Margin="12,0,0,0" VerticalAlignment="Center">
                         <Grid>
                             <Grid.ColumnDefinitions>
@@ -183,6 +187,7 @@
                         <Button Click="OnRamPlusActionClicked"
                                 Content="{x:Bind ButtonLabel(Svc.RamPlus.Status), Mode=OneWay}"
                                 MinWidth="86"
+                                AutomationProperties.HelpText="Auto-tagging (RAM++) model"
                                 Visibility="{x:Bind ShowActionButton(Svc.RamPlus.Status), Mode=OneWay}" />
                     </Grid>
                 </Grid>
@@ -198,7 +203,8 @@
                               Glyph="{x:Bind GlyphFor(Svc.Arcface.Status), Mode=OneWay}"
                               Foreground="{x:Bind IconBrushFor(Svc.Arcface.Status), Mode=OneWay}"
                               FontSize="22"
-                              VerticalAlignment="Top" />
+                              VerticalAlignment="Top"
+                              AutomationProperties.AccessibilityView="Raw" />
                     <StackPanel Grid.Column="1" Spacing="4" Margin="12,0,0,0" VerticalAlignment="Center">
                         <Grid>
                             <Grid.ColumnDefinitions>
@@ -250,6 +256,7 @@
                         <Button Click="OnArcfaceActionClicked"
                                 Content="{x:Bind ButtonLabel(Svc.Arcface.Status), Mode=OneWay}"
                                 MinWidth="86"
+                                AutomationProperties.HelpText="Face recognition (YuNet + SFace) model"
                                 Visibility="{x:Bind ShowActionButton(Svc.Arcface.Status), Mode=OneWay}" />
                     </Grid>
                 </Grid>
@@ -266,7 +273,8 @@
                               Glyph="{x:Bind GlyphFor(Svc.DeepVlm.Status), Mode=OneWay}"
                               Foreground="{x:Bind IconBrushFor(Svc.DeepVlm.Status), Mode=OneWay}"
                               FontSize="22"
-                              VerticalAlignment="Top" />
+                              VerticalAlignment="Top"
+                              AutomationProperties.AccessibilityView="Raw" />
                     <StackPanel Grid.Column="1" Spacing="4" Margin="12,0,0,0" VerticalAlignment="Center">
                         <Grid>
                             <Grid.ColumnDefinitions>
@@ -318,6 +326,7 @@
                         <Button Click="OnDeepVlmActionClicked"
                                 Content="{x:Bind ButtonLabel(Svc.DeepVlm.Status), Mode=OneWay}"
                                 MinWidth="86"
+                                AutomationProperties.HelpText="Deep Analyze vision model"
                                 Visibility="{x:Bind ShowActionButton(Svc.DeepVlm.Status), Mode=OneWay}" />
                     </Grid>
                 </Grid>
@@ -335,7 +344,8 @@
                               Glyph="{x:Bind AcceleratorGlyph(Svc.Accelerator.Status, Svc.AcceleratorIsRealInstall), Mode=OneWay}"
                               Foreground="{x:Bind AcceleratorIconBrush(Svc.Accelerator.Status, Svc.AcceleratorIsRealInstall), Mode=OneWay}"
                               FontSize="22"
-                              VerticalAlignment="Top" />
+                              VerticalAlignment="Top"
+                              AutomationProperties.AccessibilityView="Raw" />
                     <StackPanel Grid.Column="1" Spacing="4" Margin="12,0,0,0" VerticalAlignment="Center">
                         <Grid>
                             <Grid.ColumnDefinitions>
@@ -381,6 +391,7 @@
                         <Button Click="OnAcceleratorActionClicked"
                                 Content="{x:Bind ButtonLabel(Svc.Accelerator.Status), Mode=OneWay}"
                                 MinWidth="86"
+                                AutomationProperties.HelpText="GPU Acceleration Pack"
                                 Visibility="{x:Bind ShowAcceleratorButton(Svc.Accelerator.Status, Svc.AcceleratorIsRealInstall), Mode=OneWay}" />
                     </Grid>
                 </Grid>

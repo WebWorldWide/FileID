@@ -52,7 +52,8 @@
                     BorderThickness="0"
                     Padding="6,2"
                     Click="OnDismissWarningClicked"
-                    ToolTipService.ToolTip="Dismiss">
+                    ToolTipService.ToolTip="Dismiss"
+                    AutomationProperties.Name="Dismiss warning">
                 <FontIcon Glyph="&#xE711;" FontSize="11" />
             </Button>
         </Grid>
@@ -69,7 +70,8 @@
                    Style="{StaticResource CaptionTextBlockStyle}"
                    FontWeight="SemiBold"
                    CharacterSpacing="40"
-                   Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                   AutomationProperties.HeadingLevel="Level2" />
 
         <!-- Pre-scan: idle pill + Start Scan -->
         <StackPanel x:Name="IdlePanel" Spacing="8">
@@ -94,7 +96,9 @@
                     Style="{StaticResource GoldButtonStyle}"
                     Height="40"
                     AccessKey="R"
-                    ToolTipService.ToolTip="Start scan (Ctrl+R)">
+                    ToolTipService.ToolTip="Start scan (Ctrl+R)"
+                    AutomationProperties.Name="Start Scan"
+                    AutomationProperties.HelpText="Start scanning the selected folder (Ctrl+R)">
                 <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                     <FontIcon FontSize="13" Glyph="&#xE768;" />
                     <TextBlock Text="Start Scan" FontWeight="SemiBold" />
@@ -115,7 +119,9 @@
             <HyperlinkButton x:Name="OpenLogButton"
                              Click="OnOpenLogClicked"
                              Padding="0"
-                             HorizontalAlignment="Left">
+                             HorizontalAlignment="Left"
+                             AutomationProperties.Name="Open engine log"
+                             AutomationProperties.HelpText="Open the engine diagnostic log in your default viewer">
                 <TextBlock Text="Open engine log"
                            Style="{StaticResource CaptionTextBlockStyle}"
                            Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
@@ -148,8 +154,10 @@
                 </Grid.RowDefinitions>
 
                 <Border Grid.Row="0" Grid.Column="0" Padding="10,8"
+                        x:Name="DiscoveredStatBorder"
                         Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                        CornerRadius="8">
+                        CornerRadius="8"
+                        AutomationProperties.Name="Discovered">
                     <StackPanel Spacing="2">
                         <TextBlock Text="Discovered"
                                    Style="{StaticResource CaptionTextBlockStyle}"
@@ -162,7 +170,8 @@
                 <Border Grid.Row="0" Grid.Column="1" Padding="10,8"
                         x:Name="TaggedStatBorder"
                         Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                        CornerRadius="8">
+                        CornerRadius="8"
+                        AutomationProperties.Name="Tagged">
                     <StackPanel Spacing="2">
                         <TextBlock Text="Tagged"
                                    Style="{StaticResource CaptionTextBlockStyle}"
@@ -173,8 +182,10 @@
                     </StackPanel>
                 </Border>
                 <Border Grid.Row="1" Grid.Column="0" Padding="10,8"
+                        x:Name="MemoryStatBorder"
                         Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                        CornerRadius="8">
+                        CornerRadius="8"
+                        AutomationProperties.Name="Memory">
                     <StackPanel Spacing="2">
                         <TextBlock Text="Memory"
                                    Style="{StaticResource CaptionTextBlockStyle}"
@@ -184,8 +195,10 @@
                     </StackPanel>
                 </Border>
                 <Border Grid.Row="1" Grid.Column="1" Padding="10,8"
+                        x:Name="FailuresStatBorder"
                         Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                        CornerRadius="8">
+                        CornerRadius="8"
+                        AutomationProperties.Name="Failures">
                     <StackPanel Spacing="2">
                         <TextBlock Text="Failures"
                                    Style="{StaticResource CaptionTextBlockStyle}"
@@ -225,7 +238,8 @@
                         BorderThickness="1"
                         BorderBrush="{ThemeResource DestructiveBorderBrush}"
                         Background="{ThemeResource DestructiveBackgroundBrush}"
-                        CornerRadius="8">
+                        CornerRadius="8"
+                        AutomationProperties.Name="Cancel scan">
                     <TextBlock Text="Cancel"
                                Style="{StaticResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource DestructiveTextBrush}" />

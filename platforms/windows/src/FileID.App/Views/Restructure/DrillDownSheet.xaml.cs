@@ -94,6 +94,9 @@ public sealed partial class DrillDownSheet : UserControl
             Background = (Brush)Application.Current.Resources["SubtleFillColorSecondaryBrush"],
             ColumnSpacing = 12,
         };
+        // Accessible name for the whole row = the file name, so a screen reader
+        // reading the drill-down list announces each file.
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(grid, Path.GetFileName(m.Source));
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });

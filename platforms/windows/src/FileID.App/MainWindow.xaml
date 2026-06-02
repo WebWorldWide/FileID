@@ -62,7 +62,8 @@
             <FontIcon x:Name="SidebarToggleGlyph"
                       FontFamily="{ThemeResource SymbolThemeFontFamily}"
                       Glyph="&#xE700;"
-                      FontSize="14" />
+                      FontSize="14"
+                      AutomationProperties.AccessibilityView="Raw" />
         </Button>
 
         <!-- App icon + name: visible but hit-test-invisible so window-drag

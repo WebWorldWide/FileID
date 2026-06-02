@@ -28,12 +28,14 @@
                   FontSize="56"
                   HorizontalAlignment="Center"
                   Foreground="{ThemeResource GoldBrush}"
-                  Opacity="0.55" />
+                  Opacity="0.55"
+                  AutomationProperties.AccessibilityView="Raw" />
         <TextBlock x:Name="TitleText"
                    FontSize="22"
                    FontWeight="Bold"
                    HorizontalAlignment="Center"
-                   TextAlignment="Center" />
+                   TextAlignment="Center"
+                   AutomationProperties.HeadingLevel="Level2" />
         <TextBlock x:Name="BodyText"
                    FontSize="13"
                    Opacity="0.7"
@@ -53,7 +55,8 @@
                 HorizontalAlignment="Center"
                 Visibility="Collapsed">
             <StackPanel Orientation="Horizontal" Spacing="6">
-                <FontIcon x:Name="ActionGlyphIcon" FontSize="11" />
+                <FontIcon x:Name="ActionGlyphIcon" FontSize="11"
+                          AutomationProperties.AccessibilityView="Raw" />
                 <TextBlock x:Name="ActionLabelText" />
             </StackPanel>
         </Button>

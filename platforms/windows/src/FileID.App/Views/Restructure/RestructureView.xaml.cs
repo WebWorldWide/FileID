@@ -226,6 +226,12 @@ public sealed partial class RestructureView : UserControl
         ReorgValue.Text = reorgFiles.ToString("N0");
         ReorgHint.Text = reorgFolders == 1 ? "from 1 generic folder" : $"from {reorgFolders:N0} generic folders";
 
+        // Stat-tile accessible names combine the value + its label so a screen
+        // reader announces the whole stat (e.g. "Staying put: 12 folders kept intact").
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(KeepTile, $"Staying put: {KeepValue.Text} {KeepHint.Text}");
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(TidyTile, $"Tidying: {TidyValue.Text} files {TidyHint.Text}");
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ReorgTile, $"Reorganizing: {ReorgValue.Text} files {ReorgHint.Text}");
+
         Sankey.SetPlan(plan);
         TreeDiff.SetPlan(plan);
         int srcCount = DistinctAllSourceFolders(plan);

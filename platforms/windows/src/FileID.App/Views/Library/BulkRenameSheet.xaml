@@ -24,7 +24,8 @@
         <StackPanel Grid.Row="0" Spacing="4">
             <TextBlock x:Name="HeaderText"
                        Style="{StaticResource SubtitleTextBlockStyle}"
-                       Text="Rename selected files" />
+                       Text="Rename selected files"
+                       AutomationProperties.HeadingLevel="Level1" />
             <TextBlock x:Name="SelectionText"
                        Style="{StaticResource CaptionTextBlockStyle}"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />

@@ -24,7 +24,8 @@
 
         <TextBlock Grid.Row="0"
                    x:Name="HeaderText"
-                   Style="{StaticResource SubtitleTextBlockStyle}" />
+                   Style="{StaticResource SubtitleTextBlockStyle}"
+                   AutomationProperties.HeadingLevel="Level2" />
         <TextBlock Grid.Row="1"
                    x:Name="CountText"
                    Style="{StaticResource CaptionTextBlockStyle}"
