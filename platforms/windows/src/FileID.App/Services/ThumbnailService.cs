@@ -208,6 +208,21 @@ internal sealed class ThumbnailService : IDisposable
         ".ogv", ".vob", ".qt",
     };
 
+    /// <summary>True when the file's extension is audio or video — kinds whose
+    /// shell IThumbnailProvider runs IN-PROCESS (Media Foundation) and can
+    /// native-fast-fail the whole app (an unpackaged WinUI app has no
+    /// DllHost/COM-surrogate isolation). EVERY direct GetThumbnailAsync callsite
+    /// must consult this before invoking the shell chain (this service's
+    /// RenderAsync, DeepAnalyzeView, DrillDownSheet). NOT images / HEIC / HEIF /
+    /// AVIF — those render fine through the shell provider, so they must NOT be
+    /// skipped. Single source of truth so a newly-added extension covers all
+    /// callsites at once.</summary>
+    public static bool SkipShellThumbnailForExtension(string path)
+    {
+        var ext = Path.GetExtension(path);
+        return AudioExtensions.Contains(ext) || VideoExtensions.Contains(ext);
+    }
+
     private static async Task<BitmapImage?> RenderAsync(
         string path,
         double? modifiedAt,
