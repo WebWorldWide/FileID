@@ -1,5 +1,12 @@
 # NEXT — Windows (resume here)
 
+## 2026-06-02 (later 2) — Scan-crash fix follow-ups
+
+The mid-scan native fast-fail (in-proc shell VIDEO thumbnail provider on `.mov`) is FIXED + merged (video now skips the in-proc shell, like audio — see STATE). Remaining:
+
+1. **Restore LIVE video thumbnails safely (out-of-process).** The skip makes new video tiles show a placeholder (cached keyframes still show). The durable fix for the WHOLE in-proc-shell crash class (images still use it) is an OUT-OF-PROCESS extractor: either (a) the shell `IThumbnailCache` COM API (Explorer's thumbnail-cache service runs providers out-of-proc — needs COM interop in `ThumbnailService`), or (b) reuse the engine's scan-time video keyframe (`shell::video::keyframe_25pct`) — persist a 192px keyframe the app's `ThumbnailDiskCache` can read. (b) is cleaner cross-platform (macOS uses out-of-proc `QLThumbnailGenerator`). Verify on hardware against a `.mov`-heavy folder.
+2. **Arm WER dumps before the next repro** (`! pwsh -File platforms\windows\build\enable-crash-dumps.ps1`, self-elevates) so any residual fast-fail (e.g. a flaky IMAGE codec) drops a native minidump in `%LOCALAPPDATA%\FileID\crashdumps` that names the faulting provider DLL.
+
 ## 2026-06-02 (later) — Perf + bug + lockstep sweep follow-ups (branch `perf-bug-lockstep-2026-06-02`)
 
 Landed this pass (headless-green, engine clippy + 246 tests): RAM++ preprocess-out-of-lock + byte-budgeted read-ahead (perf hygiene, below noise floor); eng-ipc-0 JoinError terminal events. Remaining, highest-value first:

@@ -189,6 +189,25 @@ internal sealed class ThumbnailService : IDisposable
         ".wma", ".aiff", ".aif", ".alac", ".ape", ".mka", ".m4b",
     };
 
+    /// <summary>Video extensions whose thumbnail (a decoded keyframe) would come
+    /// from the SAME in-process shell IThumbnailProvider / Media Foundation chain
+    /// as audio art — and the same hazard: a flaky codec/handler fast-fails the
+    /// whole app with NO managed exception. The 2026-06-02 scan crash died EXACTLY
+    /// here, mid-burst thumbnailing .mov files (app.log stops with no exception;
+    /// the engine then saw stdin EOF and exited cleanly — innocent). We skip the
+    /// in-proc shell call for video and render the placeholder; a previously
+    /// disk-cached keyframe still shows via the L2 read above. Mirrors the
+    /// AudioExtensions guard. Restoring LIVE video thumbnails safely needs an
+    /// OUT-OF-PROCESS extractor (shell IThumbnailCache, or reusing the engine's
+    /// scan-time keyframe) — tracked in NEXT.md. Arm build/enable-crash-dumps.ps1
+    /// to capture the native faulting stack if a provider ever faults again.</summary>
+    private static readonly HashSet<string> VideoExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".mov", ".mp4", ".m4v", ".avi", ".mkv", ".wmv", ".webm", ".mpg",
+        ".mpeg", ".mpe", ".3gp", ".3g2", ".mts", ".m2ts", ".ts", ".flv",
+        ".ogv", ".vob", ".qt",
+    };
+
     private static async Task<BitmapImage?> RenderAsync(
         string path,
         double? modifiedAt,
@@ -234,6 +253,19 @@ internal sealed class ThumbnailService : IDisposable
         if (AudioExtensions.Contains(ext))
         {
             DebugLog.Debug($"[THUMB] AUDIO_SHELL_SKIP file={path} ext={ext}");
+            Interlocked.Increment(ref _renderedFailed);
+            return null;
+        }
+
+        // Video: same in-process shell hazard as audio — a flaky codec / Media
+        // Foundation thumbnail handler fast-fails the whole app with no managed
+        // exception. The 2026-06-02 scan crash died here on .mov. Skip the shell
+        // call; a previously-cached keyframe already returned via the L2 read, else
+        // the placeholder renders. (See VideoExtensions; out-of-proc keyframe is
+        // the follow-up to restore live video thumbnails — NEXT.md.)
+        if (VideoExtensions.Contains(ext))
+        {
+            DebugLog.Debug($"[THUMB] VIDEO_SHELL_SKIP file={path} ext={ext}");
             Interlocked.Increment(ref _renderedFailed);
             return null;
         }
