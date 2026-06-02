@@ -35,6 +35,14 @@ public sealed partial class RestructureView : UserControl
     private readonly Dictionary<RestructureOutcome, List<RestructureFileRowVm>> _filesByOutcome = new();
     private readonly Dictionary<RestructureOutcome, RestructureRecommendationVm> _recByOutcome = new();
 
+    // Selection intent persisted across navigation. The view is recreated on
+    // every tab switch (ctor re-subscribes, Unloaded unsubscribes), so the
+    // per-file IsSelected flags — which default to all-selected — would reset
+    // each return, silently discarding which files the user chose to exclude.
+    // Static so it survives the view's recreation for the app session; cleared
+    // only when a genuinely new plan is computed (OnLoaded's recompute path).
+    private static readonly HashSet<long> _deselectedFileIds = new();
+
     private bool _unloaded;
     private bool _suppressRecompute;
     private bool _deepAnalyzeHintDismissed;
@@ -109,6 +117,8 @@ public sealed partial class RestructureView : UserControl
                 return;
             }
             PlanStatusText.Text = "Computing plan...";
+            // A freshly computed plan supersedes any prior selection intent.
+            _deselectedFileIds.Clear();
             try
             {
                 await EngineClient.Instance.PlanRestructureAsync(folder);
@@ -265,6 +275,17 @@ public sealed partial class RestructureView : UserControl
         NothingToMoveCard.Visibility = hasMoves ? Visibility.Collapsed : Visibility.Visible;
         UpdateStayingPut(keepFolders);
 
+        // Re-apply the selections the user made before navigating away (see
+        // _deselectedFileIds). Suppressed so RecomputeSelection runs once below,
+        // not once per row.
+        if (_deselectedFileIds.Count > 0)
+        {
+            _suppressRecompute = true;
+            foreach (var kv in _allFileRows)
+                if (_deselectedFileIds.Contains(kv.Key)) kv.Value.IsSelected = false;
+            _suppressRecompute = false;
+        }
+
         ApplyBarTotalCount.Text = moveCount.ToString("N0");
         RecomputeSelection();
     }
@@ -360,6 +381,8 @@ public sealed partial class RestructureView : UserControl
             if (sender is CheckBox cb && cb.DataContext is RestructureFileRowVm f)
             {
                 f.IsSelected = cb.IsChecked == true;
+                if (f.IsSelected) _deselectedFileIds.Remove(f.FileId);
+                else _deselectedFileIds.Add(f.FileId);
             }
         });
 
@@ -380,7 +403,12 @@ public sealed partial class RestructureView : UserControl
             if (_filesByOutcome.TryGetValue(vm.Outcome, out var files))
             {
                 _suppressRecompute = true;
-                foreach (var f in files) f.IsSelected = approve;
+                foreach (var f in files)
+                {
+                    f.IsSelected = approve;
+                    if (approve) _deselectedFileIds.Remove(f.FileId);
+                    else _deselectedFileIds.Add(f.FileId);
+                }
                 _suppressRecompute = false;
             }
             RecomputeSelection();
@@ -564,6 +592,8 @@ public sealed partial class RestructureView : UserControl
                 return;
             }
             PlanStatusText.Text = "Computing plan...";
+            // A freshly computed plan supersedes any prior selection intent.
+            _deselectedFileIds.Clear();
             try
             {
                 await EngineClient.Instance.PlanRestructureAsync(folder);

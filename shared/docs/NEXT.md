@@ -1,5 +1,19 @@
 # NEXT — Windows (resume here)
 
+## 2026-06-02 (later 3) — Production-hardening pass (plan: `majestic-foraging-tome.md`)
+
+Driving the approved v1.0 plan via workflows, verified-merge per workstream. Landed to `main` this session (all headless-gate-green — engine clippy/fmt/test + app build/format/test):
+- **WS4 a11y pt.1** — 161 `AutomationProperties` across all views (28 WCAG-AA contrast flags deferred to WS7).
+- **WS2 silent-failure elimination** — 20 callsites + `EngineClient.WaitForBulkActionResultAsync` + `SqliteErrorTranslator` + `LibraryViewModel` open/search-error consumer (UI-thread-marshaled).
+- **WS0 download-integrity** — `check_size_plausible` (size sanity, both paths) + `.part-N` orphan guard + 3 tests. Hash VALUES + non-`None` CI gate → WS-CD (need real artifacts; RAM++ hash not final until WS5).
+- **WS3 part 1** — engine `db::quick_check` at open → `db_integrity_check_failed` EngineError; RestructureView selection persistence across nav (`_deselectedFileIds` static set).
+
+**WS3 deferred (resume here):**
+1. **DeepAnalyze ProposeRenames** — `ProposeRenamesCheck` (DeepAnalyzeView.xaml:296) is bound-but-ignored. Wiring is an **IPC-contract change, not app-only**: add `proposeRenames` to `DeepAnalyzeAllCommand` in `ipc.schema.json` + C# DTO + Rust command + honor it in `deep_analyze` (today the full pass always renames when `tagsOnly=false`; the checkbox should let the user get caption+tags WITHOUT renames). One atomic Rust+C#+schema PR with a schema-key test.
+2. **Resumable scan checkpoint** — schema ready (`scan_sessions.last_file_index`); `db::open_writer` currently marks crashed `running`→`failed` (the anti-resume). The checkpoint WRITE (DBWriter updates `last_file_index` per batch) is low-risk/additive; the auto-RESUME (skip already-tagged on restart) is a pipeline change that can skip/re-tag files if wrong — **ship behind a default-off `FILEID_RESUME_SCAN` flag with unit tests for the skip logic, then enable + verify on the RTX 2060 against a real interrupted scan** (project rule: no unverified pipeline regression).
+
+Remaining plan workstreams: WS1b (out-of-proc video keyframe), WS1c sweep (one-time `Resources[]` sites), WS4 (per-monitor DPI + keyboard E2E test), WS5 (256 re-export [BLOCKED: needs Py 3.11–3.13] + memory bounding + HNSW), WS6 (macOS lockstep [BLOCKED: needs a Mac]), WS7 polish, WS-CD (all CI/CD + hash population + EV cert [BLOCKED]).
+
 ## 2026-06-02 (later 2) — Scan-crash fix follow-ups
 
 The mid-scan native fast-fail (in-proc shell VIDEO thumbnail provider on `.mov`) is FIXED + merged (video now skips the in-proc shell, like audio — see STATE). Remaining:

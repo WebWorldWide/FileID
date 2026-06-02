@@ -215,6 +215,31 @@ async fn async_main() -> Result<()> {
         return Ok(());
     }
 
+    // Structural integrity check on the now-open writer. A torn page or a
+    // truncated file (power-loss mid-checkpoint, failing disk) would otherwise
+    // surface later as opaque per-query failures; quick_check catches it once,
+    // up front, with actionable guidance. Non-fatal — the engine keeps running
+    // so the user can wipe + rescan to rebuild (the DB may be partly readable).
+    if let Some(conn) = db_conn.as_ref() {
+        // Bind in its own statement so the lock guard drops at the semicolon —
+        // a temporary in an `if let` scrutinee would otherwise be held across
+        // the `.await` below (clippy::await_holding_lock).
+        let verdict = db::quick_check(&conn.lock());
+        if let Err(detail) = verdict {
+            tracing::error!(%detail, "database failed PRAGMA quick_check");
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "db_integrity_check_failed".into(),
+                message: format!(
+                    "The library database failed an integrity check ({detail}). It may be \
+                     corrupted. Open Settings and wipe the library, then run a scan to rebuild it."
+                ),
+                path: Some(db_path.display().to_string()),
+                model_kind: None,
+            }))))
+            .await;
+        }
+    }
+
     // Emit `ready` first thing so the app sidebar can transition out of
     // .starting. The handshake is one-way; the app doesn't ack.
     commands::hardware::emit_ready(&sink).await;
