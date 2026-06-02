@@ -7,6 +7,19 @@
 
 ---
 
+## 2026-06-02 — WS-CD pt.1: signing-correctness + release CD shipped; rest scoped with correct approaches
+
+**Context**: WS-CD is the consolidated CI/CD/release phase. A 5-cell investigation mapped the full pipeline (3 CI workflows, publish-bundle.ps1/sign.ps1, WiX MSI+Burn, version sourcing, model hashes, the release gap). Landed the ship-critical + headless-verifiable pieces; scoped the rest.
+
+- **Shipped (inspection + parse verified — CI never builds the installer and the headless gate builds only app+engine, so these can't be CI-verified):** (1) `publish-bundle.ps1` `Sign-Binary` now checks `$LASTEXITCODE` — THE "ships UNSIGNED silently" blocker: signtool failures (expired cert, timestamp timeout, denied) were swallowed, the script sailed on, and the bundle tripped SmartScreen on every user. (2) Release-build guard: `CI_RELEASE=true` forbids `-SkipSign`/`-SkipPrivacyGate` (local dev unaffected). (3) Signature verify extended bundle→per-arch MSIs. (4) `release.yml` — a tag-triggered (`v*`) Windows CD workflow, **ready-but-dormant**: fails loudly without the cert (never ships unsigned), a `workflow_dispatch dry_run` exercises the build cert-less, `contents: write` + `gh release create`. Doesn't touch the 3 existing CI workflows.
+- **Single external blocker:** the Authenticode **EV cert** (~$300/yr + identity vetting) + its SHA1 thumbprint as the `FILEID_EV_THUMBPRINT` repo secret. Everything in release.yml except the literal signing is code-ready + conditional on the secret.
+- **Deferred with correct approaches (NEXT.md "(later 4)"):**
+  - **WiX MSI RollbackBoundary** — the audit's "`<RollbackBoundary/>` as a `<MajorUpgrade>` CHILD" is **invalid WiX**: RollbackBoundary is a standalone element in the install sequence (Package/Feature) that marks the transaction commit point, NOT a MajorUpgrade child. Needs the WiX toolchain to verify → build-capable session.
+  - **Version single-sourcing** — Cargo.toml `[package].version` → `/p:Version` into the .csproj (`<Version Condition="'$(Version)'==''">`) + both .wixproj (DefineConstants → `$(var.Version)` in Product.wxs/Bundle.wxs). 5 hardcoded `0.1.0` sites; MSI-build-gated → build-capable session.
+  - **SHA256 population + non-`None` CI gate** (WS0's deferred data) — 39 artifacts; canonical hash = the `oid sha256:` in each HF LFS pointer (`GET <repo>/raw/main/<path>`) for LFS blobs, byte-hash for small raw + pinned GitHub/NVIDIA files. Network/release step; the gate can't hard-fail until populated (would red CI) and RAM++'s hash is provisional until the (blocked) WS5 256 re-export. WS0 size-sanity guards meanwhile.
+  - **Telemetry + source-URL allowlist canonicalization** — lists duplicated across windows-engine/app/macos.yml + publish-bundle.ps1 (drift hazard). Extract to `shared/ci/*.txt`, load via `Get-Content`/`mapfile`. Touches 3 LIVE workflows → local-test-the-loader + push-verify follow-up. windows-app.yml also lacks the source-URL scan.
+  - **Cargo.lock-freshness + BOM-verify CI gates** — low-risk additive gates; careful push-verify follow-up. (Signed-binary CI verify has no cert in CI → lives in release.yml, done.)
+
 ## 2026-06-02 — WS0 model-integrity: download-path hardening now, hash values + CI gate in WS-CD
 
 **Context**: The verify-or-bail path in `downloader.rs` is fully wired (both the simple and 12-way parallel paths re-hash on completion and bail on mismatch) and `prewarm.rs` already passes `expected_sha256: file.sha256.clone()` — but every `registry.rs` entry is `sha256: None`, so verification is inert (the S2 note, 2026-05-31). WS0 is split into machinery-now / values-later.

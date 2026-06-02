@@ -1,5 +1,15 @@
 # NEXT — Windows (resume here)
 
+## 2026-06-02 (later 4) — WS-CD remaining (CI/CD + release pipeline)
+
+Shipped this session (DECISIONS "WS-CD pt.1"): `publish-bundle.ps1` signtool `$LASTEXITCODE` check + `CI_RELEASE` `-SkipSign`/`-SkipPrivacyGate` guard + per-MSI signature verify; `release.yml` (tag-triggered, dormant until the EV cert). Remaining — each needs a build-capable session, the network, or the cert:
+
+1. **EV cert (SOLE hard blocker)** — procure (DigiCert/SSL.com/Sectigo) → store the SHA1 as the `FILEID_EV_THUMBPRINT` GitHub secret → `release.yml` goes live. Also pin `PROD_EV_THUMBPRINT` in `WinVerifyTrustChecker.cs` post-cert.
+2. **WiX (build-capable session — neither CI nor the headless gate builds the .wixproj):** add a `RollbackBoundary` as a standalone install-sequence element in `Product.wxs` (NOT a `<MajorUpgrade>` child — that's invalid WiX); single-source the version from `Cargo.toml` via `/p:Version` → .csproj `<Version Condition>` + both .wixproj `DefineConstants` → `$(var.Version)` in `Product.wxs:33` + `Bundle.wxs:26` (kills the 5 hardcoded `0.1.0` sites).
+3. **SHA256 population + gate (network):** fetch the `oid sha256:` from each HF LFS pointer (`GET <repo>/raw/main/<path>`) for the 39 `registry.rs` artifacts (byte-hash the small raw + pinned GitHub/NVIDIA ones), populate `registry.rs` + `MODELS.md`, THEN add the `windows-engine.yml` gate failing on any `sha256: None`. RAM++ hash provisional until the (blocked) WS5 256 re-export.
+4. **CI gate hardening (local-test the loader, then push-verify):** canonicalize the telemetry-string + source-URL-allowlist into `shared/ci/*.txt` loaded by all 3 workflows + `publish-bundle.ps1` (+ add the missing source-URL scan to `windows-app.yml`); add a Cargo.lock-freshness gate (windows-engine) + a BOM-verify-after-format gate (windows-app).
+5. **Final ship gate:** `release.yml` produces a signed bundle that installs + suppresses SmartScreen on a clean Win10/11 VM; crash-free 1h/50K soak.
+
 ## 2026-06-02 (later 3) — Production-hardening pass (plan: `majestic-foraging-tome.md`)
 
 Driving the approved v1.0 plan via workflows, verified-merge per workstream. Landed to `main` this session (all headless-gate-green — engine clippy/fmt/test + app build/format/test):

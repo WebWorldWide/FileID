@@ -38,6 +38,23 @@ param(
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
+# A release build must never bypass signing or the privacy gate. release.yml
+# sets CI_RELEASE=true on the actual signing path; if -SkipSign / -SkipPrivacyGate
+# slipped through there it would ship unsigned/unverified binaries to users —
+# exactly the failure these gates exist to prevent. Local dev builds (CI_RELEASE
+# unset) may still -SkipSign for cert-less iteration; a cert-less CI dry-run must
+# NOT set CI_RELEASE.
+if ($env:CI_RELEASE -eq 'true') {
+    if ($SkipSign) {
+        Write-Host "ERROR: -SkipSign is forbidden on a release build (would ship unsigned binaries)." -ForegroundColor Red
+        exit 1
+    }
+    if ($SkipPrivacyGate) {
+        Write-Host "ERROR: -SkipPrivacyGate is forbidden on a release build (would ship unverified binaries)." -ForegroundColor Red
+        exit 1
+    }
+}
+
 $ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PlatformDir = Resolve-Path (Join-Path $ScriptDir "..")
 $EngineDir   = Resolve-Path (Join-Path $PlatformDir "src/engine")
@@ -175,6 +192,14 @@ if (-not $SkipArm64) {
 function Sign-Binary($path) {
     if ($SkipSign) { return }
     & signtool sign /fd SHA256 /tr $TimestampServer /td SHA256 /sha1 $SignThumbprint $path | Out-Null
+    # signtool's failures (expired/absent cert, timestamp-server timeout, denied
+    # access) are non-fatal to the pipe unless we check $LASTEXITCODE — without
+    # this the script sails on and ships an UNSIGNED bundle that trips SmartScreen
+    # on every user's machine. Mirrors sign.ps1's per-target check.
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ERROR: signtool failed (exit $LASTEXITCODE) for $path — refusing to ship a partially-signed bundle." -ForegroundColor Red
+        exit 1
+    }
 }
 
 function Sign-PublishDir($dir) {
@@ -244,6 +269,21 @@ if (-not $SkipSign) {
         exit 1
     }
     Write-Host "  Authenticode          OK (signed by $($sig.SignerCertificate.Subject))" -ForegroundColor Green
+
+    # The bundle being Valid doesn't prove the inner MSIs are signed — a
+    # half-signed set still trips SmartScreen + WinVerifyTrust after install.
+    # Verify every shipped MSI too (the publish-dir exes are signed via
+    # Sign-PublishDir above; the MSIs are the user-facing secondary artifacts).
+    $msis = @($MsiX64)
+    if (-not $SkipArm64) { $msis += $MsiArm64 }
+    foreach ($msi in $msis) {
+        $ms = Get-AuthenticodeSignature $msi
+        if ($ms.Status -ne "Valid") {
+            Write-Host "ERROR: MSI signature status is $($ms.Status) for $msi" -ForegroundColor Red
+            exit 1
+        }
+    }
+    Write-Host "  Authenticode (MSIs)   OK" -ForegroundColor Green
 }
 
 # ─── 11. Privacy gate ──────────────────────────────────────────────────────
