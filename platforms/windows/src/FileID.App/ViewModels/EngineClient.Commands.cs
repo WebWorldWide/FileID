@@ -381,8 +381,8 @@ internal sealed partial class EngineClient
         SendCommandAsync(new DeepAnalyzeFolderCommand(pathPrefix, modelKind));
     // tagsOnly = the fast background auto-tag pass (one VLM call/file). The
     // manual Deep Analyze pass leaves it false → full caption + rename + tags.
-    public Task DeepAnalyzeAllAsync(string modelKind, bool skipExisting, bool tagsOnly = false) =>
-        SendCommandAsync(new DeepAnalyzeAllCommand(modelKind, skipExisting, tagsOnly));
+    public Task DeepAnalyzeAllAsync(string modelKind, bool skipExisting, bool tagsOnly = false, bool proposeRenames = true) =>
+        SendCommandAsync(new DeepAnalyzeAllCommand(modelKind, skipExisting, tagsOnly, proposeRenames));
     public Task DeepAnalyzeCancelAsync() => SendCommandAsync(new DeepAnalyzeCancelCommand());
     public Task PrewarmModelAsync(string modelKind)
     {

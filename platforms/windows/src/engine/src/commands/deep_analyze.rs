@@ -197,7 +197,7 @@ pub(crate) async fn handle_deep_analyze_folder(
         }
     };
     // Folder-scoped Deep Analyze is a manual action → full enrichment (Both).
-    run_deep_analyze_batch(sink, db, &payload.model_kind, ids, cancel, true, false).await;
+    run_deep_analyze_batch(sink, db, &payload.model_kind, ids, cancel, true, false, true).await;
 }
 
 pub(crate) async fn handle_deep_analyze_all(
@@ -221,6 +221,7 @@ pub(crate) async fn handle_deep_analyze_all(
         cancel,
         payload.skip_existing,
         payload.tags_only,
+        payload.propose_renames,
     )
     .await;
 }
@@ -245,13 +246,16 @@ async fn run_deep_analyze_batch(
     cancel: Arc<AtomicBool>,
     skip_existing: bool,
     tags_only: bool,
+    propose_renames: bool,
 ) {
     // TagsOnly = one VLM call/file (background auto-tag, ~3× faster); Both =
     // caption + tags + rename (the manual Deep Analyze pass).
     let mode = if tags_only {
         AnalyzeMode::TagsOnly
-    } else {
+    } else if propose_renames {
         AnalyzeMode::Both
+    } else {
+        AnalyzeMode::CaptionAndTags
     };
 
     // Resolve both VLM backends up front so we can gate correctly BEFORE

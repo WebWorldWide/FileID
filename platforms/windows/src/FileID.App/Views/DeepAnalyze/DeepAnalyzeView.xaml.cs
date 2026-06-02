@@ -627,7 +627,7 @@ public sealed partial class DeepAnalyzeView : UserControl
         {
             // Manual pass = full enrichment (caption + smart-rename + tags), so
             // tagsOnly stays false. The background auto-pass uses tagsOnly:true.
-            await EngineClient.Instance.DeepAnalyzeAllAsync(_activeModel, SkipExistingToggle.IsOn, tagsOnly: false);
+            await EngineClient.Instance.DeepAnalyzeAllAsync(_activeModel, SkipExistingToggle.IsOn, tagsOnly: false, proposeRenames: ProposeRenamesCheck.IsChecked == true);
         }
         catch (Exception ex)
         {
