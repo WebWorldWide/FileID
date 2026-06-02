@@ -46,6 +46,18 @@ public sealed partial class MainWindow : Window
     private MicaController? _micaController;
     private DesktopAcrylicController? _acrylicController;
 
+    // Per-monitor DPI re-scale. The WinUI framework auto-updates XamlRoot
+    // RasterizationScale + re-layouts content on a DPI change, but the
+    // top-level window keeps its OLD physical-pixel size unless we honor the
+    // OS-suggested rect that arrives with WM_DPICHANGED — so the window looks
+    // mis-sized after a drag to a different-DPI monitor. We subclass the HWND
+    // to catch that message and apply the suggested rect (lParam). The
+    // delegate is held in a field so it isn't GC'd while pinned as the
+    // subclass callback; the subclass is removed in OnClosed.
+    private SubclassProc? _dpiSubclassProc;
+    private IntPtr _subclassedHwnd = IntPtr.Zero;
+    private const uint DpiSubclassId = 0xF11E1D;
+
     public MainWindow()
     {
         // every step in the constructor is independently
@@ -95,6 +107,7 @@ public sealed partial class MainWindow : Window
         Step("ApplyMinimumSize", ApplyMinimumSize);
         Step("ApplySystemBackdrop", ApplySystemBackdrop);
         Step("ForceDarkTitleBar", ForceDarkTitleBar);
+        Step("HookDpiChange", HookDpiChange);
         Step("WireKeyboardShortcuts", WireKeyboardShortcuts);
 
         Activated += OnActivated;
@@ -352,6 +365,65 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private void HookDpiChange()
+    {
+        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+        if (hwnd == IntPtr.Zero) { return; }
+
+        // Keep the delegate alive in a field — the marshaled function pointer
+        // must outlive the subclass registration or the GC will collect it and
+        // the next WM_DPICHANGED will jump to freed memory.
+        _dpiSubclassProc = DpiWndProc;
+        if (SetWindowSubclass(hwnd, _dpiSubclassProc, DpiSubclassId, IntPtr.Zero))
+        {
+            _subclassedHwnd = hwnd;
+        }
+        else
+        {
+            _dpiSubclassProc = null;
+        }
+    }
+
+    private IntPtr DpiWndProc(
+        IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam, uint subclassId, IntPtr refData)
+    {
+        if (msg == WM_DPICHANGED && lParam != IntPtr.Zero)
+        {
+            // wParam low word = new DPI; lParam = RECT* with the OS-suggested
+            // window bounds for the target monitor. WinUI re-scales the XAML
+            // content itself; our job is only to move/resize the top-level
+            // window to the suggested rect so its physical size matches the
+            // new monitor's scale. Returning 0 tells the OS we handled it.
+            var suggested = Marshal.PtrToStructure<RECT>(lParam);
+            int width = suggested.Right - suggested.Left;
+            int height = suggested.Bottom - suggested.Top;
+            if (width > 0 && height > 0)
+            {
+                _ = SetWindowPos(
+                    hwnd,
+                    IntPtr.Zero,
+                    suggested.Left,
+                    suggested.Top,
+                    width,
+                    height,
+                    SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            return IntPtr.Zero;
+        }
+
+        return DefSubclassProc(hwnd, msg, wParam, lParam);
+    }
+
+    private void RemoveDpiHook()
+    {
+        if (_subclassedHwnd != IntPtr.Zero && _dpiSubclassProc is not null)
+        {
+            _ = RemoveWindowSubclass(_subclassedHwnd, _dpiSubclassProc, DpiSubclassId);
+        }
+        _subclassedHwnd = IntPtr.Zero;
+        _dpiSubclassProc = null;
+    }
+
     /// <summary>
     /// Register every keyboard shortcut on the root layout so they fire
     /// regardless of focus location.
@@ -468,6 +540,7 @@ public sealed partial class MainWindow : Window
         if (_micaController is not null) { _micaController.Dispose(); _micaController = null; }
         if (_acrylicController is not null) { _acrylicController.Dispose(); _acrylicController = null; }
         _backdropConfig = null;
+        try { RemoveDpiHook(); } catch { /* swallow */ }
         AppViewModel.Instance.PropertyChanged -= OnAppViewModelChanged;
 
         // Tell the engine to wrap up so the WAL gets checkpointed cleanly.
@@ -660,4 +733,37 @@ public sealed partial class MainWindow : Window
 
     [DllImport("dwmapi.dll", EntryPoint = "DwmSetWindowAttribute")]
     private static extern int NativeDwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int pvAttribute, int cbAttribute);
+
+    private const uint WM_DPICHANGED = 0x02E0;
+    private const uint SWP_NOZORDER = 0x0004;
+    private const uint SWP_NOACTIVATE = 0x0010;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate IntPtr SubclassProc(
+        IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam, uint subclassId, IntPtr refData);
+
+    [DllImport("comctl32.dll", SetLastError = true)]
+    private static extern bool SetWindowSubclass(
+        IntPtr hwnd, SubclassProc callback, uint subclassId, IntPtr refData);
+
+    [DllImport("comctl32.dll", SetLastError = true)]
+    private static extern bool RemoveWindowSubclass(
+        IntPtr hwnd, SubclassProc callback, uint subclassId);
+
+    [DllImport("comctl32.dll")]
+    private static extern IntPtr DefSubclassProc(
+        IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetWindowPos(
+        IntPtr hwnd, IntPtr hwndInsertAfter, int x, int y, int cx, int cy, uint flags);
 }

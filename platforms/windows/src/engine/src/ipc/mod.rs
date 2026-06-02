@@ -262,6 +262,7 @@ pub struct ApplyRestructurePayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RestructureMove {
+    #[serde(rename = "fileID")]
     pub file_id: i64,
     pub source: String,
     pub destination: String,
@@ -283,6 +284,7 @@ pub struct RestructureMove {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyTagsPayload {
+    #[serde(rename = "fileIDs")]
     pub file_ids: Vec<i64>,
     pub tags: Vec<String>,
     /// "add" (default) appends; "replace" overwrites.
@@ -311,6 +313,7 @@ pub struct RenameFilesPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenameEntry {
+    #[serde(rename = "fileID")]
     pub file_id: i64,
     /// New filename only (no directory components). Engine resolves the
     /// destination as `dirname(current) + new_name`.
@@ -320,13 +323,16 @@ pub struct RenameEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrashFilesPayload {
+    #[serde(rename = "fileIDs")]
     pub file_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MergeClustersPayload {
+    #[serde(rename = "sourcePersonID")]
     pub source_person_id: i64,
+    #[serde(rename = "destinationPersonID")]
     pub destination_person_id: i64,
 }
 
@@ -336,13 +342,16 @@ pub struct EmbedTextQueryPayload {
     pub query: String,
     /// Echoed back on the response event so the caller can correlate
     /// (multiple in-flight queries won't get crossed).
+    #[serde(rename = "queryID")]
     pub query_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EmbedImageQueryPayload {
+    #[serde(rename = "fileID")]
     pub file_id: i64,
+    #[serde(rename = "queryID")]
     pub query_id: String,
 }
 
@@ -361,20 +370,25 @@ pub struct GenerateVideoThumbnailPayload {
 #[serde(rename_all = "camelCase")]
 pub struct RestoreFromTrashPayload {
     /// Identifier from the trash_log JSON (UUID emitted by trashFiles).
+    #[serde(rename = "batchID")]
     pub batch_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RevertMergePayload {
+    #[serde(rename = "sourcePersonID")]
     pub source_person_id: i64,
+    #[serde(rename = "destinationPersonID")]
     pub destination_person_id: i64,
+    #[serde(rename = "faceIDsToRevert")]
     pub face_ids_to_revert: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenamePersonPayload {
+    #[serde(rename = "personID")]
     pub person_id: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -392,6 +406,7 @@ pub struct RenamePersonPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MarkPersonsAsUnknownPayload {
+    #[serde(rename = "personIDs")]
     pub person_ids: Vec<i64>,
 }
 
@@ -401,19 +416,27 @@ pub struct MarkPersonsAsUnknownPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MarkPersonsDifferentPayload {
+    #[serde(rename = "sourcePersonID")]
     pub source_person_id: i64,
+    #[serde(rename = "destinationPersonID")]
     pub destination_person_id: i64,
+    #[serde(rename = "sourceAnchorFaceID")]
     pub source_anchor_face_id: i64,
+    #[serde(rename = "destinationAnchorFaceID")]
     pub destination_anchor_face_id: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MergeSuggestion {
+    #[serde(rename = "sourcePersonID")]
     pub source_person_id: i64,
+    #[serde(rename = "destinationPersonID")]
     pub destination_person_id: i64,
     pub similarity: f32,
+    #[serde(rename = "sourceAnchorFaceID")]
     pub source_anchor_face_id: i64,
+    #[serde(rename = "destinationAnchorFaceID")]
     pub destination_anchor_face_id: i64,
     pub source_member_count: i64,
     pub destination_member_count: i64,
@@ -914,7 +937,7 @@ pub struct LibraryWiped {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BulkActionItem {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "fileID", default, skip_serializing_if = "Option::is_none")]
     pub file_id: Option<i64>,
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -924,6 +947,7 @@ pub struct BulkActionItem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipTextEmbedding {
+    #[serde(rename = "queryID")]
     pub query_id: String,
     pub query: String,
     /// 512-d L2-normalized float32 embedding from the CLIP text encoder.

@@ -65,7 +65,7 @@ public sealed record ApplyRestructureCommand(
     bool UseSymlinks = false) : CommandPayload;
 
 public sealed record RestructureMove(
-    long FileId,
+    [property: JsonPropertyName("fileID")] long FileId,
     string Source,
     string Destination,
     string Category,
@@ -80,28 +80,28 @@ public sealed record RestructureMove(
     string? Reason = null);
 
 public sealed record ApplyTagsCommand(
-    System.Collections.Generic.IReadOnlyList<long> FileIds,
+    [property: JsonPropertyName("fileIDs")] System.Collections.Generic.IReadOnlyList<long> FileIds,
     System.Collections.Generic.IReadOnlyList<string> Tags,
     string Mode = "add") : CommandPayload;
 
 public sealed record RenameFilesCommand(
     System.Collections.Generic.IReadOnlyList<RenameEntry> Renames) : CommandPayload;
 
-public sealed record RenameEntry(long FileId, string NewName);
+public sealed record RenameEntry([property: JsonPropertyName("fileID")] long FileId, string NewName);
 
 public sealed record TrashFilesCommand(
-    System.Collections.Generic.IReadOnlyList<long> FileIds) : CommandPayload;
+    [property: JsonPropertyName("fileIDs")] System.Collections.Generic.IReadOnlyList<long> FileIds) : CommandPayload;
 
 public sealed record MergeClustersCommand(
-    long SourcePersonId,
-    long DestinationPersonId) : CommandPayload;
+    [property: JsonPropertyName("sourcePersonID")] long SourcePersonId,
+    [property: JsonPropertyName("destinationPersonID")] long DestinationPersonId) : CommandPayload;
 
 public sealed record EmbedTextQueryCommand(
     string Query,
-    string QueryId) : CommandPayload;
+    [property: JsonPropertyName("queryID")] string QueryId) : CommandPayload;
 
 public sealed record RenamePersonCommand(
-    long PersonId,
+    [property: JsonPropertyName("personID")] long PersonId,
     string? Title = null,
     string? FirstName = null,
     string? MiddleName = null,
@@ -110,7 +110,7 @@ public sealed record RenamePersonCommand(
 
 /// <summary>FEAT-CRIT-1: bulk mark-as-unknown for People multi-select.</summary>
 public sealed record MarkPersonsAsUnknownCommand(
-    System.Collections.Generic.IReadOnlyList<long> PersonIds) : CommandPayload;
+    [property: JsonPropertyName("personIDs")] System.Collections.Generic.IReadOnlyList<long> PersonIds) : CommandPayload;
 
 public sealed record FindMergeSuggestionsCommand : CommandPayload;
 
@@ -118,21 +118,22 @@ public sealed record FindMergeSuggestionsCommand : CommandPayload;
 /// findMergeSuggestions stops re-suggesting it. Routed through the engine's
 /// single-writer DB connection; keyed on stable anchor face ids.</summary>
 public sealed record MarkPersonsDifferentCommand(
-    long SourcePersonId,
-    long DestinationPersonId,
-    long SourceAnchorFaceId,
-    long DestinationAnchorFaceId) : CommandPayload;
+    [property: JsonPropertyName("sourcePersonID")] long SourcePersonId,
+    [property: JsonPropertyName("destinationPersonID")] long DestinationPersonId,
+    [property: JsonPropertyName("sourceAnchorFaceID")] long SourceAnchorFaceId,
+    [property: JsonPropertyName("destinationAnchorFaceID")] long DestinationAnchorFaceId) : CommandPayload;
 
 public sealed record EmbedImageQueryCommand(
-    long FileId,
-    string QueryId) : CommandPayload;
+    [property: JsonPropertyName("fileID")] long FileId,
+    [property: JsonPropertyName("queryID")] string QueryId) : CommandPayload;
 
-public sealed record RestoreFromTrashCommand(string BatchId) : CommandPayload;
+public sealed record RestoreFromTrashCommand(
+    [property: JsonPropertyName("batchID")] string BatchId) : CommandPayload;
 
 public sealed record RevertMergeCommand(
-    long SourcePersonId,
-    long DestinationPersonId,
-    System.Collections.Generic.IReadOnlyList<long> FaceIdsToRevert) : CommandPayload;
+    [property: JsonPropertyName("sourcePersonID")] long SourcePersonId,
+    [property: JsonPropertyName("destinationPersonID")] long DestinationPersonId,
+    [property: JsonPropertyName("faceIDsToRevert")] System.Collections.Generic.IReadOnlyList<long> FaceIdsToRevert) : CommandPayload;
 
 public sealed record WipeLibraryCommand : CommandPayload;
 

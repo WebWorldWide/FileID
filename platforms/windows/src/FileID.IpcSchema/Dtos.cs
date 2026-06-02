@@ -45,21 +45,21 @@ public sealed record BulkActionResult(
     System.Collections.Generic.IReadOnlyList<BulkActionItem> Messages);
 
 public sealed record BulkActionItem(
-    long? FileId,
+    [property: JsonPropertyName("fileID")] long? FileId,
     bool Ok,
     string? Message = null);
 
 public sealed record ClipTextEmbedding(
-    string QueryId,
+    [property: JsonPropertyName("queryID")] string QueryId,
     string Query,
     System.Collections.Generic.IReadOnlyList<float> Embedding);
 
 public sealed record MergeSuggestion(
-    long SourcePersonId,
-    long DestinationPersonId,
+    [property: JsonPropertyName("sourcePersonID")] long SourcePersonId,
+    [property: JsonPropertyName("destinationPersonID")] long DestinationPersonId,
     float Similarity,
-    long SourceAnchorFaceId,
-    long DestinationAnchorFaceId,
+    [property: JsonPropertyName("sourceAnchorFaceID")] long SourceAnchorFaceId,
+    [property: JsonPropertyName("destinationAnchorFaceID")] long DestinationAnchorFaceId,
     long SourceMemberCount,
     long DestinationMemberCount);
 

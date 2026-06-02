@@ -1,5 +1,10 @@
 [package]
 name = "fileid-engine"
+# Canonical product version lives in platforms/windows/VERSION; the engine
+# mirrors it here because Cargo can't read an external file without a build
+# script (no new deps) and exposes its own version via CARGO_PKG_VERSION
+# (main.rs / hardware.rs). Keep in sync — the MSI build (FileID.Msi.wixproj)
+# cross-checks this literal against VERSION and fails the build on drift.
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.90"

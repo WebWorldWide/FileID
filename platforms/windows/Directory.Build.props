@@ -12,6 +12,21 @@
       - lockfile mode locked — builds are reproducible byte-for-byte
   -->
 
+  <!--
+    Single source of truth for the product version. `VERSION` (one line,
+    next to this file) is the canonical value; every C# project in the tree
+    inherits <Version>/<FileVersion> from here so nothing hardcodes a literal.
+    The Rust engine mirrors it in src/engine/Cargo.toml (Cargo can't read an
+    external file without a build script — no new deps), and the WiX .wixproj
+    files read the same VERSION file and pass it to the preprocessor; the MSI
+    build cross-checks Cargo.toml against VERSION and fails on drift.
+  -->
+  <PropertyGroup>
+    <FileIDVersion>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)VERSION').Trim())</FileIDVersion>
+    <Version>$(FileIDVersion)</Version>
+    <FileVersion>$(FileIDVersion).0</FileVersion>
+  </PropertyGroup>
+
   <PropertyGroup>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
