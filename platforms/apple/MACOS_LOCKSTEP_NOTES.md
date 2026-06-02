@@ -74,3 +74,49 @@ Likely first errors to iterate on:
 
 4. **Docs.** Flip the `shared/docs/MODELS.md` macOS rows from "lockstep pending"
    to live once parts 1–3 build + verify.
+
+## Part 3 — DB-contract lockstep (PR #5, branch `macos-lockstep`, 2026-06-02)
+
+The persisted-bytes half of lockstep: a Windows-written SQLite library and a
+macOS-written one must agree on the contract. Grounded in the **current**
+Windows `fileid-engine` source (byte-faithful reference), implemented via a
+10-cell workflow + 4 adversarial verifiers. **Edit-only — built nowhere here;
+macOS CI (`swift build -c release` + `swift test`, Xcode 16 / Swift 6) is the
+build gate. The cross-platform round-trip that DEFINES lockstep still needs a
+Mac to validate (open a Windows-written `fileid.sqlite` on macOS + vice-versa).**
+
+Landed (round-trip-critical):
+- **Timestamp epoch** 2001-ref → Unix(1970) across the whole chain (writer +
+  every reader): `DBWriter` files.created/modified/scanned_at, `DeepAnalyzeRunner`
+  vlm_analyzed_at, `FaceClustering` persons.created_at/last_clustered_at,
+  `ReadStore` (toFileRow + scan_sessions; fixed a pre-existing writer=1970/
+  reader=2001 mismatch), `Restructure` (dropped `+978_307_200`). Existing
+  macOS DBs written with the old 2001-ref base read wrong until re-scanned.
+- **Tag source** `vision`→`auto` (writer + all readers); rescan DELETE+REPLACE
+  + trim/skip-empty; dropped orientation/capability extra tags; hyphen
+  sanitizer (byte-faithful to `sanitize_proposed_name`).
+- **IPC**: `startScan` → rootPath/rootDisplay?/rescan (app resolves bookmark;
+  **unsandboxed** model — no `.entitlements`); +`markPersonsDifferent`,
+  +`wipeLibrary`, +8 reply events/DTOs, +`EngineInfo.hardware`/`HardwareInfo`,
+  +`EngineError.modelKind`, +`deepAnalyzeAll.tagsOnly`.
+
+Deferred here (need a Mac to behavior-verify; some overlap Part 2):
+1. **Face bbox** coordinate-space parity (Windows stores **pixels**, macOS
+   **normalized 0..1**). The JSON-format swap was **reverted** — it broke macOS
+   clustering (`DBWriter.bboxArea`/`PeopleView.cropFace` still CSV-split) and
+   still wasn't byte-faithful. True parity = pixels + JSON + update both
+   consumers + the cluster threshold; do it together with Part 2 #1 (FaceAlign).
+2. **RAM++ tagger** (Part 2 #3) + `tags.score` column — until then macOS emits
+   Vision identifiers (score NULL), Windows emits RAM++ nouns (scored).
+3. **content_hash + file_ref + rename/move heal** — macOS scan writes both NULL
+   (no inode/BLAKE3), so cross-platform move-heal one-directional.
+4. **Restructure routing** rewrite (People/Places/Documents `<Year>` subfolders,
+   video/audio arms, month-name) — macOS uses a different semantic architecture.
+5. **VLM tag generation** (`source='vlm'`) + the deep-analyze caption knobs.
+
+Known pre-existing drift discovered (NOT a lockstep/DB blocker, latent because
+each app talks only to its own engine): the schema + Swift use `...ID`
+(uppercase) for person/query/batch id fields, but Rust serde `camelCase`
+produces `...Id` (lowercase d) and the C# app matches Rust — so the schema and
+the Windows wire disagree on those keys. Only matters for a hypothetical
+cross-language IPC pipe; the DB round-trip is unaffected.
