@@ -379,21 +379,33 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         }
     }
 
-    private void OnGroupKeepLargest(object sender, RoutedEventArgs e)
+    private void OnGroupKeepShallowest(object sender, RoutedEventArgs e)
     {
         var grp = GroupFromFlyoutItem(sender);
         if (grp == null || grp.Members.Count == 0) return;
-        var largestIdx = 0;
+        // Within a byte-identical group every member is the same size, so "keep
+        // largest" was always a no-op (kept index 0). Keep the copy in the
+        // least-nested / most-canonical location instead: fewest path
+        // separators, then shortest path, then ordinal (#19).
+        static int Depth(string p)
+        {
+            int n = 0;
+            foreach (var c in p) if (c == '\\' || c == '/') n++;
+            return n;
+        }
+        var bestIdx = 0;
         for (int i = 1; i < grp.Members.Count; i++)
         {
-            if (grp.Members[i].SizeBytes > grp.Members[largestIdx].SizeBytes)
-            {
-                largestIdx = i;
-            }
+            string a = grp.Members[i].Path, b = grp.Members[bestIdx].Path;
+            int da = Depth(a), db = Depth(b);
+            bool better = da < db
+                || (da == db && a.Length < b.Length)
+                || (da == db && a.Length == b.Length && string.CompareOrdinal(a, b) < 0);
+            if (better) bestIdx = i;
         }
         for (int i = 0; i < grp.Members.Count; i++)
         {
-            grp.Members[i].IsKeeper = (i == largestIdx);
+            grp.Members[i].IsKeeper = (i == bestIdx);
         }
     }
 

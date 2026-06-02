@@ -82,13 +82,29 @@ pub fn recognize(rgb: &[u8], width: u32, height: u32) -> Result<OcrResult> {
                     Err(_) => continue,
                 };
                 let text = line.Text().map(|s| s.to_string_lossy()).unwrap_or_default();
+                // Union of every word's rect, not just the first word's — the
+                // line bbox must span the whole line for an overlay/crop to be
+                // correct (#30).
                 let bbox = if let Ok(words) = line.Words() {
-                    if let (Ok(first), Ok(_)) = (words.GetAt(0), words.Size()) {
-                        if let Ok(rect) = first.BoundingRect() {
-                            [rect.X, rect.Y, rect.Width, rect.Height]
-                        } else {
-                            [0.0; 4]
+                    let count = words.Size().unwrap_or(0);
+                    let mut min_x = f32::MAX;
+                    let mut min_y = f32::MAX;
+                    let mut max_x = f32::MIN;
+                    let mut max_y = f32::MIN;
+                    let mut any = false;
+                    for w in 0..count {
+                        if let Ok(word) = words.GetAt(w) {
+                            if let Ok(r) = word.BoundingRect() {
+                                min_x = min_x.min(r.X);
+                                min_y = min_y.min(r.Y);
+                                max_x = max_x.max(r.X + r.Width);
+                                max_y = max_y.max(r.Y + r.Height);
+                                any = true;
+                            }
                         }
+                    }
+                    if any {
+                        [min_x, min_y, (max_x - min_x).max(0.0), (max_y - min_y).max(0.0)]
                     } else {
                         [0.0; 4]
                     }

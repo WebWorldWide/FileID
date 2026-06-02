@@ -82,6 +82,11 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         finally { if (!_disposed) IsLoading = false; }
     }
 
+    /// <summary>Files larger than this use a head+tail+size COMPOSITE
+    /// content_hash in the engine, not a full BLAKE3 — so matching hashes are
+    /// "likely", not byte-verified. Mirror of the engine's FULL_HASH_MAX_BYTES.</summary>
+    private const long FullHashMaxBytes = 16L * 1024 * 1024;
+
     private List<DuplicateGroup> Load(CancellationToken ct)
     {
         // First-launch guard: the engine creates the DB on first scan.
@@ -163,6 +168,12 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
             {
                 ContentHash = hash,
                 Members = members,
+                // For files > 16 MB the engine's content_hash is a head+tail+size
+                // COMPOSITE, not a full BLAKE3 — matching composites are "likely
+                // duplicates", not byte-for-byte verified. Mark the group so the
+                // caption drops the false "identical" guarantee that drives the
+                // unsafe one-click delete (#3).
+                IsApproximate = rawMembers[indices[0]].Size > FullHashMaxBytes,
             });
         }
 
@@ -196,6 +207,11 @@ internal sealed class DuplicateGroup : INotifyPropertyChanged
     public required IReadOnlyList<DuplicateMember> Members { get; init; }
     public int MemberCount => Members.Count;
 
+    /// <summary>True when members exceed the engine's full-hash threshold, so
+    /// the shared content_hash is a head+tail+size composite — "likely", not
+    /// byte-verified duplicates. Drives the cautious caption (#3).</summary>
+    public bool IsApproximate { get; init; }
+
     // FEAT-CRIT-2: per-group skip flag. Members of a skipped group are
     // excluded from "Trash non-keepers". Mirrors the macOS Cleanup
     // per-group "Skip" action.
@@ -212,10 +228,19 @@ internal sealed class DuplicateGroup : INotifyPropertyChanged
         }
     }
 
-    public string Caption =>
-        IsSkipped
-            ? $"{MemberCount} identical copies · {ShortHash} · SKIPPED"
-            : $"{MemberCount} identical copies · {ShortHash}";
+    public string Caption
+    {
+        get
+        {
+            // Approximate (>16 MB composite-hash) groups are NOT byte-verified —
+            // present them as "likely duplicates — verify before deleting" so the
+            // caption never makes a false byte-for-byte guarantee (#3).
+            var label = IsApproximate
+                ? $"{MemberCount} likely duplicates — verify before deleting · {ShortHash}"
+                : $"{MemberCount} identical copies · {ShortHash}";
+            return IsSkipped ? $"{label} · SKIPPED" : label;
+        }
+    }
 
     /// <summary>First 12 chars of the content hash for a compact caption.</summary>
     private string ShortHash =>

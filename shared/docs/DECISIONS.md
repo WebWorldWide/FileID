@@ -2633,3 +2633,68 @@ The user asked for macOS/Windows lockstep + an on-hardware RAM++ "lock in." Per
   gate; glyphs come from int code points / XML `&#xHEX;` entities, never embedded private-use-area
   characters (which the editor tooling silently dropped). The Tests project is not format-gated -
   its existing files are LF/no-BOM - so the new test file's encoding is cosmetic there.
+
+## 2026-06-01 — Batched RAM++ inference: MEASURED on RTX 2060, DISPROVEN, kept opt-in OFF
+
+The long-standing perf hypothesis was that RAM++ at batch=1 leaves the GPU "<1% utilized"
+(latency-bound), so batching N images per forward would fill the kernels for a 2-4× win. We
+built the infrastructure (dynamic-batch ONNX export + a `RamPlusBatchCoordinator` mirroring
+`batch_clip.rs`, env-gated by `FILEID_RAMPLUS_BATCH_SIZE`), then **measured it on the RTX 2060**
+and the hypothesis is **false**:
+
+- **GPU profile during a single-path scan:** GPU util **mean 73% / p50 87% / p90 97%**, VRAM
+  **5348/5955 MB (90% full)**. The card is compute- AND VRAM-saturated at batch=1 — the
+  single-image *pool* (pool_size=2) already overlaps inference and fills the GPU.
+- **A/B (same ONNX, same 311-file corpus, only `FILEID_RAMPLUS_BATCH_SIZE` differs):**
+  single-pool **2.1 files/s** vs batched=4 **1.6 files/s** — batching is **~23% SLOWER**
+  (RAM++ per-file 2.4s → 4.7s). With no idle compute to fill and no spare VRAM to grow into,
+  one big serialized session loses the pool's concurrency for nothing. The production fp16
+  model on the pool path hits **6.2 files/s** — near this card's ceiling for Swin-L @384.
+
+**Decision:** RAM++ is GPU-compute/VRAM-bound on this hardware, not latency-bound. The batched
+coordinator is **retained as an opt-in knob (OFF by default)** for GPUs that do NOT saturate at
+batch=1 (high-SM-count / high-VRAM cards, per the all-vendor HW-accel roadmap) — RE-VALIDATE per
+card before enabling. It must NEVER be defaulted on without a per-card measurement. The genuine
+throughput levers for the 2060 are a faster-kernel EP (TensorRT) or a lighter tagger, not
+batching. (Supersedes the NEXT.md "batched RAM++ is the only real win" note.)
+
+## 2026-06-01 — Cleanup dedupe key: Windows stays on exact content_hash (NOT macOS's phash) — by design, for delete safety
+
+The macOS Cleanup tab groups duplicates by **phash** (perceptual); Windows groups by
+**content_hash** (exact: full BLAKE3 ≤16 MB, head+tail+size composite >16 MB). A parity audit
+flagged the divergence. We deliberately keep the exact-content key on Windows because Cleanup is
+**destructive** (trashes non-keepers): phash-equal files are perceptually identical but NOT
+byte-identical, so a perceptual key would trash files that differ in real bytes (EXIF, edits,
+re-encodes). Exact-content is the safer default for a one-click delete. The >16 MB composite-hash
+groups are now surfaced as **"likely duplicates — verify before deleting"** (not a false
+"identical" claim) so the UI never over-promises (#3). A perceptual/Hamming "near-duplicate" mode
+is a reasonable FUTURE opt-in (separate review-only surface), but it would diverge from a 1:1
+delete-on-exact-match contract and needs a product call — tracked in NEXT.md, not silently adopted.
+
+## 2026-06-01 — Accuracy + residual-bug sweep: 28 fixes (branch `accuracy-residual-fixes-2026-06-01`)
+
+A 10-dimension fan-out workflow (45 agents, adversarially verified) surfaced **30 confirmed
+worth-fixing findings**; 28 landed headless-green. Non-obvious calls:
+
+- **CLIP input resize nearest → bilinear (#1).** Both CLIP call sites nearest-decimated the
+  full-res decode straight to 224² — heavy aliasing that shifts the embedding and diverges from
+  the macOS reference (`.high` interpolation + 512px pre-shrink). Switched to `Triangle` (the
+  filter RAM++ already trusts). This shifts the CLIP cosine distribution, so `SCENE_COSINE_THRESHOLD`
+  (0.15) should be re-tuned against the corpus — tracked in NEXT.md.
+- **Stage-ran flags for stale-row clearing (#5/#11).** Added `faces_evaluated` / `ocr_stage_ran`
+  / `doc_stage_ran` to `TaggedFile`; the dbwriter now keys its stale-row DELETE on "did the stage
+  actually run this session" (GPU alive + models present), NOT on "is the result non-empty" — so
+  a zero-result re-process clears orphans while a models-missing/GPU-dead session preserves valid
+  rows. The naive "always delete" would wipe valid faces on a models-missing rescan.
+- **IPC `action` schema honesty (#13).** The reply emits 8 discriminators + a `trashFiles:<uuid>`
+  undo-batch suffix, but the schema enum listed only 4. Chose the minimal-risk honest fix — a
+  documented `pattern` covering all 8 + the optional suffix — over moving the batch id to a new
+  field (which would touch the working C# `IndexOf(':')` undo parse across 4 files).
+- **Path-redaction fallback DROPPED (#26).** The `contains("appdata\\local\\fileid\\")` fallback
+  leaked any path merely containing that substring (e.g. `D:\Backups\AppData\Local\FileID\…`). The
+  primary `paths::root()`-anchored branch already passes THIS engine's own tree; the fallback only
+  ever fired for foreign trees that SHOULD be redacted. Removed + tests rewritten to derive the
+  passthrough from the real resolved root, not a hardcoded username.
+- **Deferred: CLIP tokenizer reference-regex (#16).** Correct but requires regenerating the
+  precomputed scene matrix AND re-tuning `SCENE_COSINE_THRESHOLD`; compounding it with #1's
+  cosine shift un-revalidated risks scene-tag quality. Left for an on-hardware retune pass.

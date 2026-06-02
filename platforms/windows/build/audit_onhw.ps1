@@ -83,6 +83,9 @@ $psi.Environment["LOCALAPPDATA"]   = $Temp
 $psi.Environment["FILEID_LOG"]     = "info"
 $psi.Environment["FILEID_PERF_TRACE"] = "1"
 $psi.Environment["ORT_DYLIB_PATH"] = Join-Path $outDir "onnxruntime.dll"
+# Forward the RAM++ batch-size toggle so a measurement run can A/B single
+# (unset/0) vs batched (>1) without editing this script.
+if ($env:FILEID_RAMPLUS_BATCH_SIZE) { $psi.Environment["FILEID_RAMPLUS_BATCH_SIZE"] = $env:FILEID_RAMPLUS_BATCH_SIZE }
 
 $proc = New-Object System.Diagnostics.Process
 $proc.StartInfo = $psi

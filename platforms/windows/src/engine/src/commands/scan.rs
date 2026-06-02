@@ -28,16 +28,19 @@ pub(crate) async fn handle_start_scan(
 
     // Atomic check-and-reserve under one lock: gate + slot reservation must
     // be a single critical section, or two StartScan commands queued back-to-
-    // back can both pass the gate before either reserves the slot. We park a
-    // placeholder coordinator now; it gets replaced after model load with the
-    // real one. If anyone else reaches here while we hold the slot, they
-    // bounce with `scan_already_running`.
+    // back can both pass the gate before either reserves the slot. Construct
+    // the REAL coordinator now and park its clone, so a pause/cancel arriving
+    // after reservation lands on the coordinator the session actually uses —
+    // not a throwaway placeholder that the old code swapped out post-model-load
+    // (#20). If anyone else reaches here while we hold the slot, they bounce
+    // with `scan_already_running`.
+    let coord = ScanCoordinator::new();
     let already_running = {
         let mut guard = scan_state.lock();
         if guard.is_some() {
             true
         } else {
-            *guard = Some(ScanCoordinator::new());
+            *guard = Some(coord.clone());
             false
         }
     };
@@ -118,10 +121,8 @@ pub(crate) async fn handle_start_scan(
     }))))
     .await;
 
-    // Swap the placeholder for the real coordinator that the worker pool
-    // and the IPC pause/resume/cancel handlers will hold a clone of.
-    let coord = ScanCoordinator::new();
-    *scan_state.lock() = Some(coord.clone());
+    // (The real coordinator was reserved into scan_state above, before the
+    // first .await — no placeholder swap, so no pause/cancel can be lost #20.)
 
     // Load ML model weights once per session. Heavy enough to belong on a
     // blocking thread (ORT session create can take 100-500ms per model).

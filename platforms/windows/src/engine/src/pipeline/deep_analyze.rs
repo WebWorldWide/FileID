@@ -88,6 +88,18 @@ pub enum AnalyzeMode {
 /// keyframe, or PDF page-1 via shell helpers) → call the VLM via the
 /// subprocess wrapper → write results back to the DB. Cancellation
 /// honored via the shared `AtomicBool`.
+/// Removes the temp rasterized frame on EVERY exit path (`?` error, cancel
+/// bail, success), so VLM error paths no longer leak temp files (#24). Mirrors
+/// the discovery.rs `TempDir` Drop pattern.
+struct TempFileGuard(Option<std::path::PathBuf>);
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+}
+
 pub async fn analyze_file(
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
     runner: &crate::models::vlm::VlmRunner,
@@ -107,6 +119,9 @@ pub async fn analyze_file(
 
     // Resolve + rasterize the source (image as-is; video keyframe; PDF page-1).
     let (rasterized, temp_to_clean) = rasterize_for_vlm(&db, file_id).await?;
+    // Guard cleans the temp frame on any exit, including the `?`/bail paths
+    // below that previously leaked it (#24).
+    let _temp_guard = TempFileGuard(temp_to_clean);
 
     let mut description: Option<String> = None;
     let mut proposed_name: Option<String> = None;
@@ -176,10 +191,7 @@ pub async fn analyze_file(
         )?;
     }
 
-    // Best-effort cleanup of any temp rasterized frame.
-    if let Some(temp) = temp_to_clean {
-        let _ = std::fs::remove_file(&temp);
-    }
+    // (temp frame removed by `_temp_guard` on drop — #24)
 
     Ok(AnalyzeOutcome {
         file_id,
@@ -280,24 +292,30 @@ fn persist_vlm_results(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0);
-    conn.execute(
+    // Single transaction so the caption/name UPDATE and the vlm-tag
+    // DELETE+INSERT-replace commit atomically — a crash between the DELETE and
+    // the INSERT loop must not drop a file's VLM tags (#23). `unchecked_`
+    // because the callers hold `conn` behind a parking_lot::Mutex and pass &ref.
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "UPDATE files SET vlm_description=COALESCE(?1, vlm_description), \
                           vlm_proposed_name=COALESCE(?2, vlm_proposed_name), \
                           vlm_model=?3, vlm_analyzed_at=?4 WHERE id=?5",
         rusqlite::params![description, proposed_name, model_kind, now, file_id],
     )?;
     if !tags.is_empty() {
-        conn.execute(
+        tx.execute(
             "DELETE FROM tags WHERE file_id=?1 AND source='vlm'",
             rusqlite::params![file_id],
         )?;
-        let mut stmt = conn.prepare(
+        let mut stmt = tx.prepare(
             "INSERT OR IGNORE INTO tags (file_id, tag, source, score) VALUES (?1, ?2, 'vlm', NULL)",
         )?;
         for t in tags {
             stmt.execute(rusqlite::params![file_id, t])?;
         }
     }
+    tx.commit()?;
     Ok(())
 }
 
@@ -349,6 +367,9 @@ pub(crate) async fn analyze_file_via_server(
     use crate::models::vlm;
     let started = std::time::Instant::now();
     let (rasterized, temp_to_clean) = rasterize_for_vlm(&db, file_id).await?;
+    // Guard cleans the temp frame on any exit, including the cancel-bail/`?`
+    // paths below that previously leaked it (#24).
+    let _temp_guard = TempFileGuard(temp_to_clean);
 
     let mut description: Option<String> = None;
     let mut proposed_name: Option<String> = None;
@@ -394,9 +415,7 @@ pub(crate) async fn analyze_file_via_server(
             &tags,
         )?;
     }
-    if let Some(temp) = temp_to_clean {
-        let _ = std::fs::remove_file(&temp);
-    }
+    // (temp frame removed by `_temp_guard` on drop — #24)
 
     Ok(AnalyzeOutcome {
         file_id,
@@ -408,9 +427,8 @@ pub(crate) async fn analyze_file_via_server(
 }
 
 /// Pull a 25%-duration keyframe from a video into a temp JPEG via the
-/// existing Media Foundation helper, return the temp path. Caller is
-/// responsible for cleanup (we leak the temp; OS cleans the temp dir on
-/// reboot — fine for one-off analysis).
+/// existing Media Foundation helper, return the temp path. The caller wraps
+/// the returned path in a `TempFileGuard` so it is removed on every exit path.
 async fn rasterize_video_keyframe(path: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
     let p = path.to_path_buf();
     // First attempt the 25 %-of-duration keyframe. If Media Foundation

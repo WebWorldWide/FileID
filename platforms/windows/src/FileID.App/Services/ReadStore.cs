@@ -265,6 +265,10 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
             {
                 var blob = (byte[])reader.GetValue(9);
+                // Skip dimension-mismatched/corrupt embeddings instead of
+                // scoring them 0 and occupying a result slot — parity with the
+                // macOS reference guard (#15).
+                if (blob.Length != queryEmbedding.Length * 4) continue;
                 float score = DotProduct(queryEmbedding, blob);
                 var row = ReadRow(reader);
                 if (heap.Count < limit)
@@ -333,6 +337,8 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
                 {
                     var fid = reader.GetInt64(0);
                     var blob = (byte[])reader.GetValue(1);
+                    // Skip dimension-mismatched embeddings (parity w/ macOS, #15).
+                    if (blob.Length != seedVec.Length * 4) continue;
                     float score = DotProduct(seedVec, blob);
 
                     if (heap.Count < limit)

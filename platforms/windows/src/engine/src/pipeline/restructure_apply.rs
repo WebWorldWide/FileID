@@ -181,6 +181,14 @@ impl RestructureApply {
                             );
                             record_path_update_failure(m.file_id, &m.source, &final_dest);
                         }
+                        // Move the on-disk tags sidecar to follow the file (#27).
+                        // Real-move branch only — symlink mode leaves the source
+                        // (and its sidecar) in place. Best-effort; uses
+                        // final_dest since collisions uniquify the name.
+                        crate::shell::tags::move_sidecar(
+                            std::path::Path::new(&m.source),
+                            &final_dest,
+                        );
                     }
                     applied += 1;
                 }

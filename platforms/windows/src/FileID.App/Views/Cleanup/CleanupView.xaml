@@ -100,9 +100,9 @@
                                             <FontIcon Glyph="&#xE73E;" />
                                         </MenuFlyoutItem.Icon>
                                     </MenuFlyoutItem>
-                                    <MenuFlyoutItem Text="Keep largest"
-                                                    Click="OnGroupKeepLargest"
-                                                    ToolTipService.ToolTip="Mark the largest file as keeper.">
+                                    <MenuFlyoutItem Text="Keep shallowest path"
+                                                    Click="OnGroupKeepShallowest"
+                                                    ToolTipService.ToolTip="Mark the copy in the least-nested folder as keeper.">
                                         <MenuFlyoutItem.Icon>
                                             <FontIcon Glyph="&#xE8AB;" />
                                         </MenuFlyoutItem.Icon>

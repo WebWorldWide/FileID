@@ -168,7 +168,11 @@ pub(crate) async fn handle_rename_files(
                 }
             };
             let dest = dir.join(&entry.new_name);
-            if dest.exists() {
+            // Long-path-safe FS operands (\\?\ prefix); the un-prefixed `dest`
+            // is still used for DB path_text + user messages so stored paths
+            // stay normal-form (#29). symlink_metadata (not exists) so a
+            // dangling-symlink destination is correctly treated as occupied.
+            if std::fs::symlink_metadata(crate::util::path_safety::to_extended_length(&dest)).is_ok() {
                 failed += 1;
                 messages.push(BulkActionItem {
                     file_id: Some(entry.file_id),
@@ -177,7 +181,10 @@ pub(crate) async fn handle_rename_files(
                 });
                 continue;
             }
-            if let Err(err) = std::fs::rename(&path, &dest) {
+            if let Err(err) = std::fs::rename(
+                crate::util::path_safety::to_extended_length(&path),
+                crate::util::path_safety::to_extended_length(&dest),
+            ) {
                 failed += 1;
                 messages.push(BulkActionItem {
                     file_id: Some(entry.file_id),
@@ -186,6 +193,10 @@ pub(crate) async fn handle_rename_files(
                 });
                 continue;
             }
+            // Move the on-disk tags sidecar to follow the renamed file (#27).
+            // Best-effort: a missing sidecar (the common case) or any error is
+            // ignored so it never turns a successful rename into a failure.
+            crate::shell::tags::move_sidecar(&path, &dest);
             let dest_text = dest.to_string_lossy().to_string();
             // ENG-91: keep path_hash in sync with path_text (lookups/dedup key
             // on it). ENG-92: do NOT swallow the UPDATE error and still claim
@@ -256,7 +267,12 @@ pub(crate) async fn handle_trash_files(
                     |r| r.get::<_, String>(0),
                 ) {
                     let path = PathBuf::from(p);
-                    let existed = path.exists();
+                    // Verbatim (\\?\) probe so a >260-char file is classified as
+                    // present (and trashed) instead of "already missing" (#28).
+                    let existed = std::fs::symlink_metadata(
+                        crate::util::path_safety::to_extended_length(&path),
+                    )
+                    .is_ok();
                     path_for_id.push((*fid, path, existed));
                 }
             }
@@ -630,7 +646,16 @@ pub(crate) async fn handle_find_merge_suggestions(
                 .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                 .collect()
         };
-        let cos = |a: &[f32], b: &[f32]| -> f32 { a.iter().zip(b).map(|(x, y)| x * y).sum() };
+        // Length guard: a dimension mismatch must never masquerade as a
+        // near-merge. zip() silently truncates to the shorter slice, inflating
+        // the dot product; returning -1.0 is safely excluded by the COS_LOW
+        // band check below so a mismatched pair is never suggested (#17).
+        let cos = |a: &[f32], b: &[f32]| -> f32 {
+            if a.len() != b.len() {
+                return -1.0;
+            }
+            a.iter().zip(b).map(|(x, y)| x * y).sum()
+        };
 
         // "Different people" verdicts. Person-keyed pairs cover legacy rows;
         // face-anchor-keyed pairs (v13) survive re-clustering because

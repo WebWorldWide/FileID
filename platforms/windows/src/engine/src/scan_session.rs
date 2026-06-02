@@ -229,6 +229,10 @@ impl ScanSession {
         };
 
         // Wire the three pipeline stages with bounded mpsc channels.
+        // Capture the skip-set size before it moves into Discovery: a count==0
+        // result with a non-empty skip set means "incremental rescan, all files
+        // already current" — NOT an empty/unsupported folder (#21).
+        let skip_count = skip_paths.len();
         let discovery = Discovery::new_with_skip(root, self.coordinator.clone(), skip_paths);
         let handle = discovery.spawn();
         let discovered_count = handle.count.clone();
@@ -278,7 +282,21 @@ impl ScanSession {
                     // Close out cleanly with a "no supported files found"
                     // error so the user knows what happened.
                     let errs = errors_for_tick.load(std::sync::atomic::Ordering::Relaxed);
-                    if count == 0 {
+                    if count == 0 && skip_count > 0 {
+                        // Incremental rescan where every file was already
+                        // current — not an error. Non-fatal "already up to
+                        // date" notice (#21).
+                        let _ = sink_for_tick.try_send(IpcEvent::now(EventPayload::Error(
+                            Wrap::new(crate::ipc::EngineError {
+                                kind: "rescan_no_changes".into(),
+                                message: "Library is already up to date — no new or changed files to scan."
+                                    .into(),
+                                path: Some(root_for_tick.clone()),
+                                model_kind: None,
+                            }),
+                        )));
+                    } else if count == 0 {
+                        // Genuinely empty / unsupported folder.
                         let _ = sink_for_tick.try_send(IpcEvent::now(EventPayload::Error(
                             Wrap::new(crate::ipc::EngineError {
                                 kind: "empty_folder".into(),

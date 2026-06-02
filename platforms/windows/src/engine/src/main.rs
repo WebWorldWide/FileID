@@ -271,6 +271,12 @@ async fn async_main() -> Result<()> {
     let deep_analyze_cancel: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
     let dispatch_deep_cancel = deep_analyze_cancel.clone();
+    // Single-in-flight gate: a second Deep Analyze command must bounce cleanly
+    // rather than re-arm the shared cancel flag (mode A) or cross-cancel the
+    // running pass (mode B). Only a successful acquire resets `cancel` (#10).
+    let deep_analyze_active: Arc<std::sync::atomic::AtomicBool> =
+        Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dispatch_deep_active = deep_analyze_active.clone();
 
     // Shared HTTP client (HTTP/2 + connection pool) for the 12-way parallel
     // downloader. Built once at engine startup; cloned cheaply via Arc into
@@ -322,6 +328,7 @@ async fn async_main() -> Result<()> {
                                 dispatch_db.as_ref(),
                                 &dispatch_scan_state,
                                 &dispatch_deep_cancel,
+                                &dispatch_deep_active,
                                 &dispatch_http_client,
                                 &dispatch_prewarm_cancel,
                                 &text,
@@ -388,12 +395,32 @@ async fn async_main() -> Result<()> {
     Ok(())
 }
 
+/// Clears the Deep-Analyze single-in-flight flag on drop, so the slot frees even
+/// if the spawned handler panics or early-returns (#10).
+struct DeepActiveGuard(Arc<std::sync::atomic::AtomicBool>);
+impl Drop for DeepActiveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+async fn emit_deep_analyze_busy(sink: &Sink) {
+    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+        kind: "deep_analyze_already_running".into(),
+        message: "A Deep Analyze pass is already running — wait for it to finish or cancel it first.".into(),
+        path: None,
+        model_kind: None,
+    }))))
+    .await;
+}
+
 async fn handle_line(
     sink: &Sink,
     shutdown: &Arc<Notify>,
     db: Option<&std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>>,
     scan_state: &Arc<parking_lot::Mutex<Option<coordinator::ScanCoordinator>>>,
     deep_analyze_cancel: &Arc<std::sync::atomic::AtomicBool>,
+    deep_analyze_active: &Arc<std::sync::atomic::AtomicBool>,
     http_client: &Arc<reqwest::Client>,
     prewarm_cancel: &Arc<std::sync::atomic::AtomicBool>,
     line: &str,
@@ -608,11 +635,20 @@ async fn handle_line(
                 emit_db_unavailable(sink, "deepAnalyzeFile").await;
                 return;
             };
+            if deep_analyze_active
+                .compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Relaxed)
+                .is_err()
+            {
+                emit_deep_analyze_busy(sink).await;
+                return;
+            }
+            deep_analyze_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+            let guard = DeepActiveGuard(deep_analyze_active.clone());
             let sink_c = sink.clone();
             let db_c = db.clone();
             let cancel = deep_analyze_cancel.clone();
-            cancel.store(false, std::sync::atomic::Ordering::Relaxed);
             tokio::spawn(async move {
+                let _guard = guard;
                 commands::deep_analyze::handle_deep_analyze_file(sink_c, db_c, payload, cancel).await;
             });
         }
@@ -621,11 +657,20 @@ async fn handle_line(
                 emit_db_unavailable(sink, "deepAnalyzeFolder").await;
                 return;
             };
+            if deep_analyze_active
+                .compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Relaxed)
+                .is_err()
+            {
+                emit_deep_analyze_busy(sink).await;
+                return;
+            }
+            deep_analyze_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+            let guard = DeepActiveGuard(deep_analyze_active.clone());
             let sink_c = sink.clone();
             let db_c = db.clone();
             let cancel = deep_analyze_cancel.clone();
-            cancel.store(false, std::sync::atomic::Ordering::Relaxed);
             tokio::spawn(async move {
+                let _guard = guard;
                 commands::deep_analyze::handle_deep_analyze_folder(sink_c, db_c, payload, cancel).await;
             });
         }
@@ -634,11 +679,20 @@ async fn handle_line(
                 emit_db_unavailable(sink, "deepAnalyzeAll").await;
                 return;
             };
+            if deep_analyze_active
+                .compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Relaxed)
+                .is_err()
+            {
+                emit_deep_analyze_busy(sink).await;
+                return;
+            }
+            deep_analyze_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+            let guard = DeepActiveGuard(deep_analyze_active.clone());
             let sink_c = sink.clone();
             let db_c = db.clone();
             let cancel = deep_analyze_cancel.clone();
-            cancel.store(false, std::sync::atomic::Ordering::Relaxed);
             tokio::spawn(async move {
+                let _guard = guard;
                 commands::deep_analyze::handle_deep_analyze_all(sink_c, db_c, payload, cancel).await;
             });
         }

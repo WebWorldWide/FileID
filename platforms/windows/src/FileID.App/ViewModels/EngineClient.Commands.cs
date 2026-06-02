@@ -135,6 +135,11 @@ internal sealed partial class EngineClient
         // to the per-file CLI path — tags still land, just slower. Surface as a
         // warning, not a scary error.
         "vlm_server_payload_rejected" => true,
+        // #21: an incremental rescan found nothing new — informational, not an
+        // error. #10: a second Deep Analyze bounced because one is already
+        // running — a benign "already busy" notice, not a failure.
+        "rescan_no_changes" => true,
+        "deep_analyze_already_running" => true,
         _ => false,
     };
 

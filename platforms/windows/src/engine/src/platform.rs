@@ -37,13 +37,13 @@ pub fn redact_path_for_log(path: impl AsRef<Path>) -> String {
             }
         }
     }
-    // Also pass through the canonical Windows app dir even if `root()` resolved
-    // elsewhere (a redirected/different-user LOCALAPPDATA). The trailing
-    // separator keeps `…\Local\FileIDBackup\…` from matching — only the real
-    // `…\AppData\Local\FileID\…` state tree.
-    if s_lower.contains("appdata\\local\\fileid\\") {
-        return s;
-    }
+    // NOTE: no `contains("appdata\\local\\fileid\\")` fallback. The `root()`
+    // branch above already passes through THIS engine's own state tree (root()
+    // resolves from LOCALAPPDATA to exactly `…\AppData\Local\FileID`). A path
+    // under a DIFFERENT `AppData\Local\FileID` (another user, or a backup like
+    // `D:\Backups\AppData\Local\FileID\…`) is NOT this engine's tree and MUST be
+    // redacted — the old unanchored `contains` leaked those verbatim (#26).
+    //
     // Only Normal components are PII candidates — Prefix (drive letter,
     // UNC server\share) and RootDir are protocol/topology, never PII.
     // Excluding them ensures C:\ → "…" and \\server\share\user\file.jpg
@@ -86,8 +86,18 @@ mod redaction_tests {
 
     #[test]
     fn passes_through_app_structural_path() {
-        let s = r"C:\Users\Adam\AppData\Local\FileID\Models\arcface\weights.onnx";
-        assert_eq!(redact_path_for_log(s), s);
+        // The engine's OWN state tree (under the resolved root) passes through
+        // for debugging — derive it from root() rather than hardcoding a
+        // username, since only THIS engine's tree is exempt from redaction (#26).
+        if let Ok(root) = crate::paths::root() {
+            let s = root
+                .join("Models")
+                .join("arcface")
+                .join("weights.onnx")
+                .to_string_lossy()
+                .to_string();
+            assert_eq!(redact_path_for_log(&s), s);
+        }
     }
 
     #[test]
@@ -117,11 +127,26 @@ mod redaction_tests {
 
     /// App structural paths are returned UNCHANGED — they refer to
     /// FileID's own dirs (logs, models, sentinels) and are useful for
-    /// debugging without redaction.
+    /// debugging without redaction. Derived from the resolved root so the
+    /// passthrough is keyed on THIS engine's tree, not a hardcoded username.
     #[test]
     fn app_structural_logs_path_unchanged() {
-        let s = r"C:\Users\Adam\AppData\Local\FileID\logs\app.log";
-        assert_eq!(redact_path_for_log(s), s);
+        if let Ok(root) = crate::paths::root() {
+            let s = root.join("logs").join("app.log").to_string_lossy().to_string();
+            assert_eq!(redact_path_for_log(&s), s);
+        }
+    }
+
+    /// #26: a USER path that merely CONTAINS `AppData\Local\FileID` but lives
+    /// outside this engine's resolved root (e.g. a backup on another volume) is
+    /// NOT the app's state tree and MUST be redacted — the old unanchored
+    /// `contains` fallback leaked these verbatim.
+    #[test]
+    #[cfg(windows)]
+    fn redacts_user_backup_path_containing_appdata_local_fileid() {
+        let r = redact_path_for_log(r"D:\Backups\AppData\Local\FileID\notes.txt");
+        assert_eq!(r, "…/FileID/notes.txt");
+        assert!(!r.contains("Backups"), "backup path leaked: {r}");
     }
 
     /// ENG-97: a USER path that merely contains a folder named "FileID" (a dev

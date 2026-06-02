@@ -30,7 +30,10 @@ use windows::Win32::UI::Shell::{
 pub fn trash_path(path: &Path) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
 
-    if !path.exists() {
+    // Verbatim (\\?\) probe: a bare `path.exists()` misses >260-char paths the
+    // verbatim discovery walk indexed, silently no-opping the delete (#28).
+    let probe = crate::util::path_safety::to_extended_length(path);
+    if std::fs::symlink_metadata(&probe).is_err() {
         return Ok(());
     }
 

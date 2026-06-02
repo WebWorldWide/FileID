@@ -4,7 +4,7 @@
 //! uniformly regardless of source.
 
 use crate::ipc::{
-    self, sink::Sink, ClipTextEmbedding, EngineError, EventPayload, IpcEvent, Wrap,
+    self, sink::Sink, ClipTextEmbedding, EventPayload, IpcEvent, Wrap,
 };
 
 /// Pull the stored CLIP image embedding for a file_id from `clip_embeddings`
@@ -66,17 +66,28 @@ pub(crate) async fn handle_embed_image_query(
             .await;
         }
         Ok(Ok(None)) => {
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "embedding_missing".into(),
-                message: "This file doesn't have a CLIP embedding yet. Re-scan with CLIP installed."
-                    .into(),
-                path: None,
-                model_kind: None,
-            }))))
+            // No embedding for this file yet — resolve the awaiting query with
+            // an empty embedding so "find similar" falls back cleanly instead
+            // of stalling 5s on a reply that never carries this query_id (#12).
+            sink.send(IpcEvent::now(EventPayload::ClipTextEmbedding(Wrap::new(
+                ClipTextEmbedding {
+                    query_id,
+                    query: format!("file:{}", payload.file_id),
+                    embedding: Vec::new(),
+                },
+            ))))
             .await;
         }
         Ok(Err(err)) => {
             tracing::warn!(?err, "embed_image_query failed");
+            sink.send(IpcEvent::now(EventPayload::ClipTextEmbedding(Wrap::new(
+                ClipTextEmbedding {
+                    query_id,
+                    query: format!("file:{}", payload.file_id),
+                    embedding: Vec::new(),
+                },
+            ))))
+            .await;
         }
         Err(err) => {
             tracing::warn!(?err, "embed_image_query spawn failed");
@@ -148,15 +159,20 @@ pub(crate) async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQ
             .await;
         }
         Ok(Err(err)) => {
+            // Resolve the awaiting query with an empty embedding (the same shape
+            // the CLIP-disabled fast path uses) so the search box drops to the
+            // clean FTS fallback immediately instead of stalling 5s and tripping
+            // the global red error pill on every keystroke (#12). A user-facing
+            // "install CLIP" nudge, if wanted, belongs on the search-box-local
+            // channel, not the global engine-status error.
             tracing::warn!(?err, "CLIP text embed failed");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "clip_text_embed_failed".into(),
-                message: format!(
-                    "CLIP text embed failed: {err}. Install CLIP via Welcome / Settings."
-                ),
-                path: None,
-                model_kind: None,
-            }))))
+            sink.send(IpcEvent::now(EventPayload::ClipTextEmbedding(Wrap::new(
+                ClipTextEmbedding {
+                    query_id,
+                    query,
+                    embedding: Vec::new(),
+                },
+            ))))
             .await;
         }
         Err(err) => {

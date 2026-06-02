@@ -129,7 +129,14 @@ pub fn semantic_classify(
 
     let mut moves = Vec::new();
 
-    // Stable cluster iteration (smallest id first).
+    // Group names already claimed by a *different* new-group cluster this run.
+    // Without this, two clusters with identical top tags collapse into one
+    // folder (#9). Consulted ONLY by the new-group branch; the existing-folder
+    // branch legitimately routes many clusters into one user folder.
+    let mut used_group_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Stable cluster iteration (smallest id first) — makes the collision
+    // disambiguation below deterministic across runs.
     let mut ids: Vec<usize> = clusters.keys().copied().collect();
     ids.sort_unstable();
     for cid in ids {
@@ -172,7 +179,22 @@ pub fn semantic_classify(
                 // *distinctive* tags (c-TF-IDF), tiered by how tight + large it is.
                 _ => {
                     let terms = distinctive_terms(members, files, &global_freq);
-                    let name = group_name_from_terms(&terms);
+                    let base = group_name_from_terms(&terms);
+                    // Disambiguate a name already claimed by another new-group
+                    // cluster so distinct clusters get distinct folders (#9):
+                    // prefer the next distinctive term, then a numeric suffix.
+                    let mut pretty = base.clone();
+                    if used_group_names.contains(&pretty) {
+                        if let Some(extra) = terms.get(2) {
+                            pretty = format!("{} {}", base, title_case(extra));
+                        }
+                    }
+                    let mut n = 2usize;
+                    while used_group_names.contains(&pretty) {
+                        pretty = format!("{} {}", base, n);
+                        n += 1;
+                    }
+                    used_group_names.insert(pretty.clone());
                     let confidence = if coh >= AUTO_COHESION && members.len() >= AUTO_MIN_MEMBERS {
                         Confidence::Auto
                     } else if coh >= REVIEW_COHESION {
@@ -186,7 +208,13 @@ pub fn semantic_classify(
                         let shown: Vec<String> = terms.iter().take(3).map(|t| title_case(t)).collect();
                         format!("{} files sharing {}", members.len(), shown.join(", "))
                     };
-                    (library_root.join(&name), name, confidence, reason)
+                    // Path-safe directory name (mirrors the person route):
+                    // illegal/separator chars in tag-derived names ("16:9",
+                    // "dog/cat") would mis-route or fail the move and break
+                    // cross-platform name parity (#2). Keep `pretty` for the
+                    // human-facing category/reason.
+                    let safe = crate::util::path_safety::safe_filename_component(&pretty);
+                    (library_root.join(&safe), pretty, confidence, reason)
                 }
             };
 

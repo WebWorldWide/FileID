@@ -204,6 +204,21 @@ pub struct TaggedFile {
     /// optional Deep-Analyze VLM pass as `source='vlm'`, when the user installs
     /// a Qwen / Gemma model.)
     pub tags: Vec<(String, Option<f32>)>,
+
+    /// True iff the face detect/embed stage actually executed for this file
+    /// this scan (models present AND the GPU was alive). The dbwriter keys its
+    /// stale-`face_prints` DELETE on this flag, not on `faces.is_empty()`: an
+    /// edited/zero-face re-process must clear orphaned faces, but a
+    /// face-disabled or GPU-dead session must NOT wipe still-valid rows. See
+    /// dbwriter face-flush.
+    pub faces_evaluated: bool,
+
+    /// True iff the OCR / doc-text extraction stages actually ran for this file
+    /// this scan. Same contract as `faces_evaluated`: the dbwriter
+    /// delete-then-reinserts `ocr_*` / `doc_*` (clearing now-empty text) ONLY
+    /// when the stage ran, never on the ambiguous default-skip path.
+    pub ocr_stage_ran: bool,
+    pub doc_stage_ran: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -746,6 +761,9 @@ impl Tagger {
                                 text_embedding: None,
                                 doc_text: None,
                                 tags: Vec::new(),
+                                faces_evaluated: false,
+                                ocr_stage_ran: false,
+                                doc_stage_ran: false,
                             }
                         }
                     };
@@ -1118,6 +1136,9 @@ async fn process_file_predecoded(
         text_embedding: None,
         doc_text: None,
         tags: Vec::new(),
+        faces_evaluated: false,
+        ocr_stage_ran: false,
+        doc_stage_ran: false,
     };
 
     // Content identity for rename/move heal. Skipped for cloud placeholders
@@ -1134,6 +1155,12 @@ async fn process_file_predecoded(
     // for FileKind::Doc. Run a cheap RAKE-style keyword extractor → tag chips
     // (source='auto'), and stash the text on the row so the dbwriter can
     // persist it into doc_text/doc_fts for full-text search.
+    //
+    // The doc-text stage "ran" iff extraction was attempted this session (a
+    // doc-kind input that isn't a cloud placeholder) — the dbwriter keys its
+    // stale doc_text/doc_fts DELETE on this so a re-process that now yields
+    // empty text clears phantom FTS hits (#11).
+    tagged.doc_stage_ran = matches!(file.kind, FileKind::Doc | FileKind::Pdf) && !file.online_only;
     if let Some(text) = doc_text {
         if !text.trim().is_empty() {
             for (label, score) in crate::util::keywords::extract(&text) {
@@ -1317,6 +1344,13 @@ async fn process_file_predecoded(
                     STATS_VISION_US.fetch_add(vision_started.elapsed().as_micros() as u64, Ordering::Relaxed);
                 }
                 }
+                // The face stage truly ran this session iff the GPU was alive at
+                // entry, the face models were loaded, AND the GPU did not die
+                // mid-pass. The dbwriter keys its stale-face DELETE on this (not
+                // on `faces.is_empty()`) so a zero-face re-process clears orphans
+                // while a models-missing / GPU-dead session preserves valid rows.
+                tagged.faces_evaluated =
+                    gpu_alive && models.scrfd.is_some() && models.arcface.is_some() && !coord.is_gpu_dead();
                 tagged.has_faces = !tagged.faces.is_empty();
 
                 if !coord.is_gpu_dead() {
@@ -1326,7 +1360,7 @@ async fn process_file_predecoded(
                     let clip_started = Instant::now();
                     if permit.is_ok() {
                         let clip_mu = &clip_pool[worker_idx % clip_pool.len()];
-                        let resized = resize_rgb_nearest(&rgb, w as usize, h as usize, 224, 224);
+                        let resized = resize_rgb_quality(&rgb, w as usize, h as usize, 224, 224);
                         let embed_result = {
                             let mut c = clip_mu.lock();
                             c.embed(&resized)
@@ -1351,7 +1385,7 @@ async fn process_file_predecoded(
                     // Opt-in batch path: workers submit to coordinator,
                     // get batched embedding back via oneshot.
                     let clip_started = Instant::now();
-                    let resized = resize_rgb_nearest(&rgb, w as usize, h as usize, 224, 224);
+                    let resized = resize_rgb_quality(&rgb, w as usize, h as usize, 224, 224);
                     match clip_coord.embed(resized).await {
                         Ok(emb) => tagged.clip_embedding = Some(emb),
                         Err(err) => {
@@ -1432,7 +1466,13 @@ async fn process_file_predecoded(
                                     max_score,
                                     "[TAGGING] ram_plus_summary"
                                 );
-                                ram_plus_ran = true;
+                                // Treat RAM++ as "satisfied the tagger contract"
+                                // only when it actually emitted content tags. A
+                                // zero-tag success (hard/abstract image) must NOT
+                                // suppress the lower-threshold CLIP scene-tag
+                                // fallback below, else the file gets only Year/
+                                // camera chips (#7).
+                                ram_plus_ran = ram_emit_count > 0;
                             }
                             Err(err) => {
                                 if error_has_device_removed_marker(&err) {
@@ -1520,6 +1560,10 @@ async fn process_file_predecoded(
                 // Windows.Media.Ocr fails-soft on driver issues but skipping
                 // avoids any recursive device-init.
                 if matches!(file.kind, FileKind::Image) && !coord.is_gpu_dead() && should_run_ocr(&file.path, &tagged, file.size_bytes) {
+                    // The OCR stage ran this session regardless of whether text
+                    // came back — lets the dbwriter clear stale ocr_text/ocr_fts
+                    // on a re-process that now yields nothing (#11).
+                    tagged.ocr_stage_ran = true;
                     let ocr_started = Instant::now();
                     if let Ok(Some(ocr)) = run_ocr_blocking(rgb.clone(), w, h).await {
                         if !ocr.text.trim().is_empty() {
@@ -1769,8 +1813,11 @@ fn crop_and_resize_face(
     Some(resize_rgb_nearest(&crop, crop_w, crop_h, 112, 112))
 }
 
-/// Nearest-neighbor resize for interleaved RGB. Fast, fine for ML
-/// preprocessing where the model is robust to interpolation choice.
+/// Nearest-neighbor resize for interleaved RGB. Fast, and acceptable for the
+/// dHash fingerprint (9×8) and the tight 112px face-crop, where the downscale
+/// ratio is small or the model is insensitive. NOT for CLIP — a multi-megapixel
+/// source decimated in one nearest step injects heavy aliasing that shifts the
+/// embedding; use [`resize_rgb_quality`] there.
 pub fn resize_rgb_nearest(
     rgb: &[u8],
     src_w: usize,
@@ -1798,6 +1845,34 @@ pub fn resize_rgb_nearest(
         }
     }
     out
+}
+
+/// High-quality (bilinear) resize for interleaved RGB — the CLIP 224×224 image
+/// input. Nearest one-step decimation of a multi-megapixel photo injects
+/// aliasing that shifts the embedding and diverges from the macOS reference
+/// (which draws at `.high` interpolation after a 512px pre-shrink), degrading
+/// semantic search, zero-shot scene tags, and CLIP dedup. Triangle (bilinear)
+/// closely matches macOS at this downscale ratio and reuses the same filter
+/// RAM++ preprocessing already trusts. Falls back to nearest only if the raw
+/// buffer can't form an image (size mismatch).
+pub fn resize_rgb_quality(
+    rgb: &[u8],
+    src_w: usize,
+    src_h: usize,
+    dst_w: usize,
+    dst_h: usize,
+) -> Vec<u8> {
+    let src = match image::RgbImage::from_raw(src_w as u32, src_h as u32, rgb.to_vec()) {
+        Some(img) => img,
+        None => return resize_rgb_nearest(rgb, src_w, src_h, dst_w, dst_h),
+    };
+    image::imageops::resize(
+        &src,
+        dst_w as u32,
+        dst_h as u32,
+        image::imageops::FilterType::Triangle,
+    )
+    .into_raw()
 }
 
 /// Difference-hash perceptual fingerprint. 9×8 grayscale → 64 bits, one
@@ -1955,6 +2030,9 @@ mod tests {
             text_embedding: None,
             doc_text: None,
             tags: Vec::new(),
+            faces_evaluated: false,
+            ocr_stage_ran: false,
+            doc_stage_ran: false,
         }
     }
 

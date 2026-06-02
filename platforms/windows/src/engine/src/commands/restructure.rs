@@ -136,8 +136,11 @@ pub(crate) async fn handle_plan_restructure(
             }
             let mut tags: std::collections::HashMap<i64, Vec<String>> =
                 std::collections::HashMap::new();
+            // DISTINCT so a tag carried under multiple sources for the same
+            // file counts ONCE — otherwise c-TF-IDF tf/df double-counts it and
+            // skews distinctive_terms group naming (#18).
             let mut tstmt =
-                conn.prepare("SELECT file_id, tag FROM tags WHERE source IN ('auto','vlm','user')")?;
+                conn.prepare("SELECT DISTINCT file_id, tag FROM tags WHERE source IN ('auto','vlm','user')")?;
             let trows =
                 tstmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?;
             for r in trows {

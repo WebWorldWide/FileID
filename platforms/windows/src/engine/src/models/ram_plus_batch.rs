@@ -1,19 +1,26 @@
-// Batched RAM++ inference coordinator.
+// Batched RAM++ inference coordinator — OPT-IN, OFF by default.
 //
-// One Session, batched inputs — the RAM++ throughput fix (HW-4). A single
-// 384x384 image leaves a ~52-TFLOPS GPU <1% utilized, so RAM++ at batch=1 is
-// launch/latency-bound (measured ~670 ms/img on an RTX 2060; adding concurrent
-// pool sessions REGRESSED, proving it is not concurrency-bound). A dedicated OS
-// thread owns the `RamPlusTagger`; tagging workers submit (rgb, w, h, oneshot)
-// requests through a crossbeam channel. The coordinator drains up to BATCH_SIZE
-// requests (or BATCH_TIMEOUT_MS, whichever first), runs `tag_batch` ONCE, and
-// fans the per-image tag lists back through the oneshots — one GPU dispatch
-// instead of N, filling the kernels.
+// One Session, batched inputs. A dedicated OS thread owns the `RamPlusTagger`;
+// tagging workers submit (rgb, w, h, oneshot) requests through a crossbeam
+// channel. The coordinator drains up to BATCH_SIZE requests (or
+// BATCH_TIMEOUT_MS, whichever first), runs `tag_batch` ONCE, and fans the
+// per-image tag lists back through the oneshots — one GPU dispatch instead of N.
 //
-// Mirrors `batch_clip.rs`. REQUIRES a RAM++ ONNX exported with a dynamic batch
-// axis (`export_ram_plus_onnx.py --dynamic-batch`); the coordinator is only
-// spawned when batching is enabled (see `ModelStack::load_default`), so a
-// fixed-batch=1 model keeps using the single-image pool path.
+// MEASURED CAVEAT (2026-06-01, RTX 2060): batching does NOT help and in fact
+// REGRESSES on this card. A single-path scan profiled GPU util at p50=87% /
+// p90=97% with VRAM 90% full (5348/5955 MB) — Swin-L @384 already saturates the
+// SMs at batch=1, and the single-image *pool* overlaps inference for free. With
+// no idle compute to fill and no spare VRAM to grow into, an A/B (same ONNX,
+// same corpus) measured batched=4 at 1.6 files/s vs single-pool 2.1 files/s
+// (~23% slower); the pool also beats it on the production fp16 model (6.2 f/s).
+// So RAM++ is compute/VRAM-bound here, NOT latency-bound — see DECISIONS.md.
+//
+// This path is retained as an opt-in tuning knob for GPUs that do NOT saturate
+// at batch=1 (high-SM-count / high-VRAM cards) per the all-vendor HW-accel
+// roadmap — RE-VALIDATE per card before enabling. It REQUIRES a RAM++ ONNX
+// exported with a dynamic batch axis (`export_ram_plus_onnx.py --dynamic-batch`)
+// and is only spawned when `FILEID_RAMPLUS_BATCH_SIZE > 1` (see
+// `ModelStack::load_default`); otherwise the single-image pool path is used.
 //
 // Failure mode: if `tag_batch` errors, every request in that batch receives the
 // error — the caller logs + skips the file's tags. The coordinator never panics

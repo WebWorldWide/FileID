@@ -151,10 +151,13 @@ impl YuNet {
             d.bbox[1] = d.bbox[1].clamp(0.0, ih);
             d.bbox[2] = d.bbox[2].clamp(0.0, iw);
             d.bbox[3] = d.bbox[3].clamp(0.0, ih);
-            for lm in &mut d.landmarks {
-                lm[0] = lm[0].clamp(0.0, iw);
-                lm[1] = lm[1].clamp(0.0, ih);
-            }
+            // Do NOT clamp landmarks: the 5-point similarity transform in
+            // align_112 needs their true positions to fit the crop correctly,
+            // and align_112's bilinear sampler already edge-clamps pixel reads.
+            // Clamping a slightly-out-of-frame eye/mouth point skews the
+            // transform and warps the aligned face (#8). validate_face_geometry
+            // already tolerates landmarks up to 10% outside the bbox, and
+            // DetectedFace.landmarks is metadata-only.
         }
 
         Ok(nms(candidates, NMS_IOU))

@@ -204,6 +204,9 @@ impl DbWriter {
             let mut ocr_fts_delete = tx
                 .prepare_cached("DELETE FROM ocr_fts WHERE rowid = ?1")
                 .context("preparing ocr_fts delete")?;
+            let mut ocr_text_delete = tx
+                .prepare_cached("DELETE FROM ocr_text WHERE file_id = ?1")
+                .context("preparing ocr_text delete")?;
             let mut ocr_fts_stmt = tx
                 .prepare_cached("INSERT INTO ocr_fts (rowid, text) VALUES (?1, ?2)")
                 .context("preparing ocr_fts insert")?;
@@ -214,6 +217,9 @@ impl DbWriter {
             let mut doc_fts_delete = tx
                 .prepare_cached("DELETE FROM doc_fts WHERE rowid = ?1")
                 .context("preparing doc_fts delete")?;
+            let mut doc_text_delete = tx
+                .prepare_cached("DELETE FROM doc_text WHERE file_id = ?1")
+                .context("preparing doc_text delete")?;
             let mut doc_fts_stmt = tx
                 .prepare_cached("INSERT INTO doc_fts (rowid, text) VALUES (?1, ?2)")
                 .context("preparing doc_fts insert")?;
@@ -306,7 +312,13 @@ impl DbWriter {
                         .with_context(|| format!("text_embeddings insert for {}", path_text))?;
                 }
 
-                if !f.faces.is_empty() {
+                // Key the stale-face DELETE on whether the face stage actually
+                // ran this session, NOT on `faces.is_empty()`: an edited/zero-
+                // face re-process must clear orphaned face_prints (else they
+                // keep polluting clusters), while a face-disabled / GPU-dead
+                // session leaves still-valid rows intact (#5). The insert loop
+                // is naturally a no-op when there are no faces.
+                if f.faces_evaluated {
                     face_delete
                         .execute(params![file_id])
                         .with_context(|| format!("face delete for {}", path_text))?;
@@ -342,30 +354,45 @@ impl DbWriter {
                     }
                 }
 
-                if let Some(text) = &f.ocr_text {
-                    if !text.trim().is_empty() {
-                        ocr_text_stmt
-                            .execute(params![file_id, text])
-                            .with_context(|| format!("ocr_text insert for {}", path_text))?;
-                        // ocr_fts is a contentless FTS5 view; rebuild row by id.
-                        let _ = ocr_fts_delete.execute(params![file_id]);
-                        ocr_fts_stmt
-                            .execute(params![file_id, text])
-                            .with_context(|| format!("ocr_fts insert for {}", path_text))?;
+                // Delete-then-conditional-insert, but ONLY when the OCR stage
+                // actually ran this session — never on the ambiguous default-
+                // skip path. This clears stale ocr_text/ocr_fts when a
+                // re-process now yields empty text (phantom FTS hits, #11) while
+                // leaving valid prior text untouched on the common skipped
+                // sessions.
+                if f.ocr_stage_ran {
+                    let _ = ocr_fts_delete.execute(params![file_id]);
+                    ocr_text_delete
+                        .execute(params![file_id])
+                        .with_context(|| format!("ocr_text delete for {}", path_text))?;
+                    if let Some(text) = &f.ocr_text {
+                        if !text.trim().is_empty() {
+                            ocr_text_stmt
+                                .execute(params![file_id, text])
+                                .with_context(|| format!("ocr_text insert for {}", path_text))?;
+                            ocr_fts_stmt
+                                .execute(params![file_id, text])
+                                .with_context(|| format!("ocr_fts insert for {}", path_text))?;
+                        }
                     }
                 }
 
-                // Phase 4: document text + FTS5 — same contentless-FTS shape
-                // as ocr_text/ocr_fts above.
-                if let Some(text) = &f.doc_text {
-                    if !text.trim().is_empty() {
-                        doc_text_stmt
-                            .execute(params![file_id, text])
-                            .with_context(|| format!("doc_text insert for {}", path_text))?;
-                        let _ = doc_fts_delete.execute(params![file_id]);
-                        doc_fts_stmt
-                            .execute(params![file_id, text])
-                            .with_context(|| format!("doc_fts insert for {}", path_text))?;
+                // Phase 4: document text + FTS5 — same stage-ran-gated
+                // delete-then-conditional-insert as ocr_text/ocr_fts above (#11).
+                if f.doc_stage_ran {
+                    let _ = doc_fts_delete.execute(params![file_id]);
+                    doc_text_delete
+                        .execute(params![file_id])
+                        .with_context(|| format!("doc_text delete for {}", path_text))?;
+                    if let Some(text) = &f.doc_text {
+                        if !text.trim().is_empty() {
+                            doc_text_stmt
+                                .execute(params![file_id, text])
+                                .with_context(|| format!("doc_text insert for {}", path_text))?;
+                            doc_fts_stmt
+                                .execute(params![file_id, text])
+                                .with_context(|| format!("doc_fts insert for {}", path_text))?;
+                        }
                     }
                 }
 
@@ -709,6 +736,9 @@ mod tests {
             text_embedding: None,
             doc_text: None,
             tags: vec![],
+            faces_evaluated: false,
+            ocr_stage_ran: false,
+            doc_stage_ran: false,
         }
     }
 

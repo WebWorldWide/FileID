@@ -73,6 +73,11 @@ public sealed class LavaLampBackground : Control
         {
             root.Changed -= OnXamlRootChanged;
         }
+        // Stop + release the resize-debounce timer so no Tick fires post-unload
+        // and the timer stops rooting the control (#25). OnSizeChanged recreates
+        // it lazily on the next resize, so a control reload stays correct.
+        _resizeDebounce?.Stop();
+        _resizeDebounce = null;
         StopAnimations();
         if (_root is not null)
         {

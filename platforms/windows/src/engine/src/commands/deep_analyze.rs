@@ -55,6 +55,18 @@ pub(crate) async fn handle_deep_analyze_file(
                 model_kind: None,
             }))))
             .await;
+            // Always send a terminal Complete so the UI clears the
+            // "Loading model…" card instead of stranding forever (#6).
+            sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
+                DeepAnalyzeComplete {
+                    processed: 0,
+                    failed: 1,
+                    total_seconds: 0.0,
+                    model_kind: payload.model_kind.clone(),
+                    cancelled: true,
+                },
+            ))))
+            .await;
             return;
         }
     };
@@ -143,6 +155,18 @@ pub(crate) async fn handle_deep_analyze_file(
                 path: None,
                 model_kind: None,
             }))))
+            .await;
+            // Terminal Complete on the analyze failure too, mirroring the batch
+            // handler's convention so the card clears / Analyze-All re-enables (#6).
+            sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
+                DeepAnalyzeComplete {
+                    processed: 0,
+                    failed: 1,
+                    total_seconds: started_at.elapsed().as_secs_f64(),
+                    model_kind,
+                    cancelled: true,
+                },
+            ))))
             .await;
         }
     }
