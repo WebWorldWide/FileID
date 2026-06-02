@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-02 — WS3 resumable-scan: already implemented (discovery skip-set); the planned checkpoint is redundant
+
+**Context**: The plan's WS3 "resumable scan checkpoint (persist `scan_sessions.last_file_index`, resume a running session)" assumed resume needed building. A focused investigation of the current scan pipeline found it is ALREADY resumable — more robustly than a linear index would be.
+
+- **How resume already works:** `ScanSession::run` pre-loads a skip-set from the DB — `SELECT path_text FROM files WHERE failed=0 AND scanned_at >= modified_at` (scan_session.rs ~197) — and Discovery silently filters those paths at walk time (discovery.rs ~263). Re-running a scan after a crash skips every file that completed a batch flush and re-processes only the in-flight (un-flushed) batch + not-yet-reached files. `rescan=true` empties the skip-set for a forced full re-scan; dbwriter's `ON CONFLICT(path_text) DO UPDATE` makes a re-touched file idempotent.
+- **Why the planned `last_file_index` checkpoint is REDUNDANT (and deliberately not built):** a per-file skip-set keyed on `scanned_at >= modified_at` is strictly better than a linear `last_file_index` cursor — correct under out-of-order batch completion, survives file add/remove between runs, and needs no per-batch write on the hot flush path. Building the checkpoint would add dead complexity for zero behavioral gain (the `last_file_index` column stays unused/harmless; a future USN-journal rescan could repurpose it). Per the project's "verify directives against current code" rule, the directive was already satisfied.
+- **The only real gap (optional polish, not built):** `db::open_writer` marks an interrupted `running` session → `failed` on startup (db/mod.rs ~52); the user is never told "your last scan was interrupted; the next scan resumes automatically." A recovery-UX notice (engine surfaces the orphaned session via a new EngineInfo field/event → a sidebar "Resume / Start fresh" banner) is a moderate IPC+app change for informational value only — resume happens regardless. Deferred as low-value polish.
+
 ## 2026-06-02 — WS-CD pt.1: signing-correctness + release CD shipped; rest scoped with correct approaches
 
 **Context**: WS-CD is the consolidated CI/CD/release phase. A 5-cell investigation mapped the full pipeline (3 CI workflows, publish-bundle.ps1/sign.ps1, WiX MSI+Burn, version sourcing, model hashes, the release gap). Landed the ship-critical + headless-verifiable pieces; scoped the rest.
