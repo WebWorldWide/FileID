@@ -8,6 +8,16 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-02 (later 6) — Verified "what's-left" audit + Windows ship-hardening + RAM++ 256 closure + on-hardware
+
+Answered "what's left for v1.0" with a refute-by-default audit workflow (5 cells vs current main) — it found the persistence docs overstate remaining work; **the sole hard external blocker is the EV cert.** Then landed the high-value doable-here code, ran the on-hardware test (authorized), and definitively closed the 256 question.
+
+- **PR #6 ship-hardening → main (138760c, CI-green all 5 jobs):** image-decode cap (deep_analyze.rs 50 MP); **IPC capital-ID casing aligned Rust+C#+schema** (~25 fields, both round-trip suites pass — closes the long-standing eng-ipc casing drift); per-monitor DPI `WM_DPICHANGED` handler; WiX `RollbackBoundary` (Burn `<Chain>`); single-source version (`VERSION`+`Directory.Build.props`→csproj/WiX/Cargo + drift-guard, kills the 5 hardcoded `0.1.0`). Headless-gated first (engine clippy -D + fmt + 255 tests; app build 0/0 + format + tests).
+- **`windows-app.yml`** gained the source-URL allowlist scan (app-only PRs were bypassing the engine workflow's scan).
+- **RAM++ 384→256 perf lever — CLOSED as a dead end (definitive).** The prior export had completed (`out256/`, `[1,3,256,256]`); I fp16-converted it to 660 MB and A/B'd tag-F1 vs the 384 model on 60 corpus images with the engine-faithful pipeline = **0.76**, well below the 0.90 gate. fp32-256 scored IDENTICAL 0.76 → resolution-inherent loss (lossy position-bias interpolation), NOT a fp16/threshold artifact. RAM++ stays at 384; the ~6.5 f/s ceiling stands. (Python 3.11 was already present — the real blocker was never the toolchain, it was quality.)
+- **On-hardware (RTX 2060 / DirectML, fully ISOLATED state — real 24k-file library verified byte-identical/untouched):** the merged engine ran crash-free — 120 imgs/20 s ≈ 6 f/s, 1128 `source='auto'` tags (accurate concrete nouns), 218 SFace 128-d (512-byte) embeddings, 105 clusters with no mega-blob, peak RAM 4.2 GB at 120-file scale. Validates the IPC-casing + decode-cap changes on real hardware.
+- **Record corrected:** `NEXT.md` "(later 6)" lists the ~10 audit-verified already-DONE items (SHA256 pinning + gate, release.yml, AutomationProperties, memory bounding, HNSW, USN, WS7, ARM64, WS6 DB-contract) so future sessions stop re-chasing them, plus the genuine remaining work by blocker (EV cert; Mac behavior-layer; Windows-HW soak/matrix; lower-priority doable-here).
+
 ## 2026-06-02 (later 5) — WS6 macOS lockstep: DB-contract half (epoch / tag-source / IPC) — PR #5, build-verify track
 
 Tackled the macOS lockstep that "needs a Mac" by splitting it into the **persisted-bytes contract** (do-able + macOS-CI-build-verifiable from here) vs the **behavior-verifiable** half (needs a Mac). Implemented the former via a 10-cell file-disjoint Workflow + 4 adversarial verifiers, grounded in the **current** Windows engine source (the LOCKSTEP doc was stale on month-name and false-positive on vlm_model — verified each claim against code per the "verify directives" rule). Pushed `macos-lockstep` → **PR #5** (macOS CI `pull_request` building; the only gate, since no Windows source changed).

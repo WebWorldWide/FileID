@@ -1,5 +1,27 @@
 # NEXT — Windows (resume here)
 
+## 2026-06-02 (later 6) — Verified "what's left" audit + ship-hardening + 256 closure (RESUME HERE)
+
+A read-only audit (5-cell workflow, refute-by-default vs CURRENT main) found the entries below SIGNIFICANTLY OVERSTATE remaining work. **The only HARD external blocker to a Windows v1.0 is the EV code-signing cert.** Verified already-DONE — stop re-chasing (older entries are stale on these):
+- **SHA256 model pinning** — all 29 `registry.rs` artifacts pinned + the mandatory-pin CI gate is LIVE in `windows-engine.yml`. (Download-time verify against real network artifacts is the only residual — a release step.)
+- **`release.yml` CD** — fully implemented, dormant-until-cert. **`publish-bundle.ps1`** — signtool `$LASTEXITCODE` guard + per-MSI Authenticode verify done.
+- **Accessibility** — 161 `AutomationProperties` across all tabs (7b2b799); keyboard-nav CODE merged (3d47a63 / 9dd7785). Remaining: WCAG-AA contrast pass + multi-monitor DPI verify + a UI-automation test.
+- **Memory bounding** — L1 128 MB byte-budget + 256 MB pre-decode budget LANDED (2f0d6b9). (RAM++ source-clone + ORT arena bounds remain for the 50K RSS gate.)
+- **HNSW** module built + wired into face + restructure clustering (only the semantic-SEARCH path remains). **USN** foundation (v9 + query primitives) landed. **WS7** 18-fix polish merged (abc06a9). **ARM64** native runner live.
+- **WS6 macOS DB-contract lockstep** — merged (PR #5 / e3e4959, macOS-CI build-verified): epoch→Unix-1970 across writer+readers, tag `source='auto'`, `startScan` reshape + `markPersonsDifferent`/`wipeLibrary` + 8 reply events + `EngineInfo.hardware` + `EngineError.modelKind`, hyphen sanitizer, extra-tag pruning. (The cross-platform DB ROUND-TRIP that defines lockstep still needs a Mac to validate.)
+
+**Landed THIS session (CI-green on main):**
+- **PR #6 ship-hardening** (138760c): image-decode cap (deep_analyze.rs, 50 MP peek-then-cap); **IPC capital-ID casing aligned Rust+C#+schema** (~25 fields — closes the eng-ipc-1/2 latent drift + makes the wire schema-conformant); per-monitor DPI `WM_DPICHANGED` handler; WiX `RollbackBoundary` in the Burn `<Chain>`; **single-source version** (`VERSION` + `Directory.Build.props` → csproj/WiX/Cargo + drift-guard). → resolves "later 4" item 2 + the eng-ipc casing item + decode-caps.
+- **`windows-app.yml`** source-URL allowlist scan (closes the app-only-PR bypass — engine workflow's scan only fires on engine-path changes).
+- **RAM++ 384→256 — CLOSED, dead end.** Export DID complete (`%TEMP%\ramexp\out256`, `[1,3,256,256]`, 4585 logits); fp16-converted to 660 MB. But tag-F1 vs the 384 model = **0.76** (60-img engine-faithful A/B), far below the 0.90 gate; **fp32-256 scored IDENTICAL 0.76 → the loss is RESOLUTION-INHERENT** (lossy 384→256 position-bias interpolation), not a fp16/threshold artifact. RAM++ stays at 384; the ~6.5 f/s GPU-compute-bound ceiling stands; no quality-preserving perf lever remains short of a different tagger model.
+- **On-hardware (RTX 2060, DirectML, ISOLATED state — real library verified untouched):** merged engine ran crash-free, 120 imgs/20 s ≈ 6 f/s, 1128 `auto` tags, 218 SFace 128-d embeddings, healthy clusters, peak RAM 4.2 GB @ 120 files.
+
+**Genuine remaining work, by blocker:**
+- **External (THE blocker):** EV Authenticode cert → `FILEID_EV_THUMBPRINT` secret → `release.yml` goes live + pin `PROD_EV_THUMBPRINT`. The first real WiX MSI/Burn/ARM64 build runs in `release.yml`.
+- **Needs a Mac (macOS BEHAVIOR layer — the DB contract is already done):** `FaceAlign.align112` + `VNDetectFaceLandmarksRequest` wiring + face-bbox px-vs-normalized parity (the face round-trip); RAM++ CoreML tagger; `content_hash`/`file_ref` scan write-path + rename-heal; restructure-routing parity; VLM `source='vlm'` tag emission.
+- **Needs Windows hardware/time:** 1 h/50K crash-free soak + RSS ≤ 1.5 GB (needs the RAM++ source-clone / ORT-arena memory work — RSS hits ~5.7 GB at 50K); per-vendor EP matrix (AMD/Intel/Snapdragon — no HW here); face-threshold calibration (hand-labeled subset); multi-monitor DPI rescale verify.
+- **Doable-here (lower priority):** canonicalize telemetry/URL allowlists into `shared/ci/*.txt` (DEFERRED this pass — refactoring a green release-blocker privacy gate that can't be verified locally risks a silent pass-everything regression; do it with a negative-control test); HNSW semantic-SEARCH path; USN reader; perceived-speed UX; Restructure P2–P4; WCAG-AA contrast (needs the user's eye on the gold palette).
+
 ## 2026-06-02 (later 4) — WS-CD remaining (CI/CD + release pipeline)
 
 Shipped this session (DECISIONS "WS-CD pt.1"): `publish-bundle.ps1` signtool `$LASTEXITCODE` check + `CI_RELEASE` `-SkipSign`/`-SkipPrivacyGate` guard + per-MSI signature verify; `release.yml` (tag-triggered, dormant until the EV cert). Remaining — each needs a build-capable session, the network, or the cert:
