@@ -671,10 +671,18 @@ impl Tagger {
             let rx = raw_rx.clone();
             let tx = predecoded_tx.clone();
             let coord = self.coordinator.clone();
-            std::thread::Builder::new()
+            let spawn_result = std::thread::Builder::new()
                 .name(format!("fileid-decode-{decoder_idx}"))
-                .spawn(move || run_decoder_thread(rx, tx, coord))
-                .expect("spawn decoder thread");
+                .spawn(move || run_decoder_thread(rx, tx, coord));
+            if let Err(e) = spawn_result {
+                // Don't panic mid-scan if the OS refuses a new thread (handle or
+                // memory pressure on a very large library). Log and continue with
+                // the decoders that did start; rx/tx/coord drop here, which is
+                // safe (the channels just have one fewer consumer/producer).
+                tracing::warn!(
+                    "fileid-decode-{decoder_idx} failed to spawn ({e}); continuing with fewer decode threads"
+                );
+            }
         }
         drop(raw_rx);
         drop(predecoded_tx);

@@ -163,7 +163,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
                           OR p.last_name LIKE $like ESCAPE '\'
                    )
               )
-            ORDER BY f.modified_at DESC NULLS LAST
+            ORDER BY f.scanned_at DESC, f.id DESC
             LIMIT $limit
             """;
 
@@ -192,8 +192,9 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
     }
 
     /// <summary>
-    /// Most-recently-modified files as a fallback when the search box is
-    /// empty (or when CLIP isn't installed yet).
+    /// Most-recently-scanned files as a fallback when the search box is empty
+    /// (or when CLIP isn't installed yet). scanned_at DESC puts freshly scanned
+    /// files at the TOP (macOS parity); id DESC breaks sub-second ties.
     /// </summary>
     public async Task<IReadOnlyList<FileRow>> RecentAsync(int limit, CancellationToken ct, string? kind = null)
     {
@@ -211,7 +212,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
                        (SELECT GROUP_CONCAT(tag, '|') FROM (SELECT tag FROM tags WHERE file_id = files.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, score DESC, rowid)) AS auto_tags,
                        vlm_proposed_name
                 FROM files{kindClause}
-                ORDER BY modified_at DESC NULLS LAST LIMIT $limit
+                ORDER BY scanned_at DESC, id DESC LIMIT $limit
                 """;
             cmd.Parameters.AddWithValue("$limit", limit);
             if (kindClause.Length > 0) cmd.Parameters.AddWithValue("$kind", kind!);
