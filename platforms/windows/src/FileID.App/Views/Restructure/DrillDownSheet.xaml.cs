@@ -91,7 +91,7 @@ public sealed partial class DrillDownSheet : UserControl
         {
             Padding = new Thickness(10, 6, 10, 6),
             CornerRadius = new CornerRadius(8),
-            Background = (Brush)Application.Current.Resources["SubtleFillColorSecondaryBrush"],
+            Background = FileID.Services.ThemeHelper.GetBrushSafe("SubtleFillColorSecondaryBrush"),
             ColumnSpacing = 12,
         };
         // Accessible name for the whole row = the file name, so a screen reader
@@ -106,7 +106,7 @@ public sealed partial class DrillDownSheet : UserControl
             Width = 56,
             Height = 56,
             CornerRadius = new CornerRadius(6),
-            Background = (Brush)Application.Current.Resources["SubtleFillColorTertiaryBrush"],
+            Background = FileID.Services.ThemeHelper.GetBrushSafe("SubtleFillColorTertiaryBrush"),
         };
         var img = new Image { Stretch = Stretch.UniformToFill, Width = 56, Height = 56 };
         thumbHost.Child = img;
@@ -128,7 +128,7 @@ public sealed partial class DrillDownSheet : UserControl
             {
                 Text = m.Reason,
                 Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
-                Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+                Foreground = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorSecondaryBrush"),
                 TextWrapping = TextWrapping.Wrap,
             });
         }
@@ -136,7 +136,7 @@ public sealed partial class DrillDownSheet : UserControl
         {
             Text = $"{m.Source} → {m.Destination}",
             Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
-            Foreground = (Brush)Application.Current.Resources["TextFillColorTertiaryBrush"],
+            Foreground = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorTertiaryBrush"),
             TextTrimming = TextTrimming.CharacterEllipsis,
         });
         Grid.SetColumn(labelStack, 1);

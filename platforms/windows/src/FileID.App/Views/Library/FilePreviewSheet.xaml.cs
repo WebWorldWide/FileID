@@ -484,7 +484,7 @@ public sealed partial class FilePreviewSheet : UserControl
         {
             Text = label,
             Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
-            Foreground = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+            Foreground = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorSecondaryBrush"),
             VerticalAlignment = VerticalAlignment.Top,
         };
         Grid.SetRow(labelText, rowIdx);

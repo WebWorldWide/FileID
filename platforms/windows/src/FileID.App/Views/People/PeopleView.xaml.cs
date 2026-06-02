@@ -358,7 +358,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     {
         if (sender is not Grid g) return;
         // Restore styling first so a failure mid-drop doesn't leave the gold ring.
-        g.BorderBrush = (SolidColorBrush)Application.Current.Resources["CardStrokeColorDefaultBrush"];
+        g.BorderBrush = FileID.Services.ThemeHelper.GetBrushSafe("CardStrokeColorDefaultBrush");
         g.BorderThickness = new Thickness(1);
 
         if (!args.DataView.Properties.TryGetValue(MergeFormatId, out var raw)) return;
