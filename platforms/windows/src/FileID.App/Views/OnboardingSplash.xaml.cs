@@ -103,8 +103,23 @@ public sealed partial class OnboardingSplash : UserControl
                 ? WinRT.Interop.WindowNative.GetWindowHandle(window)
                 : IntPtr.Zero;
             var result = await FolderPickerService.PickFolderAsync(hwnd);
-            if (result.FailureReason is not null || result.Path is null)
+            if (result.FailureReason is not null)
             {
+                // The picker opened but the selected folder couldn't be used
+                // (permission denied, offline share, broken redirect). On
+                // first-run the user is stranded on this splash with no other
+                // affordance, so surface the actionable reason and offer to
+                // re-open the picker — never swallow it to a log line.
+                var retry = await ShowPickFailureAsync(result.FailureReason);
+                if (retry)
+                {
+                    OnPickFolderClicked(sender, e);
+                }
+                return;
+            }
+            if (result.Path is null)
+            {
+                // User cancelled the picker — not an error, no surfacing.
                 return;
             }
             AppViewModel.Instance.FolderPath = result.Path;
@@ -112,6 +127,68 @@ public sealed partial class OnboardingSplash : UserControl
         catch (Exception ex)
         {
             DebugLog.Warn("OnboardingSplash.OnPickFolderClicked threw: " + ex);
+            await ShowAlertAsync(
+                "Couldn't open the folder picker",
+                "FileID couldn't open the folder picker.\n\n"
+                + "Try again. If it keeps failing, restart FileID.\n\n"
+                + "Details: " + ex.Message);
+        }
+    }
+
+    // Surface a folder-pick failure with a Try Again path. Returns true when
+    // the user chose to re-open the picker.
+    private async Task<bool> ShowPickFailureAsync(string reason)
+    {
+        try
+        {
+            if (XamlRoot is null)
+            {
+                DebugLog.Warn("ShowPickFailureAsync: XamlRoot is null; skipping dialog.");
+                return false;
+            }
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = "Couldn't use that folder",
+                Content = reason,
+                PrimaryButtonText = "Try again",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Primary,
+            };
+            return await dialog.ShowAsync() == ContentDialogResult.Primary;
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("ShowPickFailureAsync threw: " + ex.Message);
+            return false;
+        }
+    }
+
+    private async Task ShowAlertAsync(string title, string body)
+    {
+        // ContentDialog.ShowAsync can throw on a broken XamlRoot
+        // (mid-shutdown). Catch + log so a failed alert never escalates to
+        // App.UnhandledException. Mirrors SidebarProcessingControl.ShowAlertAsync.
+        try
+        {
+            if (XamlRoot is null)
+            {
+                DebugLog.Warn($"ShowAlertAsync: XamlRoot is null ({title}); skipping dialog.");
+                return;
+            }
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = title,
+                Content = body,
+                CloseButtonText = "OK",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            await dialog.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"ShowAlertAsync({title}) threw: " + ex.Message);
         }
     }
 }

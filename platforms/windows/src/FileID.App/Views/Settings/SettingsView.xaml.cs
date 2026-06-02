@@ -660,10 +660,44 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             slot.Message = "Cancelling…";
             slot.BytesPerSecond = 0;
             slot.EtaSeconds = 0;
-            _ = SafeRunAsync(() => Svc.CancelAllAsync(), "Cancel " + slot.DisplayLabel);
+            _ = CancelSlotAsync(slot);
             return;
         }
         _ = SafeRunAsync(() => slot.InstallAsync(), "Install " + slot.DisplayLabel);
+    }
+
+    // Drive the cancel and surface failure. If CancelAllAsync throws (engine
+    // crashed / IPC dead), the slot would otherwise sit at "Cancelling…"
+    // forever with the button still reading "Cancel". Reset it back to the
+    // Downloading caption and tell the user the cancel couldn't be delivered.
+    private async Task CancelSlotAsync(Services.ModelSlot slot)
+    {
+        try
+        {
+            await Svc.CancelAllAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"[SETTINGS] Cancel {slot.DisplayLabel} threw: {ex}");
+            if (_unloaded) return;
+            // Clear the optimistic "Cancelling…" caption so the row no longer
+            // claims a cancel is in progress; the slot stays Downloading and
+            // the button reverts to "Cancel" for another attempt.
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (slot.Status == Services.ModelInstallStatus.Downloading
+                    && slot.Message == "Cancelling…")
+                {
+                    slot.Message = null;
+                }
+            });
+            await ShowAlertAsync(
+                "Couldn't cancel the download",
+                $"FileID couldn't reach the engine to cancel {slot.DisplayLabel}. "
+                + "The download may still be running.\n\n"
+                + "Try again in a moment. If it persists, restart FileID from the Engine card in Settings.\n\n"
+                + "Details: " + ex.Message).ConfigureAwait(true);
+        }
     }
 
     private static async Task SafeRunAsync(Func<Task> action, string label)
@@ -675,6 +709,35 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         catch (Exception ex)
         {
             DebugLog.Warn($"[SETTINGS] {label} threw: {ex}");
+        }
+    }
+
+    private async Task ShowAlertAsync(string title, string body)
+    {
+        // ContentDialog.ShowAsync can throw on a broken XamlRoot
+        // (mid-shutdown, tab re-host). Catch + log so a failed alert never
+        // escalates to App.UnhandledException. Mirrors
+        // SidebarProcessingControl.ShowAlertAsync.
+        try
+        {
+            if (XamlRoot is null)
+            {
+                DebugLog.Warn($"ShowAlertAsync: XamlRoot is null ({title}); skipping dialog.");
+                return;
+            }
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = title,
+                Content = body,
+                CloseButtonText = "OK",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            await dialog.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"ShowAlertAsync({title}) threw: " + ex.Message);
         }
     }
 

@@ -41,11 +41,30 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         _store = store;
         _clip = clip;
         _ui = ui;
+        // ReadStore.LastOpenError / ClipSearchService.LastSearchError carry
+        // humanized open/search failures but raise PropertyChanged off the UI
+        // thread (both run with ConfigureAwait(false)). Surface them into
+        // ErrorMessage — which StatusText reads — marshaled to the UI thread, so a
+        // DB-open or search failure shows the message instead of an indistinguishable
+        // empty grid. This also covers the path where OpenAsync throws and the view's
+        // Loaded handler skips RefreshAsync (ErrorMessage would otherwise never be set).
+        _store.PropertyChanged += OnServiceErrorChanged;
+        _clip.PropertyChanged += OnServiceErrorChanged;
         // Per-tile PropertyChanged subscription happens via this hook —
         // FileTile only raises IsSelected on itself, so without forwarding
         // here the VM's SelectedCount stays stale and the bulk-action
         // toolbar visibility breaks.
         Items.CollectionChanged += OnItemsCollectionChanged;
+    }
+
+    private void OnServiceErrorChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is not (nameof(ReadStore.LastOpenError) or nameof(ClipSearchService.LastSearchError)))
+            return;
+        // Prefer the open error (more fundamental) over a transient search error.
+        var msg = !string.IsNullOrEmpty(_store.LastOpenError) ? _store.LastOpenError : _clip.LastSearchError;
+        if (string.IsNullOrEmpty(msg)) return;
+        _ui.TryEnqueue(() => { if (!_disposed) ErrorMessage = msg; });
     }
 
     public void Dispose()
@@ -60,6 +79,8 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         try { _searchCts?.Cancel(); } catch { /* swallow */ }
         _searchCts?.Dispose();
         _searchCts = null;
+        _store.PropertyChanged -= OnServiceErrorChanged;
+        _clip.PropertyChanged -= OnServiceErrorChanged;
         Items.CollectionChanged -= OnItemsCollectionChanged;
         foreach (var t in Items) t.PropertyChanged -= OnTilePropertyChanged;
         _selected.Clear();

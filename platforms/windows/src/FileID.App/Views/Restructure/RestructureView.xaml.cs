@@ -39,6 +39,7 @@ public sealed partial class RestructureView : UserControl
     private bool _suppressRecompute;
     private bool _deepAnalyzeHintDismissed;
     private RestructureOutcome? _hovered;
+    private EngineError? _lastHandledError;
 
     // UI-thread brushes cached at ctor time (CLAUDE.md: never build brushes per
     // event). Tile tints match RestructureRecommendationVm's outcome colors.
@@ -108,7 +109,18 @@ public sealed partial class RestructureView : UserControl
                 return;
             }
             PlanStatusText.Text = "Computing plan...";
-            await EngineClient.Instance.PlanRestructureAsync(folder);
+            try
+            {
+                await EngineClient.Instance.PlanRestructureAsync(folder);
+            }
+            catch (Exception ex)
+            {
+                // SendCommandAsync can throw if the engine pipe is dead. Without
+                // this the status freezes on "Computing plan..." forever (the
+                // plan event never arrives). Recover to a clear message.
+                DebugLog.Warn("PlanRestructure (OnLoaded) send failed: " + ex.Message);
+                PlanStatusText.Text = "Couldn't start planning - the engine isn't responding. Try restarting the app.";
+            }
         });
 
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
@@ -124,6 +136,10 @@ public sealed partial class RestructureView : UserControl
                 case nameof(EngineClient.LastRestructureApplyResult):
                     DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
                     DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncApplyResult(); });
+                    break;
+                case nameof(EngineClient.LastError):
+                    DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
+                    DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncEngineError(); });
                     break;
                 case nameof(EngineClient.DeepAnalyzeProgress):
                     DispatcherQueue.TryEnqueue(() => { if (!_unloaded) UpdateDeepAnalyzeBanner(); });
@@ -548,7 +564,15 @@ public sealed partial class RestructureView : UserControl
                 return;
             }
             PlanStatusText.Text = "Computing plan...";
-            await EngineClient.Instance.PlanRestructureAsync(folder);
+            try
+            {
+                await EngineClient.Instance.PlanRestructureAsync(folder);
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn("PlanRestructure (OnPlanClicked) send failed: " + ex.Message);
+                PlanStatusText.Text = "Couldn't start planning - the engine isn't responding. Try restarting the app.";
+            }
         });
 
     private async void OnApplySymlinksClicked(object sender, RoutedEventArgs e) => await ApplyAsync(useSymlinks: true);
@@ -568,7 +592,21 @@ public sealed partial class RestructureView : UserControl
         ApplyStatusText.Text = useSymlinks
             ? $"Creating {sel.Count:N0} symlinks..."
             : $"Moving {sel.Count:N0} files...";
-        await EngineClient.Instance.ApplyRestructureAsync(plan.LibraryRoot, sel, useSymlinks);
+        try
+        {
+            await EngineClient.Instance.ApplyRestructureAsync(plan.LibraryRoot, sel, useSymlinks);
+        }
+        catch (Exception ex)
+        {
+            // SendCommandAsync can throw if the engine pipe is dead. Without this
+            // the status freezes on "Moving N files..." (the apply-result event
+            // never arrives). Surface it instead of a silent hang.
+            DebugLog.Warn("ApplyRestructure send failed: " + ex.Message);
+            ApplyStatusText.Text = "Couldn't apply - the engine isn't responding. Try restarting the app.";
+            await ShowAlertAsync("Couldn't apply changes",
+                "FileID couldn't tell the engine to apply your reorganization (it isn't responding). " +
+                "Your files were not touched. Try restarting the app, then apply again.");
+        }
     }
 
     private void SyncApplyResult()
@@ -578,6 +616,7 @@ public sealed partial class RestructureView : UserControl
         if (!string.IsNullOrEmpty(r.PrivilegeError))
         {
             ApplyStatusText.Text = r.PrivilegeError;
+            _ = ShowAlertAsync("Couldn't apply changes", r.PrivilegeError!);
             return;
         }
         ApplyStatusText.Text = r.Failed == 0
@@ -588,10 +627,77 @@ public sealed partial class RestructureView : UserControl
             StepChip2Bg.Background = FileID.Services.ThemeHelper.GetBrushSafe("GoldBrush");
             StepChip2Bg.BorderThickness = new Thickness(0);
         }
+        else if (r.Failed > 0)
+        {
+            // Partial/total failure must be a dismissible, actionable surface -
+            // not a status line the user can scroll past thinking it worked.
+            _ = ShowAlertAsync("Some changes couldn't be applied",
+                $"Applied {r.Applied:N0}, but {r.Failed:N0} failed. The originals for the failed items are unchanged.\n\n" +
+                "This usually means a file was open, moved, or you don't have permission to write the destination. " +
+                "Check the engine log at %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl, then try again.");
+        }
+    }
+
+    // A plan/apply that dies engine-side surfaces as EngineClient.LastError with
+    // a restructure kind (restructure.rs: "plan_restructure_failed" /
+    // "apply_restructure") - never as a Plan/ApplyResult event. Without handling
+    // it the tab freezes on "Computing plan..." / "Moving N files..." forever.
+    // Only react to restructure kinds (LastError is a shared slot) and de-dupe.
+    private void SyncEngineError()
+    {
+        var err = EngineClient.Instance.LastError;
+        if (err is null || ReferenceEquals(err, _lastHandledError)) return;
+        if (err.Kind != "plan_restructure_failed" && err.Kind != "apply_restructure") return;
+        _lastHandledError = err;
+
+        if (err.Kind == "plan_restructure_failed")
+        {
+            PlanStatusText.Text = "Planning didn't complete - try again, or run a fresh scan.";
+            _ = ShowAlertAsync("Couldn't plan the reorganization",
+                string.IsNullOrWhiteSpace(err.Message)
+                    ? "FileID couldn't compute a reorganization plan. Try again, or run a fresh scan first."
+                    : err.Message);
+        }
+        else
+        {
+            ApplyStatusText.Text = "Apply didn't complete - your files are unchanged. Try again.";
+            _ = ShowAlertAsync("Couldn't apply changes",
+                (string.IsNullOrWhiteSpace(err.Message)
+                    ? "FileID couldn't finish applying your reorganization."
+                    : err.Message) +
+                "\n\nYour originals are unchanged. Try again; if it keeps failing, check the engine log at %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl.");
+        }
     }
 
     // ---- Helpers --------------------------------------------------------
 
     private static string Count(int n, string noun)
         => $"{n:N0} {noun}{(n == 1 ? "" : "s")}";
+
+    // Mirrors SidebarProcessingControl.ShowAlertAsync: a dismissible ContentDialog
+    // that never escalates to App.UnhandledException on a broken XamlRoot.
+    private async Task ShowAlertAsync(string title, string body)
+    {
+        try
+        {
+            if (XamlRoot is null)
+            {
+                DebugLog.Warn($"ShowAlertAsync: XamlRoot is null ({title}); skipping dialog.");
+                return;
+            }
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = title,
+                Content = body,
+                CloseButtonText = "OK",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            await dialog.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"ShowAlertAsync({title}) threw: " + ex.Message);
+        }
+    }
 }

@@ -385,11 +385,27 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
 
         try
         {
-            await ViewModels.EngineClient.Instance.MergeClustersAsync(sourceId, destId);
+            // Await the engine's bulkActionResult instead of fire-and-forget:
+            // a swallowed merge made the user think the merge happened, then
+            // the refresh re-showed the old state. Surface any failure.
+            var r = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
+                "mergeClusters",
+                () => ViewModels.EngineClient.Instance.MergeClustersAsync(sourceId, destId),
+                TimeSpan.FromSeconds(30));
+            if (r.Failed > 0 || r.Succeeded == 0)
+            {
+                var detail = r.Messages.FirstOrDefault(m => m is not null && !m.Ok)?.Message
+                             ?? (r.Messages.Count > 0 ? r.Messages[0] : null)?.Message
+                             ?? "The engine did not confirm the merge.";
+                await ShowAlertAsync("Merge failed",
+                    $"Couldn't merge #{sourceId} into #{destId} — {detail}");
+            }
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            // Failure surfaces through the BulkActionResult event.
+            DebugLog.Warn("MergeClusters drop IPC failed: " + ex.Message);
+            await ShowAlertAsync("Merge failed",
+                $"Couldn't merge #{sourceId} into #{destId} — {SqliteErrorTranslator.Humanize(ex)}");
         }
 
         await ViewModel.RefreshAsync(CancellationToken.None);
@@ -490,17 +506,44 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         // Merge cluster ids[1..N] into ids[0] (the first selected).
         // Engine `mergeClusters` is 1:1; loop the call N-1 times.
         var dest = ids[0];
-        try
+        int merged = 0;
+        int failed = 0;
+        string? firstFailure = null;
+        for (int i = 1; i < ids.Count; i++)
         {
-            for (int i = 1; i < ids.Count; i++)
+            try
             {
-                await EngineClient.Instance.MergeClustersAsync(ids[i], dest);
+                // Await each merge's bulkActionResult so a swallowed failure
+                // can't masquerade as success (the refresh would then re-show
+                // the unmerged clusters with no explanation).
+                var r = await EngineClient.Instance.WaitForBulkActionResultAsync(
+                    "mergeClusters",
+                    () => EngineClient.Instance.MergeClustersAsync(ids[i], dest),
+                    TimeSpan.FromSeconds(30));
+                if (r.Failed > 0 || r.Succeeded == 0)
+                {
+                    failed++;
+                    firstFailure ??= r.Messages.FirstOrDefault(m => m is not null && !m.Ok)?.Message
+                                     ?? (r.Messages.Count > 0 ? r.Messages[0] : null)?.Message
+                                     ?? $"#{ids[i]} could not be merged.";
+                }
+                else
+                {
+                    merged++;
+                }
             }
-            DebugLog.Info($"Bulk-merged {ids.Count - 1} clusters into {dest}");
+            catch (Exception ex)
+            {
+                DebugLog.Warn("BulkMerge IPC failed: " + ex.Message);
+                failed++;
+                firstFailure ??= SqliteErrorTranslator.Humanize(ex);
+            }
         }
-        catch (Exception ex)
+        DebugLog.Info($"Bulk-merged {merged} clusters into {dest}; {failed} failed");
+        if (failed > 0)
         {
-            DebugLog.Warn("BulkMerge IPC failed: " + ex.Message);
+            await ShowAlertAsync("Some merges failed",
+                $"Merged {merged} into #{dest}; {failed} failed — {firstFailure}");
         }
         // Exit select mode + refresh.
         ViewModel.IsSelectMode = false;
@@ -531,6 +574,35 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         SelectButtonText.Text = "Select";
         UpdateCheckboxVisibility();
         await ViewModel.RefreshAsync(CancellationToken.None);
+    }
+
+    // Mirrors SidebarProcessingControl.ShowAlertAsync: a dismissible
+    // ContentDialog for surfacing a failure. ShowAsync can throw on a
+    // broken XamlRoot (mid-shutdown, tab re-host) so the call is wrapped
+    // and logged — a failed alert must never escalate to UnhandledException.
+    private async Task ShowAlertAsync(string title, string body)
+    {
+        try
+        {
+            if (_unloaded || XamlRoot is null)
+            {
+                DebugLog.Warn($"PeopleView.ShowAlertAsync: XamlRoot null/unloaded ({title}); skipping dialog.");
+                return;
+            }
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = title,
+                Content = body,
+                CloseButtonText = "OK",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            await dialog.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"PeopleView.ShowAlertAsync threw ({title}): " + ex.Message);
+        }
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;

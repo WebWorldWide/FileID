@@ -322,6 +322,52 @@ internal sealed partial class EngineClient
         }
     }
 
+    /// <summary>Run a bulk command and await its <c>BulkActionResult</c> reply,
+    /// matched by the action prefix the engine tags replies with
+    /// (e.g. "trashFiles", "applyTags", "renameFiles", "restoreFromTrash"). Mirrors
+    /// <see cref="WipeLibraryAndWaitAsync"/>: callers can then surface
+    /// Succeeded/Failed instead of fire-and-forgetting (the silent-failure class —
+    /// "user thinks files were deleted but they weren't"). Throws TimeoutException
+    /// if no matching reply lands. The separate UndoStack listener still captures
+    /// the same result for undo independently.</summary>
+    public async Task<BulkActionResult> WaitForBulkActionResultAsync(
+        string actionPrefix, Func<Task> send, TimeSpan timeout, CancellationToken ct = default)
+    {
+        var tcs = new TaskCompletionSource<BulkActionResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        PropertyChangedEventHandler? handler = null;
+        handler = (_, e) =>
+        {
+            if (e.PropertyName == nameof(LastBulkAction)
+                && LastBulkAction is { } r
+                && r.Action is { } a
+                && a.StartsWith(actionPrefix, StringComparison.Ordinal))
+            {
+                PropertyChanged -= handler;
+                tcs.TrySetResult(r);
+            }
+        };
+        // Reset first so a value-equal reply still re-fires PropertyChanged.
+        LastBulkAction = null;
+        PropertyChanged += handler;
+        try
+        {
+            await send().ConfigureAwait(false);
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(timeout);
+            using var reg = cts.Token.Register(() =>
+            {
+                PropertyChanged -= handler;
+                tcs.TrySetException(new TimeoutException(
+                    $"Engine did not confirm '{actionPrefix}' within {timeout.TotalSeconds:0}s."));
+            });
+            return await tcs.Task.ConfigureAwait(false);
+        }
+        finally
+        {
+            PropertyChanged -= handler;
+        }
+    }
+
     /// <summary>tell the engine to re-probe CUDA/cuDNN
     /// availability. Engine replies with a <c>hardwareReprobed</c> event
     /// which lands on <see cref="LastHardwareReprobe"/>. Used by
