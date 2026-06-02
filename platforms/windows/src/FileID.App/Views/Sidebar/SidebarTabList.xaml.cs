@@ -15,10 +15,20 @@ namespace FileID.Views.Sidebar;
 public sealed partial class SidebarTabList : UserControl
 {
     private readonly Dictionary<string, Button> _tabButtons = new();
+    // Cache the selection brushes at ctor (UI thread). SyncSelection fires on every
+    // tab switch / folder change; allocating a fresh SolidColorBrush + indexing
+    // Application.Current.Resources[...] per call churned DispatcherObjects and risked
+    // a KeyNotFound native fast-fail (CLAUDE.md: cache UI-thread-affined brushes).
+    private Brush _goldSelectedBg = null!;
+    private Brush _goldSelectedStroke = null!;
+    private Brush _transparentBrush = null!;
 
     public SidebarTabList()
     {
         InitializeComponent();
+        _transparentBrush = new SolidColorBrush(Colors.Transparent);
+        _goldSelectedBg = FileID.Services.ThemeHelper.GetBrushSafe("GoldSelectedBackgroundBrush");
+        _goldSelectedStroke = FileID.Services.ThemeHelper.GetBrushSafe("GoldSelectedStrokeBrush");
         BuildButtons();
         AppViewModel.Instance.PropertyChanged += OnAppViewModelChanged;
         Loaded += (_, _) => SyncSelection();
@@ -84,15 +94,11 @@ public sealed partial class SidebarTabList : UserControl
     private void SyncSelection()
     {
         var vm = AppViewModel.Instance;
-        var goldBrush = (SolidColorBrush)Application.Current.Resources["GoldSelectedBackgroundBrush"];
-        var goldStroke = (SolidColorBrush)Application.Current.Resources["GoldSelectedStrokeBrush"];
-        var transparent = new SolidColorBrush(Colors.Transparent);
-
         foreach (var (tabId, btn) in _tabButtons)
         {
             bool selected = vm.ActiveTab.Id == tabId;
-            btn.Background = selected ? goldBrush : transparent;
-            btn.BorderBrush = selected ? goldStroke : transparent;
+            btn.Background = selected ? _goldSelectedBg : _transparentBrush;
+            btn.BorderBrush = selected ? _goldSelectedStroke : _transparentBrush;
 
             // Disable every tab except Settings until a folder is picked
             // (matches macOS "Pick a folder above to enable tabs" hint).

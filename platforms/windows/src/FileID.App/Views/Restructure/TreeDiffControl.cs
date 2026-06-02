@@ -37,9 +37,9 @@ public sealed class TreeDiffControl : Control
         public bool IsHighlighted => Status != "unchanged";
         public Brush HighlightBrush => Status switch
         {
-            "added" or "moved-dest" => (Brush)Application.Current.Resources["GoldBrush"],
-            "removed" or "moved-source" => (Brush)Application.Current.Resources["TextFillColorTertiaryBrush"],
-            _ => (Brush)Application.Current.Resources["TextFillColorPrimaryBrush"],
+            "added" or "moved-dest" => FileID.Services.ThemeHelper.GetBrushSafe("GoldBrush"),
+            "removed" or "moved-source" => FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorTertiaryBrush"),
+            _ => FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorPrimaryBrush"),
         };
     }
 
