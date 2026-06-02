@@ -82,6 +82,10 @@ pub enum AnalyzeMode {
     /// pass is ~3× faster. Caption + proposed-name columns are left untouched.
     TagsOnly,
     Both,
+    /// Caption + tags, but NO smart-rename — the full manual pass with the
+    /// "Propose renames" checkbox unticked. Same VLM calls as Both minus the
+    /// rename call; the proposed-name column is left untouched.
+    CaptionAndTags,
 }
 
 /// Run Deep Analyze on a single file: pull image bytes (image, video
@@ -126,7 +130,7 @@ pub async fn analyze_file(
     let mut description: Option<String> = None;
     let mut proposed_name: Option<String> = None;
 
-    if matches!(mode, AnalyzeMode::CaptionOnly | AnalyzeMode::Both) {
+    if matches!(mode, AnalyzeMode::CaptionOnly | AnalyzeMode::Both | AnalyzeMode::CaptionAndTags) {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
@@ -147,7 +151,7 @@ pub async fn analyze_file(
     // zero-shot if the user drops CLIP. Clones the weights + rasterized frame so
     // the rename branch below can still take ownership.
     let mut tags: Vec<String> = Vec::new();
-    if matches!(mode, AnalyzeMode::Both | AnalyzeMode::TagsOnly) {
+    if matches!(mode, AnalyzeMode::Both | AnalyzeMode::TagsOnly | AnalyzeMode::CaptionAndTags) {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
@@ -375,7 +379,7 @@ pub(crate) async fn analyze_file_via_server(
     let mut proposed_name: Option<String> = None;
     let mut tags: Vec<String> = Vec::new();
 
-    if matches!(mode, AnalyzeMode::CaptionOnly | AnalyzeMode::Both) {
+    if matches!(mode, AnalyzeMode::CaptionOnly | AnalyzeMode::Both | AnalyzeMode::CaptionAndTags) {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
@@ -384,7 +388,7 @@ pub(crate) async fn analyze_file_via_server(
         description = Some(d);
     }
 
-    if matches!(mode, AnalyzeMode::TagsOnly | AnalyzeMode::Both) {
+    if matches!(mode, AnalyzeMode::TagsOnly | AnalyzeMode::Both | AnalyzeMode::CaptionAndTags) {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }

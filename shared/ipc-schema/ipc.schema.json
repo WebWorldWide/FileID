@@ -97,7 +97,8 @@
               "properties": {
                 "modelKind":    { "type": "string" },
                 "skipExisting": { "type": "boolean", "description": "If true, skip files where vlm_description IS NOT NULL for this model." },
-                "tagsOnly":     { "type": "boolean", "description": "If true, run the fast tags-only pass (one VLM call/file) instead of full caption + smart-rename + tags. Used by the background auto-tag chain. Optional; defaults to false." }
+                "tagsOnly":     { "type": "boolean", "description": "If true, run the fast tags-only pass (one VLM call/file) instead of full caption + smart-rename + tags. Used by the background auto-tag chain. Optional; defaults to false." },
+                "proposeRenames": { "type": "boolean", "description": "If true (default), the full manual pass also proposes smart filenames; set false for caption + tags without the rename VLM call. Ignored when tagsOnly is true." }
               }
             }
           }

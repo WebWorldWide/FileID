@@ -221,6 +221,15 @@ pub struct DeepAnalyzeAllPayload {
     /// tags). `#[serde(default)]` keeps older clients that omit the field valid.
     #[serde(default)]
     pub tags_only: bool,
+    /// Propose smart filenames during the full pass. Defaults to true (the
+    /// "Propose renames" checkbox is ticked by default); set false for
+    /// caption + tags without the rename VLM call. Ignored when tags_only.
+    #[serde(default = "default_true")]
+    pub propose_renames: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1049,6 +1058,7 @@ mod tests {
                 model_kind: "qwen2_5_vl_7b".into(),
                 skip_existing: true,
                 tags_only: true,
+                propose_renames: true,
             }),
             CommandPayload::DeepAnalyzeCancel(Empty {}),
             CommandPayload::PrewarmModel(PrewarmModelPayload {
