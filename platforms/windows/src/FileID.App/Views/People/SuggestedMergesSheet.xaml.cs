@@ -92,7 +92,19 @@ public sealed partial class SuggestedMergesSheet : UserControl
         if ((sender as FrameworkElement)?.DataContext is not MergeSuggestionVm vm) return;
         try
         {
-            await EngineClient.Instance.MergeClustersAsync(vm.SourcePersonId, vm.DestinationPersonId);
+            // Await the engine's bulkActionResult BEFORE dimming the row.
+            // Previously the row was marked resolved on a fire-and-forget
+            // send, so an engine-side merge failure left the pair greyed-out
+            // and un-actionable while the clusters stayed un-merged.
+            var r = await EngineClient.Instance.WaitForBulkActionResultAsync(
+                "mergeClusters",
+                () => EngineClient.Instance.MergeClustersAsync(vm.SourcePersonId, vm.DestinationPersonId),
+                TimeSpan.FromSeconds(30));
+            if (r.Failed > 0 || r.Succeeded == 0)
+            {
+                StatusText.Text = $"Merge failed: {FirstFailureMessage(r) ?? "the engine did not confirm the merge."}";
+                return;
+            }
             vm.IsResolved = true;
             // The merged-away source person no longer exists; resolve any other
             // visible pair that references it so the user can't act on a
@@ -111,6 +123,18 @@ public sealed partial class SuggestedMergesSheet : UserControl
         {
             StatusText.Text = $"Merge failed: {ex.Message}";
         }
+    }
+
+    private static string? FirstFailureMessage(FileID.IpcSchema.BulkActionResult r)
+    {
+        string? fallback = null;
+        foreach (var m in r.Messages)
+        {
+            if (m is null) continue;
+            fallback ??= m.Message;
+            if (!m.Ok && m.Message is { } msg) return msg;
+        }
+        return fallback;
     }
 
     private async void OnDifferentClicked(object sender, RoutedEventArgs e)

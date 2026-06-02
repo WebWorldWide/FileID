@@ -88,8 +88,11 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             }
             catch
             {
-                // ReadStore.OpenAsync surfaces errors via ErrorMessage on
-                // refresh — initial open before scan is allowed to no-op.
+                // ReadStore.OpenAsync sets LastOpenError on a real open failure,
+                // which LibraryViewModel surfaces into ErrorMessage (StatusText) via
+                // its service-PropertyChanged subscription — so the error shows even
+                // though this throw skips RefreshAsync. An initial open before the
+                // first scan (DB not yet created) sets nothing and no-ops silently.
             }
             SyncUndoPill();
             SyncBanners();

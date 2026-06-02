@@ -616,17 +616,30 @@ public sealed partial class DeepAnalyzeView : UserControl
 
     private async void OnAnalyzeAllClicked(object sender, RoutedEventArgs e)
     {
+        // Set the optimistic/working UI state BEFORE the await: if the send
+        // throws, the catch reverts it and surfaces the error. Setting it after
+        // the await meant a send failure showed the user nothing — the run
+        // silently never started while the UI looked idle/ready.
+        StreamCard.Visibility = Visibility.Visible;
+        CancelButton.IsEnabled = true;
+        AnalyzeAllButton.IsEnabled = false;
         try
         {
             // Manual pass = full enrichment (caption + smart-rename + tags), so
             // tagsOnly stays false. The background auto-pass uses tagsOnly:true.
             await EngineClient.Instance.DeepAnalyzeAllAsync(_activeModel, SkipExistingToggle.IsOn, tagsOnly: false);
-            StreamCard.Visibility = Visibility.Visible;
-            CancelButton.IsEnabled = true;
         }
         catch (Exception ex)
         {
             DebugLog.Warn("DeepAnalyzeAll failed: " + ex);
+            // Revert the optimistic state so the UI doesn't falsely look like a
+            // run is in flight, then surface a dismissible error.
+            StreamCard.Visibility = Visibility.Collapsed;
+            CancelButton.IsEnabled = false;
+            AnalyzeAllButton.IsEnabled = true;
+            await ShowAlertAsync("Couldn't start Deep Analyze",
+                "Deep Analyze couldn't be started: " + ex.Message +
+                "\n\nMake sure the model is installed and the engine is running, then try again.");
         }
     }
 
@@ -665,5 +678,33 @@ public sealed partial class DeepAnalyzeView : UserControl
     {
         try { await EngineClient.Instance.DeepAnalyzeCancelAsync(); }
         catch (Exception ex) { DebugLog.Warn("Cancel failed: " + ex); }
+    }
+
+    private async System.Threading.Tasks.Task ShowAlertAsync(string title, string body)
+    {
+        // ContentDialog.ShowAsync can throw on a broken XamlRoot (mid-shutdown,
+        // tab re-host). Catch + log so a failed alert never escalates to
+        // App.UnhandledException. Mirrors SidebarProcessingControl.ShowAlertAsync.
+        try
+        {
+            if (XamlRoot is null)
+            {
+                DebugLog.Warn($"ShowAlertAsync: XamlRoot is null ({title}); skipping dialog.");
+                return;
+            }
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = title,
+                Content = body,
+                CloseButtonText = "OK",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            await dialog.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"ShowAlertAsync({title}) threw: " + ex.Message);
+        }
     }
 }

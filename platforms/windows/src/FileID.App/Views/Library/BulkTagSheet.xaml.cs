@@ -70,14 +70,57 @@ public sealed partial class BulkTagSheet : UserControl
         StatusText.Text = "Applying...";
         try
         {
-            await EngineClient.Instance.ApplyTagsAsync(_fileIds, tags, Mode);
-            StatusText.Text = $"Sent {tags.Count} tag(s) for {_fileIds.Count} file(s).";
+            var result = await EngineClient.Instance.WaitForBulkActionResultAsync(
+                "applyTags",
+                () => EngineClient.Instance.ApplyTagsAsync(_fileIds, tags, Mode),
+                TimeSpan.FromSeconds(30));
+
+            if (result.Failed > 0)
+            {
+                // Surface per-file engine failures. Keep the dialog open so the
+                // user can adjust + retry; do NOT report success.
+                var first = result.Messages.FirstOrDefault(m => !m.Ok)?.Message
+                            ?? "see logs for details";
+                var body = result.Succeeded > 0
+                    ? $"Tagged {result.Succeeded}; {result.Failed} failed — {first}"
+                    : $"{result.Failed} file(s) failed to tag — {first}";
+                StatusText.Text = body;
+                await ShowAlertAsync("Tagging incomplete", body);
+                return false;
+            }
+
+            StatusText.Text = $"Tagged {result.Succeeded} file(s).";
             return true;
         }
         catch (Exception ex)
         {
-            StatusText.Text = $"Failed: {ex.Message}";
+            var msg = Services.SqliteErrorTranslator.Humanize(ex);
+            StatusText.Text = $"Failed: {msg}";
+            await ShowAlertAsync("Tagging failed", msg);
             return false;
+        }
+    }
+
+    private async Task ShowAlertAsync(string title, string body)
+    {
+        // ContentDialog.ShowAsync can throw on a broken XamlRoot (mid-shutdown,
+        // tab re-host). Catch + log so a failed alert never escalates.
+        try
+        {
+            if (XamlRoot is null) return;
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = title,
+                Content = body,
+                CloseButtonText = "OK",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            await dialog.ShowAsync();
+        }
+        catch
+        {
+            // Best-effort surfacing; the in-sheet StatusText still carries the message.
         }
     }
 

@@ -18,6 +18,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -25,12 +26,31 @@ using Microsoft.Data.Sqlite;
 
 namespace FileID.Services;
 
-internal sealed class ReadStore : IAsyncDisposable, IDisposable
+internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyPropertyChanged
 {
     private readonly string _dbPath;
     private readonly string _connString;
     private SqliteConnection? _connection;
     private readonly SemaphoreSlim _gate = new(1, 1);
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    /// <summary>Humanized last error from <see cref="OpenAsync"/> — a DB-open
+    /// timeout, permission denial, lock, or corruption. Null when the store
+    /// opened cleanly (or is still waiting for the engine's first-scan DB).
+    /// Callers (LibraryViewModel / search) bind/read this to surface a
+    /// dismissible message instead of an indistinguishable silent-empty grid.</summary>
+    private string? _lastOpenError;
+    public string? LastOpenError
+    {
+        get => _lastOpenError;
+        private set
+        {
+            if (_lastOpenError == value) return;
+            _lastOpenError = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(LastOpenError)));
+        }
+    }
 
     public ReadStore(string dbPath)
     {
@@ -83,25 +103,56 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
                 }
                 catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                 {
+                    // A 5s stall on the DB path is an actionable degradation
+                    // (disconnected SMB share / unplugged USB), not the silent
+                    // first-launch "DB not yet created" case — surface it so the
+                    // caller shows a dismissible "drive unreachable" message
+                    // rather than an indistinguishable empty grid.
                     DebugLog.Warn($"ReadStore.OpenAsync: File.Exists timed out for {PathRedactor.Redact(dbPath)}; treating as missing.");
+                    LastOpenError = "FileID couldn't reach the library folder (the drive may be disconnected or slow). Check the drive is connected and try again.";
                     return;
                 }
             }
             if (!dbExists)
             {
+                // Genuine first-launch: the engine hasn't created the DB yet.
+                // Stay silent (no error) — this is an expected transient state.
                 return;
             }
-            var conn = new SqliteConnection(_connString);
-            await conn.OpenAsync(ct).ConfigureAwait(false);
-            // Match the engine's PRAGMA shape so reads see the same cache /
-            // mmap behavior as the writer (these are no-ops on read-only,
-            // but documented for parity).
-            using (var cmd = conn.CreateCommand())
+            SqliteConnection? conn = null;
+            try
             {
-                cmd.CommandText = "PRAGMA query_only = ON;";
-                await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                conn = new SqliteConnection(_connString);
+                await conn.OpenAsync(ct).ConfigureAwait(false);
+                // Match the engine's PRAGMA shape so reads see the same cache /
+                // mmap behavior as the writer (these are no-ops on read-only,
+                // but documented for parity).
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = "PRAGMA query_only = ON;";
+                    await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                }
+                _connection = conn;
+                conn = null;
+                LastOpenError = null;
             }
-            _connection = conn;
+            catch (OperationCanceledException)
+            {
+                conn?.Dispose();
+                throw; // caller-initiated cancellation — not an error to surface
+            }
+            catch (Exception ex)
+            {
+                // DB open / first-PRAGMA failure: locked (BUSY), permission
+                // denied (CANTOPEN), corrupt image, full disk, IO error. These
+                // used to propagate raw and get swallowed by the caller's bare
+                // catch — surface a humanized, actionable message AND rethrow so
+                // an awaiting caller still observes the failure.
+                conn?.Dispose();
+                LastOpenError = SqliteErrorTranslator.Humanize(ex);
+                DebugLog.Warn($"ReadStore.OpenAsync: open failed for {PathRedactor.Redact(_dbPath)}: {ex.Message}");
+                throw;
+            }
         }
         finally
         {

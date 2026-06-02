@@ -78,6 +78,10 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         }
         catch (OperationCanceledException) { /* expected */ }
         catch (ObjectDisposedException) { /* expected during teardown */ }
+        // Surface DB/IO failures as an actionable message instead of the raw
+        // SQLite jargon ("database disk image is malformed") the user can't act on.
+        catch (SqliteException ex) { if (!_disposed) ErrorMessage = SqliteErrorTranslator.Humanize(ex); }
+        catch (IOException ex) { if (!_disposed) ErrorMessage = SqliteErrorTranslator.Humanize(ex); }
         catch (Exception ex) { if (!_disposed) ErrorMessage = ex.Message; }
         finally { if (!_disposed) IsLoading = false; }
     }

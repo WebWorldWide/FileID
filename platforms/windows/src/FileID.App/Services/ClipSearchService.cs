@@ -80,6 +80,13 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
     private void OnEngineClientChanged(object? sender, PropertyChangedEventArgs e)
         => DebugLog.SafeRun("ClipSearchService.OnEngineClientChanged", () =>
         {
+            // This handler can fire after Dispose() — Dispose() detaches the
+            // subscription, but a notification already in flight on another
+            // thread (tab-nav disposal racing an engine state change) can land
+            // here with _disposed already true. Bail before touching _inflight
+            // (drained + cleared in Dispose) or the now-stale generation so we
+            // don't complete a disposed caller's TCS with stale/null results.
+            if (_disposed) return;
             if (e.PropertyName == nameof(EngineClient.State))
             {
                 DebugLog.Debug($"[ENGINE-SUB:ClipSearchService] {e.PropertyName}");
@@ -202,10 +209,23 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
             {
                 rows.Add(r.Row);
             }
+            // If the store never opened (DB locked/permission/corrupt — see
+            // ReadStore.LastOpenError) the query above returns empty with no
+            // signal. Surface the store's open error so search shows a clear,
+            // dismissible message instead of an indistinguishable empty grid.
+            if (rows.Count == 0 && _store.LastOpenError is { Length: > 0 } storeErr)
+            {
+                LastSearchError = storeErr;
+            }
             return rows;
         }
         // FTS5 fallback (filename + OCR) — covers the case where CLIP
         // models aren't installed yet OR the query embedded to all-zeros.
-        return await _store.SearchAsync(query, limit, ct, kind).ConfigureAwait(false);
+        var fts = await _store.SearchAsync(query, limit, ct, kind).ConfigureAwait(false);
+        if (fts.Count == 0 && _store.LastOpenError is { Length: > 0 } openErr)
+        {
+            LastSearchError = openErr;
+        }
+        return fts;
     }
 }

@@ -317,26 +317,53 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         var choice = await confirm.ShowAsync();
         if (choice != ContentDialogResult.Primary) return;
 
+        // UndoStack still captures the same reply independently (it listens
+        // on its own PropertyChanged subscription); leave it in place.
+        Services.UndoStack.CaptureNextBulkResult(
+            "trashFiles:",
+            $"trash {ids.Count} duplicate{(ids.Count == 1 ? "" : "s")}",
+            async batchId =>
+            {
+                if (string.IsNullOrEmpty(batchId)) return false;
+                try
+                {
+                    await ViewModels.EngineClient.Instance.RestoreFromTrashAsync(batchId);
+                    return true;
+                }
+                catch { return false; }
+            });
+
+        // Await the engine's BulkActionResult so a partial/total failure is
+        // surfaced instead of fire-and-forgetting + unconditionally refreshing
+        // (the #1 silent failure: the user thinks files were trashed when some
+        // weren't). Only refresh on a clean run (Failed == 0).
         try
         {
-            Services.UndoStack.CaptureNextBulkResult(
-                "trashFiles:",
-                $"trash {ids.Count} duplicate{(ids.Count == 1 ? "" : "s")}",
-                async batchId =>
-                {
-                    if (string.IsNullOrEmpty(batchId)) return false;
-                    try
-                    {
-                        await ViewModels.EngineClient.Instance.RestoreFromTrashAsync(batchId);
-                        return true;
-                    }
-                    catch { return false; }
-                });
-            await ViewModels.EngineClient.Instance.TrashFilesAsync(ids);
+            var result = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
+                "trashFiles",
+                () => ViewModels.EngineClient.Instance.TrashFilesAsync(ids),
+                TimeSpan.FromSeconds(30));
+            if (result.Failed > 0)
+            {
+                var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
+                var detail = string.IsNullOrWhiteSpace(first) ? "" : $" — {first}";
+                await ShowAlertAsync(
+                    "Some files weren't trashed",
+                    $"Trashed {result.Succeeded}; {result.Failed} failed{detail}. The failed files are still in place — they may be open, read-only, or you may not have permission. Close them or check permissions, then try again.");
+                return;
+            }
         }
-        catch
+        catch (TimeoutException)
         {
-            // Result surfaces via BulkActionResultEvent.
+            await ShowAlertAsync(
+                "Trash didn't confirm",
+                "The engine didn't confirm the trash within 30 seconds. The files may or may not have moved — re-run the scan to check before retrying.");
+            return;
+        }
+        catch (Exception ex)
+        {
+            await ShowAlertAsync("Trash failed", $"Couldn't trash the selected files: {ex.Message}");
+            return;
         }
 
         await ViewModel.RefreshAsync(CancellationToken.None);
@@ -458,21 +485,76 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
             DefaultButton = ContentDialogButton.Close,
         };
         if (await confirm.ShowAsync() != ContentDialogResult.Primary) return;
+        // UndoStack still captures the same reply independently; leave it in place.
+        Services.UndoStack.CaptureNextBulkResult(
+            "trashFiles:",
+            $"trash {ids.Count} duplicate{(ids.Count == 1 ? "" : "s")}",
+            async batchId =>
+            {
+                if (string.IsNullOrEmpty(batchId)) return false;
+                try { await ViewModels.EngineClient.Instance.RestoreFromTrashAsync(batchId); return true; }
+                catch { return false; }
+            });
+
+        // Await the engine reply: surface partial/total failure and only
+        // refresh on a clean run, so a per-group trash can't falsely look done.
         try
         {
-            Services.UndoStack.CaptureNextBulkResult(
-                "trashFiles:",
-                $"trash {ids.Count} duplicate{(ids.Count == 1 ? "" : "s")}",
-                async batchId =>
-                {
-                    if (string.IsNullOrEmpty(batchId)) return false;
-                    try { await ViewModels.EngineClient.Instance.RestoreFromTrashAsync(batchId); return true; }
-                    catch { return false; }
-                });
-            await ViewModels.EngineClient.Instance.TrashFilesAsync(ids);
+            var result = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
+                "trashFiles",
+                () => ViewModels.EngineClient.Instance.TrashFilesAsync(ids),
+                TimeSpan.FromSeconds(30));
+            if (result.Failed > 0)
+            {
+                var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
+                var detail = string.IsNullOrWhiteSpace(first) ? "" : $" — {first}";
+                await ShowAlertAsync(
+                    "Some files weren't trashed",
+                    $"Trashed {result.Succeeded}; {result.Failed} failed{detail}. The failed files are still in place — they may be open, read-only, or you may not have permission. Close them or check permissions, then try again.");
+                return;
+            }
         }
-        catch { }
+        catch (TimeoutException)
+        {
+            await ShowAlertAsync(
+                "Trash didn't confirm",
+                "The engine didn't confirm the trash within 30 seconds. The files may or may not have moved — re-run the scan to check before retrying.");
+            return;
+        }
+        catch (Exception ex)
+        {
+            await ShowAlertAsync("Trash failed", $"Couldn't trash the selected files: {ex.Message}");
+            return;
+        }
         await ViewModel.RefreshAsync(CancellationToken.None);
+    }
+
+    // Dismissible alert mirroring SidebarProcessingControl.ShowAlertAsync —
+    // surfaces a partial/failed bulk op so the user is never left thinking a
+    // trash succeeded when some (or all) of it didn't.
+    private async System.Threading.Tasks.Task ShowAlertAsync(string title, string body)
+    {
+        try
+        {
+            if (_unloaded || XamlRoot is null)
+            {
+                DebugLog.Warn($"CleanupView.ShowAlertAsync: XamlRoot null/unloaded ({title}); skipping dialog.");
+                return;
+            }
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = title,
+                Content = body,
+                CloseButtonText = "OK",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            await dialog.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"CleanupView.ShowAlertAsync({title}) threw: " + ex.Message);
+        }
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
