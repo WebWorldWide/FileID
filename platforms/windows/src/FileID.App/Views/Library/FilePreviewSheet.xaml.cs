@@ -658,6 +658,7 @@ public sealed partial class FilePreviewSheet : UserControl
             {
                 var formatted = FileID.Theme.Controls.TagChip.FormatTag(t);
                 var chip = new FileID.Theme.Controls.TagChip { TagText = formatted };
+                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(chip, $"Tag: {formatted}");
                 // Estimate chip width — TagChip is 11pt font; rough heuristic
                 // is "~7 DIP per char + 10 DIP padding", capped at 120.
                 double estDip = System.Math.Min(120, 7.0 * System.Math.Max(2, formatted.Length) + 10.0);

@@ -27,7 +27,8 @@
         <TextBlock Grid.Row="0"
                    x:Name="HeaderText"
                    Style="{StaticResource SubtitleTextBlockStyle}"
-                   Text="Tag selected files" />
+                   Text="Tag selected files"
+                   AutomationProperties.HeadingLevel="Level1" />
 
         <TextBlock Grid.Row="1"
                    x:Name="SelectionText"
@@ -38,7 +39,8 @@
                  x:Name="TagsInput"
                  PlaceholderText="vacation, italy, family"
                  KeyDown="OnTagsKeyDown"
-                 Header="Tags (comma-separated)" />
+                 Header="Tags (comma-separated)"
+                 AutomationProperties.HelpText="Enter one or more tags separated by commas" />
 
         <StackPanel Grid.Row="3"
                     Orientation="Horizontal"

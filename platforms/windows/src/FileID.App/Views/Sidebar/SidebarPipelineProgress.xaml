@@ -24,7 +24,8 @@
                    Style="{StaticResource CaptionTextBlockStyle}"
                    FontWeight="SemiBold"
                    CharacterSpacing="40"
-                   Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                   AutomationProperties.HeadingLevel="Level2" />
 
         <!-- 5 equal columns. Each column owns one stage: dot + label
              stacked vertically, connector halves in the same column. -->

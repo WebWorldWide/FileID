@@ -26,6 +26,7 @@ public sealed partial class PersonDetailSheet : UserControl
     {
         public required long FaceId { get; init; }
         public required string ImageUri { get; init; }
+        public string FaceLabel => $"Face {FaceId}";
     }
 
     private long _personId;
@@ -42,6 +43,7 @@ public sealed partial class PersonDetailSheet : UserControl
                           x:DataType='p:PersonDetailSheet+FaceTile'>
               <Border CornerRadius='8'
                       Background='{ThemeResource SubtleFillColorTertiaryBrush}'
+                      AutomationProperties.Name='{x:Bind FaceLabel}'
                       Width='100' Height='100'>
                 <Image Source='{x:Bind ImageUri, Mode=OneTime}' Stretch='UniformToFill' />
               </Border>

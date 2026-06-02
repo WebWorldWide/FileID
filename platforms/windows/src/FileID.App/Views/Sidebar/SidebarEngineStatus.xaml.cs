@@ -95,6 +95,9 @@ public sealed partial class SidebarEngineStatus : UserControl
         StatusGlow.Fill = accent == StatusAccent.Gold ? _goldGlow : _redGlow;
         StatusText.Text = text;
         ToolTipService.SetToolTip(this, tip);
+        // Screen-reader name for the status pill — the live engine state
+        // plus its detail line, so the dot+text reads as one announcement.
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(this, $"Engine status: {text}");
     }
 
     private static string BuildReadyTooltip(EngineClient ec) =>

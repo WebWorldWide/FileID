@@ -70,6 +70,7 @@
                 <TextBlock x:Name="FileNameText"
                            Style="{StaticResource SubtitleTextBlockStyle}"
                            TextTrimming="CharacterEllipsis"
+                           AutomationProperties.HeadingLevel="Level1"
                            MaxLines="1" />
                 <TextBlock x:Name="ParentPathText"
                            Style="{StaticResource CaptionTextBlockStyle}"
@@ -107,6 +108,8 @@
                     x:Name="AnalyzeButton"
                     Click="OnAnalyzeClicked"
                     ToolTipService.ToolTip="Run Deep Analyze (VLM) on this file"
+                    AutomationProperties.Name="Analyze this file"
+                    AutomationProperties.HelpText="Runs Deep Analyze with the vision-language model on this file"
                     Visibility="Collapsed">
                 <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
                     <FontIcon Glyph="&#xE945;" FontSize="13" />
@@ -116,7 +119,8 @@
 
             <Button Grid.Column="4"
                     Click="OnOpenClicked"
-                    ToolTipService.ToolTip="Open in the default app">
+                    ToolTipService.ToolTip="Open in the default app"
+                    AutomationProperties.Name="Open in the default app">
                 <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
                     <FontIcon Glyph="&#xE8E5;" FontSize="13" />
                     <TextBlock Text="Open" />
@@ -125,7 +129,8 @@
 
             <Button Grid.Column="5"
                     Click="OnRevealClicked"
-                    ToolTipService.ToolTip="Show in Explorer">
+                    ToolTipService.ToolTip="Show in Explorer"
+                    AutomationProperties.Name="Show in Explorer">
                 <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
                     <FontIcon Glyph="&#xE838;" FontSize="13" />
                     <TextBlock Text="Show in Explorer" />
@@ -136,6 +141,7 @@
                     x:Name="CloseButton"
                     Click="OnCloseClicked"
                     ToolTipService.ToolTip="Close (Esc)"
+                    AutomationProperties.Name="Close preview"
                     Background="Transparent"
                     BorderThickness="0"
                     Padding="6">
@@ -163,6 +169,7 @@
                        HorizontalAlignment="Center"
                        VerticalAlignment="Center"
                        Margin="20"
+                       AutomationProperties.Name="File preview"
                        Visibility="Collapsed" />
 
                 <!-- MediaPlayerElement handles both video and audio.
@@ -252,7 +259,8 @@
                                 Padding="14">
                             <StackPanel Spacing="8">
                                 <TextBlock Text="Metadata"
-                                           Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                           Style="{StaticResource BodyStrongTextBlockStyle}"
+                                           AutomationProperties.HeadingLevel="Level2" />
                                 <Grid x:Name="MetadataGrid"
                                       RowSpacing="4"
                                       ColumnSpacing="10">
@@ -283,7 +291,8 @@
                                 Visibility="Collapsed">
                             <StackPanel Spacing="8">
                                 <TextBlock Text="Tags"
-                                           Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                           Style="{StaticResource BodyStrongTextBlockStyle}"
+                                           AutomationProperties.HeadingLevel="Level2" />
                                 <!-- Chips are added in code-behind from
                                      LoadVisionTagsAsync because WinUI 3's
                                      built-in layouts don't wrap (StackPanel
@@ -310,7 +319,8 @@
                             <StackPanel Spacing="8">
                                 <TextBlock Text="Proposed rename"
                                            Style="{StaticResource BodyStrongTextBlockStyle}"
-                                           Foreground="{ThemeResource GoldBrush}" />
+                                           Foreground="{ThemeResource GoldBrush}"
+                                           AutomationProperties.HeadingLevel="Level2" />
                                 <TextBlock x:Name="ProposedRenameText"
                                            TextWrapping="Wrap"
                                            FontFamily="Consolas"
@@ -319,9 +329,11 @@
                                     <Button x:Name="ApplyRenameButton"
                                             Content="Apply rename"
                                             Click="OnApplyRenameClicked"
+                                            AutomationProperties.HelpText="Renames this file to the proposed name"
                                             Style="{StaticResource AccentButtonStyle}" />
                                     <Button Content="Dismiss"
-                                            Click="OnDismissRenameClicked" />
+                                            Click="OnDismissRenameClicked"
+                                            AutomationProperties.HelpText="Dismisses the proposed rename without applying it" />
                                 </StackPanel>
                             </StackPanel>
                         </Border>
@@ -334,7 +346,8 @@
                                 Padding="14">
                             <StackPanel Spacing="8">
                                 <TextBlock Text="Tags"
-                                           Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                           Style="{StaticResource BodyStrongTextBlockStyle}"
+                                           AutomationProperties.HeadingLevel="Level2" />
                                 <Grid ColumnSpacing="8">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="*" />
@@ -343,11 +356,14 @@
                                     <TextBox Grid.Column="0"
                                              x:Name="TagInput"
                                              PlaceholderText="Add tags (comma-separated)"
-                                             KeyDown="OnTagInputKeyDown" />
+                                             KeyDown="OnTagInputKeyDown"
+                                             AutomationProperties.Name="Add tags"
+                                             AutomationProperties.HelpText="Enter one or more tags separated by commas, then press Enter or Add" />
                                     <Button Grid.Column="1"
                                             x:Name="ApplyTagsButton"
                                             Click="OnApplyTagsClicked"
-                                            Content="Add" />
+                                            Content="Add"
+                                            AutomationProperties.Name="Add tags to this file" />
                                 </Grid>
                                 <TextBlock x:Name="TagStatusText"
                                            Style="{StaticResource CaptionTextBlockStyle}"

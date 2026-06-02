@@ -27,7 +27,8 @@
         <StackPanel Padding="32,32,32,32" Spacing="20" MaxWidth="820" HorizontalAlignment="Center">
 
             <StackPanel Spacing="4">
-                <TextBlock Text="Settings" Style="{StaticResource TitleTextBlockStyle}"/>
+                <TextBlock Text="Settings" Style="{StaticResource TitleTextBlockStyle}"
+                           AutomationProperties.HeadingLevel="Level1"/>
                 <TextBlock Text="Models, GPU acceleration, storage."
                            Style="{StaticResource BodyTextBlockStyle}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
@@ -42,7 +43,8 @@
                     BorderThickness="1"
                     Padding="20">
                 <StackPanel Spacing="14">
-                    <TextBlock Text="Local AI" Style="{StaticResource SubtitleTextBlockStyle}"/>
+                    <TextBlock Text="Local AI" Style="{StaticResource SubtitleTextBlockStyle}"
+                               AutomationProperties.HeadingLevel="Level2"/>
                     <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                TextWrapping="Wrap"
@@ -251,7 +253,8 @@
                     BorderThickness="1"
                     Padding="20">
                 <StackPanel Spacing="6">
-                    <TextBlock Text="Engine" Style="{StaticResource SubtitleTextBlockStyle}"/>
+                    <TextBlock Text="Engine" Style="{StaticResource SubtitleTextBlockStyle}"
+                               AutomationProperties.HeadingLevel="Level2"/>
                     <TextBlock Text="{x:Bind EngineVersionText, Mode=OneWay}"
                                Style="{StaticResource BodyTextBlockStyle}"/>
                     <TextBlock Text="{x:Bind WorkerCapText, Mode=OneWay}"
@@ -280,7 +283,8 @@
                     BorderThickness="1"
                     Padding="20">
                 <StackPanel Spacing="14">
-                    <TextBlock Text="Performance" Style="{StaticResource SubtitleTextBlockStyle}"/>
+                    <TextBlock Text="Performance" Style="{StaticResource SubtitleTextBlockStyle}"
+                               AutomationProperties.HeadingLevel="Level2"/>
 
                     <!-- Detected GPU + adapter name. -->
                     <StackPanel Spacing="4">
@@ -337,7 +341,9 @@
                         <ComboBox x:Name="ProviderCombo"
                                   Width="240"
                                   SelectedIndex="0"
-                                  SelectionChanged="OnProviderOverrideChanged">
+                                  SelectionChanged="OnProviderOverrideChanged"
+                                  AutomationProperties.Name="GPU execution provider override"
+                                  AutomationProperties.HelpText="Persisted across launches. Takes effect on the next scan.">
                             <ComboBoxItem Content="Auto-detect (recommended)" Tag="auto"/>
                             <ComboBoxItem Content="DirectML — universal" Tag="directml"/>
                             <ComboBoxItem Content="CUDA — NVIDIA only" Tag="cuda"/>
@@ -387,6 +393,7 @@
                                     x:Name="InstallCudaLlamaButton"
                                     Content="Install"
                                     Click="OnInstallCudaLlamaClicked"
+                                    AutomationProperties.Name="Install CUDA llama.cpp for Deep Analyze"
                                     ToolTipService.ToolTip="Downloads llama-bXXXX-bin-win-cuda-cu12.4-x64.zip from github.com/ggml-org/llama.cpp/releases." />
                         </Grid>
 
@@ -435,6 +442,7 @@
                                 <Button x:Name="InstallCudnnButton"
                                         Content="Install"
                                         Click="OnInstallCudnnClicked"
+                                        AutomationProperties.Name="Install CUDA pack for scanning (cuDNN + ORT CUDA provider)"
                                         ToolTipService.ToolTip="Downloads cuDNN ~430 MB from NVIDIA's public CDN and registers it for the ORT CUDA EP. DirectML works fine without this — only install if you want the 10-15% scanning speedup." />
                                 <!-- re-probe after manual install. Engine doesn't
                                      restart; just re-runs the DLL probe and emits a
@@ -497,7 +505,8 @@
                       Padding="20,8,20,16">
                 <Expander.Header>
                     <TextBlock Text="Advanced — diagnostics &amp; tools"
-                               Style="{StaticResource SubtitleTextBlockStyle}"/>
+                               Style="{StaticResource SubtitleTextBlockStyle}"
+                               AutomationProperties.HeadingLevel="Level2"/>
                 </Expander.Header>
                 <StackPanel Spacing="14">
 
@@ -573,7 +582,8 @@
                                    TextWrapping="Wrap" />
                         <Button Content="Refresh"
                                 Click="OnRefreshDiagnosticsClicked"
-                                HorizontalAlignment="Left" />
+                                HorizontalAlignment="Left"
+                                AutomationProperties.Name="Refresh diagnostics" />
                     </StackPanel>
 
                 </StackPanel>
@@ -586,7 +596,8 @@
                     BorderThickness="1"
                     Padding="20">
                 <StackPanel Spacing="14">
-                    <TextBlock Text="Cleanup" Style="{StaticResource SubtitleTextBlockStyle}"/>
+                    <TextBlock Text="Cleanup" Style="{StaticResource SubtitleTextBlockStyle}"
+                               AutomationProperties.HeadingLevel="Level2"/>
 
                     <ToggleSwitch x:Name="CleanupAutoTagToggle"
                                   Header="Tag kept files after Cleanup auto-trash"
@@ -606,7 +617,8 @@
                     BorderThickness="1"
                     Padding="20">
                 <StackPanel Spacing="10">
-                    <TextBlock Text="Storage" Style="{StaticResource SubtitleTextBlockStyle}"/>
+                    <TextBlock Text="Storage" Style="{StaticResource SubtitleTextBlockStyle}"
+                               AutomationProperties.HeadingLevel="Level2"/>
                     <Grid ColumnSpacing="12" RowSpacing="6">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="180"/>
@@ -630,7 +642,8 @@
                                    VerticalAlignment="Center" />
                         <Button Grid.Row="0" Grid.Column="2"
                                 Content="Show"
-                                Click="OnShowDbFolderClicked" />
+                                Click="OnShowDbFolderClicked"
+                                AutomationProperties.Name="Show database folder in File Explorer" />
 
                         <TextBlock Grid.Row="1" Grid.Column="0" Text="Thumbnail cache"
                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
@@ -643,7 +656,8 @@
                                    VerticalAlignment="Center" />
                         <Button Grid.Row="1" Grid.Column="2"
                                 Content="Show"
-                                Click="OnShowThumbCacheClicked" />
+                                Click="OnShowThumbCacheClicked"
+                                AutomationProperties.Name="Show thumbnail cache folder in File Explorer" />
 
                         <TextBlock Grid.Row="2" Grid.Column="0" Text="Models"
                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
@@ -656,7 +670,8 @@
                                    VerticalAlignment="Center" />
                         <Button Grid.Row="2" Grid.Column="2"
                                 Content="Show"
-                                Click="OnShowModelsFolderClicked" />
+                                Click="OnShowModelsFolderClicked"
+                                AutomationProperties.Name="Show models folder in File Explorer" />
                     </Grid>
                     <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
@@ -674,7 +689,8 @@
                     BorderThickness="1"
                     Padding="20">
                 <StackPanel Spacing="10">
-                    <TextBlock Text="Recent scans" Style="{StaticResource SubtitleTextBlockStyle}"/>
+                    <TextBlock Text="Recent scans" Style="{StaticResource SubtitleTextBlockStyle}"
+                               AutomationProperties.HeadingLevel="Level2"/>
                     <TextBlock x:Name="RecentScansEmptyText"
                                Style="{StaticResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
@@ -691,7 +707,8 @@
                     BorderThickness="1"
                     Padding="20">
                 <StackPanel Spacing="6">
-                    <TextBlock Text="About" Style="{StaticResource SubtitleTextBlockStyle}"/>
+                    <TextBlock Text="About" Style="{StaticResource SubtitleTextBlockStyle}"
+                               AutomationProperties.HeadingLevel="Level2"/>
                     <TextBlock Style="{StaticResource BodyTextBlockStyle}"
                                Text="{x:Bind AppVersionText, Mode=OneWay}"/>
                     <TextBlock Style="{StaticResource CaptionTextBlockStyle}"

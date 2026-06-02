@@ -25,7 +25,8 @@
                        Style="{StaticResource CaptionTextBlockStyle}"
                        FontWeight="SemiBold"
                        CharacterSpacing="40"
-                       Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                       AutomationProperties.HeadingLevel="Level2" />
             <TextBlock x:Name="TotalEtaText"
                        Grid.Column="1"
                        Style="{StaticResource CaptionTextBlockStyle}"

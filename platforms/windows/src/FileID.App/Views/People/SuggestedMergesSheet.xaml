@@ -26,6 +26,7 @@
 
         <StackPanel Grid.Row="0" Spacing="6">
             <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                       AutomationProperties.HeadingLevel="Level1"
                        Text="Suggested merges" />
             <TextBlock x:Name="HeaderText"
                        Style="{StaticResource CaptionTextBlockStyle}"
@@ -47,6 +48,7 @@
                         <Grid Padding="12,10,12,10"
                               CornerRadius="10"
                               Background="#33141414"
+                              AutomationProperties.Name="{x:Bind Title}"
                               Opacity="{x:Bind RowOpacity, Mode=OneWay}">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="Auto" />
@@ -83,11 +85,13 @@
                                     Content="Different people"
                                     Margin="0,0,8,0"
                                     IsEnabled="{x:Bind ActionsEnabled, Mode=OneWay}"
+                                    AutomationProperties.HelpText="Mark this pair as different people so it isn't suggested again."
                                     Click="OnDifferentClicked" />
                             <Button Grid.Column="4"
                                     Content="Merge"
                                     Style="{StaticResource AccentButtonStyle}"
                                     IsEnabled="{x:Bind ActionsEnabled, Mode=OneWay}"
+                                    AutomationProperties.HelpText="Merge this pair of clusters into one person."
                                     Click="OnMergeClicked" />
                         </Grid>
                     </DataTemplate>

@@ -56,6 +56,7 @@ public sealed partial class BulkRenameSheet : UserControl
 
     private FrameworkElement BuildRow(RenamePlan plan)
     {
+        var currentName = Path.GetFileName(plan.CurrentPath);
         var grid = new Grid
         {
             ColumnSpacing = 10,
@@ -73,10 +74,11 @@ public sealed partial class BulkRenameSheet : UserControl
         };
         include.Checked += (_, _) => plan.Include = true;
         include.Unchecked += (_, _) => plan.Include = false;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(include, $"Include {currentName} in rename");
 
         var current = new TextBlock
         {
-            Text = Path.GetFileName(plan.CurrentPath),
+            Text = currentName,
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis,
             Style = (Style)Application.Current.Resources["BodyStrongTextBlockStyle"],
@@ -89,6 +91,7 @@ public sealed partial class BulkRenameSheet : UserControl
             PlaceholderText = "new filename",
         };
         proposed.TextChanged += (_, _) => plan.ProposedName = proposed.Text ?? string.Empty;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(proposed, $"New name for {currentName}");
 
         Grid.SetColumn(include, 0);
         Grid.SetColumn(current, 1);

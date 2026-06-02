@@ -34,7 +34,8 @@
                        FontWeight="SemiBold"
                        CharacterSpacing="40"
                        Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                       VerticalAlignment="Center" />
+                       VerticalAlignment="Center"
+                       AutomationProperties.HeadingLevel="Level2" />
             <Button Grid.Column="1"
                     x:Name="CollapseButton"
                     Click="OnCollapseClicked"
@@ -67,7 +68,8 @@
             <Button HorizontalAlignment="Stretch"
                     Click="OnPickClicked"
                     Height="40"
-                    Style="{StaticResource GoldButtonStyle}">
+                    Style="{StaticResource GoldButtonStyle}"
+                    AutomationProperties.Name="Pick a folder">
                 <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                     <FontIcon FontSize="14" Glyph="&#xE8B7;" />
                     <TextBlock Text="Pick a folder" FontWeight="SemiBold" />
@@ -84,7 +86,9 @@
                     BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
                     Background="{ThemeResource ControlFillColorDefaultBrush}"
                     CornerRadius="8"
-                    ToolTipService.ToolTip="Change folder (Ctrl+O)">
+                    ToolTipService.ToolTip="Change folder (Ctrl+O)"
+                    AutomationProperties.Name="Change folder"
+                    AutomationProperties.HelpText="Pick a different library folder (Ctrl+O)">
                 <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                     <FontIcon FontSize="12" Glyph="&#xE8DA;" Opacity="0.75" />
                     <TextBlock Text="Change folder…" Style="{StaticResource CaptionTextBlockStyle}" />
@@ -96,7 +100,8 @@
                     BorderThickness="1"
                     BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
                     Background="Transparent"
-                    CornerRadius="8">
+                    CornerRadius="8"
+                    AutomationProperties.Name="Clear folder">
                 <TextBlock Text="Clear folder"
                            Style="{StaticResource CaptionTextBlockStyle}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
@@ -108,7 +113,9 @@
                     BorderBrush="{ThemeResource DestructiveBorderBrush}"
                     Background="{ThemeResource DestructiveBackgroundBrush}"
                     CornerRadius="8"
-                    ToolTipService.ToolTip="Delete everything FileID has learned and reset to a clean slate. Your files and downloaded models are kept.">
+                    ToolTipService.ToolTip="Delete everything FileID has learned and reset to a clean slate. Your files and downloaded models are kept."
+                    AutomationProperties.Name="Wipe library"
+                    AutomationProperties.HelpText="Delete everything FileID has learned and reset to a clean slate. Your files and downloaded models are kept.">
                 <TextBlock Text="Wipe"
                            Style="{StaticResource CaptionTextBlockStyle}"
                            Foreground="{ThemeResource DestructiveTextBrush}" />
