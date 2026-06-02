@@ -393,7 +393,7 @@ public sealed partial class SidebarProcessingControl : UserControl
 
         // Reset foreground so a successful follow-up scan doesn't keep the
         // red text from the previous failed attempt.
-        IdleStatusText.Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"];
+        IdleStatusText.Foreground = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorSecondaryBrush");
 
         // enable on HasFolder alone. The previous version also
         // required `EngineClient.State == Ready`, which made the button

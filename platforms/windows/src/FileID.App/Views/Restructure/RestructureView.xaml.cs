@@ -579,7 +579,7 @@ public sealed partial class RestructureView : UserControl
             : $"Applied {r.Applied:N0}, failed {r.Failed:N0}. Check %LOCALAPPDATA%\\FileID\\logs\\.";
         if (r.Failed == 0 && r.Applied > 0)
         {
-            StepChip2Bg.Background = (Brush)Application.Current.Resources["GoldBrush"];
+            StepChip2Bg.Background = FileID.Services.ThemeHelper.GetBrushSafe("GoldBrush");
             StepChip2Bg.BorderThickness = new Thickness(0);
         }
     }
