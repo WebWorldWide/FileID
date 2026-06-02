@@ -160,6 +160,52 @@ jobs:
           }
           Write-Host "Charset OK: $($files.Count) .cs/.xaml files all UTF-8 BOM."
 
+      # Privacy gate — outbound-URL allowlist over the APP source. Parity with
+      # windows-engine.yml's source-URL scan: that scan globs all of
+      # platforms/windows/src (incl. app .cs/.xaml) but only RUNS when an
+      # engine-path change triggers windows-engine.yml — an app-only PR would
+      # bypass it. This step closes that gap so app-only changes are
+      # URL-scanned too. The allowlist + loopback exemption MUST stay in sync
+      # with windows-engine.yml (see shared/docs/DECISIONS.md to add a host).
+      - name: Privacy — source URL allowlist scan (x64 only)
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $allowedHosts = @(
+            "huggingface.co",
+            "github.com",
+            "developer.download.nvidia.com",
+            "developer.nvidia.com",
+            "schemas.microsoft.com",
+            "schemas.openxmlformats.org"
+          )
+          $sources = Get-ChildItem -Path src -Recurse -File `
+            -Include *.cs,*.xaml,*.xaml.cs |
+            Where-Object { $_.FullName -notmatch '\\(bin|obj|target|packages)\\' }
+          # Loopback is exempt: a 127.0.0.1 / localhost URL never leaves the
+          # machine (matches windows-engine.yml's rationale, DECISIONS V16.20).
+          $loopbackHosts = @("127.0.0.1", "localhost", "0.0.0.0", "::1")
+          $hits = @()
+          foreach ($file in $sources) {
+            $content = Get-Content -Raw $file.FullName
+            if (-not $content) { continue }
+            $matches = [regex]::Matches($content, 'https?://([a-zA-Z0-9._-]+)')
+            foreach ($m in $matches) {
+              $hostName = $m.Groups[1].Value.ToLowerInvariant()
+              if ($loopbackHosts -contains $hostName) { continue }
+              if ($allowedHosts -notcontains $hostName) {
+                $hits += "$($file.FullName): $($m.Value)"
+              }
+            }
+          }
+          Write-Host "App source files scanned: $($sources.Count)"
+          if ($hits.Count -gt 0) {
+            Write-Error "URLs found that are not on the allowlist:"
+            $hits | ForEach-Object { Write-Error "  $_" }
+            exit 1
+          }
+          Write-Host "All app source URLs are on the allowlist. ✅"
+
       - name: Vulnerability scan (x64 only)
         if: matrix.arch == 'x64'
         run: |
