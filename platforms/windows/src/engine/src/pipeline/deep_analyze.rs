@@ -269,6 +269,23 @@ async fn transcode_image_to_jpeg(
 ) -> anyhow::Result<std::path::PathBuf> {
     let p = path.to_path_buf();
     tokio::task::spawn_blocking(move || -> anyhow::Result<std::path::PathBuf> {
+        // Peek dimensions before decode so a tiny adversarial file that expands
+        // to a multi-GB raw buffer can't OOM this blocking thread — mirrors the
+        // MAX_DECODED_PIXELS guard in tagging::decode_image_sync_imagecrate.
+        const MAX_DECODED_PIXELS: u64 = 50_000_000;
+        let (pw, ph) = image::ImageReader::open(&p)
+            .map_err(|e| anyhow::anyhow!("open {}: {e}", p.display()))?
+            .with_guessed_format()
+            .map_err(|e| anyhow::anyhow!("guess format {}: {e}", p.display()))?
+            .into_dimensions()
+            .map_err(|e| anyhow::anyhow!("dimensions {}: {e}", p.display()))?;
+        let pixels = pw as u64 * ph as u64;
+        if pixels > MAX_DECODED_PIXELS {
+            anyhow::bail!(
+                "image dimensions {}×{} ({} pixels) exceed cap of {} — refusing to decode",
+                pw, ph, pixels, MAX_DECODED_PIXELS
+            );
+        }
         let img = image::open(&p)
             .map_err(|e| anyhow::anyhow!("decode {}: {e}", p.display()))?;
         let dest = std::env::temp_dir().join(format!("fileid-vlm-{}.jpg", uuid::Uuid::new_v4()));
