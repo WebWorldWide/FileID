@@ -10,6 +10,7 @@ pub(crate) mod hardware;
 pub(crate) mod prewarm;
 pub(crate) mod restructure;
 pub(crate) mod scan;
+pub(crate) mod thumbnail;
 pub(crate) mod trash;
 pub(crate) mod trash_log;
 pub(crate) mod wipe;

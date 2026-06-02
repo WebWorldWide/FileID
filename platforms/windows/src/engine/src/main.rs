@@ -769,6 +769,12 @@ async fn handle_line(
                 commands::wipe::handle_wipe_library(sink_c, db_c).await;
             });
         }
+        CommandPayload::GenerateVideoThumbnail(payload) => {
+            let sink_c = sink.clone();
+            tokio::spawn(async move {
+                commands::thumbnail::handle_generate_video_thumbnail(sink_c, payload).await;
+            });
+        }
     }
 }
 

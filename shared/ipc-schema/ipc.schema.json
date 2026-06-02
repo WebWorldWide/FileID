@@ -228,6 +228,15 @@
               "queryID": { "type": "string" }
             } } } },
 
+        { "type": "object", "required": ["generateVideoThumbnail"], "additionalProperties": false,
+          "properties": { "generateVideoThumbnail": { "type": "object", "additionalProperties": false,
+            "required": ["path"],
+            "description": "Generate a 192px JPEG thumbnail for a video on demand. Engine extracts a 25%-duration keyframe, resizes (long side = 192, aspect-preserved), JPEG- + base64-encodes it, and replies with a thumbnailGenerated event.",
+            "properties": {
+              "path": { "type": "string", "description": "Absolute filesystem path to the video file." },
+              "modifiedAt": { "type": ["number", "null"], "description": "File's modified-unix time (f64 seconds). Echoed back on the reply so the app can key its (path, modifiedAt) thumbnail cache. Optional." }
+            } } } },
+
         { "type": "object", "required": ["restoreFromTrash"], "additionalProperties": false,
           "properties": { "restoreFromTrash": { "type": "object", "additionalProperties": false,
             "required": ["batchID"],
@@ -305,7 +314,8 @@
             }
           }
         },
-        { "type": "object", "required": ["libraryWiped"], "additionalProperties": false, "properties": { "libraryWiped": { "$ref": "#/$defs/SinglePositional/LibraryWiped" } } }
+        { "type": "object", "required": ["libraryWiped"], "additionalProperties": false, "properties": { "libraryWiped": { "$ref": "#/$defs/SinglePositional/LibraryWiped" } } },
+        { "type": "object", "required": ["thumbnailGenerated"],     "additionalProperties": false, "properties": { "thumbnailGenerated":     { "$ref": "#/$defs/SinglePositional/ThumbnailGenerated" } } }
       ]
     },
 
@@ -755,6 +765,25 @@
             "properties": {
               "ok":      { "type": "boolean" },
               "message": { "type": ["string", "null"] }
+            }
+          }
+        }
+      },
+
+      "ThumbnailGenerated": {
+        "description": "Reply to generateVideoThumbnail. `bytes` is a base64-encoded 192px JPEG (aspect-preserved, long side = 192) — a base64 string, NOT a number array. `modifiedAt` is echoed from the request so the app can write the bytes under its (path, modifiedAt) cache key.",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["_0"],
+        "properties": {
+          "_0": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "bytes"],
+            "properties": {
+              "path":       { "type": "string" },
+              "modifiedAt": { "type": ["number", "null"] },
+              "bytes":      { "type": "string", "description": "Base64-encoded 192px JPEG." }
             }
           }
         }

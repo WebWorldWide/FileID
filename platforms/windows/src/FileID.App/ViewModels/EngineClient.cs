@@ -294,6 +294,16 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         private set => Set(ref _lastMergeSuggestions, value);
     }
 
+    /// <summary>Most recent out-of-process video thumbnail rendered by the
+    /// engine. ThumbnailService observes this (via PropertyChanged) to write
+    /// the base64 JPEG under its (Path, ModifiedAt) cache key.</summary>
+    private ThumbnailGenerated? _lastThumbnailGenerated;
+    public ThumbnailGenerated? LastThumbnailGenerated
+    {
+        get => _lastThumbnailGenerated;
+        private set => Set(ref _lastThumbnailGenerated, value);
+    }
+
     /// <summary>latest CUDA/cuDNN re-probe result from the engine.
     /// Settings → Performance "Verify install" binds to this to flip the
     /// card to ✓ or surface a diagnostics string on failure.</summary>
@@ -1136,6 +1146,10 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         break;
                     case LibraryWipedEvent lw:
                         LastLibraryWiped = lw.Result;
+                        break;
+                    case ThumbnailGeneratedEvent tg:
+                        LastThumbnailGenerated = tg.Generated;
+                        DebugLog.Info($"[IPC IN] thumbnailGenerated path={PathRedactor.Redact(tg.Generated.Path)} ({tg.Generated.Bytes.Length} b64 chars)");
                         break;
                 }
             }

@@ -444,4 +444,12 @@ internal sealed partial class EngineClient
     public Task RevertMergeAsync(long sourcePersonId, long destPersonId, IReadOnlyList<long> faceIdsToRevert) =>
         SendCommandAsync(new RevertMergeCommand(sourcePersonId, destPersonId, faceIdsToRevert));
 
+    /// <summary>Ask the engine to render a video keyframe out-of-process; it
+    /// replies with a <c>thumbnailGenerated</c> event that lands on
+    /// <see cref="LastThumbnailGenerated"/>. <paramref name="modifiedAt"/> is
+    /// the file's modified-unix time, echoed back so ThumbnailService can
+    /// write the result under its (path, modifiedAt) cache key.</summary>
+    public Task GenerateVideoThumbnailAsync(string path, double? modifiedAt) =>
+        SendCommandAsync(new GenerateVideoThumbnailCommand(path, modifiedAt));
+
 }
