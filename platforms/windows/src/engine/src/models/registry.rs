@@ -49,8 +49,12 @@ pub enum LookupResult {
 /// Conventions:
 /// - All URLs MUST be on huggingface.co for our privacy story
 ///   (the only egress the engine performs).
-/// - SHA256s are optional but strongly preferred — the downloader
-///   verifies when present, skips when absent.
+/// - SHA256 is MANDATORY for every FileEntry — the downloader verifies the
+///   downloaded bytes against it (a compromised mirror serving a malicious
+///   .onnx/.gguf/.dll is RCE during inference). CI fails the build on any
+///   unpinned (`None`) entry. The pinned value is the `oid sha256:` from the HF
+///   LFS pointer (`GET <repo>/raw/<rev>/<path>`) or the sha256 of the
+///   GitHub/NVIDIA release asset.
 /// - `dest` is absolute under `%LOCALAPPDATA%\FileID\Models\...`.
 pub fn lookup_full(model_kind: &str) -> LookupResult {
     let models_root = match paths::models_dir() {
@@ -82,14 +86,14 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                         url: "https://huggingface.co/opencv/face_detection_yunet/resolve/main/face_detection_yunet_2023mar.onnx"
                             .to_string(),
                         dest: yunet_dir.join("face_detection_yunet_2023mar.onnx"),
-                        sha256: None,
+                        sha256: Some("8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4".into()),
                         approx_bytes: 232_589,
                     },
                     FileEntry {
                         url: "https://huggingface.co/opencv/face_recognition_sface/resolve/main/face_recognition_sface_2021dec.onnx"
                             .to_string(),
                         dest: sface_dir.join("face_recognition_sface_2021dec.onnx"),
-                        sha256: None,
+                        sha256: Some("0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79".into()),
                         approx_bytes: 38_696_353,
                     },
                 ],
@@ -114,7 +118,7 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                     url: "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/vision_model.onnx"
                         .to_string(),
                     dest: dir.join("mobileclip_s2_image.onnx"),
-                    sha256: None,
+                    sha256: Some("fd6e1402a588279d1723c7534d4bcba5bc0b14b47dfab0e46f8c47b8270d7d40".into()),
                     approx_bytes: 351_685_709,
                 }],
             })
@@ -137,21 +141,21 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                         url: "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/text_model.onnx"
                             .to_string(),
                         dest: dir.join("clip_text.onnx"),
-                        sha256: None,
+                        sha256: Some("3f6571f5bad13a97c469c1622e1cfc4d9aef78b79fdbfcff804ca357bfada8cc".into()),
                         approx_bytes: 254_058_553,
                     },
                     FileEntry {
                         url: "https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/vocab.json"
                             .to_string(),
                         dest: dir.join("vocab.json"),
-                        sha256: None,
+                        sha256: Some("5047b556ce86ccaf6aa22b3ffccfc52d391ea4accdab9c2f2407da5b742d4363".into()),
                         approx_bytes: 1_000_000,
                     },
                     FileEntry {
                         url: "https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/merges.txt"
                             .to_string(),
                         dest: dir.join("merges.txt"),
-                        sha256: None,
+                        sha256: Some("f526393189112391ce6f9795d4695f704121ce452c3aad1f5335cc41337eba85".into()),
                         approx_bytes: 525_000,
                     },
                 ],
@@ -177,7 +181,7 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                         url: "https://huggingface.co/Web-World-Wide/ram-plus-onnx/resolve/main/ram_plus.onnx"
                             .to_string(),
                         dest: dir.join("ram_plus.onnx"),
-                        sha256: None,
+                        sha256: Some("86058ac8881128540084d29f2b83cd1c4b4214350a8658addad35a877634f7d9".into()),
                         // fp16 export is ~882 MB: RAM++ bakes the 4585×51 frozen
                         // tag-description embeddings into the graph as constants.
                         approx_bytes: 925_600_000,
@@ -186,14 +190,14 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                         url: "https://huggingface.co/Web-World-Wide/ram-plus-onnx/resolve/main/ram_plus_tags.txt"
                             .to_string(),
                         dest: dir.join("ram_plus_tags.txt"),
-                        sha256: None,
+                        sha256: Some("78c9db7838690addaddcb7b3f7dc724b6798f0d6eff7d67c106e8ad8f3f3e69e".into()),
                         approx_bytes: 47_000,
                     },
                     FileEntry {
                         url: "https://huggingface.co/Web-World-Wide/ram-plus-onnx/resolve/main/ram_plus_thresholds.txt"
                             .to_string(),
                         dest: dir.join("ram_plus_thresholds.txt"),
-                        sha256: None,
+                        sha256: Some("7a69cbf2875161aefbc7db174f726a74eb1cebbd2e4538cef2e20fdc7eabb4e2".into()),
                         approx_bytes: 46_000,
                     },
                 ],
@@ -216,14 +220,14 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                         url: "https://huggingface.co/bartowski/mistralai_Mistral-Small-3.2-24B-Instruct-2506-GGUF/resolve/main/mistralai_Mistral-Small-3.2-24B-Instruct-2506-Q4_K_M.gguf"
                             .to_string(),
                         dest: dir.join("model.gguf"),
-                        sha256: None,
+                        sha256: Some("80f5bda68f156f12650ca03a0a2dbfae06a215ac41caa773b8631a479f82415e".into()),
                         approx_bytes: 14_300_000_000,
                     },
                     FileEntry {
                         url: "https://huggingface.co/bartowski/mistralai_Mistral-Small-3.2-24B-Instruct-2506-GGUF/resolve/main/mmproj-mistralai_Mistral-Small-3.2-24B-Instruct-2506-f16.gguf"
                             .to_string(),
                         dest: dir.join("mmproj.gguf"),
-                        sha256: None,
+                        sha256: Some("e41cc0321dbd0d7e42cdada75862a5ed0b221263313b0f1b55b0b696dfec8647".into()),
                         approx_bytes: 878_000_000,
                     },
                 ],
@@ -239,14 +243,14 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                         url: "https://huggingface.co/ggml-org/Qwen2.5-VL-7B-Instruct-GGUF/resolve/main/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf"
                             .to_string(),
                         dest: dir.join("model.gguf"),
-                        sha256: None,
+                        sha256: Some("9258bf05b12686d097ff3b6b18d968ab393649780aa2b3cd67fec43d50554392".into()),
                         approx_bytes: 4_700_000_000,
                     },
                     FileEntry {
                         url: "https://huggingface.co/ggml-org/Qwen2.5-VL-7B-Instruct-GGUF/resolve/main/mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf"
                             .to_string(),
                         dest: dir.join("mmproj.gguf"),
-                        sha256: None,
+                        sha256: Some("c24a7f5fcfc68286f0a217023b6738e73bea4f11787a43e8238d4bb1b8604cde".into()),
                         approx_bytes: 1_400_000_000,
                     },
                 ],
@@ -262,7 +266,7 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                         url: "https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf"
                             .to_string(),
                         dest: dir.join("model.gguf"),
-                        sha256: None,
+                        sha256: Some("882e8d2db44dc554fb0ea5077cb7e4bc49e7342a1f0da57901c0802ea21a0863".into()),
                         approx_bytes: 2_500_000_000,
                     },
                     FileEntry {
@@ -272,7 +276,7 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                         url: "https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF/resolve/main/mmproj-model-f16.gguf"
                             .to_string(),
                         dest: dir.join("mmproj.gguf"),
-                        sha256: None,
+                        sha256: Some("8c0fb064b019a6972856aaae2c7e4792858af3ca4561be2dbf649123ba6c40cb".into()),
                         approx_bytes: 851_251_104,
                     },
                 ],
@@ -301,7 +305,7 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                     url: "https://github.com/ggml-org/llama.cpp/releases/download/b9254/llama-b9254-bin-win-vulkan-x64.zip"
                         .to_string(),
                     dest: dir.join("llama-runtime.zip"),
-                    sha256: None,
+                    sha256: Some("45d276bdf73c80c795860e8421fe27ee4b1aa0a4d0916fe60dfc90dca1d4117b".into()),
                     approx_bytes: 32_681_387,
                 }],
             })
@@ -329,7 +333,7 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                     url: "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.5.1.17_cuda12-archive.zip"
                         .to_string(),
                     dest: dir.join("cudnn-runtime.zip"),
-                    sha256: None,
+                    sha256: Some("3a4cecc8b6d6aa7f6777620e6f2c129b76be635357c4506f2c4ccdbe0e2a1641".into()),
                     approx_bytes: 430_000_000,
                 }],
             })
@@ -358,7 +362,7 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                     url: "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-x64-gpu-1.22.0.zip"
                         .to_string(),
                     dest: dir.join("ort-cuda.zip"),
-                    sha256: None,
+                    sha256: Some("5b5241716b2628c1ab5e79ee620be767531021149ee68f30fc46c16263fb94dd".into()),
                     approx_bytes: 312_700_000,
                 }],
             })
@@ -386,7 +390,7 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                     url: "https://huggingface.co/Web-World-Wide/OpenVINO/resolve/main/ort-openvino-win-x64-1.22.0.zip"
                         .to_string(),
                     dest: dir.join("ort-openvino.zip"),
-                    sha256: None,
+                    sha256: Some("de3d73e9fd9bc33931343ec4e11c21bc8fe5d1ae0921e24ffc574de171118154".into()),
                     approx_bytes: 41_300_000,
                 }],
             })
@@ -414,7 +418,7 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                         url: "https://github.com/ggml-org/llama.cpp/releases/download/b9254/llama-b9254-bin-win-cuda-12.4-x64.zip"
                             .to_string(),
                         dest: dir.join("llama-runtime.zip"),
-                        sha256: None,
+                        sha256: Some("61280c0e77da6422e0c07e9c930a48903d403cd6f577fe330c1bf94cb7495889".into()),
                         approx_bytes: 259_875_510,
                     },
                     // CUDA runtime DLLs (cudart / cublas). b9254 ships these as a
@@ -428,7 +432,7 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                         url: "https://github.com/ggml-org/llama.cpp/releases/download/b9254/cudart-llama-bin-win-cuda-12.4-x64.zip"
                             .to_string(),
                         dest: dir.join("cudart.zip"),
-                        sha256: None,
+                        sha256: Some("8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6".into()),
                         approx_bytes: 391_443_627,
                     },
                 ],
@@ -447,13 +451,13 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                     FileEntry {
                         url: "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model.onnx".to_string(),
                         dest: dir.join("bge_small.onnx"),
-                        sha256: None,
+                        sha256: Some("828e1496d7fabb79cfa4dcd84fa38625c0d3d21da474a00f08db0f559940cf35".into()),
                         approx_bytes: 135_000_000,
                     },
                     FileEntry {
                         url: "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/vocab.txt".to_string(),
                         dest: dir.join("vocab.txt"),
-                        sha256: None,
+                        sha256: Some("07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3".into()),
                         approx_bytes: 232_000,
                     },
                 ],
@@ -476,37 +480,37 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                     FileEntry {
                         url: "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/onnx/vision_encoder.onnx".to_string(),
                         dest: dir.join("vision_encoder.onnx"),
-                        sha256: None,
+                        sha256: Some("2c7464fce495ea43b415b48afe7dbe84a9ebbe0cfe3c31fdd81c6dd66b39ff75".into()),
                         approx_bytes: 110_000_000,
                     },
                     FileEntry {
                         url: "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/onnx/embed_tokens.onnx".to_string(),
                         dest: dir.join("embed_tokens.onnx"),
-                        sha256: None,
+                        sha256: Some("fec0fd20276af861afb6a23a11544bf1378c05e2a41001b610cc281e244c4b20".into()),
                         approx_bytes: 25_000_000,
                     },
                     FileEntry {
                         url: "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/onnx/encoder_model.onnx".to_string(),
                         dest: dir.join("encoder_model.onnx"),
-                        sha256: None,
+                        sha256: Some("b155b5a0e56a4244c62060751bb1b70dfe481015d0dbfa6d19b1912d9e58da0d".into()),
                         approx_bytes: 110_000_000,
                     },
                     FileEntry {
                         url: "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/onnx/decoder_model_merged.onnx".to_string(),
                         dest: dir.join("decoder_model_merged.onnx"),
-                        sha256: None,
+                        sha256: Some("6d6e1266d7f94f5d4ec9cc07d9c1f7b3e47049c9b0de7bbe82a91e62dfd152af".into()),
                         approx_bytes: 200_000_000,
                     },
                     FileEntry {
                         url: "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/tokenizer.json".to_string(),
                         dest: dir.join("tokenizer.json"),
-                        sha256: None,
+                        sha256: Some("d69dcdb2323e124ac4f800cb9863ddccea0d7bb11e16125e8df3bd60f2f8aeac".into()),
                         approx_bytes: 5_000_000,
                     },
                     FileEntry {
                         url: "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/config.json".to_string(),
                         dest: dir.join("config.json"),
-                        sha256: None,
+                        sha256: Some("74efbe2299e13cfcc9e083861eae4a943d76f784ddd595d85e779d189cf0a574".into()),
                         approx_bytes: 10_000,
                     },
                 ],
