@@ -21,6 +21,28 @@ pub(crate) async fn handle_apply_tags(
     payload: ipc::ApplyTagsPayload,
 ) {
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<BulkActionResult> {
+        // Bound the request so a pathological payload can't make the handler do
+        // quadratic work (tags × files) under the DB lock or balloon the messages
+        // Vec. The IPC peer is the trusted sibling app, but a bug there must not
+        // be able to wedge the engine.
+        const MAX_TAGS: usize = 2000;
+        const MAX_FILES: usize = 100_000;
+        if payload.tags.len() > MAX_TAGS || payload.file_ids.len() > MAX_FILES {
+            return Ok(BulkActionResult {
+                action: "applyTags".into(),
+                succeeded: 0,
+                failed: payload.file_ids.len().min(u32::MAX as usize) as u32,
+                messages: vec![BulkActionItem {
+                    file_id: None,
+                    ok: false,
+                    message: Some(format!(
+                        "Request too large: {} tags / {} files (max {MAX_TAGS} / {MAX_FILES})",
+                        payload.tags.len(),
+                        payload.file_ids.len()
+                    )),
+                }],
+            });
+        }
         let mut succeeded = 0u32;
         let mut failed = 0u32;
         let mut messages = Vec::new();
@@ -387,6 +409,14 @@ pub(crate) async fn handle_merge_clusters(
             rusqlite::params![dst, src],
         )? as u32;
         let _ = tx.execute("DELETE FROM persons WHERE id = ?1", rusqlite::params![src]);
+        // Clean up face-verification verdicts referencing the merged-away source
+        // person — otherwise findMergeSuggestions JOINs on a now-deleted persons
+        // row and surfaces stale suggestions (orphan rows that never GC). The
+        // "src != X" verdict is moot once src is folded into dst.
+        let _ = tx.execute(
+            "DELETE FROM face_verifications WHERE person_a = ?1 OR person_b = ?1",
+            rusqlite::params![src],
+        );
         // Recompute the destination's file_count AND representative_face_id
         // (highest-quality embedded face now in the cluster) so the People
         // card + suggestion anchor reflect the combined membership rather than

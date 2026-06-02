@@ -361,7 +361,9 @@ impl DbWriter {
                 // leaving valid prior text untouched on the common skipped
                 // sessions.
                 if f.ocr_stage_ran {
-                    let _ = ocr_fts_delete.execute(params![file_id]);
+                    ocr_fts_delete
+                        .execute(params![file_id])
+                        .with_context(|| format!("ocr_fts delete for {}", path_text))?;
                     ocr_text_delete
                         .execute(params![file_id])
                         .with_context(|| format!("ocr_text delete for {}", path_text))?;
@@ -380,7 +382,9 @@ impl DbWriter {
                 // Phase 4: document text + FTS5 — same stage-ran-gated
                 // delete-then-conditional-insert as ocr_text/ocr_fts above (#11).
                 if f.doc_stage_ran {
-                    let _ = doc_fts_delete.execute(params![file_id]);
+                    doc_fts_delete
+                        .execute(params![file_id])
+                        .with_context(|| format!("doc_fts delete for {}", path_text))?;
                     doc_text_delete
                         .execute(params![file_id])
                         .with_context(|| format!("doc_text delete for {}", path_text))?;

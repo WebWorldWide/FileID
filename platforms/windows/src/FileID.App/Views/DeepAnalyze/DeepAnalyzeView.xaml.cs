@@ -509,7 +509,7 @@ public sealed partial class DeepAnalyzeView : UserControl
     {
         try
         {
-            var store = new Services.ReadStore(Services.AppPaths.DbPath);
+            using var store = new Services.ReadStore(Services.AppPaths.DbPath);
             await store.OpenAsync();
             var pending = await store.PendingProposedRenamesAsync(500, System.Threading.CancellationToken.None);
             if (pending.Count == 0)
@@ -552,7 +552,6 @@ public sealed partial class DeepAnalyzeView : UserControl
             var remaining = await store.PendingProposedRenameCountAsync(System.Threading.CancellationToken.None);
             _proposedNameCount = remaining;
             SyncProposedNamesPill();
-            store.Dispose();
         }
         catch (Exception ex)
         {
