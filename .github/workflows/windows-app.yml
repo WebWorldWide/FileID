@@ -138,6 +138,28 @@ jobs:
         if: matrix.arch == 'x64'
         run: dotnet format FileID.sln --verify-no-changes
 
+      - name: Charset — UTF-8 BOM on .cs/.xaml (x64 only)
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        # CLAUDE.md convention: .cs/.xaml ship as UTF-8 WITH a BOM. `dotnet format`
+        # enforces it for .cs but NOT .xaml, so a .xaml could silently drop the BOM
+        # (3 had — normalized in this commit). Fail the build if any does, so the
+        # charset contract can't drift back.
+        run: |
+          $files = Get-ChildItem -Path src -Recurse -Include *.cs,*.xaml -File |
+            Where-Object { $_.FullName -notmatch '[\\/](obj|bin)[\\/]' }
+          $bad = @()
+          foreach ($f in $files) {
+            $b = [System.IO.File]::ReadAllBytes($f.FullName)
+            if ($b.Length -lt 3 -or $b[0] -ne 0xEF -or $b[1] -ne 0xBB -or $b[2] -ne 0xBF) { $bad += $f.FullName }
+          }
+          if ($bad.Count -gt 0) {
+            Write-Host "::error::$($bad.Count) .cs/.xaml file(s) missing the required UTF-8 BOM:"
+            $bad | ForEach-Object { Write-Host "  $_" }
+            exit 1
+          }
+          Write-Host "Charset OK: $($files.Count) .cs/.xaml files all UTF-8 BOM."
+
       - name: Vulnerability scan (x64 only)
         if: matrix.arch == 'x64'
         run: |
