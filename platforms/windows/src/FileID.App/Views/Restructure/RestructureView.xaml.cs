@@ -328,7 +328,7 @@ public sealed partial class RestructureView : UserControl
             ? "Originals stay put - applying creates shortcuts you can review."
             : "Generate a plan to enable Apply.";
         StepChip1Bg.Background = hasWork
-            ? (Brush)Application.Current.Resources["GoldBrush"]
+            ? FileID.Services.ThemeHelper.GetBrushSafe("GoldBrush")
             : new SolidColorBrush(Windows.UI.Color.FromArgb(0x44, 0xFF, 0xCC, 0x00));
     }
 
