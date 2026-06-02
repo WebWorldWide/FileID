@@ -8,6 +8,18 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-02 (later 4) — Production-hardening pass cont'd: WS1b/WS3/WS7/WS-CD (5 more verified merges)
+
+Continued the v1.0 plan via investigate→implement→adversarial-verify→gate→merge workflows. All headless-gate-green (engine clippy/fmt/test + app build/format/test), pushed to `main`, CI green:
+
+- **WS1b on-demand video thumbnails** (`91b637e`) — new `generateVideoThumbnail` command + `thumbnailGenerated` event (schema + Rust + C#, round-trip-tested). Engine handler runs `keyframe_25pct` out-of-process, fits-192 + JPEG + base64, echoes `modifiedAt` so the app writes ThumbnailDiskCache with the SAME key the tile computes; ThumbnailService correlates the response back to the awaiting tile (20s timeout). Restores video tiles for the EXISTING library (no rescan) without re-exposing the crash class. Verified by a 3-lens adversarial pass (cache-key round-trip, correlation lifecycle, engine panic-safety) — all clean.
+- **WS3 ProposeRenames** (`cb208cd`) — the bound-but-ignored checkbox now functions: new `AnalyzeMode::CaptionAndTags` (caption+tags, rename gate excluded) chosen when `!tags_only && !proposeRenames`; `proposeRenames` threaded through schema/Rust/C#/view, default true (no regression).
+- **WS7 18 medium/polish fixes** (`abc06a9`) — a fresh 6-lens audit of current main (refute-by-default, adversarially verified) → 19 findings, 18 fixed, 1 dropped as a false positive (SuggestedMerges "transitive dangling" — mergeClusters deletes the source, dest survives). ThumbnailDiskCache (.tmp-orphan, LRU race, LastAccessTicks×2); engine deep_analyze silent-returns + batch_clip `.expect()`; People mark-unknown silent-fail; WelcomeSheet persistence-not-awaited; remaining GoldBrush/style indexer reads → ThemeHelper; DeepAnalyze warm-up timeout; installer ready-timeout 30→75s.
+- **WS-CD pt.1** (`50d73f9`) — `publish-bundle.ps1` signtool `$LASTEXITCODE` check (THE ships-unsigned-silently blocker) + `CI_RELEASE` skip-guards + per-MSI signature verify; `release.yml` tag-triggered Windows CD, ready-but-dormant until the EV cert. (PS parse-clean, YAML valid; CI doesn't build the installer so unverifiable beyond that.)
+- **WS3 resumable-scan** — investigated + found ALREADY IMPLEMENTED (discovery skip-set on `scanned_at >= modified_at`); the planned `last_file_index` checkpoint is redundant and deliberately not built (DECISIONS 2026-06-02). WS3 complete.
+
+**Plan status:** WS0/WS1(a,b,c)/WS2/WS3/WS4-a11y/WS5-mem/WS7/WS-CD-pt1 all merged + CI-green. Remaining is externally blocked or needs hardware/toolchain not in this env (NEXT.md "(later 4)"): WS5 256-export (Py 3.11–3.13), WS6 macOS lockstep (a Mac), WS-CD EV cert + WiX-build (RollbackBoundary/version) + network SHA256 population + push-verify CI-gate hardening; plus hardware-verify-only polish (per-monitor DPI, keyboard-E2E UI-automation, HNSW/perceived-speed perf, the optional scan-recovery banner).
+
 ## 2026-06-02 (later 3) — Production-hardening pass: 6 verified merges (plan `majestic-foraging-tome.md`)
 
 Drove the approved v1.0 production plan via file-disjoint Workflow fan-outs + verified per-workstream merges. Each workstream: headless gate matching CI exactly (engine `cargo clippy --all-targets -D warnings` / `fmt --check` / `test` from the engine dir for the pinned 1.90 toolchain; app `dotnet build` / `format --verify-no-changes` / `test`), then merge to `main`, branch deleted, untracked strays kept out of every commit. Six landed, all green:
