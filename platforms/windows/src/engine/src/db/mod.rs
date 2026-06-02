@@ -58,6 +58,21 @@ pub fn open_writer(db_path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Run `PRAGMA quick_check` on the writer connection. Returns `Ok(())` when the
+/// database is structurally sound, or `Err(detail)` carrying the first problem
+/// SQLite reports. quick_check is the fast cousin of `integrity_check` — it
+/// skips the expensive index-content cross-check, so it's cheap enough to run
+/// at every startup yet still catches a torn page / truncated file before the
+/// app reads garbage. Bounded to the first error (`quick_check(1)`) so a badly
+/// corrupted large library can't hang startup enumerating every fault.
+pub fn quick_check(conn: &Connection) -> std::result::Result<(), String> {
+    match conn.query_row("PRAGMA quick_check(1)", [], |r| r.get::<_, String>(0)) {
+        Ok(s) if s.eq_ignore_ascii_case("ok") => Ok(()),
+        Ok(detail) => Err(detail),
+        Err(e) => Err(format!("integrity check could not run: {e}")),
+    }
+}
+
 /// Drain WAL into the main DB file. Called at shutdown to keep the on-disk
 /// state self-contained — `PRAGMA wal_checkpoint(TRUNCATE)`.
 ///
