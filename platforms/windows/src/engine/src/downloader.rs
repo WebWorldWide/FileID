@@ -62,12 +62,42 @@ fn http_semaphore() -> &'static Arc<tokio::sync::Semaphore> {
 ///                        original "reading chunk" failure on the
 ///                        Welcome sheet.
 pub fn build_shared_client() -> Result<Arc<reqwest::Client>> {
+    // Restrict redirects to the host families we actually download from (HF +
+    // its CDN, GitHub + its objects CDN, NVIDIA). reqwest's default follows up to
+    // 10 redirects to ANY host — an on-path attacker could bounce a 302 chain to
+    // an off-allowlist host, dodging the source-URL allowlist that only checks
+    // the ORIGINAL URL. Suffix-match with a leading dot for subdomains so
+    // "evilhuggingface.co" never matches ".huggingface.co".
+    const REDIRECT_ALLOWED: &[&str] = &[
+        "huggingface.co",
+        "hf.co",
+        "github.com",
+        "githubusercontent.com",
+        "download.nvidia.com",
+        "developer.nvidia.com",
+    ];
+    let redirect_policy = reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 10 {
+            return attempt.stop();
+        }
+        match attempt.url().host_str() {
+            Some(h)
+                if REDIRECT_ALLOWED
+                    .iter()
+                    .any(|d| h == *d || h.ends_with(&format!(".{d}"))) =>
+            {
+                attempt.follow()
+            }
+            _ => attempt.stop(),
+        }
+    });
     let c = reqwest::Client::builder()
         .user_agent("FileID/0.1 (+local)")
         .pool_idle_timeout(Some(Duration::from_secs(60)))
         .pool_max_idle_per_host(PARALLEL_PARTS * 2)
         .connect_timeout(Duration::from_secs(30))
         .read_timeout(Duration::from_secs(120))
+        .redirect(redirect_policy)
         .build()
         .context("building shared reqwest client")?;
     Ok(Arc::new(c))
