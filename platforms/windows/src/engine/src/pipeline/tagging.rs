@@ -60,6 +60,13 @@ static STATS_CLIP_US: AtomicU64 = AtomicU64::new(0);
 static STATS_OCR_US: AtomicU64 = AtomicU64::new(0);
 static STATS_OCR_RAN: AtomicU64 = AtomicU64::new(0);
 static STATS_TOTAL_US: AtomicU64 = AtomicU64::new(0);
+// HW-4 diagnostics: RAM++ inference time (was unaccounted — folded into the
+// total_us gap) and the time spent WAITING to acquire `vision_sem` (both the
+// faces and RAM++ acquisitions). Together with vision_us/clip_us these explain
+// where per-file wall time actually goes, so the throughput bottleneck can be
+// fixed with data rather than guesses.
+static STATS_RAMPLUS_US: AtomicU64 = AtomicU64::new(0);
+static STATS_VISION_WAIT_US: AtomicU64 = AtomicU64::new(0);
 const STATS_PERIOD: u64 = 100;
 
 fn record_stage(stage: &AtomicU64, started: Instant) {
@@ -79,6 +86,8 @@ fn maybe_emit_stats() {
     let vision = STATS_VISION_US.load(Ordering::Relaxed) / n;
     let clip = STATS_CLIP_US.load(Ordering::Relaxed) / n;
     let total = STATS_TOTAL_US.load(Ordering::Relaxed) / n;
+    let ramplus = STATS_RAMPLUS_US.load(Ordering::Relaxed) / n;
+    let vision_wait = STATS_VISION_WAIT_US.load(Ordering::Relaxed) / n;
     let ocr_ran = STATS_OCR_RAN.load(Ordering::Relaxed);
     let ocr_avg = STATS_OCR_US
         .load(Ordering::Relaxed)
@@ -99,6 +108,8 @@ fn maybe_emit_stats() {
         ocr_us = ocr_avg,
         ocr_ran = ocr_ran,
         total_us = total,
+        ramplus_us = ramplus,
+        vision_wait_us = vision_wait,
         clip_batches = batch_count,
         clip_avg_batch_x10 = avg_batch,
         "[STATS] per-file avg microseconds"
@@ -253,6 +264,12 @@ pub struct ModelStack {
     /// populated) → tagging falls back to the CLIP zero-shot `scene_labeler`,
     /// so there is zero regression when RAM++ isn't installed.
     pub ram_plus: Option<Vec<Mutex<crate::models::ram_plus::RamPlusTagger>>>,
+    /// RAM++ batch-coordinator path (HW-4): one Session driven with batched
+    /// (N,3,384,384) tensors, filling the GPU kernels that a single 384² image
+    /// leaves <1% utilized. Spawned only when `FILEID_RAMPLUS_BATCH_SIZE > 1`
+    /// AND a dynamic-batch ONNX is installed; otherwise `ram_plus` (the
+    /// single-image pool) is used. When this is `Some`, `ram_plus` is `None`.
+    pub ram_plus_batch: Option<Arc<crate::models::ram_plus_batch::RamPlusBatchCoordinator>>,
 }
 
 /// Aspirational pool size — actual cap is `min(this, vram_cap, worker_count)`
@@ -277,6 +294,13 @@ const MODEL_POOL_SIZE: usize = 4;
 /// fragmentation under longer-running scans. On a 6 GB card the gate now
 /// clamps the ArcFace/SCRFD/RAM++ pools to 2.
 const VRAM_PER_POOL_INSTANCE_MB: u64 = 2000;
+// HW-4 (RTX 2060, 2026-06-01): a CUDA-specific smaller estimate to fit pool=3
+// was TESTED on hardware and REGRESSED throughput (5.1→3.9 files/s, RAM++
+// 670→812 ms/file, peak RSS 5.7→7.6 GB) — 3 RAM++ Swin-L sessions over-subscribe
+// the single GPU and thrash rather than parallelize. RAM++ throughput is
+// GPU-COMPUTE-bound, not concurrency-bound; the only real win is BATCHED RAM++
+// inference (a dynamic-axis ONNX re-export, see NEXT.md) or a lighter tagger.
+// Do NOT raise the pool to "fix" throughput — it makes it worse.
 
 /// Always-reserved VRAM headroom (Windows desktop compositor + other
 /// apps). Subtracted from the dedicated total before dividing by
@@ -285,6 +309,15 @@ const VRAM_PER_POOL_INSTANCE_MB: u64 = 2000;
 /// ArcFace/SCRFD pools to 3 sessions. (MobileCLIP defaults to the
 /// single-Session batch path, so this clamp mainly bounds the face models.)
 const VRAM_RESERVED_MB: u64 = 1500;
+
+/// ENG-71: ceiling on the pre-allocation HINT for the per-file read buffer.
+/// `file.size_bytes` comes from a filesystem stat; a bogus/huge value (sparse
+/// file, corrupt metadata, or a misclassified multi-GB blob) makes
+/// `Vec::with_capacity(size)` abort the whole process on the failed allocation
+/// — across all decoder threads. Clamping the hint prevents the abort;
+/// `read_to_end` still grows the Vec to the file's true length, so the
+/// hash/EXIF/decode of a normally-sized file is byte-for-byte unchanged.
+const MAX_PREALLOC_BYTES: usize = 64 * 1024 * 1024;
 
 fn resolve_pool_size(worker_count: usize) -> usize {
     let env_override = std::env::var("FILEID_MODEL_POOL_SIZE")
@@ -441,20 +474,50 @@ impl ModelStack {
         // yet populated) yields None and tagging falls back to CLIP scene-tags
         // (zero regression). The tag-list path is captured into the loader
         // closure since `load_pool` passes only the resolved ONNX path.
-        let ram_plus = match crate::models::ram_plus::default_tags_path() {
-            Ok(tags_path) => load_pool(
-                "RAM++",
-                pool_size,
-                crate::models::ram_plus::default_onnx_path(),
-                move |p| crate::models::ram_plus::RamPlusTagger::load(p, tags_path.clone()),
-            ),
+        // RAM++ default = single-image pool. When FILEID_RAMPLUS_BATCH_SIZE > 1
+        // AND a dynamic-batch ONNX is installed, use the batch coordinator
+        // instead (one Session, batched forward — the HW-4 throughput fix). The
+        // two paths are mutually exclusive.
+        let ram_batch_size =
+            crate::models::ram_plus_batch::RamPlusBatchCoordinator::configured_batch_size();
+        let (ram_plus, ram_plus_batch) = match crate::models::ram_plus::default_tags_path() {
+            Ok(tags_path) if ram_batch_size > 1 => {
+                match crate::models::ram_plus::default_onnx_path() {
+                    Ok(p) if p.exists() => {
+                        match crate::models::ram_plus::RamPlusTagger::load(p.clone(), tags_path) {
+                            Ok(tagger) => {
+                                tracing::info!(model = "RAM++", path = %p.display(), batch_size = ram_batch_size, "model loaded (batch-coordinator mode)");
+                                let coord = crate::models::ram_plus_batch::RamPlusBatchCoordinator::spawn(tagger);
+                                (None, Some(coord))
+                            }
+                            Err(err) => {
+                                tracing::warn!(model = "RAM++", ?err, "batch load failed; tagging falls back to CLIP scene-tags");
+                                (None, None)
+                            }
+                        }
+                    }
+                    _ => {
+                        tracing::info!(model = "RAM++", "ONNX not installed; tagging falls back to CLIP scene-tags");
+                        (None, None)
+                    }
+                }
+            }
+            Ok(tags_path) => {
+                let pool = load_pool(
+                    "RAM++",
+                    pool_size,
+                    crate::models::ram_plus::default_onnx_path(),
+                    move |p| crate::models::ram_plus::RamPlusTagger::load(p, tags_path.clone()),
+                );
+                (pool, None)
+            }
             Err(err) => {
                 tracing::warn!(model = "RAM++", ?err, "tag-list path unresolved; tagging falls back to CLIP scene-tags");
-                None
+                (None, None)
             }
         };
 
-        Self { arcface, scrfd, mobileclip_pool, mobileclip_batch, scene_labeler, bge_text, ram_plus }
+        Self { arcface, scrfd, mobileclip_pool, mobileclip_batch, scene_labeler, bge_text, ram_plus, ram_plus_batch }
     }
 
     #[allow(dead_code)]
@@ -467,6 +530,7 @@ impl ModelStack {
             scene_labeler: None,
             bge_text: None,
             ram_plus: None,
+            ram_plus_batch: None,
         }
     }
 }
@@ -748,7 +812,7 @@ fn run_decoder_thread(
             match file.kind {
                 FileKind::Image => {
                     if let Ok(mut f) = open_image_file(&file.path) {
-                        let mut bytes = Vec::with_capacity(file.size_bytes as usize);
+                        let mut bytes = Vec::with_capacity((file.size_bytes as usize).min(MAX_PREALLOC_BYTES));
                         if std::io::Read::read_to_end(&mut f, &mut bytes).is_ok() {
                             // Baseline: a successful read always produces Some(_)
                             // so the worker's parse_exif_blocking fallback is
@@ -794,7 +858,7 @@ fn run_decoder_thread(
                     if file.size_bytes <= crate::util::content_hash::FULL_HASH_MAX_BYTES =>
                 {
                     if let Ok(mut f) = open_image_file(&file.path) {
-                        let mut bytes = Vec::with_capacity(file.size_bytes as usize);
+                        let mut bytes = Vec::with_capacity((file.size_bytes as usize).min(MAX_PREALLOC_BYTES));
                         if std::io::Read::read_to_end(&mut f, &mut bytes).is_ok() {
                             content_hash = Some(*blake3::hash(&bytes).as_bytes());
                             file_bytes = Some(bytes);
@@ -1166,7 +1230,9 @@ async fn process_file_predecoded(
                 let gpu_alive = !coord.is_gpu_dead();
                 if gpu_alive {
                 if let (Some(scrfd_pool), Some(arcface_pool)) = (&models.scrfd, &models.arcface) {
+                    let vwait = Instant::now();
                     let permit = vision_sem.acquire().await;
+                    STATS_VISION_WAIT_US.fetch_add(vwait.elapsed().as_micros() as u64, Ordering::Relaxed);
                     let vision_started = Instant::now();
                     if permit.is_ok() {
                         let scrfd_mu = &scrfd_pool[worker_idx % scrfd_pool.len()];
@@ -1313,51 +1379,72 @@ async fn process_file_predecoded(
                 // `vision_sem` GPU budget; device-removed → cancel the scan.
                 let mut ram_plus_ran = false;
                 if !coord.is_gpu_dead() {
-                    if let Some(ram_pool) = &models.ram_plus {
-                        let permit = vision_sem.acquire().await;
-                        if permit.is_ok() {
-                            let ram_started = Instant::now();
-                            let ram_mu = &ram_pool[worker_idx % ram_pool.len()];
-                            let tag_result = {
-                                let mut r = ram_mu.lock();
-                                r.tag(&rgb, w, h)
-                            };
-                            match tag_result {
-                                Ok(tags) => {
-                                    let redacted = crate::platform::redact_path_for_log(&file.path);
-                                    let ram_emit_count = tags.len();
-                                    let max_score = tags.first().map(|(_, s)| *s).unwrap_or(0.0);
-                                    for (label, score) in tags {
-                                        tracing::debug!(
-                                            target: "FileIDEngine::tagging",
-                                            path = %redacted,
-                                            label,
-                                            score,
-                                            "[TAGGING] ram_plus"
-                                        );
-                                        tagged.tags.push((label, Some(score)));
-                                    }
-                                    tracing::info!(
+                    // Tags come from EITHER the batch coordinator (one batched
+                    // Session — HW-4 throughput path; no vision_sem because the
+                    // coordinator owns the Session and serializes batches itself,
+                    // mirroring the CLIP batch path) OR the per-worker pool
+                    // (single-image, vision_sem-gated). Both yield the same
+                    // Result<Vec<(tag, score)>>, handled by the shared match.
+                    let ram_started = Instant::now();
+                    let tag_result: Option<anyhow::Result<Vec<(String, f32)>>> =
+                        if let Some(ram_coord) = &models.ram_plus_batch {
+                            Some(ram_coord.tag(rgb.clone(), w, h).await)
+                        } else if let Some(ram_pool) = &models.ram_plus {
+                            let rwait = Instant::now();
+                            let permit = vision_sem.acquire().await;
+                            STATS_VISION_WAIT_US
+                                .fetch_add(rwait.elapsed().as_micros() as u64, Ordering::Relaxed);
+                            if permit.is_ok() {
+                                let ram_mu = &ram_pool[worker_idx % ram_pool.len()];
+                                let r = {
+                                    let mut g = ram_mu.lock();
+                                    g.tag(&rgb, w, h)
+                                };
+                                Some(r)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                    if let Some(tag_result) = tag_result {
+                        STATS_RAMPLUS_US
+                            .fetch_add(ram_started.elapsed().as_micros() as u64, Ordering::Relaxed);
+                        match tag_result {
+                            Ok(tags) => {
+                                let redacted = crate::platform::redact_path_for_log(&file.path);
+                                let ram_emit_count = tags.len();
+                                let max_score = tags.first().map(|(_, s)| *s).unwrap_or(0.0);
+                                for (label, score) in tags {
+                                    tracing::debug!(
                                         target: "FileIDEngine::tagging",
                                         path = %redacted,
-                                        ram_emit_count,
-                                        max_score,
-                                        "[TAGGING] ram_plus_summary"
+                                        label,
+                                        score,
+                                        "[TAGGING] ram_plus"
                                     );
-                                    ram_plus_ran = true;
+                                    tagged.tags.push((label, Some(score)));
                                 }
-                                Err(err) => {
-                                    if error_has_device_removed_marker(&err) {
-                                        if coord.mark_gpu_dead() {
-                                            tracing::error!(?err, "[GPU-TDR] RAM++ device-removed; cancelling scan");
-                                        }
-                                    } else {
-                                        tracing::warn!(?err, "RAM++ tag failed");
+                                tracing::info!(
+                                    target: "FileIDEngine::tagging",
+                                    path = %redacted,
+                                    ram_emit_count,
+                                    max_score,
+                                    "[TAGGING] ram_plus_summary"
+                                );
+                                ram_plus_ran = true;
+                            }
+                            Err(err) => {
+                                if error_has_device_removed_marker(&err) {
+                                    if coord.mark_gpu_dead() {
+                                        tracing::error!(?err, "[GPU-TDR] RAM++ device-removed; cancelling scan");
                                     }
+                                } else {
+                                    tracing::warn!(?err, "RAM++ tag failed");
                                 }
                             }
-                            perf_trace("ram_plus_done", &file.path, ram_started.elapsed().as_secs_f64() * 1000.0);
                         }
+                        perf_trace("ram_plus_done", &file.path, ram_started.elapsed().as_secs_f64() * 1000.0);
                     }
                 }
 

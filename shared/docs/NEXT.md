@@ -1,5 +1,31 @@
 # NEXT — Windows (resume here)
 
+## 2026-06-01 (later) — Audit follow-ups (branch `audit-fixes-2026-06-01`)
+
+Full report + master prioritized plan: [`AUDIT-2026-06-01.md`](AUDIT-2026-06-01.md).
+
+**✅ DONE + headless-verified across two waves (~17 fixes; see STATE):** crash/data-loss — ENG-2 (wipe FK leak), ENG-18 (file_ref u64 abort), ENG-42 (restructure ` (2)` churn), ENG-69 (SFace dim assert), ENG-71 (decode pre-alloc), APP-1 (UndoStack lock), APP-2 (watchdog dispatcher), PAR-111 (face-cluster re-entrancy); security/correctness — ENG-59 (per-EP disable), ENG-88 (zip actual-bytes cap), ENG-91/92 (rename path_hash + false success), ENG-97 (path redaction), PAR-69/96 (restructure name sanitizer parity); queries — PAR-116 (kind-in-SQL), PAR-117 (semantic failed=0). Plus the RAM++/vision-wait perf profiling that pinned the throughput bottleneck.
+
+**Highest-value REMAINING, grouped by what each needs:**
+
+**Headless-fixable on Windows now (pick up anytime):**
+1. **Throughput bottleneck = RAM++ Swin-L @384 (HW-4) — PROFILED + both concurrency fixes TESTED & DISPROVEN on the RTX 2060.** Per-stage `[STATS]` instrumentation (landed) shows RAM++ ≈ **670 ms/file** on pool_size=2; workers wait ~680 ms for the pool. Tested on hardware and reverted: (×) the **CLIP fill-window** (no gain); (×) a **CUDA pool=3** — it REGRESSED to **3.9 files/s** (RAM++ 670→812 ms, RSS 5.7→7.6 GB) because 3 RAM++ Swin-L sessions over-subscribe the single GPU and thrash. **Conclusion: RAM++ is GPU-COMPUTE-bound, not concurrency-bound — adding sessions cannot help.** The ONLY real win is **batched RAM++ inference**: re-export `ram_plus.onnx` with a dynamic batch axis (`shared/scripts/export_ram_plus_onnx.py` is `dynamic_axes=None`) + a RAM++ batch coordinator mirroring `batch_clip.rs` (~2-4×; needs the offline export + SHA pin #9), or ship a lighter tagger. Also fix the per-image CLIP double-copy (ENG-57).
+2. **Unbounded image decode caps (ENG-10/38/71):** `Read::take(cap)` + `image::io::Reader.limits()` in `tagging.rs` / `deep_analyze.rs` / `vlm_server.rs` — OOM/DoS + allocation-abort defense (12 decoder threads each `Vec::with_capacity(size)`).
+3. **RAM-fit VLM gating (PAR-57):** disable a VLM card whose RAM need > machine RAM (`GlobalMemoryStatusEx`) + "needs N GB" badge — prevents OOM-killing the engine.
+4. **ReadStore (PAR-116/117):** push the kind filter into SQL *before* LIMIT (filtered grids under-fill today); add `AND failed=0` to semantic search. **Thumbnail `size` param (PAR-124):** every surface is a 192px upscale. **Cleanup keeper rank + preview (PAR-135/136); restructure irreversibility confirm (PAR-141); Settings Restart/Stop engine (PAR-148); live-scan headline (PAR-128).**
+5. **EP-guard correctness (ENG-59 multi-EP poison, ENG-61/62 override mismatch); path-redaction unification (ENG-97/98/99).**
+
+**Needs the RTX 2060 / `G:\TrueNAS`:**
+6. **Re-measure DirectML throughput (HW-1, UNVERIFIED).** The audit never completed a DirectML scan (harness bug). Disable the CUDA pack, confirm forward progress + the CUDA-vs-DirectML delta. CUDA itself is confirmed working at 4.9 files/s.
+7. **RSS ≤ 1.5 GB (HW-3):** RAM++ per-file source clone (ENG-67), decode-buffer caps, ORT arena bounds. Peak was 5.7 GB.
+8. **Face-clustering over-split calibration (HW-5):** sweep COS thresholds on a hand-labeled real subset (176 persons / 624 faces today).
+
+**Needs network / release step:**
+9. **SHA256 verify-or-bail (ENG-76):** every `registry.rs` entry is `sha256: None`; multi-GB weights + native runtime DLLs load with ZERO integrity check despite the wired verify path. Pin real hashes in `MODELS.md`, enforce (also closes ENG-78 part-resume corruption, ENG-82 sentinel fast-path).
+
+**Needs a Mac (WS-MAC lockstep — the cross-platform DB round-trip is broken today):**
+10. **v13 migration on macOS (PAR-1)**; **SFace 128-d + FaceAlign wiring (PAR-2 / EG2)**; **canonical `source=` / `vlm_model` / timestamp-epoch tokens (PAR-78/88/85)**; **`markPersonsDifferent` + 7 missing IPC events/2 commands (PAR-3/107)**; **INSERT-OR-REPLACE FK-cascade + `content_hash`/rename-heal (PAR-14/15/16).**
+
 ## 2026-06-01 - On-hardware verify Wipe + Restructure overhaul (branch `windows/wipe-restructure-overhaul`)
 
 Headless-green (app build 0/0, format exit 0, App 108 + IpcSchema 34). The WinUI runtime path needs the RTX 2060 (`build\build-all.ps1 -Run`):

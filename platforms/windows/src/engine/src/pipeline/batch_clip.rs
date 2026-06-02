@@ -32,8 +32,22 @@ use crate::models::mobileclip::MobileClipImage;
 /// — drop to 4 if a smaller GPU OOMs under sustained scan load.
 const DEFAULT_BATCH_SIZE: usize = 8;
 
-/// Hard ceiling on how long the coordinator waits for batch fill once
-/// it has at least one request. Tunable via `FILEID_CLIP_BATCH_TIMEOUT_MS`.
+/// Hard ceiling on how long the coordinator waits for batch fill once it has at
+/// least one request. Tunable via `FILEID_CLIP_BATCH_TIMEOUT_MS`.
+///
+/// HW-4 finding (RTX 2060, 2026-06-01): widening this 20 ms → 75 ms did NOT
+/// help — batch avg rose only 1.5 → ~2.0 and throughput stayed ~5 files/s while
+/// per-file CLIP latency grew 190 → ~250 ms. The root cause is upstream/
+/// downstream, NOT this window: only ~2 files are ever concurrently in the CLIP
+/// stage even though there are 9 tagging workers, so the coordinator never has
+/// more than ~2 requests queued no matter how long it waits. Per-stage
+/// instrumentation (`ramplus_us`/`vision_wait_us` in [STATS]) then PINNED the
+/// real bottleneck — NOT DBWriter, NOT this window: RAM++ Swin-L @384 costs
+/// ~670 ms/file and runs on only pool_size=2 sessions (VRAM-clamped on the 6 GB
+/// card), so workers spend ~680 ms just WAITING for the vision-sem/RAM++ pool;
+/// CLIP (~190 ms) sits downstream and is starved. The real lever is RAM++
+/// throughput (a CUDA-specific larger pool, or a batched RAM++ ONNX re-export).
+/// Kept at 20 ms (a longer wait only adds latency). See NEXT.md.
 const DEFAULT_BATCH_TIMEOUT_MS: u64 = 20;
 
 /// Channel depth — backs up tagging workers if CLIP is the bottleneck

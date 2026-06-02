@@ -201,6 +201,15 @@ def main():
         help="fp16 (default) ~halves the ONNX so it fits a 4 GB GPU alongside "
         "faces+CLIP; I/O stays fp32 so ram_plus.rs is unchanged. fp32 for max fidelity.",
     )
+    ap.add_argument(
+        "--dynamic-batch",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Export with a dynamic batch axis (image[0]/logits[0]) so the engine "
+        "can run N images per forward — the RAM++ throughput fix (HW-4). The Swin "
+        "window grid is static at 384px, so only the batch dim is made dynamic. "
+        "Use --no-dynamic-batch for the legacy fixed [1,3,384,384] export.",
+    )
     args = ap.parse_args()
 
     import torch
@@ -251,18 +260,41 @@ def main():
     print(f"wrote {len(thr)} per-class thresholds → {thr_path}")
 
     dummy = torch.zeros(1, 3, IMAGE_SIZE, IMAGE_SIZE, dtype=torch.float32)
+    # HW-4: a dynamic batch axis lets the engine run N images per forward, which
+    # fills the GPU's kernels — a single 384² image leaves a ~52-TFLOPS card at
+    # <1% utilization, so RAM++ at batch=1 is launch/latency-bound, not
+    # compute-bound (proven on the RTX 2060: 670 ms/img; adding concurrent
+    # sessions regressed, batching is the right lever). ONLY dim 0 is made
+    # dynamic; the Swin window grid stays static at 384² so the window-attention
+    # reshapes (the dynamic-`nW` Concat issue in SWIN_EXPORT_NOTE) are untouched.
+    dyn_axes = (
+        {"image": {0: "batch"}, "logits": {0: "batch"}} if args.dynamic_batch else None
+    )
+    # torch >= 2.5 DEFAULTS torch.onnx.export to the dynamo exporter, which for
+    # this model emits a Loop/SequenceInsert graph that (a) the SWIN_EXPORT_NOTE
+    # warns against and (b) breaks fp16 conversion (Sequence vs Tensor elem-type
+    # mismatch → the ONNX won't even load). Force the legacy TorchScript tracer
+    # (dynamo=False): it unrolls the static 384² Swin window grid into a clean
+    # constant graph that fp16-converts and loads. Passed only when the running
+    # torch supports the kwarg (>=2.5) so the script still runs on torch 2.2-2.4.
+    export_kwargs = dict(
+        input_names=["image"],
+        output_names=["logits"],
+        opset_version=args.opset,
+        # Constant-folding evaluates Swin-L's conv/matmul subgraphs on CPU at
+        # export time — pathologically slow for this model (tens of minutes /
+        # hours). Skip it: onnxruntime constant-folds at session load instead,
+        # for the same runtime graph.
+        do_constant_folding=False,
+        dynamic_axes=dyn_axes,
+    )
+    import inspect as _inspect
+
+    if "dynamo" in _inspect.signature(torch.onnx.export).parameters:
+        export_kwargs["dynamo"] = False
     with torch.no_grad():
-        torch.onnx.export(
-            wrapper,
-            dummy,
-            onnx_path,
-            input_names=["image"],
-            output_names=["logits"],
-            opset_version=args.opset,
-            do_constant_folding=True,
-            dynamic_axes=None,  # FIXED shapes on purpose — see SWIN_EXPORT_NOTE
-        )
-    print(f"exported → {onnx_path}")
+        torch.onnx.export(wrapper, dummy, onnx_path, **export_kwargs)
+    print(f"exported → {onnx_path}  (dynamic_batch={args.dynamic_batch})")
 
     # fp16: convert graph weights to half precision (≈450 MB vs ≈800 MB) so the
     # tagger fits a 4 GB GPU next to faces+CLIP. keep_io_types=True leaves the
@@ -285,7 +317,12 @@ def main():
         m16 = float16.convert_float_to_float16(
             onnx.load(onnx_path),
             keep_io_types=True,
-            op_block_list=["Softmax", "LayerNormalization", "ReduceMean", "ReduceSum", "Exp", "Div"],
+            # "Cast" is blocked too: the tagging head has Cast ops at fp16/fp32
+            # boundaries that the converter otherwise leaves emitting fp16 where a
+            # blocked downstream op declares fp32 (load-time "Type (float16) does
+            # not match expected (float)"). Keeping Casts as-is lets the converter
+            # insert its own boundary casts consistently.
+            op_block_list=["Softmax", "LayerNormalization", "ReduceMean", "ReduceSum", "Exp", "Div", "Cast"],
         )
         onnx.save(m16, onnx_path)
         print(f"converted to fp16 (fp32 I/O + sensitive ops) → {onnx_path}")

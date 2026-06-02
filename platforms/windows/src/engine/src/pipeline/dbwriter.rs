@@ -239,7 +239,7 @@ impl DbWriter {
                     let ch_bytes = f.content_hash.as_ref().map(|h| h.as_slice());
                     let healed: Option<(i64, String, bool)> = heal_lookup_stmt
                         .query_row(
-                            params![f.file_ref, ch_bytes, path_text.as_ref()],
+                            params![f.file_ref.map(|r| r as i64), ch_bytes, path_text.as_ref()],
                             |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)),
                         )
                         .optional()
@@ -282,7 +282,7 @@ impl DbWriter {
                             f.failed as i64,
                             f.error_message,
                             f.content_hash.as_ref().map(|h| h.as_slice()),
-                            f.file_ref,
+                            f.file_ref.map(|r| r as i64),
                         ],
                         |row| row.get(0),
                     )
@@ -674,7 +674,7 @@ mod tests {
                 f.failed as i64,
                 f.error_message,
                 f.content_hash.as_ref().map(|h| h.as_slice()),
-                f.file_ref,
+                f.file_ref.map(|r| r as i64),
             ],
         )?;
         Ok(())
@@ -752,7 +752,7 @@ mod tests {
              f.has_faces as i64, f.has_text as i64,
              f.camera_model.clone(), f.location_lat, f.location_lon,
              f.failed as i64, f.error_message.clone(),
-             f.content_hash.as_ref().map(|h| h.to_vec()), f.file_ref)
+             f.content_hash.as_ref().map(|h| h.to_vec()), f.file_ref.map(|r| r as i64))
         };
         let row = bind(&f);
         let id1: i64 = conn.query_row(
@@ -898,7 +898,7 @@ mod tests {
             let healed: Option<(i64, String, bool)> = conn
                 .query_row(
                     HEAL_LOOKUP_SQL,
-                    params![f.file_ref, ch_bytes, path_text.as_ref()],
+                    params![f.file_ref.map(|r| r as i64), ch_bytes, path_text.as_ref()],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)),
                 )
                 .optional()
@@ -931,7 +931,7 @@ mod tests {
                 f.failed as i64,
                 f.error_message,
                 f.content_hash.as_ref().map(|h| h.as_slice()),
-                f.file_ref,
+                f.file_ref.map(|r| r as i64),
             ],
             |r| r.get(0),
         )
@@ -1071,6 +1071,36 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ENG-18: an NTFS `file_ref` with the high bit set (a non-zero sequence
+    /// number lives in the top 16 bits) exceeds `i64::MAX`. rusqlite's
+    /// `ToSql for u64` rejects values above `i64::MAX`, so binding the raw u64
+    /// errored and the `?` aborted the entire flush batch — losing the whole
+    /// catalog. We now bitcast `u64 -> i64` losslessly at every bind site; the
+    /// insert must succeed and the value must still round-trip through the
+    /// heal lookup (same MFT ref → rename → heal, not a duplicate row).
+    #[test]
+    fn high_bit_file_ref_does_not_abort_insert() {
+        let dir = unique_tmp_dir("eng18_ref");
+        let hi: u64 = 0xFFFF_0000_0000_0001; // > i64::MAX
+        assert!(hi > i64::MAX as u64, "fixture must exercise the high-bit path");
+
+        let conn = in_memory_db();
+        let mut a = fixture(dir.join("a.png").to_str().unwrap());
+        a.file_ref = Some(hi);
+        let id_a = ingest_with_heal(&conn, &a); // must NOT error on the u64 bind
+
+        let mut b = fixture(dir.join("b.png").to_str().unwrap());
+        b.file_ref = Some(hi); // same MFT ref at a new path → a true rename
+        let id_b = ingest_with_heal(&conn, &b);
+
+        assert_eq!(id_a, id_b, "high-bit file_ref must round-trip and heal");
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "rename must not create a duplicate row");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

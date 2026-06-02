@@ -46,6 +46,37 @@ public sealed partial class DeepAnalyzeView : UserControl
         Unloaded -= OnUnloadedHandler;
     }
 
+    // Resident-RAM budget per VLM, in GB. Mirrors the macOS AIModelKind
+    // .ramBudgetGB (platforms/apple .../AIModels.swift) so the OOM gate is
+    // identical across platforms. A model whose budget can't fit under the
+    // headroom is disabled — loading it would OOM-kill the engine.
+    private static double RamBudgetGB(string kind) => kind switch
+    {
+        "mistral_small_3_2" => 16.0,
+        "qwen2_5_vl_7b" => 7.0,
+        "gemma_3_4b" => 4.5,
+        _ => 7.0,
+    };
+
+    // Reserves ~8 GB for the OS + scan engine + DB cache, exactly like macOS
+    // AIModelKind.fits(ramGB:). Returns the machine's physical RAM in GB from
+    // EngineClient.Info (PhysicalMemoryGB, with Hardware.ramTotalMB as the
+    // fallback), or null when the engine hasn't reported yet.
+    private static double? PhysicalRamGB()
+    {
+        var info = EngineClient.Instance.Info;
+        if (info is null) return null;
+        if (info.PhysicalMemoryGB > 0) return info.PhysicalMemoryGB;
+        if (info.Hardware is { RamTotalMb: > 0 } hw) return hw.RamTotalMb / 1024.0;
+        return null;
+    }
+
+    private static bool Fits(string kind, double ramGB)
+    {
+        var headroom = Math.Max(0, ramGB - 8.0);
+        return RamBudgetGB(kind) <= headroom;
+    }
+
     private void OnLoadedHandler(object sender, RoutedEventArgs e)
     {
         ModelInstallerService.Instance.DeepVlm.PropertyChanged += OnInstallerChanged;
@@ -169,6 +200,12 @@ public sealed partial class DeepAnalyzeView : UserControl
                     DebugLog.Debug($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
                     _ = RefreshNamePeopleGateAsync();
                     break;
+                case nameof(EngineClient.Info):
+                    // The engine just reported physical RAM — re-gate the model
+                    // cards so any VLM that would OOM-kill the engine is disabled.
+                    DebugLog.Debug($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
+                    DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncCards(); });
+                    break;
             }
         });
 
@@ -179,9 +216,10 @@ public sealed partial class DeepAnalyzeView : UserControl
         // not the shared "any VLM installed" slot, otherwise installing one model
         // makes the other cards mis-report as installed and Deep Analyze fails
         // every file with "VLM weights not installed".
-        ApplyVlmCard(MistralStatus, MistralProgress, MistralInstallButton, "mistral_small_3_2", slot);
-        ApplyVlmCard(QwenLargeStatus, QwenLargeProgress, QwenLargeInstallButton, "qwen2_5_vl_7b", slot);
-        ApplyVlmCard(GemmaStatus, GemmaProgress, GemmaInstallButton, "gemma_3_4b", slot);
+        var ramGB = PhysicalRamGB();
+        ApplyVlmCard(MistralCard, MistralStatus, MistralProgress, MistralInstallButton, "mistral_small_3_2", slot, ramGB);
+        ApplyVlmCard(QwenLargeCard, QwenLargeStatus, QwenLargeProgress, QwenLargeInstallButton, "qwen2_5_vl_7b", slot, ramGB);
+        ApplyVlmCard(GemmaCard, GemmaStatus, GemmaProgress, GemmaInstallButton, "gemma_3_4b", slot, ramGB);
         HighlightActiveCard();
     }
 
@@ -200,8 +238,29 @@ public sealed partial class DeepAnalyzeView : UserControl
         catch { return false; }
     }
 
-    private static void ApplyVlmCard(TextBlock status, ProgressBar bar, Button installButton, string kind, ModelSlot slot)
+    private static void ApplyVlmCard(Border card, TextBlock status, ProgressBar bar, Button installButton, string kind, ModelSlot slot, double? ramGB)
     {
+        // RAM gate — mirrors macOS ModelOptionRow. When the engine has reported
+        // physical RAM and this VLM's budget can't fit under the ~8 GB headroom,
+        // disable install/select and show a "Needs N GB (you have M)" affordance
+        // instead of letting the model OOM-kill the engine on load.
+        if (ramGB is double available && !Fits(kind, available))
+        {
+            status.Text = $"Needs {RamBudgetGB(kind):0} GB (you have {available:0})";
+            status.Foreground = (Brush)Application.Current.Resources["DestructiveTextBrush"];
+            bar.Visibility = Visibility.Collapsed;
+            installButton.IsEnabled = false;
+            ToolTipService.SetToolTip(card,
+                $"This model needs {RamBudgetGB(kind):0} GB resident RAM. With your {available:0} GB machine and the scan engine running, loading it would OOM-kill the engine. Pick a smaller model.");
+            card.Opacity = 0.55;
+            card.IsHitTestVisible = false;
+            return;
+        }
+        status.Foreground = (Brush)Application.Current.Resources["AiBrush"];
+        ToolTipService.SetToolTip(card, null);
+        card.Opacity = 1.0;
+        card.IsHitTestVisible = true;
+
         // The shared Vlm slot tracks at most one in-flight download; attribute its
         // Downloading/Failed state to a card only when CurrentModelKind matches.
         bool isThisModel = string.Equals(slot.CurrentModelKind, kind, StringComparison.OrdinalIgnoreCase);
@@ -505,6 +564,10 @@ public sealed partial class DeepAnalyzeView : UserControl
     {
         if (sender is FrameworkElement el && el.Tag is string id)
         {
+            // Don't let the user select a model that would OOM-kill the engine —
+            // mirrors the macOS `guard fits else { return }`. The card is also
+            // IsHitTestVisible=false in that state, but guard here defensively.
+            if (PhysicalRamGB() is double ramGB && !Fits(id, ramGB)) return;
             _activeModel = id;
             HighlightActiveCard();
             UpdateActiveModelLabel();

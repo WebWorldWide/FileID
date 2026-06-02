@@ -258,11 +258,11 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             IReadOnlyList<FileRow> rows;
             if (string.IsNullOrWhiteSpace(_query))
             {
-                rows = await _store.RecentAsync(PageSize, token).ConfigureAwait(false);
+                rows = await _store.RecentAsync(PageSize, token, _kindFilter == "all" ? null : _kindFilter).ConfigureAwait(false);
             }
             else
             {
-                rows = await _clip.SearchAsync(_query, PageSize, token).ConfigureAwait(false);
+                rows = await _clip.SearchAsync(_query, PageSize, token, _kindFilter == "all" ? null : _kindFilter).ConfigureAwait(false);
             }
 
             if (_disposed || token.IsCancellationRequested) return;
@@ -310,7 +310,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             var token = linked.Token;
             IsLoading = true;
             ErrorMessage = null;
-            var ranked = await _store.SemanticSearchAsync(seed, PageSize, token).ConfigureAwait(false);
+            var ranked = await _store.SemanticSearchAsync(seed, PageSize, token, _kindFilter == "all" ? null : _kindFilter).ConfigureAwait(false);
             if (_disposed || token.IsCancellationRequested) return;
             var filtered = new List<FileTile>(ranked.Count);
             foreach (var hit in ranked)

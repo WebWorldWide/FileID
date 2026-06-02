@@ -218,11 +218,12 @@ pub struct FileForClassify {
 }
 
 fn sanitize_path_component(s: &str) -> String {
-    s.chars()
-        .filter(|c| !matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'))
-        .collect::<String>()
-        .trim()
-        .to_string()
+    // PAR-69/PAR-96: byte-faithful with macOS componentSafe (replace illegal +
+    // control chars with `_`, handle Windows reserved names / trailing dots /
+    // length / empty). The old version only DELETED illegal chars, which
+    // diverged from macOS and produced NTFS-invalid names (e.g. a category
+    // "CON" failed MoveFileExW with a cryptic error).
+    crate::util::path_safety::safe_filename_component(s)
 }
 
 fn month_name(m: u32) -> String {

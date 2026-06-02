@@ -14,11 +14,34 @@ pub fn redact_path_for_log(path: impl AsRef<Path>) -> String {
     use std::path::Component;
     let s = path.as_ref().to_string_lossy().to_string();
     let s_lower = s.to_lowercase();
-    // App-structural paths: pass through.
-    if s_lower.contains("\\fileid\\")
-        || s_lower.contains("/fileid/")
-        || s_lower.contains("appdata\\local\\fileid")
-    {
+    // App-structural paths: pass through ONLY the engine's own state dir
+    // (`%LOCALAPPDATA%\FileID\…` / the per-OS equivalent). ENG-97: the old broad
+    // `\fileid\` / `/fileid/` substring match leaked any USER path that merely
+    // contained a folder named "FileID" (e.g. a dev checkout at C:\Code\FileID\…)
+    // verbatim, username and all — defeating redaction for a whole class of real
+    // paths. Anchor on the actual resolved root instead.
+    if let Ok(root) = crate::paths::root() {
+        let mut root_prefix = root.to_string_lossy().to_lowercase();
+        if !root_prefix.is_empty() {
+            if s_lower == root_prefix {
+                return s;
+            }
+            // Require a path-separator boundary so a sibling dir whose name
+            // merely STARTS with the app root (e.g. `…\Local\FileIDBackup\…`)
+            // does not string-prefix-match and leak. (ENG-97)
+            if !root_prefix.ends_with(['\\', '/']) {
+                root_prefix.push('\\');
+            }
+            if s_lower.starts_with(&root_prefix) {
+                return s;
+            }
+        }
+    }
+    // Also pass through the canonical Windows app dir even if `root()` resolved
+    // elsewhere (a redirected/different-user LOCALAPPDATA). The trailing
+    // separator keeps `…\Local\FileIDBackup\…` from matching — only the real
+    // `…\AppData\Local\FileID\…` state tree.
+    if s_lower.contains("appdata\\local\\fileid\\") {
         return s;
     }
     // Only Normal components are PII candidates — Prefix (drive letter,
@@ -99,6 +122,18 @@ mod redaction_tests {
     fn app_structural_logs_path_unchanged() {
         let s = r"C:\Users\Adam\AppData\Local\FileID\logs\app.log";
         assert_eq!(redact_path_for_log(s), s);
+    }
+
+    /// ENG-97: a USER path that merely contains a folder named "FileID" (a dev
+    /// checkout, a backup dir, …) is NOT the app's state tree and MUST be
+    /// redacted — the old broad `\fileid\` substring match leaked these verbatim
+    /// with the username.
+    #[test]
+    #[cfg(windows)]
+    fn redacts_user_path_merely_containing_fileid() {
+        let r = redact_path_for_log(r"C:\Users\Adam\Code\FileID\src\secret.rs");
+        assert_eq!(r, "…/src/secret.rs");
+        assert!(!r.contains("Adam"), "username leaked: {r}");
     }
 }
 

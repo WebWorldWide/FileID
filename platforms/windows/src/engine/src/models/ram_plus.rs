@@ -253,55 +253,125 @@ impl RamPlusTagger {
             .ok_or_else(|| anyhow::anyhow!("RAM++ ONNX has no inputs"))?
             .name
             .clone();
-        let outputs: SessionOutputs = self
-            .session
-            .run(vec![(input_name, SessionInputValue::from(input))])
-            .context("RAM++ session.run")
-            .map_err(classify_inference_error)?;
-        let (_, value) = outputs
-            .iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("RAM++ produced no outputs"))?;
-        let (_shape, logits) = value
-            .try_extract_tensor::<f32>()
-            .context("extract RAM++ logits as f32")?;
-        if logits.len() != self.tags.len() {
-            anyhow::bail!(
-                "RAM++ output dim {} != tag list len {} — the ONNX and tag list are out of sync",
-                logits.len(),
-                self.tags.len()
-            );
+        // Extract the logits inside a block so the `outputs` borrow of
+        // `self.session` is released BEFORE the `&self` select_tags call below.
+        // `SessionOutputs` has a Drop impl, so its borrow lives to end-of-scope
+        // — calling select_tags in the same scope is the E0502 the old
+        // closure-locals workaround sidestepped; the block drops it first.
+        let logits_vec: Vec<f32> = {
+            let outputs: SessionOutputs = self
+                .session
+                .run(vec![(input_name, SessionInputValue::from(input))])
+                .context("RAM++ session.run")
+                .map_err(classify_inference_error)?;
+            let (_, value) = outputs
+                .iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("RAM++ produced no outputs"))?;
+            let (_shape, logits) = value
+                .try_extract_tensor::<f32>()
+                .context("extract RAM++ logits as f32")?;
+            if logits.len() != self.tags.len() {
+                anyhow::bail!(
+                    "RAM++ output dim {} != tag list len {} — the ONNX and tag list are out of sync",
+                    logits.len(),
+                    self.tags.len()
+                );
+            }
+            logits.to_vec()
+        };
+        Ok(self.select_tags(&logits_vec))
+    }
+
+    /// Batched [`tag`]: preprocess N images into ONE (N,3,384,384) tensor and run
+    /// a single forward. A lone 384² image leaves a ~52-TFLOPS GPU <1% utilized —
+    /// RAM++ at batch=1 is launch/latency-bound, not compute-bound (measured
+    /// 670 ms/img on an RTX 2060; adding concurrent sessions regressed) — so
+    /// batching fills the kernels and is the throughput fix (HW-4). REQUIRES an
+    /// ONNX exported with a dynamic batch axis (export_ram_plus_onnx.py
+    /// --dynamic-batch); a fixed-batch=1 model errors at run. Returns one tag
+    /// list per input, in order.
+    pub fn tag_batch(&mut self, imgs: &[(Vec<u8>, u32, u32)]) -> Result<Vec<Vec<(String, f32)>>> {
+        use ndarray::s;
+        if imgs.is_empty() {
+            return Ok(Vec::new());
         }
-        // Bind the fields the closure needs as locals: `outputs` holds a mutable
-        // borrow of `self.session` until it drops, so the closure must touch
-        // disjoint fields only — a `&self` method call here is an E0502.
-        let tags = &self.tags;
-        let suppress_extra = &self.suppress_extra;
-        let per_class = self.per_class_threshold.as_ref();
-        let threshold = self.threshold;
-        let precision_floor = self.precision_floor;
+        let n = INPUT_SIZE as usize;
+        let bs = imgs.len();
+        let mut batch = Array4::<f32>::zeros((bs, 3, n, n));
+        for (i, (rgb, w, h)) in imgs.iter().enumerate() {
+            let expected = (*w as usize) * (*h as usize) * 3;
+            if rgb.len() != expected {
+                anyhow::bail!(
+                    "RAM++ tag_batch image {i}: expected {expected} RGB8 bytes for {w}x{h}, got {}",
+                    rgb.len()
+                );
+            }
+            let chw = Self::preprocess(rgb, *w, *h)?;
+            batch.slice_mut(s![i..i + 1, .., .., ..]).assign(&chw);
+        }
+        let input = Tensor::from_array(batch).context("RAM++ batch input tensor")?;
+        let input_name = self
+            .session
+            .inputs
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("RAM++ ONNX has no inputs"))?
+            .name
+            .clone();
+        let num_tags = self.tags.len();
+        let logits_vec: Vec<f32> = {
+            let outputs: SessionOutputs = self
+                .session
+                .run(vec![(input_name, SessionInputValue::from(input))])
+                .context("RAM++ batch session.run")
+                .map_err(classify_inference_error)?;
+            let (_, value) = outputs
+                .iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("RAM++ produced no outputs"))?;
+            let (_shape, logits) = value
+                .try_extract_tensor::<f32>()
+                .context("extract RAM++ batch logits as f32")?;
+            if logits.len() != bs * num_tags {
+                anyhow::bail!(
+                    "RAM++ batch output len {} != {bs} images x {num_tags} tags",
+                    logits.len()
+                );
+            }
+            logits.to_vec()
+        };
+        Ok(logits_vec
+            .chunks_exact(num_tags)
+            .map(|row| self.select_tags(row))
+            .collect())
+    }
+
+    /// Apply per-class thresholds + suppress-list + top-k cap to one logits row →
+    /// `(tag, confidence)` pairs, highest first. Shared by [`tag`] + [`tag_batch`]
+    /// so both paths emit identical tags.
+    fn select_tags(&self, logits: &[f32]) -> Vec<(String, f32)> {
         let mut hits: Vec<(usize, f32)> = logits
             .iter()
             .enumerate()
             .filter_map(|(i, &z)| {
-                if is_suppressed(&tags[i], suppress_extra) {
+                if is_suppressed(&self.tags[i], &self.suppress_extra) {
                     return None;
                 }
                 let p = sigmoid(z);
-                let cut = per_class
+                let cut = self
+                    .per_class_threshold
+                    .as_ref()
                     .map(|t| t[i])
-                    .unwrap_or(threshold)
-                    .max(precision_floor);
+                    .unwrap_or(self.threshold)
+                    .max(self.precision_floor);
                 (p >= cut).then_some((i, p))
             })
             .collect();
-        // Highest confidence first; truncate to the per-file cap.
         hits.sort_by(|a, b| b.1.total_cmp(&a.1));
         hits.truncate(self.max_tags);
-        Ok(hits
-            .into_iter()
+        hits.into_iter()
             .map(|(i, p)| (self.tags[i].clone(), p))
-            .collect())
+            .collect()
     }
 
     /// Bilinear resize to 384×384 + ImageNet normalize into a (1,3,384,384)

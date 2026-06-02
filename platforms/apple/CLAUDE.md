@@ -12,7 +12,7 @@ Two binaries, newline-delimited JSON over stdin/stdout:
 - `shared/Sources/FileIDShared/` — `IPCProtocol.swift` (`IPCCommand`/`IPCEvent`), DB row types, the AI model registry (`AIModels.swift`), mirrored against `../../shared/ipc-schema/ipc.schema.json`.
 - `Tests/` — Swift Testing (Shared + Engine suites). `scripts/iterate.sh` — corpus regression harness.
 
-Storage: GRDB.swift on SQLite WAL. Single writer (engine), many readers (app via `ReadStore`). **Schema v12**, migrations append-only in `Database.swift`, byte-faithful with the Windows engine so a library round-trips across platforms. Not SwiftData.
+Storage: GRDB.swift on SQLite WAL. Single writer (engine), many readers (app via `ReadStore`). **Schema v13** (v13_face_verification_anchors mirrors the Windows engine — added 2026-06-01, unverified-until-Mac), migrations append-only in `Database.swift`, byte-faithful with the Windows engine so a library round-trips across platforms. Not SwiftData.
 
 ## Tabs
 

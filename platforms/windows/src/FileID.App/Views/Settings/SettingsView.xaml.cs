@@ -937,6 +937,56 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
+    /// <summary>PAR-148: always-available "Restart engine" in the Engine
+    /// card (the only other restart is buried in the conditional cuDNN
+    /// pill). Shutdown + auto-respawn so the engine re-runs the EP picker;
+    /// cancels any in-flight scan. Mirrors macOS SettingsView's "Restart
+    /// Engine" button.</summary>
+    private async void OnRestartEngineCardClicked(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            RestartEngineCardButton.IsEnabled = false;
+            StopEngineCardButton.IsEnabled = false;
+            RestartEngineCardButton.Content = "Restarting…";
+            await EngineClient.Instance.RestartAsync();
+            DebugLog.Info("Engine restart requested by user from the Engine card.");
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("Engine restart (card) failed: " + ex.Message);
+        }
+        finally
+        {
+            RestartEngineCardButton.Content = "Restart engine";
+            RestartEngineCardButton.IsEnabled = true;
+            StopEngineCardButton.IsEnabled = true;
+        }
+    }
+
+    /// <summary>PAR-148: always-available "Stop engine" in the Engine card.
+    /// Cleanly shuts the engine down (user-initiated, so no auto-respawn).
+    /// Mirrors macOS SettingsView's "Stop Engine" button.</summary>
+    private async void OnStopEngineCardClicked(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            StopEngineCardButton.IsEnabled = false;
+            StopEngineCardButton.Content = "Stopping…";
+            await EngineClient.Instance.ShutdownAsync();
+            DebugLog.Info("Engine shutdown requested by user from the Engine card.");
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("Engine shutdown (card) failed: " + ex.Message);
+        }
+        finally
+        {
+            StopEngineCardButton.Content = "Stop engine";
+            StopEngineCardButton.IsEnabled = true;
+        }
+    }
+
     public event PropertyChangedEventHandler? PropertyChanged;
     private void OnPropertyChanged(string name)
         => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));

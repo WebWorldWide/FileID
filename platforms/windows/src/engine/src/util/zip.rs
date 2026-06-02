@@ -67,10 +67,11 @@ pub(crate) fn extract_into_parent(zip_path: &Path) -> anyhow::Result<()> {
                 MAX_ENTRY_BYTES
             );
         }
+        // Cheap early-out on an honest header; the AUTHORITATIVE cumulative cap
+        // is charged the ACTUAL decompressed bytes after the copy below (ENG-88).
         if total_bytes.saturating_add(entry_size) > MAX_BYTES {
             anyhow::bail!("zip rejected: cumulative size exceeds {} bytes", MAX_BYTES);
         }
-        total_bytes = total_bytes.saturating_add(entry_size);
 
         if let Some(p) = dest.parent() {
             std::fs::create_dir_all(p).ok();
@@ -91,8 +92,29 @@ pub(crate) fn extract_into_parent(zip_path: &Path) -> anyhow::Result<()> {
 
         let mut out = std::fs::File::create(&dest)
             .with_context(|| format!("creating {}", dest.display()))?;
-        std::io::copy(&mut entry, &mut out)
+        // ENG-88: the declared `entry.size()` cap above is attacker-controlled.
+        // Bound the ACTUAL decompressed stream too so a lying header (e.g.
+        // size()=1 that expands to GB) can't fill the disk. +1 byte so an entry
+        // exactly at the cap still copies while an over-cap one is detected.
+        let mut limited = std::io::Read::take(&mut entry, MAX_ENTRY_BYTES + 1);
+        let written = std::io::copy(&mut limited, &mut out)
             .with_context(|| format!("writing {}", dest.display()))?;
+        if written > MAX_ENTRY_BYTES {
+            let _ = std::fs::remove_file(&dest);
+            anyhow::bail!(
+                "zip rejected: entry '{}' decompressed past the {}-byte cap",
+                name.display(),
+                MAX_ENTRY_BYTES
+            );
+        }
+        // ENG-88: charge the cumulative budget the ACTUAL decompressed bytes, so
+        // many entries each declaring a tiny size() can't collectively blow past
+        // MAX_BYTES (a lying header evaded the declared-size accounting above).
+        if total_bytes.saturating_add(written) > MAX_BYTES {
+            let _ = std::fs::remove_file(&dest);
+            anyhow::bail!("zip rejected: cumulative decompressed size exceeds {} bytes", MAX_BYTES);
+        }
+        total_bytes = total_bytes.saturating_add(written);
 
         if let Ok(real) = std::fs::canonicalize(&dest) {
             if !real.starts_with(&parent_canon) {

@@ -90,6 +90,15 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     // in the DeepAnalyzeCompleteEvent arm.
     private int _autoDeepAnalyzeInFlight;
 
+    // PAR-111: re-entrancy gate for the auto-triggered face-clustering pass.
+    // A rescan emits a SECOND ScanComplete in the same session; without this
+    // gate each one fire-and-forgets another RunFaceClustering, and the engine
+    // spawns one clustering task per IPC with no dedup of its own — so two
+    // passes race the same persons / face_prints.person_id writes. Acquired in
+    // AutoTriggerFaceClusteringAsync, released on FaceClusteringComplete or a
+    // clustering error. Mirrors macOS EngineClient.faceClusteringInFlight.
+    private int _faceClusterAutoInFlight;
+
     // Throttle for scan FileDone events. A fast scan can emit hundreds per
     // second; publishing each through the Rx Subject inflates UI work for
     // every subscriber (LibraryView, transcript, etc.). Sample every Nth
@@ -1031,6 +1040,12 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                             LastError = e.Error;
                             DebugLog.Warn($"[IPC IN] engine error: kind={e.Error.Kind} msg={e.Error.Message} path={PathRedactor.Redact(e.Error.Path)}");
                         }
+                        // PAR-111: a clustering failure must release the auto gate,
+                        // else auto-clustering stays suppressed for the rest of the session.
+                        if (e.Error.Kind is { } ck && ck.Contains("cluster", StringComparison.OrdinalIgnoreCase))
+                        {
+                            Interlocked.Exchange(ref _faceClusterAutoInFlight, 0);
+                        }
                         break;
                     case LogEvent:
                         // Engine LogLine events go to the transcript via Events.
@@ -1038,6 +1053,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         break;
                     case FaceClusteringCompleteEvent fc:
                         LastFaceClustering = fc.Result;
+                        Interlocked.Exchange(ref _faceClusterAutoInFlight, 0); // PAR-111: release the auto gate
                         break;
                     case DeepAnalyzeStartingEvent das:
                         DeepAnalyzeStarting = das.Starting;
@@ -1158,6 +1174,14 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     /// clustering hiccup to surface as a scan failure.</summary>
     private async Task AutoTriggerFaceClusteringAsync()
     {
+        // PAR-111: skip if an auto-clustering pass is already in flight (e.g. a
+        // rescan completing while the prior pass still runs). Released on
+        // FaceClusteringComplete or a clustering error.
+        if (Interlocked.CompareExchange(ref _faceClusterAutoInFlight, 1, 0) != 0)
+        {
+            DebugLog.Info("[AUTO-ADVANCE] face clustering already in flight — skipping duplicate trigger");
+            return;
+        }
         try
         {
             await Task.Yield(); // let the rest of Apply complete first
@@ -1166,6 +1190,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         }
         catch (Exception ex)
         {
+            // The IPC send failed — release the gate so a later scan can retry.
+            Interlocked.Exchange(ref _faceClusterAutoInFlight, 0);
             DebugLog.Warn("[AUTO-ADVANCE] face clustering trigger threw: " + ex.Message);
         }
     }

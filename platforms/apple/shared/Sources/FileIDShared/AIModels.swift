@@ -8,10 +8,14 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
     // (Qwen Research license) was dropped for the Apache-2.0 7B. Gemma /
     // PaliGemma stay (Gemma Terms permit commercial use); Mistral-Small-3.2
     // (Apache-2.0) is the max-quality pick. Mirrors the Windows VLM ladder.
-    case qwen2VL7B       = "qwen2_vl_7b"
+    // rawValues are the canonical cross-platform model-kind tokens — they
+    // must match the Windows engine (registry.rs ids / AppSettings
+    // AllowedVlmKinds) byte-for-byte so a DB shared across platforms
+    // round-trips the "analyzed" state (skipExisting matches, badge lights).
+    case qwen2VL7B       = "qwen2_5_vl_7b"
     case qwen3VL4B       = "qwen3_vl_4b"
-    case gemma3_4B       = "gemma3_4b"
-    case gemma3_12B      = "gemma3_12b"
+    case gemma3_4B       = "gemma_3_4b"
+    case gemma3_12B      = "gemma_3_12b"
     case mistralSmall32  = "mistral_small_3_2"
     case paligemma3B     = "paligemma_3b"
 
@@ -111,12 +115,20 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
     }
 
     /// Migrate a persisted rawValue that may predate the commercial-clean
-    /// lineup (e.g. the dropped "qwen2_vl_3b"). Call this when decoding a
-    /// stored selection so an old value maps to a supported model instead
-    /// of failing to decode. Mirrors the Windows AppSettings v5 migration.
+    /// lineup (e.g. the dropped "qwen2_vl_3b") or the cross-platform
+    /// model-kind token rename (the rawValues now match the Windows engine
+    /// tokens exactly). Call this when decoding a stored selection so an old
+    /// value maps to a supported model instead of failing to decode. Mirrors
+    /// the Windows AppSettings v5 migration.
     public static func migrated(rawValue: String) -> AIModelKind {
         if let kind = AIModelKind(rawValue: rawValue) { return kind }
         switch rawValue {
+        // Pre-rename tokens for kinds whose rawValue changed to the Windows
+        // canonical form (qwen2_vl_7b → qwen2_5_vl_7b, gemma3_* → gemma_3_*).
+        case "qwen2_vl_7b":                  return .qwen2VL7B
+        case "gemma3_4b":                    return .gemma3_4B
+        case "gemma3_12b":                   return .gemma3_12B
+        // Dropped non-commercial Qwen2.5-VL-3B (Qwen Research License).
         case "qwen2_vl_3b", "qwen2_5_vl_3b": return .qwen2VL7B
         default:                              return .qwen2VL7B
         }

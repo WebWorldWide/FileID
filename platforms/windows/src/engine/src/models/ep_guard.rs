@@ -34,8 +34,11 @@ fn attempt_path() -> Option<PathBuf> {
     Some(packs_dir()?.join(".ep_attempt"))
 }
 
-fn disabled_path() -> Option<PathBuf> {
-    Some(packs_dir()?.join(".ep_disabled"))
+/// Per-EP disable marker so two different packs can BOTH be crash-disabled at
+/// once. The old single `.ep_disabled` file held one EP name and was overwritten
+/// by the next poison, silently un-disabling the first. (ENG-59)
+fn disabled_marker(ep: &str) -> Option<PathBuf> {
+    Some(packs_dir()?.join(format!(".ep_disabled_{}", ep.to_ascii_lowercase())))
 }
 
 /// EPs that are guarded. DirectML/CPU are the safe fallbacks — never armed.
@@ -82,7 +85,7 @@ pub fn resolve_poison_at_startup() -> Option<String> {
     if !is_guarded(&ep) {
         return None;
     }
-    if let Some(dis) = disabled_path() {
+    if let Some(dis) = disabled_marker(&ep) {
         if let Some(parent) = dis.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -102,7 +105,13 @@ pub fn is_disabled(ep: &str) -> bool {
     if !is_guarded(ep) {
         return false;
     }
-    disabled_path()
+    // Per-EP marker is authoritative; the legacy single `.ep_disabled` file
+    // (one EP name) is still honored for in-place upgrades.
+    if disabled_marker(ep).map(|p| p.exists()).unwrap_or(false) {
+        return true;
+    }
+    packs_dir()
+        .map(|d| d.join(".ep_disabled"))
         .and_then(|p| read_trimmed(&p))
         .map(|d| d == ep.to_ascii_lowercase())
         .unwrap_or(false)
@@ -111,10 +120,24 @@ pub fn is_disabled(ep: &str) -> bool {
 /// Clear the persistent disable (user re-enable / pack reinstall / explicit
 /// provider override). Safe to call when nothing is disabled.
 pub fn reenable() {
-    if let Some(p) = disabled_path() {
-        if p.exists() {
-            tracing::info!("[EP-GUARD] re-enabling a previously crash-disabled execution provider");
-            let _ = std::fs::remove_file(p);
+    let Some(dir) = packs_dir() else { return };
+    let mut cleared = false;
+    // Legacy single-file format.
+    let legacy = dir.join(".ep_disabled");
+    if legacy.exists() {
+        let _ = std::fs::remove_file(&legacy);
+        cleared = true;
+    }
+    // All per-EP markers (`.ep_disabled_<ep>`).
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(".ep_disabled_") {
+                let _ = std::fs::remove_file(entry.path());
+                cleared = true;
+            }
         }
+    }
+    if cleared {
+        tracing::info!("[EP-GUARD] re-enabling previously crash-disabled execution provider(s)");
     }
 }

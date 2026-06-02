@@ -97,6 +97,16 @@ impl SFace {
             .try_extract_tensor::<f32>()
             .context("extract SFace output as f32")?;
         let mut emb: Vec<f32> = data.to_vec();
+        // SFace is a 128-d embedder; a wrong/quantized export with a different
+        // output width would silently mis-cluster and (worse) diverge from the
+        // cross-platform face DB, which is keyed on 128-d / 512-byte blobs. Fail
+        // loudly rather than persist an off-dim vector. (ENG-69)
+        if emb.len() != 128 {
+            anyhow::bail!(
+                "SFace produced a {}-d embedding, expected 128 (wrong or quantized model?)",
+                emb.len()
+            );
+        }
         l2_normalize(&mut emb);
         Ok(emb)
     }

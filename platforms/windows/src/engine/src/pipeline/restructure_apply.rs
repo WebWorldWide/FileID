@@ -134,6 +134,16 @@ impl RestructureApply {
                 }
             }
 
+            // Skip a no-op (the file already sits at its PLANNED destination)
+            // BEFORE uniquifying. If we uniquified first, `unique_destination`
+            // would see the file itself occupying `dest`, bump it to a ` (2)`
+            // sibling, and we'd rename an already-correctly-placed file —
+            // churning an organized library, silently in auto-file mode. (ENG-42)
+            if !self.use_symlinks && paths_equal(&m.source, &dest.to_string_lossy()) {
+                applied += 1;
+                continue;
+            }
+
             // B3: real moves never clobber. `move_file` drops
             // MOVEFILE_REPLACE_EXISTING, and we additionally resolve a
             // collision-free name within the SAME parent (so containment +
@@ -147,13 +157,6 @@ impl RestructureApply {
                 claimed.insert(d.clone());
                 d
             };
-
-            // Skip a no-op (the file already sits at the destination) rather
-            // than spuriously renaming it to a ` (2)` sibling.
-            if !self.use_symlinks && paths_equal(&m.source, &final_dest.to_string_lossy()) {
-                applied += 1;
-                continue;
-            }
 
             let result = if self.use_symlinks {
                 make_symlink(&m.source, &final_dest)
@@ -287,9 +290,15 @@ fn make_symlink(_src: &str, _dst: &Path) -> std::result::Result<(), ApplyError> 
 
 fn update_path_in_db(conn: &Arc<Mutex<Connection>>, file_id: i64, new_path: &Path) -> Result<()> {
     let conn = conn.lock();
+    // ENG-91: keep path_hash in sync with path_text (same as the rename command
+    // + every dbwriter insert) so the column stays consistent for lookups/dedup
+    // and cross-platform DB parity — a move that updated only path_text left a
+    // stale hash.
+    let path_text = new_path.to_string_lossy();
+    let path_hash = crate::util::path_safety::stable_path_hash(&path_text);
     conn.execute(
-        "UPDATE files SET path_text = ?1 WHERE id = ?2",
-        params![new_path.to_string_lossy(), file_id],
+        "UPDATE files SET path_text = ?1, path_hash = ?2 WHERE id = ?3",
+        params![path_text, path_hash, file_id],
     )
     .context("DB UPDATE files.path_text")?;
     Ok(())

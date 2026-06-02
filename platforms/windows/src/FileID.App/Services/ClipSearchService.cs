@@ -191,12 +191,12 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
     }
 
     public async Task<IReadOnlyList<FileRow>> SearchAsync(
-        string query, int limit, CancellationToken ct)
+        string query, int limit, CancellationToken ct, string? kind = null)
     {
         var embed = await EmbedQueryAsync(query, ct).ConfigureAwait(false);
         if (embed != null)
         {
-            var ranked = await _store.SemanticSearchAsync(embed, limit, ct).ConfigureAwait(false);
+            var ranked = await _store.SemanticSearchAsync(embed, limit, ct, kind).ConfigureAwait(false);
             var rows = new List<FileRow>(ranked.Count);
             foreach (var r in ranked)
             {
@@ -206,6 +206,6 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
         }
         // FTS5 fallback (filename + OCR) — covers the case where CLIP
         // models aren't installed yet OR the query embedded to all-zeros.
-        return await _store.SearchAsync(query, limit, ct).ConfigureAwait(false);
+        return await _store.SearchAsync(query, limit, ct, kind).ConfigureAwait(false);
     }
 }

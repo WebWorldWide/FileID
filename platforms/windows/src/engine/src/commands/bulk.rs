@@ -187,16 +187,33 @@ pub(crate) async fn handle_rename_files(
                 continue;
             }
             let dest_text = dest.to_string_lossy().to_string();
-            let _ = tx.execute(
-                "UPDATE files SET path_text = ?1 WHERE id = ?2",
-                rusqlite::params![dest_text, entry.file_id],
-            );
-            succeeded += 1;
-            messages.push(BulkActionItem {
-                file_id: Some(entry.file_id),
-                ok: true,
-                message: Some(dest_text),
-            });
+            // ENG-91: keep path_hash in sync with path_text (lookups/dedup key
+            // on it). ENG-92: do NOT swallow the UPDATE error and still claim
+            // success — a file renamed on disk but with a failed DB write must
+            // be reported as failed (the next scan's rename-heal rebinds it via
+            // content_hash/file_ref).
+            let dest_hash = crate::util::path_safety::stable_path_hash(&dest_text);
+            match tx.execute(
+                "UPDATE files SET path_text = ?1, path_hash = ?2 WHERE id = ?3",
+                rusqlite::params![dest_text, dest_hash, entry.file_id],
+            ) {
+                Ok(_) => {
+                    succeeded += 1;
+                    messages.push(BulkActionItem {
+                        file_id: Some(entry.file_id),
+                        ok: true,
+                        message: Some(dest_text),
+                    });
+                }
+                Err(err) => {
+                    failed += 1;
+                    messages.push(BulkActionItem {
+                        file_id: Some(entry.file_id),
+                        ok: false,
+                        message: Some(format!("renamed on disk but DB update failed: {err}")),
+                    });
+                }
+            }
         }
         tx.commit()?;
         Ok(BulkActionResult {
@@ -222,7 +239,13 @@ pub(crate) async fn handle_trash_files(
         let mut succeeded = 0u32;
         let mut failed = 0u32;
         let mut messages = Vec::new();
-        let mut path_for_id: Vec<(i64, PathBuf)> = Vec::with_capacity(payload.file_ids.len());
+        // ENG-93: capture each path's pre-op existence. shell::trash::trash_path
+        // is idempotent — a source that is already gone returns Ok (reported as
+        // `true`). That is correct for the shell layer but must not be recorded
+        // here as a successful trash: it would pollute the undo/trash log with an
+        // entry restoreFromTrash can never honor. A file missing before the op is
+        // skipped (failed), not trashed.
+        let mut path_for_id: Vec<(i64, PathBuf, bool)> = Vec::with_capacity(payload.file_ids.len());
 
         {
             let conn = db.lock();
@@ -232,7 +255,9 @@ pub(crate) async fn handle_trash_files(
                     rusqlite::params![fid],
                     |r| r.get::<_, String>(0),
                 ) {
-                    path_for_id.push((*fid, PathBuf::from(p)));
+                    let path = PathBuf::from(p);
+                    let existed = path.exists();
+                    path_for_id.push((*fid, path, existed));
                 }
             }
         }
@@ -240,14 +265,27 @@ pub(crate) async fn handle_trash_files(
         let outcomes = crate::shell::trash::trash(
             &path_for_id
                 .iter()
-                .map(|(_, p)| p.clone())
+                .map(|(_, p, _)| p.clone())
                 .collect::<Vec<_>>(),
         );
 
         let conn = db.lock();
         let tx = conn.unchecked_transaction()?;
         let mut log_items: Vec<TrashLogItem> = Vec::new();
-        for ((fid, path), trashed_ok) in path_for_id.iter().zip(outcomes) {
+        for ((fid, path, existed), trashed_ok) in path_for_id.iter().zip(outcomes) {
+            if !existed {
+                tracing::warn!(
+                    path = %crate::platform::redact_path_for_log(path),
+                    "ENG-93: skipping trash record — file was already missing before the op"
+                );
+                failed += 1;
+                messages.push(BulkActionItem {
+                    file_id: Some(*fid),
+                    ok: false,
+                    message: Some(format!("already missing: {}", path.display())),
+                });
+                continue;
+            }
             if trashed_ok {
                 let _ = tx.execute("DELETE FROM files WHERE id = ?1", rusqlite::params![fid]);
                 succeeded += 1;

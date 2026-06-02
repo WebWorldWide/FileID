@@ -114,7 +114,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
     /// same match-expression shape as macOS — whitespace-joined terms.
     /// </summary>
     public async Task<IReadOnlyList<FileRow>> SearchAsync(
-        string query, int limit, CancellationToken ct)
+        string query, int limit, CancellationToken ct, string? kind = null)
     {
         if (_connection == null)
         {
@@ -123,7 +123,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
         var trimmedSearch = query?.Trim();
         if (string.IsNullOrEmpty(trimmedSearch))
         {
-            return await RecentAsync(limit, ct).ConfigureAwait(false);
+            return await RecentAsync(limit, ct, kind).ConfigureAwait(false);
         }
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -140,13 +140,15 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             var like = $"%{escapedSearch}%";
             var match = BuildMatchExpression(trimmedSearch);
             var hasMatch = !string.IsNullOrEmpty(match);
+            // PAR-116: filter kind in SQL (before LIMIT) so a kind-restricted grid fills.
+            var kindClause = string.IsNullOrEmpty(kind) || kind == "all" ? "" : " AND f.kind = $kind";
 
             cmd.CommandText = $"""
             SELECT f.id, f.path_text, f.kind, f.size_bytes, f.modified_at, f.has_faces, f.has_text,
                    (SELECT GROUP_CONCAT(tag, '|') FROM (SELECT tag FROM tags WHERE file_id = f.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, score DESC, rowid)) AS auto_tags,
                    f.vlm_proposed_name
             FROM files f
-            WHERE f.failed = 0
+            WHERE f.failed = 0{kindClause}
               AND (
                    {(hasMatch ? "f.id IN (SELECT rowid FROM ocr_fts WHERE ocr_fts MATCH $match) OR f.id IN (SELECT rowid FROM doc_fts WHERE doc_fts MATCH $match)" : "0")}
                    OR f.path_text LIKE $like ESCAPE '\'
@@ -171,6 +173,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             }
             cmd.Parameters.AddWithValue("$like", like);
             cmd.Parameters.AddWithValue("$limit", limit);
+            if (kindClause.Length > 0) cmd.Parameters.AddWithValue("$kind", kind!);
 
             using (var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false))
             {
@@ -192,7 +195,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
     /// Most-recently-modified files as a fallback when the search box is
     /// empty (or when CLIP isn't installed yet).
     /// </summary>
-    public async Task<IReadOnlyList<FileRow>> RecentAsync(int limit, CancellationToken ct)
+    public async Task<IReadOnlyList<FileRow>> RecentAsync(int limit, CancellationToken ct, string? kind = null)
     {
         if (_connection == null) return Array.Empty<FileRow>();
         await _gate.WaitAsync(ct).ConfigureAwait(false);
@@ -201,14 +204,17 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             if (_connection == null) return Array.Empty<FileRow>();
             var rows = new List<FileRow>(limit);
             using var cmd = _connection.CreateCommand();
-            cmd.CommandText = """
+            // PAR-116: filter kind in SQL (before LIMIT).
+            var kindClause = string.IsNullOrEmpty(kind) || kind == "all" ? "" : " WHERE kind = $kind";
+            cmd.CommandText = $"""
                 SELECT id, path_text, kind, size_bytes, modified_at, has_faces, has_text,
                        (SELECT GROUP_CONCAT(tag, '|') FROM (SELECT tag FROM tags WHERE file_id = files.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, score DESC, rowid)) AS auto_tags,
                        vlm_proposed_name
-                FROM files
+                FROM files{kindClause}
                 ORDER BY modified_at DESC NULLS LAST LIMIT $limit
                 """;
             cmd.Parameters.AddWithValue("$limit", limit);
+            if (kindClause.Length > 0) cmd.Parameters.AddWithValue("$kind", kind!);
             using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
             {
@@ -227,7 +233,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
     /// swaps in an HNSW or IVF index if benchmarks demand it.
     /// </summary>
     public async Task<IReadOnlyList<FileRowWithScore>> SemanticSearchAsync(
-        float[] queryEmbedding, int limit, CancellationToken ct)
+        float[] queryEmbedding, int limit, CancellationToken ct, string? kind = null)
     {
         if (_connection == null || queryEmbedding.Length == 0)
         {
@@ -239,7 +245,12 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             if (_connection == null) return Array.Empty<FileRowWithScore>();
             var heap = new PriorityQueue<FileRowWithScore, float>(limit);
             using var cmd = _connection.CreateCommand();
-            cmd.CommandText = """
+            // PAR-117: exclude failed files — a corrupt file with a stale CLIP
+            // embedding must not surface in semantic results. PAR-116: filter by
+            // kind in SQL so a kind-restricted grid isn't under-filled by the
+            // post-fetch C# filter.
+            var kindClause = string.IsNullOrEmpty(kind) || kind == "all" ? "" : " AND f.kind = $kind";
+            cmd.CommandText = $"""
             SELECT f.id, f.path_text, f.kind, f.size_bytes, f.modified_at,
                    f.has_faces, f.has_text,
                    (SELECT GROUP_CONCAT(tag, '|') FROM (SELECT tag FROM tags WHERE file_id = f.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, score DESC, rowid)) AS auto_tags,
@@ -247,7 +258,9 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
                    e.embedding
             FROM clip_embeddings e
             JOIN files f ON f.id = e.file_id
+            WHERE f.failed = 0{kindClause}
             """;
+            if (kindClause.Length > 0) cmd.Parameters.AddWithValue("$kind", kind!);
             using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
             {

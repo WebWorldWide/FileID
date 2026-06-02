@@ -121,22 +121,31 @@ pub fn wipe_all(conn: &Connection) -> Result<()> {
     };
 
     // FK off so DELETE order across parent/child tables is irrelevant (must be
-    // toggled outside a transaction; it's a no-op inside one).
+    // toggled outside a transaction; it's a no-op inside one). `foreign_keys`
+    // is a PER-CONNECTION setting, NOT transaction-scoped — if the body below
+    // errors out via `?`, a naked early return would leave the engine's single
+    // long-lived writer with FK enforcement OFF for the rest of the session,
+    // letting orphaned child rows be inserted. Run the body in a closure and
+    // re-enable FK on EVERY exit path before propagating the original error.
     conn.execute_batch("PRAGMA foreign_keys = OFF")?;
-    let tx = conn.unchecked_transaction()?;
-    for t in &data_tables {
-        tx.execute_batch(&format!("DELETE FROM \"{t}\""))
-            .with_context(|| format!("wiping table {t}"))?;
-    }
-    for v in &virtual_tables {
-        tx.execute_batch(&format!("INSERT INTO \"{v}\"(\"{v}\") VALUES('delete-all')"))
-            .with_context(|| format!("resetting FTS table {v}"))?;
-    }
-    // Reset AUTOINCREMENT so the next scan starts at id 1 again. Only present
-    // when an AUTOINCREMENT table exists (it does); guard anyway.
-    let _ = tx.execute_batch("DELETE FROM sqlite_sequence");
-    tx.commit().context("committing wipe")?;
-    conn.execute_batch("PRAGMA foreign_keys = ON")?;
+    let wipe = (|| -> Result<()> {
+        let tx = conn.unchecked_transaction()?;
+        for t in &data_tables {
+            tx.execute_batch(&format!("DELETE FROM \"{t}\""))
+                .with_context(|| format!("wiping table {t}"))?;
+        }
+        for v in &virtual_tables {
+            tx.execute_batch(&format!("INSERT INTO \"{v}\"(\"{v}\") VALUES('delete-all')"))
+                .with_context(|| format!("resetting FTS table {v}"))?;
+        }
+        // Reset AUTOINCREMENT so the next scan starts at id 1 again. Only present
+        // when an AUTOINCREMENT table exists (it does); guard anyway.
+        let _ = tx.execute_batch("DELETE FROM sqlite_sequence");
+        tx.commit().context("committing wipe")?;
+        Ok(())
+    })();
+    let _ = conn.execute_batch("PRAGMA foreign_keys = ON");
+    wipe?;
 
     // Shrink the on-disk file: collapse the WAL, then reclaim freed pages.
     // Both best-effort — an ephemeral reader holding a lock makes VACUUM

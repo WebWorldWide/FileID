@@ -368,14 +368,19 @@ async fn run_deep_analyze_batch(
             let already = {
                 let conn = db.lock();
                 if tags_only {
-                    // TagsOnly never writes vlm_description, so "already done"
-                    // means the file already has ≥1 source='vlm' tag. Checking
-                    // vlm_description here (as the Both path does) would never
-                    // match → the auto-tag pass would re-tag the whole library
-                    // on every scan instead of resuming on untagged files only.
+                    // ENG-40: TagsOnly never writes vlm_description, but it DOES
+                    // write vlm_model (persist_vlm_results sets it on every
+                    // successful pass). Keying "already done" on ≥1 source='vlm'
+                    // tag row re-analyzed any file whose VLM tags were all
+                    // stopword/empty-filtered (zero rows persisted) on every run.
+                    // Mirror the macOS reference (DeepAnalyzeRunner.swift): a file
+                    // is DONE when it was analyzed BY THIS MODEL (vlm_model match)
+                    // — the processed marker is written even when no tag survives
+                    // filtering, while genuinely-unprocessed files (vlm_model NULL
+                    // or a different model) still run.
                     conn.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM tags WHERE file_id=?1 AND source='vlm')",
-                        rusqlite::params![file_id],
+                        "SELECT EXISTS(SELECT 1 FROM files WHERE id=?1 AND vlm_model=?2)",
+                        rusqlite::params![file_id, model_kind],
                         |r| r.get::<_, bool>(0),
                     )
                     .unwrap_or(false)

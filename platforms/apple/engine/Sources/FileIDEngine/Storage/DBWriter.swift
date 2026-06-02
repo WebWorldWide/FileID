@@ -285,15 +285,45 @@ public actor DBWriter {
     /// Static + nonisolated so the GRDB write closure can call it without
     /// crossing the actor's executor (Swift 6 strict concurrency).
     private static func insertOne(file: TaggedFile, db: GRDB.Database) throws {
-        // 1. files row.
+        // 1. files row. Mirror the Windows engine's INSERT_FILE_RETURNING_ID_SQL
+        // (platforms/windows/src/engine/src/pipeline/dbwriter.rs) column-for-column:
+        // an upsert that UPDATEs the existing row in place on a path_text
+        // conflict. The previous `INSERT OR REPLACE` deleted the conflicting row,
+        // which FK-cascaded away its tags/face_prints/clip_embeddings/ocr_text on
+        // every rescan (the v1 `files.path_text` column carries an
+        // `ON CONFLICT REPLACE` action). The explicit `ON CONFLICT(path_text) DO
+        // UPDATE` clause overrides that column action for this statement, so the
+        // row id and its FK-linked children survive a rescan.
+        //   created_at + aesthetic are inserted but intentionally NOT in the
+        //   DO UPDATE set (matches Windows): a rescan must not clobber the
+        //   originally-recorded creation time, and aesthetic is scored elsewhere.
+        //   content_hash/file_ref aren't computed by the macOS scan path yet, so
+        //   they bind NULL and COALESCE preserves any previously-stored value.
         let pathHash = Int(bitPattern: UInt(truncatingIfNeeded: file.url.path.hashValue))
         try db.execute(sql: """
-            INSERT OR REPLACE INTO files
+            INSERT INTO files
               (path_text, path_hash, size_bytes, created_at, modified_at,
                scanned_at, kind, extension, phash, aesthetic, has_faces,
                has_text, camera_model, location_lat, location_lon,
-               failed, error_message)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               failed, error_message, content_hash, file_ref)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(path_text) DO UPDATE SET
+                path_hash     = excluded.path_hash,
+                size_bytes    = excluded.size_bytes,
+                modified_at   = excluded.modified_at,
+                scanned_at    = excluded.scanned_at,
+                kind          = excluded.kind,
+                extension     = excluded.extension,
+                phash         = excluded.phash,
+                has_faces     = excluded.has_faces,
+                has_text      = excluded.has_text,
+                camera_model  = excluded.camera_model,
+                location_lat  = excluded.location_lat,
+                location_lon  = excluded.location_lon,
+                failed        = excluded.failed,
+                error_message = excluded.error_message,
+                content_hash  = COALESCE(excluded.content_hash, content_hash),
+                file_ref      = COALESCE(excluded.file_ref, file_ref)
             """, arguments: [
                 file.url.path,
                 pathHash,
@@ -311,10 +341,19 @@ public actor DBWriter {
                 file.locationLat,
                 file.locationLon,
                 file.failed ? 1 : 0,
-                file.errorMessage
+                file.errorMessage,
+                nil,
+                nil
             ]
         )
-        let fileID = db.lastInsertedRowID
+        // On the DO UPDATE branch lastInsertedRowID is NOT the conflicting row's
+        // id, so resolve the id by path_text — the path is unique. This mirrors
+        // the row-id stability the Windows `RETURNING id` provides on both
+        // branches, and is required so the child-row writes below (tags, faces,
+        // OCR, CLIP) attach to the correct, surviving row on a rescan.
+        let fileID: Int64 = try Int64.fetchOne(db, sql: """
+            SELECT id FROM files WHERE path_text = ?
+            """, arguments: [file.url.path]) ?? db.lastInsertedRowID
 
         // 2. tags
         for tag in file.visionTags {
@@ -331,7 +370,14 @@ public actor DBWriter {
                 """, arguments: [fileID, text])
             // External-content FTS5 needs an explicit insert into the FTS table
             // that references the rowid (file_id). The `content=` linkage means
-            // SELECTs auto-fetch text from ocr_text.
+            // SELECTs auto-fetch text from ocr_text. Now that the files row
+            // survives a rescan (ON CONFLICT DO UPDATE, no cascade delete), the
+            // contentless FTS row is no longer wiped first — drop the prior row
+            // by rowid before re-inserting so a rescan doesn't accumulate
+            // duplicate FTS entries (mirrors the Windows `ocr_fts_delete`).
+            try db.execute(sql: """
+                DELETE FROM ocr_fts WHERE rowid = ?
+                """, arguments: [fileID])
             try db.execute(sql: """
                 INSERT INTO ocr_fts (rowid, text) VALUES (?, ?)
                 """, arguments: [fileID, text])
@@ -346,6 +392,13 @@ public actor DBWriter {
         // this face, but keep the row for display in PersonDetailSheet").
         let bboxes = file.faceBBoxes
         if !bboxes.isEmpty {
+            // The files row now survives a rescan (ON CONFLICT DO UPDATE, no
+            // cascade delete), so clear this file's prior face rows before
+            // re-inserting — otherwise a rescan accumulates duplicate faces.
+            // Mirrors the Windows `face_delete` that precedes its face inserts.
+            try db.execute(sql: """
+                DELETE FROM face_prints WHERE file_id = ?
+                """, arguments: [fileID])
             for i in 0..<bboxes.count {
                 let print: Data = i < file.facePrints.count ? file.facePrints[i] : Data()
                 let quality: Double? = i < file.faceQualities.count

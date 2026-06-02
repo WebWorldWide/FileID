@@ -335,6 +335,20 @@ public final class Database: @unchecked Sendable {
             try db.execute(sql: "DELETE FROM persons")
         }
 
+        // v13: stable anchor-face columns for "different people" verdicts.
+        // Byte-faithful mirror of the Windows "v13_face_verification_anchors"
+        // migration (same identifier + nullable INTEGER columns) so a face DB
+        // round-trips cross-platform — without this a Windows-written library
+        // has 13 grdb_migrations rows + these columns while macOS has 12 and
+        // lacks them (the schema drift the append-only invariant forbids).
+        // markPersonsDifferent keys verdicts on the stable (min,max) face-print
+        // anchor pair (face_a/face_b) instead of churning person ids on
+        // re-cluster. (PAR-1)
+        m.registerMigration("v13_face_verification_anchors") { db in
+            try db.execute(sql: "ALTER TABLE face_verifications ADD COLUMN face_a INTEGER")
+            try db.execute(sql: "ALTER TABLE face_verifications ADD COLUMN face_b INTEGER")
+        }
+
         return m
     }
 

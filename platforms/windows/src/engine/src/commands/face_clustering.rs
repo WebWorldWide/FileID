@@ -142,6 +142,18 @@ pub(crate) async fn handle_run_face_clustering(
         }
         Err(err) => {
             tracing::warn!(?err, "face clustering spawn failed");
+            // PAR-111: emit a face_clustering error so the app-side auto-trigger
+            // gate (_faceClusterAutoInFlight) is released even when the
+            // clustering closure panics — a JoinError otherwise fires no
+            // completion/error event, leaving auto-clustering stuck for the
+            // session.
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "face_clustering_failed".into(),
+                message: format!("Face clustering task did not complete: {err}"),
+                path: None,
+                model_kind: None,
+            }))))
+            .await;
         }
     }
 }

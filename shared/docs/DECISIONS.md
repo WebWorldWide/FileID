@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-06-01 — Full Windows audit: method + key calls (branch `audit-fixes-2026-06-01`)
+
+**Context**: A top-to-bottom audit of the entire Windows app (engine + WinUI), driven by multi-agent Workflow orchestration. Report: [`AUDIT-2026-06-01.md`](AUDIT-2026-06-01.md).
+
+- **4-stream adversarial method.** Engine static, app static, macOS parity, and a live on-hardware run — ~675 agents, every finding **refute-by-default verified** before it entered the report. Rationale: exhaustive coverage with a low false-positive rate. Raw findings (618) vastly exceed confirmed (153) precisely because the adversarial verify pass culls plausible-but-wrong claims; a synthesis pass then de-dupes the same root issue across streams (e.g. the SFace/ArcFace embedding mismatch surfaced in both engine and parity).
+- **On-hardware isolation harness** (`build/audit_onhw.ps1`), non-destructive by construction: redirect the engine via `LOCALAPPDATA=<temp>` with the real `Models/` junctioned in, so the user's 24k-file library DB is never opened and no destructive command (apply/rename/trash) is ever sent. **Gotcha recorded:** `paths::root()` appends `FileID` to `LOCALAPPDATA`, so the junction must sit at `<temp>\FileID\Models`, not `<temp>\Models`. The first run's "DirectML / models_not_installed / scan failed" was THIS harness bug, not a product fault — so the synthesis's HW-1 "DirectML never completes" was reclassified **UNVERIFIED**. The corrected run bound **CUDA** and completed cleanly.
+- **CUDA pack DOES bind on the RTX 2060** (supersedes the long-standing "unverified, needs hardware" note): `ort_cuda_x64` + cuDNN present → `executionProvider=cuda`, pack + cuDNN DLL dirs registered, scan completes. The throughput ceiling (4.9 files/s, well under the ≥140 target) is **CLIP under-batching + per-file serialization, not the EP** — so the next perf work is the batch coordinator, not the EP chain.
+- **ENG-18: `file_ref` is stored as a bitcast `i64`, not `u64`.** rusqlite's `ToSql for u64` rejects values `> i64::MAX`; an NTFS MFT reference with a non-zero sequence number (top 16 bits) exceeds it and aborted the entire flush batch. `r as i64` is a lossless reinterpret; the `HEAL_LOOKUP` equality still holds because write and lookup bind the same bitcast, and nothing reads the column back as `u64` (SQLite INTEGER is i64). Chosen over widening the column (no schema change, byte-compatible with macOS, which stores the same inode identity).
+- **ENG-2: `wipe_all` re-enables `foreign_keys` on every exit path** via a closure-captured result, because `PRAGMA foreign_keys` is per-*connection* (not transaction-scoped) and the engine reuses one long-lived writer — a naked early-return on a failed DELETE/commit would leave FK enforcement off for the rest of the session.
+
 ## 2026-05-31 — Suggested-merges crash + faces/merge audit (branch `fix/win-face-merge-crash`)
 
 **Context**: User report — opening People → Suggested merges hard-crashes the Windows app. Fixed + audited the faces/merge subsystem.

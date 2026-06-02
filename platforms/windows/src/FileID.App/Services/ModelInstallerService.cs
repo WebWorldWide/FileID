@@ -111,8 +111,18 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     /// (AppSettings.SelectedVlmModelKind).</summary>
     private string _deepVlmModelKind = "qwen2_5_vl_7b";
 
+    // APP-2: captured on the UI thread at ctor time (the singleton is first
+    // touched during app startup on the UI thread — the same thread on which
+    // it constructs the ModelSlots below, which rely on the same capture). The
+    // no-progress watchdog must marshal slot.Fail back to the UI thread, but it
+    // runs after `await ...ConfigureAwait(false)`, where
+    // DispatcherQueue.GetForCurrentThread() returns null — so it uses this
+    // captured reference rather than the ambient (null) one.
+    private readonly Microsoft.UI.Dispatching.DispatcherQueue? _ui;
+
     private ModelInstallerService()
     {
+        _ui = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
         Clip = new ModelSlot(
             displayLabel: "CLIP ViT-B/32",
             approxBytes: 220UL * 1024 * 1024,
@@ -600,15 +610,16 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         ScheduleNoProgressWatchdog(slot, modelKind);
     }
 
-    private static void ScheduleNoProgressWatchdog(ModelSlot slot, string modelKind, CancellationToken ct = default)
+    private void ScheduleNoProgressWatchdog(ModelSlot slot, string modelKind, CancellationToken ct = default)
     {
         var sentAt = DateTime.UtcNow;
-        // Capture the UI dispatcher at schedule time. The watchdog runs on
-        // a thread-pool thread (Task.Run) but slot.Fail mutates state that
-        // x:Bind UI elements observe — those updates have to land on the
-        // UI thread or downstream PropertyChanged handlers may touch
-        // FrameworkElements off-thread.
-        var ui = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
+        // APP-2: use the UI dispatcher captured at ctor time. This method is
+        // reached after `await ...ConfigureAwait(false)`, so the ambient
+        // DispatcherQueue.GetForCurrentThread() would return null here and
+        // silently disable the watchdog (a genuinely stuck install would then
+        // never surface "No response — try again"). slot.Fail mutates
+        // x:Bind-observed state, so it must marshal to the UI thread.
+        var ui = _ui;
         _ = Task.Run(async () =>
         {
             try

@@ -424,7 +424,7 @@ struct FileIDEngineMain {
                 try db.execute(sql: """
                     INSERT INTO scan_sessions (id, root_path, started_at, status)
                     VALUES (?, ?, ?, 'running')
-                    """, arguments: [session.id, url.path, Date().timeIntervalSinceReferenceDate])
+                    """, arguments: [session.id, url.path, Date().timeIntervalSince1970])
             }
         } catch {
             JSONLog.shared.warn(ev: "scan_session_insert_failed", sess: session.id, error: "\(error)")
@@ -586,7 +586,7 @@ struct FileIDEngineMain {
                     """, arguments: [
                         scanRootPath,
                         prefix + "%",
-                        scanStart.timeIntervalSinceReferenceDate
+                        scanStart.timeIntervalSince1970
                     ])
                 return rows.map { r in
                     CandidateRow(id: r["id"] ?? 0, path: r["path_text"] ?? "")
@@ -667,7 +667,7 @@ struct FileIDEngineMain {
                     UPDATE scan_sessions
                     SET status = 'crashed', completed_at = ?
                     WHERE status = 'running'
-                    """, arguments: [Date().timeIntervalSinceReferenceDate])
+                    """, arguments: [Date().timeIntervalSince1970])
             }
             for row in crashed {
                 JSONLog.shared.warn(
@@ -731,7 +731,7 @@ struct FileIDEngineMain {
                     WHERE id = ?
                     """, arguments: [
                         cancelled ? "cancelled" : "completed",
-                        Date().timeIntervalSinceReferenceDate,
+                        Date().timeIntervalSince1970,
                         session.id
                     ])
             }

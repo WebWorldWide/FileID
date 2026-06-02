@@ -24,6 +24,7 @@ pub mod clip_tokenizer;
 pub mod ep_guard;
 pub mod mobileclip;
 pub mod ram_plus;
+pub mod ram_plus_batch;
 pub mod registry;
 pub mod runtime;
 pub mod florence2;
