@@ -323,7 +323,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     {
         if (sender is Grid g)
         {
-            g.BorderBrush = (SolidColorBrush)Application.Current.Resources["CardStrokeColorDefaultBrush"];
+            g.BorderBrush = FileID.Services.ThemeHelper.GetBrushSafe("CardStrokeColorDefaultBrush");
             g.BorderThickness = new Thickness(1);
         }
     }

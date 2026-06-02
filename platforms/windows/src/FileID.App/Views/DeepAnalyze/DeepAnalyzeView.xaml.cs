@@ -247,7 +247,7 @@ public sealed partial class DeepAnalyzeView : UserControl
         if (ramGB is double available && !Fits(kind, available))
         {
             status.Text = $"Needs {RamBudgetGB(kind):0} GB (you have {available:0})";
-            status.Foreground = (Brush)Application.Current.Resources["DestructiveTextBrush"];
+            status.Foreground = ThemeHelper.GetBrushSafe("DestructiveTextBrush");
             bar.Visibility = Visibility.Collapsed;
             installButton.IsEnabled = false;
             ToolTipService.SetToolTip(card,
@@ -256,7 +256,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             card.IsHitTestVisible = false;
             return;
         }
-        status.Foreground = (Brush)Application.Current.Resources["AiBrush"];
+        status.Foreground = ThemeHelper.GetBrushSafe("AiBrush");
         ToolTipService.SetToolTip(card, null);
         card.Opacity = 1.0;
         card.IsHitTestVisible = true;
@@ -296,8 +296,8 @@ public sealed partial class DeepAnalyzeView : UserControl
 
     private void HighlightActiveCard()
     {
-        var idle = (Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"];
-        var gold = (Brush)Application.Current.Resources["GoldBrush"];
+        var idle = ThemeHelper.GetBrushSafe("CardStrokeColorDefaultBrush");
+        var gold = ThemeHelper.GetBrushSafe("GoldBrush");
         MistralCard.BorderBrush = _activeModel == "mistral_small_3_2" ? gold : idle;
         QwenLargeCard.BorderBrush = _activeModel == "qwen2_5_vl_7b" ? gold : idle;
         GemmaCard.BorderBrush = _activeModel == "gemma_3_4b" ? gold : idle;
