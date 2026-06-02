@@ -328,9 +328,9 @@ public actor DBWriter {
                 file.url.path,
                 pathHash,
                 Int(file.sizeBytes),
-                file.createdAt?.timeIntervalSinceReferenceDate,
-                file.modifiedAt?.timeIntervalSinceReferenceDate,
-                Date().timeIntervalSinceReferenceDate,
+                file.createdAt?.timeIntervalSince1970,
+                file.modifiedAt?.timeIntervalSince1970,
+                Date().timeIntervalSince1970,
                 file.kind,
                 file.extension,
                 file.phash.map { Int(bitPattern: UInt(truncatingIfNeeded: $0)) },
@@ -355,11 +355,19 @@ public actor DBWriter {
             SELECT id FROM files WHERE path_text = ?
             """, arguments: [file.url.path]) ?? db.lastInsertedRowID
 
-        // 2. tags
+        // 2. tags — auto (classifier output). Delete any prior `source='auto'`
+        // rows first so a rescan replaces stale tags atomically; user tags
+        // (`source='user'`) are untouched. Mirrors the Windows `tag_delete` +
+        // `INSERT OR REPLACE` in dbwriter.rs.
+        try db.execute(sql: """
+            DELETE FROM tags WHERE file_id = ? AND source = 'auto'
+            """, arguments: [fileID])
         for tag in file.visionTags {
+            let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { continue }
             try db.execute(sql: """
-                INSERT OR IGNORE INTO tags (file_id, tag, source) VALUES (?, ?, ?)
-                """, arguments: [fileID, tag, "vision"])
+                INSERT OR REPLACE INTO tags (file_id, tag, source) VALUES (?, ?, ?)
+                """, arguments: [fileID, trimmed, "auto"])
         }
 
         // 3. OCR text + FTS5 (FTS5 is auto-populated via content= linkage on

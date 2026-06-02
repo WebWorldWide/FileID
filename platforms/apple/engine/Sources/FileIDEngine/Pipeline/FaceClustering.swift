@@ -294,7 +294,7 @@ public enum FaceClustering {
                     )
                 }
 
-                let now = Date().timeIntervalSinceReferenceDate
+                let now = Date().timeIntervalSince1970
                 for p in personsList {
                     let blob = ArcFaceService.embeddingToBlob(p.centroid)
                     let inherited = p.inherited

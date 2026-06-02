@@ -146,7 +146,7 @@ struct FileIDEngineMain {
     static func dispatch(_ cmd: IPCCommand, coordinator: ScanCoordinator,
                           sink: IPCSink, database: Database?) async {
         switch cmd.payload {
-        case .startScan(let bookmark, let displayPath):
+        case .startScan(let rootPath, let rootDisplay, let rescan):
             guard let database else {
                 await sink.emit(.error(EngineError(
                     kind: "db_unavailable",
@@ -154,6 +154,10 @@ struct FileIDEngineMain {
                 )))
                 return
             }
+            // The app resolves the security-scoped bookmark to a filesystem
+            // path before sending, so the engine receives a ready-to-walk
+            // path. `rootDisplay` defaults to `rootPath` when omitted.
+            let displayPath = rootDisplay ?? rootPath
             // Enqueue — runs immediately if nothing else queued, else
             // waits for predecessors to finish.
             let title = "Scan \((displayPath as NSString).lastPathComponent)"
@@ -163,7 +167,8 @@ struct FileIDEngineMain {
                 etaSeconds: nil  // unknown until discovery completes
             ) {
                 let task = Task.detached(priority: .userInitiated) {
-                    await runScan(bookmark: bookmark, displayPath: displayPath,
+                    await runScan(rootPath: rootPath, displayPath: displayPath,
+                                  rescan: rescan,
                                   coordinator: coordinator, sink: sink,
                                   database: database)
                 }
@@ -248,7 +253,12 @@ struct FileIDEngineMain {
                                              scope: .folder(prefix: prefix),
                                              modelKind: kind)
             })
-        case .deepAnalyzeAll(let modelKind, let skipExisting):
+        case .deepAnalyzeAll(let modelKind, let skipExisting, let tagsOnly):
+            // `tagsOnly` (fast one-VLM-call/file pass) is accepted for wire
+            // parity; the macOS DeepAnalyzeRunner's wholeLibrary scope doesn't
+            // branch on it yet (tracked in NEXT.md) — full caption + tags runs
+            // regardless.
+            _ = tagsOnly
             guard let database, let kind = AIModelKind(rawValue: modelKind) else {
                 await sink.emit(.error(EngineError(
                     kind: "deep_invalid",
@@ -339,9 +349,11 @@ struct FileIDEngineMain {
              .renamePerson,
              .markPersonsAsUnknown,
              .findMergeSuggestions,
+             .markPersonsDifferent,
              .embedImageQuery,
              .restoreFromTrash,
-             .revertMerge:
+             .revertMerge,
+             .wipeLibrary:
             await sink.emit(.error(EngineError(
                 kind: "not_implemented_yet",
                 message: "This command is implemented on Windows; mac engine support is planned for V14.10."
@@ -354,52 +366,25 @@ struct FileIDEngineMain {
         }
     }
 
-    /// Resolve the security-scoped bookmark and run discovery.
+    /// Run discovery against an already-resolved filesystem path. The app
+    /// resolves its security-scoped bookmark to a path and starts accessing
+    /// the scoped resource before sending `startScan`, so the engine just
+    /// walks the path it's given.
     /// `database` is the engine's single shared `Database` (one DatabasePool
     /// per engine process — opening more would trigger SQLITE_BUSY).
     static func runScan(
-        bookmark: Data, displayPath: String,
+        rootPath: String, displayPath: String, rescan: Bool,
         coordinator: ScanCoordinator, sink: IPCSink,
         database: Database
     ) async {
-        // Bookmark might or might not carry security scope depending on
-        // whether the app is sandboxed. Try with scope first (production
-        // path), then without (tests / unsandboxed dev runs). Both fail =
-        // genuine error.
-        var stale = false
-        let url: URL
-        do {
-            url = try URL(
-                resolvingBookmarkData: bookmark,
-                options: [.withSecurityScope],
-                relativeTo: nil,
-                bookmarkDataIsStale: &stale
-            )
-        } catch {
-            do {
-                url = try URL(
-                    resolvingBookmarkData: bookmark,
-                    options: [],
-                    relativeTo: nil,
-                    bookmarkDataIsStale: &stale
-                )
-            } catch let secondError {
-                await sink.emit(.error(EngineError(
-                    kind: "bookmark_invalid",
-                    message: "Could not resolve bookmark for \(displayPath): \(error) / fallback: \(secondError)"
-                )))
-                JSONLog.shared.error(ev: "bookmark_invalid", path: redactPathForLog(displayPath),
-                                     error: "withScope=\(error) noScope=\(secondError)")
-                return
-            }
-        }
-        if stale {
-            JSONLog.shared.warn(ev: "bookmark_stale", path: redactPathForLog(url.path))
-        }
-        // Security-scoped access only matters inside an app sandbox (where
-        // the bookmark MUST carry scope, granted via NSOpenPanel). Outside
-        // the sandbox (CLI dev runs, tests) this returns false even for valid
-        // URLs because there's nothing to scope. Log but proceed.
+        // `rescan` (force-reprocess vs. incremental-skip) is accepted for
+        // wire parity with the schema; the macOS scan pipeline's incremental
+        // skip isn't wired to it yet (tracked in NEXT.md).
+        _ = rescan
+        let url = URL(fileURLWithPath: rootPath)
+        // The path arrives already resolved from the app side. Re-establish
+        // security-scoped access in case the app handed off scope (no-op /
+        // false outside a sandbox, which is fine for CLI dev runs + tests).
         let hasScope = url.startAccessingSecurityScopedResource()
         defer { if hasScope { url.stopAccessingSecurityScopedResource() } }
         if !hasScope {

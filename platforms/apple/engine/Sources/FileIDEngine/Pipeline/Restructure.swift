@@ -130,9 +130,9 @@ public enum Restructure {
         // to the rule cascade. Mirrors the Windows engine (commands/restructure.rs).
         let semanticFiles: [RestructureSemantic.SemanticFile] = rows.compactMap { s in
             guard s.kind == "image", let clip = loaded.embeddings[s.id] else { return nil }
-            // created_at/modified_at are seconds since the 2001 reference date;
-            // shift to the Unix epoch so day-of-year matches the Windows engine.
-            let timeUnix = (s.createdAt ?? s.modifiedAt).map { $0 + 978_307_200 } ?? 0
+            // created_at/modified_at are seconds since the Unix epoch (byte-faithful
+            // with the Windows engine), so they feed day-of-year directly.
+            let timeUnix = (s.createdAt ?? s.modifiedAt) ?? 0
             return RestructureSemantic.SemanticFile(
                 fileID: s.id, source: s.path, clip: clip,
                 tags: loaded.tags[s.id] ?? [], timeUnix: timeUnix)
@@ -158,8 +158,8 @@ public enum Restructure {
         let calendar = Calendar(identifier: .gregorian)
         for s in rows where !movedIDs.contains(s.id) {
             let date: Date? = {
-                if let c = s.createdAt { return Date(timeIntervalSinceReferenceDate: c) }
-                if let m = s.modifiedAt { return Date(timeIntervalSinceReferenceDate: m) }
+                if let c = s.createdAt { return Date(timeIntervalSince1970: c) }
+                if let m = s.modifiedAt { return Date(timeIntervalSince1970: m) }
                 return nil
             }()
             let year = date.map { String(calendar.component(.year, from: $0)) }

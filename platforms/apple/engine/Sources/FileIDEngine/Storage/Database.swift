@@ -87,7 +87,7 @@ public final class Database: @unchecked Sendable {
                 t.column("file_id", .integer).notNull()
                     .references("files", onDelete: .cascade)
                 t.column("tag",     .text).notNull()
-                t.column("source",  .text).notNull()        // vision|clip|exif|user
+                t.column("source",  .text).notNull()        // auto|clip|exif|user|vlm
                 t.column("score",   .double)
                 t.primaryKey(["file_id", "tag", "source"])
             }

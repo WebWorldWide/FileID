@@ -329,10 +329,13 @@ public enum Tagging {
     }
 
     /// Free-from-the-data tags layered on top of Vision's classifier
-    /// output. Year (so users can search "2024"), camera family
-    /// ("iPhone" / "Canon"), aspect orientation (Wide / Tall / Square),
-    /// and capability flags ("Has Faces", "Has Text"). Sync — these
-    /// don't add measurable per-file cost.
+    /// output: Year (so users can search "2024") and camera family
+    /// ("iPhone" / "Canon"). Sync — these don't add measurable per-file
+    /// cost. Aspect orientation (Wide/Tall/Square) and capability flags
+    /// (Has Faces / Has Text / Has Location) used to be emitted here too,
+    /// but they dominated `TopTwoTags` on EXIF-less files and read as UI
+    /// concerns rather than content; the signals still live in their own
+    /// DB columns/facets. Mirrors Windows `push_enriched_extras`.
     private static func extraTags(
         cgImage: CGImage,
         cameraModel: String?,
@@ -366,18 +369,6 @@ public enum Tagging {
             else { family = nil }
             if let family { out.append(family) }
         }
-        // Orientation/aspect tag — instantly groupable in the Library.
-        let w = cgImage.width
-        let h = cgImage.height
-        if w > 0 && h > 0 {
-            let ratio = Double(w) / Double(h)
-            if ratio > 1.30 { out.append("Wide") }
-            else if ratio < 0.77 { out.append("Tall") }
-            else { out.append("Square") }
-        }
-        if hasFaces { out.append("Has Faces") }
-        if hasOCR { out.append("Has Text") }
-        if hasLocation { out.append("Has Location") }
         return out
     }
 

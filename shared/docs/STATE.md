@@ -8,6 +8,15 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-02 (later 5) — WS6 macOS lockstep: DB-contract half (epoch / tag-source / IPC) — PR #5, build-verify track
+
+Tackled the macOS lockstep that "needs a Mac" by splitting it into the **persisted-bytes contract** (do-able + macOS-CI-build-verifiable from here) vs the **behavior-verifiable** half (needs a Mac). Implemented the former via a 10-cell file-disjoint Workflow + 4 adversarial verifiers, grounded in the **current** Windows engine source (the LOCKSTEP doc was stale on month-name and false-positive on vlm_model — verified each claim against code per the "verify directives" rule). Pushed `macos-lockstep` → **PR #5** (macOS CI `pull_request` building; the only gate, since no Windows source changed).
+
+- **Timestamp epoch** 2001-ref → Unix(1970) across writer **and every reader** (DBWriter, DeepAnalyzeRunner, FaceClustering `persons.*` — a verifier-caught straggler, ReadStore incl. a pre-existing writer/reader mismatch, Restructure — dropped `+978_307_200`). **Scan tag source** `vision`→`auto` (writer + all readers) + rescan DELETE/REPLACE + trim-skip-empty; dropped orientation/capability extra tags; byte-faithful hyphen sanitizer. **IPC contract**: `startScan` reshaped to rootPath/rootDisplay?/rescan (unsandboxed model — no `.entitlements`), +`markPersonsDifferent`/`wipeLibrary` commands, +8 reply events/DTOs, +`EngineInfo.hardware`/`HardwareInfo`, +`EngineError.modelKind`, +`deepAnalyzeAll.tagsOnly`; both switches + round-trip test updated.
+- **Reverted** the face-bbox JSON swap — it broke macOS clustering (`bboxArea` CSV-parse) and still wasn't byte-faithful (px vs normalized).
+- **Deferred (need a Mac to behavior-verify; in `MACOS_LOCKSTEP_NOTES.md` Part 3):** face bbox coord-space + FaceAlign/landmark embeddings (Part 2 #1), RAM++ CoreML tagger (#3), content-hash + rename-heal, restructure-routing rewrite, VLM-tag gen. Found a pre-existing latent `ID`-vs-`Id` schema/Windows-wire casing drift (not a DB-round-trip blocker).
+- **HONESTY:** edit-only; Swift not built here. macOS CI build-verifies compilation; the cross-platform DB round-trip that *defines* lockstep still requires the user's Mac — this is build-verified, not lockstep-verified.
+
 ## 2026-06-02 (later 4) — Production-hardening pass cont'd: WS1b/WS3/WS7/WS-CD (5 more verified merges)
 
 Continued the v1.0 plan via investigate→implement→adversarial-verify→gate→merge workflows. All headless-gate-green (engine clippy/fmt/test + app build/format/test), pushed to `main`, CI green:

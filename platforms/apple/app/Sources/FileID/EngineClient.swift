@@ -428,6 +428,19 @@ public final class EngineClient {
             modelDownloadProgress = p
         case .queueState(let q):
             queueState = q
+        // ── Windows-originated reply events. The mac app's equivalent flows
+        //    are synchronous (per-tab actions), so these aren't consumed here
+        //    yet; they're decoded so a shared/cross-platform engine doesn't
+        //    wedge the wire. ──
+        case .restructurePlan,
+             .restructureApplyResult,
+             .bulkActionResult,
+             .clipTextEmbedding,
+             .mergeSuggestions,
+             .hardwareReprobed,
+             .libraryWiped,
+             .thumbnailGenerated:
+            break
         }
     }
 
@@ -546,26 +559,35 @@ public final class EngineClient {
         autoPilotActive = true
         autoPilotStage = .scanning
         isPaused = false
-        let path = rootURL.path
+        let displayPath = rootURL.path
+        // Resolve the security-scoped bookmark to a filesystem path APP-SIDE
+        // and send the resolved `rootPath` (the wire contract carries a path,
+        // not a bookmark). Round-tripping through bookmarkData →
+        // resolvingBookmarkData yields the canonical scoped path the sandbox
+        // actually grants; outside a sandbox it's just rootURL.path.
         Task.detached(priority: .userInitiated) { [weak self] in
+            let resolvedPath: String
             do {
                 let bookmark = try rootURL.bookmarkData(
                     options: [],
                     includingResourceValuesForKeys: nil,
                     relativeTo: nil
                 )
-                await MainActor.run {
-                    self?.send(.startScan(rootBookmark: bookmark, rootPathDisplay: path))
-                }
+                var stale = false
+                let resolved = try URL(
+                    resolvingBookmarkData: bookmark,
+                    options: [],
+                    relativeTo: nil,
+                    bookmarkDataIsStale: &stale
+                )
+                resolvedPath = resolved.path
             } catch {
-                await MainActor.run {
-                    self?.lastError = EngineError(
-                        kind: "bookmark_create_failed",
-                        message: "\(error)", path: path
-                    )
-                    self?.autoPilotActive = false
-                    self?.autoPilotStage = .idle
-                }
+                // Bookmark round-trip failed (e.g. unsandboxed dev run where
+                // bookmarks aren't meaningful) — fall back to the raw path.
+                resolvedPath = displayPath
+            }
+            await MainActor.run {
+                self?.send(.startScan(rootPath: resolvedPath, rootDisplay: displayPath, rescan: false))
             }
         }
     }
@@ -653,7 +675,7 @@ public final class EngineClient {
         deepAnalyzeProgress = nil
         deepAnalyzeComplete = nil
         deepAnalyzeStarting = nil
-        send(.deepAnalyzeAll(modelKind: modelKind, skipExisting: skipExisting))
+        send(.deepAnalyzeAll(modelKind: modelKind, skipExisting: skipExisting, tagsOnly: false))
     }
 
     public func deepAnalyzeCancel() {

@@ -16,7 +16,12 @@ public struct IPCCommand: Codable, Sendable {
     }
 
     public enum Payload: Codable, Sendable {
-        case startScan(rootBookmark: Data, rootPathDisplay: String)
+        /// Absolute filesystem `rootPath`, an optional human-readable
+        /// `rootDisplay` (defaults to `rootPath` when nil), and `rescan`
+        /// (force every file to be reprocessed even when already current).
+        /// Mirrors the schema's StartScan shape byte-for-byte — the app
+        /// resolves the security-scoped bookmark to a path before sending.
+        case startScan(rootPath: String, rootDisplay: String?, rescan: Bool)
         case pauseScan
         case resumeScan
         case cancelScan
@@ -25,7 +30,13 @@ public struct IPCCommand: Codable, Sendable {
         case runFaceClustering
         case deepAnalyzeFile(fileID: Int64, modelKind: String)
         case deepAnalyzeFolder(pathPrefix: String, modelKind: String)
-        case deepAnalyzeAll(modelKind: String, skipExisting: Bool)
+        /// `tagsOnly` runs the fast one-VLM-call/file pass (background
+        /// auto-tag chain) instead of full caption + smart-rename + tags.
+        /// The schema marks it optional (defaults false); the Windows
+        /// engine always serializes it, so a Windows-emitted command
+        /// decodes cleanly. Any extra schema key (e.g. `proposeRenames`)
+        /// is ignored by Swift's keyed decoder.
+        case deepAnalyzeAll(modelKind: String, skipExisting: Bool, tagsOnly: Bool)
         case deepAnalyzeCancel
         /// Pre-fetch a VLM's weights into the swift-transformers HF
         /// cache without running inference. Used by the welcome-sheet
@@ -57,6 +68,15 @@ public struct IPCCommand: Codable, Sendable {
         case embedImageQuery(fileID: Int64, queryID: String)
         case restoreFromTrash(batchID: String)
         case revertMerge(sourcePersonID: Int64, destinationPersonID: Int64, faceIDsToRevert: [Int64])
+        /// Record a user "different people" verdict for a suggested pair so
+        /// findMergeSuggestions stops re-suggesting it. Keyed on stable
+        /// anchor face ids so it survives re-clustering. Windows-originated;
+        /// the mac engine returns the structured not-implemented pointer.
+        case markPersonsDifferent(sourcePersonID: Int64, destinationPersonID: Int64, sourceAnchorFaceID: Int64, destinationAnchorFaceID: Int64)
+        /// Truncate all learned library state (tags, faces, captions,
+        /// embeddings) in-process on the engine's writer connection — no file
+        /// deletion. Engine replies with a `libraryWiped` event. Empty payload.
+        case wipeLibrary
         /// Windows-only: re-probe CUDA + cuDNN. Always returns
         /// `not_applicable_on_platform` on mac.
         case verifyCudaPack
@@ -86,6 +106,22 @@ public struct RestructureMove: Codable, Sendable {
         self.tier = tier
         self.confidence = confidence
         self.reason = reason
+    }
+
+    /// Custom decode so a move emitted by a Windows engine that omits
+    /// `confidence` (it's `skip_serializing_if = "String::is_empty"` there)
+    /// still decodes — `confidence` defaults to "" when absent, matching the
+    /// "empty on older engines" semantics. `tier`/`reason` are optional.
+    /// `encode(to:)` stays auto-synthesized.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        fileID = try c.decode(Int64.self, forKey: .fileID)
+        source = try c.decode(String.self, forKey: .source)
+        destination = try c.decode(String.self, forKey: .destination)
+        category = try c.decode(String.self, forKey: .category)
+        tier = try c.decodeIfPresent(String.self, forKey: .tier)
+        confidence = try c.decodeIfPresent(String.self, forKey: .confidence) ?? ""
+        reason = try c.decodeIfPresent(String.self, forKey: .reason)
     }
 }
 
@@ -125,6 +161,18 @@ public struct IPCEvent: Codable, Sendable {
         case deepAnalyzeComplete(DeepAnalyzeComplete)
         case modelDownloadProgress(ModelDownloadProgress)
         case queueState(QueueState)
+        // ── Windows-originated reply events. The mac engine doesn't emit
+        //    these yet (the equivalent flows return synchronously on mac),
+        //    but the app must DECODE them so a shared/cross-platform engine
+        //    or test corpus round-trips. Each mirrors the schema's DTO. ──
+        case restructurePlan(RestructurePlan)
+        case restructureApplyResult(RestructureApplyResult)
+        case bulkActionResult(BulkActionResult)
+        case clipTextEmbedding(ClipTextEmbedding)
+        case mergeSuggestions(MergeSuggestions)
+        case hardwareReprobed(HardwareReprobed)
+        case libraryWiped(LibraryWiped)
+        case thumbnailGenerated(ThumbnailGenerated)
     }
 }
 
@@ -135,12 +183,118 @@ public struct EngineInfo: Codable, Sendable {
     public let pid: Int32
     public let workerCap: Int
     public let physicalMemoryGB: Double
+    /// CPU + GPU detection result the engine made on startup. Optional so
+    /// older engines (that don't emit it) still decode — `nil` when absent.
+    public let hardware: HardwareInfo?
 
-    public init(version: String, pid: Int32, workerCap: Int, physicalMemoryGB: Double) {
+    public init(version: String, pid: Int32, workerCap: Int, physicalMemoryGB: Double,
+                hardware: HardwareInfo? = nil) {
         self.version = version
         self.pid = pid
         self.workerCap = workerCap
         self.physicalMemoryGB = physicalMemoryGB
+        self.hardware = hardware
+    }
+}
+
+/// CPU/GPU/NPU detection snapshot. Mirrors the schema's HardwareInfo +
+/// the Windows engine's `HardwareInfo`. Every field is optional/defaulted so
+/// an older engine that omits the V15.9 adaptive-utilization fields (or omits
+/// `hardware` entirely) still decodes cleanly.
+public struct HardwareInfo: Codable, Sendable {
+    /// "nvidia" / "amd" / "intel" / "qualcomm" / "other" / "none".
+    public let gpuVendor: String
+    /// Friendly adapter name as reported by the OS graphics API.
+    public let adapterName: String?
+    /// EP the engine picked: "cuda" / "tensorrt" / "directml" / "openvino"
+    /// / "qnn" / "cpu" (mac: "coreml").
+    public let executionProvider: String
+    public let physicalCpuCores: Int
+    public let cudaPackPresent: Bool
+    public let openvinoPackPresent: Bool
+    public let qnnPackPresent: Bool
+    /// Contextual recommendation; empty when already on the optimal path.
+    public let recommendation: String
+    // ── V15.9 adaptive-utilization diagnostics (all optional/defaulted). ──
+    public let pCores: Int
+    public let eCores: Int
+    public let logicalCpuCores: Int
+    public let workerCap: Int
+    public let ramTotalMB: Int
+    public let ramAvailableMB: Int
+    public let memoryTier: String
+    public let vramMB: Int
+    public let npuPresent: Bool
+    public let powerSource: String
+    public let batteryPercent: Int?
+    public let activeProfile: String
+
+    public init(
+        gpuVendor: String = "none",
+        adapterName: String? = nil,
+        executionProvider: String = "cpu",
+        physicalCpuCores: Int = 0,
+        cudaPackPresent: Bool = false,
+        openvinoPackPresent: Bool = false,
+        qnnPackPresent: Bool = false,
+        recommendation: String = "",
+        pCores: Int = 0,
+        eCores: Int = 0,
+        logicalCpuCores: Int = 0,
+        workerCap: Int = 0,
+        ramTotalMB: Int = 0,
+        ramAvailableMB: Int = 0,
+        memoryTier: String = "",
+        vramMB: Int = 0,
+        npuPresent: Bool = false,
+        powerSource: String = "",
+        batteryPercent: Int? = nil,
+        activeProfile: String = ""
+    ) {
+        self.gpuVendor = gpuVendor
+        self.adapterName = adapterName
+        self.executionProvider = executionProvider
+        self.physicalCpuCores = physicalCpuCores
+        self.cudaPackPresent = cudaPackPresent
+        self.openvinoPackPresent = openvinoPackPresent
+        self.qnnPackPresent = qnnPackPresent
+        self.recommendation = recommendation
+        self.pCores = pCores
+        self.eCores = eCores
+        self.logicalCpuCores = logicalCpuCores
+        self.workerCap = workerCap
+        self.ramTotalMB = ramTotalMB
+        self.ramAvailableMB = ramAvailableMB
+        self.memoryTier = memoryTier
+        self.vramMB = vramMB
+        self.npuPresent = npuPresent
+        self.powerSource = powerSource
+        self.batteryPercent = batteryPercent
+        self.activeProfile = activeProfile
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        gpuVendor = try c.decodeIfPresent(String.self, forKey: .gpuVendor) ?? "none"
+        adapterName = try c.decodeIfPresent(String.self, forKey: .adapterName)
+        executionProvider = try c.decodeIfPresent(String.self, forKey: .executionProvider) ?? "cpu"
+        physicalCpuCores = try c.decodeIfPresent(Int.self, forKey: .physicalCpuCores) ?? 0
+        cudaPackPresent = try c.decodeIfPresent(Bool.self, forKey: .cudaPackPresent) ?? false
+        openvinoPackPresent = try c.decodeIfPresent(Bool.self, forKey: .openvinoPackPresent) ?? false
+        qnnPackPresent = try c.decodeIfPresent(Bool.self, forKey: .qnnPackPresent) ?? false
+        recommendation = try c.decodeIfPresent(String.self, forKey: .recommendation) ?? ""
+        pCores = try c.decodeIfPresent(Int.self, forKey: .pCores) ?? 0
+        eCores = try c.decodeIfPresent(Int.self, forKey: .eCores) ?? 0
+        logicalCpuCores = try c.decodeIfPresent(Int.self, forKey: .logicalCpuCores) ?? 0
+        workerCap = try c.decodeIfPresent(Int.self, forKey: .workerCap) ?? 0
+        ramTotalMB = try c.decodeIfPresent(Int.self, forKey: .ramTotalMB) ?? 0
+        ramAvailableMB = try c.decodeIfPresent(Int.self, forKey: .ramAvailableMB) ?? 0
+        memoryTier = try c.decodeIfPresent(String.self, forKey: .memoryTier) ?? ""
+        vramMB = try c.decodeIfPresent(Int.self, forKey: .vramMB) ?? 0
+        npuPresent = try c.decodeIfPresent(Bool.self, forKey: .npuPresent) ?? false
+        powerSource = try c.decodeIfPresent(String.self, forKey: .powerSource) ?? ""
+        batteryPercent = try c.decodeIfPresent(Int.self, forKey: .batteryPercent)
+        activeProfile = try c.decodeIfPresent(String.self, forKey: .activeProfile) ?? ""
     }
 }
 
@@ -423,11 +577,16 @@ public struct EngineError: Codable, Sendable, Error {
     public let kind: String        // discovery_failed | vision_failed | db_failed | unknown
     public let message: String
     public let path: String?       // file path if applicable
+    /// For errors pertaining to a specific model/pack install (e.g.
+    /// `mobileclip_s2`, `cuda_pack_x64`), the model id — lets the app route
+    /// the error to the right install slot. Optional/`nil` when absent.
+    public let modelKind: String?
 
-    public init(kind: String, message: String, path: String? = nil) {
+    public init(kind: String, message: String, path: String? = nil, modelKind: String? = nil) {
         self.kind = kind
         self.message = message
         self.path = path
+        self.modelKind = modelKind
     }
 }
 
@@ -442,5 +601,172 @@ public struct LogLine: Codable, Sendable {
 
     public enum Level: String, Codable, Sendable {
         case debug, info, warn, error
+    }
+}
+
+// MARK: - Windows-originated reply DTOs
+//
+// These mirror the schema's $defs (and the Windows engine's IPC structs)
+// so the macOS app can DECODE events emitted by a cross-platform engine /
+// the shared test corpus. The mac engine doesn't emit them yet.
+
+public struct RestructureCategoryCount: Codable, Sendable {
+    public let category: String
+    public let count: Int
+
+    public init(category: String, count: Int) {
+        self.category = category
+        self.count = count
+    }
+}
+
+public struct FolderClassificationCounts: Codable, Sendable {
+    public let anchorFolders: Int
+    public let mixedFolders: Int
+    public let junkFolders: Int
+
+    public init(anchorFolders: Int, mixedFolders: Int, junkFolders: Int) {
+        self.anchorFolders = anchorFolders
+        self.mixedFolders = mixedFolders
+        self.junkFolders = junkFolders
+    }
+}
+
+public struct RestructurePlan: Codable, Sendable {
+    public let libraryRoot: String
+    public let moves: [RestructureMove]
+    public let categoryCounts: [RestructureCategoryCount]
+    /// Engine-authoritative folder classification counts. Nil on older engines.
+    public let folderClassifications: FolderClassificationCounts?
+
+    public init(libraryRoot: String, moves: [RestructureMove],
+                categoryCounts: [RestructureCategoryCount],
+                folderClassifications: FolderClassificationCounts? = nil) {
+        self.libraryRoot = libraryRoot
+        self.moves = moves
+        self.categoryCounts = categoryCounts
+        self.folderClassifications = folderClassifications
+    }
+}
+
+public struct RestructureApplyResult: Codable, Sendable {
+    public let applied: Int
+    public let failed: Int
+    /// Surfaces a "Developer Mode required for symlinks" message; nil otherwise.
+    public let privilegeError: String?
+
+    public init(applied: Int, failed: Int, privilegeError: String? = nil) {
+        self.applied = applied
+        self.failed = failed
+        self.privilegeError = privilegeError
+    }
+}
+
+public struct BulkActionItem: Codable, Sendable {
+    public let fileID: Int64?
+    public let ok: Bool
+    public let message: String?
+
+    public init(fileID: Int64? = nil, ok: Bool, message: String? = nil) {
+        self.fileID = fileID
+        self.ok = ok
+        self.message = message
+    }
+}
+
+public struct BulkActionResult: Codable, Sendable {
+    /// Originating command's discriminator; the trashFiles reply additionally
+    /// carries the undo batch id as a ":<uuid>" suffix.
+    public let action: String
+    public let succeeded: Int
+    public let failed: Int
+    public let messages: [BulkActionItem]
+
+    public init(action: String, succeeded: Int, failed: Int, messages: [BulkActionItem]) {
+        self.action = action
+        self.succeeded = succeeded
+        self.failed = failed
+        self.messages = messages
+    }
+}
+
+public struct ClipTextEmbedding: Codable, Sendable {
+    public let queryID: String
+    public let query: String
+    /// 512-d L2-normalized float32 embedding from the CLIP text encoder.
+    public let embedding: [Float]
+
+    public init(queryID: String, query: String, embedding: [Float]) {
+        self.queryID = queryID
+        self.query = query
+        self.embedding = embedding
+    }
+}
+
+public struct MergeSuggestionPair: Codable, Sendable {
+    public let sourcePersonID: Int64
+    public let destinationPersonID: Int64
+    public let similarity: Double
+    public let sourceAnchorFaceID: Int64
+    public let destinationAnchorFaceID: Int64
+    public let sourceMemberCount: Int
+    public let destinationMemberCount: Int
+
+    public init(sourcePersonID: Int64, destinationPersonID: Int64, similarity: Double,
+                sourceAnchorFaceID: Int64, destinationAnchorFaceID: Int64,
+                sourceMemberCount: Int, destinationMemberCount: Int) {
+        self.sourcePersonID = sourcePersonID
+        self.destinationPersonID = destinationPersonID
+        self.similarity = similarity
+        self.sourceAnchorFaceID = sourceAnchorFaceID
+        self.destinationAnchorFaceID = destinationAnchorFaceID
+        self.sourceMemberCount = sourceMemberCount
+        self.destinationMemberCount = destinationMemberCount
+    }
+}
+
+public struct MergeSuggestions: Codable, Sendable {
+    public let pairs: [MergeSuggestionPair]
+
+    public init(pairs: [MergeSuggestionPair]) {
+        self.pairs = pairs
+    }
+}
+
+/// Reply to `verifyCudaPack`. Fresh `HardwareInfo` snapshot + an optional
+/// human-readable `diagnostics` string explaining a negative probe.
+public struct HardwareReprobed: Codable, Sendable {
+    public let hardware: HardwareInfo
+    public let diagnostics: String?
+
+    public init(hardware: HardwareInfo, diagnostics: String? = nil) {
+        self.hardware = hardware
+        self.diagnostics = diagnostics
+    }
+}
+
+/// Reply to `wipeLibrary`. `ok` is true when every table was truncated;
+/// `message` carries the error on failure.
+public struct LibraryWiped: Codable, Sendable {
+    public let ok: Bool
+    public let message: String?
+
+    public init(ok: Bool, message: String? = nil) {
+        self.ok = ok
+        self.message = message
+    }
+}
+
+/// Reply to `generateVideoThumbnail`. `bytes` is a base64-encoded 192px JPEG
+/// (aspect-preserved, long side = 192) — a base64 String, NOT a number array.
+public struct ThumbnailGenerated: Codable, Sendable {
+    public let path: String
+    public let modifiedAt: Double?
+    public let bytes: String
+
+    public init(path: String, modifiedAt: Double? = nil, bytes: String) {
+        self.path = path
+        self.modifiedAt = modifiedAt
+        self.bytes = bytes
     }
 }

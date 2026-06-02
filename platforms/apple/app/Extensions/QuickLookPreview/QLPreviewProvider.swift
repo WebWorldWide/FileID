@@ -72,7 +72,7 @@ class QLPreviewProvider: NSObject, QLPreviewingController {
                 let desc: String? = r["vlm_description"]
 
                 let tagRows = try Row.fetchAll(db, sql: """
-                    SELECT tag FROM tags WHERE file_id = ? AND source = 'vision'
+                    SELECT tag FROM tags WHERE file_id = ? AND source = 'auto'
                     ORDER BY rowid LIMIT 8
                     """, arguments: [fileID])
                 let tags = tagRows.compactMap { $0["tag"] as String? }
