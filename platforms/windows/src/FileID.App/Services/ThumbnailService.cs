@@ -39,11 +39,19 @@ public readonly record struct ThumbnailDiagnostics(
 
 internal sealed class ThumbnailService : IDisposable
 {
-    /// <summary>LRU cap ~5000 entries (~25 MB at ~5 KB/thumb) — sized for
-    /// ~10K-file libraries; smaller ones cap themselves.</summary>
+    /// <summary>Decoded-BitmapImage L1 cache, bounded by a real BYTE budget
+    /// (not an entry count). Each cached BitmapImage holds a DECODED bitmap
+    /// (~ThumbnailRequestPx² × 4 bytes), so the old 5000-entry cap was really
+    /// ~550 MB of live bitmaps on a large library — not the "~25 MB" the entry
+    /// count implied (that estimate was the ENCODED ~5 KB/thumb, not the decoded
+    /// surface). Sizing each entry by its decoded cost and capping the total at
+    /// ~128 MB holds the working set bounded across a 50K-file scroll; LRU evicts
+    /// the coldest thumbnails and a miss just re-decodes (no correctness hit).</summary>
+    private const long DecodedBytesPerEntry = (long)ThumbnailRequestPx * ThumbnailRequestPx * 4;
+    private const long L1CacheByteBudget = 128L * 1024 * 1024;
     private readonly MemoryCache _cache = new(new MemoryCacheOptions
     {
-        SizeLimit = 5_000,
+        SizeLimit = L1CacheByteBudget,
     });
     private readonly Channel<ThumbnailRequest> _queue;
     private readonly CancellationTokenSource _cts = new();
@@ -139,7 +147,7 @@ internal sealed class ThumbnailService : IDisposable
                     var key = CacheKey(req.Path, req.ModifiedAt);
                     _cache.Set(key, bmp, new MemoryCacheEntryOptions
                     {
-                        Size = 1,
+                        Size = DecodedBytesPerEntry,
                         SlidingExpiration = TimeSpan.FromMinutes(15),
                     });
                 }
