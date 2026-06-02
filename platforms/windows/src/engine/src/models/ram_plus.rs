@@ -252,6 +252,17 @@ impl RamPlusTagger {
     /// capped at `max_tags`. Confidence is the sigmoid probability (0..1) and is
     /// what the pipeline persists in `tags.score`.
     pub fn tag(&mut self, rgb: &[u8], width: u32, height: u32) -> Result<Vec<(String, f32)>> {
+        let chw = Self::preprocess_tensor(rgb, width, height)?;
+        self.tag_prepared(chw)
+    }
+
+    /// CPU-only preprocess (resize + ImageNet-normalize) into the model input
+    /// tensor. Split out of [`tag`] so a caller can run it OUTSIDE the per-session
+    /// Mutex + GPU permit — the GPU forward in [`tag_prepared`] is the only part
+    /// that needs the exclusive session, so one worker can prep while another's
+    /// forward pass runs (shrinks the per-session serial CPU gap). Tag output is
+    /// byte-identical to the old single-call `tag`.
+    pub fn preprocess_tensor(rgb: &[u8], width: u32, height: u32) -> Result<Array4<f32>> {
         let expected = (width as usize) * (height as usize) * 3;
         if rgb.len() != expected {
             anyhow::bail!(
@@ -262,7 +273,13 @@ impl RamPlusTagger {
                 rgb.len()
             );
         }
-        let chw = Self::preprocess(rgb, width, height)?;
+        Self::preprocess(rgb, width, height)
+    }
+
+    /// Run the GPU forward on a pre-normalized input tensor + select tags. The
+    /// ONLY part that touches `&mut self.session`, so it is what the caller
+    /// serializes under the pool Mutex.
+    pub fn tag_prepared(&mut self, chw: Array4<f32>) -> Result<Vec<(String, f32)>> {
         let input = Tensor::from_array(chw).context("RAM++ input tensor")?;
         let input_name = self
             .session

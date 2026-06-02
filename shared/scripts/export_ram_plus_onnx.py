@@ -138,6 +138,27 @@ def build_logits_wrapper(model):
 def load_model(checkpoint):
     import torch
 
+    # transformers >= 4.0 moved these utility fns from modeling_utils to
+    # pytorch_utils; recognize-anything's vendored bert.py still imports them from
+    # the old location, so it ImportErrors on modern transformers (incl. the
+    # transformers 5.x that Python 3.14 forces — there are no Python-3.14 wheels
+    # for the old transformers RAM++ was built against). Re-export them into the
+    # legacy namespace so the import resolves; the functions are unchanged.
+    try:
+        import transformers.modeling_utils as _mu
+        import transformers.pytorch_utils as _pu
+
+        for _n in (
+            "apply_chunking_to_forward",
+            "find_pruneable_heads_and_indices",
+            "prune_linear_layer",
+            "Conv1D",
+        ):
+            if not hasattr(_mu, _n) and hasattr(_pu, _n):
+                setattr(_mu, _n, getattr(_pu, _n))
+    except Exception:  # noqa: BLE001 — best-effort compat shim
+        pass
+
     try:
         from ram.models import ram_plus
     except ImportError as e:
@@ -195,6 +216,18 @@ def main():
     ap.add_argument("--sample-image", help="optional image for ONNX-vs-torch validation")
     ap.add_argument("--opset", type=int, default=17)
     ap.add_argument(
+        "--image-size",
+        type=int,
+        default=IMAGE_SIZE,
+        help="Square input resolution (default 384 = the RAM++ fine-tune size). "
+        "A smaller size (e.g. 256) re-exports a lighter, faster model — compute "
+        "drops ~with the pixel ratio — for throughput on weaker GPUs. The shipped "
+        "checkpoint is fine-tuned at 384, so VALIDATE tag F1 vs the 384 model on a "
+        "real corpus before shipping (recognize-anything interpolates the Swin "
+        "relative-position bias for the new size; the engine's RAM++ INPUT_SIZE "
+        "must match whatever you export).",
+    )
+    ap.add_argument(
         "--precision",
         choices=["fp16", "fp32"],
         default="fp16",
@@ -211,6 +244,10 @@ def main():
         "Use --no-dynamic-batch for the legacy fixed [1,3,384,384] export.",
     )
     args = ap.parse_args()
+    # Resolution drives model construction (ram_plus(image_size=...)), the dummy
+    # input, and validation — all read the module-global IMAGE_SIZE, so set it
+    # from the CLI before anything downstream reads it.
+    globals()["IMAGE_SIZE"] = args.image_size
 
     import torch
 
@@ -260,13 +297,16 @@ def main():
     print(f"wrote {len(thr)} per-class thresholds → {thr_path}")
 
     dummy = torch.zeros(1, 3, IMAGE_SIZE, IMAGE_SIZE, dtype=torch.float32)
-    # HW-4: a dynamic batch axis lets the engine run N images per forward, which
-    # fills the GPU's kernels — a single 384² image leaves a ~52-TFLOPS card at
-    # <1% utilization, so RAM++ at batch=1 is launch/latency-bound, not
-    # compute-bound (proven on the RTX 2060: 670 ms/img; adding concurrent
-    # sessions regressed, batching is the right lever). ONLY dim 0 is made
-    # dynamic; the Swin window grid stays static at 384² so the window-attention
-    # reshapes (the dynamic-`nW` Concat issue in SWIN_EXPORT_NOTE) are untouched.
+    # A dynamic batch axis lets a caller run N images per forward. NOTE (corrects
+    # the original HW-4 hypothesis): batched RAM++ was MEASURED on an RTX 2060
+    # (2026-06) and DISPROVEN — the GPU is compute+VRAM saturated at batch=1 (util
+    # p50 87%, VRAM ~90% full), so batch=4 ran ~23% SLOWER, not faster. Keep the
+    # dynamic axis (harmless; opt-in via the engine's batch coordinator for
+    # high-SM/high-VRAM cards that do NOT saturate at batch=1), but the real
+    # throughput levers are a lighter/lower-res model or a faster-kernel EP, not
+    # batching. ONLY dim 0 is made dynamic; the Swin window grid stays static at
+    # the chosen image size so the window-attention reshapes (the dynamic-`nW`
+    # Concat issue in SWIN_EXPORT_NOTE) are untouched.
     dyn_axes = (
         {"image": {0: "batch"}, "logits": {0: "batch"}} if args.dynamic_batch else None
     )

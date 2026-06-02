@@ -99,7 +99,18 @@ pub(crate) async fn handle_plan_restructure(
                 return;
             }
             Err(err) => {
+                // JoinError = the blocking query task panicked / was aborted.
+                // Emit a terminal error so the Restructure tab's "Computing
+                // plan…" status recovers instead of awaiting forever (mirrors
+                // the face_clustering PAR-111 JoinError handling).
                 tracing::warn!(?err, "planRestructure spawn_blocking failed");
+                sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                    kind: "plan_restructure_failed".into(),
+                    message: format!("Restructure planning did not complete: {err}"),
+                    path: None,
+                    model_kind: None,
+                }))))
+                .await;
                 return;
             }
         };
@@ -288,7 +299,18 @@ pub(crate) async fn handle_apply_restructure(
             .await;
         }
         Err(err) => {
+            // JoinError = the apply task panicked / was aborted. Emit a terminal
+            // error so the Restructure tab's "Moving N files…" status recovers
+            // instead of hanging forever (ApplyRestructureAsync has no app-side
+            // timeout; mirrors the face_clustering PAR-111 JoinError handling).
             tracing::warn!(?err, "applyRestructure spawn_blocking failed");
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "apply_restructure".into(),
+                message: format!("Apply did not complete: {err}"),
+                path: None,
+                model_kind: None,
+            }))))
+            .await;
         }
     }
 }

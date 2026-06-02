@@ -653,10 +653,18 @@ impl Tagger {
         // don't oversaturate the GPU side or starve the WinUI 3 app.
         let topo = crate::platform::cpu_topology();
         let decoder_count = ((topo.p_cores + topo.e_cores) as usize).clamp(2, 12);
-        // Channel cap: 2× worker count keeps a small read-ahead buffer
-        // ready, without ballooning RAM with decoded RGB bytes (each
-        // frame can be ~50 MB for a 12 MP photo).
-        let predecoded_cap = (self.worker_count * 2).max(8);
+        // Channel cap: bound decoded-RGB read-ahead by a MEMORY budget, not a
+        // flat frame count. A 12 MP frame is ~36 MB, so the old (worker*2) count
+        // pinned ~0.5-1 GB of pure read-ahead slack the GPU never needs — decode
+        // (CPU, the [2,12] decoder pool) vastly outruns the GPU-bound RAM++
+        // tagger (~6-8 files/s), so the channel sits full all scan and a
+        // shallower queue cannot starve the GPU. Size to ~256 MB of typical
+        // frames while still guaranteeing every worker can hold one frame ready
+        // (floor = worker_count). Per-frame pixels are already capped at
+        // MAX_DECODED_PIXELS, so this also tightens the pathological-frame ceiling.
+        const PREDECODE_BUDGET_MB: usize = 256;
+        const TYPICAL_FRAME_MB: usize = 24; // ~8 MP RGB8
+        let predecoded_cap = (PREDECODE_BUDGET_MB / TYPICAL_FRAME_MB).max(self.worker_count);
         let (predecoded_tx, predecoded_rx) =
             async_channel::bounded::<PreDecoded>(predecoded_cap);
         for decoder_idx in 0..decoder_count {
@@ -1424,19 +1432,30 @@ async fn process_file_predecoded(
                         if let Some(ram_coord) = &models.ram_plus_batch {
                             Some(ram_coord.tag(rgb.clone(), w, h).await)
                         } else if let Some(ram_pool) = &models.ram_plus {
-                            let rwait = Instant::now();
-                            let permit = vision_sem.acquire().await;
-                            STATS_VISION_WAIT_US
-                                .fetch_add(rwait.elapsed().as_micros() as u64, Ordering::Relaxed);
-                            if permit.is_ok() {
-                                let ram_mu = &ram_pool[worker_idx % ram_pool.len()];
-                                let r = {
-                                    let mut g = ram_mu.lock();
-                                    g.tag(&rgb, w, h)
-                                };
-                                Some(r)
-                            } else {
-                                None
+                            // Run the CPU preprocess (resize + ImageNet-normalize)
+                            // BEFORE acquiring the GPU permit + session Mutex, so it
+                            // overlaps other workers' GPU forwards instead of
+                            // serializing under the scarce session lock; the lock +
+                            // permit now wrap only the GPU forward pass.
+                            match crate::models::ram_plus::RamPlusTagger::preprocess_tensor(
+                                &rgb, w, h,
+                            ) {
+                                Ok(chw) => {
+                                    let rwait = Instant::now();
+                                    let permit = vision_sem.acquire().await;
+                                    STATS_VISION_WAIT_US.fetch_add(
+                                        rwait.elapsed().as_micros() as u64,
+                                        Ordering::Relaxed,
+                                    );
+                                    if permit.is_ok() {
+                                        let ram_mu = &ram_pool[worker_idx % ram_pool.len()];
+                                        let mut g = ram_mu.lock();
+                                        Some(g.tag_prepared(chw))
+                                    } else {
+                                        None
+                                    }
+                                }
+                                Err(e) => Some(Err(e)),
                             }
                         } else {
                             None

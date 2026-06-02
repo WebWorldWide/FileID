@@ -193,7 +193,7 @@ public struct ScanProgress: Codable, Sendable {
 
 public struct FileDoneEvent: Codable, Sendable {
     public let path: String
-    public let kind: String          // image|video|pdf|doc|other
+    public let kind: String          // image|video|pdf|doc|audio|other
     public let totalMs: Double
     public let failed: Bool
     public let errorMessage: String?

@@ -90,7 +90,19 @@ pub(crate) async fn handle_embed_image_query(
             .await;
         }
         Err(err) => {
+            // JoinError = the embed task panicked. Resolve the awaiting query
+            // with an empty embedding (same shape as the Ok(Err) arm) so "find
+            // similar" falls back cleanly instead of stalling 5s on a reply that
+            // never carries this query_id (#12).
             tracing::warn!(?err, "embed_image_query spawn failed");
+            sink.send(IpcEvent::now(EventPayload::ClipTextEmbedding(Wrap::new(
+                ClipTextEmbedding {
+                    query_id,
+                    query: format!("file:{}", payload.file_id),
+                    embedding: Vec::new(),
+                },
+            ))))
+            .await;
         }
     }
 }
@@ -176,7 +188,18 @@ pub(crate) async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQ
             .await;
         }
         Err(err) => {
+            // JoinError = the embed task panicked. Resolve with an empty
+            // embedding (same shape as the Ok(Err) arm) so the search box drops
+            // to the FTS fallback immediately instead of stalling 5s (#12).
             tracing::warn!(?err, "CLIP embed spawn failed");
+            sink.send(IpcEvent::now(EventPayload::ClipTextEmbedding(Wrap::new(
+                ClipTextEmbedding {
+                    query_id,
+                    query,
+                    embedding: Vec::new(),
+                },
+            ))))
+            .await;
         }
     }
 }

@@ -2698,3 +2698,49 @@ worth-fixing findings**; 28 landed headless-green. Non-obvious calls:
 - **Deferred: CLIP tokenizer reference-regex (#16).** Correct but requires regenerating the
   precomputed scene matrix AND re-tuning `SCENE_COSINE_THRESHOLD`; compounding it with #1's
   cosine shift un-revalidated risks scene-tag quality. Left for an on-hardware retune pass.
+
+## 2026-06-02 (later) — Perf reality, INT8 dead-end, lower-res the lever, IPC-casing deferred
+
+Multi-workflow perf/bug/lockstep sweep. Non-obvious calls:
+
+- **RAM++ is GENUINELY fp16 — verified, not assumed (so NO fp16 conversion lever).** The on-disk
+  `ram_plus.onnx` is 882 MB, which a research pass *guessed* meant fp32 (an easy ~2×/half-VRAM win).
+  Inspecting the ONNX (`build/inspect_onnx.py`) settled it: **924.5 MB FLOAT16 vs 0.4 MB FLOAT32**, all
+  MatMul/Conv weights fp16; the size is the baked frozen tag-description constants
+  (`[1,4585,51,512]` + `[512,233835]` = 478 MB of fp16). The `registry.rs` comment ("fp16 export is
+  ~882 MB: RAM++ bakes the 4585×51 tag embeddings as constants") was RIGHT. Lesson reinforced: verify
+  the artifact, don't infer precision from file size.
+- **INT8 quantization is a dead end on this stack (do not pursue for GPU).** Cited reality: DirectML
+  has no INT8 fast path for Swin's ops on Turing (microsoft/DirectML#282 measured a quantized conv
+  ~10× *slower*); the ORT CUDA EP cannot consume INT8/QDQ nodes (runs them in float anyway); TensorRT
+  *automatic* INT8 gives Swin ≈1.0× ("FP16 recommended" — Swin-Transformer-TensorRT). The 1.4–1.85×
+  Swin INT8 numbers are NVIDIA FasterTransformer's hand-written kernels, unreachable from ORT. Dynamic
+  INT8 is a CPU-only win. So INT8 is removed from the perf roadmap.
+- **The one real throughput lever is a lower-res 384→256 re-export (~1.8–2.7×), and it is offline /
+  release-step work — NOT headless-now on this box.** It works on the *shipped* DirectML EP (no new
+  pack), relieves the 90 %-full VRAM, and the export script + A/B harness are staged. It is blocked
+  HERE only by Python 3.14 forcing transformers 5.x, which `recognize-anything`'s 2023 vendored BERT
+  can't import against (symbols moved/removed from `transformers.modeling_utils`). Needs a Py 3.11–3.13
+  env (transformers ~4.25 + timm<1.0). The shipped 384 checkpoint is 384-tuned, so 256 MUST pass a
+  tag-F1 ship gate vs 384 on the real corpus before adoption. (Recipe + gate in NEXT.md.)
+- **The two perf wins this pass are correct hygiene, NOT a measured throughput win — said plainly.**
+  `perf_bench.ps1` showed ~25 % run-to-run variance on the 2060 (RAM++ 517↔671 ms on byte-identical
+  code, GPU-clock/thermal), and the wins (preprocess-out-of-lock, byte-budget read-ahead) are <5 %
+  effects, below that floor. They are kept because they are architecturally sound + non-regressing
+  (preprocess shouldn't hold a GPU permit; a memory budget is more principled than a frame count and
+  bounds the pathological-frame case), not because a macro-benchmark could isolate them. Detecting
+  them needs a clock-pinned, multi-run, `[STATS]`-counter A/B (NEXT.md).
+- **IPC field-name casing fix (eng-ipc-1/2) DEFERRED to one atomic, test-guarded PR — by design.** The
+  drift (Rust/C# emit lowercase-`d` `queryId`/`personId`/… vs the schema's + macOS's capital-`ID`) is
+  a real contract violation that breaks the macOS round-trip, but it is NOT a live Windows bug
+  (both Windows peers agree on lowercase-d). It spans ~25 fields across Rust + C#, commands + events,
+  with several non-unique field names — a partial edit would break the live app. Doing it half-way is
+  worse than not doing it, so it is specced complete in NEXT.md (full field table) to land as one PR
+  with serialize-and-assert-the-schema-key tests on both sides as the safety net. Only eng-ipc-0
+  (JoinError → terminal event; a real UI-hang bug) was fixed this pass.
+- **macOS lockstep reconciliation is DOCUMENTED, not blind-edited.** The audit found 39 divergences,
+  almost all macOS-side (the macOS engine trails the Windows+schema reference). Since none of the
+  Swift can be built/verified in this Windows dev env, blind-writing ~30 Swift edits (esp. the CRITICAL
+  timestamp-epoch fix, which must reconcile several *internally inconsistent* macOS read/write sites —
+  a wrong edit corrupts macOS's own timestamps) is higher-risk than valuable. Captured instead as a
+  file:line-precise, per-side plan in `LOCKSTEP-2026-06-02.md` for a Mac session + CI verification.

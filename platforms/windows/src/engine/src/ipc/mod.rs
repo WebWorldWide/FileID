@@ -1086,6 +1086,7 @@ mod tests {
                 destination_person_id: 2,
                 face_ids_to_revert: vec![10, 11, 12],
             }),
+            CommandPayload::WipeLibrary(Empty {}),
         ];
 
         for payload in &cases {
