@@ -375,8 +375,68 @@ internal sealed partial class EngineClient
     /// immediate feedback after installing cuDNN, without an engine
     /// restart.</summary>
     public Task VerifyCudaPackAsync() => SendCommandAsync(new VerifyCudaPackCommand());
-    public Task DeepAnalyzeFileAsync(long fileId, string modelKind) =>
-        SendCommandAsync(new DeepAnalyzeFileCommand(fileId, modelKind));
+    /// <summary>Send deepAnalyzeFile and await the engine's terminal
+    /// <c>DeepAnalyzeComplete</c> reply (the single-file handler always emits
+    /// one — on success, analyze failure, AND the no-model early return), so a
+    /// stuck or no-model run surfaces instead of fire-and-forgetting (the user
+    /// otherwise sees the stream card stay open with no result and no error).
+    /// Mirrors the awaited-bounded pattern in <see cref="WaitForBulkActionResultAsync"/>;
+    /// the IPC wire shape is unchanged. A single VLM caption can be slow, so the
+    /// timeout is generous and a no-response is surfaced as a warning (the run
+    /// may still be in flight) rather than a hard error.</summary>
+    public async Task DeepAnalyzeFileAsync(long fileId, string modelKind)
+    {
+        var tcs = new TaskCompletionSource<FileID.IpcSchema.DeepAnalyzeComplete>(TaskCreationOptions.RunContinuationsAsynchronously);
+        PropertyChangedEventHandler? handler = null;
+        handler = (_, e) =>
+        {
+            if (e.PropertyName == nameof(DeepAnalyzeComplete) && DeepAnalyzeComplete is { } r)
+            {
+                PropertyChanged -= handler;
+                tcs.TrySetResult(r);
+            }
+        };
+        DeepAnalyzeComplete = null;
+        PropertyChanged += handler;
+        try
+        {
+            await SendCommandAsync(new DeepAnalyzeFileCommand(fileId, modelKind)).ConfigureAwait(false);
+            using var cts = new CancellationTokenSource(DeepAnalyzeFileTimeout);
+            using var reg = cts.Token.Register(() =>
+            {
+                PropertyChanged -= handler;
+                tcs.TrySetException(new TimeoutException(
+                    $"Engine did not confirm deepAnalyzeFile({fileId}) within {DeepAnalyzeFileTimeout.TotalSeconds:0}s."));
+            });
+            var result = await tcs.Task.ConfigureAwait(false);
+            if (!result.Cancelled && result.Failed > 0)
+            {
+                LastWarning = new EngineError(
+                    "deep_analyze_file_failed",
+                    "Deep Analyze couldn't process this file. It may be an unsupported format, or the model isn't installed yet.",
+                    null,
+                    modelKind);
+            }
+        }
+        catch (TimeoutException)
+        {
+            LastWarning = new EngineError(
+                "deep_analyze_no_confirm",
+                $"Deep Analyze hasn't responded in {DeepAnalyzeFileTimeout.TotalMinutes:0} minutes. It may still be running on a large model — check the stream, or cancel and retry if it stays stuck.",
+                null,
+                modelKind);
+        }
+        finally
+        {
+            PropertyChanged -= handler;
+        }
+    }
+
+    /// <summary>Ceiling for a single-file Deep Analyze before we surface a
+    /// "no response" warning. Generous: a 7B VLM captioning one image on CPU
+    /// can run well over a minute, and we must NOT abort a healthy slow run —
+    /// this only guards a genuinely wedged engine.</summary>
+    private static readonly TimeSpan DeepAnalyzeFileTimeout = TimeSpan.FromMinutes(5);
     public Task DeepAnalyzeFolderAsync(string pathPrefix, string modelKind) =>
         SendCommandAsync(new DeepAnalyzeFolderCommand(pathPrefix, modelKind));
     // tagsOnly = the fast background auto-tag pass (one VLM call/file). The
@@ -384,14 +444,105 @@ internal sealed partial class EngineClient
     public Task DeepAnalyzeAllAsync(string modelKind, bool skipExisting, bool tagsOnly = false, bool proposeRenames = true) =>
         SendCommandAsync(new DeepAnalyzeAllCommand(modelKind, skipExisting, tagsOnly, proposeRenames));
     public Task DeepAnalyzeCancelAsync() => SendCommandAsync(new DeepAnalyzeCancelCommand());
+    /// <summary>No-progress (stall) window for a prewarm/pack install. A large
+    /// pack download is legitimately long, so we do NOT cap total wall time —
+    /// instead the watchdog only fires when NO <c>ModelDownloadProgress</c>
+    /// event lands for this long, which means the engine wedged. Each progress
+    /// event re-arms the window (any progress = engine alive), so a healthy
+    /// multi-GB download never false-fails. Matches ModelInstallerService's
+    /// 60 s no-progress guard; raised here only by the absolute backstop.</summary>
+    private static readonly TimeSpan PrewarmNoProgressTimeout = TimeSpan.FromSeconds(90);
+
+    /// <summary>Absolute backstop. Even with a stall watchdog, a pathological
+    /// engine could dribble one byte every 89 s forever; this caps the total
+    /// watch at a generous ceiling so the UI is never wedged indefinitely. Set
+    /// well above any realistic pack download on a slow link.</summary>
+    private static readonly TimeSpan PrewarmAbsoluteCeiling = TimeSpan.FromHours(2);
+
+    private int _prewarmCancelRequested;
+
     public Task PrewarmModelAsync(string modelKind)
     {
         DebugLog.Info($"[INSTALL] EngineClient.PrewarmModelAsync('{modelKind}') called. State={State}, _stdin={(_stdin is null ? "NULL" : "alive")}");
-        return SendCommandAsync(new PrewarmModelCommand(modelKind));
+        Interlocked.Exchange(ref _prewarmCancelRequested, 0);
+        var send = SendCommandAsync(new PrewarmModelCommand(modelKind));
+        // Detached stall guard — keeps PrewarmModelAsync fire-and-forget (callers
+        // like ModelInstallerService schedule their own UI-slot watchdog after
+        // this returns) while still surfacing a wedged install to LastError when
+        // nothing else is watching (Settings / auto-installer paths).
+        _ = StartPrewarmStallGuardAsync(modelKind, send);
+        return send;
     }
+
+    private async Task StartPrewarmStallGuardAsync(string modelKind, Task send)
+    {
+        try
+        {
+            await send.ConfigureAwait(false);
+        }
+        catch
+        {
+            // The IPC send itself failed; SendCommandAsync's awaiter already
+            // throws to the caller (which surfaces it). Nothing to watch.
+            return;
+        }
+
+        var startedAt = DateTime.UtcNow;
+        var lastSeenAt = startedAt;
+        // Each ModelDownloadProgress event is a fresh record instance, so a
+        // reference change is a reliable "the engine emitted progress" signal.
+        var lastProgress = ModelDownloadProgress;
+
+        while (true)
+        {
+            if (Interlocked.CompareExchange(ref _prewarmCancelRequested, 0, 0) == 1) return;
+
+            await Task.Delay(PrewarmNoProgressTimeout).ConfigureAwait(false);
+
+            if (Interlocked.CompareExchange(ref _prewarmCancelRequested, 0, 0) == 1) return;
+
+            var current = ModelDownloadProgress;
+            // A terminal "installed" event arrives as fraction >= 1.0 for THIS
+            // model — install finished cleanly, stop watching.
+            if (current is { } c
+                && string.Equals(c.ModelKind, modelKind, StringComparison.Ordinal)
+                && c.Fraction >= 0.999)
+            {
+                return;
+            }
+            // A relevant engine error already routed to LastError (prewarm
+            // failures emit EngineError); stop watching so we don't pile a
+            // generic stall message on top of the specific one.
+            if (LastError is { } err
+                && string.Equals(err.ModelKind, modelKind, StringComparison.Ordinal))
+            {
+                return;
+            }
+            // Any new progress (different slot reference or moved fraction) means
+            // the engine is alive — re-arm the window.
+            if (!ReferenceEquals(current, lastProgress))
+            {
+                lastProgress = current;
+                lastSeenAt = DateTime.UtcNow;
+            }
+
+            var now = DateTime.UtcNow;
+            if (now - lastSeenAt >= PrewarmNoProgressTimeout || now - startedAt >= PrewarmAbsoluteCeiling)
+            {
+                var stalled = now - startedAt >= PrewarmAbsoluteCeiling
+                    ? $"The install for '{modelKind}' is still running after {PrewarmAbsoluteCeiling.TotalHours:0} hours — something is wrong. Cancel and try again."
+                    : $"The install for '{modelKind}' stopped responding (no progress for {PrewarmNoProgressTimeout.TotalSeconds:0}s). Check your connection, then cancel and retry.";
+                DebugLog.Warn($"[INSTALL] prewarm stall guard firing for '{modelKind}': {stalled}");
+                _ui.TryEnqueue(() => LastError = new EngineError("model_install_stalled", stalled, null, modelKind));
+                return;
+            }
+        }
+    }
+
     public Task CancelPrewarmAsync()
     {
         DebugLog.Info("[INSTALL] EngineClient.CancelPrewarmAsync() called.");
+        Interlocked.Exchange(ref _prewarmCancelRequested, 1);
         return SendCommandAsync(new CancelPrewarmCommand());
     }
 
@@ -438,8 +589,46 @@ internal sealed partial class EngineClient
     public Task EmbedImageQueryAsync(long fileId, string queryId) =>
         SendCommandAsync(new EmbedImageQueryCommand(fileId, queryId));
 
-    public Task RestoreFromTrashAsync(string batchId) =>
-        SendCommandAsync(new RestoreFromTrashCommand(batchId));
+    /// <summary>Send restoreFromTrash and await the engine's matching
+    /// <c>BulkActionResult</c> reply (action prefix "restoreFromTrash"), surfacing
+    /// any partial/total failure or non-response to LastError/LastWarning so the
+    /// user isn't told "restored" when the engine timed out or some entries
+    /// couldn't come back. Mirrors the awaited-bounded pattern in
+    /// <see cref="WaitForBulkActionResultAsync"/>; the IPC wire shape is
+    /// unchanged (still a single restoreFromTrash command). The UndoStack
+    /// listener captures the same reply independently.</summary>
+    public async Task RestoreFromTrashAsync(string batchId)
+    {
+        try
+        {
+            var result = await WaitForBulkActionResultAsync(
+                "restoreFromTrash",
+                () => SendCommandAsync(new RestoreFromTrashCommand(batchId)),
+                TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+            if (result.Failed > 0)
+            {
+                var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
+                var detail = string.IsNullOrWhiteSpace(first) ? "" : $" — {first}";
+                LastWarning = new EngineError(
+                    "restore_partial_failure",
+                    $"Restored {result.Succeeded}; {result.Failed} couldn't be brought back{detail}.",
+                    null);
+            }
+        }
+        catch (TimeoutException)
+        {
+            LastError = new EngineError(
+                "restore_no_confirm",
+                "The engine didn't confirm the restore within 30 seconds. The files may or may not have been restored — re-run the scan to check before retrying.",
+                null);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            LastError = new EngineError("restore_failed", $"Restore failed: {ex.Message}", null);
+            throw;
+        }
+    }
 
     public Task RevertMergeAsync(long sourcePersonId, long destPersonId, IReadOnlyList<long> faceIdsToRevert) =>
         SendCommandAsync(new RevertMergeCommand(sourcePersonId, destPersonId, faceIdsToRevert));

@@ -260,37 +260,47 @@ pub(crate) async fn handle_prewarm_model(
         }));
     }
 
-    let mut first_err: Option<(String, PathBuf, anyhow::Error)> = None;
+    // Collect EVERY failed file, not just the first — a multi-file or
+    // multi-pack failure must not be masked by reporting only one. Each is
+    // logged on its own, then surfaced as a single combined error.
+    let mut errs: Vec<(String, PathBuf, anyhow::Error)> = Vec::new();
     for h in regular_handles {
         match h.await {
             Ok(Ok(())) => {}
-            Ok(Err(triple)) => {
-                if first_err.is_none() {
-                    first_err = Some(triple);
-                }
-            }
+            Ok(Err(triple)) => errs.push(triple),
             Err(join_err) => {
-                if first_err.is_none() {
-                    first_err = Some(("(task)".into(), PathBuf::new(), anyhow::anyhow!(join_err)));
-                }
+                errs.push(("(task)".into(), PathBuf::new(), anyhow::anyhow!(join_err)));
             }
         }
     }
-    if let Some((label, dest, err)) = first_err {
-        tracing::warn!(?err, file = %label, "model download failed");
+    if !errs.is_empty() {
+        for (label, _dest, err) in &errs {
+            tracing::warn!(?err, file = %label, "model download failed");
+        }
+        let detail = errs
+            .iter()
+            .map(|(label, _dest, err)| format!("{label}: {err}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (first_label, first_dest, _) = &errs[0];
+        let summary = if errs.len() == 1 {
+            format!("Couldn't download {first_label}")
+        } else {
+            format!("Couldn't download {} files", errs.len())
+        };
         sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
             kind: "model_download_failed".into(),
             message: format!(
-                "Couldn't download {label}: {err}\n\n\
+                "{summary}:\n{detail}\n\n\
                  Large model downloads can take several minutes — \
                  check your connection and click Retry. Downloads \
                  resume from where they stopped, so no progress is lost."
             ),
-            path: Some(dest.display().to_string()),
+            path: Some(first_dest.display().to_string()),
             model_kind: Some(model_kind.clone()),
         }))))
         .await;
-        tracing::warn!(model_kind = %model_kind, outcome = "download_failed", file = %label, "[PREWARM] exiting");
+        tracing::warn!(model_kind = %model_kind, outcome = "download_failed", failed = errs.len(), "[PREWARM] exiting");
         return;
     }
     // Lock in the final byte counts for regular files so zip progress
@@ -360,7 +370,16 @@ pub(crate) async fn handle_prewarm_model(
         }
         let _ = std::fs::remove_file(&file.dest);
         if let Some(parent) = file.dest.parent() {
-            platform::register_dll_dirs_under(parent);
+            // Returns the dirs whose AddDllDirectory call failed; an empty Vec is
+            // full success. Log failures (path-redacted) so a pack whose GPU DLLs
+            // won't be on the search path at load is diagnosable.
+            let failed = platform::register_dll_dirs_under(parent);
+            for dir in &failed {
+                tracing::warn!(
+                    dir = %platform::redact_path_for_log(dir),
+                    "[PREWARM] AddDllDirectory failed for pack dir; its DLLs may not load"
+                );
+            }
         }
         per_file_done[idx].store(file.approx_bytes, Ordering::Relaxed);
     }
@@ -388,9 +407,16 @@ pub(crate) async fn handle_prewarm_model(
         let tmp = sentinel.with_extension("installed.tmp");
         if let Err(err) = tokio::fs::write(&tmp, model.id.as_bytes()).await {
             tracing::error!(?err, tmp = %tmp.display(), "sentinel tmp write failed");
+            // A failed write can leave a partial .tmp behind; remove it (mirroring
+            // the rename path below) so a half-written marker isn't left on disk.
+            let _ = tokio::fs::remove_file(&tmp).await;
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                 kind: "sentinel_write_failed".into(),
-                message: format!("Couldn't write the install marker for {}: {err}", model.display_name),
+                message: format!(
+                    "Couldn't write the install marker for {}: {err}. The model is \
+                     downloaded but not registered as installed; try again.",
+                    model.display_name
+                ),
                 path: Some(tmp.display().to_string()),
                 model_kind: Some(model_kind.clone()),
             }))))
@@ -403,7 +429,8 @@ pub(crate) async fn handle_prewarm_model(
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                 kind: "sentinel_rename_failed".into(),
                 message: format!(
-                    "Couldn't finalize the install marker for {}: {err}",
+                    "Couldn't finalize the install marker for {}: {err}. The model is \
+                     downloaded but not registered as installed; try again.",
                     model.display_name
                 ),
                 path: Some(sentinel.display().to_string()),

@@ -184,9 +184,13 @@ pub(crate) async fn handle_start_scan(
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                 kind: "model_load_timeout".into(),
                 message:
-                    "Loading inference models took longer than 120 seconds — \
-                     a model file may be corrupted. Reinstall from Settings \
-                     → Local AI."
+                    "Loading inference models took longer than 120 seconds and was \
+                     stopped.\n\nThis usually means the model is too large for the \
+                     available memory or GPU, or a model file is incomplete. Try:\n\
+                     • Close other memory- or GPU-heavy apps and start the scan again.\n\
+                     • Reinstall the models from Settings → Local AI to repair an \
+                     incomplete download.\n\
+                     • Pick a smaller Deep Analyze model in Settings → Local AI."
                         .into(),
                 path: None,
                 model_kind: None,

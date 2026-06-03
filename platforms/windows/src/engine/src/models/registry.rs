@@ -313,10 +313,10 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
 
         // ── cuDNN for Windows (CUDA 12 line). Public NVIDIA-hosted CDN —
         // same channel NVIDIA's own developer site points at and the
-        // redistributable URL the cuDNN docs publish. Auto-installed on
-        // NVIDIA hardware alongside the ORT CUDA provider by
-        // `CudaAutoInstaller.cs::TryInstallOrtCudaPack` so the ORT CUDA EP
-        // has the cuDNN DLLs on its loader path. Engine startup calls
+        // redistributable URL the cuDNN docs publish. Installed ON DEMAND
+        // (user clicks the GPU acceleration pack / Install-all) alongside the
+        // ORT CUDA provider so the ORT CUDA EP has the cuDNN DLLs on its
+        // loader path. Engine startup calls
         // `register_dll_dirs_under(&models_dir.join("cudnn"))` so the
         // LoadLibrary policy can find the DLLs after extraction.
         "cudnn_runtime_x64" => {

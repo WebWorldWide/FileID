@@ -16,6 +16,35 @@ namespace FileID.Views.Restructure;
 
 public sealed partial class DrillDownSheet : UserControl
 {
+    // Badge colors are a small fixed set (confidence: auto/review/hold,
+    // tier: Anchor/Mixed/Junk). Pill() formerly allocated 3 SolidColorBrush
+    // per badge per file; with a large move list that's thousands of
+    // DispatcherObject constructions. Pre-build the brush triples once and
+    // reuse — fill (accent @ 0x33 alpha) + border/foreground (full accent).
+    // Gold (#FFCC00) is shared by "review" + "Anchor"; one entry covers both.
+    private static readonly Windows.UI.Color GreenAccent = Windows.UI.Color.FromArgb(0xFF, 0x6C, 0xC2, 0x4A);
+    private static readonly Windows.UI.Color GoldAccent = Windows.UI.Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00);
+    private static readonly Windows.UI.Color AmberAccent = Windows.UI.Color.FromArgb(0xFF, 0xF5, 0xB7, 0x4D);
+    private static readonly Windows.UI.Color CyanAccent = Windows.UI.Color.FromArgb(0xFF, 0xA0, 0xE2, 0xEA);
+    private static readonly Windows.UI.Color PinkAccent = Windows.UI.Color.FromArgb(0xFF, 0xF2, 0xA6, 0xC0);
+
+    private static readonly System.Collections.Generic.Dictionary<uint, (SolidColorBrush Fill, SolidColorBrush Accent)> PillBrushes =
+        BuildPillBrushes();
+
+    private static System.Collections.Generic.Dictionary<uint, (SolidColorBrush, SolidColorBrush)> BuildPillBrushes()
+    {
+        var map = new System.Collections.Generic.Dictionary<uint, (SolidColorBrush, SolidColorBrush)>();
+        foreach (var accent in new[] { GreenAccent, GoldAccent, AmberAccent, CyanAccent, PinkAccent })
+        {
+            var fill = accent; fill.A = 0x33;
+            map[Key(accent)] = (new SolidColorBrush(fill), new SolidColorBrush(accent));
+        }
+        return map;
+    }
+
+    private static uint Key(Windows.UI.Color c)
+        => ((uint)c.A << 24) | ((uint)c.R << 16) | ((uint)c.G << 8) | c.B;
+
     public DrillDownSheet()
     {
         InitializeComponent();
@@ -161,9 +190,9 @@ public sealed partial class DrillDownSheet : UserControl
     {
         (string label, Windows.UI.Color accent) = confidence switch
         {
-            "auto" => ("Auto-file", Windows.UI.Color.FromArgb(0xFF, 0x6C, 0xC2, 0x4A)),
-            "review" => ("Review", Windows.UI.Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00)),
-            "ask" => ("Hold", Windows.UI.Color.FromArgb(0xFF, 0xF5, 0xB7, 0x4D)),
+            "auto" => ("Auto-file", GreenAccent),
+            "review" => ("Review", GoldAccent),
+            "ask" => ("Hold", AmberAccent),
             _ => ("", default),
         };
         return string.IsNullOrEmpty(label) ? null : Pill(label, accent);
@@ -175,9 +204,9 @@ public sealed partial class DrillDownSheet : UserControl
     {
         Windows.UI.Color accent = tier switch
         {
-            "Anchor" => Windows.UI.Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00),
-            "Mixed" => Windows.UI.Color.FromArgb(0xFF, 0xA0, 0xE2, 0xEA),
-            "Junk" => Windows.UI.Color.FromArgb(0xFF, 0xF2, 0xA6, 0xC0),
+            "Anchor" => GoldAccent,
+            "Mixed" => CyanAccent,
+            "Junk" => PinkAccent,
             _ => default,
         };
         return string.IsNullOrEmpty(tier) || accent.A == 0 ? null : Pill(tier!, accent);
@@ -187,11 +216,15 @@ public sealed partial class DrillDownSheet : UserControl
     /// confidence and folder-tier labels.</summary>
     private static Border Pill(string text, Windows.UI.Color accent)
     {
-        var fill = accent; fill.A = 0x33;
+        if (!PillBrushes.TryGetValue(Key(accent), out var brushes))
+        {
+            var fill = accent; fill.A = 0x33;
+            brushes = (new SolidColorBrush(fill), new SolidColorBrush(accent));
+        }
         return new Border
         {
-            Background = new SolidColorBrush(fill),
-            BorderBrush = new SolidColorBrush(accent),
+            Background = brushes.Fill,
+            BorderBrush = brushes.Accent,
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(8),
             Padding = new Thickness(8, 2, 8, 2),
@@ -201,7 +234,7 @@ public sealed partial class DrillDownSheet : UserControl
                 Text = text,
                 FontSize = 11,
                 FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-                Foreground = new SolidColorBrush(accent),
+                Foreground = brushes.Accent,
             },
         };
     }

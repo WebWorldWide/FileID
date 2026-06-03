@@ -119,9 +119,14 @@ internal sealed class UndoStack : INotifyPropertyChanged
 
             if (System.Threading.Interlocked.CompareExchange(ref consumed, 1, 0) != 0) return;
 
+            // Action is "trashFiles:<uuid>". A missing/empty suffix (no colon,
+            // or a trailing ':' with nothing after it) yields no batch id; skip
+            // rather than push an undo entry whose reverse can never resolve.
+            // IndexOf+Substring is bounds-safe — never throws on a malformed suffix.
             var colonIdx = bar.Action.IndexOf(':');
             var batchId = colonIdx >= 0 ? bar.Action.Substring(colonIdx + 1) : string.Empty;
             ec.PropertyChanged -= once;
+            if (batchId.Length == 0) return;
             Instance.Push(undoLabel, () => reverse(batchId));
         };
         ec.PropertyChanged += once;
