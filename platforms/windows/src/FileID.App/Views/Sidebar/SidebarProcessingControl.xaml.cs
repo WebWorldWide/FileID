@@ -26,12 +26,17 @@ public sealed partial class SidebarProcessingControl : UserControl
     // uses the same pattern.
     private readonly SolidColorBrush _memoryWarnBrush;
     private readonly SolidColorBrush _statDefaultBrush;
+    // Idle-status default foreground. Resolved once at ctor instead of via a
+    // Resources traversal on every Sync() (~10 Hz during a scan, even with the
+    // IdlePanel collapsed).
+    private readonly Brush _idleStatusDefaultBrush;
 
     public SidebarProcessingControl()
     {
         InitializeComponent();
         _memoryWarnBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0x99, 0x00));
         _statDefaultBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
+        _idleStatusDefaultBrush = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorSecondaryBrush");
         Loaded += (_, _) => { Sync(); SyncWarningBanner(); };
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         AppViewModel.Instance.PropertyChanged += OnAppChanged;
@@ -392,8 +397,9 @@ public sealed partial class SidebarProcessingControl : UserControl
         CompletedPanel.Visibility = isCompleted ? Visibility.Visible : Visibility.Collapsed;
 
         // Reset foreground so a successful follow-up scan doesn't keep the
-        // red text from the previous failed attempt.
-        IdleStatusText.Foreground = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorSecondaryBrush");
+        // red text from the previous failed attempt. Cached at ctor — avoids a
+        // Resources traversal on every Sync() (~10 Hz during a scan).
+        IdleStatusText.Foreground = _idleStatusDefaultBrush;
 
         // enable on HasFolder alone. The previous version also
         // required `EngineClient.State == Ready`, which made the button
@@ -499,9 +505,12 @@ public sealed partial class SidebarProcessingControl : UserControl
             // previous version showed "in 0s" because of a placeholder
             // typo `prog.Total > 0 ? 0 : 0`.
             var elapsed = EngineClient.Instance.LastScanDuration.TotalSeconds;
+            // Use the engine's authoritative ScanComplete count, not LastProgress
+            // (which can be throttle-stale by up to one batch on a fast scan).
+            var done = Math.Max(EngineClient.Instance.LastScanProcessedFiles, prog.Processed);
             CompletedSummary.Text = elapsed > 0
-                ? $"Scan complete -- {prog.Processed:N0} files in {FormatDuration(elapsed)}."
-                : $"Scan complete -- {prog.Processed:N0} files.";
+                ? $"Scan complete -- {done:N0} files in {FormatDuration(elapsed)}."
+                : $"Scan complete -- {done:N0} files.";
         }
         else if (!AppViewModel.Instance.HasFolder)
         {

@@ -2773,3 +2773,36 @@ Multi-workflow perf/bug/lockstep sweep. Non-obvious calls:
   timestamp-epoch fix, which must reconcile several *internally inconsistent* macOS read/write sites —
   a wrong edit corrupts macOS's own timestamps) is higher-risk than valuable. Captured instead as a
   file:line-precise, per-side plan in `LOCKSTEP-2026-06-02.md` for a Mac session + CI verification.
+
+## 2026-06-03 — Full-repo audit fix pass (non-obvious calls)
+
+Branch `win-prod-hardening-2026-06-03`; full inventory + deferred list in `AUDIT-2026-06-03.md`.
+
+- **rename-heal now requires old-path-gone for ALL matches, not just content_hash.** The
+  `heal_candidate_moved` `by_ref ||` short-circuit was REMOVED — it healed a `file_ref` (NTFS MFT)
+  match unconditionally on the assumption "a volume reuses a ref only for the same file." That is
+  false ACROSS volumes (the ref is volume-local) and for hardlinks, so a collision collapsed two
+  distinct files into one row (FK-cascading the loser's tags/faces). Requiring the old path absent for
+  every heal closes the data-loss with zero schema change (a genuine move always leaves its old path
+  gone, so no legitimate heal is blocked). Volume-scoping `file_ref` itself is the deeper fix but is a
+  persisted-column + cross-platform change — deferred. `file_ref_match_heals_unconditionally` was
+  rewritten into the corrected pair (rename-when-gone heals; collision-with-both-present stays
+  distinct).
+- **Only the `cpu` EP override was made exclusive**, not all overrides.
+  `execution_providers_for_chain` emits no dispatch for CPU (ORT's implicit fallback), so `[Cpu,
+  Cuda, …]` silently bound the GPU EP; non-CPU overrides emit a real dispatch that binds first, so
+  prepend-then-fall-through stays correct for them (graceful GPU→DirectML→CPU). Targeted = lowest risk.
+- **Tagging data-loss gated with a new `tags_evaluated` flag**, mirroring the faces/OCR/doc stage-ran
+  gates rather than a new mechanism. Set `!coord.is_gpu_dead()` at the normal return; false on the
+  timeout + GPU-dead-bail rows. The dbwriter tag delete+reinsert is gated on it, so an interrupted
+  pass never wipes prior auto-tags.
+- **Wipe-during-scan enforced in the ENGINE** (sole DB owner): `handle_wipe_library` cancels any
+  in-flight scan and bounded-waits (≤5 s) for the writer slot to clear before truncating.
+- **Deferred-with-rationale (NOT blind-fixed):** ORT_DYLIB_PATH override-blind pin + rename TOCTOU
+  need real GPU / Windows-overwrite verification (rule: no unverified pipeline/EP regression);
+  LibraryView-trash false-success (HIGH) coexists with `UndoStack.CaptureNextBulkResult` (the
+  await-result rewrite needs the WinUI runtime to verify trash+undo, and it self-heals on refresh
+  meanwhile); per-model prewarm cancel + schema-drift are IPC-contract lockstep changes; composite
+  `(kind,scanned_at)` index + `created_at` are cross-platform migrations. All file:line-precise in
+  `AUDIT-2026-06-03.md`.
+  file:line-precise, per-side plan in `LOCKSTEP-2026-06-02.md` for a Mac session + CI verification.

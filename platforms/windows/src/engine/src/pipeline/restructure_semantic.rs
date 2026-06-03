@@ -320,11 +320,15 @@ fn cluster(fused: &[Vec<f32>]) -> Vec<usize> {
         crate::util::hnsw_index::build(points)
     });
 
+    let mut knn_search = crate::util::hnsw_index::Searcher::default();
     let result = identity_clustering::cluster(
         fused,
         |i| {
             let mut hits: Vec<Neighbor> = if let Some(idx) = &hnsw {
-                crate::util::hnsw_index::search_top_k(idx, &fused[i], k + 1)
+                // Reuse one Search scratch across the sweep (a fresh one re-zeros
+                // an n-byte visited set per query — an O(n²) term over the pass).
+                knn_search
+                    .top_k(idx, &fused[i], k + 1)
                     .into_iter()
                     .filter(|(j, _)| *j != i)
                     .map(|(j, d)| Neighbor { idx: j, similarity: 1.0 - d / 2.0 })
@@ -335,8 +339,16 @@ fn cluster(fused: &[Vec<f32>]) -> Vec<usize> {
                     .map(|j| Neighbor { idx: j, similarity: dot(&fused[i], &fused[j]) })
                     .collect()
             };
-            hits.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal));
-            hits.truncate(k);
+            // Bounded top-k: O(n) partition instead of an O(n log n) full sort of
+            // all n-1 neighbors when only k are used; sort just the k kept.
+            let cmp = |a: &Neighbor, b: &Neighbor| {
+                b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal)
+            };
+            if hits.len() > k {
+                hits.select_nth_unstable_by(k, cmp);
+                hits.truncate(k);
+            }
+            hits.sort_by(cmp);
             hits
         },
         params,

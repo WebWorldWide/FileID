@@ -18,6 +18,9 @@ const CONTEXT_LEN: usize = 77;
 
 pub struct ClipText {
     session: Session,
+    /// The ONNX's single input tensor name, read once at load and reused on
+    /// every forward instead of re-walking `session.inputs.first()`.
+    input_name: String,
     tokenizer: ClipTokenizer,
 }
 
@@ -27,7 +30,7 @@ impl ClipText {
         if !path.exists() {
             anyhow::bail!("CLIP text weights missing at {}", path.display());
         }
-        let probe = RuntimeProbe::detect();
+        let probe = RuntimeProbe::shared();
         let chain = priority_chain(probe.vendor);
         let builder = Session::builder().context("ORT session builder")?;
         let mut builder = configure_session_builder(builder)
@@ -43,7 +46,13 @@ impl ClipText {
         let session = builder
             .commit_from_file(path)
             .context("ORT session commit (CLIP text)")?;
-        Ok(Self { session, tokenizer })
+        let input_name = session
+            .inputs
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("CLIP text ONNX has no inputs"))?
+            .name
+            .clone();
+        Ok(Self { session, input_name, tokenizer })
     }
 
     pub fn embed(&mut self, query: &str) -> Result<Vec<f32>> {
@@ -65,13 +74,7 @@ impl ClipText {
         let input = Array2::<i64>::from_shape_vec((1, CONTEXT_LEN), padded)
             .context("CLIP text input shape")?;
         let tensor = Tensor::from_array(input).context("CLIP text input tensor")?;
-        let input_name = self
-            .session
-            .inputs
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("CLIP text ONNX has no inputs"))?
-            .name
-            .clone();
+        let input_name = self.input_name.clone();
         let outputs: SessionOutputs = self
             .session
             .run(vec![(input_name, SessionInputValue::from(tensor))])
@@ -116,13 +119,7 @@ impl ClipText {
         let input = Array2::<i64>::from_shape_vec((batch, CONTEXT_LEN), flat)
             .context("CLIP text batch input shape")?;
         let tensor = Tensor::from_array(input).context("CLIP text batch input tensor")?;
-        let input_name = self
-            .session
-            .inputs
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("CLIP text ONNX has no inputs"))?
-            .name
-            .clone();
+        let input_name = self.input_name.clone();
         let outputs: SessionOutputs = self
             .session
             .run(vec![(input_name, SessionInputValue::from(tensor))])

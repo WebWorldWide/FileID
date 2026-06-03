@@ -206,7 +206,15 @@ pub async fn caption(
             cmd.arg("--device").arg(dev);
         }
         cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
+        // Discard stderr rather than pipe-and-not-read it. llama-mtmd-cli writes
+        // a large volume of diagnostics to stderr (model/mmproj load, ggml +
+        // GPU-backend init, per-token timing). If we `piped()` it but only drain
+        // stdout, the child blocks on a full stderr pipe (~64 KB) while we block
+        // on stdout it can no longer produce — a classic undrained-pipe deadlock
+        // that hangs the per-file Deep Analyze caption with no outer timeout.
+        // The completion text comes on stdout; stderr is diagnostics only.
+        // Mirrors vlm_server.rs / probe_discrete_gpu_device, which also null it.
+        cmd.stderr(std::process::Stdio::null());
         cmd.stdin(std::process::Stdio::null());
         // Kill the child if the parent task is dropped mid-caption so we
         // don't orphan llama-mtmd-cli for the OS session.

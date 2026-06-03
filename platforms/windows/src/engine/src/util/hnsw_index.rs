@@ -37,23 +37,34 @@ pub(crate) fn build<V: Clone>(points: Vec<(Vec<f32>, V)>) -> HnswMap<Embedding, 
     Builder::default().build(embeds, values)
 }
 
-/// Top-k nearest neighbors of `query` in `index`, returned in ascending
-/// distance order (most similar first). Distance is squared-L2; map to
-/// cosine via `1 − d/2` for unit-normalized vectors. Items are returned by
-/// value (cloned out of the index) so the caller doesn't have to thread a
-/// `Search` scratch buffer to keep the borrows alive.
-pub(crate) fn search_top_k<V: Clone>(
-    index: &HnswMap<Embedding, V>,
-    query: &[f32],
-    k: usize,
-) -> Vec<(V, f32)> {
-    let mut s = Search::default();
-    let q = Embedding(query.to_vec());
-    index
-        .search(&q, &mut s)
-        .take(k)
-        .map(|item| (item.value.clone(), item.distance))
-        .collect()
+/// Reusable kNN searcher: owns the `instant-distance` scratch buffer so a
+/// per-item sweep amortizes its internal allocations. A fresh `Search`
+/// re-`reserve_capacity`s and zero-fills an n-byte visited set on EVERY query
+/// (instant-distance 0.6), reintroducing an O(n²) term over a full clustering
+/// pass — exactly the quadratic the HNSW path exists to remove. Reusing it
+/// across the sweep makes that a no-op after the first query. Sequential use.
+#[derive(Default)]
+pub(crate) struct Searcher {
+    scratch: Search,
+}
+
+impl Searcher {
+    /// Top-k nearest neighbors of `query`, ascending distance (most similar
+    /// first). Distance is squared-L2; for unit-normalized vectors map to cosine
+    /// via `1 − d/2`. Reuses the scratch buffer across calls (see the type doc).
+    pub(crate) fn top_k<V: Clone>(
+        &mut self,
+        index: &HnswMap<Embedding, V>,
+        query: &[f32],
+        k: usize,
+    ) -> Vec<(V, f32)> {
+        let q = Embedding(query.to_vec());
+        index
+            .search(&q, &mut self.scratch)
+            .take(k)
+            .map(|item| (item.value.clone(), item.distance))
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -76,7 +87,7 @@ mod tests {
             (norm(vec![0.0, 0.0, 1.0]), "z"),
         ];
         let idx = build(points);
-        let hits = search_top_k(&idx, &norm(vec![1.0, 0.0, 0.0]), 1);
+        let hits = Searcher::default().top_k(&idx, &norm(vec![1.0, 0.0, 0.0]), 1);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, "x");
         // Self-distance is ~0 (squared L2 of a unit vector with itself).
@@ -92,7 +103,7 @@ mod tests {
             (norm(vec![0.0, 1.0]), "y"),
         ];
         let idx = build(points);
-        let hits = search_top_k(&idx, &norm(vec![1.0, 0.0]), 3);
+        let hits = Searcher::default().top_k(&idx, &norm(vec![1.0, 0.0]), 3);
         let labels: Vec<&str> = hits.iter().map(|h| h.0).collect();
         assert_eq!(labels, vec!["x", "xy", "y"]);
     }
@@ -100,7 +111,7 @@ mod tests {
     #[test]
     fn empty_index_search_yields_no_hits() {
         let idx: HnswMap<Embedding, &str> = build(Vec::<(Vec<f32>, &str)>::new());
-        let hits = search_top_k(&idx, &norm(vec![1.0, 0.0]), 5);
+        let hits = Searcher::default().top_k(&idx, &norm(vec![1.0, 0.0]), 5);
         assert!(hits.is_empty());
     }
 }

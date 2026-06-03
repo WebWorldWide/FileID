@@ -82,6 +82,68 @@ pub(crate) async fn handle_run_face_clustering(
         let face_count = faces.len() as u64;
         let (assignments, anchors) = cluster(&faces);
 
+        // Snapshot user-assigned identities BEFORE wiping `persons`. Re-clustering
+        // drops + re-creates the persons table with fresh rowids on EVERY run
+        // (the v13 migration note documents this), and this handler is auto-fired
+        // after every scan completion — so without carrying names forward, an
+        // incremental rescan that adds a single photo would destroy every name +
+        // "not this person" verdict the user entered in the People tab (data
+        // loss). We re-attach each new cluster's identity from the prior person
+        // that owned the MAJORITY of its member faces (ties broken toward the
+        // cluster's anchor face), which survives the anchor-selection drift a
+        // bare representative_face_id match would miss.
+        struct PriorIdentity {
+            name: Option<String>,
+            title: Option<String>,
+            first_name: Option<String>,
+            middle_name: Option<String>,
+            last_name: Option<String>,
+            suffix: Option<String>,
+            is_unknown: i64,
+            created_at: f64,
+        }
+        let mut prior_by_person: HashMap<i64, PriorIdentity> = HashMap::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT id, name, title, first_name, middle_name, last_name, suffix, \
+                        COALESCE(is_unknown, 0), created_at \
+                 FROM persons \
+                 WHERE name IS NOT NULL OR COALESCE(is_unknown, 0) = 1",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    PriorIdentity {
+                        name: r.get(1)?,
+                        title: r.get(2)?,
+                        first_name: r.get(3)?,
+                        middle_name: r.get(4)?,
+                        last_name: r.get(5)?,
+                        suffix: r.get(6)?,
+                        is_unknown: r.get(7)?,
+                        created_at: r.get(8)?,
+                    },
+                ))
+            })?;
+            for row in rows {
+                let (id, ident) = row?;
+                prior_by_person.insert(id, ident);
+            }
+        }
+        // face_id → the prior person that owned it (only identity-bearing ones).
+        let mut face_to_prior: HashMap<i64, i64> = HashMap::new();
+        {
+            let mut stmt =
+                conn.prepare("SELECT id, person_id FROM face_prints WHERE person_id IS NOT NULL")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+            for row in rows {
+                let (face_id, pid) = row?;
+                if prior_by_person.contains_key(&pid) {
+                    face_to_prior.insert(face_id, pid);
+                }
+            }
+        }
+
         let tx = conn.unchecked_transaction()?;
         // Persist clusters: clear existing person_id assignments + persons,
         // re-create one persons row per anchor, point face_prints at it.
@@ -93,13 +155,61 @@ pub(crate) async fn handle_run_face_clustering(
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
 
+        // Per new cluster, tally which prior identity owned the most member faces.
+        let mut cluster_votes: HashMap<i32, HashMap<i64, u32>> = HashMap::new();
+        for a in &assignments {
+            if let Some(&pid) = face_to_prior.get(&a.face_id) {
+                *cluster_votes
+                    .entry(a.cluster_id)
+                    .or_default()
+                    .entry(pid)
+                    .or_insert(0) += 1;
+            }
+        }
+
         // Map cluster_id (1-based) → DB person row id.
         let mut cid_to_person: HashMap<i32, i64> = HashMap::new();
         for anchor in &anchors {
+            // Winning prior person: most member faces; tie → owner of this
+            // cluster's anchor face, else lowest prior person id (determinism).
+            let mut best: Option<(i64, u32)> = None;
+            if let Some(votes) = cluster_votes.get(&anchor.cluster_id) {
+                let anchor_owner = face_to_prior.get(&anchor.anchor_face_id).copied();
+                // Rank key (higher wins): most votes, then this cluster's anchor
+                // owner, then lowest prior person id (Reverse) for determinism.
+                let key = |pid: i64, count: u32| {
+                    (count, Some(pid) == anchor_owner, std::cmp::Reverse(pid))
+                };
+                for (&pid, &count) in votes {
+                    let better = match best {
+                        None => true,
+                        Some((bpid, bcount)) => key(pid, count) > key(bpid, bcount),
+                    };
+                    if better {
+                        best = Some((pid, count));
+                    }
+                }
+            }
+            let inherited = best.and_then(|(pid, _)| prior_by_person.get(&pid));
+            let created = inherited.map(|i| i.created_at).unwrap_or(now);
+
             tx.execute(
-                "INSERT INTO persons (name, representative_face_id, file_count, created_at) \
-                 VALUES (NULL, ?1, ?2, ?3)",
-                rusqlite::params![anchor.anchor_face_id, anchor.member_count as i64, now],
+                "INSERT INTO persons \
+                   (name, title, first_name, middle_name, last_name, suffix, is_unknown, \
+                    representative_face_id, file_count, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                rusqlite::params![
+                    inherited.and_then(|i| i.name.clone()),
+                    inherited.and_then(|i| i.title.clone()),
+                    inherited.and_then(|i| i.first_name.clone()),
+                    inherited.and_then(|i| i.middle_name.clone()),
+                    inherited.and_then(|i| i.last_name.clone()),
+                    inherited.and_then(|i| i.suffix.clone()),
+                    inherited.map(|i| i.is_unknown).unwrap_or(0),
+                    anchor.anchor_face_id,
+                    anchor.member_count as i64,
+                    created,
+                ],
             )?;
             let person_id = tx.last_insert_rowid();
             cid_to_person.insert(anchor.cluster_id, person_id);

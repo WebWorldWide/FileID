@@ -58,10 +58,15 @@ pub fn decode(path: &Path) -> Result<(Vec<u8>, u32, u32)> {
     if pw == 0 || ph == 0 {
         anyhow::bail!("heic decode: zero-dimension image");
     }
-    // Cap the same way decode_image_sync does (160 MP). HEIC files at
-    // 100 MP exist in the wild (Sony / Canon "small RAW"); above 160 MP
-    // is almost always adversarial — refuse to decode.
-    const MAX_PIXELS: u64 = 160_000_000;
+    // Match the rest of the pipeline's per-worker decode budget (50 MP =
+    // ~150 MB RGB8 — the same MAX_DECODED_PIXELS ceiling tagging.rs/deep_analyze
+    // enforce for image-rs decodes). HEIC has no image-rs decoder, so this is
+    // HEIC's only size guard; the previous 160 MP value let a 50-160 MP HEIC
+    // allocate up to ~480 MB RGB through the full ML pipeline, busting the
+    // per-worker RAM budget the 50 MP cap exists to hold (and the read-ahead
+    // channel's per-frame sizing assumption). 50-160 MP HEIC is rare pro
+    // panorama/stitched output; bounding it keeps the 50K-file RSS goal safe.
+    const MAX_PIXELS: u64 = 50_000_000;
     if (pw as u64) * (ph as u64) > MAX_PIXELS {
         anyhow::bail!(
             "heic decode: dimensions {pw}x{ph} exceed cap of {MAX_PIXELS} pixels"

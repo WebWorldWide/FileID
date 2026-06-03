@@ -117,27 +117,31 @@ pub fn is_disabled(ep: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Clear the persistent disable (user re-enable / pack reinstall / explicit
-/// provider override). Safe to call when nothing is disabled.
-pub fn reenable() {
+/// Clear the persistent disable for ONE execution provider only — the targeted
+/// "Verify install" / per-pack reinstall path. Unlike [`reenable`] (clear-all),
+/// this does NOT touch sibling EPs' disables, so verifying/installing the CUDA
+/// pack can't silently re-arm a separately crash-poisoned OpenVINO EP and send
+/// the next scan straight back into its bad bind (ENG-59's per-EP isolation).
+/// Clears the legacy single-file marker only when it names `ep`.
+pub fn reenable_ep(ep: &str) {
+    if !is_guarded(ep) {
+        return;
+    }
     let Some(dir) = packs_dir() else { return };
     let mut cleared = false;
-    // Legacy single-file format.
+    if let Some(p) = disabled_marker(ep) {
+        if p.exists() {
+            let _ = std::fs::remove_file(&p);
+            cleared = true;
+        }
+    }
+    // Legacy single-file format — only if it names THIS ep.
     let legacy = dir.join(".ep_disabled");
-    if legacy.exists() {
+    if read_trimmed(&legacy).map(|d| d == ep.to_ascii_lowercase()).unwrap_or(false) {
         let _ = std::fs::remove_file(&legacy);
         cleared = true;
     }
-    // All per-EP markers (`.ep_disabled_<ep>`).
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            if entry.file_name().to_string_lossy().starts_with(".ep_disabled_") {
-                let _ = std::fs::remove_file(entry.path());
-                cleared = true;
-            }
-        }
-    }
     if cleared {
-        tracing::info!("[EP-GUARD] re-enabling previously crash-disabled execution provider(s)");
+        tracing::info!(ep, "[EP-GUARD] re-enabling previously crash-disabled execution provider");
     }
 }

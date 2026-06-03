@@ -12,7 +12,27 @@ use rusqlite::Connection;
 use crate::ipc::{sink::Sink, EventPayload, IpcEvent, LibraryWiped, Wrap};
 use crate::{db, paths};
 
-pub(crate) async fn handle_wipe_library(sink: Sink, db: Arc<Mutex<Connection>>) {
+pub(crate) async fn handle_wipe_library(
+    sink: Sink,
+    db: Arc<Mutex<Connection>>,
+    scan_state: Arc<Mutex<Option<crate::coordinator::ScanCoordinator>>>,
+) {
+    // Cancel any in-flight scan and wait (bounded) for it to release the single
+    // writer before truncating. Otherwise the running DbWriter keeps committing
+    // batches into the just-wiped DB between truncate and scan-end — both
+    // serialize on the same mutex (no corruption), but the library ends up
+    // half-populated, contradicting the "wiped" confirmation, and the
+    // scan_sessions 'running' row survives the wipe. The engine is the sole DB
+    // owner, so enforce this interlock here regardless of what the app sends.
+    if let Some(coord) = scan_state.lock().clone() {
+        coord.request_cancel();
+    }
+    let mut waited = 0u32;
+    while scan_state.lock().is_some() && waited < 100 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        waited += 1;
+    }
+
     let wiped = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
         let conn = db.lock();
         db::wipe_all(&conn)

@@ -193,9 +193,98 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
     }
 
     private void Replace(IReadOnlyList<DuplicateGroup> rows)
+        => MergeByContentHash(Groups, rows);
+
+    /// <summary>Reconcile <paramref name="groups"/> to match <paramref name="rows"/>
+    /// by <see cref="DuplicateGroup.ContentHash"/>, in place (mirrors
+    /// <c>LibraryViewModel.MergeById</c>). The old Clear+Add raised a
+    /// CollectionChanged.Reset ~1 Hz during a scan, re-realizing the whole
+    /// ItemsRepeater, re-decoding every member thumbnail, and discarding the
+    /// user's in-flight keeper/skip state. Surviving groups whose membership is
+    /// unchanged keep their existing instance (and its IsKeeper / IsSkipped /
+    /// loaded thumbnails); only genuine deltas emit Add/Remove. A group whose
+    /// member set changed is replaced (its <c>Members</c> binding is OneTime, so
+    /// the list must re-realize to reflect the new membership). Static +
+    /// collection-only so it carries no UI-thread affinity beyond the
+    /// ObservableCollection it mutates.</summary>
+    internal static void MergeByContentHash(
+        ObservableCollection<DuplicateGroup> groups,
+        IReadOnlyList<DuplicateGroup> rows)
     {
-        Groups.Clear();
-        foreach (var r in rows) Groups.Add(r);
+        if (groups.Count == 0)
+        {
+            foreach (var r in rows) groups.Add(r);
+            return;
+        }
+
+        var existingByHash = new Dictionary<string, DuplicateGroup>(groups.Count);
+        foreach (var g in groups) existingByHash[g.ContentHash] = g;
+
+        // Target sequence: reuse a surviving group instance only when its member
+        // set is identical (so the OneTime Members binding stays valid and the
+        // keeper/skip state is preserved); otherwise take the fresh instance.
+        // `reused` tracks the surviving instances we keep by reference, so step 1
+        // can drop the old instance of a group whose membership changed (its hash
+        // survives but we're replacing it with the fresh one).
+        var desired = new List<DuplicateGroup>(rows.Count);
+        var nextHashes = new HashSet<string>(rows.Count);
+        var reused = new HashSet<DuplicateGroup>();
+        foreach (var fresh in rows)
+        {
+            if (!nextHashes.Add(fresh.ContentHash)) continue;
+            if (existingByHash.TryGetValue(fresh.ContentHash, out var keep)
+                && SameMembers(keep, fresh))
+            {
+                reused.Add(keep);
+                desired.Add(keep);
+            }
+            else
+            {
+                desired.Add(fresh);
+            }
+        }
+
+        // 1) Remove any existing group we're not reusing by reference — both
+        //    genuinely-gone hashes and replaced-instance survivors.
+        for (int i = groups.Count - 1; i >= 0; i--)
+        {
+            if (!reused.Contains(groups[i])) groups.RemoveAt(i);
+        }
+
+        // 2) Align order to `desired` via Remove+Insert of the instance, so a
+        //    surviving-but-reordered group keeps its instance.
+        for (int j = 0; j < desired.Count; j++)
+        {
+            var want = desired[j];
+            if (j < groups.Count && ReferenceEquals(groups[j], want)) continue;
+            int cur = IndexOfInstance(groups, want, j);
+            if (cur >= 0) groups.RemoveAt(cur);
+            groups.Insert(j, want);
+        }
+    }
+
+    /// <summary>True when two groups hold the same member Ids (order-insensitive).
+    /// Same ContentHash + same member set ⇒ the surviving instance is reusable
+    /// and its keeper/skip state worth preserving.</summary>
+    private static bool SameMembers(DuplicateGroup a, DuplicateGroup b)
+    {
+        if (a.Members.Count != b.Members.Count) return false;
+        var ids = new HashSet<long>(a.Members.Count);
+        foreach (var m in a.Members) ids.Add(m.Id);
+        foreach (var m in b.Members) if (!ids.Contains(m.Id)) return false;
+        return true;
+    }
+
+    private static int IndexOfInstance(
+        ObservableCollection<DuplicateGroup> groups,
+        DuplicateGroup want,
+        int startAt)
+    {
+        for (int i = startAt; i < groups.Count; i++)
+        {
+            if (ReferenceEquals(groups[i], want)) return i;
+        }
+        return -1;
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;

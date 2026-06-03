@@ -62,6 +62,12 @@ public sealed class SankeyFlowControl : Control
     private readonly SolidColorBrush _whiteHighlight;
     private readonly Brush _sourceBrush;
 
+    // Last size we actually laid out at. SizeChanged fires on every pixel of a
+    // resize drag; the layout is pixel-quantized, so only re-render when the
+    // rounded size actually changed (debounce). -1 forces the first render.
+    private int _lastRenderW = -1;
+    private int _lastRenderH = -1;
+
     public SankeyFlowControl()
     {
         DefaultStyleKey = typeof(SankeyFlowControl);
@@ -93,7 +99,7 @@ public sealed class SankeyFlowControl : Control
         _whiteHighlight = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
 
         Loaded += (_, _) => Render();
-        SizeChanged += (_, _) => Render();
+        SizeChanged += OnSizeChanged;
         PointerMoved += OnPointerMoved;
         PointerExited += OnPointerExited;
         Tapped += OnTapped;
@@ -101,8 +107,6 @@ public sealed class SankeyFlowControl : Control
 
     /// <summary>Fires (source, category) when the user clicks a ribbon.</summary>
     public event EventHandler<(string Source, string Category)>? RibbonInvoked;
-
-    private Ribbon? _hovered;
 
     public void SetPlan(RestructurePlan? plan)
     {
@@ -117,9 +121,28 @@ public sealed class SankeyFlowControl : Control
         Render();
     }
 
+    // SizeChanged fires for every pixel during a resize drag. The layout is
+    // quantized to integer pixels, so re-rendering only when the rounded size
+    // actually changes debounces the O(S * C) layout off the hot drag path.
+    private void OnSizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        int w = (int)Math.Round(ActualWidth);
+        int h = (int)Math.Round(ActualHeight);
+        if (w == _lastRenderW && h == _lastRenderH) return;
+        Render();
+    }
+
     private void Render()
     {
         if (_canvas is null) return;
+        // Record the size being evaluated UP FRONT — even when we bail sub-threshold
+        // below — so the OnSizeChanged debounce doesn't suppress a later restore to a
+        // prior size after a sub-threshold pass blanked the canvas (which would leave
+        // the diagram permanently blank, e.g. after the Flow/Tree toggle or a
+        // narrow-then-widen). The cache must reflect the last size SEEN, not the last
+        // size successfully DRAWN.
+        _lastRenderW = (int)Math.Round(ActualWidth);
+        _lastRenderH = (int)Math.Round(ActualHeight);
         _canvas.Children.Clear();
         _ribbons.Clear();
         _sourceRects.Clear();
@@ -177,6 +200,20 @@ public sealed class SankeyFlowControl : Control
         var sourceList = rawSourceGroups.Select(g => g.Key).ToList();
         var categoryList = rawCategoryGroups.Select(g => g.Key).ToList();
 
+        // Precompute the (source, category) flow matrix in a single pass over
+        // moves. The barycentric sort below + the ribbon-draw loop used to call
+        // moves.Count(predicate) for every (source, category) cell — O(2 * S * C
+        // * Moves) per Render, re-firing on every SizeChanged during a resize
+        // drag. One pass + dictionary lookups makes each cell O(1).
+        var flow = new Dictionary<(string Src, string Cat), int>();
+        foreach (var m in moves)
+        {
+            var key = (SourceBucket(m), CategoryBucket(m));
+            flow.TryGetValue(key, out var n);
+            flow[key] = n + 1;
+        }
+        int FlowOf(string src, string cat) => flow.TryGetValue((src, cat), out var n) ? n : 0;
+
         // 2 iterations of barycentric sorting to minimize ribbon crossings
         for (int iter = 0; iter < 2; iter++)
         {
@@ -187,12 +224,11 @@ public sealed class SankeyFlowControl : Control
                 double totalWeight = 0;
                 for (int sIdx = 0; sIdx < sourceList.Count; sIdx++)
                 {
-                    var srcName = sourceList[sIdx];
-                    var flow = moves.Count(m => SourceBucket(m) == srcName && CategoryBucket(m) == cat);
-                    if (flow > 0)
+                    var f = FlowOf(sourceList[sIdx], cat);
+                    if (f > 0)
                     {
-                        weightedSum += sIdx * flow;
-                        totalWeight += flow;
+                        weightedSum += sIdx * f;
+                        totalWeight += f;
                     }
                 }
                 catWeights[cat] = totalWeight > 0 ? (weightedSum / totalWeight) : 0.0;
@@ -206,12 +242,11 @@ public sealed class SankeyFlowControl : Control
                 double totalWeight = 0;
                 for (int cIdx = 0; cIdx < categoryList.Count; cIdx++)
                 {
-                    var catName = categoryList[cIdx];
-                    var flow = moves.Count(m => SourceBucket(m) == src && CategoryBucket(m) == catName);
-                    if (flow > 0)
+                    var f = FlowOf(src, categoryList[cIdx]);
+                    if (f > 0)
                     {
-                        weightedSum += cIdx * flow;
-                        totalWeight += flow;
+                        weightedSum += cIdx * f;
+                        totalWeight += f;
                     }
                 }
                 srcWeights[src] = totalWeight > 0 ? (weightedSum / totalWeight) : 0.0;
@@ -273,7 +308,7 @@ public sealed class SankeyFlowControl : Control
             for (int c = 0; c < byCategory.Count; c++)
             {
                 var cat = byCategory[c];
-                var pairCount = src.Count(m => CategoryBucket(m) == cat.Key);
+                var pairCount = FlowOf(src.Key, cat.Key);
                 if (pairCount == 0) continue;
 
                 var srcPos = srcYs[src.Key];
@@ -432,13 +467,14 @@ public sealed class SankeyFlowControl : Control
             b0 * p0.Y + b1 * p1.Y + b2 * p2.Y + b3 * p3.Y);
     }
 
-    private void OnPointerMoved(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    // Nearest ribbon within the proximity threshold of the canvas-space point,
+    // or null. Shared by hover (PointerMoved) and tap (OnTapped) so a touch/pen
+    // tap — which never produces a hover phase — still resolves a ribbon.
+    private Ribbon? HitTest(Point pos)
     {
-        if (_canvas is null || _ribbons.Count == 0) return;
-        var pos = e.GetCurrentPoint(_canvas).Position;
-        const double HoverThreshold = 14.0;
+        const double HitThreshold = 14.0;
         Ribbon? best = null;
-        double bestDist = HoverThreshold;
+        double bestDist = HitThreshold;
         foreach (var r in _ribbons)
         {
             foreach (var s in r.Samples)
@@ -449,7 +485,13 @@ public sealed class SankeyFlowControl : Control
                 if (d < bestDist) { bestDist = d; best = r; }
             }
         }
-        ApplyHover(best);
+        return best;
+    }
+
+    private void OnPointerMoved(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (_canvas is null || _ribbons.Count == 0) return;
+        ApplyHover(HitTest(e.GetCurrentPoint(_canvas).Position));
     }
 
     private void OnPointerExited(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
@@ -459,7 +501,12 @@ public sealed class SankeyFlowControl : Control
 
     private void OnTapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e)
     {
-        if (_hovered is { } h)
+        if (_canvas is null || _ribbons.Count == 0) return;
+        // Hit-test at the tap point rather than relying on _hovered: touch/pen
+        // taps have no preceding hover phase, so _hovered would be null and the
+        // tap was silently dropped.
+        var hit = HitTest(e.GetPosition(_canvas));
+        if (hit is { } h)
         {
             RibbonInvoked?.Invoke(this, (h.Source, h.Category));
         }
@@ -467,7 +514,6 @@ public sealed class SankeyFlowControl : Control
 
     private void ApplyHover(Ribbon? hovered)
     {
-        _hovered = hovered;
         // Reset all to idle.
         foreach (var r in _ribbons) r.Path.Fill = r.IdleFill;
         foreach (var (rect, fill) in _rectIdleFill) rect.Fill = fill;

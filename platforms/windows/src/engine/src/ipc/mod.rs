@@ -75,7 +75,7 @@ pub enum CommandPayload {
     #[serde(rename = "prewarmModel")]
     PrewarmModel(PrewarmModelPayload),
     #[serde(rename = "cancelPrewarm")]
-    CancelPrewarm(Empty),
+    CancelPrewarm(CancelPrewarmPayload),
 
     #[serde(rename = "planRestructure")]
     PlanRestructure(PlanRestructurePayload),
@@ -236,6 +236,15 @@ fn default_true() -> bool {
 #[serde(rename_all = "camelCase")]
 pub struct PrewarmModelPayload {
     pub model_kind: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelPrewarmPayload {
+    /// Which model's download to cancel. `None`/absent cancels ALL in-flight
+    /// prewarms (back-compat with the original payload-less `cancelPrewarm`).
+    #[serde(default)]
+    pub model_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1088,7 +1097,7 @@ mod tests {
             CommandPayload::PrewarmModel(PrewarmModelPayload {
                 model_kind: "arcface".into(),
             }),
-            CommandPayload::CancelPrewarm(Empty {}),
+            CommandPayload::CancelPrewarm(CancelPrewarmPayload { model_kind: None }),
             CommandPayload::PlanRestructure(PlanRestructurePayload {
                 library_root: r"C:\Users\adam\Pictures".into(),
             }),

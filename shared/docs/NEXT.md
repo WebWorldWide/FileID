@@ -1,6 +1,34 @@
 # NEXT — Windows (resume here)
 
-## 2026-06-02 (later 6) — Verified "what's left" audit + ship-hardening + 256 closure (RESUME HERE)
+## 2026-06-03 — Post-audit: ALL deferred fixed; merge + on-hardware verify (RESUME HERE)
+
+Full-repo audit (4 workflows, 78 confirmed) → ~70 distinct bugs fixed on branch
+`win-prod-hardening-2026-06-03`, then a 5-pass refute-by-default RE-AUDIT loop caught + fixed 14
+fix-introduced regressions. Headless-green: engine clippy `-D` + fmt + **258 tests**; app build 0/0 +
+**App.Tests 108** + **IpcSchema.Tests 34** + format. Full record + the re-audit table in
+[`AUDIT-2026-06-03.md`](AUDIT-2026-06-03.md). **NOT yet merged.** Resume order:
+
+1. **Review + merge `win-prod-hardening-2026-06-03` → main**, confirm both GitHub workflows green.
+2. **On-hardware confirm (RTX 2060, the only thing not headless-verifiable):** `build-all.ps1 -Run`
+   and eyeball the flicker fixes — search box doesn't glitch/crash; Deep Analyze 2nd run doesn't
+   flicker; pipeline strip never blanks to grey on scan completion; Cleanup/People don't rebuild
+   (flash) mid-scan; per-row model Cancel stops only that row + the slot returns to NotInstalled. Then
+   the GPU/EP fixes on a real NVIDIA/Intel box (forced-CPU override → multi-threaded CPU + escapes a
+   TDR loop; cross-vendor override binds the matching pack runtime).
+3. **Add `FileID.IpcSchema.Tests` to `FileID.sln`** so CI runs it (it's currently orphaned — that
+   masked a contract-test break this pass; we now run it directly in the gate, but CI should too).
+4. **macOS lockstep of THIS branch's cross-platform changes** (needs a Mac): the v14
+   `(kind, scanned_at)` index migration + `created_at` capture must mirror into the apple engine to
+   keep the GRDB schema byte-faithful; the schema-drift additions (`skippedStages`/`currentCaption`/
+   `cancelPrewarm.modelKind`) are already in the Swift DTOs per prior lockstep — re-verify.
+5. **(unchanged external blocker)** EV code-signing cert → `release.yml` goes live (see below).
+
+Everything else from the prior "deferred" list is DONE (LibraryView trash, Cleanup/People MergeById,
+FilePreview/PersonDetail await-result, TreeDiff/Sankey, theme lifecycle, per-model cancel, EP/dylib,
+TOCTOU, index/created_at, schema-drift, micro-perf). Repo hygiene: gitignore `rust_out.*` +
+`__pycache__/` (stray untracked artifacts) — still worth doing.
+
+## 2026-06-02 (later 6) — Verified "what's left" audit + ship-hardening + 256 closure
 
 A read-only audit (5-cell workflow, refute-by-default vs CURRENT main) found the entries below SIGNIFICANTLY OVERSTATE remaining work. **The only HARD external blocker to a Windows v1.0 is the EV code-signing cert.** Verified already-DONE — stop re-chasing (older entries are stale on these):
 - **SHA256 model pinning** — all 29 `registry.rs` artifacts pinned + the mandatory-pin CI gate is LIVE in `windows-engine.yml`. (Download-time verify against real network artifacts is the only residual — a release step.)

@@ -85,13 +85,17 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
             .collect();
         crate::util::hnsw_index::build(points)
     });
+    let mut knn_search = crate::util::hnsw_index::Searcher::default();
     let result = super::identity_clustering::cluster(
         &embeddings,
         |i| {
             let mut hits: Vec<super::identity_clustering::Neighbor> = if let Some(idx) = &hnsw_idx {
                 // Query k+1 so we can drop the self-hit; convert squared-L2 →
-                // cosine (vectors are unit-norm: d = 2(1 − cos)).
-                crate::util::hnsw_index::search_top_k(idx, &embeddings[i], k + 1)
+                // cosine (vectors are unit-norm: d = 2(1 − cos)). Reuse one
+                // Search scratch across the whole sweep — a fresh one re-zeros an
+                // n-byte visited set per query, an O(n²) term over the pass.
+                knn_search
+                    .top_k(idx, &embeddings[i], k + 1)
                     .into_iter()
                     .filter(|(j, _)| *j != i)
                     .map(|(j, d)| super::identity_clustering::Neighbor {
@@ -108,12 +112,21 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
                     })
                     .collect()
             };
-            hits.sort_by(|a, b| {
+            // Keep only the top-k by similarity. select_nth_unstable partitions
+            // in O(n), avoiding the O(n log n) full sort of all n-1 brute-force
+            // neighbors when only k are used; then sort just those k for a stable
+            // confidence-ordered result (identical top-k set + order).
+            let cmp = |a: &super::identity_clustering::Neighbor,
+                       b: &super::identity_clustering::Neighbor| {
                 b.similarity
                     .partial_cmp(&a.similarity)
                     .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            hits.truncate(k);
+            };
+            if hits.len() > k {
+                hits.select_nth_unstable_by(k, cmp);
+                hits.truncate(k);
+            }
+            hits.sort_by(cmp);
             hits
         },
         super::identity_clustering::Hyperparameters::default(),

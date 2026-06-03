@@ -273,8 +273,11 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             // caught below as a clean teardown no-op instead of escaping to the caller.
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
             var token = linked.Token;
-            IsLoading = true;
-            ErrorMessage = null;
+            OnUi(() =>
+            {
+                IsLoading = true;
+                ErrorMessage = null;
+            });
 
             IReadOnlyList<FileRow> rows;
             if (string.IsNullOrWhiteSpace(_query))
@@ -309,11 +312,11 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         }
         catch (Exception ex)
         {
-            if (!_disposed) ErrorMessage = ex.Message;
+            OnUi(() => { if (!_disposed) ErrorMessage = ex.Message; });
         }
         finally
         {
-            if (!_disposed) IsLoading = false;
+            OnUi(() => { if (!_disposed) IsLoading = false; });
         }
     }
 
@@ -329,8 +332,11 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         {
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
             var token = linked.Token;
-            IsLoading = true;
-            ErrorMessage = null;
+            OnUi(() =>
+            {
+                IsLoading = true;
+                ErrorMessage = null;
+            });
             var ranked = await _store.SemanticSearchAsync(seed, PageSize, token, _kindFilter == "all" ? null : _kindFilter).ConfigureAwait(false);
             if (_disposed || token.IsCancellationRequested) return;
             var filtered = new List<FileTile>(ranked.Count);
@@ -346,8 +352,8 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         }
         catch (OperationCanceledException) { /* expected */ }
         catch (ObjectDisposedException) { /* expected during teardown */ }
-        catch (Exception ex) { if (!_disposed) ErrorMessage = ex.Message; }
-        finally { if (!_disposed) IsLoading = false; }
+        catch (Exception ex) { OnUi(() => { if (!_disposed) ErrorMessage = ex.Message; }); }
+        finally { OnUi(() => { if (!_disposed) IsLoading = false; }); }
     }
 
     /// <summary>
@@ -361,8 +367,11 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         {
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
             var token = linked.Token;
-            IsLoading = true;
-            ErrorMessage = null;
+            OnUi(() =>
+            {
+                IsLoading = true;
+                ErrorMessage = null;
+            });
             var similar = await _store.SimilarFilesAsync(fileId, PageSize, token).ConfigureAwait(false);
             if (_disposed || token.IsCancellationRequested) return;
             var filtered = new List<FileTile>(similar.Count);
@@ -378,8 +387,8 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         }
         catch (OperationCanceledException) { /* expected */ }
         catch (ObjectDisposedException) { /* expected during teardown */ }
-        catch (Exception ex) { if (!_disposed) ErrorMessage = ex.Message; }
-        finally { if (!_disposed) IsLoading = false; }
+        catch (Exception ex) { OnUi(() => { if (!_disposed) ErrorMessage = ex.Message; }); }
+        finally { OnUi(() => { if (!_disposed) IsLoading = false; }); }
     }
 
     private void ApplyOnUi(IReadOnlyList<FileTile> next)
@@ -392,6 +401,18 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         {
             _ui.TryEnqueue(() => ReplaceItems(next));
         }
+    }
+
+    /// Run a UI-affined mutation on the captured dispatcher. RefreshAsync's
+    /// synchronous prologue/finally run on a thread-pool thread when invoked via
+    /// ScheduleRefresh (search debounce → Task.Run + ConfigureAwait(false)), so
+    /// raising IsLoading/ErrorMessage PropertyChanged there would drive x:Bind
+    /// writes (ProgressRing.IsActive, StatusText) off the captured UI thread — a
+    /// native fast-fail. No-op marshaling when already on the UI thread.
+    private void OnUi(Action action)
+    {
+        if (_ui.HasThreadAccess) action();
+        else _ui.TryEnqueue(() => { if (!_disposed) action(); });
     }
 
     private void ReplaceItems(IReadOnlyList<FileTile> next)

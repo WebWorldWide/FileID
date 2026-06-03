@@ -659,7 +659,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             _ => null,
         };
         if (slot is null) return;
-        // Cancel = re-trigger CancelAllAsync (engine has no per-model cancel).
+        // Cancel this row's in-flight model (the engine now supports per-model cancel).
         if (slot.Status == Services.ModelInstallStatus.Downloading)
         {
             // Pre-flip caption to "Cancelling…" so the user gets instant
@@ -691,7 +691,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     {
         try
         {
-            await Svc.CancelAllAsync().ConfigureAwait(true);
+            await Svc.CancelModelAsync(slot.CurrentModelKind).ConfigureAwait(true);
         }
         catch (Exception ex)
         {

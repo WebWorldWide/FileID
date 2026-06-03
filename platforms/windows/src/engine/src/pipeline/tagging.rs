@@ -145,6 +145,11 @@ pub struct TaggedFile {
     pub kind: FileKind,
     pub size_bytes: u64,
     pub modified_unix: f64,
+    /// Creation timestamp as Unix seconds (propagated from
+    /// `DiscoveredFile.created_unix`). Persisted to `files.created_at`; a
+    /// rescan never clobbers the original (it's excluded from the INSERT's
+    /// ON CONFLICT DO UPDATE set). `None` when the platform has no birth time.
+    pub created_unix: Option<f64>,
     pub scanned_unix: f64,
 
     pub has_faces: bool,
@@ -219,6 +224,16 @@ pub struct TaggedFile {
     /// when the stage ran, never on the ambiguous default-skip path.
     pub ocr_stage_ran: bool,
     pub doc_stage_ran: bool,
+
+    /// True iff the tagging stage(s) actually produced this file's tag set this
+    /// session (RAM++ / CLIP-scene / enriched extras for images; keyword / audio
+    /// extraction for docs / audio). Same contract as `faces_evaluated`: the
+    /// dbwriter delete-then-reinserts `source='auto'` tags ONLY when this is set,
+    /// so a per-file timeout row or a GPU-dead short-circuit — both of which emit
+    /// an empty `tags` vec — can never wipe a file's previously-persisted
+    /// auto-tags. Set just before the normal return (false if the GPU died), and
+    /// left false on the timeout / GPU-dead-bail rows.
+    pub tags_evaluated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -731,6 +746,7 @@ impl Tagger {
                     let timeout_kind = predecoded.file.kind;
                     let timeout_size = predecoded.file.size_bytes;
                     let timeout_modified = predecoded.file.modified_unix;
+                    let timeout_created = predecoded.file.created_unix;
                     // Per-file timeout — image decoders or network UNC reads
                     // can hang indefinitely.
                     let fut = process_file_predecoded(predecoded, &models, &vision_sem, &clip_sem, worker_idx, &coord);
@@ -751,6 +767,7 @@ impl Tagger {
                                 kind: timeout_kind,
                                 size_bytes: timeout_size,
                                 modified_unix: timeout_modified,
+                                created_unix: timeout_created,
                                 scanned_unix: std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
@@ -780,6 +797,7 @@ impl Tagger {
                                 faces_evaluated: false,
                                 ocr_stage_ran: false,
                                 doc_stage_ran: false,
+                                tags_evaluated: false,
                             }
                         }
                     };
@@ -1129,6 +1147,7 @@ async fn process_file_predecoded(
         kind: file.kind,
         size_bytes: file.size_bytes,
         modified_unix: file.modified_unix,
+        created_unix: file.created_unix,
         scanned_unix,
         has_faces: false,
         faces: Vec::new(),
@@ -1155,6 +1174,7 @@ async fn process_file_predecoded(
         faces_evaluated: false,
         ocr_stage_ran: false,
         doc_stage_ran: false,
+        tags_evaluated: false,
     };
 
     // Content identity for rename/move heal. Skipped for cloud placeholders
@@ -1636,6 +1656,15 @@ async fn process_file_predecoded(
         );
     }
     maybe_emit_stats();
+    // Mark the tag set authoritative for the dbwriter only if the GPU survived
+    // the full tagging pass AND a decode actually happened. If the GPU died
+    // mid-file, OR an image decode failed transiently (failed=true skips the
+    // whole tagging block leaving `tags` empty), the set is partial/empty and
+    // must NOT replace previously-persisted auto-tags. (The timeout and
+    // GPU-dead-bail rows are built with tags_evaluated=false and never reach
+    // here; the `!failed` term covers the no-decode path, mirroring
+    // faces_evaluated which is set only inside the successful-decode block.)
+    tagged.tags_evaluated = !coord.is_gpu_dead() && !tagged.failed && !file.online_only;
     tagged
 }
 
@@ -1949,6 +1978,7 @@ mod tests {
             kind: FileKind::Image,
             size_bytes: 1024,
             modified_unix: 1.0,
+            created_unix: None,
             online_only: false,
             file_ref: None,
         })
@@ -2034,6 +2064,7 @@ mod tests {
             kind: FileKind::Image,
             size_bytes,
             modified_unix: 1_710_504_000.0,
+            created_unix: None,
             scanned_unix: 1_710_504_001.0,
             has_faces: false,
             faces: Vec::new(),
@@ -2060,6 +2091,7 @@ mod tests {
             faces_evaluated: false,
             ocr_stage_ran: false,
             doc_stage_ran: false,
+            tags_evaluated: true,
         }
     }
 

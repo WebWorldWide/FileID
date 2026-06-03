@@ -1054,38 +1054,109 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         var choice = await confirm.ShowAsync();
         if (choice != ContentDialogResult.Primary) return;
 
+        // Listen for the engine's BulkActionResult — it tags the
+        // action with "trashFiles:<batch_id>" so we can plumb undo. The
+        // UndoStack listener and WaitForBulkActionResultAsync below both
+        // subscribe independently for the same result; WaitFor resets
+        // LastBulkAction to null first (which CaptureNextBulkResult guards
+        // against), so they coexist.
+        Services.UndoStack.CaptureNextBulkResult(
+            "trashFiles:",
+            $"trash {ids.Length} file{(ids.Length == 1 ? "" : "s")}",
+            async batchId =>
+            {
+                if (string.IsNullOrEmpty(batchId)) return false;
+                try
+                {
+                    await EngineClient.Instance.RestoreFromTrashAsync(batchId);
+                    return true;
+                }
+                catch { return false; }
+            });
+
+        FileID.IpcSchema.BulkActionResult? result = null;
         try
         {
-            // Listen for the engine's BulkActionResult — it tags the
-            // action with "trashFiles:<batch_id>" so we can plumb undo.
-            Services.UndoStack.CaptureNextBulkResult(
-                "trashFiles:",
-                $"trash {ids.Length} file{(ids.Length == 1 ? "" : "s")}",
-                async batchId =>
-                {
-                    if (string.IsNullOrEmpty(batchId)) return false;
-                    try
-                    {
-                        await EngineClient.Instance.RestoreFromTrashAsync(batchId);
-                        return true;
-                    }
-                    catch { return false; }
-                });
-            await EngineClient.Instance.TrashFilesAsync(ids);
+            // Await the engine's BulkActionResult instead of fire-and-forget:
+            // the dbwriter may fail to trash a file (open handle / permission),
+            // and unconditionally removing every selected tile told the user
+            // files were recycled when they're still on disk (silent-failure).
+            result = await EngineClient.Instance.WaitForBulkActionResultAsync(
+                "trashFiles",
+                () => EngineClient.Instance.TrashFilesAsync(ids),
+                TimeSpan.FromSeconds(30));
         }
-        catch
+        catch (TimeoutException ex)
         {
-            // Failure surfaces through BulkActionResult event.
+            Services.DebugLog.Warn("Trash timed out: " + ex.Message);
+            await ShowAlertAsync(
+                "Trash didn't confirm",
+                "The engine didn't confirm the move to the Recycle Bin within 30 seconds. The files may or may not have been recycled — re-run the scan to check before retrying.");
+            return;
+        }
+        catch (Exception ex)
+        {
+            Services.DebugLog.Warn("Trash failed: " + ex.Message);
+            await ShowAlertAsync("Trash failed", $"Couldn't move the selected files to the Recycle Bin: {ex.Message}");
+            return;
         }
 
-        // Optimistic local removal from the grid; engine will catch up via
-        // its DELETE in the dbwriter and a future refresh.
-        foreach (var id in ids)
+        // Remove ONLY tiles the engine actually trashed — a per-file Ok in the
+        // result. Files it couldn't recycle stay on the grid so the user sees
+        // they're still there.
+        var trashedIds = new HashSet<long>(
+            result.Messages?.Where(m => m.Ok && m.FileId is not null).Select(m => m.FileId!.Value)
+                ?? Enumerable.Empty<long>());
+        foreach (var id in trashedIds)
         {
             var match = ViewModel.Items.FirstOrDefault(t => t.Id == id);
             if (match is not null) ViewModel.Items.Remove(match);
         }
         UpdateSelectionBar();
+
+        // `Succeeded == 0` (with Failed == 0) is the engine's wholesale-error shape
+        // (e.g. a busy/locked DB: emit_bulk_result's Ok(Err) arm → succeeded:0,
+        // failed:0, one ok:false message). Guarding on Failed>0 alone would leave
+        // that path silent. ids is non-empty here, so Succeeded==0 only happens on
+        // a real total failure — surface it + refresh, matching the sibling flows.
+        if (result.Failed > 0 || result.Succeeded == 0)
+        {
+            var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
+            var detail = string.IsNullOrWhiteSpace(first) ? "" : $" — {first}";
+            var body = result.Succeeded == 0 && result.Failed == 0
+                ? $"The recycle operation didn't complete{detail}. The files are unchanged; try again."
+                : $"Moved {result.Succeeded}; {result.Failed} couldn't be moved to the Recycle Bin{detail}. They may be open in another app or you may not have permission.";
+            await ShowAlertAsync("Some files couldn't be recycled", body);
+            RequestLibraryRefresh(force: true);
+        }
+    }
+
+    // Dismissible alert mirroring CleanupView.ShowAlertAsync — surfaces a
+    // partial/failed bulk op so the user is never left thinking a trash
+    // succeeded when some (or all) of it didn't.
+    private async Task ShowAlertAsync(string title, string body)
+    {
+        try
+        {
+            if (_unloaded || XamlRoot is null)
+            {
+                DebugLog.Warn($"LibraryView.ShowAlertAsync: XamlRoot null/unloaded ({title}); skipping dialog.");
+                return;
+            }
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = title,
+                Content = body,
+                CloseButtonText = "OK",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            await dialog.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"LibraryView.ShowAlertAsync({title}) threw: " + ex.Message);
+        }
     }
 
     private void OnClearSelectionClicked(object sender, RoutedEventArgs e)
@@ -1103,28 +1174,31 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         var deferral = args.GetDeferral();
         try
         {
-            var paths = ViewModel.SelectedCount > 0
-                ? ViewModel.SelectedItems.Select(t => t.Path).ToList()
-                : (sender is FrameworkElement el && el.DataContext is FileTile tile
-                    ? new List<string> { tile.Path }
-                    : new List<string>());
-            var items = new List<Windows.Storage.IStorageItem>(paths.Count);
-            foreach (var p in paths)
+            await DebugLog.SafeRunAsync(nameof(OnTileDragStarting), async () =>
             {
-                if (System.IO.File.Exists(p))
+                var paths = ViewModel.SelectedCount > 0
+                    ? ViewModel.SelectedItems.Select(t => t.Path).ToList()
+                    : (sender is FrameworkElement el && el.DataContext is FileTile tile
+                        ? new List<string> { tile.Path }
+                        : new List<string>());
+                var items = new List<Windows.Storage.IStorageItem>(paths.Count);
+                foreach (var p in paths)
                 {
-                    try
+                    if (System.IO.File.Exists(p))
                     {
-                        items.Add(await Windows.Storage.StorageFile.GetFileFromPathAsync(p));
+                        try
+                        {
+                            items.Add(await Windows.Storage.StorageFile.GetFileFromPathAsync(p));
+                        }
+                        catch { /* path inaccessible — skip */ }
                     }
-                    catch { /* path inaccessible — skip */ }
                 }
-            }
-            if (items.Count > 0)
-            {
-                args.Data.SetStorageItems(items);
-                args.Data.RequestedOperation = Windows.ApplicationModel.DataTransfer.DataPackageOperation.Copy;
-            }
+                if (items.Count > 0)
+                {
+                    args.Data.SetStorageItems(items);
+                    args.Data.RequestedOperation = Windows.ApplicationModel.DataTransfer.DataPackageOperation.Copy;
+                }
+            });
         }
         finally
         {

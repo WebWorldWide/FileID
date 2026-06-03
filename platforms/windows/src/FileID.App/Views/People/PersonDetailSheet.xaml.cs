@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using FileID.IpcSchema;
 using FileID.Services;
@@ -51,6 +52,19 @@ public sealed partial class PersonDetailSheet : UserControl
             """);
     }
 
+    private sealed class LoadResult
+    {
+        public string Title = "";
+        public string First = "";
+        public string Middle = "";
+        public string Last = "";
+        public string Suffix = "";
+        public int MemberCount;
+        public bool Found;
+        public List<FaceTile> Faces = new();
+        public string? Error;
+    }
+
     public void SetPerson(long personId, string? displayName)
     {
         _personId = personId;
@@ -58,77 +72,145 @@ public sealed partial class PersonDetailSheet : UserControl
         Load();
     }
 
-    private void Load()
+    private async void Load()
+        => await DebugLog.SafeRunAsync(nameof(Load), async () =>
     {
         _faces.Clear();
-        try
+        var dispatcher = DispatcherQueue;
+        long personId = _personId;
+
+        // The SqliteConnection open + structured-name read + up to 200
+        // File.Exists probes used to run synchronously on the UI thread before
+        // the dialog showed, stalling its open on a cold disk. Do all of it on
+        // a worker thread and marshal the UI writes back.
+        LoadResult result = await Task.Run(() =>
         {
-            var connStr = new SqliteConnectionStringBuilder
+            var res = new LoadResult();
+            try
             {
-                DataSource = AppPaths.DbPath,
-                Mode = SqliteOpenMode.ReadOnly,
-            }.ToString();
-            using var conn = new SqliteConnection(connStr);
-            conn.Open();
-
-            // Pull structured name fields.
-            using (var cmd = conn.CreateCommand())
-            {
-                cmd.CommandText = "SELECT title, first_name, middle_name, last_name, suffix, COUNT(fp.id) " +
-                                  "FROM persons p LEFT JOIN face_prints fp ON fp.person_id = p.id " +
-                                  "WHERE p.id = @id GROUP BY p.id";
-                cmd.Parameters.AddWithValue("@id", _personId);
-                using var r = cmd.ExecuteReader();
-                if (r.Read())
+                var connStr = new SqliteConnectionStringBuilder
                 {
-                    TitleBox.Text = r.IsDBNull(0) ? "" : r.GetString(0);
-                    FirstBox.Text = r.IsDBNull(1) ? "" : r.GetString(1);
-                    MiddleBox.Text = r.IsDBNull(2) ? "" : r.GetString(2);
-                    LastBox.Text = r.IsDBNull(3) ? "" : r.GetString(3);
-                    SuffixBox.Text = r.IsDBNull(4) ? "" : r.GetString(4);
-                    var memberCount = r.GetInt32(5);
-                    MemberCountText.Text = $"{memberCount} face{(memberCount == 1 ? "" : "s")} clustered.";
-                }
-            }
+                    DataSource = AppPaths.DbPath,
+                    Mode = SqliteOpenMode.ReadOnly,
+                }.ToString();
+                using var conn = new SqliteConnection(connStr);
+                conn.Open();
 
-            // Pull every face id for this cluster + check for an on-disk JPEG.
-            using (var cmd = conn.CreateCommand())
-            {
-                cmd.CommandText = "SELECT id FROM face_prints WHERE person_id = @id ORDER BY COALESCE(face_quality, 0) DESC LIMIT 200";
-                cmd.Parameters.AddWithValue("@id", _personId);
-                using var r = cmd.ExecuteReader();
-                while (r.Read())
+                // Pull structured name fields.
+                using (var cmd = conn.CreateCommand())
                 {
-                    var faceId = r.GetInt64(0);
-                    var path = Path.Combine(AppPaths.Root, "face_crops", $"{faceId}.jpg");
-                    if (File.Exists(path))
+                    cmd.CommandText = "SELECT title, first_name, middle_name, last_name, suffix, COUNT(fp.id) " +
+                                      "FROM persons p LEFT JOIN face_prints fp ON fp.person_id = p.id " +
+                                      "WHERE p.id = @id GROUP BY p.id";
+                    cmd.Parameters.AddWithValue("@id", personId);
+                    using var r = cmd.ExecuteReader();
+                    if (r.Read())
                     {
-                        _faces.Add(new FaceTile { FaceId = faceId, ImageUri = new Uri(path).AbsoluteUri });
+                        res.Found = true;
+                        res.Title = r.IsDBNull(0) ? "" : r.GetString(0);
+                        res.First = r.IsDBNull(1) ? "" : r.GetString(1);
+                        res.Middle = r.IsDBNull(2) ? "" : r.GetString(2);
+                        res.Last = r.IsDBNull(3) ? "" : r.GetString(3);
+                        res.Suffix = r.IsDBNull(4) ? "" : r.GetString(4);
+                        res.MemberCount = r.GetInt32(5);
+                    }
+                }
+
+                // Pull every face id for this cluster + check for an on-disk JPEG.
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = "SELECT id FROM face_prints WHERE person_id = @id ORDER BY COALESCE(face_quality, 0) DESC LIMIT 200";
+                    cmd.Parameters.AddWithValue("@id", personId);
+                    using var r = cmd.ExecuteReader();
+                    while (r.Read())
+                    {
+                        var faceId = r.GetInt64(0);
+                        var path = Path.Combine(AppPaths.Root, "face_crops", $"{faceId}.jpg");
+                        if (File.Exists(path))
+                        {
+                            res.Faces.Add(new FaceTile { FaceId = faceId, ImageUri = new Uri(path).AbsoluteUri });
+                        }
                     }
                 }
             }
-        }
-        catch (Exception ex)
+            catch (Exception ex)
+            {
+                res.Error = ex.Message;
+            }
+            return res;
+        }).ConfigureAwait(true);
+
+        void Apply()
         {
-            StatusText.Text = $"Couldn't load: {ex.Message}";
+            if (result.Error is not null)
+            {
+                StatusText.Text = $"Couldn't load: {result.Error}";
+                return;
+            }
+            // Guard against a stale load landing after the sheet was re-pointed at
+            // a different person — skip ALL UI writes (name boxes + face grid), not
+            // just the grid, so a slow prior load can't overwrite the new person.
+            if (_personId != personId) return;
+            if (result.Found)
+            {
+                TitleBox.Text = result.Title;
+                FirstBox.Text = result.First;
+                MiddleBox.Text = result.Middle;
+                LastBox.Text = result.Last;
+                SuffixBox.Text = result.Suffix;
+                MemberCountText.Text = $"{result.MemberCount} face{(result.MemberCount == 1 ? "" : "s")} clustered.";
+            }
+            _faces.Clear();
+            foreach (var f in result.Faces) _faces.Add(f);
         }
-    }
+
+        // ConfigureAwait(true) resumes on the captured UI context; the
+        // DispatcherQueue post is belt-and-suspenders in case the continuation
+        // resumes on a worker thread (no captured SyncContext).
+        if (dispatcher is null || dispatcher.HasThreadAccess)
+        {
+            Apply();
+        }
+        else
+        {
+            dispatcher.TryEnqueue(Apply);
+        }
+    });
 
     public async Task<bool> CommitAsync()
     {
         try
         {
-            // Route through the engine's single-writer connection so we
-            // don't contend SQLite locks with the engine writer or with a
-            // sibling PersonDetailSheet open in another window.
-            await ViewModels.EngineClient.Instance.RenamePersonAsync(
-                _personId,
-                TitleBox.Text,
-                FirstBox.Text,
-                MiddleBox.Text,
-                LastBox.Text,
-                SuffixBox.Text);
+            // Await the engine's BulkActionResult instead of fire-and-forget:
+            // renamePerson reports failure in the result (e.g. the row update
+            // didn't take), not as a thrown exception, so declaring success on
+            // the IPC send alone left the dialog closing on a failed save (the
+            // silent-failure class). Route through the engine's single-writer
+            // connection so we don't contend SQLite locks with the engine
+            // writer or a sibling sheet in another window.
+            var result = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
+                "renamePerson",
+                () => ViewModels.EngineClient.Instance.RenamePersonAsync(
+                    _personId,
+                    TitleBox.Text,
+                    FirstBox.Text,
+                    MiddleBox.Text,
+                    LastBox.Text,
+                    SuffixBox.Text),
+                TimeSpan.FromSeconds(30));
+            if (result.Failed > 0 || result.Succeeded == 0)
+            {
+                var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
+                StatusText.Text = string.IsNullOrWhiteSpace(first) ? "Save failed." : $"Save failed: {first}";
+                return false;
+            }
             return true;
+        }
+        catch (TimeoutException ex)
+        {
+            StatusText.Text = "Save didn't confirm — try again.";
+            Services.DebugLog.Warn("PersonDetailSheet.CommitAsync timed out: " + ex.Message);
+            return false;
         }
         catch (Exception ex)
         {

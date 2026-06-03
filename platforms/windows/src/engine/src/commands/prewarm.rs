@@ -35,11 +35,68 @@ impl Drop for ReleaseOnDrop {
     }
 }
 
+/// Per-model-kind cancel flags. A prewarm download polls ITS kind's flag, so
+/// cancelling one model (the per-row Cancel button) no longer aborts every other
+/// concurrent download, and a fresh prewarm of one kind can't un-cancel a
+/// different kind's pending cancel — both were bugs of the old single
+/// process-global flag.
+static PREWARM_CANCELS: OnceLock<Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>> =
+    OnceLock::new();
+
+/// Get-or-create this kind's cancel flag WITHOUT changing its value. The
+/// fresh-start reset is [`reset_prewarm_cancel`], called synchronously at
+/// dispatch time, so this getter can't clobber a cancel that raced in after the
+/// handler task was spawned.
+fn prewarm_cancel_flag(model_kind: &str) -> Arc<AtomicBool> {
+    let map = PREWARM_CANCELS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    map.lock()
+        .entry(model_kind.to_string())
+        .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+        .clone()
+}
+
+/// Reset (creating if needed) this kind's cancel flag to un-cancelled. Called
+/// from the PrewarmModel dispatch arm BEFORE the handler task is spawned, so the
+/// flag always exists (and is false) before any subsequent CancelPrewarm for
+/// this kind is processed by the serial stdio loop — closing the lazy-create
+/// race where a cancel landing in the spawn→register window was silently
+/// dropped. Resets ONLY this kind; a different kind's pending cancel is untouched.
+pub fn reset_prewarm_cancel(model_kind: &str) {
+    let map = PREWARM_CANCELS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    map.lock()
+        .entry(model_kind.to_string())
+        .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+        .store(false, Ordering::Relaxed);
+}
+
+/// Signal cancellation for one model kind (create-or-set, so a cancel is never
+/// lost even if processed before the handler first reads the flag), or ALL known
+/// prewarm flags when `model_kind` is None (the "cancel everything" form).
+/// In-flight `download_parallel` calls poll their flag after every chunk and bail.
+pub fn cancel_prewarm(model_kind: Option<&str>) {
+    let map = PREWARM_CANCELS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut guard = map.lock();
+    match model_kind {
+        Some(kind) => {
+            guard
+                .entry(kind.to_string())
+                .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+                .store(true, Ordering::Relaxed);
+            tracing::info!(model_kind = kind, "CancelPrewarm received (per-model)");
+        }
+        None => {
+            for flag in guard.values() {
+                flag.store(true, Ordering::Relaxed);
+            }
+            tracing::info!("CancelPrewarm received (all in-flight)");
+        }
+    }
+}
+
 pub(crate) async fn handle_prewarm_model(
     sink: Sink,
     model_kind: String,
     http_client: Arc<reqwest::Client>,
-    cancel: Arc<AtomicBool>,
 ) {
     // Emit an immediate "Queued" progress event so the welcome sheet row
     // flips out of the captionless-spinner state the moment the engine
@@ -92,10 +149,16 @@ pub(crate) async fn handle_prewarm_model(
         set: in_flight,
     };
 
+    // Per-model cancel flag (reset to un-cancelled for this fresh prewarm).
+    // download_parallel below polls it after every chunk.
+    let cancel = prewarm_cancel_flag(&model_kind);
+
     // (Re)installing a GPU EP pack is an explicit "try this EP again" — clear
     // any prior crash-disable (ep_guard) so the next launch re-attempts the bind.
-    if matches!(model_kind.as_str(), "ort_cuda_x64" | "ort_openvino_x64") {
-        crate::models::ep_guard::reenable();
+    match model_kind.as_str() {
+        "ort_cuda_x64" => crate::models::ep_guard::reenable_ep("cuda"),
+        "ort_openvino_x64" => crate::models::ep_guard::reenable_ep("openvino"),
+        _ => {}
     }
 
     // Distinguish "the engine can't resolve its models dir" (a storage/env
@@ -212,10 +275,12 @@ pub(crate) async fn handle_prewarm_model(
                     total_bytes: Some(total_estimate),
                 },
             )));
-            let s = sink_for_progress.clone();
-            tokio::spawn(async move {
-                s.send(event).await;
-            });
+            // Send inline (drop-on-full) rather than via a spawned task. Spawning
+            // a task per callback gave no ordering guarantee, so a later,
+            // higher-fraction event could reach the channel before an earlier,
+            // lower one and bounce the progress bar backward. try_send preserves
+            // emission order; progress is throttled upstream so drops are benign.
+            let _ = sink_for_progress.try_send(event);
         }
     };
 
@@ -274,6 +339,21 @@ pub(crate) async fn handle_prewarm_model(
         }
     }
     if !errs.is_empty() {
+        // A user-initiated cancel is not a network failure: surface a benign
+        // event the app suppresses (ModelInstallerService treats
+        // "prewarm_cancelled" as a no-op) instead of a red "download failed —
+        // check your connection / Retry" pill.
+        if cancel.load(Ordering::Relaxed) {
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "prewarm_cancelled".into(),
+                message: format!("Download of {model_kind} cancelled."),
+                path: None,
+                model_kind: Some(model_kind.clone()),
+            }))))
+            .await;
+            tracing::info!(model_kind = %model_kind, outcome = "cancelled", "[PREWARM] exiting");
+            return;
+        }
         for (label, _dest, err) in &errs {
             tracing::warn!(?err, file = %label, "model download failed");
         }
@@ -337,6 +417,17 @@ pub(crate) async fn handle_prewarm_model(
         if let Err(err) =
             download_parallel(http_client.clone(), req, cancel.clone(), progress_cb).await
         {
+            if cancel.load(Ordering::Relaxed) {
+                sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                    kind: "prewarm_cancelled".into(),
+                    message: format!("Download of {model_kind} cancelled."),
+                    path: None,
+                    model_kind: Some(model_kind.clone()),
+                }))))
+                .await;
+                tracing::info!(model_kind = %model_kind, outcome = "cancelled", "[PREWARM] exiting");
+                return;
+            }
             tracing::warn!(?err, file = %label, "model download failed");
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                 kind: "model_download_failed".into(),
@@ -452,4 +543,32 @@ pub(crate) async fn handle_prewarm_model(
     ))))
     .await;
     tracing::info!(model_kind = %model_kind, outcome = "installed", "[PREWARM] exiting");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Per-model cancel registry: cancelling one kind must not touch another, and
+    // a fresh prewarm of a kind resets only its own flag. Unique kind names keep
+    // the process-global static from cross-contaminating parallel tests.
+    #[test]
+    fn per_model_cancel_is_isolated() {
+        let a = prewarm_cancel_flag("test_kind_alpha");
+        let b = prewarm_cancel_flag("test_kind_beta");
+        cancel_prewarm(Some("test_kind_alpha"));
+        assert!(a.load(Ordering::Relaxed), "the cancelled kind's flag must be set");
+        assert!(!b.load(Ordering::Relaxed), "a different kind's flag must NOT be set");
+        // reset_prewarm_cancel (the dispatch-time fresh start) clears only its kind.
+        reset_prewarm_cancel("test_kind_alpha");
+        assert!(!a.load(Ordering::Relaxed), "reset clears its own kind's flag");
+        assert!(!b.load(Ordering::Relaxed), "and still leaves the other kind untouched");
+        // A cancel that arrives BEFORE the flag was ever fetched must still record
+        // (create-or-set) — this is the lazy-create-race fix.
+        cancel_prewarm(Some("test_kind_gamma"));
+        assert!(
+            prewarm_cancel_flag("test_kind_gamma").load(Ordering::Relaxed),
+            "a cancel before first fetch must still be recorded"
+        );
+    }
 }

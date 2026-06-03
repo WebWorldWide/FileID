@@ -84,10 +84,22 @@ internal sealed partial class EngineClient
         get => _lastScanDuration;
         private set => Set(ref _lastScanDuration, value);
     }
+
+    /// Authoritative processed-file count from the last ScanComplete (the
+    /// engine's final total). The completed-scan summary reads this instead of
+    /// LastProgress.Processed, which can be throttle-stale by up to one batch.
+    public ulong LastScanProcessedFiles { get; private set; }
     public Task StartScanAsync(string rootPath, string? rootDisplay = null, bool rescan = false)
     {
         _scanStartedAt = DateTime.UtcNow;
         _shownPhaseRank = -1;
+        // Clear stale Deep Analyze latches so the pipeline strip doesn't jump a
+        // fresh (re)scan straight to "Done" off a prior session's
+        // DeepAnalyzeComplete. Done here — the common path for ALL scan starts
+        // (incl. Settings "Force re-tag") — not only the optimistic-UI hook.
+        DeepAnalyzeComplete = null;
+        DeepAnalyzeProgress = null;
+        DeepAnalyzeStarting = null;
         return SendCommandAsync(new StartScanCommand(rootPath, rootDisplay, rescan));
     }
 
@@ -459,12 +471,25 @@ internal sealed partial class EngineClient
     /// well above any realistic pack download on a slow link.</summary>
     private static readonly TimeSpan PrewarmAbsoluteCeiling = TimeSpan.FromHours(2);
 
-    private int _prewarmCancelRequested;
+    // Per-model-kind stall-guard cancellation (mirrors the engine's per-kind
+    // cancel registry). A single global flag here would let a per-row Cancel kill
+    // the stall guards of every OTHER concurrently-downloading model during
+    // Install All, even though those downloads keep running. `_prewarmCancelAll`
+    // is the legacy cancel-everything path (CancelPrewarmAsync(null)).
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _prewarmCancelledKinds = new();
+    private int _prewarmCancelAllRequested;
+
+    private bool IsPrewarmCancelled(string modelKind) =>
+        Interlocked.CompareExchange(ref _prewarmCancelAllRequested, 0, 0) == 1
+        || _prewarmCancelledKinds.ContainsKey(modelKind);
 
     public Task PrewarmModelAsync(string modelKind)
     {
         DebugLog.Info($"[INSTALL] EngineClient.PrewarmModelAsync('{modelKind}') called. State={State}, _stdin={(_stdin is null ? "NULL" : "alive")}");
-        Interlocked.Exchange(ref _prewarmCancelRequested, 0);
+        // A fresh prewarm means the user wants downloads: clear this kind's cancel
+        // mark and any pending cancel-all so its (and others') stall guards re-arm.
+        Interlocked.Exchange(ref _prewarmCancelAllRequested, 0);
+        _prewarmCancelledKinds.TryRemove(modelKind, out _);
         var send = SendCommandAsync(new PrewarmModelCommand(modelKind));
         // Detached stall guard — keeps PrewarmModelAsync fire-and-forget (callers
         // like ModelInstallerService schedule their own UI-slot watchdog after
@@ -495,11 +520,11 @@ internal sealed partial class EngineClient
 
         while (true)
         {
-            if (Interlocked.CompareExchange(ref _prewarmCancelRequested, 0, 0) == 1) return;
+            if (IsPrewarmCancelled(modelKind)) return;
 
             await Task.Delay(PrewarmNoProgressTimeout).ConfigureAwait(false);
 
-            if (Interlocked.CompareExchange(ref _prewarmCancelRequested, 0, 0) == 1) return;
+            if (IsPrewarmCancelled(modelKind)) return;
 
             var current = ModelDownloadProgress;
             // A terminal "installed" event arrives as fraction >= 1.0 for THIS
@@ -539,11 +564,12 @@ internal sealed partial class EngineClient
         }
     }
 
-    public Task CancelPrewarmAsync()
+    public Task CancelPrewarmAsync(string? modelKind = null)
     {
-        DebugLog.Info("[INSTALL] EngineClient.CancelPrewarmAsync() called.");
-        Interlocked.Exchange(ref _prewarmCancelRequested, 1);
-        return SendCommandAsync(new CancelPrewarmCommand());
+        DebugLog.Info($"[INSTALL] EngineClient.CancelPrewarmAsync(modelKind={modelKind ?? "<all>"}) called.");
+        if (modelKind is null) Interlocked.Exchange(ref _prewarmCancelAllRequested, 1);
+        else _prewarmCancelledKinds[modelKind] = 1;
+        return SendCommandAsync(new CancelPrewarmCommand(modelKind));
     }
 
     // RunAutoPilotAsync + AwaitPhaseAsync + ClearAutoPilot removed

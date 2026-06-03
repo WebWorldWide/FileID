@@ -24,6 +24,13 @@ public sealed partial class DeepAnalyzeView : UserControl
     private string _captionAccumulator = string.Empty;
     private bool _unloaded;
 
+    // Monotonic generation for the streamed-thumbnail load. Each progress event
+    // fires LoadStreamThumbAsync fire-and-forget; a slow decode for an earlier
+    // file can resolve after a later one's. We bump this at the start of every
+    // load and only commit StreamImage.Source if our captured generation is
+    // still the latest, so a stale thumbnail never overwrites the current file's.
+    private int _streamThumbGeneration;
+
     // Warm-up watchdog: the engine emits DeepAnalyzeStarting (IsIndeterminate
     // "Preparing…") BEFORE the first DeepAnalyzeProgress/stream token while the
     // VLM loads (~5-30 s first run). If the load stalls there's no failure
@@ -575,6 +582,10 @@ public sealed partial class DeepAnalyzeView : UserControl
         // the dispatcher before any await and do the construct + StreamImage.Source
         // set inside one TryEnqueue; null the source on failure (placeholder, not stale).
         if (_unloaded) return;
+        // Sequence guard: a slow decode for an earlier file must not overwrite a
+        // later file's thumbnail. Capture this load's generation; only commit if
+        // it's still the latest when the decode completes.
+        var generation = System.Threading.Interlocked.Increment(ref _streamThumbGeneration);
         // In-proc shell video/audio thumbnail providers can native-fast-fail the
         // whole app (no managed exception). This path calls GetThumbnailAsync
         // directly, bypassing ThumbnailService, so it must apply the same skip —
@@ -600,12 +611,22 @@ public sealed partial class DeepAnalyzeView : UserControl
                     {
                         var bmp = new BitmapImage();
                         await bmp.SetSourceAsync(captured);
-                        StreamImage.Source = bmp;
+                        // Only commit if this is still the latest load — a slower
+                        // decode for an earlier file must not clobber a newer one.
+                        if (!_unloaded
+                            && System.Threading.Volatile.Read(ref _streamThumbGeneration) == generation)
+                        {
+                            StreamImage.Source = bmp;
+                        }
                     }
                     catch (Exception ex)
                     {
                         DebugLog.Warn($"LoadStreamThumbAsync UI render: {ex.Message}");
-                        try { StreamImage.Source = null; } catch { }
+                        if (!_unloaded
+                            && System.Threading.Volatile.Read(ref _streamThumbGeneration) == generation)
+                        {
+                            try { StreamImage.Source = null; } catch { }
+                        }
                     }
                     finally
                     {
@@ -619,12 +640,12 @@ public sealed partial class DeepAnalyzeView : UserControl
                 }
                 return;
             }
-            ClearStreamImageOnDispatcher(dispatcher);
+            ClearStreamImageOnDispatcher(dispatcher, generation);
         }
         catch (Exception ex)
         {
             DebugLog.Warn($"LoadStreamThumbAsync({PathRedactor.Redact(path)}) failed: {ex.Message}");
-            ClearStreamImageOnDispatcher(dispatcher);
+            ClearStreamImageOnDispatcher(dispatcher, generation);
         }
         finally
         {
@@ -632,10 +653,20 @@ public sealed partial class DeepAnalyzeView : UserControl
         }
     }
 
-    private void ClearStreamImageOnDispatcher(Microsoft.UI.Dispatching.DispatcherQueue? dispatcher)
+    private void ClearStreamImageOnDispatcher(Microsoft.UI.Dispatching.DispatcherQueue? dispatcher, int generation)
     {
         if (dispatcher is null || _unloaded) return;
-        dispatcher.TryEnqueue(() => { if (!_unloaded) try { StreamImage.Source = null; } catch { } });
+        // Only clear if this is still the latest load — a stale "no thumbnail"
+        // result must not wipe a newer file's freshly-set image.
+        dispatcher.TryEnqueue(() =>
+        {
+            if (_unloaded
+                || System.Threading.Volatile.Read(ref _streamThumbGeneration) != generation)
+            {
+                return;
+            }
+            try { StreamImage.Source = null; } catch { }
+        });
     }
 
     private void OnModelCardTapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e)

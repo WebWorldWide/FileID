@@ -119,7 +119,7 @@
             }
           }
         },
-        { "type": "object", "required": ["cancelPrewarm"], "additionalProperties": false, "properties": { "cancelPrewarm": { "type": "object", "additionalProperties": false } } },
+        { "type": "object", "required": ["cancelPrewarm"], "additionalProperties": false, "properties": { "cancelPrewarm": { "type": "object", "additionalProperties": false, "properties": { "modelKind": { "type": ["string", "null"], "description": "Cancel this model's in-flight download; null/absent cancels ALL in-flight prewarms." } } } } },
 
         { "type": "object", "required": ["planRestructure"], "additionalProperties": false,
           "properties": { "planRestructure": { "type": "object", "additionalProperties": false,
@@ -389,7 +389,8 @@
               "kind":         { "type": "string", "enum": ["image", "video", "pdf", "doc", "audio", "other"] },
               "totalMs":      { "type": "number", "minimum": 0 },
               "failed":       { "type": "boolean" },
-              "errorMessage": { "type": ["string", "null"] }
+              "errorMessage": { "type": ["string", "null"] },
+              "skippedStages": { "type": "array", "items": { "type": "string" }, "default": [] }
             }
           }
         }
@@ -531,6 +532,7 @@
               "total":       { "type": "integer", "minimum": 0 },
               "etaSeconds":  { "type": ["number", "null"] },
               "currentPath": { "type": ["string", "null"] },
+              "currentCaption": { "type": ["string", "null"] },
               "modelKind":   { "type": "string" }
             }
           }

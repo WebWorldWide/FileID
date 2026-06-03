@@ -208,11 +208,91 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
 
     private void Replace(IReadOnlyList<PersonCluster> rows)
     {
-        Clusters.Clear();
-        foreach (var r in rows)
+        MergeByClusterId(Clusters, rows);
+        OnPropertyChanged(nameof(SelectedCount));
+    }
+
+    /// <summary>Reconcile <paramref name="clusters"/> to match <paramref name="rows"/>
+    /// by <see cref="PersonCluster.ClusterId"/>, in place (mirrors
+    /// <c>LibraryViewModel.MergeById</c>). The old Clear+Add raised a
+    /// CollectionChanged.Reset ~1 Hz during a scan, re-realizing the whole
+    /// ItemsRepeater, full-res-decoding every anchor face again, and discarding
+    /// the user's in-flight multi-select state. Surviving clusters whose anchor
+    /// face is unchanged keep their existing instance (and its IsSelected +
+    /// already-decoded AnchorImage); only genuine deltas emit Add/Remove. A
+    /// cluster whose anchor face changed is replaced so its OneTime AnchorImage /
+    /// Caption bindings re-realize against the fresh crop. Static +
+    /// collection-only so it carries no UI-thread affinity beyond the
+    /// ObservableCollection it mutates.</summary>
+    internal static void MergeByClusterId(
+        ObservableCollection<PersonCluster> clusters,
+        IReadOnlyList<PersonCluster> rows)
+    {
+        if (clusters.Count == 0)
         {
-            Clusters.Add(r);
+            foreach (var r in rows) clusters.Add(r);
+            return;
         }
+
+        var existingById = new Dictionary<int, PersonCluster>(clusters.Count);
+        foreach (var c in clusters) existingById[c.ClusterId] = c;
+
+        // `reused` tracks the surviving instances we keep by reference, so step 1
+        // can drop the old instance of a cluster whose anchor face changed (its
+        // ClusterId survives but we're replacing it with the fresh one).
+        var desired = new List<PersonCluster>(rows.Count);
+        var nextIds = new HashSet<int>(rows.Count);
+        var reused = new HashSet<PersonCluster>();
+        foreach (var fresh in rows)
+        {
+            if (!nextIds.Add(fresh.ClusterId)) continue;
+            if (existingById.TryGetValue(fresh.ClusterId, out var keep)
+                && keep.AnchorFaceId == fresh.AnchorFaceId
+                && keep.MemberCount == fresh.MemberCount
+                && keep.DisplayName == fresh.DisplayName)
+            {
+                // Reuse the instance (preserving IsSelected + the decoded
+                // AnchorImage) ONLY when nothing visible changed. The Caption is a
+                // OneTime x:Bind over the init-only DisplayName/MemberCount, so a
+                // rename or a member-count change must take the FRESH instance to
+                // re-render — otherwise the card shows a stale name/count.
+                reused.Add(keep);
+                desired.Add(keep);
+            }
+            else
+            {
+                desired.Add(fresh);
+            }
+        }
+
+        // 1) Remove any existing cluster we're not reusing by reference — both
+        //    genuinely-gone ids and replaced-instance survivors.
+        for (int i = clusters.Count - 1; i >= 0; i--)
+        {
+            if (!reused.Contains(clusters[i])) clusters.RemoveAt(i);
+        }
+
+        // 2) Align order to `desired` via Remove+Insert of the instance.
+        for (int j = 0; j < desired.Count; j++)
+        {
+            var want = desired[j];
+            if (j < clusters.Count && ReferenceEquals(clusters[j], want)) continue;
+            int cur = IndexOfInstance(clusters, want, j);
+            if (cur >= 0) clusters.RemoveAt(cur);
+            clusters.Insert(j, want);
+        }
+    }
+
+    private static int IndexOfInstance(
+        ObservableCollection<PersonCluster> clusters,
+        PersonCluster want,
+        int startAt)
+    {
+        for (int i = startAt; i < clusters.Count; i++)
+        {
+            if (ReferenceEquals(clusters[i], want)) return i;
+        }
+        return -1;
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -248,6 +328,9 @@ internal sealed class PersonCluster : INotifyPropertyChanged
     /// ArcFace embed. Lazily constructed once + cached so the binding
     /// doesn't rebuild it on every refresh (which would flicker / loop).
     /// Null if the file doesn't exist or AnchorFaceId is 0.
+    /// DecodePixelWidth caps the decode at the ~120px card display size so a
+    /// full-res face JPEG isn't decoded for a thumbnail (mirrors
+    /// MergeSuggestionVm.ResolveFace).
     /// </summary>
     public Microsoft.UI.Xaml.Media.Imaging.BitmapImage? AnchorImage
     {
@@ -260,7 +343,11 @@ internal sealed class PersonCluster : INotifyPropertyChanged
             {
                 var path = BuildCropPath(AnchorFaceId);
                 if (!System.IO.File.Exists(path)) return null;
-                _cachedAnchorImage = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(path));
+                _cachedAnchorImage = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage
+                {
+                    DecodePixelWidth = 120,
+                    UriSource = new Uri(path),
+                };
                 return _cachedAnchorImage;
             }
             catch

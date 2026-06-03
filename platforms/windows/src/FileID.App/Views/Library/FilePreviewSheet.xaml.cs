@@ -48,6 +48,9 @@ public sealed partial class FilePreviewSheet : UserControl
         Unloaded += (_, _) =>
         {
             _unloaded = true;
+            // Stop the deferred loading-ring timer so a queued tick can't touch
+            // the torn-down content tree.
+            try { _loadingDelayTimer?.Stop(); } catch { /* swallow */ }
             // Stop playback + fully dispose the MediaPlayer so audio can't keep
             // playing and the file handle is released after the dialog dismisses.
             StopAndClearMedia();
@@ -192,14 +195,21 @@ public sealed partial class FilePreviewSheet : UserControl
         // Refresh the Vision Tags card (auto + user tags for this file).
         _ = LoadVisionTagsAsync(fileId);
 
-        // Hide every preview surface up front; the kind dispatcher below
-        // re-shows exactly one. Without this a navigation from video →
-        // image would leave both visible.
+        // Media + placeholder are cleared up front (media must stop the instant
+        // we navigate away; neither flashes a loading ring). The prior IMAGE
+        // frame is deliberately left on screen until the new thumbnail binds —
+        // see the deferred LoadingPanel below. The kind dispatcher's success
+        // paths each collapse PreviewImage when they show their own surface.
         StopAndClearMedia();
-        PreviewImage.Visibility = Visibility.Collapsed;
         PreviewMedia.Visibility = Visibility.Collapsed;
         PlaceholderPanel.Visibility = Visibility.Collapsed;
-        LoadingPanel.Visibility = Visibility.Visible;
+        // Defer the loading ring: arrow-key sibling nav is usually a cache-warm
+        // load that resolves in well under 100 ms. Collapsing the prior image
+        // and showing LoadingPanel synchronously made the ring flash between
+        // every sibling. Arm a short timer instead so only a genuinely slow
+        // decode shows it; the continuation that binds the new image (or shows
+        // media / placeholder) cancels the timer first.
+        ArmLoadingDelay();
 
         // Async-void → must wrap the entire body. Any unhandled exception
         // here would terminate the dispatcher and crash the window.
@@ -217,8 +227,53 @@ public sealed partial class FilePreviewSheet : UserControl
         }
         finally
         {
-            if (!_unloaded) LoadingPanel.Visibility = Visibility.Collapsed;
+            if (!_unloaded) HideLoadingChrome();
         }
+    }
+
+    // Deferred loading-ring timer. Shows LoadingPanel only if the new preview
+    // surface hasn't bound within the delay, so sub-100 ms cached sibling
+    // navigations never flash a ring. Single instance reused across SetFile
+    // calls; each call re-arms it and every terminal show-path cancels it.
+    private Microsoft.UI.Xaml.DispatcherTimer? _loadingDelayTimer;
+    private static readonly TimeSpan LoadingDelay = TimeSpan.FromMilliseconds(120);
+
+    private void ArmLoadingDelay()
+    {
+        if (_loadingDelayTimer is null)
+        {
+            _loadingDelayTimer = new Microsoft.UI.Xaml.DispatcherTimer { Interval = LoadingDelay };
+            _loadingDelayTimer.Tick += (_, _) =>
+            {
+                _loadingDelayTimer?.Stop();
+                if (_unloaded) return;
+                // If a fast decode already bound a surface before this 120ms delay
+                // elapsed (the Tick can be queued just after the bind continuation
+                // but before HideLoadingChrome stops the timer), do NOT blank it —
+                // collapsing PreviewImage here with no re-show would leave a blank
+                // preview. Only reveal the ring while still genuinely loading.
+                if (PreviewImage.Visibility == Visibility.Visible
+                    || PreviewMedia.Visibility == Visibility.Visible)
+                {
+                    return;
+                }
+                // Still loading after the delay — now it's worth showing the
+                // ring. Collapse the prior frame so the ring isn't drawn over it.
+                PreviewImage.Visibility = Visibility.Collapsed;
+                LoadingPanel.Visibility = Visibility.Visible;
+            };
+        }
+        _loadingDelayTimer.Stop();
+        _loadingDelayTimer.Start();
+    }
+
+    // Cancel the pending loading-ring timer and hide the ring. Called the
+    // instant a new preview surface binds (or the load finishes) so a fast
+    // cache-warm load never reveals the ring.
+    private void HideLoadingChrome()
+    {
+        _loadingDelayTimer?.Stop();
+        LoadingPanel.Visibility = Visibility.Collapsed;
     }
 
     private async Task SetFileCoreAsync(string path, string kind, long sizeBytes, double? modifiedAt)
@@ -364,6 +419,9 @@ public sealed partial class FilePreviewSheet : UserControl
             _currentMediaKind = kind;
             var src = Windows.Media.Core.MediaSource.CreateFromStorageFile(file);
             _currentMediaSource = src;
+            // The prior image frame is kept on screen until a new surface binds
+            // (deferred-loading); collapse it now that the media surface is up.
+            PreviewImage.Visibility = Visibility.Collapsed;
             PreviewMedia.Source = src;
             PreviewMedia.Visibility = Visibility.Visible;
             // Attach failure handler on the (lazily-created) MediaPlayer; detach
@@ -582,12 +640,35 @@ public sealed partial class FilePreviewSheet : UserControl
             if (FileId <= 0 || string.IsNullOrWhiteSpace(name)) return;
             try
             {
-                await ViewModels.EngineClient.Instance.RenameFilesAsync(new[]
+                // Await the engine's BulkActionResult instead of fire-and-forget:
+                // handle_rename_files reports per-file failure (unsafe name,
+                // destination exists, source missing, DB-update failed) in the
+                // result, not as a thrown exception. Collapsing the card on the
+                // IPC send alone told the user the rename succeeded when it hadn't
+                // (the silent-failure class). Mirrors BulkRenameSheet.
+                var result = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
+                    "renameFiles",
+                    () => ViewModels.EngineClient.Instance.RenameFilesAsync(new[]
+                    {
+                        new IpcSchema.RenameEntry(FileId, name!),
+                    }),
+                    TimeSpan.FromSeconds(30));
+                // Succeeded==0 (with Failed==0) is the engine's wholesale-error
+                // shape (e.g. a busy/locked DB → emit_bulk_result Ok(Err)); guard
+                // it too so a total failure isn't treated as success.
+                if (result.Failed > 0 || result.Succeeded == 0)
                 {
-                    new IpcSchema.RenameEntry(FileId, name!),
-                });
+                    // Keep the proposed-name card open so the user can see it
+                    // didn't apply and retry, rather than silently vanishing.
+                    Services.DebugLog.Warn("Apply rename reported failure; leaving card open");
+                    return;
+                }
                 ProposedRenameCard.Visibility = Visibility.Collapsed;
                 _pendingProposedName = null;
+            }
+            catch (TimeoutException ex)
+            {
+                Services.DebugLog.Warn("Apply rename timed out: " + ex.Message);
             }
             catch (Exception ex)
             {
@@ -771,9 +852,29 @@ public sealed partial class FilePreviewSheet : UserControl
         try
         {
             ApplyTagsButton.IsEnabled = false;
-            await ViewModels.EngineClient.Instance.ApplyTagsAsync(new long[] { FileId }, tags, mode: "add");
+            // Await the engine's BulkActionResult instead of fire-and-forget:
+            // declaring success on the IPC send alone told the user the tags
+            // applied even when the engine reported failure (the silent-failure
+            // class). Mirrors OnApplyRenameClicked above.
+            var result = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
+                "applyTags",
+                () => ViewModels.EngineClient.Instance.ApplyTagsAsync(new long[] { FileId }, tags, mode: "add"),
+                TimeSpan.FromSeconds(30));
+            // Also guard Succeeded==0 (the engine's wholesale-error shape, e.g. a
+            // busy/locked DB), so a total failure isn't reported as "Added N tags".
+            if (result.Failed > 0 || result.Succeeded == 0)
+            {
+                var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
+                ShowTagStatus(string.IsNullOrWhiteSpace(first) ? "Couldn't apply tags." : "Failed: " + first);
+                return;
+            }
             ShowTagStatus($"Added {tags.Length} tag" + (tags.Length == 1 ? string.Empty : "s") + ".");
             TagInput.Text = string.Empty;
+        }
+        catch (TimeoutException ex)
+        {
+            Services.DebugLog.Warn("FilePreviewSheet.ApplyDraftTags timed out: " + ex.Message);
+            ShowTagStatus("Tagging didn't confirm — try again.");
         }
         catch (Exception ex)
         {

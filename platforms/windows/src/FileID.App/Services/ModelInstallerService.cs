@@ -282,7 +282,14 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         // instead of a permanent spinner.
         FailIfDownloading(Clip, "Engine restarted — please retry.");
         FailIfDownloading(Arcface, "Engine restarted — please retry.");
+        // RamPlus + Accelerator were omitted: both reach Downloading (RamPlus is
+        // a gate on AllInstalled/IsBusy), and SeedFromSentinels early-returns for
+        // a still-Downloading slot, so an engine crash mid-download left them
+        // spinning forever with no Retry — and a stuck RamPlus blocks the
+        // "Install all" button + onboarding auto-dismiss permanently.
+        FailIfDownloading(RamPlus, "Engine restarted — please retry.");
         FailIfDownloading(DeepVlm, "Engine restarted — please retry.");
+        FailIfDownloading(Accelerator, "Engine restarted — please retry.");
 
         SeedFromSentinels();
     }
@@ -396,6 +403,27 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     }
 
     public Task CancelAllAsync() => EngineClient.Instance.CancelPrewarmAsync();
+
+    // Kinds installed by the SAME UI slot. A multi-kind slot's per-row Cancel must
+    // cancel ALL its sub-downloads: slot.CurrentModelKind is only the latest of two
+    // concurrent prewarms, so cancelling just that left the first (mobileclip_s2 /
+    // cudnn_runtime_x64) streaming to completion after the user clicked Cancel.
+    private static readonly string[][] SlotKindGroups =
+    {
+        new[] { "mobileclip_s2", "clip_text" },        // CLIP slot
+        new[] { "cudnn_runtime_x64", "ort_cuda_x64" }, // Accelerator (GPU pack) slot
+    };
+
+    /// Cancel a single slot's in-flight download(s) (the per-row Cancel button), so
+    /// cancelling one row no longer aborts every other concurrent install. For a
+    /// multi-kind slot (CLIP, Accelerator) this cancels every kind the slot owns.
+    public Task CancelModelAsync(string? modelKind)
+    {
+        if (modelKind is null) return EngineClient.Instance.CancelPrewarmAsync(null);
+        var group = SlotKindGroups.FirstOrDefault(g => g.Contains(modelKind));
+        if (group is null) return EngineClient.Instance.CancelPrewarmAsync(modelKind);
+        return Task.WhenAll(group.Select(k => EngineClient.Instance.CancelPrewarmAsync(k)));
+    }
 
     /// <summary>Deep Analyze model recommendation for the welcome-sheet DeepVlm
     /// row, tiered to the machine: a roomy box (≥16 GB RAM or a discrete GPU
@@ -841,8 +869,19 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             || kind.StartsWith("prewarm_", StringComparison.OrdinalIgnoreCase);
         if (!isInstallError) return;
 
-        // prewarm_cancelled is user-initiated; don't surface as a failure.
-        if (kind == "prewarm_cancelled") return;
+        // prewarm_cancelled is user-initiated: not a failure (no red Retry toast),
+        // but the slot must still LEAVE Downloading or it sticks at "Cancelling…"
+        // forever — wedging IsBusy/AllInstalled (and the Install-all gate). Reset it
+        // to NotInstalled so the user can re-install. ModelSlot.Set marshals to the
+        // UI thread internally, so this is safe off the engine-event thread.
+        if (kind == "prewarm_cancelled")
+        {
+            if (!string.IsNullOrEmpty(error.ModelKind))
+            {
+                SlotFor(error.ModelKind)?.ResetForRetry();
+            }
+            return;
+        }
 
         // D-track fix: route by error.ModelKind first. The engine now stamps
         // every install-failure event with the originating model id, so we

@@ -33,6 +33,9 @@ const NMS_IOU: f32 = 0.3;
 
 pub struct YuNet {
     session: Session,
+    /// The ONNX's single input tensor name, read once at load and reused on
+    /// every forward instead of re-walking `session.inputs.first()`.
+    input_name: String,
 }
 
 impl YuNet {
@@ -41,7 +44,7 @@ impl YuNet {
         if !path.exists() {
             anyhow::bail!("YuNet weights missing at {}", path.display());
         }
-        let probe = RuntimeProbe::detect();
+        let probe = RuntimeProbe::shared();
         let chain = priority_chain(probe.vendor);
         let builder = Session::builder().context("ORT session builder")?;
         let mut builder =
@@ -57,8 +60,14 @@ impl YuNet {
         let session = builder
             .commit_from_file(path)
             .context("ORT session commit (YuNet)")?;
+        let input_name = session
+            .inputs
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("YuNet ONNX has no inputs"))?
+            .name
+            .clone();
 
-        let mut model = Self { session };
+        let mut model = Self { session, input_name };
         let warmup_started = std::time::Instant::now();
         let _ = model.detect(&vec![0u8; 3 * (INPUT as usize) * (INPUT as usize)], INPUT, INPUT)?;
         tracing::info!(
@@ -94,13 +103,7 @@ impl YuNet {
         }
 
         let input = Tensor::from_array(chw).context("YuNet input tensor")?;
-        let input_name = self
-            .session
-            .inputs
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("YuNet ONNX has no inputs"))?
-            .name
-            .clone();
+        let input_name = self.input_name.clone();
         let outputs: SessionOutputs = self
             .session
             .run(vec![(input_name, SessionInputValue::from(input))])

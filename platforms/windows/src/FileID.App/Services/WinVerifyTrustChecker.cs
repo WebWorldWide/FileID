@@ -97,8 +97,16 @@ internal static class WinVerifyTrustChecker
             int hr = NativeWinVerifyTrust(IntPtr.Zero, ref WINTRUST_ACTION_GENERIC_VERIFY_V2, trustDataPtr);
 
             // Always issue a Close to release the WVT state, regardless of hr.
-            trustData.dwStateAction = WTD_STATEACTION_CLOSE;
-            Marshal.StructureToPtr(trustData, trustDataPtr, fDeleteOld: true);
+            // Read the NATIVE struct back first: the VERIFY call allocated per-call
+            // state and wrote its handle into hWVTStateData in native memory.
+            // Re-marshaling the stale managed copy (whose hWVTStateData is still
+            // Zero) would clobber that handle, so CLOSE would receive NULL and
+            // wintrust would free nothing — leaking the state (native heap +
+            // cert-chain context) on every engine spawn. Round-tripping the native
+            // struct preserves the handle so CLOSE actually releases it.
+            var afterVerify = Marshal.PtrToStructure<WinTrustData>(trustDataPtr);
+            afterVerify.dwStateAction = WTD_STATEACTION_CLOSE;
+            Marshal.StructureToPtr(afterVerify, trustDataPtr, fDeleteOld: true);
             _ = NativeWinVerifyTrust(IntPtr.Zero, ref WINTRUST_ACTION_GENERIC_VERIFY_V2, trustDataPtr);
 
             return InterpretResult(hr, expectedThumbprintHex, path);
