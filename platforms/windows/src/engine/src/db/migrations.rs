@@ -7,7 +7,8 @@
 //!   v1_core_tables, v2_clip_embeddings, v3_deep_analyze,
 //!   v4_face_verifications, v5_person_naming_structured,
 //!   v6_arcface_embeddings, v7_identity_anchors, v8_content_identity,
-//!   v9_usn_state, v10_doc_text, v11_text_embeddings, v12_face_model_reset
+//!   v9_usn_state, v10_doc_text, v11_text_embeddings, v12_face_model_reset,
+//!   v13_face_verification_anchors, v14_files_kind_scanned_index
 //!
 //! Migrations are append-only. NEVER edit a registered migration once
 //! committed; add a new vN+1 migration instead.
@@ -38,6 +39,7 @@ fn registry() -> Vec<(&'static str, &'static str)> {
         ("v11_text_embeddings",         V11_TEXT_EMBEDDINGS),
         ("v12_face_model_reset",        V12_FACE_MODEL_RESET),
         ("v13_face_verification_anchors", V13_FACE_VERIFICATION_ANCHORS),
+        ("v14_files_kind_scanned_index", V14_FILES_KIND_SCANNED_INDEX),
     ]
 }
 
@@ -68,6 +70,18 @@ DELETE FROM persons;
 const V13_FACE_VERIFICATION_ANCHORS: &str = "
 ALTER TABLE face_verifications ADD COLUMN face_a INTEGER;
 ALTER TABLE face_verifications ADD COLUMN face_b INTEGER;
+";
+
+/// v14: composite index on (kind, scanned_at). The default Library grid and
+/// any saved kind filter run `WHERE kind = ? ORDER BY scanned_at`, which the
+/// single-column `index_files_on_kind` (v1) can satisfy for the filter but
+/// not the order, so SQLite materialises a TEMP B-TREE to sort each refresh
+/// (~55 ms at 50K rows). A composite key lets the planner walk the index in
+/// scanned_at order within the kind partition, eliminating the sort.
+/// NOTE: macOS must register an identical `v14_files_kind_scanned_index`
+/// identifier with equivalent SQL for cross-platform DB parity.
+const V14_FILES_KIND_SCANNED_INDEX: &str = "
+CREATE INDEX IF NOT EXISTS idx_files_kind_scanned ON files(kind, scanned_at);
 ";
 
 /// Apply every registered migration that hasn't been applied yet, in
@@ -333,11 +347,11 @@ mod tests {
         }
         apply(&conn).expect("migrations apply");
 
-        // grdb_migrations has 13 rows.
+        // grdb_migrations has 14 rows.
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 13, "expected 13 applied migrations");
+        assert_eq!(n, 14, "expected 14 applied migrations");
 
         // v13 added face_a + face_b to face_verifications (stable anchor keys).
         let verify_cols: i64 = conn
@@ -398,7 +412,7 @@ mod tests {
         apply(&conn).unwrap();
         apply(&conn).unwrap(); // second run is a no-op
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 13);
+        assert_eq!(n, 14);
     }
 
     /// V10 added the `doc_text` + `doc_fts` (FTS5) pair, mirroring `ocr_text`
@@ -494,5 +508,45 @@ mod tests {
             )
             .unwrap();
         assert_eq!(idx, 2, "both v8 partial indexes must exist");
+    }
+
+    /// V14 added the composite `(kind, scanned_at)` index so the kind-filtered
+    /// Library grid avoids a TEMP B-TREE sort. Verify the index exists and that
+    /// the planner uses it (no SCAN / TEMP B-TREE) for the grid query shape.
+    #[test]
+    fn v14_adds_kind_scanned_composite_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply(&conn).unwrap();
+
+        let idx: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' \
+                 AND name = 'idx_files_kind_scanned'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, 1, "v14 composite index must exist");
+
+        let plan: Vec<String> = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN \
+                 SELECT id FROM files WHERE kind = 'image' AND failed = 0 \
+                 ORDER BY scanned_at DESC LIMIT 200",
+            )
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(3))
+            .unwrap()
+            .flatten()
+            .collect();
+        let joined = plan.join(" | ");
+        assert!(
+            joined.contains("idx_files_kind_scanned"),
+            "grid query should use the composite index, got: {joined}"
+        );
+        assert!(
+            !joined.to_ascii_uppercase().contains("TEMP B-TREE"),
+            "grid query must not materialise a TEMP B-TREE sort, got: {joined}"
+        );
     }
 }

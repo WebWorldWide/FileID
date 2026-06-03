@@ -663,6 +663,22 @@ public sealed partial class MainWindow : Window
 
     private async void OnDrop(object sender, DragEventArgs e)
     {
+        // async-void handler: an escaping exception (a denied GetStorageItemsAsync,
+        // a broken XamlRoot on ShowAsync) would kill the dispatcher and crash the
+        // window. Wrap the whole body + each dialog in its own catch so the worst
+        // case is a logged failure.
+        try
+        {
+            await OnDropCoreAsync(e);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("OnDrop threw: " + ex.Message);
+        }
+    }
+
+    private async Task OnDropCoreAsync(DragEventArgs e)
+    {
         DragOverlay.Visibility = Visibility.Collapsed;
         if (!e.DataView.Contains(StandardDataFormats.StorageItems))
         {
@@ -704,13 +720,17 @@ public sealed partial class MainWindow : Window
                     if ((attrs & System.IO.FileAttributes.ReparsePoint) != 0)
                     {
                         DebugLog.Warn($"Drag-drop: rejected reparse point '{PathRedactor.Redact(canonical)}'.");
-                        await new ContentDialog
+                        try
                         {
-                            XamlRoot = ((FrameworkElement)Content).XamlRoot,
-                            Title = "Can't scan a symlink or junction",
-                            Content = "FileID won't scan a folder that's a symlink or junction — please pick the real folder it points to.",
-                            CloseButtonText = "OK",
-                        }.ShowAsync();
+                            await new ContentDialog
+                            {
+                                XamlRoot = ((FrameworkElement)Content).XamlRoot,
+                                Title = "Can't scan a symlink or junction",
+                                Content = "FileID won't scan a folder that's a symlink or junction — please pick the real folder it points to.",
+                                CloseButtonText = "OK",
+                            }.ShowAsync();
+                        }
+                        catch { /* dialog already open / broken XamlRoot */ }
                         return;
                     }
                 }
@@ -725,13 +745,17 @@ public sealed partial class MainWindow : Window
             }
         }
         // No folder in drop — surface a gentle hint.
-        await new ContentDialog
+        try
         {
-            XamlRoot = ((FrameworkElement)Content).XamlRoot,
-            Title = "FileID needs a folder",
-            Content = "Drop a folder onto FileID to begin scanning. Files won't work — pick the folder they live in.",
-            CloseButtonText = "OK",
-        }.ShowAsync();
+            await new ContentDialog
+            {
+                XamlRoot = ((FrameworkElement)Content).XamlRoot,
+                Title = "FileID needs a folder",
+                Content = "Drop a folder onto FileID to begin scanning. Files won't work — pick the folder they live in.",
+                CloseButtonText = "OK",
+            }.ShowAsync();
+        }
+        catch { /* dialog already open / broken XamlRoot */ }
     }
 
     [DllImport("dwmapi.dll", EntryPoint = "DwmSetWindowAttribute")]

@@ -39,6 +39,9 @@ pub struct Pose {
 
 pub struct Scrfd {
     session: Session,
+    /// The ONNX's single input tensor name, read once at load and reused on
+    /// every forward instead of re-walking `session.inputs.first()`.
+    input_name: String,
     input_size: (u32, u32),
 }
 
@@ -48,7 +51,7 @@ impl Scrfd {
         if !path.exists() {
             anyhow::bail!("SCRFD weights missing at {}", path.display());
         }
-        let probe = RuntimeProbe::detect();
+        let probe = RuntimeProbe::shared();
         let chain = priority_chain(probe.vendor);
         let builder = Session::builder().context("ORT session builder")?;
         let mut builder = configure_session_builder(builder)
@@ -64,9 +67,16 @@ impl Scrfd {
         let session = builder
             .commit_from_file(path)
             .context("ORT session commit (SCRFD)")?;
+        let input_name = session
+            .inputs
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("SCRFD ONNX has no inputs"))?
+            .name
+            .clone();
         // SCRFD-10g default input is 640×640. We resize before feed.
         let mut model = Self {
             session,
+            input_name,
             input_size: (640, 640),
         };
         // Warmup with a zero 640×640 frame so first-call kernel compile
@@ -110,13 +120,7 @@ impl Scrfd {
         }
 
         let input = Tensor::from_array(chw).context("SCRFD input tensor")?;
-        let input_name = self
-            .session
-            .inputs
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("SCRFD ONNX has no inputs"))?
-            .name
-            .clone();
+        let input_name = self.input_name.clone();
         let outputs: SessionOutputs = self
             .session
             .run(vec![(input_name, SessionInputValue::from(input))])

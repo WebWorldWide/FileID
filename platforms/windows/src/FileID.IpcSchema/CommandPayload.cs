@@ -55,7 +55,7 @@ public sealed record DeepAnalyzeCancelCommand : CommandPayload;
 
 public sealed record PrewarmModelCommand(string ModelKind) : CommandPayload;
 
-public sealed record CancelPrewarmCommand : CommandPayload;
+public sealed record CancelPrewarmCommand(string? ModelKind = null) : CommandPayload;
 
 public sealed record PlanRestructureCommand(string LibraryRoot) : CommandPayload;
 
@@ -202,7 +202,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             "runFaceClustering" => Empty<RunFaceClusteringCommand>(ref reader),
             "verifyCudaPack" => Empty<VerifyCudaPackCommand>(ref reader),
             "deepAnalyzeCancel" => Empty<DeepAnalyzeCancelCommand>(ref reader),
-            "cancelPrewarm" => Empty<CancelPrewarmCommand>(ref reader),
+            "cancelPrewarm" => JsonSerializer.Deserialize<CancelPrewarmCommand>(ref reader, options) ?? throw new JsonException("cancelPrewarm: null body"),
 
             _ => throw new JsonException($"CommandPayload: unknown variant '{variant}'"),
         };
@@ -234,7 +234,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             case DeepAnalyzeAllCommand c: WriteVariant(writer, "deepAnalyzeAll", c, options); break;
             case DeepAnalyzeCancelCommand: WriteEmpty(writer, "deepAnalyzeCancel"); break;
             case PrewarmModelCommand c: WriteVariant(writer, "prewarmModel", c, options); break;
-            case CancelPrewarmCommand: WriteEmpty(writer, "cancelPrewarm"); break;
+            case CancelPrewarmCommand c: WriteVariant(writer, "cancelPrewarm", c, options); break;
             case PlanRestructureCommand c: WriteVariant(writer, "planRestructure", c, options); break;
             case ApplyRestructureCommand c: WriteVariant(writer, "applyRestructure", c, options); break;
             case ApplyTagsCommand c: WriteVariant(writer, "applyTags", c, options); break;

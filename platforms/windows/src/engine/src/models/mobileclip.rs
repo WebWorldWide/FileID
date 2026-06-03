@@ -24,6 +24,9 @@ const CLIP_STD: [f32; 3] = [0.26862954, 0.26130258, 0.27577711];
 
 pub struct MobileClipImage {
     session: Session,
+    /// The ONNX's single input tensor name, read once at load and reused on
+    /// every forward instead of re-walking `session.inputs.first()`.
+    input_name: String,
     input_size: u32,
 }
 
@@ -33,7 +36,7 @@ impl MobileClipImage {
         if !path.exists() {
             anyhow::bail!("MobileCLIP weights missing at {}", path.display());
         }
-        let probe = RuntimeProbe::detect();
+        let probe = RuntimeProbe::shared();
         let chain = priority_chain(probe.vendor);
         let builder = Session::builder().context("ORT session builder")?;
         let mut builder = configure_session_builder(builder)
@@ -49,9 +52,15 @@ impl MobileClipImage {
         let session = builder
             .commit_from_file(path)
             .context("ORT session commit (MobileCLIP image)")?;
+        let input_name = session
+            .inputs
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("MobileCLIP ONNX has no inputs"))?
+            .name
+            .clone();
         // Warmup with a zero 256×256 frame so first-call kernel compile
         // happens during load.
-        let mut model = Self { session, input_size: 224 };
+        let mut model = Self { session, input_name, input_size: 224 };
         let warmup_started = std::time::Instant::now();
         let _ = model.embed(&[0u8; 3 * 224 * 224])?;
         tracing::info!(
@@ -91,13 +100,7 @@ impl MobileClipImage {
         }
 
         let input = Tensor::from_array(chw).context("MobileCLIP input tensor")?;
-        let input_name = self
-            .session
-            .inputs
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("MobileCLIP ONNX has no inputs"))?
-            .name
-            .clone();
+        let input_name = self.input_name.clone();
         let outputs: SessionOutputs = self
             .session
             .run(vec![(input_name, SessionInputValue::from(input))])
@@ -157,13 +160,7 @@ impl MobileClipImage {
             }
         }
         let input = Tensor::from_array(chw).context("MobileCLIP batch input tensor")?;
-        let input_name = self
-            .session
-            .inputs
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("MobileCLIP ONNX has no inputs"))?
-            .name
-            .clone();
+        let input_name = self.input_name.clone();
         let outputs: SessionOutputs = self
             .session
             .run(vec![(input_name, SessionInputValue::from(input))])

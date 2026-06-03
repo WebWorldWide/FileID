@@ -120,7 +120,11 @@ public sealed record FileDoneEvent(
     string Kind,
     double TotalMs,
     bool Failed,
-    string? ErrorMessage);
+    string? ErrorMessage,
+    // Schema/Rust/Swift parity: the Rust + macOS DTOs carry skippedStages; the
+    // Windows engine doesn't emit fileDone today, so this is contract hygiene
+    // (a future fileDone with skippedStages no longer silently drops the field).
+    IReadOnlyList<string>? SkippedStages = null);
 
 public sealed record BatchSummary(
     uint BatchIndex,

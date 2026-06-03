@@ -111,12 +111,35 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         OnPropertyChanged(nameof(FooterVisibility));
     }
 
+    // Groups (+ their members) we've wired OnGroupOrMemberChanged on. Tracked
+    // explicitly so a CollectionChanged.Reset — which carries neither OldItems
+    // nor NewItems — can still unsubscribe the prior handlers instead of leaking
+    // them (and double-counting in HeaderStats). The identity-stable merge
+    // (CleanupViewModel.MergeByContentHash) normally emits granular Add/Remove,
+    // but any residual Clear()/Reset path must not leave dangling subscriptions.
+    private readonly System.Collections.Generic.HashSet<DuplicateGroup> _wiredGroups = new();
+
     private void OnGroupsCollectionChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
     {
         if (_unloaded) return;
         OnPropertyChanged(nameof(StatusText));
         OnPropertyChanged(nameof(FooterVisibility));
         OnPropertyChanged(nameof(HeaderStats));
+
+        // Reset (Clear) surfaces no Old/NewItems — unsubscribe everything we've
+        // tracked, then re-wire whatever the collection now holds.
+        if (e.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Reset)
+        {
+            foreach (var g in new System.Collections.Generic.List<DuplicateGroup>(_wiredGroups))
+            {
+                g.PropertyChanged -= OnGroupOrMemberChanged;
+                foreach (var m in g.Members) m.PropertyChanged -= OnGroupOrMemberChanged;
+            }
+            _wiredGroups.Clear();
+            foreach (var g in ViewModel.Groups) WireGroup(g);
+            return;
+        }
+
         // Wire HeaderStats live updates to every keeper-radio toggle.
         // The DataTemplate's RadioButton TwoWay-binds IsKeeper which
         // fires DuplicateMember.PropertyChanged; we listen once per
@@ -125,30 +148,30 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         {
             foreach (var added in e.NewItems)
             {
-                if (added is DuplicateGroup g)
-                {
-                    g.PropertyChanged += OnGroupOrMemberChanged;
-                    foreach (var m in g.Members)
-                    {
-                        m.PropertyChanged += OnGroupOrMemberChanged;
-                    }
-                }
+                if (added is DuplicateGroup g) WireGroup(g);
             }
         }
         if (e.OldItems != null)
         {
             foreach (var removed in e.OldItems)
             {
-                if (removed is DuplicateGroup g)
-                {
-                    g.PropertyChanged -= OnGroupOrMemberChanged;
-                    foreach (var m in g.Members)
-                    {
-                        m.PropertyChanged -= OnGroupOrMemberChanged;
-                    }
-                }
+                if (removed is DuplicateGroup g) UnwireGroup(g);
             }
         }
+    }
+
+    private void WireGroup(DuplicateGroup g)
+    {
+        if (!_wiredGroups.Add(g)) return;
+        g.PropertyChanged += OnGroupOrMemberChanged;
+        foreach (var m in g.Members) m.PropertyChanged += OnGroupOrMemberChanged;
+    }
+
+    private void UnwireGroup(DuplicateGroup g)
+    {
+        _wiredGroups.Remove(g);
+        g.PropertyChanged -= OnGroupOrMemberChanged;
+        foreach (var m in g.Members) m.PropertyChanged -= OnGroupOrMemberChanged;
     }
 
     private void OnGroupOrMemberChanged(object? sender, PropertyChangedEventArgs e)
@@ -167,6 +190,16 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         Loaded -= OnLoadedAsync;
         try { ViewModel.PropertyChanged -= OnViewModelPropertyChanged; } catch { /* swallow */ }
         try { ViewModel.Groups.CollectionChanged -= OnGroupsCollectionChanged; } catch { /* swallow */ }
+        // Detach the per-group/member handlers tracked in _wiredGroups. The
+        // identity-stable merge keeps DuplicateGroup instances alive across
+        // refreshes, so a still-subscribed group would pin this view after unload.
+        // Snapshot first — UnwireGroup mutates _wiredGroups.
+        try
+        {
+            foreach (var g in new System.Collections.Generic.List<DuplicateGroup>(_wiredGroups)) UnwireGroup(g);
+            _wiredGroups.Clear();
+        }
+        catch { /* swallow */ }
         try { ViewModels.EngineClient.Instance.PropertyChanged -= OnEngineChanged; } catch { /* swallow */ }
         foreach (var (_, cts) in _inflightThumbs) { try { cts.Cancel(); } catch { /* swallow */ } cts.Dispose(); }
         _inflightThumbs.Clear();

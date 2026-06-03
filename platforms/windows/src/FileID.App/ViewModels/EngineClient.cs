@@ -1023,7 +1023,10 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                     case BatchSummaryEvent b:
                         LastBatch = b.Summary;
                         break;
-                    case ScanCompleteEvent:
+                    case ScanCompleteEvent sce:
+                        // Authoritative final count for the completed-scan summary
+                        // (LastProgress.Processed can be throttle-stale by a batch).
+                        LastScanProcessedFiles = sce.Result.ProcessedFiles;
                         Phase = ScanPhase.Completed;
                         _shownPhaseRank = PhaseRank(ScanPhase.Completed);
                         IsPaused = false;
@@ -1073,6 +1076,14 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         break;
                     case DeepAnalyzeStartingEvent das:
                         DeepAnalyzeStarting = das.Starting;
+                        // Clear the previous run's terminal result. DeepAnalyzeComplete
+                        // is otherwise only cleared on the single-file path, so on a
+                        // 2nd+ "Analyze All" run the stale Complete makes the view's
+                        // SyncStream `complete` block clobber the live progress every
+                        // tick — the buttons + status text visibly fight between live
+                        // "{processed}/{total}" and the stale "Done — N captioned" at
+                        // ~4 Hz, with Cancel wrongly greyed out for the whole run.
+                        DeepAnalyzeComplete = null;
                         break;
                     case DeepAnalyzeProgressEvent dap:
                         DeepAnalyzeProgress = dap.Progress;

@@ -575,6 +575,15 @@ where
         let got = hex::encode(h.finalize());
         if !expected.eq_ignore_ascii_case(&got) {
             let _ = tokio::fs::remove_file(&combined).await;
+            // Also remove the per-range parts. A byte-complete-but-wrong part
+            // (corrupt/compromised mirror, or a same-size remote revision across
+            // attempts) would otherwise be treated as "already complete" on the
+            // next attempt (cur_start > end), re-concatenated, and re-fail the SHA
+            // forever — a permanently-stuck install until the user manually clears
+            // the cache. Removing them forces a clean re-fetch on Retry.
+            for i in 0..PARALLEL_PARTS {
+                let _ = tokio::fs::remove_file(part_file_path(&request.destination, i)).await;
+            }
             anyhow::bail!(
                 "SHA256 mismatch for {}: expected {expected}, got {got}",
                 request.url
@@ -586,6 +595,9 @@ where
     let actual_len = tokio::fs::metadata(&combined).await.map(|m| m.len()).unwrap_or(0);
     if let Err(e) = check_size_plausible(actual_len, request.expected_bytes, &request.url) {
         let _ = tokio::fs::remove_file(&combined).await;
+        for i in 0..PARALLEL_PARTS {
+            let _ = tokio::fs::remove_file(part_file_path(&request.destination, i)).await;
+        }
         return Err(e);
     }
 
@@ -726,6 +738,19 @@ async fn download_range_with_retry(
         }
         if !status.is_success() {
             anyhow::bail!("range {range_header}: HTTP {status}");
+        }
+        // If we're resuming a partially-downloaded range (bytes already on disk)
+        // but the server answered 200 (full body) instead of 206 (partial),
+        // appending would splice our partial prefix in front of the full file →
+        // a corrupt, oversized part. Discard the partial and restart this range
+        // cleanly. (download_simple handles the same 200-on-resume case.)
+        if existing_len > 0 && status.as_u16() != 206 {
+            tracing::warn!(
+                part = %part_path.display(), %status,
+                "range resume answered non-206; discarding partial and restarting"
+            );
+            let _ = tokio::fs::remove_file(part_path).await;
+            continue;
         }
 
         // Open part file in append mode (resumes on retry too).

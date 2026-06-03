@@ -110,6 +110,18 @@ impl RuntimeProbe {
             qnn_pack_present,
         }
     }
+
+    /// Process-lifetime memoized probe. `detect()` is idempotent but walks DXGI
+    /// and probes the filesystem each call, so every model wrapper's `load()`
+    /// re-walked the adapters + pack dirs 7-15× at startup. Cache the first
+    /// `detect()` for the life of the process (same pattern as
+    /// [`active_provider`]). The wrappers read `vendor` (Copy) and
+    /// `adapter_index` (Copy) off the shared probe, so a shared `&'static`
+    /// borrow is sufficient.
+    pub fn shared() -> &'static RuntimeProbe {
+        static CELL: std::sync::OnceLock<RuntimeProbe> = std::sync::OnceLock::new();
+        CELL.get_or_init(RuntimeProbe::detect)
+    }
 }
 
 /// Order the EPs we'd attempt for a given hardware tier. The first one
@@ -119,6 +131,18 @@ pub fn priority_chain(vendor: GpuVendor) -> Vec<ExecutionProvider> {
     let user_override = read_user_ep_override();
     let mut chain: Vec<ExecutionProvider> = Vec::new();
     if let Some(ep) = user_override {
+        // A forced "cpu" override must be EXCLUSIVE — the vendor GPU EPs cannot
+        // be appended after it. `execution_providers_for_chain` emits NO dispatch
+        // for Cpu (it's ORT's implicit fallback), so a chain of [Cpu, Cuda, ...]
+        // would silently bind the GPU EP first and discard the user's CPU choice.
+        // That defeated the documented GPU-TDR recovery path ("switch to CPU EP
+        // via gpuExecutionProviderOverride"), leaving the user stuck in a
+        // device-removed crash-loop. For CPU, return CPU-only. Other overrides
+        // emit a real dispatch that binds first, so prepend-then-fall-through is
+        // correct for them (preserves graceful GPU→DirectML→CPU degradation).
+        if ep == ExecutionProvider::Cpu {
+            return vec![ExecutionProvider::Cpu];
+        }
         chain.push(ep);
     }
     match vendor {
@@ -345,7 +369,17 @@ pub fn configure_session_builder(
     builder: ort::session::builder::SessionBuilder,
 ) -> ort::Result<ort::session::builder::SessionBuilder> {
     use ort::session::builder::GraphOptimizationLevel;
-    let ep = active_provider();
+    // Use the EP that will ACTUALLY bind — the first in the override-aware
+    // priority chain — not active_provider() (which is derived from pick_provider
+    // and ignores gpuExecutionProviderOverride, see armed_provider's doc). Else a
+    // forced "cpu" override (now a CPU-exclusive chain, the GPU-TDR recovery path)
+    // would be tuned with the GPU default of 1 intra-op thread → single-threaded
+    // CPU inference on a multi-core box. priority_chain always ends with Cpu, so
+    // next() is always Some.
+    let ep = priority_chain(RuntimeProbe::shared().vendor)
+        .into_iter()
+        .next()
+        .unwrap_or(ExecutionProvider::Cpu);
     let opt = if ep == ExecutionProvider::Qnn {
         GraphOptimizationLevel::Level1
     } else {

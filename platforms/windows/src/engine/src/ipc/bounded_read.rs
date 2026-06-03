@@ -32,8 +32,12 @@ pub(crate) async fn bounded_read_line<R: AsyncBufRead + Unpin>(
                     if buf.last() == Some(&b'\r') {
                         buf.pop();
                     }
-                    let text = String::from_utf8(std::mem::take(buf))
-                        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+                    // Build the String from a borrow, NOT `mem::take(buf)`:
+                    // taking swaps the caller's pre-grown 8 KB Vec out for an
+                    // empty one, so every frame after the first re-grows from
+                    // capacity 0 — defeating the documented zero-alloc reuse.
+                    // `buf` is cleared at the top of the next call.
+                    let text = String::from_utf8_lossy(buf).into_owned();
                     return Ok(BoundedRead::Line(text));
                 }
                 if buf.len() >= max_bytes {
@@ -46,8 +50,7 @@ pub(crate) async fn bounded_read_line<R: AsyncBufRead + Unpin>(
                     return Ok(BoundedRead::Eof);
                 }
                 // Trailing partial line at EOF — treat as a complete frame.
-                let text = String::from_utf8(std::mem::take(buf))
-                    .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+                let text = String::from_utf8_lossy(buf).into_owned();
                 return Ok(BoundedRead::Line(text));
             }
             Err(e) => return Err(e),

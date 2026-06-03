@@ -151,8 +151,19 @@ pub(crate) async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQ
                 anyhow::anyhow!("merges.txt missing at {}: {}", merges_path.display(), e)
             })?;
             let tokenizer = crate::models::ClipTokenizer::new(&vocab, &merges)?;
-            let model = crate::models::clip_text::ClipText::load(weights, tokenizer)?;
-            *guard = Some(model);
+            // EP crash-safety: this is the one GPU-EP session bind that happens
+            // OUTSIDE the scan's load_default arm window — the CLIP-text encoder
+            // loads lazily on the first search query. Without arming here, a hard
+            // native crash while binding a freshly-installed CUDA/OpenVINO pack on
+            // the search path leaves no `.ep_attempt` breadcrumb, so the engine
+            // crash-loops on every search instead of reverting to DirectML. Mirror
+            // scan.rs: arm the override-aware EP, bind, then disarm (a Rust error
+            // still disarms below; only a hard crash leaves the breadcrumb).
+            let armed_ep = crate::models::runtime::armed_provider();
+            crate::models::ep_guard::arm(armed_ep.as_str());
+            let loaded = crate::models::clip_text::ClipText::load(weights, tokenizer);
+            crate::models::ep_guard::disarm();
+            *guard = Some(loaded?);
         }
         let model = guard.as_mut().expect("just set");
         model.embed(&payload.query)

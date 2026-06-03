@@ -13,6 +13,52 @@ use crate::pipeline::face_clustering::{COS_LOW, MERGE_SUGGEST_COS_HIGH};
 
 use super::trash_log::{self, TrashLogEntry, TrashLogItem};
 
+#[cfg(windows)]
+use std::path::Path;
+#[cfg(windows)]
+use windows::core::PCWSTR;
+#[cfg(windows)]
+use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_COPY_ALLOWED};
+
+/// No-clobber filename rename (same directory, filesystem move). On Windows this
+/// is `MoveFileExW(MOVEFILE_COPY_ALLOWED)` with NO `MOVEFILE_REPLACE_EXISTING`,
+/// so an occupied destination fails the move atomically inside the kernel rather
+/// than being silently overwritten — closing the existence-check→rename TOCTOU.
+/// Both operands carry the `\\?\` extended-length prefix (the engine .exe has no
+/// longPathAware manifest); mirrors restructure_apply.rs::move_file (B3).
+#[cfg(windows)]
+fn no_clobber_rename(src: &Path, dst: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    let src_ext = crate::util::path_safety::to_extended_length(src);
+    let dst_ext = crate::util::path_safety::to_extended_length(dst);
+    let src_w: Vec<u16> = src_ext
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let dst_w: Vec<u16> = dst_ext
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        MoveFileExW(
+            PCWSTR(src_w.as_ptr()),
+            PCWSTR(dst_w.as_ptr()),
+            MOVEFILE_COPY_ALLOWED,
+        )
+        .map_err(|e| std::io::Error::other(e.to_string()))
+    }
+}
+
+#[cfg(not(windows))]
+fn no_clobber_rename(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::rename(
+        crate::util::path_safety::to_extended_length(src),
+        crate::util::path_safety::to_extended_length(dst),
+    )
+}
+
 /// Bulk-apply tags to a set of files. Updates DB `tags` table + writes the
 /// sidecar JSON so Explorer + future scans see the same set.
 pub(crate) async fn handle_apply_tags(
@@ -133,8 +179,8 @@ pub(crate) async fn handle_apply_tags(
     emit_bulk_result(&sink, "applyTags", result).await;
 }
 
-/// Bulk-rename a set of files (filename only, same directory). Each move
-/// is `MoveFileExW` semantics via std::fs::rename + DB row update.
+/// Bulk-rename a set of files (filename only, same directory). Each move is a
+/// no-clobber `MoveFileExW` (no `MOVEFILE_REPLACE_EXISTING`) + DB row update.
 pub(crate) async fn handle_rename_files(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
@@ -190,23 +236,16 @@ pub(crate) async fn handle_rename_files(
                 }
             };
             let dest = dir.join(&entry.new_name);
-            // Long-path-safe FS operands (\\?\ prefix); the un-prefixed `dest`
-            // is still used for DB path_text + user messages so stored paths
-            // stay normal-form (#29). symlink_metadata (not exists) so a
-            // dangling-symlink destination is correctly treated as occupied.
-            if std::fs::symlink_metadata(crate::util::path_safety::to_extended_length(&dest)).is_ok() {
-                failed += 1;
-                messages.push(BulkActionItem {
-                    file_id: Some(entry.file_id),
-                    ok: false,
-                    message: Some(format!("destination exists: {}", dest.display())),
-                });
-                continue;
-            }
-            if let Err(err) = std::fs::rename(
-                crate::util::path_safety::to_extended_length(&path),
-                crate::util::path_safety::to_extended_length(&dest),
-            ) {
+            // No-clobber rename. The destination existence is re-checked by the
+            // kernel inside the move itself (no MOVEFILE_REPLACE_EXISTING), so a
+            // separate symlink_metadata probe + std::fs::rename — which clobbers
+            // via MoveFileExW(REPLACE_EXISTING) — is a TOCTOU: an external file
+            // materializing in the probe→rename window would be silently
+            // overwritten. Here an occupied destination fails the move (failed++)
+            // rather than destroying data. The un-prefixed `dest` is still used
+            // for DB path_text + user messages so stored paths stay normal-form
+            // (#29). Mirrors restructure_apply.rs::move_file (B3).
+            if let Err(err) = no_clobber_rename(&path, &dest) {
                 failed += 1;
                 messages.push(BulkActionItem {
                     file_id: Some(entry.file_id),
@@ -689,12 +728,22 @@ pub(crate) async fn handle_find_merge_suggestions(
 
         // "Different people" verdicts. Person-keyed pairs cover legacy rows;
         // face-anchor-keyed pairs (v13) survive re-clustering because
-        // face_prints ids are stable. A candidate is suppressed if EITHER key
-        // matches.
+        // face_prints ids are stable. A candidate is suppressed if ANY key
+        // matches (legacy person pair, exact-anchor face pair, or the
+        // current-membership person pair derived below).
         let mut verified_persons: std::collections::HashSet<(i64, i64)> =
             std::collections::HashSet::new();
         let mut verified_faces: std::collections::HashSet<(i64, i64)> =
             std::collections::HashSet::new();
+        // Stored verified face pairs, retained so the verdict can be re-projected
+        // onto CURRENT cluster membership below. The anchor-keyed `verified_faces`
+        // set only matches when the stored faces are still the live anchors, but
+        // anchor selection (highest-quality embedded face) changes under
+        // re-clustering — so a "different people" verdict could resurface as a
+        // suggestion even though both verified faces still belong to the same two
+        // clusters. Re-deriving the person pair from current membership closes
+        // that gap without a schema change.
+        let mut verified_face_pairs: Vec<(i64, i64)> = Vec::new();
         if let Ok(mut vstmt) = conn.prepare(
             "SELECT person_a, person_b, face_a, face_b FROM face_verifications WHERE same_person = 0",
         ) {
@@ -715,6 +764,43 @@ pub(crate) async fn handle_find_merge_suggestions(
                     if let (Some(fa), Some(fb)) = (fa, fb) {
                         let fk = if fa < fb { (fa, fb) } else { (fb, fa) };
                         verified_faces.insert(fk);
+                        verified_face_pairs.push((fa, fb));
+                    }
+                }
+            }
+        }
+
+        // Re-project each stored face pair onto the person it CURRENTLY belongs
+        // to and suppress that (min,max) person pair. Only the verified faces are
+        // looked up (bounded by the verdict count), not the whole table.
+        let mut verified_membership_persons: std::collections::HashSet<(i64, i64)> =
+            std::collections::HashSet::new();
+        if !verified_face_pairs.is_empty() {
+            let mut face_person: std::collections::HashMap<i64, i64> =
+                std::collections::HashMap::new();
+            if let Ok(mut fpstmt) =
+                conn.prepare("SELECT person_id FROM face_prints WHERE id = ?1")
+            {
+                for &(fa, fb) in &verified_face_pairs {
+                    for fid in [fa, fb] {
+                        if let std::collections::hash_map::Entry::Vacant(slot) =
+                            face_person.entry(fid)
+                        {
+                            if let Ok(Some(pid)) = fpstmt.query_row(
+                                rusqlite::params![fid],
+                                |r| r.get::<_, Option<i64>>(0),
+                            ) {
+                                slot.insert(pid);
+                            }
+                        }
+                    }
+                }
+            }
+            for (fa, fb) in verified_face_pairs {
+                if let (Some(&pa), Some(&pb)) = (face_person.get(&fa), face_person.get(&fb)) {
+                    if pa != pb {
+                        let pk = if pa < pb { (pa, pb) } else { (pb, pa) };
+                        verified_membership_persons.insert(pk);
                     }
                 }
             }
@@ -736,7 +822,10 @@ pub(crate) async fn handle_find_merge_suggestions(
                 } else {
                     (anchor_b, anchor_a)
                 };
-                if verified_persons.contains(&pk) || verified_faces.contains(&fk) {
+                if verified_persons.contains(&pk)
+                    || verified_faces.contains(&fk)
+                    || verified_membership_persons.contains(&pk)
+                {
                     continue;
                 }
                 let s = cos(ea, eb);

@@ -164,6 +164,51 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         if (_unloaded) return;
         OnPropertyChanged(nameof(StatusText));
         OnPropertyChanged(nameof(FooterVisibility));
+
+        // Keep select-mode wiring consistent across refreshes. The
+        // identity-stable merge (PeopleViewModel.MergeByClusterId) preserves
+        // surviving instances and their IsSelected subscription, but a refresh
+        // can still Add brand-new clusters (which arrive unwired, with a
+        // Collapsed checkbox) or Remove gone ones (whose subscription would
+        // leak). Re-apply wiring + checkbox visibility + count so the select UI
+        // never goes stale after a re-cluster while the user is mid-selection.
+        if (!ViewModel.IsSelectMode) return;
+
+        if (e.OldItems != null)
+        {
+            foreach (var removed in e.OldItems)
+            {
+                if (removed is PersonCluster oc) oc.PropertyChanged -= OnClusterIsSelectedChanged;
+            }
+        }
+        if (e.NewItems != null)
+        {
+            foreach (var added in e.NewItems)
+            {
+                if (added is PersonCluster nc)
+                {
+                    nc.PropertyChanged -= OnClusterIsSelectedChanged;
+                    nc.PropertyChanged += OnClusterIsSelectedChanged;
+                }
+            }
+        }
+        if (e.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Reset)
+        {
+            foreach (var c in ViewModel.Clusters)
+            {
+                c.PropertyChanged -= OnClusterIsSelectedChanged;
+                c.PropertyChanged += OnClusterIsSelectedChanged;
+            }
+        }
+
+        // Newly-added cards may not be realized yet on this synchronous event;
+        // defer the visual-tree checkbox sweep so it sees them.
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (_unloaded || !ViewModel.IsSelectMode) return;
+            UpdateCheckboxVisibility();
+        });
+        UpdateSelectionCountText();
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
@@ -173,6 +218,11 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         Loaded -= OnLoadedAsync;
         try { ViewModel.PropertyChanged -= OnViewModelPropertyChanged; } catch { /* swallow */ }
         try { ViewModel.Clusters.CollectionChanged -= OnClustersCollectionChanged; } catch { /* swallow */ }
+        // Detach the per-cluster IsSelected handlers wired during select mode.
+        // Now that the identity-stable merge keeps PersonCluster instances alive
+        // across refreshes, a still-subscribed cluster would pin this view after
+        // unload.
+        try { foreach (var c in ViewModel.Clusters) c.PropertyChanged -= OnClusterIsSelectedChanged; } catch { /* swallow */ }
         try { FileID.ViewModels.EngineClient.Instance.PropertyChanged -= OnEngineClientChanged; } catch { /* swallow */ }
         // Dispose the ViewModel — cancels its _disposalCts so any in-flight
         // RefreshAsync task running on a thread-pool thread unwinds with

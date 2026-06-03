@@ -181,6 +181,10 @@ public sealed partial class SidebarPipelineProgress : UserControl
             }
         });
 
+    // Last activeIndex actually rendered; lets SyncStage early-return on the
+    // ~10 Hz LastProgress storm when the pipeline stage hasn't changed.
+    private int _lastRenderedIndex = int.MinValue;
+
     private void SyncStage()
     {
         // Stage 0 = Scan (Discovering)
@@ -210,7 +214,20 @@ public sealed partial class SidebarPipelineProgress : UserControl
             if (captionsDone) activeIndex = 4;
             else if (captionsRunning) activeIndex = 3;
             else if (peopleDone) activeIndex = 2;
+            // A finished scan never regresses below the People stage: face
+            // clustering auto-runs right after ScanComplete, so before its event
+            // lands all the latches above are still unset and activeIndex would
+            // stay -1 — blanking the whole strip to grey for a beat on EVERY scan
+            // completion. Hold at People (2) instead of going dark.
+            else if (phase == ScanPhase.Completed) activeIndex = 2;
         }
+
+        // The rendered strip is a pure function of activeIndex, but LastProgress
+        // fires ~10 Hz throughout a scan while activeIndex changes only a handful
+        // of times. Skip the redundant 5-cell rewrite (Fill/Width/Height + a
+        // per-cell AutomationProperties string allocation) when nothing changed.
+        if (activeIndex == _lastRenderedIndex) return;
+        _lastRenderedIndex = activeIndex;
 
         // brushes cached at ctor time — see field comments.
         for (int i = 0; i < Stages.Length; i++)
@@ -223,6 +240,7 @@ public sealed partial class SidebarPipelineProgress : UserControl
             {
                 _dots[i].Fill = _goldBrush;
                 _dots[i].Stroke = _goldStroke;
+                _dots[i].StrokeThickness = 1; // reset the 1.5 left over from the active state
                 _dots[i].Width = 10; _dots[i].Height = 10;
             }
             else if (active)

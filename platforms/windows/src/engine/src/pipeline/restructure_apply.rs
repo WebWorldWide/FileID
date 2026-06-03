@@ -224,11 +224,21 @@ enum ApplyError {
 #[cfg(windows)]
 fn move_file(src: &str, dst: &Path) -> std::result::Result<(), ApplyError> {
     use std::os::windows::ffi::OsStrExt;
-    let src_w: Vec<u16> = std::ffi::OsStr::new(src)
+    // Win32 file APIs silently fail past MAX_PATH (260) unless the operand
+    // carries the \\?\ extended-length prefix — the engine .exe has no
+    // longPathAware manifest. Every other FS site wraps via to_extended_length
+    // (bulk.rs rename, platform.rs, discovery.rs, dbwriter.rs, …); restructure
+    // routes files into deep semantic group folders (root + up to 200-char
+    // group name + filename) that trivially exceed 260, so without the prefix
+    // the move just fails (failed++) where bulk-rename of the same path works.
+    let src_ext = crate::util::path_safety::to_extended_length(Path::new(src));
+    let dst_ext = crate::util::path_safety::to_extended_length(dst);
+    let src_w: Vec<u16> = src_ext
+        .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    let dst_w: Vec<u16> = dst
+    let dst_w: Vec<u16> = dst_ext
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
@@ -251,11 +261,16 @@ fn move_file(src: &str, dst: &Path) -> std::result::Result<(), ApplyError> {
 #[cfg(windows)]
 fn make_symlink(src: &str, dst: &Path) -> std::result::Result<(), ApplyError> {
     use std::os::windows::ffi::OsStrExt;
-    let src_w: Vec<u16> = std::ffi::OsStr::new(src)
+    // \\?\ prefix both operands so the link can be created (and its target
+    // resolved) past MAX_PATH (260) — same rationale as move_file.
+    let src_ext = crate::util::path_safety::to_extended_length(Path::new(src));
+    let dst_ext = crate::util::path_safety::to_extended_length(dst);
+    let src_w: Vec<u16> = src_ext
+        .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    let dst_w: Vec<u16> = dst
+    let dst_w: Vec<u16> = dst_ext
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
@@ -344,7 +359,12 @@ fn paths_equal(a: &str, b: &str) -> bool {
 /// ` (2)`, ` (3)`, … before the extension — within the same parent so the
 /// containment/reparse checks already performed on `dest` still hold.
 fn unique_destination(dest: &Path, claimed: &HashSet<PathBuf>) -> PathBuf {
-    let occupied = |p: &Path| claimed.contains(p) || std::fs::symlink_metadata(p).is_ok();
+    let occupied = |p: &Path| {
+        // \\?\ prefix so a deep already-occupied destination is detected rather
+        // than mis-probed as free (std::fs silently fails past MAX_PATH).
+        claimed.contains(p)
+            || std::fs::symlink_metadata(crate::util::path_safety::to_extended_length(p)).is_ok()
+    };
     if !occupied(dest) {
         return dest.to_path_buf();
     }

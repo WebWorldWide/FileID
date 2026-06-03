@@ -33,6 +33,10 @@ internal static class ThumbnailDiskCache
 {
     private const int MaxBytesToCache = 500 * 1024;
     private const long CacheCapBytes = 500L * 1024 * 1024;
+    // Above this the cache is far enough over the soft cap that we sweep
+    // immediately, bypassing the 30 s time throttle — otherwise a burst of
+    // writes between sweeps could overshoot the cap by hundreds of MB.
+    private const long HardCeilingBytes = (long)(CacheCapBytes * 1.2);
     private static readonly TimeSpan SweepInterval = TimeSpan.FromSeconds(30);
 
     private static DateTime _lastSweep = DateTime.MinValue;
@@ -208,12 +212,17 @@ internal static class ThumbnailDiskCache
 
     private static void MaybeSweep()
     {
-        if (Interlocked.Read(ref _cachedBytes) <= CacheCapBytes) { return; }
+        var cached = Interlocked.Read(ref _cachedBytes);
+        if (cached <= CacheCapBytes) { return; }
+        // The 30 s throttle bounds disk churn for the common soft-headroom trim.
+        // But once the cache has blown past a hard ceiling the cap is no longer a
+        // soft target, so we sweep regardless of how recently we last swept.
+        bool overHardCeiling = cached > HardCeilingBytes;
         var now = DateTime.UtcNow;
-        if (now - _lastSweep < SweepInterval) { return; }
+        if (!overHardCeiling && now - _lastSweep < SweepInterval) { return; }
         lock (_sweepLock)
         {
-            if (DateTime.UtcNow - _lastSweep < SweepInterval) { return; }
+            if (!overHardCeiling && DateTime.UtcNow - _lastSweep < SweepInterval) { return; }
             _lastSweep = DateTime.UtcNow;
         }
 

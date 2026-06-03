@@ -56,7 +56,6 @@ public class IpcCommandTests
     [InlineData(typeof(ShutdownCommand),          "shutdown")]
     [InlineData(typeof(RunFaceClusteringCommand), "runFaceClustering")]
     [InlineData(typeof(DeepAnalyzeCancelCommand), "deepAnalyzeCancel")]
-    [InlineData(typeof(CancelPrewarmCommand),     "cancelPrewarm")]
     [InlineData(typeof(VerifyCudaPackCommand),    "verifyCudaPack")]
     public void EmptyPayloadVariants_EncodeAsObjectNotString(Type t, string expectedKey)
     {
@@ -67,6 +66,24 @@ public class IpcCommandTests
 
         var rt = IpcCoder.Decode<IpcCommand>(json);
         Assert.IsType(t, rt.Payload);
+    }
+
+    // cancelPrewarm gained an optional modelKind (per-model cancel; null = all),
+    // so it is no longer an empty payload — it round-trips its field both ways.
+    [Fact]
+    public void CancelPrewarm_RoundTripsWithAndWithoutModelKind()
+    {
+        var all = new IpcCommand("c", new CancelPrewarmCommand());
+        var allJson = IpcCoder.Encode(all);
+        Assert.Contains("\"cancelPrewarm\":{", allJson);
+        var allCmd = Assert.IsType<CancelPrewarmCommand>(IpcCoder.Decode<IpcCommand>(allJson).Payload);
+        Assert.Null(allCmd.ModelKind);
+
+        var one = new IpcCommand("c", new CancelPrewarmCommand("clip_text"));
+        var oneJson = IpcCoder.Encode(one);
+        Assert.Contains("\"modelKind\":\"clip_text\"", oneJson);
+        var oneCmd = Assert.IsType<CancelPrewarmCommand>(IpcCoder.Decode<IpcCommand>(oneJson).Payload);
+        Assert.Equal("clip_text", oneCmd.ModelKind);
     }
 
     [Fact]

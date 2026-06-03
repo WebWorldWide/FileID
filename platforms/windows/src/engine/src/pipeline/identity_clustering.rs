@@ -202,10 +202,18 @@ where
     let pass1_cores = cores.len();
 
     // ── Pass 2: outlier assignment with margin ────────────────────
-    let mut core_centroids: Vec<Vec<f32>> = cores
+    // Maintain a parallel unnormalized running sum per core alongside the
+    // normalized centroid. Recomputing centroid_normalized over the full
+    // membership on every outlier add is O(S) per add → O(S^2) over a pass;
+    // folding the outlier into the running sum is O(dim) per add and the
+    // normalized copy is recomputed from that sum. Mathematically identical
+    // (only floating-point reassociation differs).
+    let mut core_sums: Vec<Vec<f32>> = cores
         .iter()
-        .map(|c| centroid_normalized(c, embeddings, dim))
+        .map(|c| centroid_sum(c, embeddings, dim))
         .collect();
+    let mut core_centroids: Vec<Vec<f32>> =
+        core_sums.iter().map(|s| normalize_sum(s, dim)).collect();
     let mut outliers_assigned = 0;
     let mut outliers_as_singletons = 0;
     for outlier in outliers {
@@ -231,10 +239,17 @@ where
         if passes_floor && passes_margin {
             let target = c1_idx as usize;
             cores[target].push(outlier);
-            core_centroids[target] = centroid_normalized(&cores[target], embeddings, dim);
+            let sum = &mut core_sums[target];
+            for d in 0..dim.min(v.len()) {
+                sum[d] += v[d];
+            }
+            core_centroids[target] = normalize_sum(sum, dim);
             outliers_assigned += 1;
         } else {
             cores.push(vec![outlier]);
+            // A singleton's unnormalized sum is the embedding itself; its
+            // normalized centroid is the (already L2-normalized) embedding.
+            core_sums.push(v.clone());
             core_centroids.push(v.clone());
             outliers_as_singletons += 1;
         }
@@ -277,6 +292,13 @@ where
 
 /// L2-normalized mean of the indexed embeddings.
 fn centroid_normalized(indices: &[usize], embeddings: &[Vec<f32>], dim: usize) -> Vec<f32> {
+    let sum = centroid_sum(indices, embeddings, dim);
+    normalize_sum(&sum, dim)
+}
+
+/// Unnormalized component-wise sum of the indexed embeddings. Pass 2 keeps this
+/// alongside the normalized centroid so an outlier add is O(dim), not O(S).
+fn centroid_sum(indices: &[usize], embeddings: &[Vec<f32>], dim: usize) -> Vec<f32> {
     let mut sum = vec![0f32; dim];
     for &i in indices {
         let v = &embeddings[i];
@@ -284,20 +306,26 @@ fn centroid_normalized(indices: &[usize], embeddings: &[Vec<f32>], dim: usize) -
         // dimension; restructure passes one CLIP space). The `.min` is a
         // release-safe backstop so a stray short vector can never index out of
         // bounds and panic here.
-        debug_assert_eq!(v.len(), dim, "centroid_normalized: embedding dim mismatch");
+        debug_assert_eq!(v.len(), dim, "centroid_sum: embedding dim mismatch");
         for d in 0..dim.min(v.len()) {
             sum[d] += v[d];
         }
     }
+    sum
+}
+
+/// L2-normalize a running sum vector into a unit centroid.
+fn normalize_sum(sum: &[f32], dim: usize) -> Vec<f32> {
+    let mut out = vec![0f32; dim];
     let mut norm: f32 = 0.0;
     for d in 0..dim {
         norm += sum[d] * sum[d];
     }
     let inv_n = 1.0 / norm.sqrt().max(f32::MIN_POSITIVE);
     for d in 0..dim {
-        sum[d] *= inv_n;
+        out[d] = sum[d] * inv_n;
     }
-    sum
+    out
 }
 
 /// Cosine on pre-normalized vectors = dot product.

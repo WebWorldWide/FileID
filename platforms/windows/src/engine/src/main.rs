@@ -316,12 +316,9 @@ async fn async_main() -> Result<()> {
     };
     let dispatch_http_client = http_client.clone();
 
-    // Prewarm cancel flag. CancelPrewarm flips it; download_parallel polls
-    // it after every chunk.
-    let prewarm_cancel: Arc<std::sync::atomic::AtomicBool> =
-        Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let dispatch_prewarm_cancel = prewarm_cancel.clone();
-
+    // Prewarm cancellation is per-model-kind, owned by a static registry inside
+    // commands::prewarm (see prewarm_cancel_flag / cancel_prewarm) — no global
+    // flag to thread through here.
     let stdio_loop = tokio::spawn(async move {
         const MAX_FRAME_BYTES: usize = 1024 * 1024;
         let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
@@ -355,7 +352,6 @@ async fn async_main() -> Result<()> {
                                 &dispatch_deep_cancel,
                                 &dispatch_deep_active,
                                 &dispatch_http_client,
-                                &dispatch_prewarm_cancel,
                                 &text,
                             ).await;
                         }
@@ -447,7 +443,6 @@ async fn handle_line(
     deep_analyze_cancel: &Arc<std::sync::atomic::AtomicBool>,
     deep_analyze_active: &Arc<std::sync::atomic::AtomicBool>,
     http_client: &Arc<reqwest::Client>,
-    prewarm_cancel: &Arc<std::sync::atomic::AtomicBool>,
     line: &str,
 ) {
     // Strip a leading UTF-8 BOM defensively. The C# side ships BOM-less UTF-8,
@@ -481,22 +476,22 @@ async fn handle_line(
             shutdown.notify_waiters();
         }
         CommandPayload::PrewarmModel(payload) => {
-            // Clear the cancel flag at the start of every NEW prewarm call —
-            // an in-flight cancel from a prior call shouldn't immediately abort
-            // this one. Downloads run concurrently against the shared
-            // http_client pool.
-            prewarm_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+            // Reset THIS kind's cancel flag SYNCHRONOUSLY, before the spawn, so a
+            // CancelPrewarm dispatched right after lands on an existing flag (the
+            // serial stdio loop runs this before reading the next frame) — closing
+            // the lazy-create race. Resets only this kind; others are untouched.
+            commands::prewarm::reset_prewarm_cancel(&payload.model_kind);
             let sink = sink.clone();
             let model_kind = payload.model_kind.clone();
             let http_client = http_client.clone();
-            let cancel = prewarm_cancel.clone();
             tokio::spawn(async move {
-                commands::prewarm::handle_prewarm_model(sink, model_kind, http_client, cancel).await;
+                commands::prewarm::handle_prewarm_model(sink, model_kind, http_client).await;
             });
         }
-        CommandPayload::CancelPrewarm(_) => {
-            prewarm_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-            tracing::info!("CancelPrewarm received; in-flight downloads will abort");
+        CommandPayload::CancelPrewarm(payload) => {
+            // Per-model when modelKind is set (one row's Cancel), all in-flight
+            // when None (the legacy payload-less "cancel everything").
+            commands::prewarm::cancel_prewarm(payload.model_kind.as_deref());
         }
         CommandPayload::PlanRestructure(payload) => {
             let Some(db) = db else {
@@ -765,8 +760,9 @@ async fn handle_line(
             };
             let sink_c = sink.clone();
             let db_c = db.clone();
+            let state_c = scan_state.clone();
             tokio::spawn(async move {
-                commands::wipe::handle_wipe_library(sink_c, db_c).await;
+                commands::wipe::handle_wipe_library(sink_c, db_c, state_c).await;
             });
         }
         CommandPayload::GenerateVideoThumbnail(payload) => {

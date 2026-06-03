@@ -49,6 +49,9 @@ platforms/linux/**/target/
 platforms/linux/target/
 **/*.rs.bk
 Cargo.lock.bak
+# Stray local-build outputs dropped next to the engine source (e.g. rust_out.exe
+# from an ad-hoc `rustc -o`); the canonical build lands under target/.
+platforms/windows/src/engine/rust_out.*
 
 # ─── .NET / WinUI 3 (Windows app) ───────────────────────────────────────────
 platforms/windows/**/bin/
@@ -129,8 +132,10 @@ shared/test-corpus/files/
 !shared/test-corpus/manifest.json
 !shared/test-corpus/README.md
 
-# ─── Python venv (script tooling) ───────────────────────────────────────────
+# ─── Python venv + caches (script tooling) ──────────────────────────────────
 .venv/
+__pycache__/
+*.pyc
 
 # ─── Claude Code session state + local settings ─────────────────────────────
 .claude/

@@ -23,6 +23,9 @@ use super::runtime::{
 
 pub struct SFace {
     session: Session,
+    /// The ONNX's single input tensor name, read once at load and reused on
+    /// every forward instead of re-walking `session.inputs.first()`.
+    input_name: String,
 }
 
 impl SFace {
@@ -31,7 +34,7 @@ impl SFace {
         if !path.exists() {
             anyhow::bail!("SFace weights missing at {}", path.display());
         }
-        let probe = RuntimeProbe::detect();
+        let probe = RuntimeProbe::shared();
         let chain = priority_chain(probe.vendor);
         let builder = Session::builder().context("ORT session builder")?;
         let mut builder =
@@ -47,8 +50,14 @@ impl SFace {
         let session = builder
             .commit_from_file(path)
             .context("ORT session commit (SFace)")?;
+        let input_name = session
+            .inputs
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("SFace ONNX has no inputs"))?
+            .name
+            .clone();
 
-        let mut model = Self { session };
+        let mut model = Self { session, input_name };
         let warmup_started = std::time::Instant::now();
         let _ = model.embed(&[0u8; 3 * 112 * 112])?;
         tracing::info!(
@@ -77,13 +86,7 @@ impl SFace {
         }
 
         let input = Tensor::from_array(chw).context("SFace input tensor")?;
-        let input_name = self
-            .session
-            .inputs
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("SFace ONNX has no inputs"))?
-            .name
-            .clone();
+        let input_name = self.input_name.clone();
         let outputs: SessionOutputs = self
             .session
             .run(vec![(input_name, SessionInputValue::from(input))])

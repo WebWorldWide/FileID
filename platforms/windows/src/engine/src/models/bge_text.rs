@@ -28,6 +28,10 @@ const MAX_SEQ: usize = 256;
 
 pub struct BgeText {
     session: Session,
+    /// The ONNX's input tensor names, read once at load. BGE binds up to three
+    /// inputs (ids/mask/token_type) by name; caching the list avoids rebuilding
+    /// a `Vec<String>` from `session.inputs` on every `embed`.
+    input_names: Vec<String>,
     tokenizer: WordPieceTokenizer,
 }
 
@@ -40,7 +44,7 @@ impl BgeText {
         let tokenizer = WordPieceTokenizer::from_vocab_file(vocab_txt.as_ref(), true)
             .context("loading BGE vocab.txt")?;
 
-        let probe = RuntimeProbe::detect();
+        let probe = RuntimeProbe::shared();
         let chain = priority_chain(probe.vendor);
         let builder = Session::builder().context("ORT session builder")?;
         let mut builder =
@@ -55,8 +59,9 @@ impl BgeText {
         let session = builder
             .commit_from_file(weights)
             .context("ORT session commit (BGE)")?;
+        let input_names: Vec<String> = session.inputs.iter().map(|i| i.name.clone()).collect();
 
-        let mut model = Self { session, tokenizer };
+        let mut model = Self { session, input_names, tokenizer };
         let _ = model.embed("warmup")?;
         tracing::info!(model = "BGE-small-en-v1.5", "warmup complete");
         Ok(model)
@@ -81,18 +86,17 @@ impl BgeText {
         let type_tensor = Tensor::from_array(type_ids).context("BGE token_type_ids tensor")?;
 
         // Bind by name so a session missing `token_type_ids` (some exports
-        // do) still runs with just ids + mask.
-        let input_names: Vec<String> =
-            self.session.inputs.iter().map(|i| i.name.clone()).collect();
+        // do) still runs with just ids + mask. Names are cached at load.
         let mut ids_opt = Some(SessionInputValue::from(ids_tensor));
         let mut mask_opt = Some(SessionInputValue::from(mask_tensor));
         let mut type_opt = Some(SessionInputValue::from(type_tensor));
-        let inputs: Vec<(String, SessionInputValue)> = input_names
-            .into_iter()
+        let inputs: Vec<(String, SessionInputValue)> = self
+            .input_names
+            .iter()
             .filter_map(|name| match name.as_str() {
-                "input_ids" => ids_opt.take().map(|v| (name, v)),
-                "attention_mask" => mask_opt.take().map(|v| (name, v)),
-                "token_type_ids" => type_opt.take().map(|v| (name, v)),
+                "input_ids" => ids_opt.take().map(|v| (name.clone(), v)),
+                "attention_mask" => mask_opt.take().map(|v| (name.clone(), v)),
+                "token_type_ids" => type_opt.take().map(|v| (name.clone(), v)),
                 _ => None,
             })
             .collect();

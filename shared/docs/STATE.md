@@ -8,6 +8,51 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-03 — Full-repo Windows bug audit (4 workflows) + production-hardening fix pass
+
+Exhaustive adversarial audit of the whole Windows app (Rust engine + WinUI) via four
+find→refute-by-default workflows: **78 confirmed bugs** (~70 distinct; verifiers rejected ~40 false
+positives). Full inventory + per-item file:line + fix-status in [`AUDIT-2026-06-03.md`](AUDIT-2026-06-03.md).
+Fixed the high-confidence set, THEN drove a fix-all workflow (8 file-disjoint cells) + a hand-built
+IPC-contract change to close EVERY remaining deferred item, THEN ran a 3-pass refute-by-default
+RE-AUDIT loop (5 → 7 → 1 confirmed) that caught 13 fix-introduced regressions — incl. a
+`tags_evaluated` decode-failure/online-only gap, an off-UI-thread `IsLoading` write in Find-Similar, a
+masked orphaned-test break, and a cancel that wedged the install slot — all fixed. ~70 distinct bugs
+addressed. Headless-gate-green: engine clippy `-D` + fmt + **258 tests**; app build 0/0 + **App.Tests
+108** + **IpcSchema.Tests 34** + format. Branch `win-prod-hardening-2026-06-03`, NOT yet merged —
+review the branch. The user's flicker report is fully diagnosed + fixed (see below).
+
+**HIGH fixed (engine):** face-clustering wiped every user-assigned name on every scan (snapshot +
+member-majority re-attach); timeout/GPU-dead row wiped a file's auto-tags (added `tags_evaluated`
+gate, mirroring faces/OCR/doc); restructure move/symlink missing `\\?\` long-path prefix; VLM CLI
+stderr piped-not-drained deadlock; `cpu` EP override silently ignored (TDR-recovery escape);
+`file_ref` cross-volume MFT collision collapsed two files into one row (heal now requires
+old-path-gone for ALL matches); CLIP-text query bound a GPU EP outside the ep_guard window
+(crash-loop); wipe-during-scan interleave (engine cancels+waits before truncate).
+**HIGH fixed (app):** Library search wrote XAML off the UI thread (fast-fail) → `OnUi` marshal; Deep
+Analyze stale `Complete` fought the live UI at 4 Hz on 2nd+ run → cleared on Starting + scan start;
+`ModelInstaller.Reset` omitted RamPlus/Accelerator → stuck-spinner.
+**MEDIUM/perf fixed:** downloader 200-vs-206 resume corruption + corrupt-part cleanup; rename-heal
+LIMIT-1 orphan; pipeline strip blanked-to-grey on completion + 10 Hz redundant redraw + filled-dot
+stroke; `ReadStore.RecentAsync` missing `failed=0`; WinVerifyTrust state-handle leak per spawn;
+FilePreview rename silent-failure; HNSW per-query O(n²) scratch re-alloc (reusable `Searcher`);
+brute-force kNN full-sort → bounded top-k; ram_plus empty-suppress alloc; bounded_read buffer reuse;
+heic decode-cap; per-EP `ep_guard` reenable; cancel-flush.
+
+**All previously-deferred items now FIXED** this pass: LibraryView trash false-success (await result,
+remove only Ok tiles); Cleanup/People `MergeById` identity-stable merge (kills the ~1 Hz rebuild
+flicker + preserves keeper/selection) + People select-mode; TreeDiff ItemTemplate; Sankey
+debounce/flow-matrix/touch; ShimmerView/LavaLamp lifecycle + occlusion + live ReducedMotion; per-model
+prewarm cancel (engine static registry + schema `modelKind` + C# wiring + slot reset-on-cancel) +
+cancel-as-failure + progress-order; ORT_DYLIB_PATH override-aware pin + CPU-override thread-count +
+rename no-clobber MoveFileExW; composite `(kind,scanned_at)` index (v14) + `created_at` capture;
+schema-drift (`skippedStages`/`currentCaption`/`modelKind`); RuntimeProbe memoize + input-name cache +
+Pass-2 centroid + ThumbnailDiskCache cap + watchdog + path-redaction + completed-count. **On-hardware
+confirmation still wanted** for the visual flicker fixes (RTX 2060 build-and-look) + GPU/EP paths
+(real NVIDIA/Intel box); engine is fully headless-verified. The ~6.5 f/s GPU ceiling is unchanged
+(perf fixes target clustering/query, not the RAM++ tagger). **Note:** `FileID.IpcSchema.Tests` is NOT
+in `FileID.sln` (a known gotcha that masked a test break this pass) — recommend adding it to CI.
+
 ## 2026-06-02 (later 7) — User-reported GPU-pack bugs + 18-bug sweep (PR #8)
 
 Fixed two user-reported Windows bugs + an adversarial-hunt sweep, via a diagnose→hunt→fix workflow chain (38-agent read-only diagnose/hunt → 8-cell file-disjoint fix + 3 verifiers). All headless-gate-green (engine clippy -D + fmt + tests; app build 0/0 + format + 108 tests). Merged to main (PR #8, 420a5ce), all 5 CI jobs green.

@@ -256,13 +256,17 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             if (_connection == null) return Array.Empty<FileRow>();
             var rows = new List<FileRow>(limit);
             using var cmd = _connection.CreateCommand();
-            // PAR-116: filter kind in SQL (before LIMIT).
-            var kindClause = string.IsNullOrEmpty(kind) || kind == "all" ? "" : " WHERE kind = $kind";
+            // PAR-116: filter kind in SQL (before LIMIT). `failed = 0` is the
+            // BASE predicate (matches SearchAsync / SemanticSearchAsync and the
+            // macOS reference) so files the engine flagged failed (corrupt /
+            // unreadable / permission-denied) don't leak into the default grid as
+            // broken placeholder tiles and inflate the count-vs-grid mismatch.
+            var kindClause = string.IsNullOrEmpty(kind) || kind == "all" ? "" : " AND kind = $kind";
             cmd.CommandText = $"""
                 SELECT id, path_text, kind, size_bytes, modified_at, has_faces, has_text,
                        (SELECT GROUP_CONCAT(tag, '|') FROM (SELECT tag FROM tags WHERE file_id = files.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, score DESC, rowid)) AS auto_tags,
                        vlm_proposed_name
-                FROM files{kindClause}
+                FROM files WHERE failed = 0{kindClause}
                 ORDER BY scanned_at DESC, id DESC LIMIT $limit
                 """;
             cmd.Parameters.AddWithValue("$limit", limit);

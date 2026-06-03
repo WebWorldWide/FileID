@@ -60,7 +60,16 @@
                                            Style="{StaticResource CaptionTextBlockStyle}"
                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                            FontWeight="SemiBold" />
-                                <TreeView x:Name="PART_CurrentTree" Grid.Row="1" />
+                                <TreeView x:Name="PART_CurrentTree" Grid.Row="1">
+                                    <TreeView.ItemTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding Content.DisplayName}"
+                                                       Foreground="{Binding Content.HighlightBrush}"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       Style="{StaticResource CaptionTextBlockStyle}" />
+                                        </DataTemplate>
+                                    </TreeView.ItemTemplate>
+                                </TreeView>
                             </Grid>
                             <Grid Grid.Column="1">
                                 <Grid.RowDefinitions>
@@ -72,7 +81,16 @@
                                            Style="{StaticResource CaptionTextBlockStyle}"
                                            Foreground="{ThemeResource GoldBrush}"
                                            FontWeight="SemiBold" />
-                                <TreeView x:Name="PART_ProposedTree" Grid.Row="1" />
+                                <TreeView x:Name="PART_ProposedTree" Grid.Row="1">
+                                    <TreeView.ItemTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding Content.DisplayName}"
+                                                       Foreground="{Binding Content.HighlightBrush}"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       Style="{StaticResource CaptionTextBlockStyle}" />
+                                        </DataTemplate>
+                                    </TreeView.ItemTemplate>
+                                </TreeView>
                             </Grid>
                         </Grid>
                     </ControlTemplate>

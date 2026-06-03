@@ -79,7 +79,12 @@ fn is_suppressed_builtin(tag: &str) -> bool {
 /// (not a method) so the hot tag() closure can borrow `suppress_extra` as a
 /// disjoint field while `self.session` is mutably borrowed by `outputs`.
 fn is_suppressed(tag: &str, extra: &HashSet<String>) -> bool {
-    is_suppressed_builtin(tag) || extra.contains(&tag.to_ascii_lowercase())
+    // Short-circuit the common empty case (no ram_plus_suppress.txt sidecar): an
+    // empty set can never contain anything, so skip the per-tag
+    // to_ascii_lowercase() heap String allocation for the ~4573 tags not in the
+    // 12-entry built-in set. Saves ~4573 alloc/free pairs per scanned image on
+    // the primary tagger path when no sidecar is configured (the default).
+    is_suppressed_builtin(tag) || (!extra.is_empty() && extra.contains(&tag.to_ascii_lowercase()))
 }
 
 /// Read the optional `ram_plus_suppress.txt` sidecar next to the tag list: one
@@ -106,6 +111,9 @@ fn load_suppress_sidecar(tag_list: &Path) -> HashSet<String> {
 
 pub struct RamPlusTagger {
     session: Session,
+    /// The ONNX's single input tensor name, read once at load. Reused on every
+    /// forward instead of re-walking `session.inputs.first()` per inference.
+    input_name: String,
     /// Index-aligned with the model's logits; `tags[i]` is the label for output i.
     tags: Vec<String>,
     /// Global fallback cutoff (DEFAULT_THRESHOLD or the FILEID_RAMPLUS_THRESHOLD
@@ -148,7 +156,7 @@ impl RamPlusTagger {
             anyhow::bail!("RAM++ tag list {} is empty", tag_list.display());
         }
 
-        let probe = RuntimeProbe::detect();
+        let probe = RuntimeProbe::shared();
         let chain = priority_chain(probe.vendor);
         let chain_labels: Vec<&'static str> = chain.iter().map(|e| e.as_str()).collect();
         let builder = Session::builder().context("ORT session builder")?;
@@ -164,6 +172,12 @@ impl RamPlusTagger {
         let session = builder
             .commit_from_file(onnx)
             .context("ORT session commit (RAM++)")?;
+        let input_name = session
+            .inputs
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("RAM++ ONNX has no inputs"))?
+            .name
+            .clone();
 
         // A set FILEID_RAMPLUS_THRESHOLD forces a single global cutoff (per-class
         // disabled — handy for threshold sweeps). Otherwise load the per-class
@@ -228,6 +242,7 @@ impl RamPlusTagger {
 
         let mut model = Self {
             session,
+            input_name,
             tags,
             threshold,
             per_class_threshold,
@@ -281,13 +296,7 @@ impl RamPlusTagger {
     /// serializes under the pool Mutex.
     pub fn tag_prepared(&mut self, chw: Array4<f32>) -> Result<Vec<(String, f32)>> {
         let input = Tensor::from_array(chw).context("RAM++ input tensor")?;
-        let input_name = self
-            .session
-            .inputs
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("RAM++ ONNX has no inputs"))?
-            .name
-            .clone();
+        let input_name = self.input_name.clone();
         // Extract the logits inside a block so the `outputs` borrow of
         // `self.session` is released BEFORE the `&self` select_tags call below.
         // `SessionOutputs` has a Drop impl, so its borrow lives to end-of-scope
@@ -346,13 +355,7 @@ impl RamPlusTagger {
             batch.slice_mut(s![i..i + 1, .., .., ..]).assign(&chw);
         }
         let input = Tensor::from_array(batch).context("RAM++ batch input tensor")?;
-        let input_name = self
-            .session
-            .inputs
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("RAM++ ONNX has no inputs"))?
-            .name
-            .clone();
+        let input_name = self.input_name.clone();
         let num_tags = self.tags.len();
         let logits_vec: Vec<f32> = {
             let outputs: SessionOutputs = self

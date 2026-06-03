@@ -404,7 +404,7 @@ public sealed partial class WelcomeSheet : UserControl
                 slot.Message = "Cancelling…";
                 slot.BytesPerSecond = 0;
                 slot.EtaSeconds = 0;
-                _ = SafeRunAsync(() => Svc.CancelAllAsync(), "Cancel " + slot.DisplayLabel);
+                _ = SafeRunAsync(() => Svc.CancelModelAsync(slot.CurrentModelKind), "Cancel " + slot.DisplayLabel);
                 break;
             case ModelInstallStatus.NotInstalled:
             case ModelInstallStatus.Failed:

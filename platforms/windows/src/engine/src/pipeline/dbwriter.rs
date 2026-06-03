@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 use tokio::sync::mpsc;
 
 use crate::coordinator::ScanCoordinator;
@@ -134,6 +134,15 @@ impl DbWriter {
                 }
             }
             if self.coordinator.is_cancelled() {
+                // Flush any rows that finished the (paid-for) ML pipeline before
+                // the cancel landed but hadn't hit a batch boundary yet — else up
+                // to current_target-1 fully-tagged files are dropped and must be
+                // fully re-processed on the next scan. Mirrors the Ok(None)/Err
+                // drain arms above.
+                if !buffer.is_empty() {
+                    let stats = self.flush(&mut buffer, &mut total, &mut failed, batch_index)?;
+                    on_batch(stats);
+                }
                 break;
             }
         }
@@ -226,6 +235,11 @@ impl DbWriter {
             for f in buffer.iter() {
                 let insert_started = Instant::now();
                 let path_text = f.path.to_string_lossy();
+                // Redacted path for error context only — `path_text` stays the
+                // raw value for the SQL binds. A flush error's `with_context`
+                // string lands in the log + on the IPC wire, so it must never
+                // carry an unredacted user path.
+                let rp = crate::platform::redact_path_for_log(&f.path);
                 let path_hash = crate::util::path_safety::stable_path_hash(&path_text);
                 let extension = f
                     .path
@@ -243,27 +257,32 @@ impl DbWriter {
                 // have neither identity (no heal possible).
                 if f.file_ref.is_some() || f.content_hash.is_some() {
                     let ch_bytes = f.content_hash.as_ref().map(|h| h.as_slice());
-                    let healed: Option<(i64, String, bool)> = heal_lookup_stmt
-                        .query_row(
+                    let candidates: Vec<(i64, String, bool)> = heal_lookup_stmt
+                        .query_map(
                             params![f.file_ref.map(|r| r as i64), ch_bytes, path_text.as_ref()],
                             |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)),
                         )
-                        .optional()
-                        .with_context(|| format!("rename-heal lookup for {}", path_text))?;
-                    // Heal only a row whose identity genuinely MOVED — a
-                    // coexisting byte-identical COPY must not steal the
-                    // original's row (see `heal_candidate_moved`).
-                    if let Some((id, old_path, by_ref)) = healed {
-                        if heal_candidate_moved(by_ref, &old_path) {
-                            heal_update_stmt
-                                .execute(params![path_text, path_hash, id])
-                                .with_context(|| format!("rename-heal update for {}", path_text))?;
-                            tracing::info!(
-                                id,
-                                new_path = %crate::platform::redact_path_for_log(&f.path),
-                                "[RENAME-HEAL] re-bound existing row to new path"
-                            );
-                        }
+                        .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
+                        .with_context(|| format!("rename-heal lookup for {rp}"))?;
+                    // Heal the FIRST identity match whose old path genuinely MOVED
+                    // (is gone from disk). Iterating — rather than the old
+                    // LIMIT-1/no-ORDER-BY single fetch — ensures a still-present
+                    // coexisting COPY returned ahead of the real orphan doesn't
+                    // skip the heal and leave the genuinely-moved file's prior row
+                    // (with its tags/faces) orphaned forever. file_ref matches are
+                    // ordered first in SQL (the precise rename signal).
+                    if let Some((id, _old, _by_ref)) = candidates
+                        .into_iter()
+                        .find(|(_, old, by_ref)| heal_candidate_moved(*by_ref, old))
+                    {
+                        heal_update_stmt
+                            .execute(params![path_text, path_hash, id])
+                            .with_context(|| format!("rename-heal update for {rp}"))?;
+                        tracing::info!(
+                            id,
+                            new_path = %crate::platform::redact_path_for_log(&f.path),
+                            "[RENAME-HEAL] re-bound existing row to new path"
+                        );
                     }
                 }
 
@@ -273,7 +292,7 @@ impl DbWriter {
                             path_text,
                             path_hash,
                             f.size_bytes as i64,
-                            None::<f64>,
+                            f.created_unix,
                             f.modified_unix,
                             f.scanned_unix,
                             f.kind.as_str(),
@@ -292,13 +311,13 @@ impl DbWriter {
                         ],
                         |row| row.get(0),
                     )
-                    .with_context(|| format!("insert+id for {}", path_text))?;
+                    .with_context(|| format!("insert+id for {rp}"))?;
 
                 if let Some(emb) = &f.clip_embedding {
                     let bytes = floats_to_le_bytes(emb);
                     clip_stmt
                         .execute(params![file_id, bytes, "mobileclip_s2"])
-                        .with_context(|| format!("clip insert for {}", path_text))?;
+                        .with_context(|| format!("clip insert for {rp}"))?;
                 }
 
                 // BGE-small text embeddings (Phase 4b) — parallel to clip
@@ -309,7 +328,7 @@ impl DbWriter {
                     let bytes = floats_to_le_bytes(emb);
                     text_embed_stmt
                         .execute(params![file_id, bytes, "bge_small_en_v1_5"])
-                        .with_context(|| format!("text_embeddings insert for {}", path_text))?;
+                        .with_context(|| format!("text_embeddings insert for {rp}"))?;
                 }
 
                 // Key the stale-face DELETE on whether the face stage actually
@@ -321,7 +340,7 @@ impl DbWriter {
                 if f.faces_evaluated {
                     face_delete
                         .execute(params![file_id])
-                        .with_context(|| format!("face delete for {}", path_text))?;
+                        .with_context(|| format!("face delete for {rp}"))?;
                     for face in &f.faces {
                         let bbox_json = serde_json::json!({
                             "x": face.bbox[0],
@@ -343,7 +362,7 @@ impl DbWriter {
                                 arcface_bytes,
                                 face.quality as f64,
                             ])
-                            .with_context(|| format!("face insert for {}", path_text))?;
+                            .with_context(|| format!("face insert for {rp}"))?;
 
                         if let Some(crop) = &face.crop_rgb_112 {
                             let face_id = tx.last_insert_rowid();
@@ -363,18 +382,18 @@ impl DbWriter {
                 if f.ocr_stage_ran {
                     ocr_fts_delete
                         .execute(params![file_id])
-                        .with_context(|| format!("ocr_fts delete for {}", path_text))?;
+                        .with_context(|| format!("ocr_fts delete for {rp}"))?;
                     ocr_text_delete
                         .execute(params![file_id])
-                        .with_context(|| format!("ocr_text delete for {}", path_text))?;
+                        .with_context(|| format!("ocr_text delete for {rp}"))?;
                     if let Some(text) = &f.ocr_text {
                         if !text.trim().is_empty() {
                             ocr_text_stmt
                                 .execute(params![file_id, text])
-                                .with_context(|| format!("ocr_text insert for {}", path_text))?;
+                                .with_context(|| format!("ocr_text insert for {rp}"))?;
                             ocr_fts_stmt
                                 .execute(params![file_id, text])
-                                .with_context(|| format!("ocr_fts insert for {}", path_text))?;
+                                .with_context(|| format!("ocr_fts insert for {rp}"))?;
                         }
                     }
                 }
@@ -384,35 +403,44 @@ impl DbWriter {
                 if f.doc_stage_ran {
                     doc_fts_delete
                         .execute(params![file_id])
-                        .with_context(|| format!("doc_fts delete for {}", path_text))?;
+                        .with_context(|| format!("doc_fts delete for {rp}"))?;
                     doc_text_delete
                         .execute(params![file_id])
-                        .with_context(|| format!("doc_text delete for {}", path_text))?;
+                        .with_context(|| format!("doc_text delete for {rp}"))?;
                     if let Some(text) = &f.doc_text {
                         if !text.trim().is_empty() {
                             doc_text_stmt
                                 .execute(params![file_id, text])
-                                .with_context(|| format!("doc_text insert for {}", path_text))?;
+                                .with_context(|| format!("doc_text insert for {rp}"))?;
                             doc_fts_stmt
                                 .execute(params![file_id, text])
-                                .with_context(|| format!("doc_fts insert for {}", path_text))?;
+                                .with_context(|| format!("doc_fts insert for {rp}"))?;
                         }
                     }
                 }
 
-                // Auto-tags (classifier output + enriched extras). Delete
-                // any prior `source='auto'` rows first so a rescan
-                // replaces stale tags atomically. User tags
-                // (`source='user'`) are untouched.
-                tag_delete
-                    .execute(params![file_id])
-                    .with_context(|| format!("tag delete for {}", path_text))?;
-                for (tag, score) in &f.tags {
-                    let trimmed = tag.trim();
-                    if trimmed.is_empty() { continue; }
-                    tag_insert
-                        .execute(params![file_id, trimmed, score.map(|s| s as f64)])
-                        .with_context(|| format!("tag insert for {}", path_text))?;
+                // Auto-tags (classifier output + enriched extras). Gate the
+                // delete-then-reinsert on whether the tagging stage actually ran
+                // this session — exactly like faces_evaluated / ocr_stage_ran /
+                // doc_stage_ran above. A per-file timeout row or a GPU-dead
+                // short-circuit emits an EMPTY `tags` vec; without this gate the
+                // unconditional DELETE would wipe a file's previously-persisted
+                // RAM++/CLIP-scene/Year/camera auto-tags on a transient slow read
+                // or a mid-scan GPU TDR, with nothing re-inserted (data loss).
+                // When the stage DID run, delete any prior `source='auto'` rows
+                // and re-insert the fresh set atomically. User tags
+                // (`source='user'`) are untouched either way.
+                if f.tags_evaluated {
+                    tag_delete
+                        .execute(params![file_id])
+                        .with_context(|| format!("tag delete for {rp}"))?;
+                    for (tag, score) in &f.tags {
+                        let trimmed = tag.trim();
+                        if trimmed.is_empty() { continue; }
+                        tag_insert
+                            .execute(params![file_id, trimmed, score.map(|s| s as f64)])
+                            .with_context(|| format!("tag insert for {rp}"))?;
+                    }
                 }
 
                 if f.failed {
@@ -586,7 +614,8 @@ const HEAL_LOOKUP_SQL: &str = r#"
           (file_ref IS NOT NULL AND file_ref = ?1)
           OR (content_hash IS NOT NULL AND content_hash = ?2)
       )
-    LIMIT 1
+    ORDER BY by_ref DESC
+    LIMIT 32
 "#;
 
 // Heal: move the existing row to the new path. `UPDATE OR REPLACE` handles
@@ -602,21 +631,26 @@ const HEAL_UPDATE_SQL: &str = r#"
 /// Decide whether a heal candidate (an existing row matched by identity at a
 /// different path) genuinely MOVED, and may therefore re-bind to the new path.
 ///
-/// A `file_ref` (NTFS MFT id) match is always a true rename/move — the volume
-/// reuses a ref only for the same file — so `by_ref` heals unconditionally.
-/// A `content_hash`-only match, however, also fires for a COEXISTING
-/// byte-identical COPY (two distinct files share one BLAKE3). Healing that
-/// would steal the original's row and, via `UPDATE OR REPLACE`, FK-cascade its
-/// tags/faces away — silent data loss. So a hash-only candidate may heal only
-/// when its previous path no longer exists on disk (a real move), never when
-/// it still does (a copy). `symlink_metadata` (not `metadata`) so a dangling
-/// symlink still counts as present and is not treated as a move.
-fn heal_candidate_moved(by_ref: bool, old_path: &str) -> bool {
-    by_ref
-        || std::fs::symlink_metadata(crate::util::path_safety::to_extended_length(
-            std::path::Path::new(old_path),
-        ))
-        .is_err()
+/// Heal ONLY when the candidate's previous path no longer exists on disk — a
+/// genuine rename/move always leaves its old path gone. This single gate is
+/// required for BOTH match kinds. A `content_hash`-only match also fires for a
+/// COEXISTING byte-identical COPY (two distinct files share one BLAKE3). A
+/// `file_ref` (NTFS MFT id) match is only VOLUME-LOCAL, so two distinct files
+/// on different volumes (an external / SD / NAS drive scanned into the same
+/// library), or two hardlinks to one file, can collide on the same ref — the
+/// old `by_ref` short-circuit healed those unconditionally. Healing a
+/// coexisting file steals the original's row and, via `UPDATE OR REPLACE`,
+/// FK-cascades its tags/faces away — silent data loss. The old-path-gone gate
+/// keeps coexisting files as distinct rows while still healing every real move
+/// (whose old path is, by definition, gone). `symlink_metadata` (not
+/// `metadata`) so a dangling symlink still counts as present and is not treated
+/// as a move. (`_by_ref` is retained for the call site's tuple; the decision no
+/// longer depends on it.)
+fn heal_candidate_moved(_by_ref: bool, old_path: &str) -> bool {
+    std::fs::symlink_metadata(crate::util::path_safety::to_extended_length(
+        std::path::Path::new(old_path),
+    ))
+    .is_err()
 }
 
 const INSERT_CLIP_SQL: &str = r#"
@@ -668,6 +702,7 @@ fn save_face_crop(face_id: i64, crop_rgb_112: &[u8]) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::pipeline::discovery::FileKind;
+    use rusqlite::OptionalExtension; // .optional() in ingest_with_heal (lib code no longer uses it)
     use std::path::PathBuf;
 
     /// Minimal mirror of the per-file body in `flush`. Exercises the
@@ -717,6 +752,7 @@ mod tests {
             kind: FileKind::Image,
             size_bytes: 1234,
             modified_unix: 1_700_000_000.0,
+            created_unix: None,
             scanned_unix: 1_700_000_100.0,
             has_faces: false,
             faces: vec![],
@@ -743,6 +779,7 @@ mod tests {
             faces_evaluated: false,
             ocr_stage_ran: false,
             doc_stage_ran: false,
+            tags_evaluated: true,
         }
     }
 
@@ -1081,15 +1118,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// B1: a true rename detected via file_ref (NTFS MFT id) heals
-    /// unconditionally — even if a file still sits at the old path — because
-    /// a volume reuses a ref only for the same file.
+    /// A true rename detected via file_ref (NTFS MFT id) heals when the old
+    /// path is GONE from disk — a real move always leaves its old path absent.
     #[test]
-    fn file_ref_match_heals_unconditionally() {
-        let dir = unique_tmp_dir("b1_ref");
-        let old_path = dir.join("before.png");
-        std::fs::write(&old_path, b"x").unwrap(); // old path STILL present
+    fn file_ref_rename_with_old_path_gone_heals() {
+        let dir = unique_tmp_dir("b1_ref_rename");
         let new_path = dir.join("after.png");
+        std::fs::write(&new_path, b"x").unwrap();
+        // Old path is never created on disk → "gone" → a real move.
+        let old_path = dir.join("gone").join("before.png");
 
         let conn = in_memory_db();
         let mut a = fixture(old_path.to_str().unwrap());
@@ -1097,14 +1134,46 @@ mod tests {
         let id_a = ingest_with_heal(&conn, &a);
 
         let mut b = fixture(new_path.to_str().unwrap());
-        b.file_ref = Some(0xDEAD_BEEF); // same MFT ref → same file, renamed
+        b.file_ref = Some(0xDEAD_BEEF); // same MFT ref + old path gone → rename
         let id_b = ingest_with_heal(&conn, &b);
 
-        assert_eq!(id_a, id_b, "file_ref match is a true rename → heal");
+        assert_eq!(id_a, id_b, "file_ref match with old path gone is a rename → heal");
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Cross-volume / hardlink safety: a file_ref match while the OLD path is
+    /// STILL present on disk is NOT a rename. The NTFS MFT reference is only
+    /// volume-local, so two distinct files on different volumes (or two
+    /// hardlinks to one file) can collide on the same ref. Healing such a
+    /// collision would re-bind one file's row to the other's path and, via
+    /// UPDATE OR REPLACE, FK-cascade the loser's tags/faces away — silent data
+    /// loss. The old-path-gone gate keeps them as two distinct rows.
+    #[test]
+    fn file_ref_collision_with_both_paths_present_stays_distinct() {
+        let dir = unique_tmp_dir("b1_ref_collision");
+        let old_path = dir.join("before.png");
+        std::fs::write(&old_path, b"x").unwrap(); // old path STILL present
+        let new_path = dir.join("after.png");
+        std::fs::write(&new_path, b"y").unwrap(); // a DISTINCT coexisting file
+
+        let conn = in_memory_db();
+        let mut a = fixture(old_path.to_str().unwrap());
+        a.file_ref = Some(0xDEAD_BEEF);
+        let id_a = ingest_with_heal(&conn, &a);
+
+        let mut b = fixture(new_path.to_str().unwrap());
+        b.file_ref = Some(0xDEAD_BEEF); // colliding ref, but old file still exists
+        let id_b = ingest_with_heal(&conn, &b);
+
+        assert_ne!(id_a, id_b, "a colliding ref with the old file present must not collapse");
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2, "two coexisting files must stay distinct rows");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
