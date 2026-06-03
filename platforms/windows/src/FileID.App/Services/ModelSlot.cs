@@ -77,6 +77,23 @@ internal sealed class ModelSlot : INotifyPropertyChanged
         set => Set(ref _fraction, value);
     }
 
+    private bool _hasStarted;
+    /// <summary>True once real progress (Fraction &gt; 0) has been observed
+    /// within the current Downloading session. Sticky for the life of one
+    /// install session; reset only when a fresh install begins
+    /// (<see cref="ResetForRetry"/>). The Welcome/Settings ProgressBar binds
+    /// IsIndeterminate to NOT-yet-started rather than to an instantaneous
+    /// Fraction&lt;=0 so a cross-pack fraction rewind (the GPU pack installs
+    /// two sub-packs into one slot, so Fraction drops 1.0→~0 between them)
+    /// can't re-flap the bar marquee↔fill. Likewise the rate/ETA row stays
+    /// visible once started, instead of collapsing on a single transient
+    /// sub-100 B/s stall sample.</summary>
+    public bool HasStarted
+    {
+        get => _hasStarted;
+        private set => Set(ref _hasStarted, value);
+    }
+
     private ulong? _bytesDone;
     public ulong? BytesDone { get => _bytesDone; set => Set(ref _bytesDone, value); }
 
@@ -121,7 +138,18 @@ internal sealed class ModelSlot : INotifyPropertyChanged
     /// </summary>
     public void Apply(ModelDownloadProgress p, Func<bool> sentinelExists)
     {
-        Fraction = p.Fraction;
+        // Clamp the displayed Fraction non-decreasing while Downloading. The
+        // GPU (multi-pack) bundle runs as TWO sequential installs into ONE
+        // slot (cuDNN pack, then the ORT-CUDA provider); the engine emits a
+        // monotonic aggregate fraction WITHIN one prewarm, so Fraction
+        // rewinds 1.0→~0 at the pack boundary. A bound ProgressBar.Value
+        // jumping backward reads as a glitch — keep it monotonic for the life
+        // of the session. ResetForRetry (fresh user-initiated start) is the
+        // only place Fraction is allowed back to 0.
+        Fraction = Status == ModelInstallStatus.Downloading
+            ? Math.Max(Fraction, p.Fraction)
+            : p.Fraction;
+        if (Fraction > 0) HasStarted = true;
         BytesDone = p.BytesDone;
         // don't let a per-file `total_bytes` from the engine
         // downgrade the slot's bundle-cumulative total. MobileCLIP-S2
@@ -179,6 +207,7 @@ internal sealed class ModelSlot : INotifyPropertyChanged
     {
         Status = ModelInstallStatus.NotInstalled;
         Fraction = 0;
+        HasStarted = false;
         BytesDone = null;
         BytesPerSecond = 0;
         EtaSeconds = 0;

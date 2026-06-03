@@ -69,7 +69,7 @@
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
                             <ProgressBar Maximum="1"
                                          Value="{x:Bind Svc.Arcface.Fraction, Mode=OneWay}"
-                                         IsIndeterminate="{x:Bind IsStarting(Svc.Arcface.Status, Svc.Arcface.Fraction), Mode=OneWay}"
+                                         IsIndeterminate="{x:Bind IsStarting(Svc.Arcface.Status, Svc.Arcface.HasStarted), Mode=OneWay}"
                                          Foreground="{StaticResource GoldBrush}"
                                          Visibility="{x:Bind VisibleIfDownloading(Svc.Arcface.Status), Mode=OneWay}"
                                          Margin="0,4,0,0"
@@ -84,7 +84,7 @@
                             <TextBlock FontFamily="Consolas"
                                        FontSize="11"
                                        Text="{x:Bind RateEtaLabel(Svc.Arcface.BytesPerSecond, Svc.Arcface.EtaSeconds), Mode=OneWay}"
-                                       Visibility="{x:Bind ShowRateEta(Svc.Arcface.Status, Svc.Arcface.BytesPerSecond), Mode=OneWay}"
+                                       Visibility="{x:Bind ShowRateEta(Svc.Arcface.Status, Svc.Arcface.HasStarted), Mode=OneWay}"
                                        Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                        TextWrapping="Wrap"/>
                             <TextBlock Text="{x:Bind ErrorLabel(Svc.Arcface.LastError), Mode=OneWay}"
@@ -131,7 +131,7 @@
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
                             <ProgressBar Maximum="1"
                                          Value="{x:Bind Svc.Clip.Fraction, Mode=OneWay}"
-                                         IsIndeterminate="{x:Bind IsStarting(Svc.Clip.Status, Svc.Clip.Fraction), Mode=OneWay}"
+                                         IsIndeterminate="{x:Bind IsStarting(Svc.Clip.Status, Svc.Clip.HasStarted), Mode=OneWay}"
                                          Foreground="{StaticResource GoldBrush}"
                                          Visibility="{x:Bind VisibleIfDownloading(Svc.Clip.Status), Mode=OneWay}"
                                          Margin="0,4,0,0"
@@ -146,7 +146,7 @@
                             <TextBlock FontFamily="Consolas"
                                        FontSize="11"
                                        Text="{x:Bind RateEtaLabel(Svc.Clip.BytesPerSecond, Svc.Clip.EtaSeconds), Mode=OneWay}"
-                                       Visibility="{x:Bind ShowRateEta(Svc.Clip.Status, Svc.Clip.BytesPerSecond), Mode=OneWay}"
+                                       Visibility="{x:Bind ShowRateEta(Svc.Clip.Status, Svc.Clip.HasStarted), Mode=OneWay}"
                                        Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                        TextWrapping="Wrap"/>
                             <TextBlock Text="{x:Bind ErrorLabel(Svc.Clip.LastError), Mode=OneWay}"
@@ -194,7 +194,7 @@
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
                             <ProgressBar Maximum="1"
                                          Value="{x:Bind Svc.RamPlus.Fraction, Mode=OneWay}"
-                                         IsIndeterminate="{x:Bind IsStarting(Svc.RamPlus.Status, Svc.RamPlus.Fraction), Mode=OneWay}"
+                                         IsIndeterminate="{x:Bind IsStarting(Svc.RamPlus.Status, Svc.RamPlus.HasStarted), Mode=OneWay}"
                                          Foreground="{StaticResource GoldBrush}"
                                          Visibility="{x:Bind VisibleIfDownloading(Svc.RamPlus.Status), Mode=OneWay}"
                                          Margin="0,4,0,0"
@@ -209,7 +209,7 @@
                             <TextBlock FontFamily="Consolas"
                                        FontSize="11"
                                        Text="{x:Bind RateEtaLabel(Svc.RamPlus.BytesPerSecond, Svc.RamPlus.EtaSeconds), Mode=OneWay}"
-                                       Visibility="{x:Bind ShowRateEta(Svc.RamPlus.Status, Svc.RamPlus.BytesPerSecond), Mode=OneWay}"
+                                       Visibility="{x:Bind ShowRateEta(Svc.RamPlus.Status, Svc.RamPlus.HasStarted), Mode=OneWay}"
                                        Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                        TextWrapping="Wrap"/>
                             <TextBlock Text="{x:Bind ErrorLabel(Svc.RamPlus.LastError), Mode=OneWay}"

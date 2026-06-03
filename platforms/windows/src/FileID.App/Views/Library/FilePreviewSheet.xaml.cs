@@ -31,6 +31,7 @@ public sealed partial class FilePreviewSheet : UserControl
 
     private IReadOnlyList<FileID.ViewModels.FileTile>? _siblings;
     private int _siblingIndex;
+    private bool _unloaded;
 
     /// <summary>Raised by the toolbar X button + Esc. Host (LibraryView)
     /// subscribes and calls <c>ContentDialog.Hide()</c>.</summary>
@@ -46,6 +47,7 @@ public sealed partial class FilePreviewSheet : UserControl
         Loaded += OnSheetLoaded;
         Unloaded += (_, _) =>
         {
+            _unloaded = true;
             // Stop playback + fully dispose the MediaPlayer so audio can't keep
             // playing and the file handle is released after the dialog dismisses.
             StopAndClearMedia();
@@ -207,12 +209,15 @@ public sealed partial class FilePreviewSheet : UserControl
         }
         catch (Exception ex)
         {
+            // The sheet may have unloaded while SetFileCoreAsync awaited; a
+            // post-continuation ShowPlaceholder would touch a torn-down tree.
+            if (_unloaded) return;
             Services.DebugLog.Warn("FilePreviewSheet.SetFile threw: " + ex);
             ShowPlaceholder(kind, "Preview failed: " + ex.Message);
         }
         finally
         {
-            LoadingPanel.Visibility = Visibility.Collapsed;
+            if (!_unloaded) LoadingPanel.Visibility = Visibility.Collapsed;
         }
     }
 
@@ -555,9 +560,10 @@ public sealed partial class FilePreviewSheet : UserControl
 
         if (string.IsNullOrWhiteSpace(name)) return;
         _pendingProposedName = name;
-        // Defensive: sheet may have closed during the async query. Wrap
-        // the UI mutation so a torn-down dialog content tree doesn't
-        // fast-fail the dispatcher.
+        // Defensive: sheet may have closed during the async query. Bail before
+        // touching XAML, then wrap the UI mutation so a torn-down dialog
+        // content tree doesn't fast-fail the dispatcher.
+        if (_unloaded) return;
         try
         {
             ProposedRenameText.Text = name;
@@ -644,6 +650,7 @@ public sealed partial class FilePreviewSheet : UserControl
         if (tags.Count == 0) return;
         // UI mutation in a try/catch — sheet may have closed during the
         // async DB read; the XAML element references could be disposed.
+        if (_unloaded) return;
         try
         {
             // Build a wrapping chip layout via runtime row construction:

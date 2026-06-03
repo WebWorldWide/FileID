@@ -22,6 +22,13 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     internal PeopleViewModel ViewModel { get; }
     private const string MergeFormatId = "fileid/person-cluster-id";
 
+    // Drag-over highlight brush. SolidColorBrush is a DispatcherObject;
+    // constructing one per drag-over event (fired continuously while a
+    // cluster card hovers) is the V15.2-class native fast-fail shape —
+    // cache once on the dispatcher this view owns and reuse. Mirrors
+    // SidebarEngineStatus's ctor-cached brushes.
+    private readonly SolidColorBrush _goldBrush = new(Microsoft.UI.Colors.Gold);
+
     private bool _unloaded;
     public PeopleView()
     {
@@ -309,7 +316,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             // animation would be nicer; brush swap is cheaper + lands now).
             if (sender is Grid g)
             {
-                g.BorderBrush = new SolidColorBrush(Microsoft.UI.Colors.Gold);
+                g.BorderBrush = _goldBrush;
                 g.BorderThickness = new Thickness(2);
             }
         }

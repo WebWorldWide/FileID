@@ -58,6 +58,17 @@ public sealed partial class MainWindow : Window
     private IntPtr _subclassedHwnd = IntPtr.Zero;
     private const uint DpiSubclassId = 0xF11E1D;
 
+    // ApplySidebarVisibility fires on every tab switch / folder change. Cache
+    // its two brushes at ctor (UI thread) instead of allocating a fresh
+    // SolidColorBrush per call — per-event DispatcherObject churn off the
+    // captured thread is the app's hazard class (CLAUDE.md).
+    private readonly Microsoft.UI.Xaml.Media.Brush _transparentBrush =
+        new Microsoft.UI.Xaml.Media.SolidColorBrush(Colors.Transparent);
+    private readonly Microsoft.UI.Xaml.Media.Brush _goldSidebarBrush =
+        FileID.Services.ThemeHelper.GetBrushSafe(
+            "GoldBrush",
+            new Microsoft.UI.Xaml.Media.SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00)));
+
     public MainWindow()
     {
         // every step in the constructor is independently
@@ -596,7 +607,7 @@ public sealed partial class MainWindow : Window
             SidebarHost.Visibility = Visibility.Visible;
             // Hamburger on transparent — "open sidebar is here, you can hide it."
             SidebarToggleGlyph.Glyph = "";
-            SidebarToggleButton.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Colors.Transparent);
+            SidebarToggleButton.Background = _transparentBrush;
             ToolTipService.SetToolTip(SidebarToggleButton, "Hide sidebar (Ctrl+Shift+S)");
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(SidebarToggleButton, "Hide sidebar");
         }
@@ -613,15 +624,7 @@ public sealed partial class MainWindow : Window
             // when the sidebar was hidden, so users saw the chevron in
             // SidebarFolderHeader vanish and assumed there was no return path.
             SidebarToggleGlyph.Glyph = "";
-            try
-            {
-                SidebarToggleButton.Background = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["GoldBrush"];
-            }
-            catch
-            {
-                SidebarToggleButton.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(
-                    Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00));
-            }
+            SidebarToggleButton.Background = _goldSidebarBrush;
             ToolTipService.SetToolTip(SidebarToggleButton, "Show sidebar (Ctrl+Shift+S)");
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(SidebarToggleButton, "Show sidebar");
         }

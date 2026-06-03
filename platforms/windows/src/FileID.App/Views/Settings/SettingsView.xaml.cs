@@ -639,6 +639,14 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     /// of truth for status; the x:Bind paths on the card update automatically
     /// via the slot's PropertyChanged. No more local OnProgress subscription
     /// (which couldn't pick up state changes that originated in Welcome).</summary>
+    // Per-card install re-entry guard. Mirrors WelcomeSheet: PrewarmAsync
+    // only flips Status to Downloading after awaiting WaitForReadyAsync, so a
+    // rapid double-click on Install/Retry could otherwise fire two
+    // slot.InstallAsync() (→ duplicate prewarm IPC) while Status is still
+    // NotInstalled/Failed. UI-thread-confined (click handler + ConfigureAwait
+    // (true) continuation).
+    private readonly System.Collections.Generic.HashSet<Services.ModelSlot> _installInFlight = new();
+
     private void OnInstallModelClicked(object sender, RoutedEventArgs e)
     {
         if (sender is not Button button || button.Tag is not string modelKind || string.IsNullOrWhiteSpace(modelKind))
@@ -663,7 +671,16 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             _ = CancelSlotAsync(slot);
             return;
         }
-        _ = SafeRunAsync(() => slot.InstallAsync(), "Install " + slot.DisplayLabel);
+        if (!_installInFlight.Add(slot))
+        {
+            DebugLog.Info($"[SETTINGS] {slot.DisplayLabel} install already in flight; ignoring duplicate click.");
+            return;
+        }
+        _ = SafeRunAsync(async () =>
+        {
+            try { await slot.InstallAsync().ConfigureAwait(true); }
+            finally { _installInFlight.Remove(slot); }
+        }, "Install " + slot.DisplayLabel);
     }
 
     // Drive the cancel and surface failure. If CancelAllAsync throws (engine
@@ -755,8 +772,12 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     // Single ProgressBar per model card: indeterminate until the first byte,
     // then determinate. Replaces the old ProgressBar↔ProgressRing Visibility
     // swap that flickered each time Fraction crossed 0.
-    internal bool IsStarting(Services.ModelInstallStatus s, double frac) =>
-        s == Services.ModelInstallStatus.Downloading && frac <= 0;
+    //
+    // Gate indeterminate on NOT-yet-started (HasStarted is sticky for the
+    // session), not on an instantaneous frac<=0 — so a multi-pack fraction
+    // rewind can't re-flap the bar to its marquee. Mirrors WelcomeSheet.
+    internal bool IsStarting(Services.ModelInstallStatus s, bool hasStarted) =>
+        s == Services.ModelInstallStatus.Downloading && !hasStarted;
 
     internal Visibility ShowActionButton(Services.ModelInstallStatus s) =>
         s != Services.ModelInstallStatus.Installed ? Visibility.Visible : Visibility.Collapsed;
@@ -768,8 +789,11 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         _ => "Install",
     };
 
-    internal Visibility ShowRateEta(Services.ModelInstallStatus status, double bytesPerSecond) =>
-        status == Services.ModelInstallStatus.Downloading && bytesPerSecond > 0
+    // Sticky once started — see WelcomeSheet.ShowRateEta. Avoids flapping the
+    // row in/out on a single transient sub-100 B/s stall sample; RateEtaLabel
+    // renders empty text while stalled so the row holds a blank line.
+    internal Visibility ShowRateEta(Services.ModelInstallStatus status, bool hasStarted) =>
+        status == Services.ModelInstallStatus.Downloading && hasStarted
             ? Visibility.Visible : Visibility.Collapsed;
 
     internal string ProgressLabel(string? message, double fraction, ulong? bytesDone, ulong? totalBytes)

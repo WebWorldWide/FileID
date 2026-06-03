@@ -165,6 +165,10 @@ public sealed partial class RestructureView : UserControl
                             await RefreshDeepAnalyzeHintAsync();
                             if (!string.IsNullOrEmpty(folder))
                             {
+                                // This recompute supersedes any prior plan, so the
+                                // user's selection intent from the old plan must not
+                                // leak forward (see _deselectedFileIds).
+                                _deselectedFileIds.Clear();
                                 try { await EngineClient.Instance.PlanRestructureAsync(folder!); }
                                 catch (Exception ex) { DebugLog.Warn("Restructure auto-regen failed: " + ex.Message); }
                             }

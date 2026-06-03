@@ -174,8 +174,13 @@ public sealed partial class WelcomeSheet : UserControl
     // flips indeterminate → determinate the moment the first byte lands.
     // Toggling one property once is flicker-free; swapping two controls'
     // Visibility every time Fraction crossed 0 was the old flicker source.
-    internal bool IsStarting(ModelInstallStatus s, double frac) =>
-        s == ModelInstallStatus.Downloading && frac <= 0;
+    //
+    // Gate indeterminate on NOT-yet-started (HasStarted is sticky for the
+    // session), not on an instantaneous frac<=0. The GPU pack installs two
+    // sub-packs into one slot, so Fraction rewinds 1.0→~0 at the boundary; a
+    // frac<=0 gate would re-flap the bar back to its marquee mid-download.
+    internal bool IsStarting(ModelInstallStatus s, bool hasStarted) =>
+        s == ModelInstallStatus.Downloading && !hasStarted;
 
     internal Visibility ShowActionButton(ModelInstallStatus s) =>
         s != ModelInstallStatus.Installed ? Visibility.Visible : Visibility.Collapsed;
@@ -197,8 +202,14 @@ public sealed partial class WelcomeSheet : UserControl
     // we have to pass the individual properties so x:Bind subscribes to
     // each one's PropertyChanged. Hence the verbose argument lists.
 
-    internal Visibility ShowRateEta(ModelInstallStatus status, double bytesPerSecond) =>
-        status == ModelInstallStatus.Downloading && bytesPerSecond > 0
+    // Sticky: once the rate row has shown during a Downloading session, keep
+    // it Visible rather than collapsing on a single transient sub-100 B/s
+    // stall sample (which would flap the row in/out). RateEtaLabel still
+    // renders empty text when BytesPerSecond==0, so a stalled row shows a
+    // blank line instead of vanishing. The 5-sample "Stalled…" Message in
+    // ModelSlot still surfaces a real stall.
+    internal Visibility ShowRateEta(ModelInstallStatus status, bool hasStarted) =>
+        status == ModelInstallStatus.Downloading && hasStarted
             ? Visibility.Visible : Visibility.Collapsed;
 
     internal string ProgressLabel(string? message, double fraction, ulong? bytesDone, ulong? totalBytes)
@@ -371,6 +382,13 @@ public sealed partial class WelcomeSheet : UserControl
         return $"~{approxBytes / (1024 * 1024)} MB";
     }
 
+    // Per-row install re-entry guard. PrewarmAsync only flips Status to
+    // Downloading AFTER awaiting WaitForReadyAsync, so a rapid double-click
+    // on Install/Retry can fire two slot.InstallAsync() (→ duplicate prewarm
+    // IPC) while Status is still NotInstalled/Failed. Tracked by slot
+    // reference; cleared when the install task settles.
+    private readonly HashSet<ModelSlot> _installInFlight = new();
+
     private void HandleAction(ModelSlot slot)
     {
         DebugLog.Info($"[INSTALL] HandleAction({slot.DisplayLabel}) — Status={slot.Status}");
@@ -390,7 +408,16 @@ public sealed partial class WelcomeSheet : UserControl
                 break;
             case ModelInstallStatus.NotInstalled:
             case ModelInstallStatus.Failed:
-                _ = SafeRunAsync(() => slot.InstallAsync(), "Install " + slot.DisplayLabel);
+                if (!_installInFlight.Add(slot))
+                {
+                    DebugLog.Info($"[INSTALL] {slot.DisplayLabel} install already in flight; ignoring duplicate click.");
+                    break;
+                }
+                _ = SafeRunAsync(async () =>
+                {
+                    try { await slot.InstallAsync().ConfigureAwait(true); }
+                    finally { _installInFlight.Remove(slot); }
+                }, "Install " + slot.DisplayLabel);
                 break;
             case ModelInstallStatus.Installed:
                 // No-op — UI shouldn't show a button in Installed state, but

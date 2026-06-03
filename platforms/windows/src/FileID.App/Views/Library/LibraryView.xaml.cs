@@ -326,6 +326,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 
     private void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
     {
+        if (_unloaded) return;
         if (e.PropertyName is nameof(LibraryViewModel.IsLoading)
             or nameof(LibraryViewModel.ErrorMessage))
         {
@@ -336,6 +337,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 
     private void OnItemsCollectionChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
     {
+        if (_unloaded) return;
         OnPropertyChanged(nameof(StatusText));
         OnPropertyChanged(nameof(FooterVisibility));
     }

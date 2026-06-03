@@ -115,7 +115,7 @@ async fn async_main() -> Result<()> {
         let _ = platform::register_dll_dirs_under(&models_dir.join("packs").join("qnn"));
         let _ = platform::register_dll_dirs_under(&models_dir.join("llama.cpp"));
         let _ = platform::register_dll_dirs_under(&models_dir.join("llama.cpp-cuda"));
-        // Private cuDNN drop (auto-installed on NVIDIA via CudnnAutoInstaller).
+        // Private cuDNN drop (installed on demand via the GPU acceleration pack).
         // The archive extracts a versioned dir containing bin/, so register the
         // parent — register_dll_dirs_under walks subdirs for DLLs.
         let _ = platform::register_dll_dirs_under(&models_dir.join("cudnn"));
