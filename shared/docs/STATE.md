@@ -8,6 +8,14 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-02 (later 7) — User-reported GPU-pack bugs + 18-bug sweep (PR #8)
+
+Fixed two user-reported Windows bugs + an adversarial-hunt sweep, via a diagnose→hunt→fix workflow chain (38-agent read-only diagnose/hunt → 8-cell file-disjoint fix + 3 verifiers). All headless-gate-green (engine clippy -D + fmt + tests; app build 0/0 + format + 108 tests). Merged to main (PR #8, 420a5ce), all 5 CI jobs green.
+
+- **GPU acceleration pack now installs ONLY on user action** (`CudaAutoInstaller.cs`): removed the NVIDIA auto-install on engine-Ready (the `TryInstallOrtCudaPack` + auto `PrewarmModelAsync(llama_runtime_cuda_x64)`); kept GPU detection so the Accelerator slot still shows status. Installs only via WelcomeSheet GPU button / Settings / Install-all. **OPEN PRODUCT DECISION:** the Intel/OpenVINO auto-install (`TryInstallOpenVinoPack`) was left intact — Intel has no explicit install button, so gating it would orphan Intel's only path. Decide: leave it, or gate it + add an Intel install entry point.
+- **Download flicker fixed** (`ModelSlot.cs` + WelcomeSheet/SettingsView bindings): the GPU pack runs two sequential sub-installs into one slot, rewinding `Fraction` 1.0→~0 at the boundary → the bar jumped backward + `IsIndeterminate` re-flapped (marquee↔fill). Now publishes a MONOTONIC `Fraction` (`Math.Max` while Downloading) + sticky `HasStarted`; `IsStarting`/`ShowRateEta` gate on `HasStarted` across all 5 WelcomeSheet + 3 SettingsView rows. Added a per-row in-flight re-entry guard (no duplicate Prewarm on double-click). **Visual needs the RTX 2060 to confirm** (one smooth non-rewinding bar; no auto-download on launch).
+- **18-bug sweep** (refute-by-default verified): brush-churn/`Resources[]` (MainWindow/PeopleView/DrillDownSheet → ctor-cache + GetBrushSafe); IPC silent-failure/timeouts (RestoreFromTrash/DeepAnalyzeFile/Prewarm → bounded result-await); lifecycle guards (LibraryView _unloaded + ThumbnailService dispose; FilePreviewSheet post-unload; RestructureView static deselect-set reset); UndoStack batch-id parse guard (no IndexOutOfRange); engine `prewarm.rs` (aggregate parallel-download errors + clean partial on sentinel-write fail + log register_dll_dirs Err) + `scan.rs` (actionable model-load-timeout EngineError). Corrected stale CudaAutoInstaller comments in registry.rs/main.rs.
+
 ## 2026-06-02 (later 6) — Verified "what's-left" audit + Windows ship-hardening + RAM++ 256 closure + on-hardware
 
 Answered "what's left for v1.0" with a refute-by-default audit workflow (5 cells vs current main) — it found the persistence docs overstate remaining work; **the sole hard external blocker is the EV cert.** Then landed the high-value doable-here code, ran the on-hardware test (authorized), and definitively closed the 256 question.
