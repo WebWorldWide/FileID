@@ -1236,11 +1236,29 @@ async fn process_file_predecoded(
     // skip the whole ML pipeline for the rest of this process lifetime.
     // mark_gpu_dead is one-shot (see coordinator.rs:96 — never reset),
     // so this also prevents the remaining Discovery queue from queueing
-    // up tens of thousands of doomed inference calls behind us. The row
-    // is still emitted (with failed=false, empty embeddings) so the
-    // file row exists in the DB and a future scan after restart picks
-    // it up.
+    // up tens of thousands of doomed inference calls behind us.
+    //
+    // Mark the row failed=true (NOT false): this file never reached the ML
+    // stages, so it has no faces/tags/embeddings. The incremental skip-set
+    // only skips failed=0 rows, so failed=1 forces a re-process on the next
+    // scan after a restart. Emitting failed=false here would stamp the file
+    // scanned-and-fine-with-no-faces and the timestamp-only skip-set would
+    // skip it forever — stranding it face-less permanently (the row still
+    // exists either way, so the resume cursor advances regardless).
     if coord.is_gpu_dead() {
+        // Only files that NEED the now-skipped GPU ML stages should be marked
+        // failed for retry — images/videos (face detect + embed). A Doc/Pdf/Audio
+        // row already finished its CPU-only extraction above, so marking it
+        // failed would wrongly hide a fully-processed file from the Library until
+        // the next healthy scan. (Their optional BGE embedding is skipped, but
+        // FTS keyword search still works, so leaving them failed=false is correct.)
+        let needed_gpu = matches!(file.kind, FileKind::Image | FileKind::Video);
+        tagged.failed = needed_gpu;
+        if needed_gpu {
+            tagged.error_message = Some(
+                "GPU device removed mid-scan; file not processed (will retry next scan)".into(),
+            );
+        }
         tagged.total_ms = started.elapsed().as_secs_f64() * 1000.0;
         return tagged;
     }

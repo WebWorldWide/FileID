@@ -1,6 +1,38 @@
 # NEXT — Windows (resume here)
 
-## 2026-06-03 — Post-audit: ALL deferred fixed; merge + on-hardware verify (RESUME HERE)
+## 2026-06-04 — Face-fix branch: merge + on-hardware calibrate (RESUME HERE)
+
+`win-face-cluster-merge-perf-2026-06-03` fixes face scanning "totally broken" (root cause: the
+`clip_text` scan-gate) + over-split / slow-merges + the install-stall toast — 16 fixes across
+engine+app, found via 3 adversarial workflows (audit → gap-verify → re-audit). Headless-green: engine
+clippy `-D` + **264 tests**; app build 0/0 + **App.Tests 108** + **IpcSchema.Tests 34** + format. See
+STATE.md 2026-06-04 + DECISIONS.md. Resume order:
+
+1. **Merge `win-face-cluster-merge-perf-2026-06-03` → main**, confirm both GitHub workflows green.
+2. **On-hardware (RTX 2060) — the only non-headless verification:** install models (let `clip_text`
+   finish), run a scan → confirm faces now populate the People tab; eyeball far fewer duplicate-person
+   cards (auto-consolidate @0.85) and that suggested-merges is fast with the obvious dups at top. Tune
+   `FILEID_FACE_AUTOMERGE_COS` (default 0.85) + the clustering thresholds against the labeled
+   `G:\TrueNAS` library; set `=1.0` to disable auto-merge if over-merge appears.
+3. **Deferred (real but out-of-scope this pass; file:line in the audit task outputs):**
+   - **RAW decode** (arw/cr2/nef/dng → `FileKind::Image` but the `image` crate can't decode them → those
+     files get zero faces). Needs a RAW-decode dependency (ASK before adding) or a WIC/embedded-preview
+     fallback in `decode_image_sync`.
+   - **Rotated portrait VIDEO** keyframes: Media Foundation doesn't auto-apply the display-rotation
+     matrix → a rotated keyframe can miss faces (fail-soft, video-only). `shell/video.rs`.
+   - **consolidate() 12k-cluster cap** degrades to a full no-op at extreme over-split — raise the cap or
+     restrict the O(C²) scan to the top-N largest clusters (`face_clustering.rs` AUTOMERGE_MAX_CLUSTERS).
+   - **suggested-merges HNSW** for very large person counts (mirror cluster()'s HNSW_MIN path) —
+     consolidate() reduces P, so only needed if a real library still has many thousands of persons.
+   - **Orphaned-verdict residual:** a "different people" verdict on two UNNAMED clusters can be lost if a
+     re-scan churns `face_prints.id`; durable fix is content-keyed (file_id+bbox) `face_verifications`
+     (migration vN+1). The name-guard already covers the named-people case.
+4. **macOS lockstep** (needs a Mac): mirror the new face behaviors into the apple engine for parity —
+   the relaxed scan model-gate, the centroid auto-merge + verdict/name guards, the 0.55..0.97 suggestion
+   band, and the load-failure abort. No new Windows-side migrations this pass.
+5. **(unchanged)** add `FileID.IpcSchema.Tests` to `FileID.sln`; EV code-signing cert.
+
+## 2026-06-03 — Post-audit: ALL deferred fixed; merge + on-hardware verify
 
 Full-repo audit (4 workflows, 78 confirmed) → ~70 distinct bugs fixed on branch
 `win-prod-hardening-2026-06-03`, then a 5-pass refute-by-default RE-AUDIT loop caught + fixed 14
@@ -8,7 +40,7 @@ fix-introduced regressions. Headless-green: engine clippy `-D` + fmt + **258 tes
 **App.Tests 108** + **IpcSchema.Tests 34** + format. Full record + the re-audit table in
 [`AUDIT-2026-06-03.md`](AUDIT-2026-06-03.md). **NOT yet merged.** Resume order:
 
-1. **Review + merge `win-prod-hardening-2026-06-03` → main**, confirm both GitHub workflows green.
+1. ~~Review + merge `win-prod-hardening-2026-06-03` → main~~ **DONE — merged as PR #9 (`773a812`), CI green.**
 2. **On-hardware confirm (RTX 2060, the only thing not headless-verifiable):** `build-all.ps1 -Run`
    and eyeball the flicker fixes — search box doesn't glitch/crash; Deep Analyze 2nd run doesn't
    flicker; pipeline strip never blanks to grey on scan completion; Cleanup/People don't rebuild

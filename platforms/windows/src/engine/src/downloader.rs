@@ -60,7 +60,14 @@ fn http_semaphore() -> &'static Arc<tokio::sync::Semaphore> {
 ///                        Qwen 2.5-VL 3B (2.1 GB) download running on
 ///                        a connection slower than ~7 MB/s — the
 ///                        original "reading chunk" failure on the
-///                        Welcome sheet.
+///                        Welcome sheet. Set to 60 s (not 120 s) so a
+///                        genuinely stalled stream errors → resumes via
+///                        download_range_with_retry within ~61 s, which
+///                        re-emits progress and re-arms the app's 120 s
+///                        no-progress install watchdog BEFORE it alarms
+///                        the user mid-recovery. 60 s of total silence is
+///                        a dead connection, never a healthy slow one
+///                        (any byte resets the timer).
 pub fn build_shared_client() -> Result<Arc<reqwest::Client>> {
     // Restrict redirects to the host families we actually download from (HF +
     // its CDN, GitHub + its objects CDN, NVIDIA). reqwest's default follows up to
@@ -96,7 +103,7 @@ pub fn build_shared_client() -> Result<Arc<reqwest::Client>> {
         .pool_idle_timeout(Some(Duration::from_secs(60)))
         .pool_max_idle_per_host(PARALLEL_PARTS * 2)
         .connect_timeout(Duration::from_secs(30))
-        .read_timeout(Duration::from_secs(120))
+        .read_timeout(Duration::from_secs(60))
         .redirect(redirect_policy)
         .build()
         .context("building shared reqwest client")?;

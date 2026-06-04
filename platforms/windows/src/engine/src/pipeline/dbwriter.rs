@@ -167,6 +167,11 @@ impl DbWriter {
         let mut store = Vec::with_capacity(buffer.len());
         let files_in_batch = buffer.len() as u32;
 
+        // Face-crop ids orphaned by faces_evaluated re-processing, pruned AFTER
+        // the batch commits — never inside the tx, so a batch rollback (which
+        // restores the old face_prints rows) can't leave them crop-less.
+        let mut crop_ids_to_prune: Vec<i64> = Vec::new();
+
         let conn = self.conn.lock();
         let tx = conn.unchecked_transaction().context("opening tx")?;
         {
@@ -338,6 +343,20 @@ impl DbWriter {
                 // session leaves still-valid rows intact (#5). The insert loop
                 // is naturally a no-op when there are no faces.
                 if f.faces_evaluated {
+                    // Capture the face ids being replaced so their now-orphaned
+                    // crop JPEGs (face_crops/<id>.jpg) can be pruned below: the
+                    // re-inserted faces get fresh AUTOINCREMENT ids, so without
+                    // this every faces_evaluated re-process leaks the prior crops
+                    // on disk (face_crops/ grows unbounded across re-scans).
+                    let stale_face_ids: Vec<i64> = {
+                        let mut q =
+                            tx.prepare_cached("SELECT id FROM face_prints WHERE file_id = ?1")?;
+                        let ids = q
+                            .query_map(params![file_id], |r| r.get::<_, i64>(0))?
+                            .filter_map(|r| r.ok())
+                            .collect::<Vec<_>>();
+                        ids
+                    };
                     face_delete
                         .execute(params![file_id])
                         .with_context(|| format!("face delete for {rp}"))?;
@@ -371,6 +390,10 @@ impl DbWriter {
                             }
                         }
                     }
+                    // New AUTOINCREMENT ids never collide with the deleted ones,
+                    // so every captured id is now orphaned. Defer the file delete
+                    // until after commit (below) so a rollback can't orphan crops.
+                    crop_ids_to_prune.extend(stale_face_ids);
                 }
 
                 // Delete-then-conditional-insert, but ONLY when the OCR stage
@@ -463,6 +486,12 @@ impl DbWriter {
             }
         }
         tx.commit().context("commit batch")?;
+
+        // Batch is durable; now prune crop JPEGs for the face ids it replaced.
+        // (After commit so a rolled-back batch never deletes a live crop.)
+        for old_id in crop_ids_to_prune {
+            remove_face_crop(old_id);
+        }
 
         // Periodic WAL checkpoint to keep the -wal file from growing
         // unboundedly on long scans. SQLite's auto-checkpoint (on this
@@ -696,6 +725,15 @@ fn save_face_crop(face_id: i64, crop_rgb_112: &[u8]) -> anyhow::Result<()> {
         .context("encode face crop JPEG")?;
     std::fs::write(&dest, &bytes).with_context(|| format!("write {}", dest.display()))?;
     Ok(())
+}
+
+/// Best-effort removal of a face crop JPEG (face_crops/<face_id>.jpg) orphaned
+/// by a faces_evaluated re-process. Silent on any error — a leftover crop is
+/// cosmetic disk use, never a correctness issue.
+fn remove_face_crop(face_id: i64) {
+    if let Ok(dir) = crate::paths::faces_dir() {
+        let _ = std::fs::remove_file(dir.join(format!("{face_id}.jpg")));
+    }
 }
 
 #[cfg(test)]

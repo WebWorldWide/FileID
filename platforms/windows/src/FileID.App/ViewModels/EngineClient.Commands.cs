@@ -461,9 +461,14 @@ internal sealed partial class EngineClient
     /// instead the watchdog only fires when NO <c>ModelDownloadProgress</c>
     /// event lands for this long, which means the engine wedged. Each progress
     /// event re-arms the window (any progress = engine alive), so a healthy
-    /// multi-GB download never false-fails. Matches ModelInstallerService's
-    /// 60 s no-progress guard; raised here only by the absolute backstop.</summary>
-    private static readonly TimeSpan PrewarmNoProgressTimeout = TimeSpan.FromSeconds(90);
+    /// multi-GB download never false-fails. 120 s (was 90 s) sits ABOVE the
+    /// engine's own 60 s read-timeout + resume cycle (downloader.rs): a transient
+    /// HuggingFace stall self-heals — the engine errors the dead read at ~60 s,
+    /// resumes from the .part, and re-emits progress — re-arming this window
+    /// before it fires, so the user is no longer told to "cancel and retry"
+    /// (interrupting recovery) mid-self-heal. Only a genuinely wedged engine
+    /// (no progress for a full 120 s) still alarms.</summary>
+    private static readonly TimeSpan PrewarmNoProgressTimeout = TimeSpan.FromSeconds(120);
 
     /// <summary>Absolute backstop. Even with a stall watchdog, a pathological
     /// engine could dribble one byte every 89 s forever; this caps the total
@@ -518,49 +523,85 @@ internal sealed partial class EngineClient
         // reference change is a reliable "the engine emitted progress" signal.
         var lastProgress = ModelDownloadProgress;
 
-        while (true)
+        // Per-kind terminal latch. The shared ModelDownloadProgress slot is
+        // overwritten by OTHER concurrent installs (Install-All), so polling it
+        // only at wake time can MISS this kind's terminal (fraction >= 1.0)
+        // event — after which, once the other downloads go quiet, the guard would
+        // false-fire a "stopped responding" toast for a model that actually
+        // finished (the reported clip_text symptom). Subscribing for the loop's
+        // lifetime and latching the first terminal event for THIS kind makes a
+        // completed install always stop the guard, regardless of what later
+        // overwrites the slot. (The 90s→120s bump alone does NOT fix this.)
+        var reachedTerminal = 0;
+        void OnProgress(object? _, PropertyChangedEventArgs e)
         {
-            if (IsPrewarmCancelled(modelKind)) return;
-
-            await Task.Delay(PrewarmNoProgressTimeout).ConfigureAwait(false);
-
-            if (IsPrewarmCancelled(modelKind)) return;
-
-            var current = ModelDownloadProgress;
-            // A terminal "installed" event arrives as fraction >= 1.0 for THIS
-            // model — install finished cleanly, stop watching.
-            if (current is { } c
-                && string.Equals(c.ModelKind, modelKind, StringComparison.Ordinal)
-                && c.Fraction >= 0.999)
+            if (e.PropertyName != nameof(ModelDownloadProgress)) return;
+            if (ModelDownloadProgress is { } p
+                && string.Equals(p.ModelKind, modelKind, StringComparison.Ordinal)
+                && p.Fraction >= 1.0)
             {
-                return;
+                Interlocked.Exchange(ref reachedTerminal, 1);
             }
-            // A relevant engine error already routed to LastError (prewarm
-            // failures emit EngineError); stop watching so we don't pile a
-            // generic stall message on top of the specific one.
-            if (LastError is { } err
-                && string.Equals(err.ModelKind, modelKind, StringComparison.Ordinal))
-            {
-                return;
-            }
-            // Any new progress (different slot reference or moved fraction) means
-            // the engine is alive — re-arm the window.
-            if (!ReferenceEquals(current, lastProgress))
-            {
-                lastProgress = current;
-                lastSeenAt = DateTime.UtcNow;
-            }
+        }
+        PropertyChanged += OnProgress;
+        // Catch a terminal that already landed between `await send` and here.
+        // Use >= 1.0 (not 0.999): in-progress events are clamped to min(0.999)
+        // (engine prewarm.rs), so 1.0 latches ONLY on the genuine terminal —
+        // a clamped near-done value must not silence the guard while the engine
+        // is still in its no-progress finalize phase (concat / SHA-256 / extract).
+        if (ModelDownloadProgress is { } seed
+            && string.Equals(seed.ModelKind, modelKind, StringComparison.Ordinal)
+            && seed.Fraction >= 1.0)
+        {
+            Interlocked.Exchange(ref reachedTerminal, 1);
+        }
 
-            var now = DateTime.UtcNow;
-            if (now - lastSeenAt >= PrewarmNoProgressTimeout || now - startedAt >= PrewarmAbsoluteCeiling)
+        try
+        {
+            while (true)
             {
-                var stalled = now - startedAt >= PrewarmAbsoluteCeiling
-                    ? $"The install for '{modelKind}' is still running after {PrewarmAbsoluteCeiling.TotalHours:0} hours — something is wrong. Cancel and try again."
-                    : $"The install for '{modelKind}' stopped responding (no progress for {PrewarmNoProgressTimeout.TotalSeconds:0}s). Check your connection, then cancel and retry.";
-                DebugLog.Warn($"[INSTALL] prewarm stall guard firing for '{modelKind}': {stalled}");
-                _ui.TryEnqueue(() => LastError = new EngineError("model_install_stalled", stalled, null, modelKind));
-                return;
+                if (IsPrewarmCancelled(modelKind)) return;
+                if (Interlocked.CompareExchange(ref reachedTerminal, 0, 0) == 1) return;
+
+                await Task.Delay(PrewarmNoProgressTimeout).ConfigureAwait(false);
+
+                if (IsPrewarmCancelled(modelKind)) return;
+                // The latch catches this kind's terminal even when a later,
+                // other-kind event has overwritten the shared slot.
+                if (Interlocked.CompareExchange(ref reachedTerminal, 0, 0) == 1) return;
+
+                var current = ModelDownloadProgress;
+                // A relevant engine error already routed to LastError (prewarm
+                // failures emit EngineError); stop watching so we don't pile a
+                // generic stall message on top of the specific one.
+                if (LastError is { } err
+                    && string.Equals(err.ModelKind, modelKind, StringComparison.Ordinal))
+                {
+                    return;
+                }
+                // Any new progress (different slot reference) means the engine is
+                // alive — re-arm the window.
+                if (!ReferenceEquals(current, lastProgress))
+                {
+                    lastProgress = current;
+                    lastSeenAt = DateTime.UtcNow;
+                }
+
+                var now = DateTime.UtcNow;
+                if (now - lastSeenAt >= PrewarmNoProgressTimeout || now - startedAt >= PrewarmAbsoluteCeiling)
+                {
+                    var stalled = now - startedAt >= PrewarmAbsoluteCeiling
+                        ? $"The install for '{modelKind}' is still running after {PrewarmAbsoluteCeiling.TotalHours:0} hours — something is wrong. Cancel and try again."
+                        : $"The install for '{modelKind}' stopped responding (no progress for {PrewarmNoProgressTimeout.TotalSeconds:0}s). Check your connection, then cancel and retry.";
+                    DebugLog.Warn($"[INSTALL] prewarm stall guard firing for '{modelKind}': {stalled}");
+                    _ui.TryEnqueue(() => LastError = new EngineError("model_install_stalled", stalled, null, modelKind));
+                    return;
+                }
             }
+        }
+        finally
+        {
+            PropertyChanged -= OnProgress;
         }
     }
 

@@ -59,7 +59,18 @@ pub(crate) async fn handle_start_scan(
     // Pre-flight before ModelStack::load_default. Without this, a user who
     // clicked Scan before completing Welcome would wedge ORT for the full
     // timeout window with no actionable feedback.
-    let missing_models: Vec<&str> = ["mobileclip_s2", "arcface", "clip_text"]
+    //
+    // ONLY the models the SCAN pipeline actually consumes belong here. `arcface`
+    // (the YuNet detector + SFace embedder bundle) drives faces; `mobileclip_s2`
+    // drives per-file image embedding. `clip_text` (the CLIP *text* encoder) is
+    // a QUERY-TIME-only model — it is loaded lazily on the first semantic search
+    // (commands/embed.rs) and is never touched by load_default or any
+    // scan→detect→embed→cluster stage. Requiring it here was a bug: a stalled or
+    // incomplete clip_text install (its sentinel never written) aborted the
+    // ENTIRE scan with models_not_installed, so face scanning produced zero
+    // faces even though YuNet+SFace+MobileCLIP were fully installed. clip_text's
+    // absence must only degrade query-time search, never block a scan.
+    let missing_models: Vec<&str> = ["mobileclip_s2", "arcface"]
         .iter()
         .filter_map(|kind| {
             let model = match models::registry::lookup_full(kind) {
@@ -202,27 +213,53 @@ pub(crate) async fn handle_start_scan(
         }
     };
 
-    // One banner per scan beats N per-file toasts when models are absent.
+    // A model whose install SENTINEL passed the pre-flight above but whose
+    // weights won't actually LOAD (corrupt/incomplete .onnx, AV-quarantined
+    // file, or an EP bind failure on every provider) must ABORT the scan — not
+    // silently skip its stage. A skipped stage still writes every file row with
+    // failed=0 and a fresh scanned_at; the incremental skip-set
+    // (scan_session.rs) is purely timestamp-based, so those files are NEVER
+    // re-tried on later default scans — the face / image-embedding stage stays
+    // permanently empty even after the model is repaired (a real "face scanning
+    // is totally broken, and stays broken" trap). Aborting (mirroring the
+    // missing-sentinel pre-flight) leaves the files un-stamped so a later scan
+    // re-processes them once the model loads. Both checked models are pre-flight
+    // requirements, so reaching here with one None means a genuine load failure.
     {
-        let mut missing_stages: Vec<&str> = Vec::new();
+        let mut failed_to_load: Vec<&str> = Vec::new();
         if models.scrfd.is_none() || models.arcface.is_none() {
-            missing_stages.push("face_detection");
+            failed_to_load.push("face detection + recognition");
         }
         if models.mobileclip_pool.is_none() && models.mobileclip_batch.is_none() {
-            missing_stages.push("image_embedding");
+            failed_to_load.push("image embedding");
         }
-        if !missing_stages.is_empty() {
+        if !failed_to_load.is_empty() {
+            tracing::error!(
+                models = ?failed_to_load,
+                "[SCAN] installed models failed to load; aborting so files aren't stranded face-less"
+            );
+            sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
+                ScanPhase::Failed,
+            ))))
+            .await;
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "stages_skipped_missing_models".into(),
+                kind: "model_load_failed".into(),
                 message: format!(
-                    "Some pipeline stages will be skipped this scan because their models didn't load: {}. \
-                     Reinstall from Settings → Local AI to populate those features.",
-                    missing_stages.join(", ")
+                    "These installed AI models failed to load, so the scan was stopped: {}.\n\n\
+                     The model files are likely incomplete or blocked by antivirus. \
+                     Reinstall them from Settings → Local AI, then scan again. \
+                     (The scan was stopped on purpose so your library isn't recorded as \
+                     scanned-with-these-features-missing, which would skip those files \
+                     on future scans.)",
+                    failed_to_load.join(", ")
                 ),
                 path: None,
                 model_kind: None,
             }))))
             .await;
+            *scan_state.lock() = None;
+            tracing::warn!("[SCAN] handle_start_scan exiting: model_load_failed (post-load)");
+            return;
         }
     }
 

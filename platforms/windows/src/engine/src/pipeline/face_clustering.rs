@@ -1,16 +1,22 @@
-// Face clustering — IdentityClustering driver.
+// Face clustering — density-clustering driver over SFace (128-d) embeddings.
 //
-// Reads ArcFace embeddings from `arcface_embeddings`, runs deterministic
-// agglomerative clustering by cosine similarity, persists per-face cluster
-// IDs into `face_verifications`, and emits `FaceClusteringResult` IPC.
+// Source of truth for thresholds: `identity_clustering::Hyperparameters::default()`
+// and the COS_* / MERGE_SUGGEST_* / AUTOMERGE_* constants in THIS file. Do not
+// re-document numeric thresholds elsewhere — they drift.
 //
-// Algorithm:
-//   1. Load every face row that has an embedding (skip low-quality/extreme-pose).
-//   2. Build pairs by cosine ≥ 0.45; route 0.45–0.70 to VLM verify.
-//   3. Connected-components on the high-similarity graph → clusters.
-//   4. Anchor selection per cluster: highest-quality embedding, persisted
-//      to `identity_anchors` so future faces compare against a stable ref.
-//   5. Emit IPC + write to DB in a single tx so app sidebar refresh is atomic.
+// Pipeline (see `cluster()` + `consolidate()` here, and the DB-side handler in
+// `commands/face_clustering.rs`):
+//   1. Load every `face_prints` row whose `arcface_embedding` (column, not a
+//      table) is non-NULL and `excluded = 0`.
+//   2. `cluster()` runs the 3-pass density algorithm (identity_clustering):
+//      Pass-1 kNN connected components ≥ pass1_cosine, Pass-2 margin-gated
+//      outlier assignment, Pass-3 2-means split of low-cohesion clusters.
+//   3. `consolidate()` folds near-certain duplicate clusters by CENTROID cosine
+//      ≥ FILEID_FACE_AUTOMERGE_COS (default 0.85), respecting user "different
+//      people" verdicts. Anchor per cluster = highest-quality member face.
+//   4. The handler persists `persons` + `face_prints.person_id` in one tx and
+//      emits `FaceClusteringResult`. `face_verifications` is only READ here
+//      (same_person = 0, to block auto-merge of user-confirmed splits).
 
 use std::collections::HashMap;
 
@@ -25,14 +31,28 @@ pub const COS_HIGH: f32 = 0.50;
 /// (provisional — calibrate with labeled faces).
 pub const COS_LOW: f32 = 0.32;
 
-/// P18: upper bound for surfacing MERGE suggestions in the People tab — just
-/// below the clusterer's Pass-1 core threshold (0.66). Two clusters whose
-/// anchors sit in COS_LOW..0.66 didn't auto-merge (below Pass-1) yet are close
-/// enough to likely be the same person; COS_HIGH (0.50) sat below the
-/// clusterer's own Pass-2 (0.54)/Pass-1 (0.66) bands, so over-split same-person
-/// pairs never surfaced as suggestions. Distinct from COS_HIGH so the
-/// (VLM-verifier) uncertain band is unaffected.
-pub const MERGE_SUGGEST_COS_HIGH: f32 = 0.66;
+/// Lower bound for surfacing MERGE suggestions in the People tab. The old code
+/// reused COS_LOW (0.32) as the floor, which flooded the sheet with anchor pairs
+/// deep in impostor territory — empirically (identity_clustering.rs) genuine
+/// same-person SFace cosine sits at 0.88–0.95 and the hardest different-person
+/// (lookalike) pairs top out near ~0.55, so a 0.32 floor is mostly noise. 0.55
+/// keeps the genuinely-uncertain band (plausible cross-pose same person, plus
+/// the hardest impostors worth a human glance) and drops the rest — fewer, more
+/// actionable suggestions. Distinct from COS_LOW so the VLM-verifier band is
+/// unaffected.
+pub const MERGE_SUGGEST_COS_LOW: f32 = 0.55;
+
+/// Upper bound for surfacing MERGE suggestions in the People tab. Previously
+/// pinned at the Pass-1 core threshold (0.66) on the theory that anything above
+/// 0.66 already auto-merged in Pass 1 — but Pass 1 is kNN-limited single-linkage
+/// and Pass 3 can re-split, so genuine same-person FRAGMENTS routinely strand in
+/// 0.66..0.95: too high to be suggested, too low/disconnected to have auto-merged.
+/// Those are exactly the obvious duplicates a user wants to merge. Raising the
+/// ceiling to 0.97 surfaces them (sorted to the top by similarity). The very
+/// top of this band (centroid ≥ FILEID_FACE_AUTOMERGE_COS) is instead folded
+/// automatically at clustering time, so in practice suggestions here are the
+/// anchor-high / centroid-borderline residue that auto-consolidation skipped.
+pub const MERGE_SUGGEST_COS_HIGH: f32 = 0.97;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -179,6 +199,213 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
     }
     anchors.sort_by_key(|a| a.cluster_id);
     (assignments, anchors)
+}
+
+/// Default minimum CENTROID cosine to auto-fold two clusters into one person.
+/// 0.85 sits deep in genuine same-person territory (empirical SFace median
+/// 0.88–0.95) and far above the hardest cross-identity / lookalike matches
+/// (~0.55, well under the 0.66 Pass-1 core threshold), so only fragments of the
+/// SAME identity that the over-split-safe clusterer left apart get rejoined —
+/// the "WAY too many similar faces" the People tab otherwise shows. Override
+/// with `FILEID_FACE_AUTOMERGE_COS` (clamped to [0.70, 1.0]; set 1.0 to disable
+/// and keep pure over-split). Centroids (means of all member embeddings) are
+/// denoised, so this is safer than any single anchor-to-anchor comparison.
+pub const AUTOMERGE_COS_DEFAULT: f32 = 0.85;
+
+/// Resolve the auto-consolidation threshold from `FILEID_FACE_AUTOMERGE_COS`,
+/// clamped to [0.70, 1.0]. A value ≥ 1.0 disables consolidation (no two
+/// distinct centroids reach cosine 1.0). Unset/unparseable → the default.
+pub fn automerge_threshold() -> f32 {
+    std::env::var("FILEID_FACE_AUTOMERGE_COS")
+        .ok()
+        .and_then(|s| s.trim().parse::<f32>().ok())
+        .map(|v| v.clamp(0.70, 1.0))
+        .unwrap_or(AUTOMERGE_COS_DEFAULT)
+}
+
+/// Conservatively fold near-certain duplicate clusters that the over-split-safe
+/// 3-pass clusterer left fragmented, using denoised per-cluster CENTROIDS.
+///
+/// Returns the same (assignments, anchors) shape with merged clusters collapsed
+/// onto a single canonical id (the largest fragment, so its name + anchor face
+/// survive; ties broken to the smallest id for determinism) and member counts
+/// summed.
+///
+/// `blocked` holds normalized (min,max) cluster-id pairs the user has marked as
+/// DIFFERENT people. A union is rejected if it would co-locate ANY blocked pair,
+/// checked at every union step — so a blocked pair can never share a person even
+/// transitively (X–Y both high to Z can't sneak a blocked X–Y together).
+///
+/// `threshold` ≥ 1.0 (or < 2 clusters) is a no-op: the inputs pass through
+/// unchanged, preserving the pure over-split behavior.
+pub fn consolidate<S: std::hash::BuildHasher>(
+    faces: &[FaceRow],
+    assignments: Vec<ClusterAssignment>,
+    anchors: Vec<ClusterAnchor>,
+    blocked: &std::collections::HashSet<(i32, i32), S>,
+    threshold: f32,
+) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>) {
+    // `>= 1.0` (not `> 1.0`): automerge_threshold() clamps to [0.70, 1.0], so the
+    // documented "set FILEID_FACE_AUTOMERGE_COS=1.0 to disable" must hit this
+    // no-op path. With a strict `>` the disable value still ran the full O(C²)
+    // centroid scan (and could merge float-identical centroids).
+    if threshold >= 1.0 || anchors.len() < 2 || faces.is_empty() {
+        return (assignments, anchors);
+    }
+    let dim = faces[0].embedding.len();
+    if dim == 0 {
+        return (assignments, anchors);
+    }
+
+    // face_id → cluster_id (assignments are not assumed parallel to `faces`).
+    let cluster_of: HashMap<i64, i32> =
+        assignments.iter().map(|a| (a.face_id, a.cluster_id)).collect();
+
+    // Per-cluster centroid = normalize(Σ member unit-embeddings). For unit
+    // vectors the count cancels under renormalization, so the sum suffices.
+    let mut sums: HashMap<i32, Vec<f32>> = HashMap::new();
+    for f in faces {
+        if f.embedding.len() != dim {
+            continue;
+        }
+        if let Some(&cid) = cluster_of.get(&f.face_id) {
+            let s = sums.entry(cid).or_insert_with(|| vec![0.0; dim]);
+            for (acc, &x) in s.iter_mut().zip(f.embedding.iter()) {
+                *acc += x;
+            }
+        }
+    }
+    let mut cids: Vec<i32> = sums.keys().copied().collect();
+    cids.sort_unstable();
+    let centroids: Vec<Vec<f32>> = cids
+        .iter()
+        .map(|cid| {
+            let mut s = sums.get(cid).cloned().unwrap_or_else(|| vec![0.0; dim]);
+            let n: f32 = s.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+            for x in &mut s {
+                *x /= n;
+            }
+            s
+        })
+        .collect();
+
+    // O(C²) all-pairs over CENTROIDS (one vector per cluster, not per face — far
+    // fewer than the face count). Hard ceiling guards a pathological over-split:
+    // above it we skip rather than burn many seconds, logging so it's never a
+    // silent truncation (the suggestion-band fix still surfaces the merges).
+    const AUTOMERGE_MAX_CLUSTERS: usize = 12_000;
+    if cids.len() > AUTOMERGE_MAX_CLUSTERS {
+        tracing::warn!(
+            clusters = cids.len(),
+            cap = AUTOMERGE_MAX_CLUSTERS,
+            "[CLUSTER] skipping auto-consolidation: cluster count over O(n²) cap"
+        );
+        return (assignments, anchors);
+    }
+
+    let idx_of: HashMap<i32, usize> = cids.iter().enumerate().map(|(i, &c)| (c, i)).collect();
+    let mut edges: Vec<(f32, usize, usize)> = Vec::new();
+    for i in 0..cids.len() {
+        for j in (i + 1)..cids.len() {
+            let s = cosine(&centroids[i], &centroids[j]);
+            if s >= threshold {
+                edges.push((s, i, j));
+            }
+        }
+    }
+    // Strongest merges first so canonical assignment is stable + greedy-optimal.
+    edges.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let blocked_idx: Vec<(usize, usize)> = blocked
+        .iter()
+        .filter_map(|&(a, b)| Some((*idx_of.get(&a)?, *idx_of.get(&b)?)))
+        .collect();
+
+    let mut parent: Vec<usize> = (0..cids.len()).collect();
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]]; // path halving
+            x = parent[x];
+        }
+        x
+    }
+    let mut any_merge = false;
+    for (_s, i, j) in edges {
+        let ri = find(&mut parent, i);
+        let rj = find(&mut parent, j);
+        if ri == rj {
+            continue;
+        }
+        // Reject if merging ri,rj would put a "different people" pair together.
+        let conflict = blocked_idx.iter().any(|&(a, b)| {
+            let ra = find(&mut parent, a);
+            let rb = find(&mut parent, b);
+            (ra == ri && rb == rj) || (ra == rj && rb == ri)
+        });
+        if conflict {
+            continue;
+        }
+        parent[ri] = rj;
+        any_merge = true;
+    }
+    if !any_merge {
+        return (assignments, anchors);
+    }
+
+    let count_of: HashMap<i32, u32> =
+        anchors.iter().map(|a| (a.cluster_id, a.member_count)).collect();
+    // Group cluster ids by union root, pick the canonical id per group.
+    let mut groups: HashMap<usize, Vec<i32>> = HashMap::new();
+    for (i, &c) in cids.iter().enumerate() {
+        groups.entry(find(&mut parent, i)).or_default().push(c);
+    }
+    let mut remap: HashMap<i32, i32> = HashMap::new();
+    for members in groups.values() {
+        // Canonical = largest fragment (its name + anchor survive); tie → lowest id.
+        let canon = *members
+            .iter()
+            .max_by(|&&a, &&b| {
+                let ca = count_of.get(&a).copied().unwrap_or(0);
+                let cb = count_of.get(&b).copied().unwrap_or(0);
+                ca.cmp(&cb).then(b.cmp(&a))
+            })
+            .expect("non-empty group");
+        for &c in members {
+            remap.insert(c, canon);
+        }
+    }
+
+    let new_assignments: Vec<ClusterAssignment> = assignments
+        .into_iter()
+        .map(|a| ClusterAssignment {
+            face_id: a.face_id,
+            cluster_id: remap.get(&a.cluster_id).copied().unwrap_or(a.cluster_id),
+        })
+        .collect();
+
+    // Surviving anchor = the canonical fragment's anchor; member_count summed
+    // across the merged group.
+    let anchor_by_cid: HashMap<i32, ClusterAnchor> =
+        anchors.into_iter().map(|a| (a.cluster_id, a)).collect();
+    let mut summed: HashMap<i32, u32> = HashMap::new();
+    for (&old, &canon) in &remap {
+        *summed.entry(canon).or_insert(0) +=
+            anchor_by_cid.get(&old).map(|a| a.member_count).unwrap_or(0);
+    }
+    let mut new_anchors: Vec<ClusterAnchor> = summed
+        .into_iter()
+        .filter_map(|(canon, total)| {
+            let base = anchor_by_cid.get(&canon)?;
+            Some(ClusterAnchor {
+                cluster_id: canon,
+                anchor_face_id: base.anchor_face_id,
+                anchor_embedding: base.anchor_embedding.clone(),
+                member_count: total,
+            })
+        })
+        .collect();
+    new_anchors.sort_by_key(|a| a.cluster_id);
+    (new_assignments, new_anchors)
 }
 
 /// Pairs in the uncertain similarity band 0.45..=0.70. The VLM verifier
@@ -358,5 +585,145 @@ mod tests {
             ids.dedup();
             proptest::prop_assert_eq!(ids.len(), anchors.len());
         }
+    }
+
+    fn anchor(cid: i32, face: i64, e: Vec<f32>, count: u32) -> ClusterAnchor {
+        ClusterAnchor {
+            cluster_id: cid,
+            anchor_face_id: face,
+            anchor_embedding: e,
+            member_count: count,
+        }
+    }
+
+    #[test]
+    fn consolidate_merges_near_identical_clusters() {
+        let v = unit(&[1.0, 0.0, 0.0]);
+        // Cluster 1 (2 faces) + cluster 2 (3 faces), both centered on the same
+        // direction → centroid cosine ≈ 1.0, well above 0.85.
+        let faces = vec![
+            row(1, 1, v.clone(), 0.9),
+            row(2, 2, v.clone(), 0.8),
+            row(3, 3, v.clone(), 0.95),
+            row(4, 4, v.clone(), 0.7),
+            row(5, 5, v.clone(), 0.6),
+        ];
+        let assignments = vec![
+            ClusterAssignment { face_id: 1, cluster_id: 1 },
+            ClusterAssignment { face_id: 2, cluster_id: 1 },
+            ClusterAssignment { face_id: 3, cluster_id: 2 },
+            ClusterAssignment { face_id: 4, cluster_id: 2 },
+            ClusterAssignment { face_id: 5, cluster_id: 2 },
+        ];
+        let anchors = vec![
+            anchor(1, 1, v.clone(), 2),
+            anchor(2, 3, v.clone(), 3),
+        ];
+        let (a, an) =
+            consolidate(&faces, assignments, anchors, &std::collections::HashSet::new(), 0.85);
+        assert_eq!(an.len(), 1, "the two same-person fragments fold into one");
+        // Larger fragment (cluster 2, 3 members) wins the canonical id + anchor.
+        assert_eq!(an[0].cluster_id, 2);
+        assert_eq!(an[0].anchor_face_id, 3);
+        assert_eq!(an[0].member_count, 5, "member counts sum");
+        assert!(a.iter().all(|x| x.cluster_id == 2), "all faces map to the survivor");
+    }
+
+    #[test]
+    fn consolidate_respects_blocked_pair() {
+        let v = unit(&[1.0, 0.0, 0.0]);
+        let faces = vec![
+            row(1, 1, v.clone(), 0.9),
+            row(2, 2, v.clone(), 0.95),
+        ];
+        let assignments = vec![
+            ClusterAssignment { face_id: 1, cluster_id: 1 },
+            ClusterAssignment { face_id: 2, cluster_id: 2 },
+        ];
+        let anchors = vec![anchor(1, 1, v.clone(), 1), anchor(2, 2, v.clone(), 1)];
+        let mut blocked = std::collections::HashSet::new();
+        blocked.insert((1, 2));
+        let (a, an) = consolidate(&faces, assignments, anchors, &blocked, 0.85);
+        assert_eq!(an.len(), 2, "a 'different people' verdict blocks the merge");
+        assert_ne!(a[0].cluster_id, a[1].cluster_id);
+    }
+
+    #[test]
+    fn consolidate_blocked_pair_is_transitively_safe() {
+        // Three near-identical clusters; 1–2 is blocked. A merge via 3 must not
+        // sneak 1 and 2 into the same person.
+        let v = unit(&[1.0, 0.0, 0.0]);
+        let faces = vec![
+            row(1, 1, v.clone(), 0.9),
+            row(2, 2, v.clone(), 0.9),
+            row(3, 3, v.clone(), 0.9),
+        ];
+        let assignments = vec![
+            ClusterAssignment { face_id: 1, cluster_id: 1 },
+            ClusterAssignment { face_id: 2, cluster_id: 2 },
+            ClusterAssignment { face_id: 3, cluster_id: 3 },
+        ];
+        let anchors = vec![
+            anchor(1, 1, v.clone(), 1),
+            anchor(2, 2, v.clone(), 1),
+            anchor(3, 3, v.clone(), 1),
+        ];
+        let mut blocked = std::collections::HashSet::new();
+        blocked.insert((1, 2));
+        let (a, an) = consolidate(&faces, assignments, anchors, &blocked, 0.85);
+        assert_eq!(an.len(), 2, "one merge allowed, the blocked pair kept apart");
+        let cid = |face: i64| a.iter().find(|x| x.face_id == face).unwrap().cluster_id;
+        assert_ne!(cid(1), cid(2), "blocked pair never co-located, even transitively");
+    }
+
+    #[test]
+    fn consolidate_disabled_above_one_is_noop() {
+        let v = unit(&[1.0, 0.0, 0.0]);
+        let faces = vec![row(1, 1, v.clone(), 0.9), row(2, 2, v.clone(), 0.9)];
+        let assignments = vec![
+            ClusterAssignment { face_id: 1, cluster_id: 1 },
+            ClusterAssignment { face_id: 2, cluster_id: 2 },
+        ];
+        let anchors = vec![anchor(1, 1, v.clone(), 1), anchor(2, 2, v.clone(), 1)];
+        // 1.0 is the documented "disable" value (the clamp ceiling) and must
+        // no-op; clone the inputs so we can also re-check at 1.01.
+        let (_, an10) = consolidate(
+            &faces,
+            assignments.clone(),
+            anchors.clone(),
+            &std::collections::HashSet::new(),
+            1.0,
+        );
+        assert_eq!(an10.len(), 2, "threshold == 1.0 (documented disable) is a no-op");
+        let (_, an) =
+            consolidate(&faces, assignments, anchors, &std::collections::HashSet::new(), 1.01);
+        assert_eq!(an.len(), 2, "threshold > 1.0 disables consolidation");
+    }
+
+    #[test]
+    fn consolidate_leaves_distinct_clusters_apart() {
+        let faces = vec![
+            row(1, 1, unit(&[1.0, 0.0, 0.0]), 0.9),
+            row(2, 2, unit(&[0.0, 1.0, 0.0]), 0.9),
+        ];
+        let assignments = vec![
+            ClusterAssignment { face_id: 1, cluster_id: 1 },
+            ClusterAssignment { face_id: 2, cluster_id: 2 },
+        ];
+        let anchors = vec![
+            anchor(1, 1, unit(&[1.0, 0.0, 0.0]), 1),
+            anchor(2, 2, unit(&[0.0, 1.0, 0.0]), 1),
+        ];
+        let (_, an) =
+            consolidate(&faces, assignments, anchors, &std::collections::HashSet::new(), 0.85);
+        assert_eq!(an.len(), 2, "orthogonal centroids (cosine 0) never merge");
+    }
+
+    #[test]
+    fn automerge_threshold_clamps_and_defaults() {
+        // Unset → default. (Other env-dependent cases aren't asserted here to
+        // avoid process-global env races with parallel tests.)
+        std::env::remove_var("FILEID_FACE_AUTOMERGE_COS");
+        assert!((automerge_threshold() - AUTOMERGE_COS_DEFAULT).abs() < 1e-6);
     }
 }
