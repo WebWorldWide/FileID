@@ -158,13 +158,19 @@ pub(crate) async fn handle_deep_analyze_file(
             .await;
             // Terminal Complete on the analyze failure too, mirroring the batch
             // handler's convention so the card clears / Analyze-All re-enables (#6).
+            // Derive `cancelled` from the cooperative cancel flag: a genuine
+            // analyze failure (decode/VLM/persist) must report cancelled:false so
+            // the app's "(1 failed)" warning fires; only a real user-cancel reports
+            // cancelled:true. Hard-coding true mislabeled every failure as a cancel
+            // and suppressed the warning toast.
+            let was_cancelled = cancel.load(Ordering::Relaxed);
             sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
                 DeepAnalyzeComplete {
                     processed: 0,
                     failed: 1,
                     total_seconds: started_at.elapsed().as_secs_f64(),
                     model_kind,
-                    cancelled: true,
+                    cancelled: was_cancelled,
                 },
             ))))
             .await;
@@ -371,6 +377,10 @@ async fn run_deep_analyze_batch(
     let total = file_ids.len() as u64;
     let mut processed = 0u64;
     let mut failed = 0u64;
+    // Use the persistent server until it errors; if it dies mid-batch and a CLI
+    // runner exists, fall back to per-file CLI for the remaining files instead of
+    // failing every one. (audit E5)
+    let mut use_server = server.is_some();
     let started_at = Instant::now();
 
     // No runtime can run the (present) weights: the persistent server didn't
@@ -520,8 +530,10 @@ async fn run_deep_analyze_batch(
                 }),
             )));
         };
-        // Persistent server when up (model already resident); else per-file CLI.
-        let outcome = if let Some(srv) = server.as_ref() {
+        // Persistent server while it's healthy (model already resident); else
+        // per-file CLI. `use_server` flips off below if the server dies. (audit E5)
+        let server_active = if use_server { server.as_ref() } else { None };
+        let outcome = if let Some(srv) = server_active {
             analyze_file_via_server(db.clone(), srv, file_id, model_kind, mode, cancel.clone(), on_token)
                 .await
         } else if let Some(r) = runner.as_ref() {
@@ -550,6 +562,15 @@ async fn run_deep_analyze_batch(
             Err(err) => {
                 failed += 1;
                 tracing::warn!(?err, file_id, "deep analyze file failed");
+                // If the persistent server errored but a CLI runner is available,
+                // assume the server died and fall back to per-file CLI for the
+                // REMAINING files rather than failing every one. (audit E5)
+                if use_server && runner.is_some() {
+                    tracing::warn!(
+                        "[DEEP-ANALYZE] persistent server call failed; falling back to per-file CLI for the rest of the batch"
+                    );
+                    use_server = false;
+                }
             }
         }
     }

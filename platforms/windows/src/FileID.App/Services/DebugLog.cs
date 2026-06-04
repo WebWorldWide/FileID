@@ -17,6 +17,12 @@ internal static class DebugLog
 {
     private const long MaxLogBytes = 10 * 1024 * 1024;
     private static readonly object s_writeLock = new();
+    // NOTE: writes are intentionally SYNCHRONOUS. An async/batched sink was tried
+    // (audit P2) but the fix re-audit caught that it loses the last <200 ms of
+    // lines on a NATIVE fast-fail — exactly the [APPLY:N]/[ENGINE-SUB] tail this
+    // log exists to capture (CLAUDE.md marks it load-bearing). Any future
+    // off-thread sink MUST preserve per-line durability (e.g. a persistent
+    // flushed StreamWriter), verified on hardware. Do not re-batch naively.
 
     public static void Info(string message) => Write("INFO ", message);
     public static void Warn(string message) => Write("WARN ", message);
@@ -58,8 +64,7 @@ internal static class DebugLog
         {
             AppPaths.EnsureDirectories();
             var path = AppPaths.AppLogPath;
-            // Bound disk usage by truncating when oversized. Date-rolling
-            // files via Microsoft.Extensions.Logging is a future polish.
+            // Bound disk usage by truncating when oversized.
             if (File.Exists(path))
             {
                 var info = new FileInfo(path);
@@ -70,6 +75,8 @@ internal static class DebugLog
             }
             var stamp = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
             var line = $"{stamp} {level} [tid {Environment.CurrentManagedThreadId}] {message}\n";
+            // Synchronous + flushed: a native fast-fail must not lose the last
+            // forensic line (see the field note above).
             lock (s_writeLock)
             {
                 File.AppendAllText(path, line, Encoding.UTF8);

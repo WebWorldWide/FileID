@@ -327,7 +327,12 @@ async fn async_main() -> Result<()> {
     // commands::prewarm (see prewarm_cancel_flag / cancel_prewarm) — no global
     // flag to thread through here.
     let stdio_loop = tokio::spawn(async move {
-        const MAX_FRAME_BYTES: usize = 1024 * 1024;
+        // 32 MiB, symmetric with the app's outbound command cap (MaxIpcFrameBytes)
+        // and its inbound read cap (MaxFrameChars). A large applyRestructure carries
+        // the same multi-MB move set the engine emitted in restructurePlan; the old
+        // 1 MiB cap silently rejected + drained it. Still bounded vs a runaway line;
+        // the engine already holds the whole plan in memory. (audit E10)
+        const MAX_FRAME_BYTES: usize = 32 * 1024 * 1024;
         let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
         loop {
             tokio::select! {
@@ -812,8 +817,9 @@ async fn handle_line(
             let sink_c = sink.clone();
             let db_c = db.clone();
             let state_c = scan_state.clone();
+            let fca_c = face_cluster_active.clone();
             tokio::spawn(async move {
-                commands::wipe::handle_wipe_library(sink_c, db_c, state_c).await;
+                commands::wipe::handle_wipe_library(sink_c, db_c, state_c, fca_c).await;
             });
         }
         CommandPayload::GenerateVideoThumbnail(payload) => {

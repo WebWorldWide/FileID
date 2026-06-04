@@ -461,7 +461,18 @@ fn ensure_inside_root(dest: &Path, canonical_root: &Path) -> Result<()> {
 #[cfg(windows)]
 fn has_reparse_point_in_chain(parent: &Path, root: &Path) -> bool {
     use std::os::windows::fs::MetadataExt;
+    use crate::util::path_safety::strip_extended_length;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    // `parent` is the raw (non-verbatim) destination parent from the IPC plan,
+    // but `root` arrives canonicalized — on Windows that is a verbatim `\\?\C:\…`
+    // path. Comparing the two prefix forms made `cur.starts_with(root)` false on
+    // the FIRST iteration, so the walk broke after checking only the leaf parent
+    // and never inspected intermediate ancestors — silently reducing the SEC-5
+    // junction-TOCTOU defense to one level. Normalize BOTH operands with
+    // strip_extended_length, which removes the `\\?\` prefix WITHOUT resolving the
+    // link (std::fs::canonicalize must NOT be used here: it follows the junction
+    // and defeats detection), so the ancestor walk runs up to the real root.
+    let root_norm = strip_extended_length(root);
     let mut cur = parent.to_path_buf();
     loop {
         if let Ok(meta) = std::fs::symlink_metadata(&cur) {
@@ -469,8 +480,9 @@ fn has_reparse_point_in_chain(parent: &Path, root: &Path) -> bool {
                 return true;
             }
         }
-        // Stop once we reach (or pass) the root.
-        if cur == root || !cur.starts_with(root) {
+        // Stop once we reach (or pass) the root — compared in the same path form.
+        let cur_norm = strip_extended_length(&cur);
+        if cur_norm == root_norm || !cur_norm.starts_with(&root_norm) {
             break;
         }
         if !cur.pop() { break; }

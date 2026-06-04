@@ -647,11 +647,15 @@ public sealed partial class MainWindow : Window
         if (e.DataView.Contains(StandardDataFormats.StorageItems))
         {
             e.AcceptedOperation = DataPackageOperation.Copy;
-            // Show the overlay. e.DragUIOverride is provided by the OS;
-            // we suppress its default text in favor of our own overlay.
-            e.DragUIOverride.IsCaptionVisible = false;
-            e.DragUIOverride.IsContentVisible = false;
-            e.DragUIOverride.IsGlyphVisible = false;
+            // Show the overlay. e.DragUIOverride is provided by the OS and CAN be
+            // null (some drag sources / shell states don't supply it); guard it so
+            // we don't NRE and lose the accepted-operation + overlay. (audit A15)
+            if (e.DragUIOverride is { } dragUi)
+            {
+                dragUi.IsCaptionVisible = false;
+                dragUi.IsContentVisible = false;
+                dragUi.IsGlyphVisible = false;
+            }
             DragOverlay.Visibility = Visibility.Visible;
         }
     }

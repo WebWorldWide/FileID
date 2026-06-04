@@ -54,14 +54,39 @@ public sealed partial class DrillDownSheet : UserControl
     public void SetSankeyFilter(RestructurePlan plan, string source, string category)
     {
         HeaderText.Text = $"{source} → {category}";
-        var moves = new List<RestructureMove>();
         var libRoot = plan.LibraryRoot ?? "";
-        foreach (var m in plan.Moves)
+        var all = plan.Moves;
+        string SrcRaw(RestructureMove m) => TopLevel(TrimRoot(m.Source, libRoot));
+
+        // Reproduce the Sankey's top-N fold so clicking the folded "Other" ribbon
+        // drills into the SAME moves it represented (the long tail), not an empty
+        // set. MUST stay in sync with SankeyFlowControl.SourceBucket/CategoryBucket
+        // (MaxNodes=12, long tail -> "Other"); TopLevel/TrimRoot already match the
+        // Sankey's SourceOf. (audit A10)
+        const int MaxNodes = 12;
+        const string OtherKey = "Other";
+        int distinctSources = all.Select(SrcRaw).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+        var topSources = all.GroupBy(SrcRaw).OrderByDescending(g => g.Count())
+            .Take(MaxNodes - 1).Select(g => g.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        string SrcBucket(RestructureMove m)
         {
-            var srcRel = TrimRoot(m.Source, libRoot);
-            var srcBucket = TopLevel(srcRel);
-            if (string.Equals(srcBucket, source, StringComparison.OrdinalIgnoreCase) &&
-                string.Equals(m.Category, category, StringComparison.OrdinalIgnoreCase))
+            var s = SrcRaw(m);
+            return distinctSources > MaxNodes && !topSources.Contains(s) ? OtherKey : s;
+        }
+        int distinctCats = all.Select(m => m.Category).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+        var topCats = all.GroupBy(m => m.Category).OrderByDescending(g => g.Count())
+            .Take(MaxNodes - 1).Select(g => g.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        string CatBucket(RestructureMove m)
+        {
+            var c = m.Category;
+            return distinctCats > MaxNodes && !topCats.Contains(c) ? OtherKey : c;
+        }
+
+        var moves = new List<RestructureMove>();
+        foreach (var m in all)
+        {
+            if (string.Equals(SrcBucket(m), source, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(CatBucket(m), category, StringComparison.OrdinalIgnoreCase))
             {
                 moves.Add(m);
             }

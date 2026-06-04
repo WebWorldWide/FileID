@@ -466,7 +466,11 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     {
         try
         {
-            var s = AppSettings.Load();
+            // Route through the shared singleton, NOT a fresh AppSettings.Load():
+            // a fresh instance shares the static debounce CTS, so its Save() cancels
+            // the singleton's pending write and persists a snapshot loaded from disk
+            // that lacks the singleton's in-memory changes (lost update). (audit A8)
+            var s = FileID.ViewModels.AppViewModel.Instance.Settings;
             if (s.SelectedVlmModelKind == kind) return;
             s.SelectedVlmModelKind = kind;
             s.Save();
@@ -950,6 +954,21 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     {
         if (EqualityComparer<T>.Default.Equals(field, value)) return;
         field = value;
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        // x:Bind reads these aggregates on the UI thread, so PropertyChanged must
+        // fire there. Reset()/SeedFromSentinels (and other engine-driven paths)
+        // can run on a thread-pool continuation; marshal through the captured UI
+        // dispatcher to avoid an RPC_E_WRONG_THREAD native fast-fail — the same
+        // pattern ModelSlot.Set uses. (audit A2)
+        var handler = PropertyChanged;
+        if (handler is null) return;
+        var args = new PropertyChangedEventArgs(propertyName);
+        if (_ui is null || _ui.HasThreadAccess)
+        {
+            handler(this, args);
+        }
+        else
+        {
+            _ui.TryEnqueue(() => handler(this, args));
+        }
     }
 }

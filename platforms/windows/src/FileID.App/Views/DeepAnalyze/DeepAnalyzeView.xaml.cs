@@ -367,6 +367,10 @@ public sealed partial class DeepAnalyzeView : UserControl
             StreamFileNameText.Text = $"{starting.Phase}: {starting.ModelKind}";
             StreamCaptionText.Text = starting.Message ?? string.Empty;
             StreamProposedNameText.Text = string.Empty;
+            // Reset the smart-rename tally at the start of each run so the pill
+            // reflects only THIS run, not a cumulative count across runs. (audit A13)
+            _proposedNameCount = 0;
+            SyncProposedNamesPill();
             OverallProgress.Value = 0;
             OverallProgress.IsIndeterminate = true;
             OverallProgressText.Text = "Preparing…";
@@ -684,7 +688,10 @@ public sealed partial class DeepAnalyzeView : UserControl
             // chain) caption with the same model the user just picked.
             try
             {
-                var s = AppSettings.Load();
+                // Shared singleton, not a fresh Load() — avoids the static-debounce
+                // lost-update where a fresh instance's Save() cancels the singleton's
+                // pending write. (audit A8)
+                var s = FileID.ViewModels.AppViewModel.Instance.Settings;
                 s.SelectedVlmModelKind = id;
                 s.Save();
             }

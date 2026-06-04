@@ -368,6 +368,31 @@ pub(crate) async fn vlm_server_payload_ok(
     result.map(|_| ())
 }
 
+/// Poll the cancel flag until it's set. Raced against an in-flight VLM request
+/// so a user cancel abandons the request promptly. (audit E4)
+async fn wait_cancelled(cancel: &std::sync::atomic::AtomicBool) {
+    while !cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+/// Run one `server.complete` but bail the moment the cancel flag flips, instead
+/// of blocking up to the client's (300 s) timeout. Dropping the losing branch's
+/// future cancels the underlying reqwest request. (audit E4)
+async fn complete_cancellable(
+    server: &crate::models::vlm_server::VlmServer,
+    image: &std::path::Path,
+    prompt: &str,
+    max_tokens: u32,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> anyhow::Result<String> {
+    tokio::select! {
+        biased;
+        _ = wait_cancelled(cancel) => anyhow::bail!("cancelled"),
+        r = server.complete(image, prompt, max_tokens) => r,
+    }
+}
+
 /// Analyze one file through the PERSISTENT llama-server (model already loaded),
 /// with NO per-call model reload. `mode` selects which VLM calls run: `Both`
 /// does caption + tags + smart-rename (3 HTTP calls); `TagsOnly` does just the
@@ -400,7 +425,7 @@ pub(crate) async fn analyze_file_via_server(
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
-        let d = server.complete(&rasterized, vlm::CAPTION_PROMPT, 80).await?;
+        let d = complete_cancellable(server, &rasterized, vlm::CAPTION_PROMPT, 80, &cancel).await?;
         on_token(&d);
         description = Some(d);
     }
@@ -409,7 +434,9 @@ pub(crate) async fn analyze_file_via_server(
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
-        tags = parse_vlm_tags(&server.complete(&rasterized, vlm::TAG_PROMPT, 40).await?);
+        tags = parse_vlm_tags(
+            &complete_cancellable(server, &rasterized, vlm::TAG_PROMPT, 40, &cancel).await?,
+        );
         // Surface tags in the live stream so a tags-only pass shows feedback.
         if !tags.is_empty() {
             on_token(&tags.join(", "));
@@ -421,7 +448,7 @@ pub(crate) async fn analyze_file_via_server(
             anyhow::bail!("cancelled");
         }
         proposed_name = Some(sanitize_proposed_name(
-            &server.complete(&rasterized, vlm::RENAME_PROMPT, 30).await?,
+            &complete_cancellable(server, &rasterized, vlm::RENAME_PROMPT, 30, &cancel).await?,
         ));
     }
 

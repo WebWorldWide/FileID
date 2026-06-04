@@ -167,10 +167,14 @@ internal sealed class ThumbnailService : IDisposable
             }
             try
             {
+                // Honor the PER-REQUEST token (a scrolled-away tile cancels its own
+                // request), linked with the service token, so the full shell+disk+
+                // decode doesn't run for a tile the user already scrolled past. (audit A6)
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, req.Cancellation);
                 // No ConfigureAwait(false): the returned BitmapImage is a
                 // UI-thread DispatcherObject, so keep the continuation (and the
                 // caller's, which sets tile.Thumbnail) on the UI thread.
-                var bmp = await RenderAsync(req.Path, req.ModifiedAt, _uiDispatcher, ct);
+                var bmp = await RenderAsync(req.Path, req.ModifiedAt, _uiDispatcher, linked.Token);
                 if (bmp != null)
                 {
                     var key = CacheKey(req.Path, req.ModifiedAt);
@@ -195,6 +199,14 @@ internal sealed class ThumbnailService : IDisposable
                 {
                     req.Completion.TrySetResult(bmp);
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                // Per-request cancel (tile scrolled away): complete null and keep
+                // draining. A service-token (shutdown) cancel re-throws so the
+                // loop exits as before. (audit A6)
+                req.Completion.TrySetResult(null);
+                if (ct.IsCancellationRequested) throw;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {

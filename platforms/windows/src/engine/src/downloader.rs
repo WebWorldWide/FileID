@@ -87,6 +87,13 @@ pub fn build_shared_client() -> Result<Arc<reqwest::Client>> {
         if attempt.previous().len() >= 10 {
             return attempt.stop();
         }
+        // Never follow a redirect off https. The host allowlist alone would let
+        // a 302 downgrade to plaintext http:// on an allowlisted host, which an
+        // on-path attacker could MITM. Every allowlisted CDN serves https, so
+        // this never blocks a legitimate redirect. (audit E11)
+        if attempt.url().scheme() != "https" {
+            return attempt.stop();
+        }
         match attempt.url().host_str() {
             Some(h)
                 if REDIRECT_ALLOWED
@@ -472,6 +479,13 @@ where
     };
 
     if total < MIN_BYTES_FOR_PARALLEL || !supports_ranges {
+        // Best-effort sweep of any .part-NN left by an earlier parallel attempt
+        // (e.g. a prior run that partially downloaded, then this retry sees the
+        // server no longer advertising ranges). download_simple uses its own
+        // "{}.part" temp and can't resume from these, so they'd leak. (audit E16)
+        for i in 0..PARALLEL_PARTS {
+            let _ = tokio::fs::remove_file(part_file_path(&request.destination, i)).await;
+        }
         return download_simple(client.clone(), request, cancel.clone(), |p| progress(p)).await;
     }
 

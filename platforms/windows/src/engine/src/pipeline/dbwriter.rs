@@ -171,6 +171,9 @@ impl DbWriter {
         // the batch commits — never inside the tx, so a batch rollback (which
         // restores the old face_prints rows) can't leave them crop-less.
         let mut crop_ids_to_prune: Vec<i64> = Vec::new();
+        // (face_id, crop bytes) to encode + write AFTER commit, outside the writer
+        // lock — the JPEG encode + fs::write must not run inside the tx. (audit P1)
+        let mut crops_to_write: Vec<(i64, Vec<u8>)> = Vec::new();
 
         let conn = self.conn.lock();
         let tx = conn.unchecked_transaction().context("opening tx")?;
@@ -240,11 +243,12 @@ impl DbWriter {
             for f in buffer.iter() {
                 let insert_started = Instant::now();
                 let path_text = f.path.to_string_lossy();
-                // Redacted path for error context only — `path_text` stays the
-                // raw value for the SQL binds. A flush error's `with_context`
-                // string lands in the log + on the IPC wire, so it must never
-                // carry an unredacted user path.
-                let rp = crate::platform::redact_path_for_log(&f.path);
+                // Path redaction is computed lazily INSIDE each error-context
+                // closure below (which almost never runs), not eagerly per file:
+                // redact_path_for_log does two to_lowercase allocs + a paths::root()
+                // lookup, wasted on every row of a 140 files/s flush. The redacted
+                // (never raw) path is still what lands in the log + IPC wire on a
+                // real flush error. (audit P3)
                 let path_hash = crate::util::path_safety::stable_path_hash(&path_text);
                 let extension = f
                     .path
@@ -268,7 +272,7 @@ impl DbWriter {
                             |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)),
                         )
                         .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
-                        .with_context(|| format!("rename-heal lookup for {rp}"))?;
+                        .with_context(|| format!("rename-heal lookup for {}", crate::platform::redact_path_for_log(&f.path)))?;
                     // Heal the FIRST identity match whose old path genuinely MOVED
                     // (is gone from disk). Iterating — rather than the old
                     // LIMIT-1/no-ORDER-BY single fetch — ensures a still-present
@@ -280,14 +284,37 @@ impl DbWriter {
                         .into_iter()
                         .find(|(_, old, by_ref)| heal_candidate_moved(*by_ref, old))
                     {
-                        heal_update_stmt
-                            .execute(params![path_text, path_hash, id])
-                            .with_context(|| format!("rename-heal update for {rp}"))?;
-                        tracing::info!(
-                            id,
-                            new_path = %crate::platform::redact_path_for_log(&f.path),
-                            "[RENAME-HEAL] re-bound existing row to new path"
-                        );
+                        match heal_update_stmt.execute(params![path_text, path_hash, id]) {
+                            Ok(_) => tracing::info!(
+                                id,
+                                new_path = %crate::platform::redact_path_for_log(&f.path),
+                                "[RENAME-HEAL] re-bound existing row to new path"
+                            ),
+                            // A content-identical COPY already occupies the new path
+                            // (scanned there independently). Skip the heal rather than
+                            // OR REPLACE-deleting that row — which silently orphaned its
+                            // FTS5 external-content index (ocr_fts/doc_fts have no delete
+                            // triggers, so the rowid entries would be left dangling). The
+                            // moved-away orphan keeps its old path and is cleaned by
+                            // orphan-pruning; the existing row is updated by the INSERT
+                            // ON CONFLICT below. (audit recheck: rename-heal FTS desync)
+                            Err(rusqlite::Error::SqliteFailure(sf, _))
+                                if sf.code == rusqlite::ErrorCode::ConstraintViolation =>
+                            {
+                                tracing::debug!(
+                                    id,
+                                    "[RENAME-HEAL] new path already occupied by a copy; skipping heal"
+                                );
+                            }
+                            Err(e) => {
+                                Err::<(), _>(e).with_context(|| {
+                                    format!(
+                                        "rename-heal update for {}",
+                                        crate::platform::redact_path_for_log(&f.path)
+                                    )
+                                })?;
+                            }
+                        }
                     }
                 }
 
@@ -316,13 +343,13 @@ impl DbWriter {
                         ],
                         |row| row.get(0),
                     )
-                    .with_context(|| format!("insert+id for {rp}"))?;
+                    .with_context(|| format!("insert+id for {}", crate::platform::redact_path_for_log(&f.path)))?;
 
                 if let Some(emb) = &f.clip_embedding {
                     let bytes = floats_to_le_bytes(emb);
                     clip_stmt
                         .execute(params![file_id, bytes, "mobileclip_s2"])
-                        .with_context(|| format!("clip insert for {rp}"))?;
+                        .with_context(|| format!("clip insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
                 }
 
                 // BGE-small text embeddings (Phase 4b) — parallel to clip
@@ -333,7 +360,7 @@ impl DbWriter {
                     let bytes = floats_to_le_bytes(emb);
                     text_embed_stmt
                         .execute(params![file_id, bytes, "bge_small_en_v1_5"])
-                        .with_context(|| format!("text_embeddings insert for {rp}"))?;
+                        .with_context(|| format!("text_embeddings insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
                 }
 
                 // Key the stale-face DELETE on whether the face stage actually
@@ -359,7 +386,7 @@ impl DbWriter {
                     };
                     face_delete
                         .execute(params![file_id])
-                        .with_context(|| format!("face delete for {rp}"))?;
+                        .with_context(|| format!("face delete for {}", crate::platform::redact_path_for_log(&f.path)))?;
                     for face in &f.faces {
                         let bbox_json = serde_json::json!({
                             "x": face.bbox[0],
@@ -381,13 +408,13 @@ impl DbWriter {
                                 arcface_bytes,
                                 face.quality as f64,
                             ])
-                            .with_context(|| format!("face insert for {rp}"))?;
+                            .with_context(|| format!("face insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
 
                         if let Some(crop) = &face.crop_rgb_112 {
                             let face_id = tx.last_insert_rowid();
-                            if let Err(err) = save_face_crop(face_id, crop) {
-                                tracing::warn!(?err, face_id, "face crop write failed");
-                            }
+                            // Defer the JPEG encode + fs::write to after commit so it
+                            // never runs inside the tx under the writer lock. (audit P1)
+                            crops_to_write.push((face_id, crop.clone()));
                         }
                     }
                     // New AUTOINCREMENT ids never collide with the deleted ones,
@@ -405,18 +432,18 @@ impl DbWriter {
                 if f.ocr_stage_ran {
                     ocr_fts_delete
                         .execute(params![file_id])
-                        .with_context(|| format!("ocr_fts delete for {rp}"))?;
+                        .with_context(|| format!("ocr_fts delete for {}", crate::platform::redact_path_for_log(&f.path)))?;
                     ocr_text_delete
                         .execute(params![file_id])
-                        .with_context(|| format!("ocr_text delete for {rp}"))?;
+                        .with_context(|| format!("ocr_text delete for {}", crate::platform::redact_path_for_log(&f.path)))?;
                     if let Some(text) = &f.ocr_text {
                         if !text.trim().is_empty() {
                             ocr_text_stmt
                                 .execute(params![file_id, text])
-                                .with_context(|| format!("ocr_text insert for {rp}"))?;
+                                .with_context(|| format!("ocr_text insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
                             ocr_fts_stmt
                                 .execute(params![file_id, text])
-                                .with_context(|| format!("ocr_fts insert for {rp}"))?;
+                                .with_context(|| format!("ocr_fts insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
                         }
                     }
                 }
@@ -426,18 +453,18 @@ impl DbWriter {
                 if f.doc_stage_ran {
                     doc_fts_delete
                         .execute(params![file_id])
-                        .with_context(|| format!("doc_fts delete for {rp}"))?;
+                        .with_context(|| format!("doc_fts delete for {}", crate::platform::redact_path_for_log(&f.path)))?;
                     doc_text_delete
                         .execute(params![file_id])
-                        .with_context(|| format!("doc_text delete for {rp}"))?;
+                        .with_context(|| format!("doc_text delete for {}", crate::platform::redact_path_for_log(&f.path)))?;
                     if let Some(text) = &f.doc_text {
                         if !text.trim().is_empty() {
                             doc_text_stmt
                                 .execute(params![file_id, text])
-                                .with_context(|| format!("doc_text insert for {rp}"))?;
+                                .with_context(|| format!("doc_text insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
                             doc_fts_stmt
                                 .execute(params![file_id, text])
-                                .with_context(|| format!("doc_fts insert for {rp}"))?;
+                                .with_context(|| format!("doc_fts insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
                         }
                     }
                 }
@@ -456,13 +483,13 @@ impl DbWriter {
                 if f.tags_evaluated {
                     tag_delete
                         .execute(params![file_id])
-                        .with_context(|| format!("tag delete for {rp}"))?;
+                        .with_context(|| format!("tag delete for {}", crate::platform::redact_path_for_log(&f.path)))?;
                     for (tag, score) in &f.tags {
                         let trimmed = tag.trim();
                         if trimmed.is_empty() { continue; }
                         tag_insert
                             .execute(params![file_id, trimmed, score.map(|s| s as f64)])
-                            .with_context(|| format!("tag insert for {rp}"))?;
+                            .with_context(|| format!("tag insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
                     }
                 }
 
@@ -521,6 +548,15 @@ impl DbWriter {
         }
 
         drop(conn);
+
+        // Encode + write the batch's face-crop JPEGs now — AFTER the tx committed
+        // and the writer lock dropped — so per-face JPEG encode + fs::write never
+        // blocks the engine's only writer (or a concurrent scan flush). (audit P1)
+        for (face_id, crop) in &crops_to_write {
+            if let Err(err) = save_face_crop(*face_id, crop) {
+                tracing::warn!(?err, face_id = *face_id, "face crop write failed");
+            }
+        }
 
         let wall = started.elapsed().as_secs_f64();
         buffer.clear();
@@ -652,7 +688,7 @@ const HEAL_LOOKUP_SQL: &str = r#"
 // preceded the rename) — SQLite REPLACE deletes the colliding row and
 // FK-cascades its tags/embeddings/faces, then the healed row wins.
 const HEAL_UPDATE_SQL: &str = r#"
-    UPDATE OR REPLACE files
+    UPDATE files
        SET path_text = ?1, path_hash = ?2
      WHERE id = ?3
 "#;

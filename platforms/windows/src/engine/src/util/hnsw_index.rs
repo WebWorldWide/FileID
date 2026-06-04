@@ -34,7 +34,12 @@ impl Point for Embedding {
 pub(crate) fn build<V: Clone>(points: Vec<(Vec<f32>, V)>) -> HnswMap<Embedding, V> {
     let (embeds, values): (Vec<_>, Vec<_>) =
         points.into_iter().map(|(e, v)| (Embedding(e), v)).unzip();
-    Builder::default().build(embeds, values)
+    // Fixed seed: instant-distance's Builder::default() seeds its layer-shuffle
+    // RNG from `rand::random()`, so the HNSW topology — and thus the approximate
+    // kNN neighbour sets — would differ run-to-run. Face clustering derives
+    // cluster IDs and inherited People names from those neighbours, so an
+    // entropy seed makes identities hop on every re-cluster. Pin it. (audit E0)
+    Builder::default().seed(0xF11E_1D00).build(embeds, values)
 }
 
 /// Reusable kNN searcher: owns the `instant-distance` scratch buffer so a
@@ -117,5 +122,27 @@ mod tests {
         let idx: HnswMap<Embedding, &str> = build(Vec::<(Vec<f32>, &str)>::new());
         let hits = Searcher::default().top_k(&idx, &norm(vec![1.0, 0.0]), 5);
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn build_is_deterministic_across_runs() {
+        // Guards the fixed seed (audit E0): two builds of the same points must
+        // return byte-identical kNN orderings, else face clustering is
+        // nondeterministic on large libraries. A spread of near-collinear
+        // vectors makes the approximate neighbour set seed-sensitive.
+        let mk = || -> Vec<(Vec<f32>, usize)> {
+            (0..256usize)
+                .map(|i| {
+                    let a = (i as f32) * 0.013;
+                    (norm(vec![a.cos(), a.sin(), (a * 0.5).cos(), (a * 0.5).sin()]), i)
+                })
+                .collect()
+        };
+        let idx_a = build(mk());
+        let idx_b = build(mk());
+        let q = norm(vec![1.0, 0.05, 0.9, 0.1]);
+        let ha: Vec<usize> = Searcher::default().top_k(&idx_a, &q, 16).into_iter().map(|h| h.0).collect();
+        let hb: Vec<usize> = Searcher::default().top_k(&idx_b, &q, 16).into_iter().map(|h| h.0).collect();
+        assert_eq!(ha, hb, "HNSW kNN ordering must be deterministic across builds");
     }
 }

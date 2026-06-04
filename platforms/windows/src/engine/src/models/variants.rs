@@ -39,6 +39,20 @@ pub fn resolve_model_path(model_dir: &Path, base_stem: &str) -> PathBuf {
     resolve_for(model_dir, base_stem, active_provider())
 }
 
+/// Resolve for a SPECIFIC execution provider. Use this when the caller pins a
+/// known EP rather than deferring to the system's `active_provider()`: e.g. BGE
+/// always binds the CPU EP, so resolving by `active_provider()` on an
+/// Intel-NPU/Snapdragon box would hand a CPU session an `_int8` OpenVINO graph
+/// or a QNN `.bin` it cannot consume. Resolving for the EP actually bound keeps
+/// the on-disk variant and the session in agreement. (audit E6)
+pub fn resolve_model_path_for(
+    model_dir: &Path,
+    base_stem: &str,
+    ep: ExecutionProvider,
+) -> PathBuf {
+    resolve_for(model_dir, base_stem, ep)
+}
+
 /// Testable core: `resolve_model_path` with the EP injected.
 fn resolve_for(model_dir: &Path, base_stem: &str, ep: ExecutionProvider) -> PathBuf {
     if let Some(suffix) = variant_suffix(ep) {

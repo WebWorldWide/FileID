@@ -1,6 +1,38 @@
 # NEXT — Windows (resume here)
 
-## 2026-06-04 (later) — win-face-fix-perf: reconcile to main, then on-hardware verify (RESUME HERE)
+## 2026-06-04 (newest) — Review + land the SIX-workflow deep audit fixes (UNCOMMITTED on `main`) (RESUME HERE)
+
+A second, larger adversarial sweep (6 serialized workflows: engine·app·perf·security + re-audit + regression-repair re-audit) fixed **~35 bugs** in the `main` working tree (layered on the prior uncommitted sweep), and its re-audit caught + repaired **4 regressions its own fixes introduced**. All headless-green (engine clippy `-D` + tests incl. +3 new; app build 0/0 + App.Tests + IpcSchema.Tests + format). **Uncommitted** — see STATE 2026-06-04 (latest) + DECISIONS 2026-06-04 (latest) + per-finding record `shared/docs/audit-2026-06-04c/`. Resume order:
+
+1. **Review the working-tree diff (39 files) and (owner) commit + push** to `main`; confirm both GitHub workflows (windows-engine, windows-app) green. The diff is the prior uncommitted sweep + this one combined.
+2. **On-hardware verify (RTX 2060 / 4 GB DirectML) — the only non-headless step.** Highest-value to confirm:
+   - **People-tab edit during an auto-clustering pass** (rename/merge/mark-unknown right after a scan completes): the edit must SURVIVE (was silently discarded by the phase-3 DELETE+re-INSERT).
+   - **Face clustering determinism:** re-run clustering twice on a >5k-face library → identical cluster IDs / People names (HNSW fixed seed).
+   - **Restructure on a large library:** the tab must populate fast (O(n) frame reader), and **Anchor/"Keep" folders must NOT be moved** when applying (they're now dropped from the plan; confirm the Keep tile count still shows). Verify the moves that DO apply are only Tidy/Reorganize.
+   - **OCR actually produces text** on a screenshot/PDF (the missing COM init meant it silently returned nothing — runtime-only; can't be headless-verified).
+   - **Bulk-tag a large selection** + **scan** concurrently: no writer-lock stall (COM/sidecar + face-crop writes now off the lock).
+   - Settings → restart engine after a (simulated) GPU-EP crash: the CRASHING EP is disabled, not a healthy sibling (ep_guard armed-set).
+   - DebugLog still synchronous (forensic tail survives a fast-fail) — confirm app.log has the last lines after a forced crash.
+3. **Deferred from THIS pass (real, documented in TRIAGE.md):** VLM server-death CLI fallback; CLIP-tokenizer punctuation (ML A/B); long-path trash manifest; wipe-vs-bulk interlock; applyRestructure outbound chunking; AppSettings lost-update refactor; Sankey "Other" drill-down; startup-auth-on-UI-thread; rename-heal FTS desync; the DebugLog durable-async perf opt (a persistent flushed StreamWriter, NOT naive batching).
+
+## 2026-06-04 (latest) — Review + land the five-workflow bug-audit fixes (UNCOMMITTED on `main`) (folded into the newest entry above — its fixes are part of the combined working-tree diff)
+
+A fresh exhaustive bug-audit sweep (4 audit workflows + a re-audit/critic) fixed **11 bugs** in the `main` working tree (10 files: 4 app + 6 engine), all headless-green (engine clippy `-D` + **267 tests** + fmt; app build 0/0 + **131 + 38 tests** + format). **Uncommitted** — see STATE 2026-06-04 (later) + DECISIONS 2026-06-04 (later) + the per-finding record in `shared/docs/audit-2026-06-04b/`. Resume order:
+
+1. **Review the working-tree diff and (owner) commit + push** to `main`; confirm both GitHub workflows (windows-engine, windows-app) green. (`git diff` shows the 10 files; nothing else touched.)
+2. **On-hardware verify the user-facing fixes (RTX 2060 / 4 GB box) — the only non-headless step:**
+   - People AND Cleanup tabs: open + refresh repeatedly (incl. after a scan / after trash) — must NOT intermittently crash (the off-UI-thread `IsLoading`/`ErrorMessage` fast-fail).
+   - Settings → **Restart engine** (and the post-GPU-pack-install restart): the engine must come back Ready, not wedge on "Starting…" with dead IPC (the stale-`Exited` race).
+   - **Wipe library** right after a scan completes (while auto-clustering may be running): the People tab must be empty afterward — no ghost person cards.
+   - **Restructure** on a large library (>~3.5k proposed moves): the tab must populate (was silently empty at the 1 MiB frame cap); an oversize drop now shows an `ipc_frame_too_large` error toast.
+   - Suggested-merges sheet: shows "Looking…" then the result — no "No likely merges" flash.
+3. **Deferred (real, out of this pass's scope):**
+   - **Single-file Deep-Analyze waiter correlation** (`EngineClient.Commands.cs` DeepAnalyzeFileAsync ~406 + engine `deep_analyze.rs`): the waiter resolves on ANY `DeepAnalyzeComplete` (batch or another single-file), so it can show a wrong/false result. Needs a request/file-id threaded through the engine's single-file `DeepAnalyzeComplete` event (IPC contract change). Low sev.
+   - **IPC forward-compat / determinism hardening** (no active drift today, so deferred): an unknown enum value drops the whole event (`IpcCoder.cs`); a missing REQUIRED field is silently zero/null-filled (`Dtos.cs`); the schema documents alphabetical key ordering but the engine emits insertion order (`sink.rs`). Tighten when the contract next evolves.
+   - **ML-preprocess micro-opts — DEFERRED TO ON-HARDWARE A/B** (a tag/embedding *quality* regression here is invisible to the headless gate; per CLAUDE.md "tune ML against real data"): RAM++ + MobileCLIP per-pixel scalar 4-D ndarray indexing (~442K bounds-checked ops/image — the biggest potential preprocess win, but may be GPU-bound-masked; `ram_plus.rs`/`mobileclip.rs`); the redundant `Array4::zeros` memset before a full overwrite; the RAM++ batch-path full-frame clone per file (dormant unless `FILEID_RAMPLUS_BATCH_SIZE>1`); the dbwriter 512-byte per-face embedding clone; model-pool sized from the unclamped CPU worker cap (latent/benign now).
+   - **restructurePlan engine-side paging**: the robust alternative to the 32 MiB cap raise — page the plan via a new bounded IPC event the app accumulates. Only needed if a real library exceeds ~200k proposed moves.
+
+## 2026-06-04 (later) — win-face-fix-perf: reconcile to main, then on-hardware verify
 
 `win-face-fix-perf` (off origin/main) = the suggested-merges hang fix + over-split tuning (implements `PLAN-suggested-faces-fix.md`) AND an exhaustive 4 GB/low-mem perf audit. Headless-green (engine clippy `-D` + 266 tests; app build 0/0 + 131 App.Tests + 38 IpcSchema.Tests + format). Commits `d7b0159f` + `c07f93e8`. See STATE 2026-06-04 + DECISIONS 2026-06-04. (This resolves the prior deferred "consolidate() 12k cap" and "suggested-merges fast / HNSW" items below — now DONE.)
 

@@ -229,7 +229,8 @@ impl Discovery {
                     children.retain(|res| {
                         let Ok(entry) = res.as_ref() else { return true; };
                         let file_type = entry.file_type();
-                        let name = entry.file_name().to_string_lossy().to_string();
+                        let name = entry.file_name();
+                        let name = name.to_string_lossy();
                         if file_type.is_dir() {
                             !is_noise_directory(&name)
                         } else if file_type.is_file() {

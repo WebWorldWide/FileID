@@ -67,7 +67,23 @@ pub fn trash_path(path: &Path) -> Result<()> {
         if must_uninit {
             CoUninitialize();
         }
-        result?;
+        // SHCreateItemFromParsingName / IShellItem are shell-namespace APIs that
+        // don't reliably honor a non-extended >260-char path (and \\?\ doesn't help
+        // them either) — so a long path the verbatim probe found can fail the delete
+        // with a cryptic HRESULT. Surface a clear, actionable error instead of the
+        // raw HRESULT so the caller/user knows WHY. (A longPathAware exe manifest is
+        // the real fix but needs a build/dependency change — owner's call.) (audit E15)
+        if let Err(e) = result {
+            let path_len = wide.len().saturating_sub(1); // wide units, excluding NUL
+            if path_len > 260 {
+                anyhow::bail!(
+                    "Path is too long for the Recycle Bin ({path_len} chars > 260); Windows shell \
+                     delete can't handle it without long-path support. Shorten the path or remove \
+                     the file manually. (underlying error: {e})"
+                );
+            }
+            return Err(e);
+        }
     }
     Ok(())
 }

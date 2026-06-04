@@ -124,8 +124,7 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
             // caught below as a clean teardown no-op instead of escaping to the caller.
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
             var token = linked.Token;
-            IsLoading = true;
-            ErrorMessage = null;
+            OnUi(() => { IsLoading = true; ErrorMessage = null; });
             var clusters = await Task.Run(() => LoadClusters(token), token).ConfigureAwait(false);
             if (_disposed || token.IsCancellationRequested) return;
             ApplyOnUi(clusters);
@@ -134,11 +133,16 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
         catch (ObjectDisposedException) { /* expected during teardown */ }
         catch (Exception ex)
         {
-            if (!_disposed) ErrorMessage = ex.Message;
+            // ConfigureAwait(false) above resumes this continuation on a
+            // thread-pool thread; IsLoading/ErrorMessage raise PropertyChanged that
+            // drives x:Bind XAML writes (ProgressRing.IsActive, StatusText), so they
+            // must be marshaled to the captured UI thread — else a native fast-fail
+            // (RPC_E_WRONG_THREAD). Mirrors LibraryViewModel.
+            OnUi(() => { if (!_disposed) ErrorMessage = ex.Message; });
         }
         finally
         {
-            if (!_disposed) IsLoading = false;
+            OnUi(() => { if (!_disposed) IsLoading = false; });
         }
     }
 
@@ -205,6 +209,17 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
         {
             _ui.TryEnqueue(() => Replace(rows));
         }
+    }
+
+    /// Marshal a UI-affined mutation onto the captured dispatcher. RefreshAsync's
+    /// catch/finally run on a thread-pool thread (Task.Run + ConfigureAwait(false)),
+    /// so raising IsLoading/ErrorMessage PropertyChanged there would drive x:Bind
+    /// XAML writes off the UI thread — a native fast-fail. No-op when already on the
+    /// UI thread. Mirrors LibraryViewModel.OnUi.
+    private void OnUi(Action action)
+    {
+        if (_ui.HasThreadAccess) action();
+        else _ui.TryEnqueue(() => { if (!_disposed) action(); });
     }
 
     private void Replace(IReadOnlyList<PersonCluster> rows)

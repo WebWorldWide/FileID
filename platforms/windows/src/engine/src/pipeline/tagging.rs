@@ -1299,6 +1299,13 @@ async fn process_file_predecoded(
             tagged.error_message = Some(
                 "GPU device removed mid-scan; file not processed (will retry next scan)".into(),
             );
+        } else {
+            // Doc/Audio finished their CPU-only tag extraction (audio metadata,
+            // doc keywords) before the GPU died. Mark the set authoritative so
+            // the dbwriter persists it — otherwise tags_evaluated stays false,
+            // the dbwriter drops the freshly-extracted tags, AND failed=false
+            // strands the row in the skip-set, losing them permanently. (audit E2)
+            tagged.tags_evaluated = true;
         }
         tagged.total_ms = started.elapsed().as_secs_f64() * 1000.0;
         return tagged;
@@ -1671,7 +1678,10 @@ async fn process_file_predecoded(
                     // on a re-process that now yields nothing (#11).
                     tagged.ocr_stage_ran = true;
                     let ocr_started = Instant::now();
-                    if let Ok(Some(ocr)) = run_ocr_blocking(rgb.clone(), w, h).await {
+                    // Move (not clone) the decoded frame into OCR: this is the
+                    // last use of `rgb` in the block, so the clone was a wasted
+                    // full-frame allocation + memcpy per OCR'd file. (audit P5)
+                    if let Ok(Some(ocr)) = run_ocr_blocking(rgb, w, h).await {
                         if !ocr.text.trim().is_empty() {
                             tagged.has_text = true;
                             tagged.ocr_text = Some(ocr.text);
@@ -1723,6 +1733,21 @@ async fn process_file_predecoded(
     // GPU-dead-bail rows are built with tags_evaluated=false and never reach
     // here; the `!failed` term covers the no-decode path, mirroring
     // faces_evaluated which is set only inside the successful-decode block.)
+    // If the GPU died DURING this file's ML stages — after the pre-flight
+    // gpu-dead bail above let it through — an image/video reached neither a
+    // complete face-detect nor embed. Mark it failed so the incremental
+    // skip-set re-processes it next scan instead of stranding it at
+    // failed=false (scanned-fine-but-face-less forever, same class as the
+    // pre-ML bail). (audit E1)
+    if coord.is_gpu_dead()
+        && matches!(file.kind, FileKind::Image | FileKind::Video)
+        && !tagged.failed
+    {
+        tagged.failed = true;
+        tagged.error_message.get_or_insert_with(|| {
+            "GPU device removed mid-scan; file not fully processed (will retry next scan)".into()
+        });
+    }
     tagged.tags_evaluated = !coord.is_gpu_dead() && !tagged.failed && !file.online_only;
     tagged
 }

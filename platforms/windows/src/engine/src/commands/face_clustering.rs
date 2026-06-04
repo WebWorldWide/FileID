@@ -42,8 +42,6 @@ pub(crate) async fn handle_run_face_clustering(
         // here so phase 2 can build the blocked set without touching the DB.
         let verdict_pairs: Vec<(i64, i64)>;
         let name_rows: Vec<(i64, String)>;
-        let mut prior_by_person: HashMap<i64, PriorIdentity> = HashMap::new();
-        let mut face_to_prior: HashMap<i64, i64> = HashMap::new();
         {
             let conn = db.lock();
 
@@ -116,58 +114,12 @@ pub(crate) async fn handle_run_face_clustering(
                 rows
             };
 
-            // (d) Snapshot user-assigned identities BEFORE wiping `persons`.
-            // Re-clustering drops + re-creates the persons table with fresh rowids
-            // on EVERY run (the v13 migration note documents this), and this handler
-            // is auto-fired after every scan completion — so without carrying names
-            // forward, an incremental rescan that adds a single photo would destroy
-            // every name + "not this person" verdict the user entered in the People
-            // tab (data loss). We re-attach each new cluster's identity from the prior
-            // person that owned the MAJORITY of its member faces (ties broken toward
-            // the cluster's anchor face), which survives the anchor-selection drift a
-            // bare representative_face_id match would miss.
-            {
-                let mut stmt = conn.prepare(
-                    "SELECT id, name, title, first_name, middle_name, last_name, suffix, \
-                            COALESCE(is_unknown, 0), created_at \
-                     FROM persons \
-                     WHERE name IS NOT NULL OR COALESCE(is_unknown, 0) = 1",
-                )?;
-                let rows = stmt.query_map([], |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        PriorIdentity {
-                            name: r.get(1)?,
-                            title: r.get(2)?,
-                            first_name: r.get(3)?,
-                            middle_name: r.get(4)?,
-                            last_name: r.get(5)?,
-                            suffix: r.get(6)?,
-                            is_unknown: r.get(7)?,
-                            created_at: r.get(8)?,
-                        },
-                    ))
-                })?;
-                for row in rows {
-                    let (id, ident) = row?;
-                    prior_by_person.insert(id, ident);
-                }
-            }
-            // face_id → the prior person that owned it (only identity-bearing ones).
-            {
-                let mut stmt = conn.prepare(
-                    "SELECT id, person_id FROM face_prints WHERE person_id IS NOT NULL",
-                )?;
-                let rows =
-                    stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
-                for row in rows {
-                    let (face_id, pid) = row?;
-                    if prior_by_person.contains_key(&pid) {
-                        face_to_prior.insert(face_id, pid);
-                    }
-                }
-            }
-
+            // (d) The user-identity snapshot (prior names/title/is_unknown + the
+            // face->person map) is read in PHASE 3 under the persist lock — NOT
+            // here — so a People-tab edit (rename / merge / mark-unknown) that
+            // commits during the lock-free phase 2 is carried forward instead of
+            // being silently clobbered by a phase-1 snapshot that predates it.
+            // (audit S0)
             drop(conn);
         }
 
@@ -281,12 +233,62 @@ pub(crate) async fn handle_run_face_clustering(
             (a, an)
         };
 
-        // PHASE 3 — re-acquire the writer lock for the persist transaction. The
-        // identity snapshot (prior_by_person/face_to_prior) was captured in phase
-        // 1 before any of the lock-free work, so it still reflects the user's
-        // People-tab names + verdicts.
+        // PHASE 3 — re-acquire the writer lock for the persist transaction.
         let conn = db.lock();
         let tx = conn.unchecked_transaction()?;
+
+        // Read the user-identity snapshot HERE — under the persist lock, inside
+        // the transaction, BEFORE the DELETE below — rather than in phase 1.
+        // Re-clustering drops + re-creates the persons table on EVERY run and is
+        // auto-fired after every scan, so the names + "not this person" verdicts
+        // the user entered must be carried forward. Reading it now (not from a
+        // phase-1 snapshot) means a People-tab edit committed during the lock-free
+        // phase 2 — which had to take this same writer lock — is reflected, instead
+        // of being silently overwritten by a stale capture (data loss). We re-attach
+        // each new cluster's identity from the prior person that owned the MAJORITY
+        // of its member faces (ties broken toward the cluster's anchor face).
+        // (audit S0)  [PriorIdentity is defined at the top of this closure.]
+        let mut prior_by_person: HashMap<i64, PriorIdentity> = HashMap::new();
+        let mut face_to_prior: HashMap<i64, i64> = HashMap::new();
+        {
+            let mut stmt = tx.prepare(
+                "SELECT id, name, title, first_name, middle_name, last_name, suffix, \
+                        COALESCE(is_unknown, 0), created_at \
+                 FROM persons \
+                 WHERE name IS NOT NULL OR COALESCE(is_unknown, 0) = 1",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    PriorIdentity {
+                        name: r.get(1)?,
+                        title: r.get(2)?,
+                        first_name: r.get(3)?,
+                        middle_name: r.get(4)?,
+                        last_name: r.get(5)?,
+                        suffix: r.get(6)?,
+                        is_unknown: r.get(7)?,
+                        created_at: r.get(8)?,
+                    },
+                ))
+            })?;
+            for row in rows {
+                let (id, ident) = row?;
+                prior_by_person.insert(id, ident);
+            }
+        }
+        {
+            let mut stmt =
+                tx.prepare("SELECT id, person_id FROM face_prints WHERE person_id IS NOT NULL")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+            for row in rows {
+                let (face_id, pid) = row?;
+                if prior_by_person.contains_key(&pid) {
+                    face_to_prior.insert(face_id, pid);
+                }
+            }
+        }
+
         // Persist clusters: clear existing person_id assignments + persons,
         // re-create one persons row per anchor, point face_prints at it.
         tx.execute("UPDATE face_prints SET person_id = NULL", [])?;

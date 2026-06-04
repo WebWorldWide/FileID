@@ -196,9 +196,8 @@ pub(crate) async fn handle_plan_restructure(
     } else {
         classify(&files, library_root_path)
     };
-    let category_summary = restructure::category_counts(&proposed);
-
-    // Engine-authoritative folder classification.
+    // Engine-authoritative folder classification, computed on the FULL proposal
+    // set so the Keep/Tidy/Reorganize tile counts stay accurate.
     let folder_class = restructure::classify_folders(&proposed);
     let mut anchor = 0u32;
     let mut mixed = 0u32;
@@ -224,6 +223,16 @@ pub(crate) async fn handle_plan_restructure(
         };
         tier_by_folder.insert(f.source_folder.clone(), tier_label);
     }
+
+    // Anchor folders are well-organized with clear names; the macOS reference
+    // emits NO proposals for them ("Files inside Anchor folders stay put"), and
+    // the Keep tile (driven by folder_classifications.anchor_folders, counted
+    // just above) tells the user they're left untouched. Drop their moves so the
+    // plan the app applies can never silently relocate a file the UI promised
+    // would stay put — without this, default-selected Anchor rows were applied.
+    // (audit A1/A3)
+    let proposed = restructure::strip_anchor_folder_moves(proposed, &folder_class);
+    let category_summary = restructure::category_counts(&proposed);
 
     let plan = RestructurePlan {
         library_root,

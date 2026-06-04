@@ -162,7 +162,7 @@ pub(crate) async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQ
             let armed_ep = crate::models::runtime::armed_provider();
             crate::models::ep_guard::arm(armed_ep.as_str());
             let loaded = crate::models::clip_text::ClipText::load(weights, tokenizer);
-            crate::models::ep_guard::disarm();
+            crate::models::ep_guard::disarm(armed_ep.as_str());
             *guard = Some(loaded?);
         }
         let model = guard.as_mut().expect("just set");

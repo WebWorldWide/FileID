@@ -9,6 +9,27 @@ use anyhow::{Context, Result};
 use windows::Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap};
 use windows::Media::Ocr::OcrEngine;
 use windows::Storage::Streams::DataWriter;
+use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+
+/// Ensure the calling thread has a COM apartment for the WinRT activations
+/// below. Every other shell module that touches COM/WinRT does this; OCR runs
+/// on tokio blocking-pool threads that start with NO apartment, so the first
+/// WinRT activation (DataWriter::new) was failing CO_E_NOTINITIALIZED and the
+/// error was silently swallowed by the caller — OCR produced nothing. Mirrors
+/// `shell::tags::with_com`. `is_ok()` is true for S_OK/S_FALSE (uninit to
+/// balance), false for RPC_E_CHANGED_MODE (thread already in another apartment;
+/// don't touch it — WinRT activation works on MTA too). (audit recheck: OCR COM)
+fn with_com<R>(body: impl FnOnce() -> R) -> R {
+    unsafe {
+        let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let must_uninit = hr.is_ok();
+        let result = body();
+        if must_uninit {
+            CoUninitialize();
+        }
+        result
+    }
+}
 
 // Public API surface — current callers only consume `text`, but `lines`
 // and `locale` are populated so the UI can later render per-line OCR
@@ -52,6 +73,7 @@ pub fn recognize(rgb: &[u8], width: u32, height: u32) -> Result<OcrResult> {
         bgra.push(255);      // A
     }
 
+    with_com(|| -> Result<OcrResult> {
     let writer = DataWriter::new()?;
     writer.WriteBytes(&bgra)?;
     let buffer = writer.DetachBuffer()?;
@@ -134,6 +156,7 @@ pub fn recognize(rgb: &[u8], width: u32, height: u32) -> Result<OcrResult> {
         lines: lines_out,
         locale,
     })
+    })
 }
 
 /// Best-effort list of locales the engine actually supports on this box.
@@ -141,9 +164,11 @@ pub fn recognize(rgb: &[u8], width: u32, height: u32) -> Result<OcrResult> {
 /// single "auto" entry.
 #[allow(dead_code)]
 pub fn user_locales() -> Result<Vec<String>> {
-    let _ = OcrEngine::TryCreateFromUserProfileLanguages()
-        .context("TryCreateFromUserProfileLanguages")?;
-    Ok(vec!["auto".into()])
+    with_com(|| -> Result<Vec<String>> {
+        let _ = OcrEngine::TryCreateFromUserProfileLanguages()
+            .context("TryCreateFromUserProfileLanguages")?;
+        Ok(vec!["auto".into()])
+    })
 }
 
 // Suppress unused-Interface warning when feature gates close all

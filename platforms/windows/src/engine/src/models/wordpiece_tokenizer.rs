@@ -92,8 +92,18 @@ impl WordPieceTokenizer {
     fn basic_tokenize(&self, text: &str) -> Vec<String> {
         let mut out = Vec::new();
         let mut cur = String::new();
-        for ch in text.chars() {
-            let c = if self.lower_case { ch.to_ascii_lowercase() } else { ch };
+        // Full Unicode lowering, not ASCII-only: lowercasing only the ASCII
+        // range leaves accented/non-Latin text in its original case so it never
+        // matches the (lowercased) vocab and collapses to [UNK]. Matches HF
+        // BertTokenizer(do_lower_case=True). (audit E8)
+        let lowered;
+        let src: &str = if self.lower_case {
+            lowered = text.to_lowercase();
+            &lowered
+        } else {
+            text
+        };
+        for c in src.chars() {
             if c.is_whitespace() {
                 if !cur.is_empty() {
                     out.push(std::mem::take(&mut cur));

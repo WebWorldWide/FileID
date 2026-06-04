@@ -161,7 +161,14 @@ pub fn semantic_classify(
                 // folder. Auto-file only when the match is strong *and*
                 // unambiguous (clear margin over the runner-up) on a tight
                 // cluster; otherwise surface for one-click review.
-                Some((proto, sim, runner_up)) if sim >= FOLDER_MATCH_COS => {
+                // Containment guard: only an in-root prototype is a valid
+                // destination — routing to a folder outside library_root would
+                // be silently rejected by the apply layer (canonicalizes
+                // outside root), so such a match falls through to a new in-root
+                // group instead. (audit E12)
+                Some((proto, sim, runner_up))
+                    if sim >= FOLDER_MATCH_COS && proto.path.starts_with(library_root) =>
+                {
                     let name = folder_display_name(&proto.path);
                     let confidence = if sim >= AUTO_FOLDER_COS
                         && coh >= REVIEW_COHESION
@@ -184,17 +191,38 @@ pub fn semantic_classify(
                     // cluster so distinct clusters get distinct folders (#9):
                     // prefer the next distinctive term, then a numeric suffix.
                     let mut pretty = base.clone();
-                    if used_group_names.contains(&pretty) {
+                    let safe_base = crate::util::path_safety::safe_filename_component(&pretty);
+                    let mut safe = safe_base.clone();
+                    // Disambiguate in the SANITIZED namespace that actually backs
+                    // the folder. Two pretty names that differ only in chars
+                    // safe_filename_component maps to '_' (e.g. "16:9" and "16/9" →
+                    // "16_9") would otherwise collide into one physical directory.
+                    // Prefer the next distinctive term first.
+                    if used_group_names.contains(&safe) {
                         if let Some(extra) = terms.get(2) {
                             pretty = format!("{} {}", base, title_case(extra));
+                            safe = crate::util::path_safety::safe_filename_component(&pretty);
                         }
                     }
+                    // Numeric-suffix fallback. Build each candidate so the suffix
+                    // ALWAYS survives the 200-scalar filename cap: a base that
+                    // already sanitizes to ~200 chars would otherwise truncate every
+                    // "{base} {n}" to the SAME string, so the uniqueness check never
+                    // clears and the loop spins forever (hanging plan generation).
+                    // Reserve room on the (already-sanitized) base and append the
+                    // suffix directly — distinct n ⇒ distinct candidate ⇒ guaranteed
+                    // termination within |used_group_names|+1 iterations.
+                    const SAFE_NAME_MAX: usize = 200; // mirrors safe_filename_component MAX_LEN
                     let mut n = 2usize;
-                    while used_group_names.contains(&pretty) {
+                    while used_group_names.contains(&safe) {
+                        let suffix = format!(" {n}");
+                        let room = SAFE_NAME_MAX.saturating_sub(suffix.chars().count());
+                        let prefix: String = safe_base.chars().take(room).collect();
+                        safe = format!("{prefix}{suffix}");
                         pretty = format!("{} {}", base, n);
                         n += 1;
                     }
-                    used_group_names.insert(pretty.clone());
+                    used_group_names.insert(safe.clone());
                     let confidence = if coh >= AUTO_COHESION && members.len() >= AUTO_MIN_MEMBERS {
                         Confidence::Auto
                     } else if coh >= REVIEW_COHESION {
@@ -211,9 +239,9 @@ pub fn semantic_classify(
                     // Path-safe directory name (mirrors the person route):
                     // illegal/separator chars in tag-derived names ("16:9",
                     // "dog/cat") would mis-route or fail the move and break
-                    // cross-platform name parity (#2). Keep `pretty` for the
-                    // human-facing category/reason.
-                    let safe = crate::util::path_safety::safe_filename_component(&pretty);
+                    // cross-platform name parity (#2). `safe` was computed during
+                    // dedup above so the uniqueness check ran in this same folder
+                    // namespace. Keep `pretty` for the human-facing category/reason.
                     (library_root.join(&safe), pretty, confidence, reason)
                 }
             };
@@ -534,6 +562,33 @@ mod tests {
         let moves = semantic_classify(&files, &[], Path::new("/lib"));
         let cats: std::collections::HashSet<_> = moves.iter().map(|m| m.category.clone()).collect();
         assert_eq!(cats.len(), 2, "expected 2 groups, got {cats:?}");
+    }
+
+    #[test]
+    fn sanitization_colliding_group_names_get_distinct_folders() {
+        // Two distinct content clusters whose distinctive tags differ ONLY in
+        // chars safe_filename_component maps to '_' ("16:9" vs "16/9" → "16_9").
+        // The dedup must back them with DISTINCT physical directories (E4), not
+        // collapse both into one folder — and the numeric-suffix loop must
+        // terminate.
+        let mut files = Vec::new();
+        for i in 0..6 {
+            files.push(file(i, &format!("a/r{i}.jpg"), vec![1.0, 0.0, 0.0, 0.0], &["16:9"]));
+        }
+        for i in 0..6 {
+            files.push(file(100 + i, &format!("a/s{i}.jpg"), vec![0.0, 1.0, 0.0, 0.0], &["16/9"]));
+        }
+        let moves = semantic_classify(&files, &[], Path::new("/lib"));
+        assert_eq!(moves.len(), 12, "all files placed: {moves:?}");
+        let parents: std::collections::HashSet<_> = moves
+            .iter()
+            .filter_map(|m| m.destination.parent().map(|p| p.to_path_buf()))
+            .collect();
+        assert_eq!(
+            parents.len(),
+            2,
+            "sanitization-colliding group names must get 2 distinct folders, got {parents:?}"
+        );
     }
 
     #[test]

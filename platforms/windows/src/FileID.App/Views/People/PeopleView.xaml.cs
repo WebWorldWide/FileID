@@ -91,7 +91,9 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
                 try
                 {
                     if (!System.IO.File.Exists(AppPaths.DbPath)) return 0;
-                    var conn = new Microsoft.Data.Sqlite.SqliteConnection(
+                    // `using` so the connection is deterministically returned to the
+                    // pool when the lambda exits (was leaked per footer refresh). (audit A14)
+                    using var conn = new Microsoft.Data.Sqlite.SqliteConnection(
                         new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
                         {
                             DataSource = AppPaths.DbPath,
@@ -142,7 +144,10 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         {
             try
             {
-                var s = AppSettings.Load();
+                // Shared singleton, not a fresh Load() — avoids the static-debounce
+                // lost-update (a fresh instance's Save() cancels the singleton's
+                // pending write). (audit A8)
+                var s = FileID.ViewModels.AppViewModel.Instance.Settings;
                 s.PeopleHideUnknown = false;
                 s.Save();
             }

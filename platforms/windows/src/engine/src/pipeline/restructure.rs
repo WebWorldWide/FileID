@@ -136,6 +136,34 @@ pub fn classify_folders(moves: &[ProposedMove]) -> Vec<ClassifiedFolder> {
     out
 }
 
+/// Drop every move whose source folder was classified
+/// [`FolderClassification::Anchor`]. Anchor folders are deliberately left
+/// untouched — the macOS reference emits NO proposals for them ("Files inside
+/// Anchor folders stay put") — so their moves must never reach the plan the app
+/// applies, even though the per-file classifier computes a canonical destination
+/// for them. The anchor COUNT for the informational "Keep" tile is the caller's
+/// responsibility, computed from the same `classified` slice BEFORE stripping.
+/// (audit A1/A3)
+pub fn strip_anchor_folder_moves(
+    moves: Vec<ProposedMove>,
+    classified: &[ClassifiedFolder],
+) -> Vec<ProposedMove> {
+    let anchor_folders: std::collections::HashSet<PathBuf> = classified
+        .iter()
+        .filter(|c| c.classification == FolderClassification::Anchor)
+        .map(|c| c.source_folder.clone())
+        .collect();
+    moves
+        .into_iter()
+        .filter(|m| {
+            m.source
+                .parent()
+                .map(|p| !anchor_folders.contains(p))
+                .unwrap_or(true)
+        })
+        .collect()
+}
+
 /// Priority-based restructure matching macOS Restructure.swift. First
 /// match wins:
 ///   1. Named person  → People/<Name>/<Year>/
@@ -297,6 +325,50 @@ mod tests {
         assert!(dest.contains("2024"), "dest={dest}");
         assert!(dest.contains("March"), "dest={dest}");
         assert_eq!(m[0].category, "photo");
+    }
+
+    #[test]
+    fn anchor_folder_moves_are_stripped_from_plan() {
+        // Three same-month photos in one well-named folder => that folder
+        // classifies Anchor (>=80% one category, >2 files, non-generic name).
+        // The macOS reference leaves anchor folders untouched, so their moves
+        // must be dropped before the plan reaches the app. (audit A1/A3)
+        let ts = 1_710_504_000.0;
+        let files = vec![
+            img(1, "D:/Library/Vacation2019/a.jpg", ts),
+            img(2, "D:/Library/Vacation2019/b.jpg", ts),
+            img(3, "D:/Library/Vacation2019/c.jpg", ts),
+        ];
+        let moves = classify(&files, Path::new("D:/Library"));
+        assert_eq!(moves.len(), 3);
+        let classified = classify_folders(&moves);
+        assert!(
+            classified
+                .iter()
+                .any(|c| c.classification == FolderClassification::Anchor),
+            "Vacation2019 should classify Anchor: {classified:?}"
+        );
+        let kept = strip_anchor_folder_moves(moves, &classified);
+        assert!(kept.is_empty(), "anchor-folder moves must be dropped: {kept:?}");
+    }
+
+    #[test]
+    fn non_anchor_folder_moves_survive_the_strip() {
+        // A generic-named folder ("Downloads") classifies Junk, not Anchor, so
+        // its moves must survive the strip — guards against over-stripping.
+        let ts = 1_710_504_000.0;
+        let files = vec![
+            img(1, "D:/Library/Downloads/a.jpg", ts),
+            img(2, "D:/Library/Downloads/b.jpg", ts),
+            img(3, "D:/Library/Downloads/c.jpg", ts),
+        ];
+        let moves = classify(&files, Path::new("D:/Library"));
+        let classified = classify_folders(&moves);
+        assert!(classified
+            .iter()
+            .all(|c| c.classification != FolderClassification::Anchor));
+        let kept = strip_anchor_folder_moves(moves, &classified);
+        assert_eq!(kept.len(), 3);
     }
 
     #[test]

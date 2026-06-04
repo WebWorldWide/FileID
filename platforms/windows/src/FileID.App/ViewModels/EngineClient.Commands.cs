@@ -18,7 +18,11 @@ internal sealed partial class EngineClient
     /// drained its half. 1 MB is generous for every legitimate command
     /// today (each fits comfortably under 100 KB) — beyond that the
     /// caller should chunk explicitly.</summary>
-    private const int MaxIpcFrameBytes = 1_000_000;
+    // 32 MiB, symmetric with the engine's command-read cap (main.rs MAX_FRAME_BYTES)
+    // and the inbound read cap (MaxFrameChars). The old 1 MiB cap rejected a large
+    // applyRestructure (>~3.5k moves) — the same move set the engine just sent in
+    // restructurePlan — leaving a big reorganize unappliable. (audit E10)
+    private const int MaxIpcFrameBytes = 32 * 1024 * 1024;
 
     public Task SendCommandAsync(CommandPayload payload, CancellationToken ct = default)
     {
@@ -430,20 +434,23 @@ internal sealed partial class EngineClient
             var result = await tcs.Task.ConfigureAwait(false);
             if (!result.Cancelled && result.Failed > 0)
             {
-                LastWarning = new EngineError(
+                // This runs on the ConfigureAwait(false) thread-pool continuation;
+                // marshal the observable write to the UI thread so its
+                // PropertyChanged never fires off-thread into x:Bind. (audit A12)
+                _ui.TryEnqueue(() => LastWarning = new EngineError(
                     "deep_analyze_file_failed",
                     "Deep Analyze couldn't process this file. It may be an unsupported format, or the model isn't installed yet.",
                     null,
-                    modelKind);
+                    modelKind));
             }
         }
         catch (TimeoutException)
         {
-            LastWarning = new EngineError(
+            _ui.TryEnqueue(() => LastWarning = new EngineError(
                 "deep_analyze_no_confirm",
                 $"Deep Analyze hasn't responded in {DeepAnalyzeFileTimeout.TotalMinutes:0} minutes. It may still be running on a large model — check the stream, or cancel and retry if it stays stuck.",
                 null,
-                modelKind);
+                modelKind));
         }
         finally
         {
@@ -676,8 +683,13 @@ internal sealed partial class EngineClient
                 tcs.TrySetResult(r);
             }
         };
-        // Reset first so a value-equal reply still re-fires PropertyChanged.
-        LastMergeSuggestions = null;
+        // Do NOT reset LastMergeSuggestions to null here. That fires
+        // PropertyChanged → SuggestedMergesSheet.Render() with a null result,
+        // flashing "No likely merges found." over the "Looking…" placeholder before
+        // the real reply lands. Unlike LastLibraryWiped/LastBulkAction (value-type
+        // records that CAN be value-equal across replies, so they need the reset),
+        // each MergeSuggestions reply carries a fresh Pairs list ⇒ never value-equal
+        // to the prior ⇒ the handler below still fires on the next reply.
         PropertyChanged += handler;
         try
         {
@@ -724,23 +736,23 @@ internal sealed partial class EngineClient
             {
                 var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
                 var detail = string.IsNullOrWhiteSpace(first) ? "" : $" — {first}";
-                LastWarning = new EngineError(
+                _ui.TryEnqueue(() => LastWarning = new EngineError(
                     "restore_partial_failure",
                     $"Restored {result.Succeeded}; {result.Failed} couldn't be brought back{detail}.",
-                    null);
+                    null));
             }
         }
         catch (TimeoutException)
         {
-            LastError = new EngineError(
+            _ui.TryEnqueue(() => LastError = new EngineError(
                 "restore_no_confirm",
                 "The engine didn't confirm the restore within 30 seconds. The files may or may not have been restored — re-run the scan to check before retrying.",
-                null);
+                null));
             throw;
         }
         catch (Exception ex)
         {
-            LastError = new EngineError("restore_failed", $"Restore failed: {ex.Message}", null);
+            _ui.TryEnqueue(() => LastError = new EngineError("restore_failed", $"Restore failed: {ex.Message}", null));
             throw;
         }
     }

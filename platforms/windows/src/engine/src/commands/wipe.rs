@@ -16,6 +16,7 @@ pub(crate) async fn handle_wipe_library(
     sink: Sink,
     db: Arc<Mutex<Connection>>,
     scan_state: Arc<Mutex<Option<crate::coordinator::ScanCoordinator>>>,
+    face_cluster_active: Arc<std::sync::atomic::AtomicBool>,
 ) {
     // Cancel any in-flight scan and wait (bounded) for it to release the single
     // writer before truncating. Otherwise the running DbWriter keeps committing
@@ -31,6 +32,22 @@ pub(crate) async fn handle_wipe_library(
     while scan_state.lock().is_some() && waited < 100 {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         waited += 1;
+    }
+
+    // Also wait (bounded) for an in-flight face-clustering pass. Clustering now
+    // drops the writer lock during cluster()+consolidate() and re-acquires it
+    // only to persist (commands/face_clustering.rs three-phase split), so a wipe
+    // that lands during that lock-free window would commit, and the clustering
+    // persist would then re-INSERT phantom `persons` rows — built from its
+    // pre-wipe in-memory anchors, pointing at now-deleted faces — into the
+    // just-wiped DB, leaving ghost People cards after a "wipe" that reported
+    // success. The single-flight FaceClusterActiveGuard clears this flag on the
+    // pass's completion/error/panic, so the wait always terminates. Mirrors the
+    // scan interlock above; enforced here per the engine's single-DB-owner rule.
+    let mut cluster_waited = 0u32;
+    while face_cluster_active.load(std::sync::atomic::Ordering::Acquire) && cluster_waited < 100 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        cluster_waited += 1;
     }
 
     let wiped = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {

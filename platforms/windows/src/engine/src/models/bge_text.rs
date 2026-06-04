@@ -54,6 +54,15 @@ impl BgeText {
         let builder = Session::builder().context("ORT session builder")?;
         let mut builder =
             configure_session_builder(builder).context("configure session (BGE)")?;
+        // configure_session_builder tunes intra-op threads for the system's
+        // DEFAULT EP — 1 on a GPU box, where the accelerator does the parallelism.
+        // BGE is pinned to the CPU EP below, so on a GPU box it would otherwise run
+        // SINGLE-THREADED on the CPU. Force the CPU performance-core count here so
+        // this CPU-only encoder is multi-threaded regardless of the system EP.
+        // Output is identical (same weights/graph); only throughput changes.
+        builder = builder
+            .with_intra_threads(crate::platform::cpu_topology().p_cores.max(1) as usize)
+            .context("set BGE intra-op threads")?;
         let providers = execution_providers_for_chain(&chain, None);
         if !providers.is_empty() {
             builder = builder
@@ -121,10 +130,21 @@ impl BgeText {
         if shape.len() != 3 || shape[2] as usize != HIDDEN {
             anyhow::bail!("BGE output shape {:?} != (1, seq, {HIDDEN})", shape);
         }
+        // The reported sequence length must match the tokens we fed (a malformed
+        // or wrong-variant ONNX re-export can disagree). Validate before pooling
+        // so a hostile/buggy model is a clean per-file error, not an index-OOB
+        // panic that kills the scan worker. (audit E9 / S1)
+        let seq = shape[1] as usize;
+        if shape[0] != 1 || seq != enc.attention_mask.len() || data.len() < seq * HIDDEN {
+            anyhow::bail!(
+                "BGE output shape {:?} inconsistent with {} input tokens (HIDDEN={HIDDEN})",
+                shape,
+                enc.attention_mask.len()
+            );
+        }
 
         // Mean-pool over the sequence dim using the attention mask, then
         // L2-normalize. Matches BGE-small's canonical pooling.
-        let seq = shape[1] as usize;
         let mut emb = vec![0f32; HIDDEN];
         let mut total: f32 = 0.0;
         for t in 0..seq {
@@ -157,9 +177,14 @@ fn l2_normalize(v: &mut [f32]) {
 /// Per-EP variant-aware weights path: `bge_text/bge_small.onnx` (or
 /// `_int8.onnx` / `_qnn.bin` on accelerated EPs when present).
 pub fn default_weights_path() -> Result<PathBuf> {
-    Ok(super::variants::resolve_model_path(
+    // BGE always binds the CPU EP (see `load`), so resolve the CPU variant
+    // (= the base .onnx) explicitly rather than via active_provider(), which on
+    // an Intel-NPU/Snapdragon box would pick an _int8/_qnn variant a CPU session
+    // can't consume. (audit E6)
+    Ok(super::variants::resolve_model_path_for(
         &crate::paths::models_dir()?.join("bge_text"),
         "bge_small",
+        ExecutionProvider::Cpu,
     ))
 }
 

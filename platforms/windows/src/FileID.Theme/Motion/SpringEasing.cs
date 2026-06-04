@@ -86,9 +86,20 @@ public static class SpringEasing
         double dampingFraction)
     {
         var visual = ElementCompositionPreview.GetElementVisual(element);
-        var size = visual.Size;
-        // Anchor scale around the visual's center so growth/shrink is symmetric.
-        visual.CenterPoint = new System.Numerics.Vector3(size.X / 2, size.Y / 2, 0);
+        // A GetElementVisual visual's Size is NOT populated (stays (0,0)) unless
+        // explicitly bound, so deriving the center from it anchored the scale at
+        // the top-left — growth/shrink wasn't symmetric. Use the element's laid-out
+        // size instead. (audit A11)
+        if (element is FrameworkElement fe)
+        {
+            visual.CenterPoint = new System.Numerics.Vector3(
+                (float)(fe.ActualWidth / 2), (float)(fe.ActualHeight / 2), 0);
+        }
+        else
+        {
+            var size = visual.Size;
+            visual.CenterPoint = new System.Numerics.Vector3(size.X / 2, size.Y / 2, 0);
+        }
         AnimateScalar(element, "Scale.X", finalScale, response, dampingFraction);
         AnimateScalar(element, "Scale.Y", finalScale, response, dampingFraction);
     }

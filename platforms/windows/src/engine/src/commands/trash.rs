@@ -216,11 +216,18 @@ pub(crate) async fn handle_revert_merge(
             moved += 1;
         }
         drop(update);
-        let _ = tx.execute(
-            "UPDATE persons SET file_count = (SELECT COUNT(DISTINCT file_id) \
-             FROM face_prints WHERE person_id = ?1) WHERE id IN (?1, ?2)",
-            rusqlite::params![new_pid, payload.destination_person_id],
-        );
+        // Recompute EACH person's file_count from its OWN faces. A single
+        // `WHERE id IN (?1, ?2)` with the subquery bound to ?1 set the
+        // destination person's count to the SOURCE person's face count (the
+        // subquery's person_id is fixed to ?1 for both rows) — a wrong count
+        // until the next re-cluster. Two correlated updates fix each row. (audit recheck)
+        for pid in [new_pid, payload.destination_person_id] {
+            let _ = tx.execute(
+                "UPDATE persons SET file_count = (SELECT COUNT(DISTINCT file_id) \
+                 FROM face_prints WHERE person_id = ?1) WHERE id = ?1",
+                rusqlite::params![pid],
+            );
+        }
         tx.commit()?;
         Ok(BulkActionResult {
             action: "revertMerge".into(),

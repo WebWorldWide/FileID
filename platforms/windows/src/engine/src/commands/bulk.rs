@@ -92,6 +92,9 @@ pub(crate) async fn handle_apply_tags(
         let mut succeeded = 0u32;
         let mut failed = 0u32;
         let mut messages = Vec::new();
+        // (path, tags) to persist to disk (sidecar JSON + IPropertyStore COM)
+        // AFTER the tx commits and the writer lock drops — never inside it. (audit P0)
+        let mut sidecar_writes: Vec<(String, Vec<String>)> = Vec::new();
         let conn = db.lock();
         let tx = conn.unchecked_transaction()?;
         // Cache prepared statements outside the per-file loop. Raw
@@ -154,10 +157,13 @@ pub(crate) async fn handle_apply_tags(
                 )?;
                 let rows = stmt.query_map(rusqlite::params![fid], |r| r.get::<_, String>(0))?;
                 let tags: Vec<String> = rows.filter_map(|r| r.ok()).collect();
-                if let Err(err) = crate::shell::tags::write_tags(std::path::Path::new(&path), &tags)
-                {
-                    tracing::warn!(?err, path = %crate::platform::redact_path_for_log(&path), "sidecar tag write failed");
-                }
+                // Defer the sidecar JSON + IPropertyStore COM write to AFTER the tx
+                // commits (see loop past tx.commit). Doing per-file fs+COM (1-10 ms
+                // each) inside the open tx held the engine's only writer lock for the
+                // whole bulk op and grew the WAL; the sidecar has no transactional
+                // coupling to the DB rows (failures only log), so deferring is
+                // behavior-preserving. (audit P0)
+                sidecar_writes.push((path, tags));
                 succeeded += 1;
                 messages.push(BulkActionItem {
                     file_id: Some(*fid),
@@ -167,6 +173,15 @@ pub(crate) async fn handle_apply_tags(
             }
         }
         tx.commit()?;
+        // Release the single writer lock BEFORE the per-file fs + COM sidecar
+        // writes so a large bulk-tag can't wedge the engine's only writer (and
+        // any concurrent scan flush) for the whole operation. (audit P0)
+        drop(conn);
+        for (path, tags) in &sidecar_writes {
+            if let Err(err) = crate::shell::tags::write_tags(std::path::Path::new(path), tags) {
+                tracing::warn!(?err, path = %crate::platform::redact_path_for_log(path), "sidecar tag write failed");
+            }
+        }
         Ok(BulkActionResult {
             action: "applyTags".into(),
             succeeded,

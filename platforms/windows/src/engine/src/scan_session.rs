@@ -254,6 +254,16 @@ impl ScanSession {
         // in scope so the tagging callback can also read it for Progress
         // event totals.
         let discovered_count_for_tick = discovered_count.clone();
+        // Single-shot guard shared with the post-drain fallback below: the tick
+        // sleeps 250 ms before its first wake-up, so a folder that discovers and
+        // drains faster than that (empty folder / fully-current rescan) would be
+        // aborted before the tick emits its notice. Whichever path wins the swap
+        // emits; the other skips. (audit E3)
+        let notice_emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let notice_emitted_for_tick = notice_emitted.clone();
+        // The tick takes `discovered_done` by move (async move); keep a clone for
+        // the post-drain fallback's done-check below. (audit E3)
+        let discovered_done_post = discovered_done.clone();
         let tick = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -282,7 +292,9 @@ impl ScanSession {
                     // Close out cleanly with a "no supported files found"
                     // error so the user knows what happened.
                     let errs = errors_for_tick.load(std::sync::atomic::Ordering::Relaxed);
-                    if count == 0 && skip_count > 0 {
+                    let already =
+                        notice_emitted_for_tick.swap(true, std::sync::atomic::Ordering::SeqCst);
+                    if !already && count == 0 && skip_count > 0 {
                         // Incremental rescan where every file was already
                         // current — not an error. Non-fatal "already up to
                         // date" notice (#21).
@@ -295,7 +307,7 @@ impl ScanSession {
                                 model_kind: None,
                             }),
                         )));
-                    } else if count == 0 {
+                    } else if !already && count == 0 {
                         // Genuinely empty / unsupported folder.
                         let _ = sink_for_tick.try_send(IpcEvent::now(EventPayload::Error(
                             Wrap::new(crate::ipc::EngineError {
@@ -309,7 +321,7 @@ impl ScanSession {
                                 model_kind: None,
                             }),
                         )));
-                    } else if errs > 0 {
+                    } else if !already && errs > 0 {
                         // Non-fatal: walk recovered after the failures.
                         let _ = sink_for_tick.try_send(IpcEvent::now(EventPayload::Error(
                             Wrap::new(crate::ipc::EngineError {
@@ -366,6 +378,57 @@ impl ScanSession {
         // abort is belt-and-suspenders for the rare case where DBWriter
         // returns before tick observes the done flag (cancel mid-walk).
         tick.abort();
+
+        // Post-drain fallback for the empty/rescan/partial notice: if discovery
+        // finished but the tick was aborted before it could emit (drained inside
+        // its 250 ms first sleep — empty folder or fully-current rescan), emit it
+        // here so the UI never silently hangs on "Discovering…". Single-shot via
+        // the shared flag so we never double-emit what the tick already sent. (audit E3)
+        if !self.coordinator.is_cancelled()
+            && discovered_done_post.load(std::sync::atomic::Ordering::Acquire)
+            && !notice_emitted.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            let count = discovered_count.load(std::sync::atomic::Ordering::Relaxed);
+            let errs = discovered_errors.load(std::sync::atomic::Ordering::Relaxed);
+            let root_display = root.to_string_lossy().into_owned();
+            let notice = if count == 0 && skip_count > 0 {
+                Some((
+                    "rescan_no_changes".to_string(),
+                    "Library is already up to date — no new or changed files to scan.".to_string(),
+                ))
+            } else if count == 0 {
+                Some((
+                    "empty_folder".to_string(),
+                    format!(
+                        "No supported files found in {}.\n\
+                         Pick a folder with images, videos, PDFs, or documents.",
+                        root_display
+                    ),
+                ))
+            } else if errs > 0 {
+                Some((
+                    "discovery_partial".to_string(),
+                    format!(
+                        "Scanned {} file(s); {} path(s) couldn't be read \
+                         (permission denied or removed mid-scan). Scan continues.",
+                        count, errs
+                    ),
+                ))
+            } else {
+                None
+            };
+            if let Some((kind, message)) = notice {
+                sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(
+                    crate::ipc::EngineError {
+                        kind,
+                        message,
+                        path: Some(root_display),
+                        model_kind: None,
+                    },
+                ))))
+                .await;
+            }
+        }
 
         let elapsed = started.elapsed().as_secs_f64();
 

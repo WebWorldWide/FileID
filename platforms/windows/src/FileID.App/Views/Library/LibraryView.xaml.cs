@@ -37,6 +37,10 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     // makes the Add/Remove pair safe regardless.
     private readonly System.Collections.Concurrent.ConcurrentDictionary<FileTile, CancellationTokenSource> _inflight = new();
     private readonly ClipSearchService _clip;
+    // Owned so OnUnloaded can dispose its SQLite connection + SemaphoreSlim.
+    // Neither ClipSearchService.Dispose nor LibraryViewModel.Dispose releases it,
+    // so without this it leaked one connection per tab navigation. (audit A7)
+    private readonly ReadStore _store;
     // One-shot tile-entrance gate. ItemsRepeater reuses element instances and
     // re-realizes them on every collection Reset — the throttled mid-scan
     // refresh raises a Reset ~1 Hz, so replaying the entrance on each
@@ -57,9 +61,9 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     public LibraryView()
     {
         var paths = AppPaths.DbPath;
-        var store = new ReadStore(paths);
-        _clip = new ClipSearchService(store);
-        ViewModel = new LibraryViewModel(store, _clip, Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
+        _store = new ReadStore(paths);
+        _clip = new ClipSearchService(_store);
+        ViewModel = new LibraryViewModel(_store, _clip, Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
 
         InitializeComponent();
         Unloaded += OnUnloaded;
@@ -83,7 +87,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         {
             try
             {
-                await store.OpenAsync(CancellationToken.None);
+                await _store.OpenAsync(CancellationToken.None);
                 await ViewModel.RefreshAsync(CancellationToken.None);
             }
             catch
@@ -322,6 +326,10 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         // tear down the services its in-flight tasks may still touch.
         try { _clip.Dispose(); } catch { /* swallow */ }
         try { _thumbnails.Dispose(); } catch { /* swallow */ }
+        // Step 4: dispose the ReadStore LAST — after ViewModel + _clip, whose
+        // in-flight reads use its connection — so the SQLite connection +
+        // SemaphoreSlim are released instead of leaking per tab nav. (audit A7)
+        try { _store.Dispose(); } catch { /* swallow */ }
     }
 
     private void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)

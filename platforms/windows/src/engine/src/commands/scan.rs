@@ -163,7 +163,7 @@ pub(crate) async fn handle_start_scan(
         tokio::task::spawn_blocking(move || ModelStack::load_default(models_worker_count)),
     )
     .await;
-    models::ep_guard::disarm();
+    models::ep_guard::disarm(armed_ep.as_str());
     let models = match load_result {
         Ok(Ok(m)) => Arc::new(m),
         Ok(Err(err)) => {

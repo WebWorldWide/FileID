@@ -70,8 +70,7 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
             // caught below as a clean teardown no-op instead of escaping to the caller.
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
             var token = linked.Token;
-            IsLoading = true;
-            ErrorMessage = null;
+            OnUi(() => { IsLoading = true; ErrorMessage = null; });
             var groups = await Task.Run(() => Load(token), token).ConfigureAwait(false);
             if (_disposed || token.IsCancellationRequested) return;
             ApplyOnUi(groups);
@@ -80,10 +79,26 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         catch (ObjectDisposedException) { /* expected during teardown */ }
         // Surface DB/IO failures as an actionable message instead of the raw
         // SQLite jargon ("database disk image is malformed") the user can't act on.
-        catch (SqliteException ex) { if (!_disposed) ErrorMessage = SqliteErrorTranslator.Humanize(ex); }
-        catch (IOException ex) { if (!_disposed) ErrorMessage = SqliteErrorTranslator.Humanize(ex); }
-        catch (Exception ex) { if (!_disposed) ErrorMessage = ex.Message; }
-        finally { if (!_disposed) IsLoading = false; }
+        // ConfigureAwait(false) above resumes these catch/finally arms on a
+        // thread-pool thread; ErrorMessage/IsLoading raise PropertyChanged that
+        // drives x:Bind XAML writes (ProgressRing.IsActive, StatusText), so marshal
+        // them to the captured UI thread — else a native fast-fail
+        // (RPC_E_WRONG_THREAD). Mirrors LibraryViewModel.
+        catch (SqliteException ex) { OnUi(() => { if (!_disposed) ErrorMessage = SqliteErrorTranslator.Humanize(ex); }); }
+        catch (IOException ex) { OnUi(() => { if (!_disposed) ErrorMessage = SqliteErrorTranslator.Humanize(ex); }); }
+        catch (Exception ex) { OnUi(() => { if (!_disposed) ErrorMessage = ex.Message; }); }
+        finally { OnUi(() => { if (!_disposed) IsLoading = false; }); }
+    }
+
+    /// Marshal a UI-affined mutation onto the captured dispatcher. RefreshAsync's
+    /// catch/finally run on a thread-pool thread (Task.Run + ConfigureAwait(false)),
+    /// so raising ErrorMessage/IsLoading PropertyChanged there would drive x:Bind
+    /// XAML writes off the UI thread — a native fast-fail. No-op when already on the
+    /// UI thread. Mirrors LibraryViewModel.OnUi.
+    private void OnUi(Action action)
+    {
+        if (_ui.HasThreadAccess) action();
+        else _ui.TryEnqueue(() => { if (!_disposed) action(); });
     }
 
     /// <summary>Files larger than this use a head+tail+size COMPOSITE

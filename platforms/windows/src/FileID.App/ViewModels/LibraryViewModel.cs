@@ -30,6 +30,13 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     /// in-flight ClipSearchService.SearchAsync resumes against a disposed
     /// service → ObjectDisposedException escapes to AppDomain.Unhandled".</summary>
     private readonly CancellationTokenSource _disposalCts = new();
+    // Refresh coordination (audit A4/A5): every public refresh entry point bumps
+    // _refreshGen and captures it; ApplyOnUi discards a result whose generation is
+    // no longer current, so a slow earlier refresh can't clobber the latest grid.
+    // _activeLoads counts in-flight refreshes so the spinner stays on until the
+    // LAST one finishes (an earlier finally no longer clears it prematurely).
+    private long _refreshGen;
+    private int _activeLoads;
     private string _query = string.Empty;
     private string _kindFilter = "all";
     private bool _isLoading;
@@ -266,6 +273,8 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     public async Task RefreshAsync(CancellationToken ct)
     {
         if (_disposed) return;
+        long myGen = Interlocked.Increment(ref _refreshGen);
+        Interlocked.Increment(ref _activeLoads);
         try
         {
             // Linked token created inside the try: a Dispose() race after the
@@ -307,7 +316,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
                 filtered.Add(FileTile.From(r));
             }
 
-            ApplyOnUi(filtered);
+            ApplyOnUi(filtered, myGen);
         }
         catch (OperationCanceledException)
         {
@@ -323,7 +332,8 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         }
         finally
         {
-            OnUi(() => { if (!_disposed) IsLoading = false; });
+            Interlocked.Decrement(ref _activeLoads);
+            OnUi(() => { if (!_disposed) IsLoading = Volatile.Read(ref _activeLoads) > 0; });
         }
     }
 
@@ -335,6 +345,8 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     public async Task SemanticSearchWithSeedAsync(float[] seed, CancellationToken ct)
     {
         if (_disposed) return;
+        long myGen = Interlocked.Increment(ref _refreshGen);
+        Interlocked.Increment(ref _activeLoads);
         try
         {
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
@@ -359,12 +371,16 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
                 }
                 filtered.Add(FileTile.From(hit.Row));
             }
-            ApplyOnUi(filtered);
+            ApplyOnUi(filtered, myGen);
         }
         catch (OperationCanceledException) { /* expected */ }
         catch (ObjectDisposedException) { /* expected during teardown */ }
         catch (Exception ex) { OnUi(() => { if (!_disposed) ErrorMessage = ex.Message; }); }
-        finally { OnUi(() => { if (!_disposed) IsLoading = false; }); }
+        finally
+        {
+            Interlocked.Decrement(ref _activeLoads);
+            OnUi(() => { if (!_disposed) IsLoading = Volatile.Read(ref _activeLoads) > 0; });
+        }
     }
 
     /// <summary>
@@ -374,6 +390,8 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     public async Task FindSimilarAsync(long fileId, CancellationToken ct)
     {
         if (_disposed) return;
+        long myGen = Interlocked.Increment(ref _refreshGen);
+        Interlocked.Increment(ref _activeLoads);
         try
         {
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
@@ -399,23 +417,35 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
                 }
                 filtered.Add(FileTile.From(r));
             }
-            ApplyOnUi(filtered);
+            ApplyOnUi(filtered, myGen);
         }
         catch (OperationCanceledException) { /* expected */ }
         catch (ObjectDisposedException) { /* expected during teardown */ }
         catch (Exception ex) { OnUi(() => { if (!_disposed) ErrorMessage = ex.Message; }); }
-        finally { OnUi(() => { if (!_disposed) IsLoading = false; }); }
+        finally
+        {
+            Interlocked.Decrement(ref _activeLoads);
+            OnUi(() => { if (!_disposed) IsLoading = Volatile.Read(ref _activeLoads) > 0; });
+        }
     }
 
-    private void ApplyOnUi(IReadOnlyList<FileTile> next)
+    private void ApplyOnUi(IReadOnlyList<FileTile> next, long gen)
     {
+        // Drop results from a refresh a newer one has already superseded — checked
+        // on the UI thread right before the swap so it also catches a refresh that
+        // started during the dispatch gap. (audit A4)
+        void Apply()
+        {
+            if (Interlocked.Read(ref _refreshGen) != gen) return;
+            ReplaceItems(next);
+        }
         if (_ui.HasThreadAccess)
         {
-            ReplaceItems(next);
+            Apply();
         }
         else
         {
-            _ui.TryEnqueue(() => ReplaceItems(next));
+            _ui.TryEnqueue(Apply);
         }
     }
 

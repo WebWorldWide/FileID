@@ -52,10 +52,16 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     private readonly Subject<IpcEvent> _events = new();
     private readonly object _writeLock = new();
 
-    // S4: bounded engine-stdout framing. Mirrors the engine's 1 MiB
-    // MAX_FRAME_BYTES guard so a wedged/compromised engine that never emits a
-    // newline can't grow an unbounded read buffer and OOM the UI process.
-    private const int MaxFrameChars = 1024 * 1024;
+    // S4: bounded engine-stdout framing — a wedged/garbled engine that never
+    // emits a newline can't grow an unbounded read buffer and OOM the UI process.
+    // The 1 MiB cap this once used silently DROPPED the restructurePlan event (one
+    // move per file × ~300 B) above ~3.5k moves, leaving the Restructure tab empty
+    // on a real "tens of thousands of files" library. The engine's MAX_FRAME_BYTES
+    // guard only bounds INBOUND commands, so outbound plan events are unbounded on
+    // the wire; size this cap to hold a full plan for the product target (~200k
+    // moves) while still bounding a runaway line. An oversize drop is now also
+    // surfaced as a visible error (see StdoutLoopAsync), never silent.
+    private const int MaxFrameChars = 32 * 1024 * 1024;
 
     /// <summary>Per-loop stdout framing state (#22). Owned by a single
     /// StdoutLoopAsync invocation — never shared across loops, so an overlapping
@@ -64,7 +70,14 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     {
         public readonly StringBuilder Buffer = new();
         public readonly char[] Chunk = new char[16 * 1024];
+        // How many leading buffer chars are already confirmed newline-free, so a
+        // multi-MB frame isn't rescanned from index 0 on every chunk (the old
+        // O(n^2) that pegged a core for minutes on a large restructurePlan). (audit A0)
+        public int Scanned;
         public bool Resyncing;
+        // Set when an over-cap frame was discarded, so StdoutLoopAsync can surface
+        // a one-shot visible error instead of failing silently.
+        public bool OversizeDropped;
     }
 
     private Process? _process;
@@ -416,7 +429,13 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             // in play, ship with the constant defined and the strict path
             // refuses Unsigned + tamper-mismatched binaries.
             var expectedThumb = Environment.GetEnvironmentVariable("FILEID_EV_THUMBPRINT");
-            var verdict = WinVerifyTrustChecker.Verify(enginePath, expectedThumbprintHex: expectedThumb);
+            // Off the UI thread: WinVerifyTrust does SHA-256 over the multi-MB engine
+            // binary AND can make an OCSP/CRL revocation round-trip — synchronously on
+            // the startup (UI) thread before the first frame. await Task.Run keeps the
+            // security gate (the spawn still waits for the verdict) while unblocking
+            // first paint; the continuation resumes on the UI thread. (audit Pc)
+            var verdict = await Task.Run(
+                () => WinVerifyTrustChecker.Verify(enginePath, expectedThumbprintHex: expectedThumb));
             switch (verdict)
             {
                 case IntegrityVerdict.NotFound:
@@ -578,9 +597,13 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     {
         while (true)
         {
-            // Emit a completed frame if the buffer already holds a newline.
+            // Emit a completed frame if the buffer already holds a newline. Scan
+            // only the not-yet-scanned tail ([Scanned..Length)): during a long
+            // frame's accumulation Scanned == Length so this is a no-op, and after
+            // a Remove it rescans only the small (<= one chunk) leftover — so the
+            // multi-MB buffer is never re-indexed per chunk. (audit A0)
             int nl = -1;
-            for (int i = 0; i < st.Buffer.Length; i++)
+            for (int i = st.Scanned; i < st.Buffer.Length; i++)
             {
                 if (st.Buffer[i] == '\n') { nl = i; break; }
             }
@@ -588,6 +611,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             {
                 string frame = st.Buffer.ToString(0, nl);
                 st.Buffer.Remove(0, nl + 1);
+                st.Scanned = 0;
                 if (st.Resyncing)
                 {
                     // This frame is the tail of an oversize line — drop it and
@@ -598,13 +622,17 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 if (frame.Length > 0 && frame[^1] == '\r') frame = frame[..^1];
                 return frame;
             }
+            // Everything currently buffered is newline-free.
+            st.Scanned = st.Buffer.Length;
             // No newline yet: if the buffer crossed the cap, the engine is
             // emitting an oversize/garbage frame. Drop it and resync.
             if (st.Buffer.Length > MaxFrameChars)
             {
                 DebugLog.Warn($"Engine emitted an oversize IPC frame (> {MaxFrameChars} chars); discarding and resyncing.");
                 st.Buffer.Clear();
+                st.Scanned = 0;
                 st.Resyncing = true;
+                st.OversizeDropped = true;
             }
             int read = await reader.ReadAsync(st.Chunk.AsMemory(), ct).ConfigureAwait(false);
             if (read == 0)
@@ -614,12 +642,27 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 {
                     string tail = st.Buffer.ToString();
                     st.Buffer.Clear();
+                    st.Scanned = 0;
                     if (tail.Length > 0 && tail[^1] == '\r') tail = tail[..^1];
                     return tail;
                 }
                 return null;
             }
+            // Detect a newline in the freshly-read chunk via a FLAT array scan
+            // (O(read)) instead of re-indexing the StringBuilder. If this chunk
+            // carries a newline, rewind Scanned to just before it so the loop's
+            // indexed scan examines only this chunk's bytes — never the whole
+            // accumulated buffer (the O(n^2) on a large frame). (audit A0)
+            int bufLenBefore = st.Buffer.Length;
             st.Buffer.Append(st.Chunk, 0, read);
+            if (Array.IndexOf(st.Chunk, '\n', 0, read) >= 0)
+            {
+                st.Scanned = bufLenBefore;
+            }
+            else
+            {
+                st.Scanned = st.Buffer.Length;
+            }
         }
     }
 
@@ -654,6 +697,20 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             {
                 DebugLog.Warn("Engine stdout read error: " + ex.Message);
                 return;
+            }
+            if (framing.OversizeDropped)
+            {
+                framing.OversizeDropped = false;
+                // Surface the drop through the normal event-dispatch path: Apply
+                // runs on the UI thread, so observable state is never written from
+                // this loop thread (the off-UI-thread fast-fail class).
+                var oversize = IpcEvent.Now(new ErrorEvent(new EngineError(
+                    "ipc_frame_too_large",
+                    "The engine sent a response too large for the app to read, so it was dropped. " +
+                    "If this was a Restructure plan on a very large library, the plan may be incomplete — " +
+                    "try restructuring a subfolder.",
+                    null)));
+                _ui.TryEnqueue(() => Apply(oversize));
             }
             if (line is null)
             {
@@ -725,6 +782,24 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     {
         _ui.TryEnqueue(() =>
         {
+            // Ignore a stale exit from a process we've already replaced. In the
+            // RestartAsync path (StopAndWaitForExitAsync → StartAsync), the OLD
+            // process's Exited callback is queued to the UI thread and can run
+            // AFTER StartAsync installed the NEW _process/_stdin/_readCts. `sender`
+            // is the exact Process that exited; if it is no longer the live
+            // _process, running Cleanup() here would tear down the freshly-spawned
+            // engine (cancel its read loops, null its stdin) and mis-count it as a
+            // crash — wedging IPC with State stuck Starting. Dispose the dead sender
+            // and bail, leaving the live engine untouched.
+            if (!ReferenceEquals(sender, _process))
+            {
+                if (sender is Process dead)
+                {
+                    try { dead.Exited -= OnProcessExited; } catch { }
+                    try { dead.Dispose(); } catch { }
+                }
+                return;
+            }
             DebugLog.Warn($"EngineClient: process exited (code={_process?.ExitCode}).");
             Cleanup();
 
@@ -1072,9 +1147,16 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                             LastError = e.Error;
                             DebugLog.Warn($"[IPC IN] engine error: kind={e.Error.Kind} msg={e.Error.Message} path={PathRedactor.Redact(e.Error.Path)}");
                         }
-                        // PAR-111: a clustering failure must release the auto gate,
-                        // else auto-clustering stays suppressed for the rest of the session.
-                        if (e.Error.Kind is { } ck && ck.Contains("cluster", StringComparison.OrdinalIgnoreCase))
+                        // PAR-111: a clustering FAILURE must release the auto gate,
+                        // else auto-clustering stays suppressed for the rest of the
+                        // session. Match the EXACT failure kind — not a broad
+                        // Contains("cluster"), which also matched the newer
+                        // "face_clustering_busy" bounce (a pass is still running — the
+                        // opposite of a failure) and wrongly cleared the gate, letting
+                        // a later rescan's auto-cluster be silently dropped. The
+                        // in-flight pass emits its own FaceClusteringComplete /
+                        // face_clustering_failed that legitimately releases the gate.
+                        if (e.Error.Kind == "face_clustering_failed")
                         {
                             Interlocked.Exchange(ref _faceClusterAutoInFlight, 0);
                         }
@@ -1097,6 +1179,12 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         // "{processed}/{total}" and the stale "Done — N captioned" at
                         // ~4 Hz, with Cancel wrongly greyed out for the whole run.
                         DeepAnalyzeComplete = null;
+                        // Also clear the prior run's last-file result so a new run
+                        // starts with no carried-over DeepAnalyzeLast — otherwise the
+                        // view's run-start _proposedNameCount reset is immediately
+                        // undone when SyncStream reprocesses the stale last in the
+                        // same pass (over-counting smart-renames). (audit A13 re-audit)
+                        DeepAnalyzeLast = null;
                         break;
                     case DeepAnalyzeProgressEvent dap:
                         DeepAnalyzeProgress = dap.Progress;
