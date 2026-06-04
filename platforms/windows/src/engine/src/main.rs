@@ -302,6 +302,13 @@ async fn async_main() -> Result<()> {
     let deep_analyze_active: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
     let dispatch_deep_active = deep_analyze_active.clone();
+    // Single-flight gate for face clustering: a second runFaceClustering must
+    // bounce cleanly rather than race the persist transaction (the writer lock
+    // is now released during cluster()+consolidate(), so two runs could overlap).
+    let face_cluster_active: Arc<std::sync::atomic::AtomicBool> =
+        Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dispatch_face_cluster_active = face_cluster_active.clone();
+    let dispatch_db_path = db_path.clone();
 
     // Shared HTTP client (HTTP/2 + connection pool) for the 12-way parallel
     // downloader. Built once at engine startup; cloned cheaply via Arc into
@@ -348,9 +355,11 @@ async fn async_main() -> Result<()> {
                                 &dispatch_sink,
                                 &dispatch_shutdown,
                                 dispatch_db.as_ref(),
+                                &dispatch_db_path,
                                 &dispatch_scan_state,
                                 &dispatch_deep_cancel,
                                 &dispatch_deep_active,
+                                &dispatch_face_cluster_active,
                                 &dispatch_http_client,
                                 &text,
                             ).await;
@@ -425,6 +434,25 @@ impl Drop for DeepActiveGuard {
     }
 }
 
+/// Clears the face-clustering single-flight flag on drop — releases on task
+/// success, error, OR panic (same RAII shape as DeepActiveGuard).
+struct FaceClusterActiveGuard(Arc<std::sync::atomic::AtomicBool>);
+impl Drop for FaceClusterActiveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+async fn emit_face_clustering_busy(sink: &Sink) {
+    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+        kind: "face_clustering_busy".into(),
+        message: "Face clustering is already running.".into(),
+        path: None,
+        model_kind: None,
+    }))))
+    .await;
+}
+
 async fn emit_deep_analyze_busy(sink: &Sink) {
     sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
         kind: "deep_analyze_already_running".into(),
@@ -435,13 +463,16 @@ async fn emit_deep_analyze_busy(sink: &Sink) {
     .await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_line(
     sink: &Sink,
     shutdown: &Arc<Notify>,
     db: Option<&std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>>,
+    db_path: &std::path::Path,
     scan_state: &Arc<parking_lot::Mutex<Option<coordinator::ScanCoordinator>>>,
     deep_analyze_cancel: &Arc<std::sync::atomic::AtomicBool>,
     deep_analyze_active: &Arc<std::sync::atomic::AtomicBool>,
+    face_cluster_active: &Arc<std::sync::atomic::AtomicBool>,
     http_client: &Arc<reqwest::Client>,
     line: &str,
 ) {
@@ -618,14 +649,17 @@ async fn handle_line(
             });
         }
         CommandPayload::FindMergeSuggestions(_) => {
-            let Some(db) = db else {
+            // Availability guard preserved (no DB → no read connection), but the
+            // handler opens its own read-only connection from db_path so it never
+            // contends on the writer mutex.
+            let Some(_db) = db else {
                 emit_db_unavailable(sink, "findMergeSuggestions").await;
                 return;
             };
             let sink_c = sink.clone();
-            let db_c = db.clone();
+            let path_c = db_path.to_path_buf();
             tokio::spawn(async move {
-                commands::bulk::handle_find_merge_suggestions(sink_c, db_c).await;
+                commands::bulk::handle_find_merge_suggestions(sink_c, path_c).await;
             });
         }
         CommandPayload::MarkPersonsDifferent(payload) => {
@@ -747,9 +781,26 @@ async fn handle_line(
                 emit_db_unavailable(sink, "runFaceClustering").await;
                 return;
             };
+            // Single-flight: the handler now drops the writer lock during
+            // cluster()+consolidate(), so two overlapping runs could race the
+            // persist transaction. Bounce a second request rather than spawn it.
+            if face_cluster_active
+                .compare_exchange(
+                    false,
+                    true,
+                    std::sync::atomic::Ordering::Acquire,
+                    std::sync::atomic::Ordering::Relaxed,
+                )
+                .is_err()
+            {
+                emit_face_clustering_busy(sink).await;
+                return;
+            }
+            let guard = FaceClusterActiveGuard(face_cluster_active.clone());
             let sink_c = sink.clone();
             let db_c = db.clone();
             tokio::spawn(async move {
+                let _guard = guard;
                 commands::face_clustering::handle_run_face_clustering(sink_c, db_c).await;
             });
         }

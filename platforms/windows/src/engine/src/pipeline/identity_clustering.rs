@@ -57,12 +57,24 @@ impl Default for Hyperparameters {
         // the un-fixable over-merge. PROVISIONAL — single-linkage Pass 1 still
         // chains on very large libraries; the real fix is mutual-kNN / density
         // edges (see NEXT.md). Final calibration on a labeled library.
+        //
+        // Two Pass-3 knobs are env-overridable for on-hardware tuning of the
+        // over-split aggressiveness (a lower mean floor / higher variance bar
+        // splits less): FILEID_FACE_PASS3_MIN_MEAN_COSINE and
+        // FILEID_FACE_PASS3_VARIANCE_THRESHOLD (both f32; unset/unparseable →
+        // the defaults below).
+        let env_f32 = |key: &str, default: f32| -> f32 {
+            std::env::var(key)
+                .ok()
+                .and_then(|s| s.trim().parse::<f32>().ok())
+                .unwrap_or(default)
+        };
         Self {
             pass1_cosine: 0.66,
             pass2_cosine: 0.54,
             pass2_margin: 0.10,
-            pass3_variance_threshold: 0.04,
-            pass3_min_mean_cosine: 0.60,
+            pass3_variance_threshold: env_f32("FILEID_FACE_PASS3_VARIANCE_THRESHOLD", 0.04),
+            pass3_min_mean_cosine: env_f32("FILEID_FACE_PASS3_MIN_MEAN_COSINE", 0.60),
             pass3_max_splits: 7,
             k_nn: 10,
         }

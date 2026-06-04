@@ -12,7 +12,7 @@
 //      Pass-1 kNN connected components ≥ pass1_cosine, Pass-2 margin-gated
 //      outlier assignment, Pass-3 2-means split of low-cohesion clusters.
 //   3. `consolidate()` folds near-certain duplicate clusters by CENTROID cosine
-//      ≥ FILEID_FACE_AUTOMERGE_COS (default 0.85), respecting user "different
+//      ≥ FILEID_FACE_AUTOMERGE_COS (default 0.75), respecting user "different
 //      people" verdicts. Anchor per cluster = highest-quality member face.
 //   4. The handler persists `persons` + `face_prints.person_id` in one tx and
 //      emits `FaceClusteringResult`. `face_verifications` is only READ here
@@ -201,16 +201,19 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
     (assignments, anchors)
 }
 
-/// Default minimum CENTROID cosine to auto-fold two clusters into one person.
-/// 0.85 sits deep in genuine same-person territory (empirical SFace median
-/// 0.88–0.95) and far above the hardest cross-identity / lookalike matches
-/// (~0.55, well under the 0.66 Pass-1 core threshold), so only fragments of the
-/// SAME identity that the over-split-safe clusterer left apart get rejoined —
-/// the "WAY too many similar faces" the People tab otherwise shows. Override
-/// with `FILEID_FACE_AUTOMERGE_COS` (clamped to [0.70, 1.0]; set 1.0 to disable
-/// and keep pure over-split). Centroids (means of all member embeddings) are
+/// Default minimum CENTROID cosine to auto-fold two clusters into one person —
+/// the Balanced default. 0.75 sits inside genuine same-person territory
+/// (empirical SFace median 0.88–0.95) yet comfortably above the hardest
+/// cross-identity / lookalike matches (~0.55, well under the 0.66 Pass-1 core
+/// threshold), so fragments of the SAME identity that the over-split-safe
+/// clusterer left apart get rejoined — the "WAY too many similar faces" the
+/// People tab otherwise shows — while distinct people stay apart. Lowered from
+/// 0.85 to claw back more over-split without inviting cross-identity merges
+/// (the ~0.55 lookalike ceiling leaves a wide margin). Override with
+/// `FILEID_FACE_AUTOMERGE_COS` (clamped to [0.70, 1.0]; set 1.0 to disable and
+/// keep pure over-split). Centroids (means of all member embeddings) are
 /// denoised, so this is safer than any single anchor-to-anchor comparison.
-pub const AUTOMERGE_COS_DEFAULT: f32 = 0.85;
+pub const AUTOMERGE_COS_DEFAULT: f32 = 0.75;
 
 /// Resolve the auto-consolidation threshold from `FILEID_FACE_AUTOMERGE_COS`,
 /// clamped to [0.70, 1.0]. A value ≥ 1.0 disables consolidation (no two
@@ -221,6 +224,63 @@ pub fn automerge_threshold() -> f32 {
         .and_then(|s| s.trim().parse::<f32>().ok())
         .map(|v| v.clamp(0.70, 1.0))
         .unwrap_or(AUTOMERGE_COS_DEFAULT)
+}
+
+/// Above this centroid count, consolidate() switches from brute O(C²) all-pairs
+/// to an HNSW candidate sweep. Below it the brute path wins (HNSW build overhead
+/// exceeds the O(C²) saving at small C).
+const HNSW_CONSOLIDATE_THRESHOLD: usize = 2_000;
+
+/// Brute O(C²) all-pairs over centroids. Returns merge edges `(cosine, i, j)`
+/// with `i < j` and `cosine >= threshold`.
+fn edges_brute(centroids: &[Vec<f32>], threshold: f32) -> Vec<(f32, usize, usize)> {
+    let mut edges: Vec<(f32, usize, usize)> = Vec::new();
+    for i in 0..centroids.len() {
+        for j in (i + 1)..centroids.len() {
+            let s = cosine(&centroids[i], &centroids[j]);
+            if s >= threshold {
+                edges.push((s, i, j));
+            }
+        }
+    }
+    edges
+}
+
+/// HNSW candidate sweep over centroids — the large-C path. Builds an index over
+/// the per-cluster centroids, gathers top-k neighbors per centroid, then scores
+/// each candidate with the EXACT cosine on the two centroids (the approximate
+/// HNSW distance is used only to PROPOSE candidates, never as the edge weight).
+/// Edges are deduped as `(min, max)` index pairs so each pair scores once.
+/// Returns the same `(cosine, i, j)` shape as `edges_brute`, i < j.
+fn edges_hnsw(centroids: &[Vec<f32>], threshold: f32) -> Vec<(f32, usize, usize)> {
+    const K: usize = 32;
+    let points: Vec<(Vec<f32>, usize)> = centroids
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.clone(), i))
+        .collect();
+    let idx = crate::util::hnsw_index::build(points);
+    let mut searcher = crate::util::hnsw_index::Searcher::default();
+    let mut seen: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    let mut edges: Vec<(f32, usize, usize)> = Vec::new();
+    for i in 0..centroids.len() {
+        // Query K+1 so the self-hit doesn't crowd out a real neighbor.
+        for (j, _approx_dist) in searcher.top_k(&idx, &centroids[i], K + 1) {
+            if j == i {
+                continue;
+            }
+            let pair = if i < j { (i, j) } else { (j, i) };
+            if !seen.insert(pair) {
+                continue;
+            }
+            // EXACT cosine on the two centroids — not the approximate distance.
+            let s = cosine(&centroids[pair.0], &centroids[pair.1]);
+            if s >= threshold {
+                edges.push((s, pair.0, pair.1));
+            }
+        }
+    }
+    edges
 }
 
 /// Conservatively fold near-certain duplicate clusters that the over-split-safe
@@ -289,30 +349,18 @@ pub fn consolidate<S: std::hash::BuildHasher>(
         })
         .collect();
 
-    // O(C²) all-pairs over CENTROIDS (one vector per cluster, not per face — far
-    // fewer than the face count). Hard ceiling guards a pathological over-split:
-    // above it we skip rather than burn many seconds, logging so it's never a
-    // silent truncation (the suggestion-band fix still surfaces the merges).
-    const AUTOMERGE_MAX_CLUSTERS: usize = 12_000;
-    if cids.len() > AUTOMERGE_MAX_CLUSTERS {
-        tracing::warn!(
-            clusters = cids.len(),
-            cap = AUTOMERGE_MAX_CLUSTERS,
-            "[CLUSTER] skipping auto-consolidation: cluster count over O(n²) cap"
-        );
-        return (assignments, anchors);
-    }
-
+    // Candidate merge edges over CENTROIDS (one vector per cluster, not per
+    // face). Brute O(C²) below the threshold; an HNSW over the centroids above
+    // it so a pathological over-split (tens of thousands of clusters) no longer
+    // burns quadratic time — and, unlike the old 12k hard cap, never silently
+    // skips consolidation. Both paths feed the SAME edge-sort + union-find +
+    // blocked-conflict logic; only the candidate-generation strategy differs.
     let idx_of: HashMap<i32, usize> = cids.iter().enumerate().map(|(i, &c)| (c, i)).collect();
-    let mut edges: Vec<(f32, usize, usize)> = Vec::new();
-    for i in 0..cids.len() {
-        for j in (i + 1)..cids.len() {
-            let s = cosine(&centroids[i], &centroids[j]);
-            if s >= threshold {
-                edges.push((s, i, j));
-            }
-        }
-    }
+    let mut edges: Vec<(f32, usize, usize)> = if cids.len() <= HNSW_CONSOLIDATE_THRESHOLD {
+        edges_brute(&centroids, threshold)
+    } else {
+        edges_hnsw(&centroids, threshold)
+    };
     // Strongest merges first so canonical assignment is stable + greedy-optimal.
     edges.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -725,5 +773,87 @@ mod tests {
         // avoid process-global env races with parallel tests.)
         std::env::remove_var("FILEID_FACE_AUTOMERGE_COS");
         assert!((automerge_threshold() - AUTOMERGE_COS_DEFAULT).abs() < 1e-6);
+    }
+
+    // Collapse a set of merge edges into a canonical per-centroid grouping via
+    // the same greedy union-find consolidate() uses downstream, then return a
+    // normalized labeling (each centroid → its group's min index) so two edge
+    // sets can be compared for IDENTICAL final clustering regardless of edge
+    // order or which representative each path happened to pick.
+    fn union_find_labels(n: usize, edges: &[(f32, usize, usize)]) -> Vec<usize> {
+        let mut sorted = edges.to_vec();
+        sorted.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut parent: Vec<usize> = (0..n).collect();
+        fn find(parent: &mut [usize], mut x: usize) -> usize {
+            while parent[x] != x {
+                parent[x] = parent[parent[x]];
+                x = parent[x];
+            }
+            x
+        }
+        for (_s, i, j) in sorted {
+            let ri = find(&mut parent, i);
+            let rj = find(&mut parent, j);
+            if ri != rj {
+                parent[ri] = rj;
+            }
+        }
+        // Normalize: label each centroid by the minimum index in its group.
+        let mut group_min: HashMap<usize, usize> = HashMap::new();
+        for x in 0..n {
+            let r = find(&mut parent, x);
+            let e = group_min.entry(r).or_insert(x);
+            if x < *e {
+                *e = x;
+            }
+        }
+        (0..n).map(|x| group_min[&find(&mut parent, x)]).collect()
+    }
+
+    #[test]
+    fn hnsw_and_brute_edge_paths_agree() {
+        // Deterministic fixture: 60 synthetic unit-normalized centroids built as
+        // 12 tight families of 5 near-identical vectors each. Each family's base
+        // direction is a distinct ORTHOGONAL axis (one-hot in 12-d), so
+        // cross-family cosine is ~0 — provably below threshold, no flaky
+        // near-collisions. Within a family, tiny jitter keeps cosine ~0.999, far
+        // above threshold. The final union-find clustering is therefore
+        // unambiguous and both edge paths must reproduce it.
+        let mut state: u64 = 0x9E3779B97F4A7C15;
+        let mut next = || {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            ((state >> 33) as f32 / (1u64 << 31) as f32) - 1.0 // ~[-1, 1)
+        };
+        const FAMILIES: usize = 12;
+        const DIM: usize = FAMILIES;
+        const PER_FAMILY: usize = 5;
+        let mut centroids: Vec<Vec<f32>> = Vec::with_capacity(FAMILIES * PER_FAMILY);
+        for fam in 0..FAMILIES {
+            let mut base = [0.0f32; DIM];
+            base[fam] = 1.0;
+            for _ in 0..PER_FAMILY {
+                // Jitter on the non-axis dims keeps within-family cosine ~0.999
+                // while the one-hot base direction dominates; cross-family stays ~0.
+                let v: Vec<f32> = base.iter().map(|&b| b + 0.01 * next()).collect();
+                centroids.push(unit(&v));
+            }
+        }
+
+        let threshold = 0.90;
+        let n = centroids.len();
+        let brute = edges_brute(&centroids, threshold);
+        let hnsw = edges_hnsw(&centroids, threshold);
+
+        let brute_labels = union_find_labels(n, &brute);
+        let hnsw_labels = union_find_labels(n, &hnsw);
+        assert_eq!(
+            brute_labels, hnsw_labels,
+            "HNSW and brute edge paths must yield identical final clustering"
+        );
+
+        // Sanity: the fixture really does merge into FAMILIES groups (otherwise
+        // the parity assertion above could pass trivially on all-singletons).
+        let distinct: std::collections::HashSet<usize> = brute_labels.iter().copied().collect();
+        assert_eq!(distinct.len(), FAMILIES, "fixture should fold into {FAMILIES} families");
     }
 }

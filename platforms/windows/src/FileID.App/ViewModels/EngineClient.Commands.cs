@@ -137,7 +137,10 @@ internal sealed partial class EngineClient
         _shownPhaseRank = -1;
     }
 
-    private static bool IsNonFatalWarningKind(string? kind) => kind switch
+    // internal (not private) so FileID.App.Tests can assert the classification
+    // headlessly — the EngineClient singleton itself needs a UI-thread
+    // DispatcherQueue and can't be constructed in a test worker.
+    internal static bool IsNonFatalWarningKind(string? kind) => kind switch
     {
         "stages_skipped_missing_models" => true,
         "discovery_partial" => true,
@@ -152,6 +155,10 @@ internal sealed partial class EngineClient
         // running — a benign "already busy" notice, not a failure.
         "rescan_no_changes" => true,
         "deep_analyze_already_running" => true,
+        // A concurrent RunFaceClustering bounced off the engine's single-flight
+        // guard — a manual Re-cluster while clustering is already running is a
+        // benign "already busy" notice, not a scary red error.
+        "face_clustering_busy" => true,
         _ => false,
     };
 
@@ -649,6 +656,47 @@ internal sealed partial class EngineClient
 
     public Task FindMergeSuggestionsAsync() =>
         SendCommandAsync(new FindMergeSuggestionsCommand());
+
+    /// <summary>Send findMergeSuggestions and await the engine's matching
+    /// <c>mergeSuggestions</c> reply (lands on <see cref="LastMergeSuggestions"/>).
+    /// Mirrors the awaited-bounded pattern of <see cref="WaitForBulkActionResultAsync"/>:
+    /// the SuggestedMergesSheet can show "looking…" → result/timeout instead of
+    /// sitting forever on the placeholder when clustering is still running on the
+    /// engine. The IPC wire shape is unchanged. Throws TimeoutException if no reply
+    /// lands within <paramref name="timeout"/>.</summary>
+    public async Task<MergeSuggestions> WaitForMergeSuggestionsAsync(TimeSpan timeout, CancellationToken ct = default)
+    {
+        var tcs = new TaskCompletionSource<MergeSuggestions>(TaskCreationOptions.RunContinuationsAsynchronously);
+        PropertyChangedEventHandler? handler = null;
+        handler = (_, e) =>
+        {
+            if (e.PropertyName == nameof(LastMergeSuggestions) && LastMergeSuggestions is { } r)
+            {
+                PropertyChanged -= handler;
+                tcs.TrySetResult(r);
+            }
+        };
+        // Reset first so a value-equal reply still re-fires PropertyChanged.
+        LastMergeSuggestions = null;
+        PropertyChanged += handler;
+        try
+        {
+            await SendCommandAsync(new FindMergeSuggestionsCommand(), ct).ConfigureAwait(false);
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(timeout);
+            using var reg = cts.Token.Register(() =>
+            {
+                PropertyChanged -= handler;
+                tcs.TrySetException(new TimeoutException(
+                    $"Engine did not return merge suggestions within {timeout.TotalSeconds:0}s."));
+            });
+            return await tcs.Task.ConfigureAwait(false);
+        }
+        finally
+        {
+            PropertyChanged -= handler;
+        }
+    }
 
     public Task MarkPersonsDifferentAsync(long sourcePersonId, long destinationPersonId, long sourceAnchorFaceId, long destinationAnchorFaceId) =>
         SendCommandAsync(new MarkPersonsDifferentCommand(sourcePersonId, destinationPersonId, sourceAnchorFaceId, destinationAnchorFaceId));

@@ -1,5 +1,5 @@
-//! SQLite database — owns the single connection (writer side) plus a small
-//! pool for read transactions. Drop-in for GRDB.swift on macOS.
+//! SQLite database — owns the single writer connection; reads fan out via
+//! fresh read-only connections (`open_read`). Drop-in for GRDB.swift on macOS.
 //!
 //! The writer is single-threaded by design (matches the macOS
 //! `Database.swift` invariant): SQLite WAL allows concurrent readers but
@@ -55,6 +55,30 @@ pub fn open_writer(db_path: &Path) -> Result<Connection> {
         [],
     );
 
+    Ok(conn)
+}
+
+/// Open an ephemeral READ-ONLY connection. Query handlers use these so they
+/// never contend on the single writer mutex — WAL lets readers run concurrent
+/// with the one writer. `NO_MUTEX` is safe because each connection stays on the
+/// task that opened it. `journal_mode`/`synchronous` are writer concerns and
+/// can't be set on a RO conn, so only the read-relevant pragmas are applied.
+pub fn open_read(db_path: &Path) -> Result<Connection> {
+    use rusqlite::OpenFlags;
+    let conn = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .with_context(|| format!("opening read-only db at {}", db_path.display()))?;
+    conn.execute_batch(
+        "PRAGMA query_only = ON; \
+         PRAGMA temp_store = MEMORY; \
+         PRAGMA mmap_size = 268435456; \
+         PRAGMA cache_size = -65536;",
+    )
+    .context("applying read-only pragmas")?;
     Ok(conn)
 }
 
@@ -168,4 +192,55 @@ pub fn wipe_all(conn: &Connection) -> Result<()> {
     let _ = checkpoint_truncate(conn);
     let _ = conn.execute_batch("VACUUM");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TempDb(std::path::PathBuf);
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+            let _ = std::fs::remove_file(self.0.with_extension("sqlite-wal"));
+            let _ = std::fs::remove_file(self.0.with_extension("sqlite-shm"));
+        }
+    }
+
+    #[test]
+    fn open_read_is_read_only() {
+        let path = std::env::temp_dir().join(format!(
+            "fileid-open-read-{}-{:?}.sqlite",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _guard = TempDb(path.clone());
+
+        // Writer creates the file + a table + a row.
+        {
+            let w = open_writer(&path).expect("open_writer");
+            w.execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+                .expect("create table");
+            w.execute("INSERT INTO t (v) VALUES ('a')", [])
+                .expect("insert");
+            checkpoint_truncate(&w).expect("checkpoint");
+        }
+
+        // Read-only connection can SELECT.
+        let r = open_read(&path).expect("open_read");
+        let n: i64 = r
+            .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
+            .expect("select count");
+        assert_eq!(n, 1);
+
+        // ...but writes are rejected.
+        assert!(
+            r.execute("INSERT INTO t (v) VALUES ('b')", []).is_err(),
+            "INSERT through a read-only conn must fail"
+        );
+        assert!(
+            r.execute_batch("CREATE TABLE t2 (id INTEGER)").is_err(),
+            "CREATE TABLE through a read-only conn must fail"
+        );
+    }
 }

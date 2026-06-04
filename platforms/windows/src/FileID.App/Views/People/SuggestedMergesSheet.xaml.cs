@@ -37,13 +37,20 @@ public sealed partial class SuggestedMergesSheet : UserControl
         Unloaded += OnUnloaded;
         Loaded += async (_, _) =>
         {
-            // Trigger a fresh suggestion fetch whenever the sheet opens.
-            // Awaited so engine-not-ready exceptions surface to the log
-            // rather than silently leaving the sheet on "Looking for…".
+            // Trigger a fresh suggestion fetch whenever the sheet opens, and
+            // bound-wait the engine's reply so the sheet doesn't sit forever on
+            // the placeholder when clustering is still running. On success the
+            // MergeSuggestionsEvent already drives Render() via the
+            // LastMergeSuggestions PropertyChanged subscription — nothing extra
+            // to do here.
             HeaderText.Text = "Looking for similar clusters…";
             try
             {
-                await EngineClient.Instance.FindMergeSuggestionsAsync();
+                await EngineClient.Instance.WaitForMergeSuggestionsAsync(TimeSpan.FromSeconds(30));
+            }
+            catch (TimeoutException)
+            {
+                HeaderText.Text = "Still preparing — clustering may be running. Try reopening this in a moment.";
             }
             catch (Exception ex)
             {
