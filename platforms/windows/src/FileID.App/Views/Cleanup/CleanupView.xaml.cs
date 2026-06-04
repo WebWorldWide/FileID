@@ -244,7 +244,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     {
         try
         {
-            var bmp = await _thumbnails.RequestAsync(member.Path, null, ct).ConfigureAwait(false);
+            var bmp = await _thumbnails.RequestAsync(member.Path, member.ModifiedAt, ct).ConfigureAwait(false);
             if (bmp == null || ct.IsCancellationRequested || _unloaded) return;
             DispatcherQueue.TryEnqueue(() =>
             {

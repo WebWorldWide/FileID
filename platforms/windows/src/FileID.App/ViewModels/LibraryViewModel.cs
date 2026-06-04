@@ -282,7 +282,14 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             IReadOnlyList<FileRow> rows;
             if (string.IsNullOrWhiteSpace(_query))
             {
-                rows = await _store.RecentAsync(PageSize, token, _kindFilter == "all" ? null : _kindFilter).ConfigureAwait(false);
+                // Microsoft.Data.Sqlite is fake-async (the query runs inline on
+                // whatever thread acquires the gate). On the UI-thread invocation
+                // paths (Loaded / per-batch RequestLibraryRefresh / OnUndoLast)
+                // the correlated GROUP_CONCAT-per-row RecentAsync would freeze
+                // first paint and stutter the grid; offload it like the sibling
+                // CleanupViewModel/PeopleViewModel. The search branch already
+                // yields via the IPC round-trip, so leave it as-is.
+                rows = await Task.Run(() => _store.RecentAsync(PageSize, token, _kindFilter == "all" ? null : _kindFilter), token).ConfigureAwait(false);
             }
             else
             {
@@ -337,7 +344,11 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
                 IsLoading = true;
                 ErrorMessage = null;
             });
-            var ranked = await _store.SemanticSearchAsync(seed, PageSize, token, _kindFilter == "all" ? null : _kindFilter).ConfigureAwait(false);
+            // Full clip_embeddings table scan + dot-product loop — and this VM
+            // is reached from an async-void context-menu handler on the UI
+            // thread, where Microsoft.Data.Sqlite's fake-async runs the scan
+            // inline. Offload to the thread pool so it can't freeze the UI.
+            var ranked = await Task.Run(() => _store.SemanticSearchAsync(seed, PageSize, token, _kindFilter == "all" ? null : _kindFilter), token).ConfigureAwait(false);
             if (_disposed || token.IsCancellationRequested) return;
             var filtered = new List<FileTile>(ranked.Count);
             foreach (var hit in ranked)
@@ -372,7 +383,12 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
                 IsLoading = true;
                 ErrorMessage = null;
             });
-            var similar = await _store.SimilarFilesAsync(fileId, PageSize, token).ConfigureAwait(false);
+            // Unbounded clip_embeddings scan + per-row blob materialization +
+            // DotProduct (SimilarFilesAsync has no LIMIT on the embedding fetch).
+            // Reached from an async-void context-menu handler on the UI thread;
+            // Microsoft.Data.Sqlite's fake-async would run the whole scan inline.
+            // Offload to the thread pool.
+            var similar = await Task.Run(() => _store.SimilarFilesAsync(fileId, PageSize, token), token).ConfigureAwait(false);
             if (_disposed || token.IsCancellationRequested) return;
             var filtered = new List<FileTile>(similar.Count);
             foreach (var r in similar)

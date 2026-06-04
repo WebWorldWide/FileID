@@ -310,10 +310,13 @@ pub fn available_memory_mb() -> u64 {
     sys.available_memory() / (1024 * 1024)
 }
 
-/// Memory-pressure tier. Drives `dbwriter_batch_size_for`, ML pool size,
-/// channel caps, thumbnail cache size. Refreshed periodically by the
-/// scan loop (every 30s) so a memory-pressure shift mid-scan downshifts
-/// throughput instead of OOM'ing.
+/// Memory-pressure tier. On `Low` it additionally caps the tagging worker
+/// count, the ML session pool (to 1), and the predecode read-ahead channel —
+/// see `commands::scan` + `pipeline::tagging` — so a low-RAM box keeps fewer
+/// full decoded frames resident; `Balanced`/`High` leave those at their CPU/VRAM
+/// defaults. Also drives `dbwriter_batch_size_for`. Refreshed at scan start (the
+/// dbwriter re-polls every 30s) so a mid-scan pressure shift downshifts instead
+/// of OOM'ing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryTier {
     /// <8 GB available — be conservative, smaller batches + pool=1.
@@ -1012,11 +1015,17 @@ pub fn find_file_under(root: &std::path::Path, filename: &str, max_depth: usize)
 /// without this, a multi-Session config can exhaust a 6 GB card's VRAM
 /// and wedge the DirectML driver (full system hang).
 ///
-/// Cheap to call (~1 ms); the DXGI factory + adapter enumeration is the
-/// same primitive `models::runtime::probe_gpu_vendor` uses for vendor
-/// detection. Safe to call from any thread.
-#[cfg(windows)]
+/// VRAM is constant for the process, so the DXGI factory + adapter walk is
+/// memoized after the first call (same pattern as `RuntimeProbe::shared`,
+/// which exists because the adapters were otherwise re-walked 7-15× at
+/// startup). Safe to call from any thread.
 pub fn dedicated_vram_mb() -> Option<u64> {
+    static CELL: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *CELL.get_or_init(probe_dedicated_vram_mb)
+}
+
+#[cfg(windows)]
+fn probe_dedicated_vram_mb() -> Option<u64> {
     use windows::Win32::Graphics::Dxgi::{
         CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, DXGI_ADAPTER_FLAG,
         DXGI_ADAPTER_FLAG_SOFTWARE,
@@ -1049,7 +1058,7 @@ pub fn dedicated_vram_mb() -> Option<u64> {
 }
 
 #[cfg(not(windows))]
-pub fn dedicated_vram_mb() -> Option<u64> {
+fn probe_dedicated_vram_mb() -> Option<u64> {
     None
 }
 

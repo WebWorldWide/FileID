@@ -51,7 +51,10 @@ const DEFAULT_BATCH_SIZE: usize = 8;
 const DEFAULT_BATCH_TIMEOUT_MS: u64 = 20;
 
 /// Channel depth — backs up tagging workers if CLIP is the bottleneck
-/// instead of letting decode race ahead and balloon memory.
+/// instead of letting decode race ahead and balloon memory. Benign on any tier:
+/// each `ClipRequest` carries only the pre-resized 224×224 buffer (~150 KB), so
+/// a full 256-deep queue is ~38 MB even though the value is 6 GB-tuned. (Unlike
+/// the RAM++ batch channel, which carries FULL frames — see ram_plus_batch.rs.)
 const REQUEST_CHANNEL_CAP: usize = 256;
 
 /// Stats: lets `[STATS]` log average batch size so we can verify
@@ -172,17 +175,24 @@ fn run_coordinator(
         STATS_BATCH_COUNT.fetch_add(1, Ordering::Relaxed);
         STATS_BATCH_SIZE_SUM.fetch_add(batch.len() as u64, Ordering::Relaxed);
 
-        let imgs: Vec<Vec<u8>> = batch.iter().map(|r| r.rgb_256.clone()).collect();
+        // Move the 224×224 buffers out instead of cloning them — the batch is
+        // fully consumed below either way. Senders ride alongside in order.
+        let mut imgs: Vec<Vec<u8>> = Vec::with_capacity(batch.len());
+        let mut senders: Vec<oneshot::Sender<Result<Vec<f32>>>> = Vec::with_capacity(batch.len());
+        for req in batch {
+            imgs.push(req.rgb_256);
+            senders.push(req.response);
+        }
         match model.embed_batch(&imgs) {
-            Ok(embeddings) if embeddings.len() == batch.len() => {
-                for (i, req) in batch.into_iter().enumerate() {
-                    let _ = req.response.send(Ok(embeddings[i].clone()));
+            Ok(mut embeddings) if embeddings.len() == senders.len() => {
+                for (sender, emb) in senders.into_iter().zip(embeddings.drain(..)) {
+                    let _ = sender.send(Ok(emb));
                 }
             }
             Ok(_) => {
                 // Pathological: model returned a wrong-shaped output.
-                for req in batch {
-                    let _ = req.response.send(Err(anyhow!(
+                for sender in senders {
+                    let _ = sender.send(Err(anyhow!(
                         "MobileCLIP embed_batch returned wrong-sized embedding vec"
                     )));
                 }
@@ -190,8 +200,8 @@ fn run_coordinator(
             Err(err) => {
                 let err_str = format!("{:#}", err);
                 tracing::warn!(?err, "[CLIP-BATCH] embed_batch failed; failing whole batch");
-                for req in batch {
-                    let _ = req.response.send(Err(anyhow!(err_str.clone())));
+                for sender in senders {
+                    let _ = sender.send(Err(anyhow!(err_str.clone())));
                 }
             }
         }

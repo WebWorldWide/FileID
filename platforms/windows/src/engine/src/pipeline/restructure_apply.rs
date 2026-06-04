@@ -319,11 +319,11 @@ fn update_path_in_db(conn: &Arc<Mutex<Connection>>, file_id: i64, new_path: &Pat
     // stale hash.
     let path_text = new_path.to_string_lossy();
     let path_hash = crate::util::path_safety::stable_path_hash(&path_text);
-    conn.execute(
-        "UPDATE files SET path_text = ?1, path_hash = ?2 WHERE id = ?3",
-        params![path_text, path_hash, file_id],
-    )
-    .context("DB UPDATE files.path_text")?;
+    // prepare_cached: a plan can issue thousands of moves, so cache the parse on
+    // the long-lived writer connection (codebase idiom — see bulk.rs/dbwriter.rs).
+    conn.prepare_cached("UPDATE files SET path_text = ?1, path_hash = ?2 WHERE id = ?3")?
+        .execute(params![path_text, path_hash, file_id])
+        .context("DB UPDATE files.path_text")?;
     Ok(())
 }
 
@@ -331,13 +331,10 @@ fn update_path_in_db(conn: &Arc<Mutex<Connection>>, file_id: i64, new_path: &Pat
 /// is gone. The single authoritative source for what `file_id` actually names.
 fn current_path_in_db(conn: &Arc<Mutex<Connection>>, file_id: i64) -> Result<Option<String>> {
     let conn = conn.lock();
-    conn.query_row(
-        "SELECT path_text FROM files WHERE id = ?1",
-        params![file_id],
-        |row| row.get::<_, String>(0),
-    )
-    .optional()
-    .context("DB SELECT files.path_text")
+    let mut stmt = conn.prepare_cached("SELECT path_text FROM files WHERE id = ?1")?;
+    stmt.query_row(params![file_id], |row| row.get::<_, String>(0))
+        .optional()
+        .context("DB SELECT files.path_text")
 }
 
 /// Path equality that tolerates separator/case differences. Fast path is a

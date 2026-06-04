@@ -340,21 +340,28 @@ internal static class ThumbnailDiskCache
         {
             if (!Directory.Exists(CacheRoot)) { return; }
             var dirInfo = new DirectoryInfo(CacheRoot);
-            long total = 0;
+            // Prime runs off the UI thread, so a WriteAsync can land mid-walk.
+            // TryAdd (not the indexer) yields to a concurrent write's newer entry,
+            // and we Add only the bytes WE inserted (never Exchange) so a write's
+            // own Interlocked.Add isn't clobbered — no double-count, no lost total.
+            long added = 0;
             foreach (var fi in dirInfo.EnumerateFiles("*.bin", SearchOption.AllDirectories))
             {
                 try
                 {
-                    _index[fi.FullName] = new CacheEntry
+                    var entry = new CacheEntry
                     {
                         SizeBytes = fi.Length,
                         LastAccessTicks = fi.LastAccessTimeUtc.Ticks,
                     };
-                    total += fi.Length;
+                    if (_index.TryAdd(fi.FullName, entry))
+                    {
+                        added += fi.Length;
+                    }
                 }
                 catch { /* swallow */ }
             }
-            Interlocked.Exchange(ref _cachedBytes, total);
+            Interlocked.Add(ref _cachedBytes, added);
         }
         catch { /* swallow */ }
     }

@@ -567,13 +567,25 @@ where
     let mut out = tokio::fs::File::create(&combined).await
         .with_context(|| format!("creating {}", combined.display()))?;
     let mut hasher = request.expected_sha256.as_ref().map(|_| Sha256::new());
+    // Stream each part through a fixed 64 KB buffer instead of reading the whole
+    // ~170 MB part into RAM (PARALLEL_PARTS of a multi-GB GGUF). Mirrors the
+    // download_simple SHA re-read loop above; integrity check is unchanged.
+    let mut buffer = vec![0u8; 65536];
     for i in 0..PARALLEL_PARTS {
         let part_path = part_file_path(&request.destination, i);
-        let bytes = tokio::fs::read(&part_path).await
+        let mut part = tokio::fs::File::open(&part_path).await
             .with_context(|| format!("reading part {}", part_path.display()))?;
-        if let Some(h) = hasher.as_mut() { h.update(&bytes); }
-        tokio::io::AsyncWriteExt::write_all(&mut out, &bytes).await
-            .context("writing combined part")?;
+        loop {
+            use tokio::io::AsyncReadExt;
+            let n = part.read(&mut buffer).await
+                .with_context(|| format!("reading chunk from {}", part_path.display()))?;
+            if n == 0 {
+                break;
+            }
+            if let Some(h) = hasher.as_mut() { h.update(&buffer[..n]); }
+            tokio::io::AsyncWriteExt::write_all(&mut out, &buffer[..n]).await
+                .context("writing combined part")?;
+        }
     }
     tokio::io::AsyncWriteExt::flush(&mut out).await.context("final flush")?;
     drop(out);

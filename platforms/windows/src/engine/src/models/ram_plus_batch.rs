@@ -47,8 +47,16 @@ const DEFAULT_BATCH_SIZE: usize = 8;
 const DEFAULT_BATCH_TIMEOUT_MS: u64 = 200;
 
 /// Channel depth — applies backpressure to tagging workers if RAM++ is the
-/// bottleneck instead of letting decode race ahead and balloon memory.
+/// bottleneck instead of letting decode race ahead and balloon memory. 6 GB-
+/// tuned. UNLIKE the CLIP batch channel, each `RamPlusRequest` carries a FULL
+/// decoded frame (no pre-resize), so a deep queue can pin many full frames; this
+/// path is opt-in (`FILEID_RAMPLUS_BATCH_SIZE > 1`) and clamped under Low tier in
+/// `spawn`.
 const REQUEST_CHANNEL_CAP: usize = 256;
+
+/// Shallower channel under memory pressure: full frames here are large, so on a
+/// low-RAM box bound the in-flight read-ahead far tighter than the 6 GB default.
+const REQUEST_CHANNEL_CAP_LOW: usize = 16;
 
 /// `[STATS]`-style counters so the average RAM++ batch size is observable.
 pub static STATS_BATCH_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -87,7 +95,14 @@ impl RamPlusBatchCoordinator {
             "FILEID_RAMPLUS_BATCH_TIMEOUT_MS",
             DEFAULT_BATCH_TIMEOUT_MS as usize,
         ) as u64;
-        let (sender, receiver) = bounded::<RamPlusRequest>(REQUEST_CHANNEL_CAP);
+        // Bound the full-frame read-ahead far tighter on a low-RAM box, but never
+        // below the batch size (a channel shallower than one batch could stall the
+        // coordinator's greedy fill on a single producer).
+        let channel_cap = match crate::platform::memory_tier() {
+            crate::platform::MemoryTier::Low => REQUEST_CHANNEL_CAP_LOW.max(batch_size),
+            _ => REQUEST_CHANNEL_CAP,
+        };
+        let (sender, receiver) = bounded::<RamPlusRequest>(channel_cap);
         std::thread::Builder::new()
             .name("fileid-ramplus-batch".to_string())
             .spawn(move || run_coordinator(&mut tagger, receiver, batch_size, batch_timeout_ms))
@@ -154,9 +169,11 @@ fn run_coordinator(
         STATS_BATCH_COUNT.fetch_add(1, Ordering::Relaxed);
         STATS_BATCH_SIZE_SUM.fetch_add(batch.len() as u64, Ordering::Relaxed);
 
-        let imgs: Vec<(Vec<u8>, u32, u32)> = batch
+        // Borrow each frame — tag_batch only reads the slices, and `batch` is
+        // consumed for responses below, so no second full-frame clone is needed.
+        let imgs: Vec<(&[u8], u32, u32)> = batch
             .iter()
-            .map(|r| (r.rgb.clone(), r.width, r.height))
+            .map(|r| (r.rgb.as_slice(), r.width, r.height))
             .collect();
         match tagger.tag_batch(&imgs) {
             Ok(results) if results.len() == batch.len() => {

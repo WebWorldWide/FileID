@@ -309,11 +309,14 @@ pub struct ModelStack {
 /// Tunable per-user via `FILEID_MODEL_POOL_SIZE` (also gated).
 const MODEL_POOL_SIZE: usize = 4;
 
-/// Estimated VRAM headroom per pooled-Session of (ArcFace + SCRFD +
-/// MobileCLIP combined): weights + DirectML allocator + intermediate
-/// tensors. Conservative upper bound — used to clamp pool size to fit
-/// available `DedicatedVideoMemory`. Real per-session residency varies
-/// by model and EP; treat this as a ceiling, not a measurement.
+/// Estimated VRAM headroom per pooled-Session of the SCALING model families —
+/// SFace (ArcFace) + YuNet (SCRFD) + RAM++ — each loaded `pool_size` times:
+/// weights + DirectML allocator + intermediate tensors. MobileCLIP is NOT part
+/// of this per-slot figure: it defaults to a SINGLE batch-coordinator session
+/// that does not scale with pool_size (fixed overhead, like the reserved
+/// headroom). Conservative upper bound — used to clamp pool size to fit
+/// available `DedicatedVideoMemory`. Real per-session residency varies by model
+/// and EP; treat this as a ceiling, not a measurement.
 ///
 /// Measured on RTX 2060 6 GB during a scan against ~40 JPEGs in
 /// %USERPROFILE%\Pictures: total dedicated VRAM peaked at ~2.6 GB from a
@@ -354,18 +357,36 @@ fn resolve_pool_size(worker_count: usize) -> usize {
         .ok()
         .and_then(|s| s.parse::<usize>().ok());
     let mut cap = env_override.unwrap_or(MODEL_POOL_SIZE);
-    if let Some(vram_mb) = crate::platform::dedicated_vram_mb() {
-        let usable = vram_mb.saturating_sub(VRAM_RESERVED_MB);
-        let vram_cap = ((usable / VRAM_PER_POOL_INSTANCE_MB).max(1)) as usize;
-        if cap > vram_cap {
-            tracing::warn!(
-                requested = cap,
-                vram_cap,
-                vram_mb,
-                "clamping ML pool to fit VRAM"
-            );
-            cap = vram_cap;
+    match crate::platform::dedicated_vram_mb() {
+        Some(vram_mb) => {
+            let usable = vram_mb.saturating_sub(VRAM_RESERVED_MB);
+            let vram_cap = ((usable / VRAM_PER_POOL_INSTANCE_MB).max(1)) as usize;
+            if cap > vram_cap {
+                tracing::warn!(
+                    requested = cap,
+                    vram_cap,
+                    vram_mb,
+                    "clamping ML pool to fit VRAM"
+                );
+                cap = vram_cap;
+            }
         }
+        None => {
+            // Fail SAFE, not open: with no VRAM reading we can't size the pool,
+            // so default to a single session rather than MODEL_POOL_SIZE=4 (the
+            // config the comments say wedges a 6 GB card). Matches main.rs's "ML
+            // pool will run at minimum" log on probe failure.
+            tracing::warn!(
+                "VRAM unreadable; clamping ML pool to 1 (fail-safe — pool would otherwise default to {MODEL_POOL_SIZE})"
+            );
+            cap = cap.min(1);
+        }
+    }
+    // Additional Low-tier ceiling on a low-RAM box: each pooled SFace/YuNet/RAM++
+    // session adds resident weights, so cap the pool to 1 under MemoryTier::Low.
+    // Stacks with (does not replace) the VRAM clamp; non-Low tiers unchanged.
+    if crate::platform::memory_tier() == crate::platform::MemoryTier::Low {
+        cap = cap.min(1);
     }
     cap.max(1).min(worker_count.max(1))
 }
@@ -679,7 +700,16 @@ impl Tagger {
         // MAX_DECODED_PIXELS, so this also tightens the pathological-frame ceiling.
         const PREDECODE_BUDGET_MB: usize = 256;
         const TYPICAL_FRAME_MB: usize = 24; // ~8 MP RGB8
-        let predecoded_cap = (PREDECODE_BUDGET_MB / TYPICAL_FRAME_MB).max(self.worker_count);
+        let budget_cap = PREDECODE_BUDGET_MB / TYPICAL_FRAME_MB;
+        // The worker_count floor guarantees every worker can hold one frame
+        // ready, but on a low-RAM box a high worker_count would override the
+        // ~256 MB budget. Under MemoryTier::Low respect the budget instead so the
+        // read-ahead can't outgrow it (a shallower queue can't starve the GPU
+        // stage — decode vastly outruns inference). Non-Low tiers keep the floor.
+        let predecoded_cap = match crate::platform::memory_tier() {
+            crate::platform::MemoryTier::Low => budget_cap.max(1),
+            _ => budget_cap.max(self.worker_count),
+        };
         let (predecoded_tx, predecoded_rx) =
             async_channel::bounded::<PreDecoded>(predecoded_cap);
         for decoder_idx in 0..decoder_count {
@@ -708,7 +738,18 @@ impl Tagger {
         // the number of loaded Sessions.
         let active_ep = crate::models::runtime::active_provider();
         let ep_pool_size = resolve_pool_size(self.worker_count);
-        let vision_cap = ep_vision_concurrency(active_ep, ep_pool_size);
+        // When the pool clamps to a SINGLE session, every vision permit-holder
+        // serializes on that one parking_lot Mutex across the GPU forward, so the
+        // extra permits just park OS threads instead of running. Issue exactly 1
+        // permit so excess workers await the ASYNC semaphore (yielding the tokio
+        // thread) rather than blocking on the mutex. Gated to pool_size==1 ONLY:
+        // for pool_size>=2 keep the full VISION_CONCURRENCY so a multi-session box
+        // (e.g. the 6 GB RTX 2060 at pool=2) is unchanged.
+        let vision_cap = if ep_pool_size == 1 {
+            1
+        } else {
+            ep_vision_concurrency(active_ep, ep_pool_size)
+        };
         let clip_cap = ep_clip_concurrency(active_ep, ep_pool_size);
         tracing::info!(
             ep = active_ep.as_str(),
@@ -1936,7 +1977,13 @@ pub fn resize_rgb_quality(
     dst_w: usize,
     dst_h: usize,
 ) -> Vec<u8> {
-    let src = match image::RgbImage::from_raw(src_w as u32, src_h as u32, rgb.to_vec()) {
+    // Borrow the source buffer rather than cloning it; same Triangle filter,
+    // identical output. Falls back to nearest if the size doesn't form an image.
+    let src = match image::ImageBuffer::<image::Rgb<u8>, &[u8]>::from_raw(
+        src_w as u32,
+        src_h as u32,
+        rgb,
+    ) {
         Some(img) => img,
         None => return resize_rgb_nearest(rgb, src_w, src_h, dst_w, dst_h),
     };

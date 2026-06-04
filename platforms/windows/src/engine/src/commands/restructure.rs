@@ -162,20 +162,23 @@ pub(crate) async fn handle_plan_restructure(
         },
     )
     .await;
-    let (embeddings, tags_map) = match signals {
+    let (mut embeddings, mut tags_map) = match signals {
         Ok(Ok(v)) => v,
         _ => (std::collections::HashMap::new(), std::collections::HashMap::new()),
     };
 
+    // Drain (remove) instead of clone: each file_id is a PK consumed once here,
+    // and both maps are dead afterward — moving avoids doubling the ~100 MB of
+    // CLIP blobs transiently on a low-RAM box.
     let semantic_files: Vec<restructure_semantic::SemanticFile> = files
         .iter()
         .filter(|f| matches!(f.kind, FileKind::Image))
         .filter_map(|f| {
-            embeddings.get(&f.file_id).map(|clip| restructure_semantic::SemanticFile {
+            embeddings.remove(&f.file_id).map(|clip| restructure_semantic::SemanticFile {
                 file_id: f.file_id,
                 source: f.source.clone(),
-                clip: clip.clone(),
-                tags: tags_map.get(&f.file_id).cloned().unwrap_or_default(),
+                clip,
+                tags: tags_map.remove(&f.file_id).unwrap_or_default(),
                 time_unix: f.created_unix.unwrap_or(f.modified_unix),
             })
         })

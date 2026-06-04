@@ -42,6 +42,10 @@ pub fn open_writer(db_path: &Path) -> Result<Connection> {
         conn.execute_batch(pragma)
             .with_context(|| format!("applying {pragma}"))?;
     }
+    // rusqlite's default cache holds 16 statements; one dbwriter flush keeps ~18
+    // prepare_cached alive at once, so the default evicts+re-prepares 1-2 hot
+    // statements every batch. 32 keeps them all resident across flushes.
+    conn.set_prepared_statement_cache_capacity(32);
     migrations::apply(&conn).context("applying migrations")?;
 
     // Sweep orphaned "running" scan_sessions left over from a previous

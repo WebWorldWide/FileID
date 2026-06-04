@@ -112,12 +112,16 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         // for a stable dictionary key. Grouping is O(n) via a dictionary, so
         // there's no per-pair scan and no candidate cap.
         using var cmd = conn.CreateCommand();
+        // modified_at rides along so the per-member thumbnail request can use the
+        // same path|mtime cache key LibraryView uses (ReadStore reads the same
+        // column) — a file shown in both tabs then shares one L1/L2 cache entry
+        // instead of being decoded + cached twice under divergent keys.
         cmd.CommandText = """
-            SELECT id, path_text, size_bytes, content_hash
+            SELECT id, path_text, size_bytes, content_hash, modified_at
             FROM files
             WHERE content_hash IS NOT NULL AND failed = 0
             """;
-        var rawMembers = new List<(long Id, string Path, long Size, string Hash)>(2048);
+        var rawMembers = new List<(long Id, string Path, long Size, string Hash, double? ModifiedAt)>(2048);
         using (var reader = cmd.ExecuteReader())
         {
             while (reader.Read())
@@ -126,7 +130,8 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
                 var hashBytes = (byte[])reader[3];
                 if (hashBytes is null || hashBytes.Length == 0) continue;
                 var hashHex = Convert.ToHexString(hashBytes);
-                rawMembers.Add((reader.GetInt64(0), reader.GetString(1), reader.GetInt64(2), hashHex));
+                var modifiedAt = reader.IsDBNull(4) ? (double?)null : reader.GetDouble(4);
+                rawMembers.Add((reader.GetInt64(0), reader.GetString(1), reader.GetInt64(2), hashHex, modifiedAt));
             }
         }
 
@@ -164,6 +169,7 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
                     Path = m.Path,
                     FileName = System.IO.Path.GetFileName(m.Path),
                     SizeBytes = m.Size,
+                    ModifiedAt = m.ModifiedAt,
                     GroupKey = groupKey,
                     IsKeeper = k == 0,
                 });
@@ -348,6 +354,11 @@ internal sealed class DuplicateMember : INotifyPropertyChanged
     public required string Path { get; init; }
     public required string FileName { get; init; }
     public required long SizeBytes { get; init; }
+
+    /// <summary>Modified-at unix seconds. Part of the thumbnail cache key so a
+    /// member shown in both Cleanup and Library resolves to the same path|mtime
+    /// L1/L2 entry instead of being cached twice.</summary>
+    public double? ModifiedAt { get; init; }
 
     /// <summary>shared per-group key for the keeper RadioButton's
     /// GroupName. Was previously bound to `Path` per member, which made

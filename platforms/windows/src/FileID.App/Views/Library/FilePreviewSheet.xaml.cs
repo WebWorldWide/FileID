@@ -299,7 +299,7 @@ public sealed partial class FilePreviewSheet : UserControl
             case "image":
             case "pdf":
             case "doc":
-                await LoadShellThumbnailAsync(path, kind);
+                await LoadShellThumbnailAsync(path, kind, modifiedAt);
                 break;
             case "video":
             case "audio":
@@ -316,7 +316,16 @@ public sealed partial class FilePreviewSheet : UserControl
     /// / .pages / PDF all render correctly when their providers are
     /// installed. Falls back to the placeholder if the provider returns
     /// nothing.</summary>
-    private async Task LoadShellThumbnailAsync(string path, string kind)
+    /// <summary>Bounded MRU cache of the 1024px preview BitmapImages, keyed by
+    /// path|modifiedAt. Arrow-keying back and forth over the same siblings would
+    /// otherwise re-run the shell extract + ~4 MB decode every step (this is the
+    /// 1024px preview path — separate from ThumbnailService's 192px L1/L2). All
+    /// access is UI-thread-affine: BitmapImage is a DispatcherObject, so this is
+    /// only ever read/written from the dispatcher-marshaled paths below.</summary>
+    private const int PreviewCacheCap = 4;
+    private readonly LinkedList<KeyValuePair<string, BitmapImage>> _previewCache = new();
+
+    private async Task LoadShellThumbnailAsync(string path, string kind, double? modifiedAt)
     {
         // BitmapImage is a DispatcherObject. The await on
         // GetThumbnailAsync can resume on a worker thread; constructing the
@@ -325,6 +334,11 @@ public sealed partial class FilePreviewSheet : UserControl
         // before any await and marshal the BitmapImage construction +
         // PreviewImage.Source/Visibility assignment inside one TryEnqueue.
         var dispatcher = DispatcherQueue;
+        var cacheKey = modifiedAt.HasValue ? $"{path}|{modifiedAt.Value:R}" : path;
+        if (dispatcher != null && TryShowCachedPreview(cacheKey, dispatcher))
+        {
+            return;
+        }
         Windows.Storage.FileProperties.StorageItemThumbnail? thumb = null;
         try
         {
@@ -346,6 +360,8 @@ public sealed partial class FilePreviewSheet : UserControl
                         await bmp.SetSourceAsync(captured);
                         PreviewImage.Source = bmp;
                         PreviewImage.Visibility = Visibility.Visible;
+                        // On the UI thread here — safe to populate the DispatcherObject cache.
+                        StorePreview(cacheKey, bmp);
                         tcs.TrySetResult(true);
                     }
                     catch (Exception ex)
@@ -384,6 +400,43 @@ public sealed partial class FilePreviewSheet : UserControl
             "doc" => "No preview available — Office handler may not be installed.",
             _ => "No preview available for this file type.",
         });
+    }
+
+    /// <summary>UI-thread-only. On a cache hit, marshal the cached BitmapImage
+    /// onto PreviewImage and bump it to most-recently-used. Returns true when a
+    /// cached preview was shown (caller skips the shell extract + decode).</summary>
+    private bool TryShowCachedPreview(string cacheKey, Microsoft.UI.Dispatching.DispatcherQueue dispatcher)
+    {
+        for (var node = _previewCache.First; node != null; node = node.Next)
+        {
+            if (node.Value.Key != cacheKey) continue;
+            var bmp = node.Value.Value;
+            _previewCache.Remove(node);
+            _previewCache.AddFirst(node);
+            dispatcher.TryEnqueue(() =>
+            {
+                if (_unloaded) return;
+                PreviewImage.Source = bmp;
+                PreviewImage.Visibility = Visibility.Visible;
+            });
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>UI-thread-only (BitmapImage is a DispatcherObject). Insert at MRU
+    /// front, dedupe the key, and evict the oldest beyond the cap.</summary>
+    private void StorePreview(string cacheKey, BitmapImage bmp)
+    {
+        for (var node = _previewCache.First; node != null; node = node.Next)
+        {
+            if (node.Value.Key == cacheKey) { _previewCache.Remove(node); break; }
+        }
+        _previewCache.AddFirst(new KeyValuePair<string, BitmapImage>(cacheKey, bmp));
+        while (_previewCache.Count > PreviewCacheCap)
+        {
+            _previewCache.RemoveLast();
+        }
     }
 
     /// <summary>Hand the file to MediaPlayerElement. Windows ships a

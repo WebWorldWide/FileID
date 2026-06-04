@@ -1184,14 +1184,16 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                 var items = new List<Windows.Storage.IStorageItem>(paths.Count);
                 foreach (var p in paths)
                 {
-                    if (System.IO.File.Exists(p))
+                    // No synchronous File.Exists pre-check: on a slow/disconnected
+                    // SMB share or USB stick it can stall the UI thread for
+                    // seconds (the same hazard ReadStore.OpenAsync wraps in a
+                    // timeout). GetFileFromPathAsync's catch below already skips
+                    // missing/inaccessible paths, so the stat was redundant.
+                    try
                     {
-                        try
-                        {
-                            items.Add(await Windows.Storage.StorageFile.GetFileFromPathAsync(p));
-                        }
-                        catch { /* path inaccessible — skip */ }
+                        items.Add(await Windows.Storage.StorageFile.GetFileFromPathAsync(p));
                     }
+                    catch { /* missing / inaccessible — skip */ }
                 }
                 if (items.Count > 0)
                 {

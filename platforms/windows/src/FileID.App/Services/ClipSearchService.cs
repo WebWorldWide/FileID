@@ -34,6 +34,14 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
     private readonly ConcurrentDictionary<string, TaskCompletionSource<float[]?>> _inflight = new();
     private bool _disposed;
 
+    // Bounded LRU of query-string → embedding. The CLIP text encoder is
+    // deterministic (same string ⇒ same vector, even across engine respawns),
+    // so repeated searches for the same term — kind-filter toggle, clear+retype,
+    // nav-back — can skip the IPC round-trip + encode entirely. No
+    // generation-based invalidation needed; only a model swap would change the
+    // mapping, which is not a supported in-session operation.
+    private readonly QueryEmbeddingCache _queryCache = new(capacity: 24);
+
     // generation counter, bumped each time the engine's lifecycle
     // transitions away from Ready (respawn or crash). Each in-flight TCS
     // captures the generation it was created in; an embedding that arrives
@@ -133,6 +141,12 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
         {
             return null;
         }
+        var cacheKey = query.Trim();
+        if (_queryCache.TryGet(cacheKey, out var cached))
+        {
+            LastSearchError = null;
+            return cached;
+        }
         var queryId = Guid.NewGuid().ToString("N");
         var tcs = new TaskCompletionSource<float[]?>(TaskCreationOptions.RunContinuationsAsynchronously);
         _inflight[queryId] = tcs;
@@ -172,8 +186,13 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
             // Empty embedding = CLIP disabled engine-side —
             // treat as null so SearchAsync falls back to FTS5, no error banner.
             if (result is { Length: 0 }) { LastSearchError = null; return null; }
-            // Successful round-trip — clear any stale error banner.
-            if (result is not null) LastSearchError = null;
+            // Successful round-trip — clear any stale error banner + cache the
+            // deterministic embedding so an identical query skips the next encode.
+            if (result is not null)
+            {
+                LastSearchError = null;
+                _queryCache.Store(cacheKey, result);
+            }
             return result;
         }
         catch (OperationCanceledException)
@@ -227,5 +246,60 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
             LastSearchError = openErr;
         }
         return fts;
+    }
+}
+
+/// <summary>Thread-safe bounded LRU mapping a trimmed query string to its CLIP
+/// text embedding. A hit moves the entry to the front (most-recently-used); a
+/// store dedupes the key then evicts the oldest beyond <c>capacity</c>. Extracted
+/// from <see cref="ClipSearchService"/> so the hit/evict policy is unit-testable
+/// without the engine singleton.</summary>
+internal sealed class QueryEmbeddingCache
+{
+    private readonly int _capacity;
+    private readonly object _lock = new();
+    private readonly LinkedList<KeyValuePair<string, float[]>> _entries = new();
+
+    public QueryEmbeddingCache(int capacity)
+    {
+        _capacity = capacity < 1 ? 1 : capacity;
+    }
+
+    public int Count
+    {
+        get { lock (_lock) { return _entries.Count; } }
+    }
+
+    public bool TryGet(string key, out float[]? embedding)
+    {
+        lock (_lock)
+        {
+            for (var node = _entries.First; node != null; node = node.Next)
+            {
+                if (node.Value.Key != key) continue;
+                embedding = node.Value.Value;
+                _entries.Remove(node);
+                _entries.AddFirst(node);
+                return true;
+            }
+        }
+        embedding = null;
+        return false;
+    }
+
+    public void Store(string key, float[] embedding)
+    {
+        lock (_lock)
+        {
+            for (var node = _entries.First; node != null; node = node.Next)
+            {
+                if (node.Value.Key == key) { _entries.Remove(node); break; }
+            }
+            _entries.AddFirst(new KeyValuePair<string, float[]>(key, embedding));
+            while (_entries.Count > _capacity)
+            {
+                _entries.RemoveLast();
+            }
+        }
     }
 }

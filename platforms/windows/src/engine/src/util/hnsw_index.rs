@@ -14,7 +14,7 @@
 use instant_distance::{Builder, HnswMap, Point, Search};
 
 /// Owned f32 embedding; `Point` implements squared-L2 over the vector.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Embedding(pub(crate) Vec<f32>);
 
 impl Point for Embedding {
@@ -46,6 +46,9 @@ pub(crate) fn build<V: Clone>(points: Vec<(Vec<f32>, V)>) -> HnswMap<Embedding, 
 #[derive(Default)]
 pub(crate) struct Searcher {
     scratch: Search,
+    // Reused across queries so a per-item sweep doesn't heap-allocate a fresh
+    // query Vec each call (search takes &Embedding, which owns its Vec).
+    query_buf: Embedding,
 }
 
 impl Searcher {
@@ -58,9 +61,10 @@ impl Searcher {
         query: &[f32],
         k: usize,
     ) -> Vec<(V, f32)> {
-        let q = Embedding(query.to_vec());
+        self.query_buf.0.clear();
+        self.query_buf.0.extend_from_slice(query);
         index
-            .search(&q, &mut self.scratch)
+            .search(&self.query_buf, &mut self.scratch)
             .take(k)
             .map(|item| (item.value.clone(), item.distance))
             .collect()
