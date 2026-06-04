@@ -97,8 +97,9 @@ public static class IpcCoder
     /// </summary>
     public static T Decode<T>(string frame)
     {
-        var trimmed = frame.AsSpan().TrimEnd('\n');
-        return JsonSerializer.Deserialize<T>(trimmed.ToString(), Options)
+        // Span overload (net8.0) — no intermediate string copy. TrimEnd on the
+        // span preserves the trailing-newline tolerance; behavior is identical.
+        return JsonSerializer.Deserialize<T>(frame.AsSpan().TrimEnd('\n'), Options)
             ?? throw new JsonException($"IpcCoder.Decode<{typeof(T).Name}>: deserializer returned null");
     }
 

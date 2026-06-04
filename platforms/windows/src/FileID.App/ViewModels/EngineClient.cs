@@ -1012,12 +1012,14 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         }
                         // Faces persist incrementally during a scan (dbwriter
                         // commits per-batch), but auto-clustering otherwise fires
-                        // ONLY on ScanComplete. A Failed/Cancelled scan would then
-                        // leave already-detected faces with no persons row, so the
-                        // People tab shows nothing until the next full scan. Fire
-                        // the (idempotent, zero-face-safe) auto-cluster on those
-                        // terminal phases too so persisted faces still surface.
-                        if (pc.Phase == ScanPhase.Cancelled || pc.Phase == ScanPhase.Failed)
+                        // ONLY on ScanComplete. A Failed scan would leave
+                        // already-detected faces with no persons row, so fire the
+                        // (idempotent, zero-face-safe) auto-cluster there too so
+                        // persisted faces still surface. A user-Cancelled scan
+                        // instead DEFERS clustering to a manual re-cluster — the
+                        // user explicitly stopped, and auto-firing a clustering
+                        // pass on cancel races the engine's own teardown.
+                        if (pc.Phase == ScanPhase.Failed)
                         {
                             _ = AutoTriggerFaceClusteringAsync();
                         }

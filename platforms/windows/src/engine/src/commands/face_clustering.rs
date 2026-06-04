@@ -18,41 +18,160 @@ pub(crate) async fn handle_run_face_clustering(
 ) {
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<FaceClusteringResult> {
         let started = Instant::now();
-        let conn = db.lock();
 
-        // Load every face that has an ArcFace embedding.
-        let mut faces: Vec<FaceRow> = Vec::new();
-        {
-            let mut stmt = conn.prepare(
-                "SELECT id, file_id, arcface_embedding, COALESCE(face_quality, 0.0) \
-                 FROM face_prints \
-                 WHERE arcface_embedding IS NOT NULL AND COALESCE(excluded, 0) = 0",
-            )?;
-            let rows = stmt.query_map([], |r| {
-                let id: i64 = r.get(0)?;
-                let file_id: i64 = r.get(1)?;
-                let blob: Vec<u8> = r.get(2)?;
-                let quality: f64 = r.get(3)?;
-                Ok((id, file_id, blob, quality))
-            })?;
-            for row in rows {
-                let (id, file_id, blob, quality) = row?;
-                if blob.len() % 4 != 0 || blob.is_empty() {
-                    continue;
-                }
-                let mut embedding = Vec::with_capacity(blob.len() / 4);
-                for chunk in blob.chunks_exact(4) {
-                    embedding.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-                }
-                faces.push(FaceRow {
-                    face_id: id,
-                    file_id,
-                    embedding,
-                    quality: quality as f32,
-                });
-            }
+        // PHASE 1 — hold the writer lock only for the DB reads. cluster() +
+        // consolidate() below run lock-free so suggested-merges (a read-only
+        // query) and other writes don't serialize behind a multi-second
+        // clustering pass. The engine-side single-flight guard (main.rs) keeps
+        // two clustering runs from racing; a face inserted between phase 1 and
+        // phase 3 is benign — it lands with person_id=NULL and is picked up next
+        // run.
+        struct PriorIdentity {
+            name: Option<String>,
+            title: Option<String>,
+            first_name: Option<String>,
+            middle_name: Option<String>,
+            last_name: Option<String>,
+            suffix: Option<String>,
+            is_unknown: i64,
+            created_at: f64,
         }
 
+        let mut faces: Vec<FaceRow> = Vec::new();
+        // (b) raw "different people" verdict pairs and (c) raw name rows, loaded
+        // here so phase 2 can build the blocked set without touching the DB.
+        let verdict_pairs: Vec<(i64, i64)>;
+        let name_rows: Vec<(i64, String)>;
+        let mut prior_by_person: HashMap<i64, PriorIdentity> = HashMap::new();
+        let mut face_to_prior: HashMap<i64, i64> = HashMap::new();
+        {
+            let conn = db.lock();
+
+            // (a) Load every face that has an ArcFace embedding.
+            {
+                let mut stmt = conn.prepare(
+                    "SELECT id, file_id, arcface_embedding, COALESCE(face_quality, 0.0) \
+                     FROM face_prints \
+                     WHERE arcface_embedding IS NOT NULL AND COALESCE(excluded, 0) = 0",
+                )?;
+                let rows = stmt.query_map([], |r| {
+                    let id: i64 = r.get(0)?;
+                    let file_id: i64 = r.get(1)?;
+                    let blob: Vec<u8> = r.get(2)?;
+                    let quality: f64 = r.get(3)?;
+                    Ok((id, file_id, blob, quality))
+                })?;
+                for row in rows {
+                    let (id, file_id, blob, quality) = row?;
+                    if blob.len() % 4 != 0 || blob.is_empty() {
+                        continue;
+                    }
+                    let mut embedding = Vec::with_capacity(blob.len() / 4);
+                    for chunk in blob.chunks_exact(4) {
+                        embedding
+                            .push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+                    }
+                    faces.push(FaceRow {
+                        face_id: id,
+                        file_id,
+                        embedding,
+                        quality: quality as f32,
+                    });
+                }
+            }
+
+            // (b) Raw "different people" verdict pairs (face-anchored). Re-projected
+            // onto the faces' CURRENT clusters in phase 2. Precise, but the link
+            // rides face_prints.id, which a faces_evaluated re-scan churns
+            // (DELETE+INSERT) — after which a stored verdict's faces no longer
+            // resolve. Guard (c) backstops that.
+            verdict_pairs = {
+                let mut vstmt = conn.prepare(
+                    "SELECT face_a, face_b FROM face_verifications \
+                     WHERE same_person = 0 AND face_a IS NOT NULL AND face_b IS NOT NULL",
+                )?;
+                let rows = vstmt
+                    .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?
+                    .filter_map(|r| r.ok())
+                    .collect::<Vec<(i64, i64)>>();
+                rows
+            };
+
+            // (c) Raw name rows for the same-name guard. Names are re-attached to
+            // clusters on EVERY re-cluster (the majority-vote snapshot below), so —
+            // unlike the volatile face-id verdict link in (b) — this guard is stable
+            // across re-scans: a user who labeled two DISTINCT people must never have
+            // them silently rejoined, however close their centroids. Same-named
+            // fragments and named+unnamed pairs still merge (intended consolidation).
+            name_rows = {
+                let mut nstmt = conn.prepare(
+                    "SELECT fp.id, p.name FROM face_prints fp \
+                     JOIN persons p ON fp.person_id = p.id \
+                     WHERE p.name IS NOT NULL AND TRIM(p.name) <> ''",
+                )?;
+                let rows = nstmt
+                    .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+                    .filter_map(|r| r.ok())
+                    .collect::<Vec<(i64, String)>>();
+                rows
+            };
+
+            // (d) Snapshot user-assigned identities BEFORE wiping `persons`.
+            // Re-clustering drops + re-creates the persons table with fresh rowids
+            // on EVERY run (the v13 migration note documents this), and this handler
+            // is auto-fired after every scan completion — so without carrying names
+            // forward, an incremental rescan that adds a single photo would destroy
+            // every name + "not this person" verdict the user entered in the People
+            // tab (data loss). We re-attach each new cluster's identity from the prior
+            // person that owned the MAJORITY of its member faces (ties broken toward
+            // the cluster's anchor face), which survives the anchor-selection drift a
+            // bare representative_face_id match would miss.
+            {
+                let mut stmt = conn.prepare(
+                    "SELECT id, name, title, first_name, middle_name, last_name, suffix, \
+                            COALESCE(is_unknown, 0), created_at \
+                     FROM persons \
+                     WHERE name IS NOT NULL OR COALESCE(is_unknown, 0) = 1",
+                )?;
+                let rows = stmt.query_map([], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        PriorIdentity {
+                            name: r.get(1)?,
+                            title: r.get(2)?,
+                            first_name: r.get(3)?,
+                            middle_name: r.get(4)?,
+                            last_name: r.get(5)?,
+                            suffix: r.get(6)?,
+                            is_unknown: r.get(7)?,
+                            created_at: r.get(8)?,
+                        },
+                    ))
+                })?;
+                for row in rows {
+                    let (id, ident) = row?;
+                    prior_by_person.insert(id, ident);
+                }
+            }
+            // face_id → the prior person that owned it (only identity-bearing ones).
+            {
+                let mut stmt = conn.prepare(
+                    "SELECT id, person_id FROM face_prints WHERE person_id IS NOT NULL",
+                )?;
+                let rows =
+                    stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+                for row in rows {
+                    let (face_id, pid) = row?;
+                    if prior_by_person.contains_key(&pid) {
+                        face_to_prior.insert(face_id, pid);
+                    }
+                }
+            }
+
+            drop(conn);
+        }
+
+        // PHASE 2 — no lock held, zero DB access. Pure in-memory clustering.
         // All face embeddings must share one dimensionality (SFace = 128). A
         // mixed/corrupt set — e.g. legacy 512-d ArcFace rows left over from
         // before the commercial-clean swap, or a truncated blob — would make
@@ -97,21 +216,11 @@ pub(crate) async fn handle_run_face_clustering(
             // faces' CURRENT clusters. Precise, but the link rides face_prints.id,
             // which a faces_evaluated re-scan churns (DELETE+INSERT) — after which
             // a stored verdict's faces no longer resolve. Guard (b) backstops that.
-            if let Ok(mut vstmt) = conn.prepare(
-                "SELECT face_a, face_b FROM face_verifications \
-                 WHERE same_person = 0 AND face_a IS NOT NULL AND face_b IS NOT NULL",
-            ) {
-                if let Ok(rows) =
-                    vstmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
-                {
-                    for (fa, fb) in rows.flatten() {
-                        if let (Some(&ca), Some(&cb)) =
-                            (cluster_of.get(&fa), cluster_of.get(&fb))
-                        {
-                            if ca != cb {
-                                blocked.insert(if ca < cb { (ca, cb) } else { (cb, ca) });
-                            }
-                        }
+            // Reads the pre-loaded `verdict_pairs` (phase 1), not the DB.
+            for &(fa, fb) in &verdict_pairs {
+                if let (Some(&ca), Some(&cb)) = (cluster_of.get(&fa), cluster_of.get(&fb)) {
+                    if ca != cb {
+                        blocked.insert(if ca < cb { (ca, cb) } else { (cb, ca) });
                     }
                 }
             }
@@ -123,20 +232,15 @@ pub(crate) async fn handle_run_face_clustering(
             // who labeled two DISTINCT people must never have them silently
             // rejoined, however close their centroids. Same-named fragments and
             // named+unnamed pairs still merge (the intended consolidation).
+            // Reads the pre-loaded `name_rows` (phase 1), not the DB.
             let mut cname_votes: HashMap<i32, HashMap<String, u32>> = HashMap::new();
-            if let Ok(mut nstmt) = conn.prepare(
-                "SELECT fp.id, p.name FROM face_prints fp \
-                 JOIN persons p ON fp.person_id = p.id \
-                 WHERE p.name IS NOT NULL AND TRIM(p.name) <> ''",
-            ) {
-                if let Ok(rows) =
-                    nstmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-                {
-                    for (fid, name) in rows.flatten() {
-                        if let Some(&cid) = cluster_of.get(&fid) {
-                            *cname_votes.entry(cid).or_default().entry(name).or_insert(0) += 1;
-                        }
-                    }
+            for (fid, name) in &name_rows {
+                if let Some(&cid) = cluster_of.get(fid) {
+                    *cname_votes
+                        .entry(cid)
+                        .or_default()
+                        .entry(name.clone())
+                        .or_insert(0) += 1;
                 }
             }
             let cluster_name: Vec<(i32, String)> = cname_votes
@@ -177,68 +281,11 @@ pub(crate) async fn handle_run_face_clustering(
             (a, an)
         };
 
-        // Snapshot user-assigned identities BEFORE wiping `persons`. Re-clustering
-        // drops + re-creates the persons table with fresh rowids on EVERY run
-        // (the v13 migration note documents this), and this handler is auto-fired
-        // after every scan completion — so without carrying names forward, an
-        // incremental rescan that adds a single photo would destroy every name +
-        // "not this person" verdict the user entered in the People tab (data
-        // loss). We re-attach each new cluster's identity from the prior person
-        // that owned the MAJORITY of its member faces (ties broken toward the
-        // cluster's anchor face), which survives the anchor-selection drift a
-        // bare representative_face_id match would miss.
-        struct PriorIdentity {
-            name: Option<String>,
-            title: Option<String>,
-            first_name: Option<String>,
-            middle_name: Option<String>,
-            last_name: Option<String>,
-            suffix: Option<String>,
-            is_unknown: i64,
-            created_at: f64,
-        }
-        let mut prior_by_person: HashMap<i64, PriorIdentity> = HashMap::new();
-        {
-            let mut stmt = conn.prepare(
-                "SELECT id, name, title, first_name, middle_name, last_name, suffix, \
-                        COALESCE(is_unknown, 0), created_at \
-                 FROM persons \
-                 WHERE name IS NOT NULL OR COALESCE(is_unknown, 0) = 1",
-            )?;
-            let rows = stmt.query_map([], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    PriorIdentity {
-                        name: r.get(1)?,
-                        title: r.get(2)?,
-                        first_name: r.get(3)?,
-                        middle_name: r.get(4)?,
-                        last_name: r.get(5)?,
-                        suffix: r.get(6)?,
-                        is_unknown: r.get(7)?,
-                        created_at: r.get(8)?,
-                    },
-                ))
-            })?;
-            for row in rows {
-                let (id, ident) = row?;
-                prior_by_person.insert(id, ident);
-            }
-        }
-        // face_id → the prior person that owned it (only identity-bearing ones).
-        let mut face_to_prior: HashMap<i64, i64> = HashMap::new();
-        {
-            let mut stmt =
-                conn.prepare("SELECT id, person_id FROM face_prints WHERE person_id IS NOT NULL")?;
-            let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
-            for row in rows {
-                let (face_id, pid) = row?;
-                if prior_by_person.contains_key(&pid) {
-                    face_to_prior.insert(face_id, pid);
-                }
-            }
-        }
-
+        // PHASE 3 — re-acquire the writer lock for the persist transaction. The
+        // identity snapshot (prior_by_person/face_to_prior) was captured in phase
+        // 1 before any of the lock-free work, so it still reflects the user's
+        // People-tab names + verdicts.
+        let conn = db.lock();
         let tx = conn.unchecked_transaction()?;
         // Persist clusters: clear existing person_id assignments + persons,
         // re-create one persons row per anchor, point face_prints at it.

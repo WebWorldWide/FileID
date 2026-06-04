@@ -614,3 +614,42 @@ public class LibraryMergeTests
         Assert.Equal(0, events);
     }
 }
+
+/// <summary>
+/// Classification tests for <see cref="EngineClient.IsNonFatalWarningKind"/> —
+/// the predicate that routes an inbound engine Error to LastWarning (benign
+/// notice) vs LastError (scary red banner). A manual Re-cluster that bounces off
+/// the engine's single-flight guard ("face_clustering_busy") must be a warning,
+/// not a failure (the People Re-cluster button must not paint red on a benign
+/// "already running"). The EngineClient singleton needs a UI-thread
+/// DispatcherQueue and can't be constructed headlessly, so we test the static
+/// predicate directly (visible via InternalsVisibleTo).
+/// </summary>
+public class EngineWarningClassificationTests
+{
+    [Theory]
+    [InlineData("face_clustering_busy")]
+    [InlineData("deep_analyze_already_running")]
+    [InlineData("rescan_no_changes")]
+    [InlineData("stages_skipped_missing_models")]
+    [InlineData("discovery_partial")]
+    [InlineData("checkpoint_failed_at_shutdown")]
+    [InlineData("cuda_dll_registration_failed")]
+    [InlineData("vlm_server_payload_rejected")]
+    public void NonFatalKinds_RouteToWarning(string kind)
+    {
+        Assert.True(EngineClient.IsNonFatalWarningKind(kind));
+    }
+
+    [Theory]
+    [InlineData("scan_failed")]
+    [InlineData("face_clustering_failed")]
+    [InlineData("db_write_failed")]
+    [InlineData("unknown_kind")]
+    [InlineData("")]
+    [InlineData(null)]
+    public void FatalOrUnknownKinds_RouteToError(string? kind)
+    {
+        Assert.False(EngineClient.IsNonFatalWarningKind(kind));
+    }
+}

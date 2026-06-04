@@ -326,15 +326,21 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
                 // macOS reference guard (#15).
                 if (blob.Length != queryEmbedding.Length * 4) continue;
                 float score = DotProduct(queryEmbedding, blob);
-                var row = ReadRow(reader);
+                // Materialize the FileRow (GROUP_CONCAT split + List + record)
+                // only for rows the bounded top-K heap actually retains — the
+                // vast majority of embedding rows are discarded, so ReadRow on
+                // every row was pure Gen0 churn. SimilarFilesAsync already heaps
+                // ids and fetches survivors afterward; mirror that here. Reading
+                // by column index stays valid until the next ReadAsync, so a lazy
+                // materialize inside the enqueue branches is byte-identical.
                 if (heap.Count < limit)
                 {
-                    heap.Enqueue(new FileRowWithScore(row, score), score);
+                    heap.Enqueue(new FileRowWithScore(ReadRow(reader), score), score);
                 }
                 else if (heap.TryPeek(out _, out var minScore) && score > minScore)
                 {
                     heap.Dequeue();
-                    heap.Enqueue(new FileRowWithScore(row, score), score);
+                    heap.Enqueue(new FileRowWithScore(ReadRow(reader), score), score);
                 }
             }
             // Heap holds best `limit` ordered worst→best; reverse to best→worst.

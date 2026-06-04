@@ -263,7 +263,16 @@ pub(crate) async fn handle_start_scan(
         }
     }
 
-    let worker_count = platform::default_worker_cap() as usize;
+    // The single largest live allocation during a scan is the set of full
+    // decoded RGB frames each in-flight worker future owns. On a low-RAM box
+    // (MemoryTier::Low, <8 GB) cap the worker count so that working set stays
+    // bounded; non-Low tiers keep the full CPU-topology cap unchanged. Pool
+    // arrays are indexed worker_idx % pool.len(), so worker_count and pool_size
+    // stay decoupled.
+    let worker_count = match platform::memory_tier() {
+        platform::MemoryTier::Low => platform::default_worker_cap().min(6) as usize,
+        _ => platform::default_worker_cap() as usize,
+    };
     let session = ScanSession::new_with_options(
         coord,
         db,

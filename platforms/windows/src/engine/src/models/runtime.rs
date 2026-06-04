@@ -331,7 +331,9 @@ pub fn active_provider() -> ExecutionProvider {
 /// EP, so a crash during that forced GPU bind left no breadcrumb and the engine
 /// crash-looped instead of reverting to DirectML (B6).
 pub fn armed_provider() -> ExecutionProvider {
-    let probe = RuntimeProbe::detect();
+    // Only reads the Copy `vendor` field; the loop re-queries pack/disable state
+    // live, so the memoized probe is byte-identical and skips a DXGI re-walk.
+    let probe = RuntimeProbe::shared();
     for ep in priority_chain(probe.vendor) {
         match ep {
             ExecutionProvider::Cuda

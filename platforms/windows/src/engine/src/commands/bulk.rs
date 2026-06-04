@@ -683,10 +683,12 @@ pub(crate) async fn handle_mark_persons_different(
 /// filtered out so the suggested-merges sheet doesn't keep re-prompting.
 pub(crate) async fn handle_find_merge_suggestions(
     sink: Sink,
-    db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    db_path: std::path::PathBuf,
 ) {
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<MergeSuggestions> {
-        let conn = db.lock();
+        // Read-only connection so this never contends on the single writer mutex
+        // (clustering can hold it for seconds on a large over-split library).
+        let conn = crate::db::open_read(&db_path)?;
         // One row per person via a JOIN to the representative face (its anchor
         // embedding + id) plus a COUNT JOIN for member size — replaces the two
         // per-person correlated subqueries the old query ran. representative_

@@ -18,7 +18,7 @@ use ort::value::Tensor;
 
 use super::runtime::{
     classify_inference_error, configure_session_builder, execution_providers_for_chain,
-    priority_chain, RuntimeProbe,
+    ExecutionProvider,
 };
 use super::wordpiece_tokenizer::WordPieceTokenizer;
 
@@ -44,18 +44,23 @@ impl BgeText {
         let tokenizer = WordPieceTokenizer::from_vocab_file(vocab_txt.as_ref(), true)
             .context("loading BGE vocab.txt")?;
 
-        let probe = RuntimeProbe::shared();
-        let chain = priority_chain(probe.vendor);
+        // Pin BGE to the CPU EP. It is a tiny 384-d text encoder over short
+        // document strings, off the GPU-bound image hot path, so on a small-VRAM
+        // card (e.g. 4 GB DirectML) it must not consume VRAM or contend on the
+        // DirectML command queue at scan start. CPU is ORT's implicit fallback,
+        // so a CPU-only chain registers no GPU dispatch. Semantic doc-search is
+        // unchanged (same weights, same output) — only the EP differs.
+        let chain = vec![ExecutionProvider::Cpu];
         let builder = Session::builder().context("ORT session builder")?;
         let mut builder =
             configure_session_builder(builder).context("configure session (BGE)")?;
-        let providers = execution_providers_for_chain(&chain, probe.adapter_index);
+        let providers = execution_providers_for_chain(&chain, None);
         if !providers.is_empty() {
             builder = builder
                 .with_execution_providers(providers)
                 .context("register execution providers (BGE)")?;
         }
-        tracing::info!(model = "BGE-small-en-v1.5", "EP priority chain registered");
+        tracing::info!(model = "BGE-small-en-v1.5", "pinned to CPU EP");
         let session = builder
             .commit_from_file(weights)
             .context("ORT session commit (BGE)")?;

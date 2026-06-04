@@ -1,6 +1,16 @@
 # NEXT — Windows (resume here)
 
-## 2026-06-04 — Face-fix branch: merge + on-hardware calibrate (RESUME HERE)
+## 2026-06-04 (later) — win-face-fix-perf: reconcile to main, then on-hardware verify (RESUME HERE)
+
+`win-face-fix-perf` (off origin/main) = the suggested-merges hang fix + over-split tuning (implements `PLAN-suggested-faces-fix.md`) AND an exhaustive 4 GB/low-mem perf audit. Headless-green (engine clippy `-D` + 266 tests; app build 0/0 + 131 App.Tests + 38 IpcSchema.Tests + format). Commits `d7b0159f` + `c07f93e8`. See STATE 2026-06-04 + DECISIONS 2026-06-04. (This resolves the prior deferred "consolidate() 12k cap" and "suggested-merges fast / HNSW" items below — now DONE.)
+
+1. **`win-face-fix-perf` is merged into LOCAL `main` (merge commit); PUSH it** to origin/main and confirm both GitHub workflows (windows-engine, windows-app) are green. Then close/delete the superseded remote branches `windows-v16.22-v16.26` (RAM++/Qwen work already on origin/main — see DECISIONS) and `plan/win-suggested-faces-fix` (its plan is now implemented).
+2. **On-hardware (RTX 2060 + the 4 GB DirectML box) — the only non-headless verification:**
+   - Suggested-merges: with a clustering pass running, the sheet must return immediately (not minutes); confirm far fewer duplicate person cards after a scan (AUTOMERGE 0.75); calibrate `FILEID_FACE_AUTOMERGE_COS` (~0.72–0.80) + the `FILEID_FACE_PASS3_*` env knobs against the labeled `G:\TrueNAS` library via `build/iterate.ps1` + `scan_assertions.py`.
+   - Perf hardware-sensitive knobs (applied but UNVERIFIED — confirm no regression on the 4 GB box AND that the 6 GB box is byte-identical; all are gated on `MemoryTier::Low` / `pool_size==1`): memory_tier worker/pool/predecode clamps, VRAM-None pool=1 fail-safe, the pool=1 vision-semaphore (vision_cap=1), BGE-on-CPU, downloader streaming. Run the `build/*.ps1` perf benches.
+3. **Deferred (still real; see the older sections below):** RAW decode; rotated portrait-video keyframes; durable content-keyed `face_verifications`; macOS lockstep of the new face behaviors; EV code-signing; add `FileID.IpcSchema.Tests` to `FileID.sln`.
+
+## 2026-06-04 — Face-fix branch (win-face-cluster-merge-perf): MERGED to origin/main; on-hardware calibrate
 
 `win-face-cluster-merge-perf-2026-06-03` fixes face scanning "totally broken" (root cause: the
 `clip_text` scan-gate) + over-split / slow-merges + the install-stall toast — 16 fixes across

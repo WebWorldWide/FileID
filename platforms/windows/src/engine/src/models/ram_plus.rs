@@ -335,7 +335,7 @@ impl RamPlusTagger {
     /// ONNX exported with a dynamic batch axis (export_ram_plus_onnx.py
     /// --dynamic-batch); a fixed-batch=1 model errors at run. Returns one tag
     /// list per input, in order.
-    pub fn tag_batch(&mut self, imgs: &[(Vec<u8>, u32, u32)]) -> Result<Vec<Vec<(String, f32)>>> {
+    pub fn tag_batch(&mut self, imgs: &[(&[u8], u32, u32)]) -> Result<Vec<Vec<(String, f32)>>> {
         use ndarray::s;
         if imgs.is_empty() {
             return Ok(Vec::new());
@@ -416,18 +416,18 @@ impl RamPlusTagger {
     /// tensor. Bilinear (not nearest) because tag quality is sensitive to
     /// resampling; matches the export script's PIL BILINEAR.
     fn preprocess(rgb: &[u8], width: u32, height: u32) -> Result<Array4<f32>> {
-        let src = image::RgbImage::from_raw(width, height, rgb.to_vec())
+        // Borrow the caller's buffer instead of cloning it (caller already
+        // validated rgb.len() == w*h*3). resize early-outs to a plain copy at
+        // equal dimensions, so calling it unconditionally is byte-identical to
+        // the old width==height==INPUT_SIZE short-circuit.
+        let src = image::ImageBuffer::<image::Rgb<u8>, &[u8]>::from_raw(width, height, rgb)
             .ok_or_else(|| anyhow::anyhow!("RAM++ preprocess: bad RGB buffer"))?;
-        let resized = if width == INPUT_SIZE && height == INPUT_SIZE {
-            src
-        } else {
-            image::imageops::resize(
-                &src,
-                INPUT_SIZE,
-                INPUT_SIZE,
-                image::imageops::FilterType::Triangle,
-            )
-        };
+        let resized = image::imageops::resize(
+            &src,
+            INPUT_SIZE,
+            INPUT_SIZE,
+            image::imageops::FilterType::Triangle,
+        );
         let n = INPUT_SIZE as usize;
         let mut chw = Array4::<f32>::zeros((1, 3, n, n));
         for y in 0..n {
