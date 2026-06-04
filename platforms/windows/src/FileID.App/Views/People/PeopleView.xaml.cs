@@ -315,11 +315,17 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         // "old data shown briefly" flicker.
         try
         {
+            // The engine may still be starting/respawning, in which case
+            // RunFaceClusteringAsync faults synchronously (State != Ready) and
+            // Re-cluster silently did nothing. Give it a brief window to come up,
+            // then run; log any abort so the formerly-swallowed failure is
+            // diagnosable instead of looking like a dead button.
+            await ViewModels.EngineClient.Instance.WaitForReadyAsync(TimeSpan.FromSeconds(15));
             await ViewModels.EngineClient.Instance.RunFaceClusteringAsync();
         }
-        catch
+        catch (Exception ex)
         {
-            // engine offline — fall through to a plain reload
+            Services.DebugLog.Warn($"People Re-cluster: clustering not run — {ex.Message}");
         }
         await ViewModel.RefreshAsync(CancellationToken.None);
     }

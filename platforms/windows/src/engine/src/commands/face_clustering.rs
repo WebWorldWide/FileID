@@ -82,6 +82,101 @@ pub(crate) async fn handle_run_face_clustering(
         let face_count = faces.len() as u64;
         let (assignments, anchors) = cluster(&faces);
 
+        // Auto-consolidate near-certain duplicate clusters the over-split-safe
+        // clusterer left fragmented (the "WAY too many similar faces" symptom).
+        // Verification-aware via TWO blocked-pair sources so a confirmed split is
+        // never silently re-merged:
+        let (assignments, anchors) = {
+            let threshold = crate::pipeline::face_clustering::automerge_threshold();
+            let cluster_of: HashMap<i64, i32> =
+                assignments.iter().map(|a| (a.face_id, a.cluster_id)).collect();
+            let mut blocked: std::collections::HashSet<(i32, i32)> =
+                std::collections::HashSet::new();
+
+            // (a) Explicit "different people" verdicts, re-projected onto the
+            // faces' CURRENT clusters. Precise, but the link rides face_prints.id,
+            // which a faces_evaluated re-scan churns (DELETE+INSERT) — after which
+            // a stored verdict's faces no longer resolve. Guard (b) backstops that.
+            if let Ok(mut vstmt) = conn.prepare(
+                "SELECT face_a, face_b FROM face_verifications \
+                 WHERE same_person = 0 AND face_a IS NOT NULL AND face_b IS NOT NULL",
+            ) {
+                if let Ok(rows) =
+                    vstmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
+                {
+                    for (fa, fb) in rows.flatten() {
+                        if let (Some(&ca), Some(&cb)) =
+                            (cluster_of.get(&fa), cluster_of.get(&fb))
+                        {
+                            if ca != cb {
+                                blocked.insert(if ca < cb { (ca, cb) } else { (cb, ca) });
+                            }
+                        }
+                    }
+                }
+            }
+
+            // (b) Never auto-merge two clusters carrying DIFFERENT user-assigned
+            // names. Names are re-attached to clusters on EVERY re-cluster (the
+            // majority-vote snapshot below), so — unlike the volatile face-id
+            // verdict link in (a) — this guard is stable across re-scans: a user
+            // who labeled two DISTINCT people must never have them silently
+            // rejoined, however close their centroids. Same-named fragments and
+            // named+unnamed pairs still merge (the intended consolidation).
+            let mut cname_votes: HashMap<i32, HashMap<String, u32>> = HashMap::new();
+            if let Ok(mut nstmt) = conn.prepare(
+                "SELECT fp.id, p.name FROM face_prints fp \
+                 JOIN persons p ON fp.person_id = p.id \
+                 WHERE p.name IS NOT NULL AND TRIM(p.name) <> ''",
+            ) {
+                if let Ok(rows) =
+                    nstmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+                {
+                    for (fid, name) in rows.flatten() {
+                        if let Some(&cid) = cluster_of.get(&fid) {
+                            *cname_votes.entry(cid).or_default().entry(name).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+            let cluster_name: Vec<(i32, String)> = cname_votes
+                .into_iter()
+                .filter_map(|(cid, votes)| {
+                    // Deterministic: highest vote wins; an exact tie resolves to
+                    // the lexicographically smallest name (nb.cmp(na)) — never
+                    // HashMap iteration order, so identical re-clusters yield the
+                    // same blocked set + the same People grouping.
+                    votes
+                        .into_iter()
+                        .max_by(|(na, ca), (nb, cb)| ca.cmp(cb).then_with(|| nb.cmp(na)))
+                        .map(|(n, _)| (cid, n))
+                })
+                .collect();
+            for i in 0..cluster_name.len() {
+                for j in (i + 1)..cluster_name.len() {
+                    if cluster_name[i].1 != cluster_name[j].1 {
+                        let (a, b) = (cluster_name[i].0, cluster_name[j].0);
+                        blocked.insert(if a < b { (a, b) } else { (b, a) });
+                    }
+                }
+            }
+
+            let before = anchors.len();
+            let (a, an) = crate::pipeline::face_clustering::consolidate(
+                &faces, assignments, anchors, &blocked, threshold,
+            );
+            if an.len() != before {
+                tracing::info!(
+                    before,
+                    after = an.len(),
+                    merged = before - an.len(),
+                    threshold,
+                    "[CLUSTER] auto-consolidated near-duplicate clusters"
+                );
+            }
+            (a, an)
+        };
+
         // Snapshot user-assigned identities BEFORE wiping `persons`. Re-clustering
         // drops + re-creates the persons table with fresh rowids on EVERY run
         // (the v13 migration note documents this), and this handler is auto-fired

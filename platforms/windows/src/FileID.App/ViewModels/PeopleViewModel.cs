@@ -175,6 +175,7 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
                 )                                                       AS anchor_face_id
             FROM persons p
             JOIN face_prints fp ON fp.person_id = p.id
+            WHERE COALESCE(p.is_unknown, 0) = 0
             GROUP BY p.id
             ORDER BY member_count DESC
             """;

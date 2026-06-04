@@ -8,6 +8,44 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-04 — Face scanning "totally broken" root-caused + fixed (3-workflow audit → gap-verify → re-audit)
+
+On-hardware report (RTX 2060): face scanning totally broken, "WAY too many similar faces",
+suggested-merges too slow, and a `clip_text` install-stall toast. Three adversarial workflows: a full
+face-pipeline audit (8 finders → refute-by-default verify → completeness critic; 34 findings, 17
+confirmed, 2 blockers), a gap-verify of the 8 critic suspects (7 refuted — incl. an EMPIRICAL load of
+the on-disk YuNet ONNX proving its 12 output names match `yunet.rs` and the decode math is OpenCV-exact,
+so faces detect/embed/cluster correctly), and a re-audit of the fix diff (16 findings → 3 confirmed →
+all fixed). **ROOT CAUSE (blocker): `scan.rs` hard-gated EVERY scan on the `clip_text` sentinel, but
+`clip_text` (the CLIP *text* encoder) is query-time-only and never used by the scan/face chain — so the
+user's stalled `clip_text` install (the toast) aborted ALL scanning with `models_not_installed` → zero
+faces.** Removed it from the gate (`[mobileclip_s2, arcface]` only).
+
+**Engine fixes:** clip_text gate (above); ABORT the scan when a pre-flight-required model passed its
+sentinel but failed to LOAD (was warn-only → a corrupt/AV-quarantined model stamped every file
+scanned-but-faceless and the timestamp-only incremental skip-set then stranded them forever); on a
+mid-scan GPU TDR mark only image/video rows `failed=true` so they retry (docs already CPU-processed stay
+visible); new verification-aware centroid auto-merge `consolidate()` (default 0.85, env
+`FILEID_FACE_AUTOMERGE_COS`, `=1.0` disables) folding over-split duplicate clusters — blocked by BOTH
+"different people" verdicts AND differing user names (stable across re-scan); merge-suggestion band
+retuned `0.32..0.66 → 0.55..0.97` (drops impostor noise, surfaces stranded same-person fragments);
+suggestion sweep releases the writer lock before its O(P²) compute; YuNet output-name contract checked
+at load (loud fail vs silent zero-faces); orphaned face-crop JPEGs pruned post-commit on re-scan;
+downloader `read_timeout` 120→60s so a stalled install self-heals before the alarm.
+
+**App fixes:** install stall-guard now latches THIS kind's terminal (`Fraction >= 1.0`) via a
+PropertyChanged subscription — fixes the false "clip_text stopped responding" toast under Install-All
+(the shared progress slot was overwritten by other concurrent downloads); `PrewarmNoProgressTimeout`
+90→120s; auto-clustering also fires on Failed/Cancelled scans (faces persisted before a non-Complete
+terminal now surface); People grid hides `is_unknown` clusters (matches macOS; makes "mark as unknown"
+actually prune); People Re-cluster awaits engine readiness + logs aborts (was a silent no-op).
+
+Headless-green: engine clippy `-D` + **264 tests**; app build 0/0 + **App.Tests 108** + **IpcSchema.Tests
+34** + format. Branch `win-face-cluster-merge-perf-2026-06-03`. Clustering thresholds + the 0.85
+auto-merge need on-hardware calibration on the labeled `G:\TrueNAS` library (over-split philosophy
+unchanged; auto-merge is conservative + env-disable). Deferred items (RAW decode, rotated video,
+consolidate 12k cap, suggestions HNSW, content-keyed verifications) in NEXT.md.
+
 ## 2026-06-03 — Full-repo Windows bug audit (4 workflows) + production-hardening fix pass
 
 Exhaustive adversarial audit of the whole Windows app (Rust engine + WinUI) via four

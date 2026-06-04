@@ -67,6 +67,39 @@ impl YuNet {
             .name
             .clone();
 
+        // Validate the output-name contract at LOAD. detect() matches outputs by
+        // literal name (cls_/obj_/bbox_/kps_ × strides 8/16/32); a mismatch makes
+        // every stride hit the skip arm and detect() return an empty Vec for the
+        // ENTIRE library — silent "zero faces". The shipped opencv
+        // face_detection_yunet_2023mar export emits exactly these 12 names, so
+        // assert them here: a future renamed re-export then fails LOUDLY at load
+        // (→ scan aborts with a reinstall message, scan.rs) instead of silently
+        // producing no faces. (YuNet's cls/obj are both 1-channel, so SCRFD-style
+        // shape-classification cannot disambiguate them — a name check is the
+        // robust guard here.)
+        {
+            let have: std::collections::HashSet<&str> =
+                session.outputs.iter().map(|o| o.name.as_str()).collect();
+            let missing: Vec<String> = STRIDES
+                .iter()
+                .flat_map(|s| {
+                    ["cls", "obj", "bbox", "kps"]
+                        .iter()
+                        .map(move |p| format!("{p}_{s}"))
+                })
+                .filter(|key| !have.contains(key.as_str()))
+                .collect();
+            if !missing.is_empty() {
+                let got: Vec<&str> = session.outputs.iter().map(|o| o.name.as_str()).collect();
+                anyhow::bail!(
+                    "YuNet ONNX output names don't match the decode contract \
+                     (missing {missing:?}; got {got:?}). The model is likely the \
+                     wrong variant or a renamed re-export — reinstall faces from \
+                     Settings → Local AI."
+                );
+            }
+        }
+
         let mut model = Self { session, input_name };
         let warmup_started = std::time::Instant::now();
         let _ = model.detect(&vec![0u8; 3 * (INPUT as usize) * (INPUT as usize)], INPUT, INPUT)?;

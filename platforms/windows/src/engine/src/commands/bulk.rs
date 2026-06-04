@@ -9,7 +9,7 @@ use crate::ipc::{
     self, sink::Sink, BulkActionItem, BulkActionResult, EngineError, EventPayload, IpcEvent,
     MergeSuggestion, MergeSuggestions, TagMode, Wrap,
 };
-use crate::pipeline::face_clustering::{COS_LOW, MERGE_SUGGEST_COS_HIGH};
+use crate::pipeline::face_clustering::{MERGE_SUGGEST_COS_HIGH, MERGE_SUGGEST_COS_LOW};
 
 use super::trash_log::{self, TrashLogEntry, TrashLogItem};
 
@@ -675,9 +675,12 @@ pub(crate) async fn handle_mark_persons_different(
 }
 
 /// Find merge-candidate cluster pairs by ArcFace cosine similarity in the
-/// uncertain band (COS_LOW..COS_HIGH from face_clustering). Pairs already
-/// confirmed-different in face_verifications are filtered out so the
-/// suggested-merges sheet doesn't keep re-prompting.
+/// suggestion band (MERGE_SUGGEST_COS_LOW..MERGE_SUGGEST_COS_HIGH from
+/// face_clustering — 0.55..0.97, distinct from the clusterer's own VLM-verify
+/// band). The floor drops impostor-territory noise; the ceiling surfaces the
+/// genuine same-person fragments that over-split stranded above the Pass-1
+/// threshold. Pairs already confirmed-different in face_verifications are
+/// filtered out so the suggested-merges sheet doesn't keep re-prompting.
 pub(crate) async fn handle_find_merge_suggestions(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
@@ -689,26 +692,33 @@ pub(crate) async fn handle_find_merge_suggestions(
         // per-person correlated subqueries the old query ran. representative_
         // face_id is the cluster anchor (highest-quality embedded face), kept
         // current by clustering + handle_merge_clusters.
-        let mut stmt = conn.prepare(
-            "SELECT p.id, rep.id, COUNT(fpc.id), rep.arcface_embedding
-             FROM persons p
-             JOIN face_prints rep
-               ON rep.id = p.representative_face_id AND rep.arcface_embedding IS NOT NULL
-             JOIN face_prints fpc ON fpc.person_id = p.id
-             GROUP BY p.id",
-        )?;
-        let rows: Vec<(i64, i64, i64, Vec<u8>)> = stmt
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, Vec<u8>>(3).unwrap_or_default(),
-                ))
-            })?
-            .filter_map(|r| r.ok())
-            .filter(|(_, _, _, blob)| !blob.is_empty() && blob.len() % 4 == 0)
-            .collect();
+        // Scope the prepared statement so its borrow of `conn` ends here,
+        // letting the writer lock be released before the cosine sweep below.
+        let rows: Vec<(i64, i64, i64, Vec<u8>)> = {
+            let mut stmt = conn.prepare(
+                "SELECT p.id, rep.id, COUNT(fpc.id), rep.arcface_embedding
+                 FROM persons p
+                 JOIN face_prints rep
+                   ON rep.id = p.representative_face_id AND rep.arcface_embedding IS NOT NULL
+                 JOIN face_prints fpc ON fpc.person_id = p.id
+                 GROUP BY p.id",
+            )?;
+            // Bind to a local so the borrowing iterator temporary is dropped at
+            // this `;` — before `stmt` — letting the block return an owned Vec.
+            let collected: Vec<(i64, i64, i64, Vec<u8>)> = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, Vec<u8>>(3).unwrap_or_default(),
+                    ))
+                })?
+                .filter_map(|r| r.ok())
+                .filter(|(_, _, _, blob)| !blob.is_empty() && blob.len() % 4 == 0)
+                .collect();
+            collected
+        };
 
         let decode = |blob: &[u8]| -> Vec<f32> {
             blob.chunks_exact(4)
@@ -717,8 +727,9 @@ pub(crate) async fn handle_find_merge_suggestions(
         };
         // Length guard: a dimension mismatch must never masquerade as a
         // near-merge. zip() silently truncates to the shorter slice, inflating
-        // the dot product; returning -1.0 is safely excluded by the COS_LOW
-        // band check below so a mismatched pair is never suggested (#17).
+        // the dot product; returning -1.0 is safely excluded by the
+        // MERGE_SUGGEST_COS_LOW band check below so a mismatched pair is never
+        // suggested (#17).
         let cos = |a: &[f32], b: &[f32]| -> f32 {
             if a.len() != b.len() {
                 return -1.0;
@@ -811,6 +822,11 @@ pub(crate) async fn handle_find_merge_suggestions(
             .map(|(pid, anchor_id, count, blob)| (pid, anchor_id, count, decode(&blob)))
             .collect();
 
+        // Every DB read is done; the O(P²) cosine sweep below is pure in-memory
+        // math. Release the single-writer lock so the (potentially multi-second
+        // on a large over-split library) sweep doesn't serialize other writes.
+        drop(conn);
+
         let mut pairs: Vec<MergeSuggestion> = Vec::new();
         for i in 0..embeddings.len() {
             for j in (i + 1)..embeddings.len() {
@@ -829,7 +845,7 @@ pub(crate) async fn handle_find_merge_suggestions(
                     continue;
                 }
                 let s = cos(ea, eb);
-                if s >= COS_LOW && s < MERGE_SUGGEST_COS_HIGH {
+                if s >= MERGE_SUGGEST_COS_LOW && s < MERGE_SUGGEST_COS_HIGH {
                     pairs.push(MergeSuggestion {
                         source_person_id: pa,
                         destination_person_id: pb,
