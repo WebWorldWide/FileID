@@ -8,6 +8,16 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-04 — Suggested-merges hang fix + over-split tuning + exhaustive perf audit (branch win-face-fix-perf)
+
+Built on `origin/main` (PR #10). Two bodies of work, headless-green, ready to merge to `main` (the push is the owner's).
+
+**Face — suggested-merges hang + over-split (implements `shared/docs/PLAN-suggested-faces-fix.md`).** The People → Suggested-merges sheet hung for minutes because the engine's single `Arc<Mutex<Connection>>` serialized the read-only suggestion query behind the multi-minute clustering write-lock. Fixes: `db::open_read()` (ephemeral `SQLITE_OPEN_READ_ONLY` conn; `handle_find_merge_suggestions` opens its own read conn instead of `db.lock()`); `handle_run_face_clustering` restructured into load (lock) → `cluster()`+`consolidate()` (LOCK-FREE) → persist (re-lock), so the writer mutex is free during the multi-second compute; an engine-side single-flight guard (`face_cluster_active`) bounces a concurrent run; app `WaitForMergeSuggestionsAsync(30s)` with an actionable timeout; auto-cluster dropped on user-Cancel. Over-split: `AUTOMERGE_COS_DEFAULT` 0.85→0.75 (Balanced, env-overridable), the 12k-cluster consolidate no-op replaced by an HNSW centroid neighbor search (cap lifted, brute-parity test), Pass-3 floors exposed as `FILEID_FACE_PASS3_*` env knobs.
+
+**Perf — exhaustive audit for the 4 GB / low-mem target.** 15-finder read-only audit over the whole Windows tree → refute-by-default verify → synthesize (33 confirmed / 7 refuted; the C# list-virtualization + LavaLamp/Win2D dimensions fully refuted — no waste). 21 safe (headless-verified) + 9 hardware-sensitive (applied conservatively, GATED so the 6 GB RTX 2060 reference box is byte-identical) findings applied. Safe highlights: borrowed-view RGB resize drops a full-frame clone per image on the primary RAM++ tagger + CLIP; three SQLite reads moved off the UI thread (fake-async M.D.Sqlite); SemanticSearch top-K lazy materialization; prepared-statement + VRAM/EP-probe caching; HNSW query-buffer reuse; shared thumbnail-cache key; IpcCoder span decode; query-embedding LRU. Hardware-sensitive (pending on-hardware confirmation): memory_tier wired into worker_count/pool/predecode (Low-tier only), VRAM-probe-None fails safe to pool=1, vision semaphore vision_cap=1 only at pool=1, BGE pinned to CPU EP, downloader streaming concat.
+
+**Gates:** engine `cargo clippy --all-targets -D warnings` + 266 tests; app `dotnet build` (WinUI) 0 warnings + 131 App.Tests + 38 IpcSchema.Tests + `dotnet format`. Commits `d7b0159f` (face) + `c07f93e8` (perf). The obsolete local `windows-v16.22-v16.26` branch (RAM++ ONNX + drop Qwen-3B) is superseded by origin/main and dropped (see DECISIONS). On-hardware verification of the hardware-sensitive perf knobs + the 0.75 automerge default remains the owner's gate.
+
 ## 2026-06-04 — Face scanning "totally broken" root-caused + fixed (3-workflow audit → gap-verify → re-audit)
 
 On-hardware report (RTX 2060): face scanning totally broken, "WAY too many similar faces",
