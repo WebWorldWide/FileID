@@ -67,6 +67,10 @@ public final class EngineClient {
 
     private var process: Process?
     private var stdinPipe: Pipe?
+    /// Serial queue for stdin command writes. The global CONCURRENT queue used
+    /// to let two rapid send() calls write to the engine's stdin fd at once,
+    /// which could reorder commands or interleave their bytes mid-line.
+    private let stdinWriteQueue = DispatchQueue(label: "com.fileid.engine.stdin")
 
     // Up to 3 respawns within respawnWindow; cleared on .ready.
     private static let respawnDelays: [UInt64] = [1, 4, 16]
@@ -77,7 +81,7 @@ public final class EngineClient {
     /// Set on shutdown() or after a "work complete" signal. Suppresses
     /// the phantom error pill after MLX's known SIGSEGV-at-exit bug.
     private var expectedExit: Bool = false
-    private var lastTerminalEventAt: Date = .distantPast
+    public private(set) var lastTerminalEventAt: Date = .distantPast
 
     /// When non-nil, the next engine exit deletes the SQLite library
     /// before the respawn, and the next `.ready` event auto-starts a
@@ -206,8 +210,13 @@ public final class EngineClient {
         proc.standardError = errPipe
 
         // IPC flows over stderr (see IPCSink for the .app fd-1 rationale).
+        // stdout is unused; drain it, and disarm on EOF — otherwise the closed
+        // fd stays permanently readable and the handler busy-spins burning CPU
+        // after the engine exits.
         outPipe.fileHandleForReading.readabilityHandler = { handle in
-            _ = handle.availableData
+            if handle.availableData.isEmpty {
+                handle.readabilityHandler = nil
+            }
         }
         let stderrBuffer = MutexBox(Data())
         errPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
@@ -357,9 +366,16 @@ public final class EngineClient {
                     autoPilotStage = .ready
                 }
             }
-            if e.kind.hasPrefix("deep") && autoPilotActive {
-                // Deep Analyze failure during auto-pilot — same idea.
-                autoPilotStage = .ready
+            if e.kind.hasPrefix("deep") {
+                // A deep-analyze error (e.g. unknown model kind → "deep_invalid")
+                // means we'll never get .deepAnalyzeComplete, which is the only
+                // place that clears this flag — so clear it here or the UI stays
+                // stuck "analyzing…" forever.
+                deepAnalyzeInFlight = false
+                if autoPilotActive {
+                    // Deep Analyze failure during auto-pilot — same idea.
+                    autoPilotStage = .ready
+                }
             }
         case .log:
             break
@@ -502,7 +518,10 @@ public final class EngineClient {
         let writeHandle = pipe.fileHandleForWriting
         let procBox = MutexBox<Process?>(self.process)
         let done = MutexBox(false)
-        DispatchQueue.global(qos: .userInitiated).async {
+        // Serial queue → commands are written in submission order and never
+        // interleave. The timeout below stays on a concurrent queue so it fires
+        // as a real timer even while a blocked write holds the serial queue.
+        stdinWriteQueue.async {
             DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 10.0) {
                 guard !done.withLock({ $0 }) else { return }
                 FileHandle.standardError.write(Data("EngineClient send timed out (engine stdin blocked)\n".utf8))
