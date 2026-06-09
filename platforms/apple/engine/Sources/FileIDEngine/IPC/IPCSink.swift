@@ -54,12 +54,21 @@ public actor IPCSink {
                     buffer.removeFirst()
                 }
             } else {
-                // Non-critical can be dropped. For progress events,
-                // overwrite the most recent progress already in the buffer
-                // instead of growing.
+                // Non-critical can be dropped. For progress events, overwrite
+                // the most recent buffered PROGRESS entry instead of growing.
+                //
+                // The old predicate used `"\"progress\"".utf8.first!` — the
+                // FIRST byte of the literal, i.e. the `"` (0x22) character.
+                // `Data.contains(_: UInt8)` then just asked "does this line
+                // contain a double-quote?" — true for EVERY JSON line — so it
+                // overwrote the newest buffered entry of ANY kind, including a
+                // buffered scanComplete / faceClusteringComplete, which then
+                // never reached the app (UI stuck mid-scan). Match the full
+                // byte needle and never clobber a critical-looking entry.
                 if case .progress = payload,
-                   let lastProgressIdx = buffer.lastIndex(where: { $0.contains("\"progress\"".utf8.first!)
-                                                                    && $0.contains("\"sessionID\"".utf8.first!) }) {
+                   let lastProgressIdx = buffer.lastIndex(where: {
+                       $0.range(of: Self.progressNeedle) != nil && !Self.entryLooksCritical($0)
+                   }) {
                     buffer[lastProgressIdx] = line
                     return
                 }
@@ -172,4 +181,8 @@ public actor IPCSink {
         }
         return false
     }
+
+    /// Byte needle for the serialized `progress` event variant. Used by the
+    /// full-buffer coalescing path to find the most recent progress line.
+    private static let progressNeedle = Data("\"progress\"".utf8)
 }
