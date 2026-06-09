@@ -42,6 +42,25 @@ fn hash_with_threshold(path: &Path, size: u64, full_max: u64) -> std::io::Result
         let n = read_fill(&mut f, &mut head)?;
         hasher.update(&head[..n]);
 
+        // Interior samples: a few evenly-spaced 64 KB chunks so two DISTINCT
+        // same-size files that happen to share their head+tail (camera bursts,
+        // container formats with identical headers/footers, padded archives)
+        // don't collide and trigger a false rename-heal. Deterministic offsets;
+        // skipped on files too small for interior reads to clear head/tail.
+        const INTERIOR_SAMPLES: u64 = 4;
+        const INTERIOR_CHUNK: usize = 64 * 1024;
+        for k in 1..=INTERIOR_SAMPLES {
+            let off = size.saturating_mul(k) / (INTERIOR_SAMPLES + 1);
+            if off < span as u64 || off + INTERIOR_CHUNK as u64 > size.saturating_sub(span as u64) {
+                continue;
+            }
+            if f.seek(SeekFrom::Start(off)).is_ok() {
+                let mut mid = vec![0u8; INTERIOR_CHUNK];
+                let n = read_fill(&mut f, &mut mid)?;
+                hasher.update(&mid[..n]);
+            }
+        }
+
         f.seek(SeekFrom::End(-(span as i64)))?;
         let mut tail = vec![0u8; span];
         let n = read_fill(&mut f, &mut tail)?;

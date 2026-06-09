@@ -40,7 +40,8 @@ pub(crate) fn extract_into_parent(zip_path: &Path) -> anyhow::Result<()> {
         );
     }
 
-    let mut total_bytes: u64 = 0;
+    let mut total_bytes: u64 = 0;     // declared (central-directory) sizes
+    let mut total_written: u64 = 0;   // actual decompressed bytes written
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).context("zip entry")?;
         let name = entry
@@ -91,8 +92,22 @@ pub(crate) fn extract_into_parent(zip_path: &Path) -> anyhow::Result<()> {
 
         let mut out = std::fs::File::create(&dest)
             .with_context(|| format!("creating {}", dest.display()))?;
-        std::io::copy(&mut entry, &mut out)
+        // Bound the ACTUAL decompressed output, not the attacker-controlled
+        // declared entry.size(): a lying central directory could otherwise
+        // make io::copy inflate far past the caps (zip bomb). Cap each entry
+        // and the cumulative total by the real byte count.
+        let entry_cap = MAX_ENTRY_BYTES.min(MAX_BYTES.saturating_sub(total_written));
+        let mut limited = std::io::Read::take(entry.by_ref(), entry_cap.saturating_add(1));
+        let written = std::io::copy(&mut limited, &mut out)
             .with_context(|| format!("writing {}", dest.display()))?;
+        if written > entry_cap {
+            let _ = std::fs::remove_file(&dest);
+            anyhow::bail!(
+                "zip rejected: '{}' decompressed past the byte cap (bomb?)",
+                name.display()
+            );
+        }
+        total_written = total_written.saturating_add(written);
 
         if let Ok(real) = std::fs::canonicalize(&dest) {
             if !real.starts_with(&parent_canon) {

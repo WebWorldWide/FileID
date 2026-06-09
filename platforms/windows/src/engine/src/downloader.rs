@@ -186,7 +186,20 @@ where
             last_err = Some(anyhow::anyhow!("HTTP {status}"));
             continue 'attempts;
         }
-        // 4xx (other than 429) — bad URL / auth required. Don't retry.
+        // HTTP 416 (Range Not Satisfiable) on a resume means our existing
+        // `.part` is at/past the server's current file length — a stale or
+        // already-complete part. Discard it and restart from 0 on the next
+        // attempt instead of bailing permanently (which left the download
+        // stuck unrecoverable forever).
+        if status.as_u16() == 416 && existing_len > 0 {
+            tracing::warn!(url = %request.url, existing_len,
+                "HTTP 416 on resume; discarding stale part and restarting from 0");
+            let _ = tokio::fs::remove_file(&tmp).await;
+            bytes_done.store(0, Ordering::Relaxed);
+            last_err = Some(anyhow::anyhow!("HTTP 416 (stale part, restarting)"));
+            continue 'attempts;
+        }
+        // 4xx (other than 429 / 416-on-resume) — bad URL / auth required. Don't retry.
         if status.is_client_error() {
             anyhow::bail!("non-2xx response: HTTP {status} for {}", request.url);
         }
@@ -592,7 +605,7 @@ async fn download_range_with_retry(
         Duration::from_secs(16),
     ];
 
-    for (attempt, backoff) in std::iter::once(Duration::ZERO)
+    'retry: for (attempt, backoff) in std::iter::once(Duration::ZERO)
         .chain(backoffs.iter().copied())
         .enumerate()
     {
@@ -603,11 +616,22 @@ async fn download_range_with_retry(
             anyhow::bail!("range cancelled (start={start})");
         }
 
-        // Resumable: stat the part file. If it has bytes, append from there.
-        let existing_len = tokio::fs::metadata(part_path).await
+        // Resumable: stat the part file. A partial part (< expected) resumes
+        // via Range; an OVERSIZED part is stale/corrupt from a prior run (a
+        // different file version or a half-written resume) — discard it and
+        // restart this range rather than treating it as "done" and stitching a
+        // corrupt model together.
+        let expected = end - start + 1;
+        let mut existing_len = tokio::fs::metadata(part_path).await
             .map(|m| m.len()).unwrap_or(0);
+        if existing_len > expected {
+            tracing::warn!(part=%part_path.display(), existing_len, expected,
+                "oversized resume part; discarding and restarting range");
+            let _ = tokio::fs::remove_file(part_path).await;
+            existing_len = 0;
+        }
         let cur_start = start + existing_len;
-        if cur_start > end { return Ok(()); } // already done
+        if cur_start > end { return Ok(()); } // existing_len == expected → done
 
         // Global HTTP concurrency cap — prevents three concurrent prewarms
         // × 12 range-GETs each from tripping HuggingFace's per-IP rate limit
@@ -656,8 +680,15 @@ async fn download_range_with_retry(
             let chunk = match chunk {
                 Ok(c) => c,
                 Err(e) => {
+                    // Retry by continuing the OUTER loop, not recursing while
+                    // holding `_permit`: recursing re-acquired a 2nd permit, and
+                    // under throttling all 8 permit-holders could recurse and
+                    // block acquiring a 9th — a permanent deadlock. `continue`
+                    // drops `_permit` at end of iteration; the loop re-stats the
+                    // .part file and resumes via Range, on the finite backoff
+                    // schedule (eventually bails instead of spinning forever).
                     tracing::warn!(?e, "stream error; retrying range");
-                    return Box::pin(download_range_with_retry(client, url, start, end, part_path, cancel, tx)).await;
+                    continue 'retry;
                 }
             };
             tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await

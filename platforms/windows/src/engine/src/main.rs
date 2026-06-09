@@ -255,11 +255,14 @@ async fn async_main() -> Result<()> {
     };
     let dispatch_http_client = http_client.clone();
 
-    // Prewarm cancel flag. CancelPrewarm flips it; download_parallel polls
-    // it after every chunk.
-    let prewarm_cancel: Arc<std::sync::atomic::AtomicBool> =
-        Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let dispatch_prewarm_cancel = prewarm_cancel.clone();
+    // Per-download cancel tokens. Each PrewarmModel gets its OWN token, so
+    // starting a new download can't reset/un-cancel others (the old single
+    // shared flag did exactly that). CancelPrewarm flips every registered
+    // token — a blanket cancel, since the IPC payload carries no per-model
+    // selector. download_parallel polls its token after every chunk.
+    let prewarm_cancels: Arc<parking_lot::Mutex<Vec<Arc<std::sync::atomic::AtomicBool>>>> =
+        Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let dispatch_prewarm_cancels = prewarm_cancels.clone();
 
     let stdio_loop = tokio::spawn(async move {
         const MAX_FRAME_BYTES: usize = 1024 * 1024;
@@ -293,7 +296,7 @@ async fn async_main() -> Result<()> {
                                 &dispatch_scan_state,
                                 &dispatch_deep_cancel,
                                 &dispatch_http_client,
-                                &dispatch_prewarm_cancel,
+                                &dispatch_prewarm_cancels,
                                 &text,
                             ).await;
                         }
@@ -365,7 +368,7 @@ async fn handle_line(
     scan_state: &Arc<parking_lot::Mutex<Option<coordinator::ScanCoordinator>>>,
     deep_analyze_cancel: &Arc<std::sync::atomic::AtomicBool>,
     http_client: &Arc<reqwest::Client>,
-    prewarm_cancel: &Arc<std::sync::atomic::AtomicBool>,
+    prewarm_cancels: &Arc<parking_lot::Mutex<Vec<Arc<std::sync::atomic::AtomicBool>>>>,
     line: &str,
 ) {
     // Strip a leading UTF-8 BOM defensively. The C# side ships BOM-less UTF-8,
@@ -399,22 +402,29 @@ async fn handle_line(
             shutdown.notify_waiters();
         }
         CommandPayload::PrewarmModel(payload) => {
-            // Clear the cancel flag at the start of every NEW prewarm call —
-            // an in-flight cancel from a prior call shouldn't immediately abort
-            // this one. Downloads run concurrently against the shared
-            // http_client pool.
-            prewarm_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+            // Fresh per-download cancel token (starts un-cancelled). Register it
+            // so CancelPrewarm can reach it, and prune already-cancelled tokens
+            // so the registry can't grow unbounded across a long session.
+            // Downloads run concurrently against the shared http_client pool.
+            let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            {
+                let mut reg = prewarm_cancels.lock();
+                reg.retain(|c| !c.load(std::sync::atomic::Ordering::Relaxed));
+                reg.push(cancel.clone());
+            }
             let sink = sink.clone();
             let model_kind = payload.model_kind.clone();
             let http_client = http_client.clone();
-            let cancel = prewarm_cancel.clone();
             tokio::spawn(async move {
                 commands::prewarm::handle_prewarm_model(sink, model_kind, http_client, cancel).await;
             });
         }
         CommandPayload::CancelPrewarm(_) => {
-            prewarm_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-            tracing::info!("CancelPrewarm received; in-flight downloads will abort");
+            let reg = prewarm_cancels.lock();
+            for c in reg.iter() {
+                c.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            tracing::info!(count = reg.len(), "CancelPrewarm received; in-flight downloads will abort");
         }
         CommandPayload::PlanRestructure(payload) => {
             let Some(db) = db else {
