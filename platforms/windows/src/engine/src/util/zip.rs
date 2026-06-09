@@ -97,7 +97,7 @@ pub(crate) fn extract_into_parent(zip_path: &Path) -> anyhow::Result<()> {
         // make io::copy inflate far past the caps (zip bomb). Cap each entry
         // and the cumulative total by the real byte count.
         let entry_cap = MAX_ENTRY_BYTES.min(MAX_BYTES.saturating_sub(total_written));
-        let mut limited = std::io::Read::take(entry.by_ref(), entry_cap.saturating_add(1));
+        let mut limited = std::io::Read::take(&mut entry, entry_cap.saturating_add(1));
         let written = std::io::copy(&mut limited, &mut out)
             .with_context(|| format!("writing {}", dest.display()))?;
         if written > entry_cap {
