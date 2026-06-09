@@ -149,6 +149,26 @@ ok "faceClusteringComplete (auto-triggered)"
 # Clean shutdown
 ipc_send "\"shutdown\""
 sleep 2
+
+# U4: the IPC wire must carry ONLY JSON event lines — any library
+# diagnostic splicing in means the fd-2 transport split regressed.
+step "U4 wire purity"
+BAD_LINES=$(grep -cv '^{' "$EVENT_LOG" 2>/dev/null || true)
+BAD_LINES=${BAD_LINES:-0}
+if [ "$BAD_LINES" -gt 0 ]; then
+    fail "$BAD_LINES non-JSON line(s) on the IPC wire:"
+    grep -v '^{' "$EVENT_LOG" | head -5
+    cleanup
+    trap - EXIT
+    exit 1
+fi
+ok "every wire line is a JSON event ($(grep -c . "$EVENT_LOG") lines)"
+if [ -f "$HOME/Library/Application Support/FileID/logs/engine-stderr.log" ]; then
+    ok "engine-stderr.log present (diagnostics rerouted)"
+else
+    warn "engine-stderr.log missing — fd-2 bootstrap may have fallen back"
+fi
+
 cleanup
 trap - EXIT
 ok "engine shut down"
