@@ -168,7 +168,10 @@ struct SankeyFlowView: View {
                     recomputeLayoutIfNeeded(width: newSize.width,
                                               height: newSize.height)
                 }
-                .onChange(of: proposals.count) { _, _ in
+                // React to layout-relevant CONTENT, not just count — a
+                // regenerate that yields the same number of proposals but
+                // different files/buckets left the diagram stale.
+                .onChange(of: proposals) { _, _ in
                     layout = Self.computeLayout(
                         proposals: proposals,
                         width: totalW,

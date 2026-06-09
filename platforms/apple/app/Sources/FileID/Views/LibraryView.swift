@@ -109,6 +109,15 @@ struct LibraryView: View {
         .onChange(of: engine.deepAnalyzeComplete?.processed ?? -1) { _, _ in
             refreshBulkState()
         }
+        // Terminal reload: the 1 s batch throttle above can swallow the FINAL
+        // scan batch (it advances lastSeenBatchIndex before the throttle guard,
+        // so the last batch never triggers a reload if it lands within 1 s).
+        // Reloading on any terminal event guarantees the grid ends complete.
+        .onChange(of: engine.lastTerminalEventAt) { _, _ in
+            store.notifyChanged()
+            reload()
+            refreshBulkState()
+        }
         .onChange(of: searchText) { _, _ in
             similarSeed = nil   // typing exits similarity mode
             // Debounce: cancel any pending reload, schedule a new one.
@@ -123,6 +132,16 @@ struct LibraryView: View {
         }
         .onChange(of: kindFilterRaw) { _, _ in reload() }
         .onChange(of: similarSeed?.id) { _, _ in reload() }
+        // Surface the undo-rename outcome (incl. partial/total failures) — it
+        // was written to `undoStatus` but never shown, so failures were silent.
+        .alert("Undo Renames", isPresented: Binding(
+            get: { undoStatus != nil },
+            set: { if !$0 { undoStatus = nil } }
+        )) {
+            Button("OK", role: .cancel) { undoStatus = nil }
+        } message: {
+            Text(undoStatus ?? "")
+        }
     }
 
     /// Inline post-scan banner used for "Grouping faces…" and

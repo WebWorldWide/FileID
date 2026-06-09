@@ -13,7 +13,12 @@ public final class CLIPTextEncoder: @unchecked Sendable {
 
     public static let shared = CLIPTextEncoder()
 
+    // `lock` guards ONLY the `model`/`loadedURL` slots and is held for
+    // microseconds. `loadLock` serializes the (multi-second) compile so it is
+    // never held while isReady/embedText — often called on the MainActor —
+    // read `model`. Holding the single lock across compileModel froze the UI.
     private let lock = NSLock()
+    private let loadLock = NSLock()
     private var model: MLModel?
     private var loadedURL: URL?
 
@@ -37,7 +42,15 @@ public final class CLIPTextEncoder: @unchecked Sendable {
     /// Returns true iff both pieces are present and loaded successfully.
     @discardableResult
     public func load() -> Bool {
-        lock.lock(); defer { lock.unlock() }
+        // Fast path — already loaded.
+        lock.lock(); let already = (model != nil); lock.unlock()
+        if already { return true }
+
+        // Serialize concurrent loads WITHOUT holding `lock` during the compile.
+        loadLock.lock(); defer { loadLock.unlock() }
+        lock.lock(); let nowLoaded = (model != nil); lock.unlock()
+        if nowLoaded { return true }
+
         let dir = Self.defaultDirectory
         guard FileManager.default.fileExists(atPath: dir.path) else { return false }
         guard CLIPTokenizer.shared.loadVocabulary(modelDirectory: dir) else {
@@ -50,11 +63,15 @@ public final class CLIPTextEncoder: @unchecked Sendable {
             return false
         }
         do {
+            // Slow work — NO `lock` held, so isReady/embedText stay responsive.
             let compiled = try MLModel.compileModel(at: modelURL)
             let config = MLModelConfiguration()
             config.computeUnits = .all
-            model = try MLModel(contentsOf: compiled, configuration: config)
+            let loaded = try MLModel(contentsOf: compiled, configuration: config)
+            lock.lock()
+            model = loaded
             loadedURL = modelURL
+            lock.unlock()
             NSLog("FileID CLIP text: loaded from %@", redactPathForLog(modelURL.path))
             return true
         } catch {

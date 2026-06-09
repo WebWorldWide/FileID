@@ -51,6 +51,9 @@ struct RestructureView: View {
     @State private var captionedFraction: Double = 0
     @State private var totalAnalyzableFiles = 0
     @State private var dismissedDeepAnalyzeHint = false
+    /// Monotonic guard: regenerate() runs from four triggers; only the newest
+    /// run may publish, so a slow stale compute can't overwrite fresh proposals.
+    @State private var regenToken = 0
 
     /// Which subset of proposals the drill-down sheet renders.
     enum DrillDownScope: Identifiable, Hashable {
@@ -764,19 +767,32 @@ struct RestructureView: View {
     // MARK: - Compute
 
     private func regenerate() async {
+        regenToken &+= 1
+        let token = regenToken
         loading = true
-        defer { loading = false }
+        defer { if token == regenToken { loading = false } }
         status = nil
         let root = libraryRoot
         let result = await Task.detached(priority: .userInitiated) {
             return RestructureEngine.compute(store: store, libraryRoot: root)
         }.value
+        // A newer regenerate() began while we were computing — discard this
+        // stale result instead of clobbering the fresh proposals/selection.
+        guard token == regenToken else { return }
         proposals = result.proposals
         summary = result.summary
         let by = Dictionary(grouping: result.proposals, by: { $0.bucket })
         groups = by.map { Group(bucket: $0.key, proposals: $0.value) }
             .sorted { $0.proposals.count > $1.proposals.count }
         selectedIDs = Set(result.proposals.map(\.fileID))
+        // Preserve the user's "Skip these" choices across regenerate: re-exclude
+        // any persisted skipped outcome's proposals from the fresh selection
+        // (otherwise skipped rows render dimmed but get re-applied).
+        for outcome in skippedOutcomes {
+            for p in result.proposals where outcomeFor(p) == outcome {
+                selectedIDs.remove(p.fileID)
+            }
+        }
 
         // Per-outcome groupings the recommendation row's expand-in-
         // place file list reads from. Built here so the render path
@@ -809,7 +825,11 @@ struct RestructureView: View {
     }
 
     private func applySelected(mode: RestructureEngine.ApplyMode) {
-        let toMove = proposals.filter { selectedIDs.contains($0.fileID) }
+        // Belt-and-suspenders: never move a proposal whose outcome is skipped,
+        // regardless of selection state.
+        let toMove = proposals.filter {
+            selectedIDs.contains($0.fileID) && !skippedOutcomes.contains(outcomeFor($0))
+        }
         Task {
             let result = await RestructureEngine.apply(proposals: toMove,
                                                        store: store, mode: mode)
