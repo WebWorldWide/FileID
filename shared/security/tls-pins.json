@@ -1,0 +1,24 @@
+{
+  "comment": "CA-allowlist TLS pinning for model-download egress. Both platforms restrict download-host trust to these root CAs (macOS: SPKI match in the URLSession challenge handler for matching hosts; Windows: reqwest built-in roots disabled, these PEMs installed as the only trust anchors on the download client). This is defense-in-depth — per-artifact SHA256 in shared/models/manifest.json is the primary integrity control. Pin level is the ROOT CA (with cross-family backups), not leaf/intermediate: leaves rotate ~90 days and HF/GitHub move between CDNs; roots are stable for decades. Captured live 2026-06-09 (huggingface.co + cas-bridge.xethub.hf.co → Amazon Root CA 1; github.com → USERTrust ECC; release-assets.githubusercontent.com → ISRG Root X1; developer.download.nvidia.com → DigiCert Global Root G3). Escape hatch: FILEID_DISABLE_TLS_PINNING=1 reverts to system roots (logged loudly; changes validation only, never adds egress). Rotation: re-run shared/scripts/check_tls_pins.sh --capture before each release; if a host moved to a CA outside this set, add its root + ship an update.",
+  "appliesToHosts": [
+    "huggingface.co",
+    "*.huggingface.co",
+    "*.hf.co",
+    "github.com",
+    "*.githubusercontent.com",
+    "developer.download.nvidia.com"
+  ],
+  "roots": [
+    { "slug": "amazon-root-ca-1",      "spkiSHA256Base64": "++MBgDH5WGvL9Bcn5Be30cRcL0f5O+NyoXuWtQdX1aI=" },
+    { "slug": "amazon-root-ca-2",      "spkiSHA256Base64": "f0KW/FtqTjs108NpYj42SrGvOB2PpxIVM8nWxjPqJGE=" },
+    { "slug": "amazon-root-ca-3",      "spkiSHA256Base64": "NqvDJlas/GRcYbcWE8S/IceH9cq77kg0jVhZeAPXq8k=" },
+    { "slug": "amazon-root-ca-4",      "spkiSHA256Base64": "9+ze1cZgR9KO1kZrVDxA4HQ6voHRCSVNz4RdTCx4U8U=" },
+    { "slug": "starfield-services-g2", "spkiSHA256Base64": "KwccWaCgrnaw6tsrrSO61FgLacNgG2MMLq8GE6+oP5I=" },
+    { "slug": "isrg-root-x1",          "spkiSHA256Base64": "C5+lpZ7tcVwmwQIMcRtPbsQtWLABXhQzejna0wHFr8M=" },
+    { "slug": "isrg-root-x2",          "spkiSHA256Base64": "diGVwiVYbubAI3RW4hB9xU8e/CH2GnkuvVFZE8zmgzI=" },
+    { "slug": "usertrust-ecc",         "spkiSHA256Base64": "ICGRfpgmOUXIWcQ/HXPLQTkFPEFPoDyjvH7ohhQpjzs=" },
+    { "slug": "usertrust-rsa",         "spkiSHA256Base64": "x4QzPSC810K5/cMjb05Qm4k3Bw5zBn4lTdO/nEW/Td4=" },
+    { "slug": "digicert-global-g2",    "spkiSHA256Base64": "i7WTqTvh0OioIruIfFR4kMPnBqrS2rdiVPl/s2uC/CY=" },
+    { "slug": "digicert-global-g3",    "spkiSHA256Base64": "uUwZgwDOxcBXrQcntwu+kYFpkiVkOaezL0WYEZ3anJc=" }
+  ]
+}
