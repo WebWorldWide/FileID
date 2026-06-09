@@ -114,7 +114,7 @@ internal static class ThumbnailDiskCache
         }
         catch (Exception ex)
         {
-            DebugLog.Warn($"ThumbnailDiskCache read ({path}): {ex.GetType().Name}: {ex.Message}");
+            DebugLog.Warn($"ThumbnailDiskCache read ({PathRedactor.Redact(path)}): {ex.GetType().Name}: {ex.Message}");
             try { File.Delete(cached); } catch { /* swallow */ }
             ForgetIndexEntry(cached);
             return null;
@@ -182,7 +182,7 @@ internal static class ThumbnailDiskCache
             }
             catch (Exception ex)
             {
-                DebugLog.Warn($"ThumbnailDiskCache write ({path}): {ex.GetType().Name}: {ex.Message}");
+                DebugLog.Warn($"ThumbnailDiskCache write ({PathRedactor.Redact(path)}): {ex.GetType().Name}: {ex.Message}");
             }
         });
     }

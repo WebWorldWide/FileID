@@ -501,14 +501,20 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             try { prior.Cancel(); } catch (ObjectDisposedException) { }
             prior.Dispose();
         }
+        // Snapshot the token while `cts` is guaranteed alive. Reading
+        // `cts.Token` INSIDE the task could race a newer ScheduleRefresh that
+        // already disposed this cts, throwing ObjectDisposedException as an
+        // unobserved task exception (process-level crash under strict modes).
+        var token = cts.Token;
         _ = Task.Run(async () =>
         {
             try
             {
-                await Task.Delay(DebounceWindow, cts.Token).ConfigureAwait(false);
-                await RefreshAsync(cts.Token).ConfigureAwait(false);
+                await Task.Delay(DebounceWindow, token).ConfigureAwait(false);
+                await RefreshAsync(token).ConfigureAwait(false);
             }
             catch (OperationCanceledException) { /* expected */ }
+            catch (ObjectDisposedException) { /* cts disposed by a newer refresh */ }
         });
     }
 

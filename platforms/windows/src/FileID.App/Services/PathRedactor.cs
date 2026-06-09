@@ -27,7 +27,12 @@ internal static class PathRedactor
             return "<null>";
         }
         var normalized = NormalizeForCompare(path);
-        if (normalized.StartsWith(s_userProfileNormalized, StringComparison.OrdinalIgnoreCase))
+        // Require an exact-home or separator boundary after the prefix —
+        // otherwise `C:\Users\bob` would match `C:\Users\bobby\…` and leak a
+        // DIFFERENT user's name as `~by\…`.
+        if (normalized.StartsWith(s_userProfileNormalized, StringComparison.OrdinalIgnoreCase)
+            && (normalized.Length == s_userProfileNormalized.Length
+                || normalized[s_userProfileNormalized.Length] == '\\'))
         {
             // Preserve original separator style by counting from the original path.
             var tail = path[s_userProfile.Length..];

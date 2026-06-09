@@ -206,6 +206,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
                        (SELECT GROUP_CONCAT(tag, '|') FROM (SELECT tag FROM tags WHERE file_id = files.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, score DESC, rowid)) AS auto_tags,
                        vlm_proposed_name
                 FROM files
+                WHERE failed = 0
                 ORDER BY modified_at DESC NULLS LAST LIMIT $limit
                 """;
             cmd.Parameters.AddWithValue("$limit", limit);
@@ -247,6 +248,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
                    e.embedding
             FROM clip_embeddings e
             JOIN files f ON f.id = e.file_id
+            WHERE f.failed = 0
             """;
             using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await reader.ReadAsync(ct).ConfigureAwait(false))

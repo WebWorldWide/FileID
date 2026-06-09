@@ -22,11 +22,15 @@ namespace FileID;
 internal static class Program
 {
     /// <summary>
-    /// Single-instance mutex name. Per-machine (not per-user) to keep the
-    /// behavior deterministic across UAC elevation states. The GUID is opaque
-    /// — never reuse it for anything else.
+    /// Single-instance mutex name. Per-SESSION (Local\ namespace), not
+    /// per-machine: a Global\ mutex blocked a SECOND logged-in Windows user
+    /// (Fast User Switching / RDP / Citrix) from launching the app at all,
+    /// since each interactive session is a separate user running their own
+    /// copy. Local\ gives each session its own gate while still preventing a
+    /// duplicate instance within the same session. The GUID is opaque — never
+    /// reuse it for anything else.
     /// </summary>
-    private const string SingleInstanceMutexName = "Global\\FileID-Singleton-{8C9D7C2E-3B87-4F19-8F3F-5A1A1B5E8A8E}";
+    private const string SingleInstanceMutexName = "Local\\FileID-Singleton-{8C9D7C2E-3B87-4F19-8F3F-5A1A1B5E8A8E}";
 
     /// <summary>harness hook. When the app is launched with
     /// <c>--auto-scan-folder &lt;path&gt;</c>, App.OnLaunched dispatches a

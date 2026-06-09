@@ -27,6 +27,7 @@ public sealed class SankeyFlowControl : Control
 {
     private Canvas? _canvas;
     private RestructurePlan? _plan;
+    private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer? _renderDebounce;
 
     // Per-rendered ribbon: keep enough state to do proximity hit-testing
     // + cross-highlight on pointer move. Rebuilt on each Render().
@@ -86,7 +87,20 @@ public sealed class SankeyFlowControl : Control
         _whiteHighlight = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
 
         Loaded += (_, _) => Render();
-        SizeChanged += (_, _) => Render();
+        // Debounce resize: a drag-resize fires SizeChanged many times per
+        // second; coalesce into one Render ~80 ms after the last change.
+        _renderDebounce = DispatcherQueue?.CreateTimer();
+        if (_renderDebounce is not null)
+        {
+            _renderDebounce.Interval = TimeSpan.FromMilliseconds(80);
+            _renderDebounce.IsRepeating = false;
+            _renderDebounce.Tick += (_, _) => Render();
+            SizeChanged += (_, _) => { _renderDebounce.Stop(); _renderDebounce.Start(); };
+        }
+        else
+        {
+            SizeChanged += (_, _) => Render();
+        }
         PointerMoved += OnPointerMoved;
         PointerExited += OnPointerExited;
         Tapped += OnTapped;
@@ -149,6 +163,19 @@ public sealed class SankeyFlowControl : Control
         var sourceList = rawSourceGroups.Select(g => g.Key).ToList();
         var categoryList = rawCategoryGroups.Select(g => g.Key).ToList();
 
+        // Precompute (source, category) flow counts ONCE — O(moves) — and reuse
+        // them in the barycentric loops below. Previously each loop iteration
+        // re-scanned the entire moves list (moves.Count(... SourceOf(m) ...)),
+        // making the sort O(2 × |sources| × |categories| × |moves|) — hundreds
+        // of full scans on a large plan, re-run on every Render/SizeChanged.
+        var flowMatrix = new Dictionary<(string, string), int>();
+        foreach (var m in moves)
+        {
+            var key = (SourceOf(m), m.Category);
+            flowMatrix.TryGetValue(key, out var c);
+            flowMatrix[key] = c + 1;
+        }
+
         // 2 iterations of barycentric sorting to minimize ribbon crossings
         for (int iter = 0; iter < 2; iter++)
         {
@@ -160,7 +187,7 @@ public sealed class SankeyFlowControl : Control
                 for (int sIdx = 0; sIdx < sourceList.Count; sIdx++)
                 {
                     var srcName = sourceList[sIdx];
-                    var flow = moves.Count(m => SourceOf(m) == srcName && m.Category == cat);
+                    var flow = flowMatrix.TryGetValue((srcName, cat), out var fv) ? fv : 0;
                     if (flow > 0)
                     {
                         weightedSum += sIdx * flow;
@@ -179,7 +206,7 @@ public sealed class SankeyFlowControl : Control
                 for (int cIdx = 0; cIdx < categoryList.Count; cIdx++)
                 {
                     var catName = categoryList[cIdx];
-                    var flow = moves.Count(m => SourceOf(m) == src && m.Category == catName);
+                    var flow = flowMatrix.TryGetValue((src, catName), out var fv) ? fv : 0;
                     if (flow > 0)
                     {
                         weightedSum += cIdx * flow;
