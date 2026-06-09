@@ -1,0 +1,19 @@
+{
+  "comment": "Shared expected outcomes both platforms' harnesses consume (platforms/apple/scripts/iterate.sh, platforms/windows/build/iterate.ps1). Keep platform-neutral; platform-specific tolerances live in the harnesses.",
+  "ocr": {
+    "file": "ocr/known-text.png",
+    "mustContainTokens": ["OCR", "12345"],
+    "note": "Assert on unambiguous tokens only — 'FileID' renders with I/| glyph ambiguity at this size on some OCR engines."
+  },
+  "collisions": {
+    "files": ["collisions/a/IMG_0001.jpg", "collisions/b/IMG_0001.jpg"],
+    "expect": "Restructure/apply funnelling both to one destination keeps BOTH payloads on disk under distinct names; neither platform may ever overwrite (C2). Suffix convention is platform-local (macOS '_2', Windows ' (2)')."
+  },
+  "faces": {
+    "note": "faces/same-person-{a,b}.jpg pending — requires a rights-cleared face pair; used for cross-platform embedding-parity UAT (same person clusters together on both platforms; embeddings are approximate, not byte-equal, since detectors differ)."
+  },
+  "unicodeNames": {
+    "manifest": "unicode-names/manifest.json",
+    "expect": "Every created name is scanned (or explicitly skip-logged); no silent drops; rename/tag round-trips preserve names byte-for-byte."
+  }
+}

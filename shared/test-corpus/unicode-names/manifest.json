@@ -1,0 +1,12 @@
+{
+  "comment": "Filename edge cases. Harnesses CREATE these files at runtime from the names below — git cannot reliably carry NFD/exotic names across platforms. Each entry: name (the exact filename to create), encoding note, and what must hold after a scan.",
+  "cases": [
+    { "name": "café-nfc.jpg", "note": "U+00E9 precomposed (NFC)", "expect": "scanned; searchable by 'café' regardless of query normalization" },
+    { "name": "café-nfd.jpg", "note": "e + U+0301 combining acute (NFD) — macOS HFS+/APFS native form", "expect": "scanned; not treated as a distinct sibling of the NFC twin on case/norm-insensitive filesystems" },
+    { "name": "🏖️-beach.jpg", "note": "emoji + VS16", "expect": "scanned; rename/tag round-trips preserve the name byte-for-byte" },
+    { "name": "שלום-rtl.jpg", "note": "RTL Hebrew", "expect": "scanned; UI renders without bidi spoofing of the extension" },
+    { "name": "mixed-‮gpj.exe", "note": "U+202E RIGHT-TO-LEFT OVERRIDE — extension spoof attempt", "expect": "scanned or skipped, but NEVER displayed in UI with the visually-spoofed extension unflagged" },
+    { "name": "ends-with-space .jpg", "note": "space before extension", "expect": "scanned; Windows shell ops handle without silent failure" },
+    { "name": "very-long-" , "note": "harness appends 'a' repeated to 250 chars + .jpg", "expect": "scanned on macOS; Windows handles via extended-length paths (M24)" }
+  ]
+}
