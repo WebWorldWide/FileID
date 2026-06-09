@@ -584,18 +584,33 @@ struct FileIDEngineMain {
     ) async {
         struct CandidateRow: Sendable { let id: Int64; let path: String }
         let prefix = scanRootPath.hasSuffix("/") ? scanRootPath : scanRootPath + "/"
+        // Match descendants with a half-open prefix RANGE, not LIKE. A real
+        // folder named e.g. "100%" or "a_b" contains LIKE wildcards, and an
+        // unescaped `LIKE prefix||'%'` would then match — and DELETE — rows for
+        // files OUTSIDE the scanned tree. The upper bound is the prefix with
+        // its final scalar bumped by one (SQLite's default BINARY collation
+        // compares byte-wise, so this captures exactly the prefix subtree).
+        let prefixUpper: String = {
+            var s = prefix
+            guard let last = s.popLast(),
+                  let next = UnicodeScalar(last.unicodeScalars.first!.value + 1) else {
+                return prefix  // unreachable for a non-empty "…/" prefix
+            }
+            return s + String(next)
+        }()
         let cap = 5000
         let candidates: [CandidateRow]
         do {
             candidates = try await database.pool.read { db in
                 let rows = try GRDB.Row.fetchAll(db, sql: """
                     SELECT id, path_text FROM files
-                    WHERE (path_text = ? OR path_text LIKE ?)
+                    WHERE (path_text = ? OR (path_text >= ? AND path_text < ?))
                       AND scanned_at < ?
                     LIMIT \(cap)
                     """, arguments: [
                         scanRootPath,
-                        prefix + "%",
+                        prefix,
+                        prefixUpper,
                         scanStart.timeIntervalSinceReferenceDate
                     ])
                 return rows.map { r in
@@ -623,16 +638,32 @@ struct FileIDEngineMain {
         }
         do {
             try await database.pool.write { db in
-                // Chunk the IN clause to keep the SQL string + bound vars sane.
-                for chunk in stride(from: 0, to: missing.count, by: 200).map({
+                let chunks = stride(from: 0, to: missing.count, by: 200).map {
                     Array(missing[$0..<min($0 + 200, missing.count)])
-                }) {
+                }
+                // Capture persons whose faces are about to be cascade-deleted,
+                // so we can reconcile their counts/representative afterward.
+                var affectedPersons = Set<Int64>()
+                for chunk in chunks {
+                    let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
+                    let pids = try Int64.fetchAll(db, sql: """
+                        SELECT DISTINCT person_id FROM face_prints
+                        WHERE person_id IS NOT NULL AND file_id IN (\(placeholders))
+                        """, arguments: StatementArguments(chunk.map { Int($0) }))
+                    affectedPersons.formUnion(pids)
+                }
+                // Chunk the IN clause to keep the SQL string + bound vars sane.
+                for chunk in chunks {
                     let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
                     try db.execute(
                         sql: "DELETE FROM files WHERE id IN (\(placeholders))",
                         arguments: StatementArguments(chunk.map { Int($0) })
                     )
                 }
+                // Reconcile persons: ON DELETE CASCADE removed face rows but
+                // leaves persons.file_count stale and representative_face_id
+                // dangling at a deleted face. Recompute both in this txn.
+                try Self.reconcilePersons(affectedPersons, db: db)
             }
             JSONLog.shared.info(ev: "orphan_sweep", sess: sessionID,
                                 extra: ["candidates": AnyCodable(candidates.count),
@@ -645,6 +676,32 @@ struct FileIDEngineMain {
                 kind: "orphan_sweep_failed",
                 message: "Could not delete \(missing.count) orphaned rows: \(error)"
             )))
+        }
+    }
+
+    /// Recompute persons.file_count and repair a dangling
+    /// representative_face_id for the given persons, after their faces may
+    /// have been removed (cascade delete). Must run inside the caller's write
+    /// transaction.
+    static func reconcilePersons(_ personIDs: Set<Int64>, db: GRDB.Database) throws {
+        for pid in personIDs {
+            try db.execute(sql: """
+                UPDATE persons
+                SET file_count = (SELECT COUNT(DISTINCT file_id)
+                                  FROM face_prints WHERE person_id = ?)
+                WHERE id = ?
+                """, arguments: [pid, pid])
+            // If the representative face was deleted (or never set), point it at
+            // any surviving face for this person, else NULL.
+            try db.execute(sql: """
+                UPDATE persons
+                SET representative_face_id =
+                    (SELECT id FROM face_prints WHERE person_id = ? ORDER BY id LIMIT 1)
+                WHERE id = ?
+                  AND (representative_face_id IS NULL
+                       OR representative_face_id NOT IN
+                          (SELECT id FROM face_prints WHERE person_id = ?))
+                """, arguments: [pid, pid, pid])
         }
     }
 

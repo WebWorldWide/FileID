@@ -323,6 +323,40 @@ public final class Database: @unchecked Sendable {
                 """)
         }
 
+        // v12 — keep the external-content FTS5 indexes in sync via triggers.
+        //
+        // ocr_fts/doc_fts are external-content FTS5 (content='ocr_text' etc.).
+        // They were only ever fed on INSERT; deletes (Cleanup prune, orphan
+        // sweep) and the old INSERT-OR-REPLACE row-id churn left stale/dup
+        // postings, so MATCH could return ids of deleted files and the index
+        // could become malformed. Rebuild both from their content tables, then
+        // install the canonical sync triggers so every insert/delete/update on
+        // the content table maintains the index. The DBWriter no longer writes
+        // ocr_fts directly (the AFTER INSERT trigger does it).
+        m.registerMigration("v12_fts_sync_triggers") { db in
+            try db.execute(sql: "INSERT INTO ocr_fts(ocr_fts) VALUES('rebuild')")
+            try db.execute(sql: "INSERT INTO doc_fts(doc_fts) VALUES('rebuild')")
+
+            for (content, fts) in [("ocr_text", "ocr_fts"), ("doc_text", "doc_fts")] {
+                try db.execute(sql: """
+                    CREATE TRIGGER IF NOT EXISTS \(content)_ai AFTER INSERT ON \(content) BEGIN
+                        INSERT INTO \(fts)(rowid, text) VALUES (new.file_id, new.text);
+                    END
+                    """)
+                try db.execute(sql: """
+                    CREATE TRIGGER IF NOT EXISTS \(content)_ad AFTER DELETE ON \(content) BEGIN
+                        INSERT INTO \(fts)(\(fts), rowid, text) VALUES ('delete', old.file_id, old.text);
+                    END
+                    """)
+                try db.execute(sql: """
+                    CREATE TRIGGER IF NOT EXISTS \(content)_au AFTER UPDATE ON \(content) BEGIN
+                        INSERT INTO \(fts)(\(fts), rowid, text) VALUES ('delete', old.file_id, old.text);
+                        INSERT INTO \(fts)(rowid, text) VALUES (new.file_id, new.text);
+                    END
+                    """)
+            }
+        }
+
         return m
     }
 

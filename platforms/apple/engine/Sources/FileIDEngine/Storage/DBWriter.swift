@@ -154,16 +154,33 @@ public actor DBWriter {
         let sessionID      = self.sessionID
 
         do {
-            try await db.pool.write { db in
-                for file in batchFiles {
-                    try Self.insertOne(file: file, db: db)
+            // Retry transient failures (SQLITE_BUSY/LOCKED/IOERR) with backoff
+            // before giving up — a momentary WAL contention or I/O blip used to
+            // drop the entire in-flight batch (up to 100 files) silently.
+            // `batchFiles` is a value copy, so retrying re-runs the same inserts
+            // safely (each is an idempotent upsert).
+            var attempt = 0
+            while true {
+                do {
+                    try await db.pool.write { db in
+                        for file in batchFiles {
+                            try Self.insertOne(file: file, db: db)
+                        }
+                        // Update scan session high-water mark in the SAME
+                        // transaction so a crash mid-batch can't leave the
+                        // resume cursor pointing past the last committed file.
+                        try db.execute(sql: """
+                            UPDATE scan_sessions SET last_file_index = ? WHERE id = ?
+                            """, arguments: [resumeCursor, sessionID])
+                    }
+                    break
+                } catch {
+                    attempt += 1
+                    guard attempt < 3, Self.isTransient(error) else { throw error }
+                    JSONLog.shared.warn(ev: "db_write_retry", sess: sessionID,
+                                        error: "attempt \(attempt): \(error)")
+                    try? await Task.sleep(nanoseconds: UInt64(attempt) * 100_000_000)
                 }
-                // Update scan session high-water mark in the SAME transaction
-                // so a crash mid-batch can't leave the resume cursor pointing
-                // past the last truly-committed file.
-                try db.execute(sql: """
-                    UPDATE scan_sessions SET last_file_index = ? WHERE id = ?
-                    """, arguments: [resumeCursor, sessionID])
             }
             self.processedTotal += insertedOK
             self.failedTotal    += insertedFailed
@@ -179,15 +196,18 @@ public actor DBWriter {
             // out from under us" — happens when the user re-runs run.sh
             // while a previous engine is still scanning. Surfacing the raw
             // SQL string isn't useful; tell them what to actually do.
-            let errString = "\(error)"
+            // Categorize on the SQLite result code (robust against error-string
+            // wording changes across SQLite versions); fall back to the message.
+            let primary = (error as? DatabaseError)?.resultCode.primaryResultCode
             let userMessage: String
-            if errString.contains("error 10") || errString.contains("disk I/O") {
+            switch primary {
+            case .SQLITE_IOERR:
                 userMessage = "The database is no longer reachable mid-scan (SQLite I/O error). This usually means another FileID process held the .sqlite file. Quit FileID completely (⌘Q), then re-run ./run.sh — it now kills stale processes before wiping."
-            } else if errString.contains("error 5") || errString.contains("database is locked") {
+            case .SQLITE_BUSY, .SQLITE_LOCKED:
                 userMessage = "Another FileID process is holding the database. Quit FileID (⌘Q) and re-run ./run.sh."
-            } else if errString.contains("error 13") || errString.contains("disk is full") {
+            case .SQLITE_FULL:
                 userMessage = "Disk full — free space and re-run."
-            } else {
+            default:
                 userMessage = "Batch \(self.batchIndex) write failed: \(error)"
             }
             await sink.emit(.error(EngineError(
@@ -270,6 +290,13 @@ public actor DBWriter {
         )))
     }
 
+    /// Transient SQLite failures worth retrying (vs. a hard schema/constraint
+    /// error). Keys on the primary result code, not the message string.
+    private nonisolated static func isTransient(_ error: Error) -> Bool {
+        guard let code = (error as? DatabaseError)?.resultCode.primaryResultCode else { return false }
+        return code == .SQLITE_BUSY || code == .SQLITE_LOCKED || code == .SQLITE_IOERR
+    }
+
     private nonisolated static func percentile(_ sorted: [Double], _ p: Double) -> Double {
         guard !sorted.isEmpty else { return 0 }
         let idx = min(sorted.count - 1, Int(Double(sorted.count - 1) * p))
@@ -285,21 +312,59 @@ public actor DBWriter {
     /// Static + nonisolated so the GRDB write closure can call it without
     /// crossing the actor's executor (Swift 6 strict concurrency).
     private static func insertOne(file: TaggedFile, db: GRDB.Database) throws {
-        // 1. files row.
         let pathHash = Int(bitPattern: UInt(truncatingIfNeeded: file.url.path.hashValue))
+
+        // Look up any existing row for this path. We need its id (to preserve
+        // it) and its size/mtime/failed state (to decide whether the file
+        // actually changed). The old `INSERT OR REPLACE` deleted+reinserted the
+        // row on every re-scan, which — via ON DELETE CASCADE — wiped
+        // face_prints (including the user's MANUAL person assignments), CLIP
+        // embeddings, and FTS rows, and minted a brand-new rowid each time.
+        let existing = try Row.fetchOne(db, sql: """
+            SELECT id, size_bytes, modified_at, failed FROM files WHERE path_text = ?
+            """, arguments: [file.url.path])
+
+        let newModified = file.modifiedAt?.timeIntervalSinceReferenceDate
+        // "Unchanged" only when the prior scan succeeded, this scan succeeded,
+        // and both size and mtime match. A previously- or newly-failed file is
+        // always reprocessed.
+        let unchanged: Bool = {
+            guard let existing else { return false }
+            let oldFailed: Int64 = existing["failed"] ?? 0
+            guard oldFailed == 0, !file.failed else { return false }
+            let oldSize: Int64 = existing["size_bytes"] ?? -1
+            guard oldSize == file.sizeBytes else { return false }
+            let oldModified: Double? = existing["modified_at"]
+            switch (oldModified, newModified) {
+            case let (a?, b?): return abs(a - b) < 0.000_001
+            case (nil, nil):   return true
+            default:           return false
+            }
+        }()
+
+        // 1. files row — id-preserving UPSERT (never delete+reinsert).
         try db.execute(sql: """
-            INSERT OR REPLACE INTO files
+            INSERT INTO files
               (path_text, path_hash, size_bytes, created_at, modified_at,
                scanned_at, kind, extension, phash, aesthetic, has_faces,
                has_text, camera_model, location_lat, location_lon,
                failed, error_message)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(path_text) DO UPDATE SET
+              path_hash=excluded.path_hash, size_bytes=excluded.size_bytes,
+              created_at=excluded.created_at, modified_at=excluded.modified_at,
+              scanned_at=excluded.scanned_at, kind=excluded.kind,
+              extension=excluded.extension, phash=excluded.phash,
+              aesthetic=excluded.aesthetic, has_faces=excluded.has_faces,
+              has_text=excluded.has_text, camera_model=excluded.camera_model,
+              location_lat=excluded.location_lat, location_lon=excluded.location_lon,
+              failed=excluded.failed, error_message=excluded.error_message
             """, arguments: [
                 file.url.path,
                 pathHash,
                 Int(file.sizeBytes),
                 file.createdAt?.timeIntervalSinceReferenceDate,
-                file.modifiedAt?.timeIntervalSinceReferenceDate,
+                newModified,
                 Date().timeIntervalSinceReferenceDate,
                 file.kind,
                 file.extension,
@@ -314,7 +379,21 @@ public actor DBWriter {
                 file.errorMessage
             ]
         )
-        let fileID = db.lastInsertedRowID
+        // last_insert_rowid() is NOT updated on the UPDATE branch of an upsert,
+        // so resolve the id from the existing row when there was one.
+        let fileID: Int64 = (existing?["id"]) ?? db.lastInsertedRowID
+
+        // Unchanged file: leave every child row exactly as-is. Re-detecting
+        // would either duplicate rows or destroy manual person assignments for
+        // a file that didn't change.
+        if unchanged { return }
+
+        // Changed or new file: rebuild the scan-derived child rows from scratch
+        // so a re-scan never accumulates duplicates. For a brand-new file these
+        // deletes are no-ops. FTS stays in sync via the v12 triggers.
+        try db.execute(sql: "DELETE FROM tags WHERE file_id = ? AND source = 'vision'",
+                       arguments: [fileID])
+        try db.execute(sql: "DELETE FROM face_prints WHERE file_id = ?", arguments: [fileID])
 
         // 2. tags
         for tag in file.visionTags {
@@ -323,18 +402,17 @@ public actor DBWriter {
                 """, arguments: [fileID, tag, "vision"])
         }
 
-        // 3. OCR text + FTS5 (FTS5 is auto-populated via content= linkage on
-        // ocr_text — we insert into ocr_text and FTS5 mirrors it).
+        // 3. OCR text. The ocr_fts external-content index is maintained by the
+        // AFTER INSERT/DELETE/UPDATE triggers installed in migration v12, so we
+        // only touch ocr_text here.
         if let text = file.ocrText, !text.isEmpty {
             try db.execute(sql: """
                 INSERT OR REPLACE INTO ocr_text (file_id, text) VALUES (?, ?)
                 """, arguments: [fileID, text])
-            // External-content FTS5 needs an explicit insert into the FTS table
-            // that references the rowid (file_id). The `content=` linkage means
-            // SELECTs auto-fetch text from ocr_text.
-            try db.execute(sql: """
-                INSERT INTO ocr_fts (rowid, text) VALUES (?, ?)
-                """, arguments: [fileID, text])
+        } else {
+            // Changed file that no longer yields OCR text — drop any stale row
+            // (the AFTER DELETE trigger evicts its FTS posting).
+            try db.execute(sql: "DELETE FROM ocr_text WHERE file_id = ?", arguments: [fileID])
         }
 
         // 4. face_prints — write one row per detected face. ArcFace
