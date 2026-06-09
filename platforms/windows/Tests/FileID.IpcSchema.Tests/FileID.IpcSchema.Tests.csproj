@@ -26,4 +26,10 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\FileID.IpcSchema\FileID.IpcSchema.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- Canonical IPC contract, copied beside the test binary so
+         SchemaConformanceTests can read it at runtime. -->
+    <None Include="..\..\..\..\shared\ipc-schema\ipc.schema.json" Link="ipc.schema.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

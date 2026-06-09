@@ -22,7 +22,7 @@ public final class CLIPTokenizer: @unchecked Sendable {
     private var encoder: [String: Int32] = [:]
     /// (a, b) → merge priority (lower = higher priority)
     private var bpeRanks: [Pair: Int] = [:]
-    private let pattern: NSRegularExpression
+    private let pattern: NSRegularExpression?
     private let byteEncoder: [UInt8: String]
 
     /// CLIP encodes inputs to a fixed length of 77 (start + 75 + end).
@@ -37,17 +37,21 @@ public final class CLIPTokenizer: @unchecked Sendable {
 
     // MARK: - Init
 
-    private init() {
+    // Internal (not private) so tests can build isolated instances
+    // instead of mutating the shared singleton.
+    init() {
         // OpenAI's pre-tokenization regex — matches contractions,
-        // letters, numbers, and other punctuation runs.
+        // letters, numbers, and other punctuation runs. The literal
+        // always compiles in practice; if it ever doesn't, fail closed
+        // (tokenizer stays unready) instead of crashing.
         let p = "<\\|startoftext\\|>|<\\|endoftext\\|>|'s|'t|'re|'ve|'m|'ll|'d|[\\p{L}]+|[\\p{N}]|[^\\s\\p{L}\\p{N}]+"
-        // swiftlint:disable:next force_try
-        pattern = try! NSRegularExpression(pattern: p, options: [.caseInsensitive])
+        pattern = try? NSRegularExpression(pattern: p, options: [.caseInsensitive])
         byteEncoder = Self.buildByteToUnicode()
     }
 
     /// True iff the vocab + merges files have been loaded successfully.
     public var isReady: Bool {
+        guard pattern != nil else { return false }
         lock.lock(); defer { lock.unlock() }
         return !encoder.isEmpty
     }
@@ -55,6 +59,7 @@ public final class CLIPTokenizer: @unchecked Sendable {
     /// Load OpenAI's vocab.json + merges.txt from the model directory.
     /// Idempotent — re-loads silently if files were updated.
     public func loadVocabulary(modelDirectory: URL) -> Bool {
+        guard pattern != nil else { return false }
         let vocabURL = modelDirectory.appendingPathComponent("vocab.json")
         let mergesURL = modelDirectory.appendingPathComponent("merges.txt")
         // Size-cap before reading. The legitimate files are ~1 MB
@@ -78,11 +83,16 @@ public final class CLIPTokenizer: @unchecked Sendable {
         // vocab.json is { "tokenString": tokenID, ... }
         guard let vocab = try? JSONSerialization.jsonObject(with: vocabData) as? [String: Int]
         else { return false }
+        // Entry-count caps: real CLIP files are ~49.4K vocab entries /
+        // ~48.9K merges. Far beyond that is corruption or tampering —
+        // fail closed rather than building giant dictionaries.
+        guard vocab.count <= 65_536 else { return false }
         var enc: [String: Int32] = [:]
         enc.reserveCapacity(vocab.count)
         for (k, v) in vocab { enc[k] = Int32(v) }
         // merges.txt: first line is a header, then "a b" per line
         let lines = mergesText.split(separator: "\n").dropFirst()
+        guard lines.count <= 50_000 else { return false }
         var ranks: [Pair: Int] = [:]
         ranks.reserveCapacity(lines.count)
         for (i, line) in lines.enumerated() {
@@ -107,6 +117,7 @@ public final class CLIPTokenizer: @unchecked Sendable {
     /// Tokenize a query into the fixed-length [Int32] CLIP expects.
     /// Returns nil if the vocabulary isn't loaded.
     public func encode(_ text: String) -> [Int32]? {
+        guard let pattern else { return nil }
         // Snapshot vocab refs once under the lock so the encode hot
         // path doesn't re-acquire per dictionary lookup.
         lock.lock()
@@ -120,18 +131,23 @@ public final class CLIPTokenizer: @unchecked Sendable {
             .lowercased(with: posixLocale)
             .trimmingCharacters(in: .whitespaces)
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        // DoS bounds: the output is truncated to 77 tokens regardless,
+        // so capping the input at 1024 chars / 256 pieces / 256 UTF-8
+        // bytes per piece is lossless for legitimate queries while
+        // keeping the regex + BPE work bounded on adversarial input.
+        let capped = String(cleaned.prefix(1_024))
 
         var pieces: [String] = []
-        let nsText = cleaned as NSString
-        let matches = pattern.matches(in: cleaned, options: [],
+        let nsText = capped as NSString
+        let matches = pattern.matches(in: capped, options: [],
                                        range: NSRange(location: 0, length: nsText.length))
-        for m in matches {
+        for m in matches.prefix(256) {
             pieces.append(nsText.substring(with: m.range))
         }
 
         var tokens: [Int32] = [sot]
         for piece in pieces {
-            let bytes = Array(piece.utf8)
+            let bytes = Array(Self.truncatedToUTF8Bytes(piece, maxBytes: 256).utf8)
             let chars = bytes.map { byteEncoder[$0] ?? "" }.joined()
             for token in bpe(token: chars).split(separator: " ") {
                 if let id = encoderSnapshot[String(token)] {
@@ -150,10 +166,32 @@ public final class CLIPTokenizer: @unchecked Sendable {
         return tokens
     }
 
+    private static func truncatedToUTF8Bytes(_ s: String, maxBytes: Int) -> String {
+        guard s.utf8.count > maxBytes else { return s }
+        var out = ""
+        var used = 0
+        for ch in s {
+            let n = ch.utf8.count
+            if used + n > maxBytes { break }
+            used += n
+            out.append(ch)
+        }
+        return out
+    }
+
     // MARK: - BPE inner loop
 
-    /// Memoized BPE results. Mutation guarded by `lock`.
+    /// Memoized BPE results. Mutation guarded by `lock`. Cleared when
+    /// it exceeds 16_384 entries — an adversarial stream of unique
+    /// queries would otherwise grow it without bound.
     private var bpeCache: [String: String] = [:]
+
+    private func cacheBPE(_ token: String, _ result: String) {
+        lock.lock()
+        if bpeCache.count > 16_384 { bpeCache.removeAll(keepingCapacity: false) }
+        bpeCache[token] = result
+        lock.unlock()
+    }
 
     private func bpe(token: String) -> String {
         // Cache lookup (lock-protected).
@@ -173,7 +211,7 @@ public final class CLIPTokenizer: @unchecked Sendable {
         var pairs = pairsFor(word)
         if pairs.isEmpty {
             let result = word.last ?? token
-            lock.lock(); bpeCache[token] = result; lock.unlock()
+            cacheBPE(token, result)
             return result
         }
         // Bound the merge loop. word.count strictly decreases each
@@ -214,7 +252,7 @@ public final class CLIPTokenizer: @unchecked Sendable {
             pairs = pairsFor(word)
         }
         let merged = word.joined(separator: " ")
-        lock.lock(); bpeCache[token] = merged; lock.unlock()
+        cacheBPE(token, merged)
         return merged
     }
 

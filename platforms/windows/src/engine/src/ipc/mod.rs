@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 
 pub mod sink;
 pub(crate) mod bounded_read;
+#[cfg(test)]
+mod conformance;
 
 // ─── Envelopes ──────────────────────────────────────────────────────────────
 
@@ -759,8 +761,8 @@ pub struct ScanComplete {
 #[serde(rename_all = "camelCase")]
 pub struct EngineError {
     /// Stable kind code: `discovery_failed`, `vision_failed`, `db_failed`,
-    /// `model_load_failed`, `model_download_failed`, `pack_not_available`,
-    /// `ipc_unknown_command`, `unknown`, ...
+    /// `model_load_failed`, `model_download_failed`, `download_tls_pin_failed`,
+    /// `pack_not_available`, `ipc_unknown_command`, `unknown`, ...
     pub kind: String,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
