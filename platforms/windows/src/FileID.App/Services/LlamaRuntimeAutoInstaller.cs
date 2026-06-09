@@ -69,7 +69,7 @@ internal static class LlamaRuntimeAutoInstaller
             // Opt-out.
             try
             {
-                var settings = AppSettings.Load();
+                var settings = AppViewModel.Instance.Settings;
                 if (settings.DisableAutoInstallVulkanRuntime) return;
             }
             catch { /* fall through and try anyway */ }

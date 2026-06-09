@@ -410,7 +410,11 @@ public sealed partial class WelcomeSheet : UserControl
     {
         try
         {
-            var settings = AppSettings.Load();
+            // Use the ONE canonical in-memory instance, not a throwaway
+            // Load(): the long-lived AppViewModel instance would otherwise
+            // serialize its stale snapshot on its next Save() and revert this
+            // write (the Welcome sheet then re-appears every launch).
+            var settings = AppViewModel.Instance.Settings;
             if (!settings.WelcomeSheetSeen)
             {
                 settings.WelcomeSheetSeen = true;

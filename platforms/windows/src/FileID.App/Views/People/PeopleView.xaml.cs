@@ -103,7 +103,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
 
         if (_unloaded) return;
         bool hideUnknown = false;
-        try { hideUnknown = AppSettings.Load().PeopleHideUnknown; } catch { /* default false */ }
+        try { hideUnknown = AppViewModel.Instance.Settings.PeopleHideUnknown; } catch { /* default false */ }
         // Defensive: view may have unloaded during the DB-read await.
         // Wrap UI mutations in try/catch so a disposed-XAML race doesn't
         // surface as a dispatcher fast-fail.
@@ -135,7 +135,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         {
             try
             {
-                var s = AppSettings.Load();
+                var s = AppViewModel.Instance.Settings;
                 s.PeopleHideUnknown = false;
                 s.Save();
             }
@@ -284,6 +284,38 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             : el.DataContext as PersonCluster;
         if (cluster is null) return;
         el.DataContext = cluster;
+
+        // M19: ItemsRepeater virtualizes + recycles cards, so the one-shot
+        // UpdateCheckboxVisibility() walk (run only at toggle time) misses any
+        // card realized later via scroll/refresh — its select checkbox then
+        // never appears (or a recycled card keeps a stale Visible). Apply the
+        // CURRENT mode to this freshly-prepared card. Deferred to Low priority
+        // so the card template (incl. the tagged CheckBox) is realized first.
+        var selectVisible = ViewModel.IsSelectMode ? Visibility.Visible : Visibility.Collapsed;
+        el.DispatcherQueue?.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            foreach (var d in EnumerateDescendants(el))
+            {
+                if (FindCheckBoxInTree(d) is { } cb) cb.Visibility = selectVisible;
+            }
+        });
+    }
+
+    private static System.Collections.Generic.IEnumerable<DependencyObject> EnumerateDescendants(DependencyObject root)
+    {
+        var stack = new System.Collections.Generic.Stack<DependencyObject>();
+        stack.Push(root);
+        while (stack.Count > 0)
+        {
+            var d = stack.Pop();
+            int n = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(d);
+            for (int i = 0; i < n; i++)
+            {
+                var c = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(d, i);
+                yield return c;
+                stack.Push(c);
+            }
+        }
     }
 
     private void OnClusterDragStarting(UIElement sender, DragStartingEventArgs args)

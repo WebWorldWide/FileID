@@ -30,7 +30,7 @@ public sealed partial class DeepAnalyzeView : UserControl
         // Restore the user's last VLM choice so the auto-chain after
         // face clustering and a manual Analyze All both use the same
         // weights the user last picked. Falls back to qwen2_5_vl_3b.
-        try { _activeModel = AppSettings.Load().SelectedVlmModelKind; }
+        try { _activeModel = AppViewModel.Instance.Settings.SelectedVlmModelKind; }
         catch { /* keep default */ }
         Loaded += OnLoadedHandler;
         Unloaded += OnUnloadedHandler;
@@ -372,7 +372,10 @@ public sealed partial class DeepAnalyzeView : UserControl
     {
         try
         {
-            var store = new Services.ReadStore(Services.AppPaths.DbPath);
+            // `using` so the SQLite connection + SemaphoreSlim are released on
+            // every exit — the empty-pending early return and the catch path
+            // below both used to leak the store.
+            using var store = new Services.ReadStore(Services.AppPaths.DbPath);
             await store.OpenAsync();
             var pending = await store.PendingProposedRenamesAsync(500, System.Threading.CancellationToken.None);
             if (pending.Count == 0)
@@ -415,7 +418,6 @@ public sealed partial class DeepAnalyzeView : UserControl
             var remaining = await store.PendingProposedRenameCountAsync(System.Threading.CancellationToken.None);
             _proposedNameCount = remaining;
             SyncProposedNamesPill();
-            store.Dispose();
         }
         catch (Exception ex)
         {
@@ -508,7 +510,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             // chain) caption with the same model the user just picked.
             try
             {
-                var s = AppSettings.Load();
+                var s = AppViewModel.Instance.Settings;
                 s.SelectedVlmModelKind = id;
                 s.Save();
             }

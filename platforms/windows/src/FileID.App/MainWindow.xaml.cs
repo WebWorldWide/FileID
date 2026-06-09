@@ -134,8 +134,8 @@ public sealed partial class MainWindow : Window
         // \FileID\Models on disk but recreated app-settings.json. A user
         // who's never seen Welcome must see it.
         var seen = false;
-        try { seen = AppSettings.Load().WelcomeSheetSeen; }
-        catch (Exception ex) { DebugLog.Warn("MaybeShowWelcomeSheet: AppSettings.Load threw: " + ex.Message); }
+        try { seen = AppViewModel.Instance.Settings.WelcomeSheetSeen; }
+        catch (Exception ex) { DebugLog.Warn("MaybeShowWelcomeSheet: read WelcomeSheetSeen threw: " + ex.Message); }
         if (seen && svc.AllInstalled)
         {
             DebugLog.Info("[INSTALL] welcomeSheetSeen=true and all models installed; skipping.");

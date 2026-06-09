@@ -94,6 +94,13 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
 
     private int _installAllInFlight; // 0 = idle, 1 = in flight
 
+    // UI dispatcher captured from a guaranteed UI-thread entry point (the
+    // public install methods, before their first ConfigureAwait(false)). The
+    // no-progress watchdog used to call DispatcherQueue.GetForCurrentThread()
+    // from a thread-pool continuation, which returns null — so it could never
+    // marshal slot.Fail() and a genuinely stuck download never surfaced.
+    private Microsoft.UI.Dispatching.DispatcherQueue? _uiDispatcher;
+
     /// <summary>Deep Analyze model the DeepVlm welcome row installs. Tiered to
     /// the machine by UpdateDeepVlmRecommendation (Qwen 3B vs 7B). Read at click
     /// time by the slot's installAction; mirrors the Deep Analyze tab default
@@ -255,6 +262,8 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     /// </summary>
     public async Task InstallAllAsync()
     {
+        // Captured here, on the UI thread, before any ConfigureAwait(false).
+        _uiDispatcher ??= Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
         if (Interlocked.CompareExchange(ref _installAllInFlight, 1, 0) != 0)
         {
             DebugLog.Info("[INSTALL] InstallAllAsync already in flight; ignoring duplicate request");
@@ -385,7 +394,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     {
         try
         {
-            var s = AppSettings.Load();
+            var s = AppViewModel.Instance.Settings;
             if (s.SelectedVlmModelKind == kind) return;
             s.SelectedVlmModelKind = kind;
             s.Save();
@@ -498,6 +507,8 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     /// </summary>
     private async Task PrewarmAsync(string modelKind)
     {
+        // Captured on the UI thread before the first ConfigureAwait(false).
+        _uiDispatcher ??= Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
         var slot = SlotFor(modelKind);
         if (slot is null)
         {
@@ -553,15 +564,13 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         ScheduleNoProgressWatchdog(slot, modelKind);
     }
 
-    private static void ScheduleNoProgressWatchdog(ModelSlot slot, string modelKind, CancellationToken ct = default)
+    private void ScheduleNoProgressWatchdog(ModelSlot slot, string modelKind, CancellationToken ct = default)
     {
         var sentAt = DateTime.UtcNow;
-        // Capture the UI dispatcher at schedule time. The watchdog runs on
-        // a thread-pool thread (Task.Run) but slot.Fail mutates state that
-        // x:Bind UI elements observe — those updates have to land on the
-        // UI thread or downstream PropertyChanged handlers may touch
-        // FrameworkElements off-thread.
-        var ui = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
+        // Use the dispatcher captured on a UI-thread entry point. This method
+        // runs after ConfigureAwait(false) hops, so GetForCurrentThread() here
+        // would return null and the watchdog could never marshal slot.Fail().
+        var ui = _uiDispatcher;
         _ = Task.Run(async () =>
         {
             try

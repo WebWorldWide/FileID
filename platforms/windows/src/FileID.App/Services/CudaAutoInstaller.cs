@@ -84,7 +84,7 @@ internal static class CudaAutoInstaller
             // Opt-out.
             try
             {
-                var settings = AppSettings.Load();
+                var settings = AppViewModel.Instance.Settings;
                 if (settings.DisableAutoInstallCuda) return;
             }
             catch { /* fall through and try anyway */ }
