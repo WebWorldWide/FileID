@@ -317,8 +317,15 @@ async fn async_main() -> Result<()> {
         Ok(c) => c,
         Err(err) => {
             tracing::error!(?err, "failed to build shared HTTP client; downloads will fail");
-            // Stub a minimal client so the engine can still start.
-            Arc::new(reqwest::Client::new())
+            // Fail CLOSED: a trust-store-empty client refuses every TLS
+            // handshake, so a broken pinned-client build can never degrade
+            // into unpinned egress. Builder does no I/O; cannot fail here.
+            Arc::new(
+                reqwest::Client::builder()
+                    .tls_built_in_root_certs(false)
+                    .build()
+                    .expect("no-roots fallback client"),
+            )
         }
     };
     let dispatch_http_client = http_client.clone();

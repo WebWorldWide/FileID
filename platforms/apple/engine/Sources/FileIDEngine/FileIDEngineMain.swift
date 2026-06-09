@@ -333,9 +333,16 @@ struct FileIDEngineMain {
                     JSONLog.shared.info(ev: "prewarm_model_cancelled",
                                         extra: ["kind": AnyCodable(kind.rawValue)])
                 } catch {
+                    let isIntegrity: Bool
+                    if case StreamingDownloadError.checksumMismatch = error {
+                        isIntegrity = true
+                    } else {
+                        isIntegrity = false
+                    }
                     await sink.emit(.error(EngineError(
-                        kind: "prewarm_failed",
-                        message: "Prewarm \(kind.displayName) failed: \(error.localizedDescription)"
+                        kind: isIntegrity ? "model_integrity_failed" : "prewarm_failed",
+                        message: "Prewarm \(kind.displayName) failed: \(error.localizedDescription)",
+                        modelKind: isIntegrity ? kind.rawValue : nil
                     )))
                 }
                 await DeepAnalyze.shared.setPrewarmTask(nil)
@@ -368,7 +375,7 @@ struct FileIDEngineMain {
              .generateVideoThumbnail:
             await sink.emit(.error(EngineError(
                 kind: "not_implemented_yet",
-                message: "This command is implemented on Windows; mac engine support is planned for V14.10."
+                message: "Bulk tag/rename operations are handled by the FileID app on macOS."
             )))
         case .verifyCudaPack:
             await sink.emit(.error(EngineError(

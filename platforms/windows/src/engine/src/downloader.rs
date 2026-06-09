@@ -21,6 +21,7 @@
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
+use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -47,6 +48,27 @@ fn http_semaphore() -> &'static Arc<tokio::sync::Semaphore> {
     SEMA.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_HTTP_REQUESTS)))
 }
 
+/// CA-allowlist TLS pinning (SECURITY.md hardening item; documented in
+/// shared/security/tls-pins.json). These PEMs become the ONLY trust anchors
+/// on the download client, so an active MITM holding any other OS-trusted CA
+/// (interception proxy, compromised CA) fails the handshake instead of
+/// silently re-signing the connection. Root-level pins, not leaf/intermediate:
+/// leaves rotate ~90 days and the CDNs move between CA families; these roots
+/// are stable for decades. Defense-in-depth alongside per-artifact SHA256.
+const PINNED_ROOT_CERTS: [(&str, &[u8]); 11] = [
+    ("amazon-root-ca-1", include_bytes!("../../../../../shared/security/pinned-roots/amazon-root-ca-1.pem")),
+    ("amazon-root-ca-2", include_bytes!("../../../../../shared/security/pinned-roots/amazon-root-ca-2.pem")),
+    ("amazon-root-ca-3", include_bytes!("../../../../../shared/security/pinned-roots/amazon-root-ca-3.pem")),
+    ("amazon-root-ca-4", include_bytes!("../../../../../shared/security/pinned-roots/amazon-root-ca-4.pem")),
+    ("digicert-global-g2", include_bytes!("../../../../../shared/security/pinned-roots/digicert-global-g2.pem")),
+    ("digicert-global-g3", include_bytes!("../../../../../shared/security/pinned-roots/digicert-global-g3.pem")),
+    ("isrg-root-x1", include_bytes!("../../../../../shared/security/pinned-roots/isrg-root-x1.pem")),
+    ("isrg-root-x2", include_bytes!("../../../../../shared/security/pinned-roots/isrg-root-x2.pem")),
+    ("starfield-services-g2", include_bytes!("../../../../../shared/security/pinned-roots/starfield-services-g2.pem")),
+    ("usertrust-ecc", include_bytes!("../../../../../shared/security/pinned-roots/usertrust-ecc.pem")),
+    ("usertrust-rsa", include_bytes!("../../../../../shared/security/pinned-roots/usertrust-rsa.pem")),
+];
+
 /// Build a long-lived shared `reqwest::Client` with HTTP/2 + connection
 /// pooling. One per engine process; cloned cheaply (it's an `Arc` inside).
 ///
@@ -68,6 +90,12 @@ fn http_semaphore() -> &'static Arc<tokio::sync::Semaphore> {
 ///                        the user mid-recovery. 60 s of total silence is
 ///                        a dead connection, never a healthy slow one
 ///                        (any byte resets the timer).
+///
+/// TLS trust is pinned to the roots in `PINNED_ROOT_CERTS` (built-in roots
+/// disabled), per shared/security/tls-pins.json. `FILEID_DISABLE_TLS_PINNING=1`
+/// reverts to the OS root store — validation only ever changes, never the
+/// egress surface — and is logged loudly as a diagnostic escape hatch for
+/// networks that intercept HTTPS.
 pub fn build_shared_client() -> Result<Arc<reqwest::Client>> {
     // Restrict redirects to the host families we actually download from (HF +
     // its CDN, GitHub + its objects CDN, NVIDIA). reqwest's default follows up to
@@ -105,16 +133,64 @@ pub fn build_shared_client() -> Result<Arc<reqwest::Client>> {
             _ => attempt.stop(),
         }
     });
-    let c = reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .user_agent("FileID/0.1 (+local)")
         .pool_idle_timeout(Some(Duration::from_secs(60)))
         .pool_max_idle_per_host(PARALLEL_PARTS * 2)
         .connect_timeout(Duration::from_secs(30))
         .read_timeout(Duration::from_secs(60))
-        .redirect(redirect_policy)
-        .build()
-        .context("building shared reqwest client")?;
+        .redirect(redirect_policy);
+    if matches!(std::env::var("FILEID_DISABLE_TLS_PINNING").as_deref(), Ok("1")) {
+        tracing::warn!(
+            "FILEID_DISABLE_TLS_PINNING=1 — CA-allowlist TLS pinning is DISABLED; model \
+             downloads will trust the OS root store, including any locally installed \
+             interception/proxy CA. Diagnostic escape hatch only; unset the variable to \
+             restore pinning."
+        );
+    } else {
+        builder = builder.tls_built_in_root_certs(false);
+        for (slug, pem) in PINNED_ROOT_CERTS {
+            builder = builder.add_root_certificate(
+                reqwest::Certificate::from_pem(pem)
+                    .with_context(|| format!("parsing pinned root CA '{slug}'"))?,
+            );
+        }
+    }
+    let c = builder.build().context("building shared reqwest client")?;
     Ok(Arc::new(c))
+}
+
+fn message_indicates_pin_failure(msg: &str) -> bool {
+    msg.contains("UnknownIssuer") || msg.contains("invalid peer certificate")
+}
+
+/// rustls reports a chain that doesn't terminate at a pinned root as
+/// `invalid peer certificate: UnknownIssuer`, but only as Display text buried
+/// in the reqwest → hyper → io source chain (no typed variant survives the
+/// wrapping), so a string match over the chain is the only stable detection.
+fn source_chain_indicates_pin_failure(err: &(dyn Error + 'static)) -> bool {
+    let mut cur: Option<&(dyn Error + 'static)> = Some(err);
+    while let Some(e) = cur {
+        if message_indicates_pin_failure(&e.to_string()) {
+            return true;
+        }
+        cur = e.source();
+    }
+    false
+}
+
+pub fn is_pin_failure(err: &reqwest::Error) -> bool {
+    source_chain_indicates_pin_failure(err)
+}
+
+/// Pin detection for the `anyhow::Error`s this module returns: `chain()`
+/// descends through every context layer and the wrapped source errors, so
+/// this sees the rustls message wherever the retry loops buried it.
+pub fn chain_has_pin_failure(err: &anyhow::Error) -> bool {
+    err.chain().any(|e| match e.downcast_ref::<reqwest::Error>() {
+        Some(re) => is_pin_failure(re),
+        None => message_indicates_pin_failure(&e.to_string()),
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -771,6 +847,10 @@ async fn download_range_with_retry(
 ) -> Result<()> {
     let mut budget = RetryBudget::new();
     let mut retrying = false;
+    // Kept so the exhausted-retries bail preserves the underlying cause —
+    // without it a TLS pin failure (or any transport error) degraded to an
+    // opaque "range exhausted retries" with no source chain to classify.
+    let mut last_err: Option<anyhow::Error> = None;
 
     'retry: loop {
         // Resumable: stat the part file. If it has bytes, append from there.
@@ -797,7 +877,11 @@ async fn download_range_with_retry(
 
         if retrying {
             let Some(backoff) = budget.next_backoff() else {
-                anyhow::bail!("range exhausted retries (start={start})");
+                let msg = format!("range exhausted retries (start={start})");
+                return Err(match last_err {
+                    Some(e) => e.context(msg),
+                    None => anyhow::anyhow!(msg),
+                });
             };
             tokio::time::sleep(backoff).await;
         }
@@ -823,6 +907,7 @@ async fn download_range_with_retry(
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(?e, "range GET failed; retrying");
+                last_err = Some(anyhow::Error::new(e).context("issuing range GET"));
                 continue;
             }
         };
@@ -834,6 +919,7 @@ async fn download_range_with_retry(
             {
                 tokio::time::sleep(Duration::from_secs(s.min(60))).await;
             }
+            last_err = Some(anyhow::anyhow!("HTTP {status}"));
             continue;
         }
         if !status.is_success() {
@@ -850,6 +936,7 @@ async fn download_range_with_retry(
                 "range resume answered non-206; discarding partial and restarting"
             );
             let _ = tokio::fs::remove_file(part_path).await;
+            last_err = Some(anyhow::anyhow!("range resume answered HTTP {status} (restarted)"));
             continue;
         }
 
@@ -875,6 +962,7 @@ async fn download_range_with_retry(
                     // backoff schedule (zero-progress attempts still bail after
                     // a finite budget instead of spinning forever).
                     tracing::warn!(?e, "stream error; retrying range");
+                    last_err = Some(anyhow::Error::new(e).context("reading range chunk"));
                     continue 'retry;
                 }
             };
@@ -889,8 +977,79 @@ async fn download_range_with_retry(
 
 #[cfg(test)]
 mod tests {
-    use super::{check_size_plausible, RetryBudget};
+    use super::{
+        chain_has_pin_failure, check_size_plausible, message_indicates_pin_failure,
+        source_chain_indicates_pin_failure, RetryBudget, PINNED_ROOT_CERTS,
+    };
     use std::time::Duration;
+
+    #[test]
+    fn every_pinned_root_pem_parses_as_certificate() {
+        assert_eq!(PINNED_ROOT_CERTS.len(), 11);
+        for (slug, pem) in PINNED_ROOT_CERTS {
+            assert!(
+                reqwest::Certificate::from_pem(pem).is_ok(),
+                "pinned root '{slug}' failed to parse"
+            );
+        }
+    }
+
+    #[test]
+    fn pin_failure_matcher_recognizes_rustls_wording() {
+        assert!(message_indicates_pin_failure(
+            "invalid peer certificate: UnknownIssuer"
+        ));
+        assert!(message_indicates_pin_failure(
+            "client error (Connect): invalid peer certificate: UnknownIssuer"
+        ));
+        assert!(!message_indicates_pin_failure("connection reset by peer"));
+        assert!(!message_indicates_pin_failure(
+            "dns error: failed to lookup address information"
+        ));
+        assert!(!message_indicates_pin_failure("HTTP 503 Service Unavailable"));
+        assert!(!message_indicates_pin_failure(
+            "certificate expired: verification time 1 (UNIX)"
+        ));
+    }
+
+    // Outer error whose Display does NOT include its source (the hyper
+    // wrapping shape) so the test exercises the source() walk, not just
+    // the top-level message match.
+    #[derive(Debug)]
+    struct OpaqueWrap(std::io::Error);
+    impl std::fmt::Display for OpaqueWrap {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "error trying to connect")
+        }
+    }
+    impl std::error::Error for OpaqueWrap {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn pin_failure_source_chain_walk_finds_nested_rustls_message() {
+        let wrapped = OpaqueWrap(std::io::Error::other(
+            "invalid peer certificate: UnknownIssuer",
+        ));
+        assert!(source_chain_indicates_pin_failure(&wrapped));
+        let plain = OpaqueWrap(std::io::Error::other("connection reset by peer"));
+        assert!(!source_chain_indicates_pin_failure(&plain));
+    }
+
+    #[test]
+    fn chain_pin_failure_detected_through_anyhow_context_layers() {
+        let err = anyhow::Error::new(OpaqueWrap(std::io::Error::other(
+            "invalid peer certificate: UnknownIssuer",
+        )))
+        .context("issuing GET")
+        .context("downloading model.onnx");
+        assert!(chain_has_pin_failure(&err));
+
+        let plain = anyhow::anyhow!("HTTP 429 Too Many Requests").context("issuing GET");
+        assert!(!chain_has_pin_failure(&plain));
+    }
 
     #[test]
     fn retry_budget_zero_progress_matches_old_four_attempt_ladder() {

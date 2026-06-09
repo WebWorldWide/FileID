@@ -65,7 +65,12 @@ sysinfo   = "0.30"
 
 # HTTP — only network surface, used by downloader.rs for HuggingFace model fetches.
 # rustls-tls so we don't pull openssl. http2 for parallel range-GETs.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2"] }
+# rustls-tls-native-roots is reachable ONLY via the FILEID_DISABLE_TLS_PINNING=1
+# escape hatch: pinned builds disable built-in roots entirely, but the escape
+# hatch must trust the OS store (corporate-proxy interception CAs live there,
+# not in the compiled-in webpki bundle, so webpki-only would make the hatch
+# useless for its audience).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "rustls-tls-native-roots", "stream", "http2"] }
 futures-util = "0.3"
 
 # Hex / SHA256 for model integrity verification.

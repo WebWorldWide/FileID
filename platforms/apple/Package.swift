@@ -105,6 +105,9 @@ let package = Package(
             name: "SharedTests",
             dependencies: ["FileIDShared"],
             path: "Tests/SharedTests",
+            // PEM fixtures are read via #filePath traversal (the SPKI
+            // tests), not Bundle resources.
+            exclude: ["Fixtures"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(

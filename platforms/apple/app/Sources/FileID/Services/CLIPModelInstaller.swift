@@ -46,7 +46,7 @@ public final class CLIPModelInstaller {
 
     public static var modelsRoot: URL { AppSupportPath.models }
 
-    private static var fetchPlan: [(remote: URL, dest: URL)] {
+    private static var fetchPlan: [(remote: URL, dest: URL, sha256: String?)] {
         let m = modelsRoot
         let txtDir = m.appendingPathComponent("clip_text")
         // OpenCLIP ViT-B/32 (MIT) ONNX — commercial-clean replacement for the
@@ -70,7 +70,8 @@ public final class CLIPModelInstaller {
             (openaiBpe("merges.txt"), txtDir.appendingPathComponent("merges.txt")),
         ]
         return pairs.compactMap { remote, dest in
-            remote.map { (remote: $0, dest: dest) }
+            remote.map { (remote: $0, dest: dest,
+                          sha256: ModelManifest.sha256(forURL: $0)) }
         }
     }
 
@@ -150,10 +151,10 @@ public final class CLIPModelInstaller {
         defer { try? FileManager.default.removeItem(at: stagingRoot) }
 
         let plan = Self.fetchPlan
-        let stagedPlan: [(remote: URL, staged: URL, finalDest: URL)] = plan.map { item in
+        let stagedPlan: [(remote: URL, staged: URL, finalDest: URL, sha256: String?)] = plan.map { item in
             let rel = item.dest.path.dropFirst(modelsRoot.path.count + 1)
             let staged = stagingRoot.appendingPathComponent(String(rel))
-            return (item.remote, staged, item.dest)
+            return (item.remote, staged, item.dest, item.sha256)
         }
 
         status = .downloading(fraction: 0, message: "Connecting…",
@@ -162,7 +163,7 @@ public final class CLIPModelInstaller {
 
         do {
             try await runParallelDownloads(
-                plan: stagedPlan.map { (remote: $0.remote, dest: $0.staged) },
+                plan: stagedPlan.map { (remote: $0.remote, dest: $0.staged, sha256: $0.sha256) },
                 // Each file uses up to 8-way ranged GETs internally,
                 // so 2 concurrent files = ~16 TCP connections to HF.
                 // More than that and Cloudflare starts rate-limiting.
@@ -173,6 +174,9 @@ public final class CLIPModelInstaller {
             return
         } catch let StreamingDownloadError.http(code) {
             status = .installFailed("Server returned HTTP \(code). Couldn't reach the model server.")
+            return
+        } catch StreamingDownloadError.checksumMismatch(let expected, let actual) {
+            status = .installFailed("Integrity check failed: a downloaded file's SHA-256 (\(actual.prefix(12))…) doesn't match the pinned manifest hash (\(expected.prefix(12))…). The file was discarded — try again; repeated failures may mean the download was tampered with.")
             return
         } catch {
             status = .installFailed("Download failed: \(error.localizedDescription)")
@@ -216,13 +220,14 @@ public final class CLIPModelInstaller {
     /// isolation checker sees Sendable parameters instead of capture
     /// inference on the closure's implicit set.
     private func runParallelDownloads(
-        plan: [(remote: URL, dest: URL)],
+        plan: [(remote: URL, dest: URL, sha256: String?)],
         tracker: ProgressTracker,
         maxConcurrency: Int
     ) async throws {
         let count = plan.count
         let remotes: [URL] = plan.map(\.remote)
         let dests:   [URL] = plan.map(\.dest)
+        let hashes:  [String?] = plan.map(\.sha256)
         try await withThrowingTaskGroup(of: Void.self) { group in
             var inFlight = 0
             var i = 0
@@ -234,9 +239,11 @@ public final class CLIPModelInstaller {
                 let idx = i
                 let remote = remotes[idx]
                 let dest = dests[idx]
+                let sha256 = hashes[idx]
                 group.addTask {
                     try await Self.runOneFile(index: idx, remote: remote,
-                                              dest: dest, tracker: tracker)
+                                              dest: dest, sha256: sha256,
+                                              tracker: tracker)
                 }
                 inFlight += 1
                 i += 1
@@ -246,7 +253,7 @@ public final class CLIPModelInstaller {
     }
 
     private static func runOneFile(
-        index: Int, remote: URL, dest: URL, tracker: ProgressTracker
+        index: Int, remote: URL, dest: URL, sha256: String?, tracker: ProgressTracker
     ) async throws {
         try Task.checkCancellation()
         try FileManager.default.createDirectory(
@@ -257,7 +264,8 @@ public final class CLIPModelInstaller {
         // on Content-Length, and falls back to single-stream when the
         // host doesn't expose ranges or the file is small. weight.bin
         // (~80 MB) gets 8-way; Manifest.json (~few KB) stays single.
-        try await parallelStreamingDownload(remote: remote, dest: dest, parts: 12) { tick in
+        try await parallelStreamingDownload(remote: remote, dest: dest, parts: 12,
+                                            expectedSHA256: sha256) { tick in
             tracker.update(index: index, tick: tick)
             Task { @MainActor in
                 Self.shared.publishFromTracker(tracker)

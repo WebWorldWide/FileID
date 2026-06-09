@@ -72,7 +72,7 @@ impl WordPieceTokenizer {
         let max_len = max_len.max(2);
         let mut ids = Vec::with_capacity(max_len);
         ids.push(self.cls_id);
-        'outer: for word in self.basic_tokenize(text) {
+        'outer: for word in self.basic_tokenize(text, max_len) {
             for piece in self.wordpiece(&word) {
                 if ids.len() >= max_len - 1 {
                     break 'outer;
@@ -88,8 +88,18 @@ impl WordPieceTokenizer {
 
     /// BERT "basic tokenizer" stage: whitespace split, optional lowercasing,
     /// and punctuation broken into its own tokens. English-first; good enough
-    /// for the models we ship.
-    fn basic_tokenize(&self, text: &str) -> Vec<String> {
+    /// for the models we ship. Bounded to `max_words` outputs (the punctuation
+    /// branch may overshoot by one): every word yields at least one wordpiece,
+    /// so the encoder can never consume more —
+    /// without the bound a multi-hundred-MB extracted document would be
+    /// materialized as a Vec of tiny Strings before truncation. The char
+    /// pre-slice bounds the `to_lowercase` allocation the same way; 64 chars
+    /// per word is generous (words past 100 chars collapse to `[UNK]`).
+    fn basic_tokenize(&self, text: &str, max_words: usize) -> Vec<String> {
+        let text = match text.char_indices().nth(max_words.saturating_mul(64)) {
+            Some((i, _)) => &text[..i],
+            None => text,
+        };
         let mut out = Vec::new();
         let mut cur = String::new();
         // Full Unicode lowering, not ASCII-only: lowercasing only the ASCII
@@ -104,6 +114,9 @@ impl WordPieceTokenizer {
             text
         };
         for c in src.chars() {
+            if out.len() >= max_words {
+                return out;
+            }
             if c.is_whitespace() {
                 if !cur.is_empty() {
                     out.push(std::mem::take(&mut cur));
@@ -216,5 +229,38 @@ mod tests {
         let mut v = HashMap::new();
         v.insert("hello".to_string(), 0i64);
         assert!(WordPieceTokenizer::from_vocab(v, true).is_err());
+    }
+
+    #[test]
+    fn ten_megabyte_document_completes_to_max_len() {
+        let text = "play ".repeat(2_097_152);
+        let started = std::time::Instant::now();
+        let e = toy().encode(&text, 256);
+        assert!(started.elapsed().as_secs() < 5);
+        assert_eq!(e.ids.len(), 256);
+        assert_eq!(e.ids.first(), Some(&2));
+        assert_eq!(e.ids.last(), Some(&3));
+    }
+
+    #[test]
+    fn word_at_max_input_chars_boundary_tokenizes() {
+        let word = format!("play{}", "ing".repeat(32));
+        assert_eq!(word.chars().count(), MAX_INPUT_CHARS_PER_WORD);
+        let e = toy().encode(&word, 256);
+        assert_eq!(e.ids.len(), 35); // [CLS] play ##ing*32 [SEP]
+        assert!(!e.ids.contains(&1));
+    }
+
+    #[test]
+    fn word_past_max_input_chars_becomes_unk() {
+        let word = format!("play{}g", "ing".repeat(32));
+        assert_eq!(word.chars().count(), MAX_INPUT_CHARS_PER_WORD + 1);
+        assert_eq!(toy().encode(&word, 256).ids, vec![2, 1, 3]);
+    }
+
+    #[test]
+    fn all_punctuation_input_splits_per_char() {
+        assert_eq!(toy().encode("!!!", 16).ids, vec![2, 8, 8, 8, 3]);
+        assert_eq!(toy().encode("???", 16).ids, vec![2, 1, 1, 1, 3]);
     }
 }

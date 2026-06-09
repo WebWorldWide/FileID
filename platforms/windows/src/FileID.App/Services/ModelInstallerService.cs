@@ -899,6 +899,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         var kind = error.Kind ?? string.Empty;
         var isInstallError =
             kind == "model_download_failed"
+            || kind == "download_tls_pin_failed"
             || kind == "zip_extract_failed"
             || kind == "pack_not_available"
             // A stale engine that doesn't know a model_kind, or one that can't

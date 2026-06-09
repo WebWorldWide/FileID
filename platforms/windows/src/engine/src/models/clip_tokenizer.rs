@@ -23,6 +23,15 @@ const SOT: u32 = 49406;
 const EOT: u32 = 49407;
 /// CLIP's fixed text context length. Keep in sync with `clip_text::CONTEXT_LEN`.
 const CLIP_CONTEXT_LEN: usize = 77;
+// DoS bounds. The BPE merge loop is O(n²) with per-iteration String clones, so
+// an unbroken multi-megabyte "word" would stall a query thread; 1 024 chars is
+// >13x the 77-token context, so truncation never changes a real query's
+// embedding. The constructor caps are defense-in-depth — vocab/merges are
+// SHA256-pinned downloads (real CLIP: 49 408 vocab / ~48 900 merges).
+const MAX_QUERY_CHARS: usize = 1_024;
+const MAX_WORD_CHARS: usize = 256;
+const MAX_MERGES: usize = 50_000;
+const MAX_VOCAB: usize = 65_536;
 
 pub struct ClipTokenizer {
     vocab: HashMap<String, u32>,
@@ -37,6 +46,9 @@ impl ClipTokenizer {
     pub fn new(vocab_json: &str, merges_txt: &str) -> Result<Self> {
         let value: Value = serde_json::from_str(vocab_json).context("parsing vocab.json")?;
         let obj = value.as_object().ok_or_else(|| anyhow::anyhow!("vocab.json not an object"))?;
+        if obj.len() > MAX_VOCAB {
+            anyhow::bail!("vocab.json has {} entries (max {MAX_VOCAB})", obj.len());
+        }
         let mut vocab = HashMap::with_capacity(obj.len());
         for (k, v) in obj {
             let id = v.as_u64().ok_or_else(|| anyhow::anyhow!("vocab id not int"))? as u32;
@@ -48,6 +60,9 @@ impl ClipTokenizer {
             // First line is "#version: ..."; skip if so.
             if rank == 0 && line.starts_with("#") {
                 continue;
+            }
+            if merges.len() >= MAX_MERGES {
+                anyhow::bail!("merges.txt exceeds {MAX_MERGES} merge rules");
             }
             let mut parts = line.split_whitespace();
             let l = parts.next();
@@ -64,11 +79,15 @@ impl ClipTokenizer {
     /// `<eot>` suffixed. Truncates to fit before the trailing EOT if
     /// needed; the caller pads to the model's context length (77).
     pub fn encode(&self, query: &str) -> Vec<u32> {
-        let normalized = normalize(query);
+        let normalized: String = normalize(query).chars().take(MAX_QUERY_CHARS).collect();
         let mut out: Vec<u32> = Vec::with_capacity(16);
         out.push(SOT);
 
         for word in split_words(&normalized) {
+            let word = match word.char_indices().nth(MAX_WORD_CHARS) {
+                Some((i, _)) => &word[..i],
+                None => word,
+            };
             // Map each UTF-8 byte to the bytes-to-unicode char and
             // mark word-end with `</w>` per the CLIP convention.
             let mut s = String::new();
@@ -152,4 +171,74 @@ fn build_byte_encoder() -> [char; 256] {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn toy() -> ClipTokenizer {
+        let vocab = r#"{"a": 9, "aa": 10, "a</w>": 320}"#;
+        let merges = "#version: 0.2\na a\n";
+        ClipTokenizer::new(vocab, merges).unwrap()
+    }
+
+    #[test]
+    fn long_query_keeps_trailing_eot_inside_context() {
+        let out = toy().encode(&"a ".repeat(200));
+        assert_eq!(out.len(), CLIP_CONTEXT_LEN);
+        assert_eq!(out[0], SOT);
+        assert_eq!(out.iter().rposition(|&t| t == EOT), Some(CLIP_CONTEXT_LEN - 1));
+    }
+
+    #[test]
+    fn short_query_round_trips() {
+        let out = toy().encode("A  a");
+        assert_eq!(out, vec![SOT, 320, 320, EOT]);
+    }
+
+    #[test]
+    fn one_megabyte_single_word_completes() {
+        let started = Instant::now();
+        let out = toy().encode(&"a".repeat(1_048_576));
+        assert!(started.elapsed().as_secs() < 5);
+        assert!(out.len() <= CLIP_CONTEXT_LEN);
+        assert_eq!(out.last(), Some(&EOT));
+    }
+
+    #[test]
+    fn emoji_run_completes() {
+        let started = Instant::now();
+        let out = toy().encode(&"🔥".repeat(100_000));
+        assert!(started.elapsed().as_secs() < 5);
+        assert!(out.len() <= CLIP_CONTEXT_LEN);
+        assert_eq!(out.last(), Some(&EOT));
+    }
+
+    #[test]
+    fn combining_char_flood_completes() {
+        let started = Instant::now();
+        let out = toy().encode(&format!("e{}", "\u{0301}".repeat(500_000)));
+        assert!(started.elapsed().as_secs() < 5);
+        assert!(out.len() <= CLIP_CONTEXT_LEN);
+        assert_eq!(out.last(), Some(&EOT));
+    }
+
+    #[test]
+    fn oversized_vocab_is_rejected() {
+        let entries: Vec<String> = (0..=MAX_VOCAB).map(|i| format!("\"t{i}\": {i}")).collect();
+        let vocab = format!("{{{}}}", entries.join(","));
+        assert!(ClipTokenizer::new(&vocab, "").is_err());
+    }
+
+    #[test]
+    fn oversized_merges_are_rejected() {
+        use std::fmt::Write;
+        let mut merges = String::new();
+        for i in 0..=MAX_MERGES {
+            writeln!(merges, "a{i} b{i}").unwrap();
+        }
+        assert!(ClipTokenizer::new(r#"{"a</w>": 320}"#, &merges).is_err());
+    }
 }

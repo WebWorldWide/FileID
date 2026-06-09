@@ -135,10 +135,18 @@ public enum DeepAnalyzeRunner {
                 }
             }
         } catch {
-            await sink.emit(.error(EngineError(
-                kind: "deep_load_failed",
-                message: "Could not load \(modelKind.displayName): \(error.localizedDescription)"
-            )))
+            if case StreamingDownloadError.checksumMismatch = error {
+                await sink.emit(.error(EngineError(
+                    kind: "model_integrity_failed",
+                    message: "Could not load \(modelKind.displayName): \(error.localizedDescription)",
+                    modelKind: modelKey
+                )))
+            } else {
+                await sink.emit(.error(EngineError(
+                    kind: "deep_load_failed",
+                    message: "Could not load \(modelKind.displayName): \(error.localizedDescription)"
+                )))
+            }
             await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
                 processed: 0, failed: 0,
                 totalSeconds: Date().timeIntervalSince(started),

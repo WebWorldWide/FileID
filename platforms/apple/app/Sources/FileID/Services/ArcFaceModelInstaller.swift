@@ -96,7 +96,8 @@ public final class ArcFaceModelInstaller {
         do {
             // Multi-part — single-stream gets ~1 MB/s from HF/Cloudflare.
             try await parallelStreamingDownload(remote: remote, dest: dest, parts: 12,
-                                                 approxBytes: kind.approxBytes) { tick in
+                                                 approxBytes: kind.approxBytes,
+                                                 expectedSHA256: ModelManifest.sha256(forURL: remote)) { tick in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     let frac = tick.total > 0
@@ -119,6 +120,9 @@ public final class ArcFaceModelInstaller {
             return
         } catch let StreamingDownloadError.http(code) {
             status[kind] = .installFailed("Server returned HTTP \(code).")
+            return
+        } catch StreamingDownloadError.checksumMismatch(let expected, let actual) {
+            status[kind] = .installFailed("Integrity check failed: the downloaded model's SHA-256 (\(actual.prefix(12))…) doesn't match the pinned manifest hash (\(expected.prefix(12))…). The file was discarded — try again; repeated failures may mean the download was tampered with.")
             return
         } catch {
             status[kind] = .installFailed("Download failed: \(error.localizedDescription)")

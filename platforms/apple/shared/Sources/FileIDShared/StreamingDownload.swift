@@ -10,6 +10,13 @@
 //
 // Nonisolated by design — runs off the main thread. SwiftUI callers
 // hop to MainActor inside their own onTick if they need it.
+//
+// Integrity: pass `expectedSHA256` (hex, from ModelManifest / the HF
+// LFS oid) and the downloaded bytes are hashed and compared BEFORE the
+// atomic promote — a mismatch deletes the temp + parts and throws
+// `.checksumMismatch`. Transport: every session delegate routes server
+// trust challenges through TLSPinning (CA-allowlist SPKI pinning).
+import CryptoKit
 import Foundation
 
 public struct DownloadTick: Sendable, Equatable {
@@ -31,12 +38,15 @@ public enum StreamingDownloadError: Error {
     case http(status: Int)
     case missingTempFile
     case rangeNotSupported
+    case checksumMismatch(expected: String, actual: String)
+    case pinningFailed
     case underlying(Error)
 }
 
 public func streamingDownload(
     remote: URL,
     dest: URL,
+    expectedSHA256: String? = nil,
     onTick: @escaping @Sendable (DownloadTick) -> Void
 ) async throws {
     let delegate = StreamingDownloadDelegate()
@@ -55,6 +65,22 @@ public func streamingDownload(
             delegate.completion = { result in
                 switch result {
                 case .success(let tempURL):
+                    if let expectedSHA256 {
+                        let actual: String
+                        do {
+                            actual = try sha256HexOfFile(at: tempURL)
+                        } catch {
+                            try? FileManager.default.removeItem(at: tempURL)
+                            cont.resume(throwing: StreamingDownloadError.underlying(error))
+                            return
+                        }
+                        guard actual == expectedSHA256.lowercased() else {
+                            try? FileManager.default.removeItem(at: tempURL)
+                            cont.resume(throwing: StreamingDownloadError.checksumMismatch(
+                                expected: expectedSHA256.lowercased(), actual: actual))
+                            return
+                        }
+                    }
                     do {
                         try moveAtomically(from: tempURL, to: dest, fsync: true)
                         onTick(DownloadTick(
@@ -103,6 +129,7 @@ public func parallelStreamingDownload(
     dest: URL,
     parts: Int = 12,
     approxBytes: Int64 = 0,
+    expectedSHA256: String? = nil,
     onTick: @escaping @Sendable (DownloadTick) -> Void
 ) async throws {
     let probeCapture = RedirectCapture()
@@ -116,6 +143,9 @@ public func parallelStreamingDownload(
         (_, headResp) = try await probeSession.data(for: headReq)
     } catch {
         probeSession.invalidateAndCancel()
+        if probeCapture.pinningRejected {
+            throw StreamingDownloadError.pinningFailed
+        }
         throw StreamingDownloadError.underlying(error)
     }
     probeSession.finishTasksAndInvalidate()
@@ -132,7 +162,8 @@ public func parallelStreamingDownload(
         .lowercased() == "bytes"
 
     if total <= 0 || !acceptsRanges {
-        try await streamingDownload(remote: remote, dest: dest, onTick: onTick)
+        try await streamingDownload(remote: remote, dest: dest,
+                                    expectedSHA256: expectedSHA256, onTick: onTick)
         return
     }
 
@@ -183,7 +214,8 @@ public func parallelStreamingDownload(
         // Fall back against the CANONICAL remote, not the resolved CDN URL —
         // a resolved per-redirect URL can be short-lived/expired, whereas the
         // sibling single-stream fallback (above) correctly re-follows `remote`.
-        try await streamingDownload(remote: remote, dest: dest, onTick: onTick)
+        try await streamingDownload(remote: remote, dest: dest,
+                                    expectedSHA256: expectedSHA256, onTick: onTick)
         return
     } catch {
         cleanupParts()
@@ -196,6 +228,7 @@ public func parallelStreamingDownload(
         cleanupParts()
         throw StreamingDownloadError.underlying(NSError(domain: "FileID", code: -1))
     }
+    var hasher: SHA256? = expectedSHA256 != nil ? SHA256() : nil
     do {
         for u in partURLs {
             let reader = try FileHandle(forReadingFrom: u)
@@ -205,6 +238,7 @@ public func parallelStreamingDownload(
                 // file (and then ship a corrupt model with no error).
                 let chunk = try autoreleasepool { try reader.read(upToCount: 4 * 1024 * 1024) } ?? Data()
                 if chunk.isEmpty { break }
+                hasher?.update(data: chunk)
                 try writer.write(contentsOf: chunk)
             }
             try? reader.close()
@@ -226,6 +260,15 @@ public func parallelStreamingDownload(
         throw StreamingDownloadError.underlying(NSError(
             domain: "FileID", code: -2,
             userInfo: [NSLocalizedDescriptionKey: "Download size mismatch: assembled \(assembledSize) bytes, expected \(total)"]))
+    }
+    if let expectedSHA256, let hasher {
+        let actual = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        guard actual == expectedSHA256.lowercased() else {
+            try? FileManager.default.removeItem(at: finalTemp)
+            cleanupParts()
+            throw StreamingDownloadError.checksumMismatch(
+                expected: expectedSHA256.lowercased(), actual: actual)
+        }
     }
     cleanupParts()
 
@@ -312,6 +355,20 @@ private func downloadRange(
     }
 }
 
+/// Streaming SHA256 of a file on disk — 4 MB autoreleasepool chunks so
+/// multi-GB models never load whole into RAM (M6). Hex, lowercase.
+public func sha256HexOfFile(at url: URL) throws -> String {
+    let handle = try FileHandle(forReadingFrom: url)
+    defer { try? handle.close() }
+    var hasher = SHA256()
+    while true {
+        let chunk = try autoreleasepool { try handle.read(upToCount: 4 * 1024 * 1024) } ?? Data()
+        if chunk.isEmpty { break }
+        hasher.update(data: chunk)
+    }
+    return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+}
+
 /// Move src → dst atomically when on the same volume; replace the
 /// destination if it exists. Optionally fsyncs the src before move
 /// (single-stream path) so a kernel panic between move and journal
@@ -365,12 +422,22 @@ private func streamingConfig(approxBytes: Int64 = 0) -> URLSessionConfiguration 
 
 private final class RedirectCapture: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     var finalURL: URL?
+    private(set) var pinningRejected = false
+
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest,
                     completionHandler: @escaping (URLRequest?) -> Void) {
         self.finalURL = request.url
         completionHandler(request)
+    }
+
+    func urlSession(_ session: URLSession,
+                    didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        let (disposition, credential) = TLSPinning.evaluate(challenge: challenge)
+        if disposition == .cancelAuthenticationChallenge { pinningRejected = true }
+        completionHandler(disposition, credential)
     }
 }
 
@@ -451,6 +518,19 @@ private final class StreamingDownloadDelegate: NSObject, URLSessionDownloadDeleg
     /// else (including a 200 with full body) is reported as
     /// `rangeNotSupported` so the caller can fall back to single-stream.
     var requireRangedResponse: Bool = false
+    /// Set when TLSPinning cancelled the server-trust challenge. The
+    /// resulting URLError.cancelled is then reported as `pinningFailed`
+    /// instead of CancellationError so callers can tell a security
+    /// rejection apart from a user cancel.
+    private(set) var pinningRejected = false
+
+    func urlSession(_ session: URLSession,
+                    didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        let (disposition, credential) = TLSPinning.evaluate(challenge: challenge)
+        if disposition == .cancelAuthenticationChallenge { pinningRejected = true }
+        completionHandler(disposition, credential)
+    }
 
     private let didFinish = NSLock()
     private var didFinishFlag = false
@@ -554,7 +634,9 @@ private final class StreamingDownloadDelegate: NSObject, URLSessionDownloadDeleg
         guard let completion else { return }
         if let error {
             if let urlError = error as? URLError, urlError.code == .cancelled {
-                completion(.failure(CancellationError()))
+                completion(.failure(pinningRejected
+                    ? StreamingDownloadError.pinningFailed
+                    : CancellationError()))
             } else {
                 completion(.failure(StreamingDownloadError.underlying(error)))
             }
@@ -580,6 +662,10 @@ extension StreamingDownloadError: LocalizedError {
             return "Downloaded data couldn't be saved. The destination disk may be full."
         case .rangeNotSupported:
             return "Server didn't honor the range request. Falling back to single-stream."
+        case .checksumMismatch(let expected, let actual):
+            return "Downloaded file failed integrity verification (expected SHA-256 \(expected.prefix(12))…, got \(actual.prefix(12))…). The file was discarded — try again; repeated failures may mean the download was tampered with."
+        case .pinningFailed:
+            return "Secure connection rejected: the server's certificate chain doesn't match FileID's pinned certificate authorities. Your network may be intercepting TLS — try a trusted connection."
         case .underlying(let err):
             if let urlError = err as? URLError {
                 switch urlError.code {

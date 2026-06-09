@@ -93,6 +93,33 @@ pub fn cancel_prewarm(model_kind: Option<&str>) {
     }
 }
 
+/// A TLS pin failure is an interception signal, not a flaky connection —
+/// "check your connection and Retry" copy would send the user in circles, so
+/// it gets its own kind + copy that says what's actually happening.
+fn download_failure_kind_and_hint(pin_failure: bool) -> (&'static str, &'static str) {
+    if pin_failure {
+        (
+            "download_tls_pin_failed",
+            "The download server presented a TLS certificate that isn't issued \
+             by any of the certificate authorities FileID pins for model \
+             downloads. Something on this network — a corporate proxy, \
+             antivirus HTTPS inspection, or a captive portal — is most likely \
+             intercepting the connection. This is not an ordinary network \
+             failure, and retrying on the same network won't help: try a \
+             different network, or, if you trust this one, set \
+             FILEID_DISABLE_TLS_PINNING=1 to trust the system certificate \
+             store instead.",
+        )
+    } else {
+        (
+            "model_download_failed",
+            "Large model downloads can take several minutes — \
+             check your connection and click Retry. Downloads \
+             resume from where they stopped, so no progress is lost.",
+        )
+    }
+}
+
 pub(crate) async fn handle_prewarm_model(
     sink: Sink,
     model_kind: String,
@@ -368,19 +395,18 @@ pub(crate) async fn handle_prewarm_model(
         } else {
             format!("Couldn't download {} files", errs.len())
         };
+        let pin_failure = errs
+            .iter()
+            .any(|(_, _, err)| crate::downloader::chain_has_pin_failure(err));
+        let (kind, hint) = download_failure_kind_and_hint(pin_failure);
         sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-            kind: "model_download_failed".into(),
-            message: format!(
-                "{summary}:\n{detail}\n\n\
-                 Large model downloads can take several minutes — \
-                 check your connection and click Retry. Downloads \
-                 resume from where they stopped, so no progress is lost."
-            ),
+            kind: kind.into(),
+            message: format!("{summary}:\n{detail}\n\n{hint}"),
             path: Some(first_dest.display().to_string()),
             model_kind: Some(model_kind.clone()),
         }))))
         .await;
-        tracing::warn!(model_kind = %model_kind, outcome = "download_failed", failed = errs.len(), "[PREWARM] exiting");
+        tracing::warn!(model_kind = %model_kind, outcome = "download_failed", error_kind = kind, failed = errs.len(), "[PREWARM] exiting");
         return;
     }
     // Lock in the final byte counts for regular files so zip progress
@@ -429,19 +455,16 @@ pub(crate) async fn handle_prewarm_model(
                 return;
             }
             tracing::warn!(?err, file = %label, "model download failed");
+            let (kind, hint) =
+                download_failure_kind_and_hint(crate::downloader::chain_has_pin_failure(&err));
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "model_download_failed".into(),
-                message: format!(
-                    "Couldn't download {label}: {err}\n\n\
-                     Large model downloads can take several minutes — \
-                     check your connection and click Retry. Downloads \
-                     resume from where they stopped, so no progress is lost."
-                ),
+                kind: kind.into(),
+                message: format!("Couldn't download {label}: {err}\n\n{hint}"),
                 path: Some(file.dest.display().to_string()),
                 model_kind: Some(model_kind.clone()),
             }))))
             .await;
-            tracing::warn!(model_kind = %model_kind, outcome = "download_failed", file = %label, "[PREWARM] exiting");
+            tracing::warn!(model_kind = %model_kind, outcome = "download_failed", error_kind = kind, file = %label, "[PREWARM] exiting");
             return;
         }
         let dest = file.dest.clone();

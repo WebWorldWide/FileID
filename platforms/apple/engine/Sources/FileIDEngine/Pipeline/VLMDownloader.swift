@@ -11,7 +11,15 @@
 // files down ourselves, DeepAnalyze calls VLMModelFactory with
 // `useOfflineMode: true` and it loads from the local cache.
 //
-// Resumable: we skip files that already exist at the expected size.
+// Resumable: we skip files that already exist at the expected size —
+// but only once a `.fileid-verified-<revision>` sentinel attests a
+// fully verified fetch; without it, on-disk files are re-hashed
+// against the LFS oid before being trusted.
+// Integrity: the tree listing + file URLs are pinned to the immutable
+// HF revision from ModelManifest, and each LFS file's sha256 (its LFS
+// oid) is enforced by the downloader before the atomic promote. Small
+// non-LFS files (configs, tokenizer JSON) carry no oid — they are
+// fetched unverified and noted in the log.
 // Progress: a single fraction across all files, weighted by byte
 // total reported by the HF tree API.
 import Foundation
@@ -20,6 +28,7 @@ import FileIDShared
 public struct VLMRepoFile: Sendable {
     public let path: String
     public let size: Int64
+    public let sha256: String?
 }
 
 public enum VLMDownloaderError: Error {
@@ -44,7 +53,8 @@ public actor VLMDownloader {
         documentsHF: URL,
         progress: @escaping @Sendable (Double, Int64, Int64) -> Void
     ) async throws {
-        let files = try await listRepoFiles(repo: repo)
+        let revision = ModelManifest.vlmPin(forRepo: repo)?.revision ?? "main"
+        let files = try await listRepoFiles(repo: repo, revision: revision)
         let downloadable = files.filter { Self.shouldDownload($0) }
         guard !downloadable.isEmpty else { throw VLMDownloaderError.noFilesListed }
 
@@ -52,6 +62,21 @@ public actor VLMDownloader {
             .appending(component: "models")
             .appending(component: repo)
         try FileManager.default.createDirectory(at: modelDir, withIntermediateDirectories: true)
+
+        // Size-based skip is only trusted once a prior fetch of THIS
+        // revision fully verified — otherwise pre-hardening installs
+        // (or a swapped file) would dodge the hash check forever. With
+        // no sentinel, an on-disk file must re-prove its LFS sha256
+        // (streamed re-hash, no download) before it's skipped.
+        let verifiedSentinel = modelDir.appendingPathComponent(".fileid-verified-\(revision)")
+        let sentinelValid = FileManager.default.fileExists(atPath: verifiedSentinel.path)
+
+        let unverified = downloadable.filter { $0.sha256 == nil }.map(\.path)
+        if !unverified.isEmpty {
+            JSONLog.shared.info(ev: "vlm_fetch_unverified_configs",
+                                extra: ["repo": AnyCodable(repo),
+                                        "files": AnyCodable(unverified.joined(separator: ","))])
+        }
 
         // Total = sum of bytes for files we'll *actually* fetch
         // (not skipped). UI progress is byte-weighted across files.
@@ -61,13 +86,21 @@ public actor VLMDownloader {
         for f in downloadable {
             let dest = modelDir.appendingPathComponent(f.path)
             if let onDisk = fileSize(dest), onDisk == f.size, f.size > 0 {
-                continue
+                if sentinelValid {
+                    continue
+                }
+                if let expected = f.sha256,
+                   let actual = try? sha256HexOfFile(at: dest),
+                   actual == expected.lowercased() {
+                    continue
+                }
             }
             todo.append(f)
             totalToFetch += f.size
         }
 
         if todo.isEmpty {
+            Self.writeVerifiedSentinel(verifiedSentinel)
             progress(1.0, 0, 0)
             return
         }
@@ -100,13 +133,13 @@ public actor VLMDownloader {
                 at: dest.deletingLastPathComponent(),
                 withIntermediateDirectories: true
             )
-            // HuggingFace `resolve/main/<path>` works for both LFS
-            // (safetensors) and small files. Range support is on.
+            // HuggingFace `resolve/<revision>/<path>` works for both
+            // LFS (safetensors) and small files. Range support is on.
             // URLs from the API may need percent-encoding.
             let pathEncoded = f.path
                 .addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? f.path
             guard let url = URL(string:
-                "https://huggingface.co/\(repo)/resolve/main/\(pathEncoded)"
+                "https://huggingface.co/\(repo)/resolve/\(revision)/\(pathEncoded)"
             ) else { continue }
 
             let fileSize = f.size
@@ -118,7 +151,8 @@ public actor VLMDownloader {
                 // sweet spot between TCP slow-start and HF per-stream
                 // throttle (~600 KB/s).
                 parts: max(1, min(12, Int(fileSize / (4 * 1024 * 1024)))),
-                approxBytes: fileSize
+                approxBytes: fileSize,
+                expectedSHA256: f.sha256
             ) { tick in
                 Task {
                     let inFlight = tick.written
@@ -134,17 +168,36 @@ public actor VLMDownloader {
             let frac = total > 0 ? min(1.0, Double(absDone) / Double(total)) : 1.0
             progress(frac, absDone, total)
         }
+
+        Self.writeVerifiedSentinel(verifiedSentinel)
+    }
+
+    private static func writeVerifiedSentinel(_ sentinel: URL) {
+        try? Data().write(to: sentinel)
     }
 
     // MARK: - HF tree listing
 
-    private func listRepoFiles(repo: String) async throws -> [VLMRepoFile] {
-        guard let url = URL(string: "https://huggingface.co/api/models/\(repo)/tree/main") else {
+    private func listRepoFiles(repo: String, revision: String) async throws -> [VLMRepoFile] {
+        guard let url = URL(string: "https://huggingface.co/api/models/\(repo)/tree/\(revision)") else {
             throw VLMDownloaderError.treeListFailed(status: 0)
         }
         var req = URLRequest(url: url)
         req.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let pinDelegate = TLSPinningSessionDelegate()
+        let session = URLSession(configuration: .ephemeral,
+                                 delegate: pinDelegate, delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+        let data: Data
+        let resp: URLResponse
+        do {
+            (data, resp) = try await session.data(for: req)
+        } catch {
+            if pinDelegate.pinningRejected {
+                throw StreamingDownloadError.pinningFailed
+            }
+            throw error
+        }
         guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw VLMDownloaderError.treeListFailed(status: (resp as? HTTPURLResponse)?.statusCode ?? 0)
         }
@@ -154,12 +207,16 @@ public actor VLMDownloader {
         }
         return raw
             .filter { $0.type == "file" }
-            .map { VLMRepoFile(path: $0.path, size: $0.size ?? $0.lfs?.size ?? 0) }
+            // `lfs.oid` IS the file's sha256 for LFS-tracked files; the
+            // top-level `oid` is a git blob sha1 — never use it here.
+            .map { VLMRepoFile(path: $0.path, size: $0.size ?? $0.lfs?.size ?? 0,
+                               sha256: $0.lfs?.oid) }
     }
 
     private struct HFTreeEntry: Decodable {
         struct LFS: Decodable {
             let size: Int64?
+            let oid: String?
         }
         let type: String
         let path: String
