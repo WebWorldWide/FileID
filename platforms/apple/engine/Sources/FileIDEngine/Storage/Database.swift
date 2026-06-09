@@ -87,7 +87,7 @@ public final class Database: @unchecked Sendable {
                 t.column("file_id", .integer).notNull()
                     .references("files", onDelete: .cascade)
                 t.column("tag",     .text).notNull()
-                t.column("source",  .text).notNull()        // vision|clip|exif|user
+                t.column("source",  .text).notNull()        // auto|clip|exif|user|vlm
                 t.column("score",   .double)
                 t.primaryKey(["file_id", "tag", "source"])
             }
@@ -323,7 +323,33 @@ public final class Database: @unchecked Sendable {
                 """)
         }
 
-        // v12 — keep the external-content FTS5 indexes in sync via triggers.
+        // v12: face-model reset for the commercial-clean swap. SFace (128-d)
+        // replaces ArcFace (512-d); the old `arcface_embedding` blobs are
+        // dimensionally incomparable, so wipe all face state and let the next
+        // scan re-detect + re-embed with SFace. Child→parent delete order keeps
+        // the face_prints.person_id FK happy. Mirrors the Windows
+        // "v12_face_model_reset" migration so both platforms reset in lockstep.
+        m.registerMigration("v12_face_model_reset") { db in
+            try db.execute(sql: "DELETE FROM face_verifications")
+            try db.execute(sql: "DELETE FROM face_prints")
+            try db.execute(sql: "DELETE FROM persons")
+        }
+
+        // v13: stable anchor-face columns for "different people" verdicts.
+        // Byte-faithful mirror of the Windows "v13_face_verification_anchors"
+        // migration (same identifier + nullable INTEGER columns) so a face DB
+        // round-trips cross-platform — without this a Windows-written library
+        // has 13 grdb_migrations rows + these columns while macOS has 12 and
+        // lacks them (the schema drift the append-only invariant forbids).
+        // markPersonsDifferent keys verdicts on the stable (min,max) face-print
+        // anchor pair (face_a/face_b) instead of churning person ids on
+        // re-cluster. (PAR-1)
+        m.registerMigration("v13_face_verification_anchors") { db in
+            try db.execute(sql: "ALTER TABLE face_verifications ADD COLUMN face_a INTEGER")
+            try db.execute(sql: "ALTER TABLE face_verifications ADD COLUMN face_b INTEGER")
+        }
+
+        // v14 — keep the external-content FTS5 indexes in sync via triggers.
         //
         // ocr_fts/doc_fts are external-content FTS5 (content='ocr_text' etc.).
         // They were only ever fed on INSERT; deletes (Cleanup prune, orphan
@@ -333,7 +359,7 @@ public final class Database: @unchecked Sendable {
         // install the canonical sync triggers so every insert/delete/update on
         // the content table maintains the index. The DBWriter no longer writes
         // ocr_fts directly (the AFTER INSERT trigger does it).
-        m.registerMigration("v12_fts_sync_triggers") { db in
+        m.registerMigration("v14_fts_sync_triggers") { db in
             try db.execute(sql: "INSERT INTO ocr_fts(ocr_fts) VALUES('rebuild')")
             try db.execute(sql: "INSERT INTO doc_fts(doc_fts) VALUES('rebuild')")
 

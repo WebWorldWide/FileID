@@ -40,7 +40,7 @@ PRAGMAs:
 
 Tables: `files`, `tags`, `ocr_text`, `ocr_fts` (FTS5 virtual), `persons`, `face_prints`, `face_verifications`, `clip_embeddings`, `scan_sessions`, plus `grdb_migrations` for tracking.
 
-Embedding columns are raw `BLOB` of L2-normalized float32 little-endian arrays (512-d for ArcFace and MobileCLIP; 2048 bytes each). Cross-platform compatible.
+Embedding columns are raw `BLOB` of L2-normalized float32 little-endian arrays — 512-d for CLIP ViT-B/32 image/text (2048 bytes), 128-d for SFace face prints (512 bytes). Cross-platform compatible.
 
 ## IPC contract
 
@@ -66,9 +66,9 @@ Tagging (N workers, N = num_physical_cores * 1.7)
     │   - read file
     │   - compute dHash (perceptual hash)
     │   - decode image (or PDF page / video keyframe / doc thumbnail)
-    │   - SCRFD face detection + ArcFace embedding (per face)
+    │   - YuNet face detection + 5-point alignment + SFace embedding (per face)
     │   - OCR (fast tier)
-    │   - MobileCLIP image embedding
+    │   - RAM++ auto-tagging (primary) + CLIP ViT-B/32 image embedding
     │   - parse EXIF / GPS / camera model
     │  AsyncChannel<TaggedFile>, capacity 256
     ▼
@@ -94,8 +94,9 @@ Performance target: ≥ 140 files/s on M1 Pro (macOS) or comparable mid-tier x64
 
 ### Windows
 - ONNX Runtime with auto-detected EP (CUDA / OpenVINO / DirectML / QNN / CPU) — see GPU acceleration strategy below
-- llama.cpp (VLMs: Qwen2.5-VL, Gemma 3, MiniCPM-V) with backend auto-pick (CUDA / Vulkan / DirectML / CPU)
-- SCRFD ONNX (face detection — landmarks → solve PnP for pose)
+- llama.cpp (VLMs: Qwen2.5-VL 7B, Gemma 3, Mistral-Small-3.2 — all commercial-clean) with backend auto-pick (CUDA / Vulkan / DirectML / CPU)
+- RAM++ ONNX (4585-tag auto-tagger, primary; CLIP scene tags as fallback) + CLIP ViT-B/32 ONNX (image + text)
+- YuNet ONNX (face detection) + SFace ONNX (128-d embedding) with 5-point similarity alignment; landmarks → PnP for pose
 - Windows.Media.Ocr (built-in WinRT OCR; PaddleOCR ONNX as opt-in)
 - pdfium-render, Media Foundation (PDF + video)
 

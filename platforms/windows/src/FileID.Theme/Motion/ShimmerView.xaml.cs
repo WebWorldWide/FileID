@@ -17,13 +17,21 @@ public sealed partial class ShimmerView : UserControl
     public ShimmerView()
     {
         InitializeComponent();
-        Loaded += (_, _) => Sync();
+        // Subscribe on Loaded (not the ctor) so subscribe/unsubscribe are
+        // lifecycle-paired. This control lives in a virtualized
+        // ItemsRepeater: a ctor-time subscription leaks via the static event
+        // for any instance that's never Loaded, and after the first recycle
+        // (Unloaded → -=) it would stay deaf to reduced-motion toggles.
+        Loaded += (_, _) =>
+        {
+            ReducedMotion.Instance.PropertyChanged += OnReducedMotionChanged;
+            Sync();
+        };
         Unloaded += (_, _) =>
         {
             ShimmerStoryboard.Stop();
             ReducedMotion.Instance.PropertyChanged -= OnReducedMotionChanged;
         };
-        ReducedMotion.Instance.PropertyChanged += OnReducedMotionChanged;
     }
 
     /// <summary>

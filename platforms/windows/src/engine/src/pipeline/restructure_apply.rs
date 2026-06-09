@@ -1,28 +1,41 @@
 // Restructure apply — execute a `Vec<ProposedMove>` on disk.
 //
 // Two modes:
-//   * Real move (default): `MoveFileExW(MOVEFILE_COPY_ALLOWED)` — NON-
-//     overwriting. Atomic when same volume; copy+delete across volumes.
-//     Colliding destination names are disambiguated ("name (2).ext") so a
-//     move can never silently destroy an existing file. The filesystem move
-//     and the DB `path_text` update are SEPARATE, non-atomic steps; crash-
-//     consistency comes from the rename/move heal (content_hash / file_ref)
-//     reconciliation on the next scan, not from a shared transaction.
+//   * Real move (default): `MoveFileExW(MOVEFILE_COPY_ALLOWED)` — NO
+//     `MOVEFILE_REPLACE_EXISTING`, so an occupied destination fails the move
+//     instead of silently overwriting whatever is already there (B3). Atomic
+//     when same volume; copy+delete across volumes. The DB row's `path_text`
+//     is updated by a SEPARATE statement AFTER the move returns — this is NOT
+//     one transaction with the filesystem op (it can't be). A crash in the
+//     move→update window leaves the file relocated with `path_text` stale; the
+//     next scan self-heals it via rename-heal on the NTFS `file_ref`, and a
+//     failed update is also recorded to a recovery sidecar.
 //   * Symlink (advanced): `CreateSymbolicLinkW`. Requires either
 //     SeCreateSymbolicLinkPrivilege (admin) OR Developer Mode enabled.
 //     Lets the user preview the proposed structure without committing
 //     to actual moves.
 //
+// COLLISION SAFETY (B3): many distinct sources share a basename and the rule
+// cascade funnels them into one folder, so two planned moves can target the
+// same path. Each real-move destination is uniquified within its parent
+// (`name (2).ext`, …) so both files survive; nothing is ever clobbered.
+//
+// STALE-PLAN / IDENTITY GUARD (B4): a plan is built from a DB snapshot, then
+// applied after an arbitrary delay. Before each move the live DB row for
+// `file_id` is re-read and required to still name `source`, so a plan that
+// went stale (the file was renamed/moved/replaced meanwhile) can't move the
+// wrong bytes — the payload `source` string is not authoritative on its own.
+//
 // PATH-TRAVERSAL GUARD: every destination MUST canonicalize to a path
 // inside `library_root`. We refuse to write outside the user's chosen
 // library — even if the planner is buggy or someone forges a payload.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::ipc::{RestructureApplyResult, RestructureMove};
@@ -55,18 +68,36 @@ impl RestructureApply {
 
         let mut applied = 0u32;
         let mut failed = 0u32;
-        // Destinations already claimed by an earlier move in THIS batch, so two
-        // NEW colliding files don't both target the same path before either is
-        // written.
-        let mut assigned: HashSet<PathBuf> = HashSet::new();
+        // B3: destinations claimed earlier in THIS batch, so two distinct
+        // sources that map to the same basename don't collide before either
+        // touches disk.
+        let mut claimed: HashSet<PathBuf> = HashSet::new();
 
         for m in moves {
+            // B4/S6/S7: bind the move to the planned file identity. The
+            // payload `source` is not authoritative on its own — re-read the
+            // live DB row for `file_id` and require it still names this
+            // source. A stale plan (file renamed/moved/replaced since
+            // planning) is skipped so we never move the wrong bytes or stamp
+            // the row with a path that never held this file.
+            match current_path_in_db(&self.db_conn, m.file_id) {
+                Ok(Some(db_path)) if paths_equal(&db_path, &m.source) => {}
+                _ => {
+                    tracing::warn!(
+                        file_id = m.file_id,
+                        "[RESTRUCTURE] skipping stale move: source no longer matches the DB row"
+                    );
+                    failed += 1;
+                    continue;
+                }
+            }
+
             let dest = PathBuf::from(&m.destination);
             // Path-traversal guard. The destination's parent must exist
             // OR be createable under library_root. Canonicalize the
             // closest existing ancestor and verify containment.
             if let Err(err) = ensure_inside_root(&dest, &canonical_root) {
-                tracing::warn!(?err, dest=%dest.display(), "rejecting move outside library root");
+                tracing::warn!(?err, dest=%crate::platform::redact_path_for_log(&dest), "rejecting move outside library root");
                 failed += 1;
                 continue;
             }
@@ -79,14 +110,14 @@ impl RestructureApply {
                 // outside the root the moment we resolve through it.
                 if has_reparse_point_in_chain(parent, &canonical_root) {
                     tracing::warn!(
-                        parent=%parent.display(),
+                        parent=%crate::platform::redact_path_for_log(parent),
                         "rejecting move: pre-existing reparse point in destination parent chain"
                     );
                     failed += 1;
                     continue;
                 }
                 if let Err(err) = std::fs::create_dir_all(parent) {
-                    tracing::warn!(?err, parent=%parent.display(), "create_dir_all failed");
+                    tracing::warn!(?err, parent=%crate::platform::redact_path_for_log(parent), "create_dir_all failed");
                     failed += 1;
                     continue;
                 }
@@ -95,7 +126,7 @@ impl RestructureApply {
                 // here is small but non-zero; defense in depth is cheap.
                 if has_reparse_point_in_chain(parent, &canonical_root) {
                     tracing::warn!(
-                        parent=%parent.display(),
+                        parent=%crate::platform::redact_path_for_log(parent),
                         "rejecting move: reparse point appeared after create_dir_all"
                     );
                     failed += 1;
@@ -103,26 +134,61 @@ impl RestructureApply {
                 }
             }
 
-            // Pick a non-colliding destination — never overwrite an existing
-            // file or a sibling move in this batch. The move APIs are also
-            // non-overwriting (no MOVEFILE_REPLACE_EXISTING), so this is the
-            // sole place a collision is resolved.
-            let dest = unique_destination(&dest, &assigned);
-            assigned.insert(dest.clone());
+            // Skip a no-op (the file already sits at its PLANNED destination)
+            // BEFORE uniquifying. If we uniquified first, `unique_destination`
+            // would see the file itself occupying `dest`, bump it to a ` (2)`
+            // sibling, and we'd rename an already-correctly-placed file —
+            // churning an organized library, silently in auto-file mode. (ENG-42)
+            if !self.use_symlinks && paths_equal(&m.source, &dest.to_string_lossy()) {
+                applied += 1;
+                continue;
+            }
+
+            // B3: real moves never clobber. `move_file` drops
+            // MOVEFILE_REPLACE_EXISTING, and we additionally resolve a
+            // collision-free name within the SAME parent (so containment +
+            // the reparse checks above still hold) — both distinct files
+            // survive. Symlink mode keeps the requested name and fails
+            // naturally if it's taken (CreateSymbolicLinkW won't overwrite).
+            let final_dest = if self.use_symlinks {
+                dest.clone()
+            } else {
+                let d = unique_destination(&dest, &claimed);
+                claimed.insert(d.clone());
+                d
+            };
 
             let result = if self.use_symlinks {
-                make_symlink(&m.source, &dest)
+                make_symlink(&m.source, &final_dest)
             } else {
-                move_file(&m.source, &dest)
+                move_file(&m.source, &final_dest)
             };
             match result {
                 Ok(()) => {
                     if !self.use_symlinks {
                         // Only update DB on real moves. Symlinks leave
                         // `path_text` pointing at the original.
-                        if let Err(err) = update_path_in_db(&self.db_conn, m.file_id, &dest) {
-                            tracing::warn!(?err, file_id = m.file_id, "DB path update failed");
+                        if let Err(err) = update_path_in_db(&self.db_conn, m.file_id, &final_dest) {
+                            // B5: the file is already relocated; do NOT silently
+                            // swallow. Record it durably for recovery and log at
+                            // error. (It also self-heals on the next scan via
+                            // rename-heal on the NTFS file_ref.)
+                            tracing::error!(
+                                ?err,
+                                file_id = m.file_id,
+                                dst = %crate::platform::redact_path_for_log(&final_dest),
+                                "[RESTRUCTURE] moved on disk but DB path update failed; recorded for recovery"
+                            );
+                            record_path_update_failure(m.file_id, &m.source, &final_dest);
                         }
+                        // Move the on-disk tags sidecar to follow the file (#27).
+                        // Real-move branch only — symlink mode leaves the source
+                        // (and its sidecar) in place. Best-effort; uses
+                        // final_dest since collisions uniquify the name.
+                        crate::shell::tags::move_sidecar(
+                            std::path::Path::new(&m.source),
+                            &final_dest,
+                        );
                     }
                     applied += 1;
                 }
@@ -134,7 +200,12 @@ impl RestructureApply {
                     });
                 }
                 Err(ApplyError::Other(err)) => {
-                    tracing::warn!(?err, src=%m.source, dst=%m.destination, "move failed");
+                    tracing::warn!(
+                        ?err,
+                        src=%crate::platform::redact_path_for_log(&m.source),
+                        dst=%crate::platform::redact_path_for_log(&final_dest),
+                        "move failed"
+                    );
                     failed += 1;
                 }
             }
@@ -145,6 +216,7 @@ impl RestructureApply {
 }
 
 #[derive(Debug)]
+#[cfg_attr(not(windows), allow(dead_code))]
 enum ApplyError {
     Privilege(String),
     Other(anyhow::Error),
@@ -153,25 +225,31 @@ enum ApplyError {
 #[cfg(windows)]
 fn move_file(src: &str, dst: &Path) -> std::result::Result<(), ApplyError> {
     use std::os::windows::ffi::OsStrExt;
-    // Extended-length (\\?\) form so deep (>MAX_PATH) moves don't silently
-    // fail — matches every other FS-access site in the engine.
-    let src_p = crate::util::path_safety::to_extended_length(Path::new(src));
-    let dst_p = crate::util::path_safety::to_extended_length(dst);
-    let src_w: Vec<u16> = src_p
+    // Win32 file APIs silently fail past MAX_PATH (260) unless the operand
+    // carries the \\?\ extended-length prefix — the engine .exe has no
+    // longPathAware manifest. Every other FS site wraps via to_extended_length
+    // (bulk.rs rename, platform.rs, discovery.rs, dbwriter.rs, …); restructure
+    // routes files into deep semantic group folders (root + up to 200-char
+    // group name + filename) that trivially exceed 260, so without the prefix
+    // the move just fails (failed++) where bulk-rename of the same path works.
+    let src_ext = crate::util::path_safety::to_extended_length(Path::new(src));
+    let dst_ext = crate::util::path_safety::to_extended_length(dst);
+    let src_w: Vec<u16> = src_ext
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    let dst_w: Vec<u16> = dst_p
+    let dst_w: Vec<u16> = dst_ext
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
     unsafe {
-        // NO MOVEFILE_REPLACE_EXISTING: collisions are pre-resolved by
-        // unique_destination, and without the flag MoveFileExW refuses to
-        // clobber (ERROR_ALREADY_EXISTS) as a last-resort safety net rather
-        // than destroying an existing file.
+        // B3: NO MOVEFILE_REPLACE_EXISTING. An occupied destination must fail
+        // the move (→ ApplyError::Other → failed++), never overwrite. The
+        // caller has already resolved a collision-free `dst`, so a remaining
+        // collision here means an unexpected race — fail safe rather than
+        // destroy data. MOVEFILE_COPY_ALLOWED still permits cross-volume moves.
         MoveFileExW(
             PCWSTR(src_w.as_ptr()),
             PCWSTR(dst_w.as_ptr()),
@@ -184,14 +262,16 @@ fn move_file(src: &str, dst: &Path) -> std::result::Result<(), ApplyError> {
 #[cfg(windows)]
 fn make_symlink(src: &str, dst: &Path) -> std::result::Result<(), ApplyError> {
     use std::os::windows::ffi::OsStrExt;
-    let src_p = crate::util::path_safety::to_extended_length(Path::new(src));
-    let dst_p = crate::util::path_safety::to_extended_length(dst);
-    let src_w: Vec<u16> = src_p
+    // \\?\ prefix both operands so the link can be created (and its target
+    // resolved) past MAX_PATH (260) — same rationale as move_file.
+    let src_ext = crate::util::path_safety::to_extended_length(Path::new(src));
+    let dst_ext = crate::util::path_safety::to_extended_length(dst);
+    let src_w: Vec<u16> = src_ext
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    let dst_w: Vec<u16> = dst_p
+    let dst_w: Vec<u16> = dst_ext
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
@@ -234,12 +314,102 @@ fn make_symlink(_src: &str, _dst: &Path) -> std::result::Result<(), ApplyError> 
 
 fn update_path_in_db(conn: &Arc<Mutex<Connection>>, file_id: i64, new_path: &Path) -> Result<()> {
     let conn = conn.lock();
-    conn.execute(
-        "UPDATE files SET path_text = ?1 WHERE id = ?2",
-        params![new_path.to_string_lossy(), file_id],
-    )
-    .context("DB UPDATE files.path_text")?;
+    // ENG-91: keep path_hash in sync with path_text (same as the rename command
+    // + every dbwriter insert) so the column stays consistent for lookups/dedup
+    // and cross-platform DB parity — a move that updated only path_text left a
+    // stale hash.
+    let path_text = new_path.to_string_lossy();
+    let path_hash = crate::util::path_safety::stable_path_hash(&path_text);
+    // prepare_cached: a plan can issue thousands of moves, so cache the parse on
+    // the long-lived writer connection (codebase idiom — see bulk.rs/dbwriter.rs).
+    conn.prepare_cached("UPDATE files SET path_text = ?1, path_hash = ?2 WHERE id = ?3")?
+        .execute(params![path_text, path_hash, file_id])
+        .context("DB UPDATE files.path_text")?;
     Ok(())
+}
+
+/// B4: the current `path_text` the DB holds for `file_id`, or None if the row
+/// is gone. The single authoritative source for what `file_id` actually names.
+fn current_path_in_db(conn: &Arc<Mutex<Connection>>, file_id: i64) -> Result<Option<String>> {
+    let conn = conn.lock();
+    let mut stmt = conn.prepare_cached("SELECT path_text FROM files WHERE id = ?1")?;
+    stmt.query_row(params![file_id], |row| row.get::<_, String>(0))
+        .optional()
+        .context("DB SELECT files.path_text")
+}
+
+/// Path equality that tolerates separator/case differences. Fast path is a
+/// string compare (the normal case — both came from the same DB row at plan
+/// time); otherwise compare canonical forms (a non-existent path canonicalizes
+/// to Err and is treated as not-equal, so a vanished source is a mismatch).
+fn paths_equal(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
+    }
+}
+
+/// B3: resolve a destination that collides with neither an on-disk file nor a
+/// destination already claimed by an earlier move in this batch, by appending
+/// ` (2)`, ` (3)`, … before the extension — within the same parent so the
+/// containment/reparse checks already performed on `dest` still hold.
+fn unique_destination(dest: &Path, claimed: &HashSet<PathBuf>) -> PathBuf {
+    let occupied = |p: &Path| {
+        // \\?\ prefix so a deep already-occupied destination is detected rather
+        // than mis-probed as free (std::fs silently fails past MAX_PATH).
+        claimed.contains(p)
+            || std::fs::symlink_metadata(crate::util::path_safety::to_extended_length(p)).is_ok()
+    };
+    if !occupied(dest) {
+        return dest.to_path_buf();
+    }
+    let parent = dest.parent().unwrap_or_else(|| Path::new(""));
+    let stem = dest
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = dest.extension().map(|e| e.to_string_lossy().into_owned());
+    for n in 2..=9999u32 {
+        let name = match &ext {
+            Some(e) => format!("{stem} ({n}).{e}"),
+            None => format!("{stem} ({n})"),
+        };
+        let candidate = parent.join(name);
+        if !occupied(&candidate) {
+            return candidate;
+        }
+    }
+    // Exhausted — return the original; the no-REPLACE move then fails safely.
+    dest.to_path_buf()
+}
+
+/// B5: best-effort durable record of a successful on-disk move whose DB
+/// path-update failed, so the stale `path_text` is recoverable even if the
+/// next scan (which self-heals via rename-heal on the NTFS `file_ref`) never
+/// runs. NDJSON, append-only; a recovery hint, not a restore authority like
+/// `trash_log`, so no HMAC. Written beside the trash log.
+fn record_path_update_failure(file_id: i64, src: &str, dst: &Path) {
+    let Ok(trash) = crate::paths::trash_log_path() else {
+        return;
+    };
+    let Some(dir) = trash.parent() else {
+        return;
+    };
+    let path = dir.join("restructure_recover.ndjson");
+    let line = serde_json::json!({
+        "file_id": file_id,
+        "src": src,
+        "dst": dst.to_string_lossy(),
+    })
+    .to_string();
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        use std::io::Write;
+        let _ = writeln!(f, "{line}");
+        let _ = f.sync_all();
+    }
 }
 
 /// Canonicalize a path, treating a missing target as "exists in spirit".
@@ -292,7 +462,18 @@ fn ensure_inside_root(dest: &Path, canonical_root: &Path) -> Result<()> {
 #[cfg(windows)]
 fn has_reparse_point_in_chain(parent: &Path, root: &Path) -> bool {
     use std::os::windows::fs::MetadataExt;
+    use crate::util::path_safety::strip_extended_length;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    // `parent` is the raw (non-verbatim) destination parent from the IPC plan,
+    // but `root` arrives canonicalized — on Windows that is a verbatim `\\?\C:\…`
+    // path. Comparing the two prefix forms made `cur.starts_with(root)` false on
+    // the FIRST iteration, so the walk broke after checking only the leaf parent
+    // and never inspected intermediate ancestors — silently reducing the SEC-5
+    // junction-TOCTOU defense to one level. Normalize BOTH operands with
+    // strip_extended_length, which removes the `\\?\` prefix WITHOUT resolving the
+    // link (std::fs::canonicalize must NOT be used here: it follows the junction
+    // and defeats detection), so the ancestor walk runs up to the real root.
+    let root_norm = strip_extended_length(root);
     let mut cur = parent.to_path_buf();
     loop {
         if let Ok(meta) = std::fs::symlink_metadata(&cur) {
@@ -300,8 +481,9 @@ fn has_reparse_point_in_chain(parent: &Path, root: &Path) -> bool {
                 return true;
             }
         }
-        // Stop once we reach (or pass) the root.
-        if cur == root || !cur.starts_with(root) {
+        // Stop once we reach (or pass) the root — compared in the same path form.
+        let cur_norm = strip_extended_length(&cur);
+        if cur_norm == root_norm || !cur_norm.starts_with(&root_norm) {
             break;
         }
         if !cur.pop() { break; }
@@ -311,40 +493,6 @@ fn has_reparse_point_in_chain(parent: &Path, root: &Path) -> bool {
 
 #[cfg(not(windows))]
 fn has_reparse_point_in_chain(_parent: &Path, _root: &Path) -> bool { false }
-
-/// Pick a destination that collides with neither an existing file on disk nor
-/// a destination already claimed by an earlier move in this batch. Appends
-/// " (2)", " (3)", … before the extension. This is what prevents two distinct
-/// source files that share a basename and route to the same bucket (e.g. two
-/// `IMG_0001.jpg` into Photos/2024/06, or every `audio.mp3` into a flat Audio/)
-/// from clobbering one another — the old MOVEFILE_REPLACE_EXISTING destroyed
-/// the first file irrecoverably.
-fn unique_destination(dest: &Path, assigned: &HashSet<PathBuf>) -> PathBuf {
-    if !dest.exists() && !assigned.contains(dest) {
-        return dest.to_path_buf();
-    }
-    let parent = dest.parent().map(Path::to_path_buf).unwrap_or_default();
-    let stem = dest
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let ext = dest.extension().map(|s| s.to_string_lossy().into_owned());
-    let mut n: u32 = 2;
-    loop {
-        let name = match &ext {
-            Some(e) => format!("{stem} ({n}).{e}"),
-            None => format!("{stem} ({n})"),
-        };
-        let candidate = parent.join(name);
-        // Cap defensively; if we somehow can't find a free name, return the
-        // last candidate — the non-overwriting move then fails for that file
-        // (counted as `failed`) rather than destroying anything.
-        if (!candidate.exists() && !assigned.contains(&candidate)) || n >= 9999 {
-            return candidate;
-        }
-        n += 1;
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -389,5 +537,124 @@ mod tests {
         let canonical_root = canonicalize_safely(&root).unwrap();
         let outside = canonical_root.parent().unwrap().join("evil.jpg");
         assert!(ensure_inside_root(&outside, &canonical_root).is_err());
+    }
+
+    #[test]
+    fn unique_destination_avoids_disk_and_claimed_collisions() {
+        let dir = std::env::temp_dir().join(format!("fileid-uniqdest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("IMG.jpg");
+
+        // Free → returned as-is.
+        let empty = HashSet::new();
+        assert_eq!(unique_destination(&dest, &empty), dest);
+
+        // On disk → bumped to " (2)".
+        std::fs::write(&dest, b"x").unwrap();
+        assert_eq!(unique_destination(&dest, &empty), dir.join("IMG (2).jpg"));
+
+        // " (2)" also claimed this batch → bumped to " (3)".
+        let mut claimed = HashSet::new();
+        claimed.insert(dir.join("IMG (2).jpg"));
+        assert_eq!(unique_destination(&dest, &claimed), dir.join("IMG (3).jpg"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn move_fixture(file_id: i64, source: &str, destination: &str) -> RestructureMove {
+        RestructureMove {
+            file_id,
+            source: source.to_string(),
+            destination: destination.to_string(),
+            category: "Sorted".to_string(),
+            tier: None,
+            confidence: String::new(),
+            reason: None,
+        }
+    }
+
+    fn insert_file_row(conn: &Connection, id: i64, path: &str) {
+        conn.execute(
+            "INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, kind, extension, failed) \
+             VALUES (?1, ?2, 0, 4, 0.0, 'image', 'jpg', 0)",
+            params![id, path],
+        )
+        .unwrap();
+    }
+
+    /// B3: two distinct sources sharing a basename, funnelled to the same
+    /// destination, must BOTH survive — the second is uniquified, never
+    /// clobbered. Windows-only: exercises the real MoveFileExW path; the
+    /// non-Windows move_file stub intentionally bails (Linux port deferred).
+    #[test]
+    #[cfg(windows)]
+    fn apply_two_same_basename_sources_keeps_both() {
+        let root = std::env::temp_dir().join(format!("fileid-apply-both-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let a_dir = root.join("a");
+        let b_dir = root.join("b");
+        let dest_dir = root.join("Sorted");
+        std::fs::create_dir_all(&a_dir).unwrap();
+        std::fs::create_dir_all(&b_dir).unwrap();
+        let src_a = a_dir.join("IMG_0001.jpg");
+        let src_b = b_dir.join("IMG_0001.jpg");
+        std::fs::write(&src_a, b"AAAA").unwrap();
+        std::fs::write(&src_b, b"BBBB").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        insert_file_row(&conn, 1, &src_a.to_string_lossy());
+        insert_file_row(&conn, 2, &src_b.to_string_lossy());
+        let db = Arc::new(Mutex::new(conn));
+
+        let apply = RestructureApply::new(db, root.clone(), false);
+        let dest = dest_dir.join("IMG_0001.jpg").to_string_lossy().into_owned();
+        let moves = vec![
+            move_fixture(1, &src_a.to_string_lossy(), &dest),
+            move_fixture(2, &src_b.to_string_lossy(), &dest),
+        ];
+        let res = apply.apply(&moves).unwrap();
+
+        assert_eq!(res.applied, 2, "both moves applied");
+        assert_eq!(res.failed, 0);
+        let first = dest_dir.join("IMG_0001.jpg");
+        let second = dest_dir.join("IMG_0001 (2).jpg");
+        assert!(first.exists() && second.exists(), "both files survived under distinct names");
+        // No clobber: the two original payloads are both present.
+        let mut bodies = std::collections::HashSet::new();
+        bodies.insert(std::fs::read(&first).unwrap());
+        bodies.insert(std::fs::read(&second).unwrap());
+        assert!(bodies.contains(b"AAAA".as_slice()) && bodies.contains(b"BBBB".as_slice()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// B4: a move whose source no longer matches the live DB row for its
+    /// file_id is a stale plan and must be skipped, not executed.
+    #[test]
+    fn apply_skips_stale_move_when_source_mismatches_db() {
+        let root = std::env::temp_dir().join(format!("fileid-apply-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let real = root.join("real.jpg");
+        std::fs::write(&real, b"data").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        // The DB says file 1 lives at `real`, but the (stale) plan claims a
+        // different source path.
+        insert_file_row(&conn, 1, &real.to_string_lossy());
+        let db = Arc::new(Mutex::new(conn));
+
+        let apply = RestructureApply::new(db, root.clone(), false);
+        let stale_src = root.join("vanished.jpg").to_string_lossy().into_owned();
+        let dest = root.join("Sorted").join("x.jpg").to_string_lossy().into_owned();
+        let res = apply.apply(&[move_fixture(1, &stale_src, &dest)]).unwrap();
+
+        assert_eq!(res.applied, 0, "stale move must not apply");
+        assert_eq!(res.failed, 1);
+        assert!(real.exists(), "the real file must be untouched");
+        assert!(!root.join("Sorted").join("x.jpg").exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

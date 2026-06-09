@@ -44,16 +44,25 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     // stays a single-sentinel "any-of".
     private static readonly string[] ClipSentinelIds = { "mobileclip_s2", "clip_text" };
     private static readonly string[] ArcfaceSentinelIds = { "arcface" };
-    private static readonly string[] DeepVlmSentinelIds = { "qwen2_5_vl_3b", "qwen2_5_vl_7b", "gemma_3_4b" };
+    private static readonly string[] DeepVlmSentinelIds = { "qwen2_5_vl_7b", "gemma_3_4b", "mistral_small_3_2" };
+    // RAM++ — the in-scan multi-label tagger. Single-sentinel "any-of".
+    private static readonly string[] RamPlusSentinelIds = { "ram_plus" };
     // one-button GPU acceleration pack on the welcome sheet.
-    // The engine's `cudnn_runtime_x64` registry arm covers NVIDIA. Other
-    // vendors stay no-op (DirectML is bundled with ORT and is the
-    // production path on AMD/Intel/Qualcomm).
-    private static readonly string[] AcceleratorSentinelIds = { "cudnn_runtime_x64" };
+    // NVIDIA gets the full CUDA EP: ort_cuda_x64 (the ONNX Runtime CUDA
+    // provider DLL — the thing that actually flips inference off DirectML) plus
+    // cudnn_runtime_x64. The PROVIDER is the completion gate: cuDNN alone never
+    // enabled CUDA, so a legacy cuDNN-only install must still read as
+    // NotInstalled and prompt for the provider. Other vendors stay no-op
+    // (DirectML is bundled with ORT and is the production path on AMD/Intel/
+    // Qualcomm).
+    private static readonly string[] AcceleratorSentinelIds = { "ort_cuda_x64", "ort_openvino_x64" };
 
     /// <summary>Time the engine has to reach Ready before an Install
-    /// click gives up and surfaces "Engine not ready" to the user.</summary>
-    private static readonly TimeSpan WaitForReadyTimeout = TimeSpan.FromSeconds(30);
+    /// click gives up and surfaces "Engine not ready" to the user. Raised
+    /// 30 → 75 s: cold-start model loading on slow disks / ARM64 can still be
+    /// legitimately initializing well past 30 s, and failing that early left
+    /// only a Retry that immediately failed again.</summary>
+    private static readonly TimeSpan WaitForReadyTimeout = TimeSpan.FromSeconds(75);
 
     /// <summary>Time after which a Downloading slot with no progress
     /// events gets flipped to Failed. Mirrors macOS WelcomeSheet's
@@ -69,8 +78,12 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
 
     public ModelSlot Clip { get; }
     public ModelSlot Arcface { get; }
-    /// <summary>Deep Analyze model — hardware-tiered Qwen 2.5-VL (3B / 7B)
-    /// or Gemma 3 4B. Installing persists AppSettings.SelectedVlmModelKind
+    /// <summary>RAM++ — the primary in-scan image tagger (4585-tag multi-label
+    /// ONNX). Optional; when absent the engine falls back to CLIP scene tags,
+    /// so it is NOT (yet) a gate on <see cref="AllInstalled"/>.</summary>
+    public ModelSlot RamPlus { get; }
+    /// <summary>Deep Analyze model — hardware-tiered Qwen2.5-VL 7B / Gemma 3 4B
+    /// / Mistral-Small 3.2. Installing persists AppSettings.SelectedVlmModelKind
     /// so the Deep Analyze tab picks the freshly-installed model by default.</summary>
     public ModelSlot DeepVlm { get; }
     /// <summary> one-button GPU acceleration pack. On NVIDIA the
@@ -102,15 +115,26 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     private Microsoft.UI.Dispatching.DispatcherQueue? _uiDispatcher;
 
     /// <summary>Deep Analyze model the DeepVlm welcome row installs. Tiered to
-    /// the machine by UpdateDeepVlmRecommendation (Qwen 3B vs 7B). Read at click
-    /// time by the slot's installAction; mirrors the Deep Analyze tab default
+    /// the machine by UpdateDeepVlmRecommendation (Gemma 3 4B on weak boxes vs
+    /// Qwen2.5-VL 7B on capable ones). Read at click time by the slot's
+    /// installAction; mirrors the Deep Analyze tab default
     /// (AppSettings.SelectedVlmModelKind).</summary>
-    private string _deepVlmModelKind = "qwen2_5_vl_3b";
+    private string _deepVlmModelKind = "qwen2_5_vl_7b";
+
+    // APP-2: captured on the UI thread at ctor time (the singleton is first
+    // touched during app startup on the UI thread — the same thread on which
+    // it constructs the ModelSlots below, which rely on the same capture). The
+    // no-progress watchdog must marshal slot.Fail back to the UI thread, but it
+    // runs after `await ...ConfigureAwait(false)`, where
+    // DispatcherQueue.GetForCurrentThread() returns null — so it uses this
+    // captured reference rather than the ambient (null) one.
+    private readonly Microsoft.UI.Dispatching.DispatcherQueue? _ui;
 
     private ModelInstallerService()
     {
+        _ui = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
         Clip = new ModelSlot(
-            displayLabel: "MobileCLIP-S2",
+            displayLabel: "CLIP ViT-B/32",
             approxBytes: 220UL * 1024 * 1024,
             // Install both halves of CLIP: the image encoder (mobileclip_s2)
             // and the text encoder (clip_text). The engine's pre-scan check
@@ -123,12 +147,17 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
                 await PrewarmAsync("clip_text").ConfigureAwait(false);
             });
         Arcface = new ModelSlot(
-            displayLabel: "ArcFace MobileFace",
-            approxBytes: 14UL * 1024 * 1024,
+            displayLabel: "Face models (YuNet + SFace)",
+            approxBytes: 39UL * 1024 * 1024,
             installAction: () => PrewarmAsync("arcface_default"));
+        RamPlus = new ModelSlot(
+            displayLabel: "RAM++ image tagger",
+            // ~882 MB fp16 ONNX (bakes the frozen tag-description embeddings in).
+            approxBytes: 925_600_000UL,
+            installAction: () => PrewarmAsync("ram_plus"));
         DeepVlm = new ModelSlot(
-            displayLabel: "Qwen2.5-VL 3B",
-            approxBytes: 3_170_000_000UL,
+            displayLabel: "Qwen2.5-VL 7B",
+            approxBytes: 6_100_000_000UL,
             installAction: async () =>
             {
                 // Persist the hardware-recommended Deep Analyze model so the
@@ -143,12 +172,28 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         // shows "Detecting GPU…" so the user knows it's waiting.
         Accelerator = new ModelSlot(
             displayLabel: "GPU Acceleration Pack",
-            approxBytes: 430UL * 1024 * 1024,
-            installAction: () => PrewarmAsync("cudnn_runtime_x64"));
+            // ORT CUDA provider (~313 MB) + cuDNN (~430 MB). cudart/cublas come
+            // from the llama.cpp-cuda pack / system toolkit.
+            approxBytes: 745UL * 1024 * 1024,
+            // Install cuDNN AND the ORT CUDA provider. The provider
+            // (ort_cuda_x64) goes LAST because it's the completion gate
+            // (AcceleratorSentinelIds): finishing it last means its 100% is the
+            // final event, so the slot lands cleanly on Installed instead of
+            // flickering Installed→Downloading→Installed, and a cuDNN failure
+            // can't leave the slot wrongly "Installed". A prewarm short-circuits
+            // at the engine if files + sentinel are already on disk. The engine's
+            // cuda_provider_present() + ORT_DYLIB_PATH pinning light up the CUDA
+            // EP once the provider lands.
+            installAction: async () =>
+            {
+                await PrewarmAsync("cudnn_runtime_x64").ConfigureAwait(false);
+                await PrewarmAsync("ort_cuda_x64").ConfigureAwait(false);
+            });
         Accelerator.Message = "Detecting GPU…";
 
         Clip.PropertyChanged += OnSlotPropertyChanged;
         Arcface.PropertyChanged += OnSlotPropertyChanged;
+        RamPlus.PropertyChanged += OnSlotPropertyChanged;
         DeepVlm.PropertyChanged += OnSlotPropertyChanged;
         Accelerator.PropertyChanged += OnSlotPropertyChanged;
 
@@ -169,7 +214,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         if (Accelerator.Status == ModelInstallStatus.Installed
             && SentinelExistsForAnyOf(AcceleratorSentinelIds))
         {
-            Accelerator.Message = "cuDNN active — ~15% faster scanning enabled.";
+            Accelerator.Message = "GPU acceleration active — scanning runs on your GPU's native execution provider (up to 3-5x faster than DirectML).";
             return;
         }
         var vendor = (gpuVendor ?? string.Empty).ToLowerInvariant();
@@ -177,7 +222,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         {
             case "nvidia":
                 Accelerator.DisplayLabel = "GPU Acceleration Pack (NVIDIA)";
-                Accelerator.Message = "Unlocks ~15% faster scanning on NVIDIA GPUs (~430 MB).";
+                Accelerator.Message = "Unlocks the CUDA execution provider — up to 3-5x faster ML inference vs DirectML (~745 MB).";
                 if (Accelerator.Status != ModelInstallStatus.Downloading
                     && Accelerator.Status != ModelInstallStatus.Installed)
                 {
@@ -192,13 +237,19 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
                 break;
             case "intel":
                 Accelerator.DisplayLabel = "GPU Acceleration (Intel)";
-                Accelerator.Message = "DirectML is already optimal for your Intel GPU — no install needed.";
+                // OpenVINO (Apache-2.0) auto-installs on Intel when the pack is
+                // available; DirectML runs meanwhile. Pseudo-Installed so no
+                // failing manual button appears before the pack is hosted.
+                Accelerator.Message = "Intel GPU — running on DirectML; OpenVINO acceleration auto-installs when available.";
                 Accelerator.Status = ModelInstallStatus.Installed;
                 Accelerator.Fraction = 1.0;
                 break;
             case "qualcomm":
                 Accelerator.DisplayLabel = "GPU Acceleration (Snapdragon)";
-                Accelerator.Message = "DirectML + QNN already optimal for your Snapdragon GPU.";
+                // QNN's SDK is proprietary (can't redistribute under commercial-
+                // clean), so we never host it — the NPU is used only if the
+                // device already provides QNN; otherwise DirectML.
+                Accelerator.Message = "Snapdragon — DirectML active; the Hexagon NPU (QNN) is used automatically if your device provides it.";
                 Accelerator.Status = ModelInstallStatus.Installed;
                 Accelerator.Fraction = 1.0;
                 break;
@@ -238,7 +289,14 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         // instead of a permanent spinner.
         FailIfDownloading(Clip, "Engine restarted — please retry.");
         FailIfDownloading(Arcface, "Engine restarted — please retry.");
+        // RamPlus + Accelerator were omitted: both reach Downloading (RamPlus is
+        // a gate on AllInstalled/IsBusy), and SeedFromSentinels early-returns for
+        // a still-Downloading slot, so an engine crash mid-download left them
+        // spinning forever with no Retry — and a stuck RamPlus blocks the
+        // "Install all" button + onboarding auto-dismiss permanently.
+        FailIfDownloading(RamPlus, "Engine restarted — please retry.");
         FailIfDownloading(DeepVlm, "Engine restarted — please retry.");
+        FailIfDownloading(Accelerator, "Engine restarted — please retry.");
 
         SeedFromSentinels();
     }
@@ -293,7 +351,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             // pseudo-Installed and are skipped naturally.
             var now = DateTime.UtcNow;
             // CLIP is included — it powers semantic search and emits scene tags.
-            var slotsToInstall = new List<ModelSlot> { Clip, Arcface, DeepVlm };
+            var slotsToInstall = new List<ModelSlot> { Clip, Arcface, RamPlus, DeepVlm };
             if (IncludeAcceleratorInInstallAll())
             {
                 slotsToInstall.Add(Accelerator);
@@ -355,6 +413,27 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
 
     public Task CancelAllAsync() => EngineClient.Instance.CancelPrewarmAsync();
 
+    // Kinds installed by the SAME UI slot. A multi-kind slot's per-row Cancel must
+    // cancel ALL its sub-downloads: slot.CurrentModelKind is only the latest of two
+    // concurrent prewarms, so cancelling just that left the first (mobileclip_s2 /
+    // cudnn_runtime_x64) streaming to completion after the user clicked Cancel.
+    private static readonly string[][] SlotKindGroups =
+    {
+        new[] { "mobileclip_s2", "clip_text" },        // CLIP slot
+        new[] { "cudnn_runtime_x64", "ort_cuda_x64" }, // Accelerator (GPU pack) slot
+    };
+
+    /// Cancel a single slot's in-flight download(s) (the per-row Cancel button), so
+    /// cancelling one row no longer aborts every other concurrent install. For a
+    /// multi-kind slot (CLIP, Accelerator) this cancels every kind the slot owns.
+    public Task CancelModelAsync(string? modelKind)
+    {
+        if (modelKind is null) return EngineClient.Instance.CancelPrewarmAsync(null);
+        var group = SlotKindGroups.FirstOrDefault(g => g.Contains(modelKind));
+        if (group is null) return EngineClient.Instance.CancelPrewarmAsync(modelKind);
+        return Task.WhenAll(group.Select(k => EngineClient.Instance.CancelPrewarmAsync(k)));
+    }
+
     /// <summary>Deep Analyze model recommendation for the welcome-sheet DeepVlm
     /// row, tiered to the machine: a roomy box (≥16 GB RAM or a discrete GPU
     /// with ≥8 GB VRAM) gets Qwen 2.5-VL 7B for the best captions; everything
@@ -371,7 +450,9 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             return;
         }
         bool wants7b = ramGB >= 16.0 || vramMB >= 8000;
-        string kind = wants7b ? "qwen2_5_vl_7b" : "qwen2_5_vl_3b";
+        // Capable boxes get Qwen2.5-VL-7B (Apache); weak boxes get the lighter
+        // Gemma-3-4B. The non-commercial Qwen-3B was removed.
+        string kind = wants7b ? "qwen2_5_vl_7b" : "gemma_3_4b";
         if (_deepVlmModelKind == kind) return;
         _deepVlmModelKind = kind;
         if (wants7b)
@@ -381,8 +462,8 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         }
         else
         {
-            DeepVlm.DisplayLabel = "Qwen2.5-VL 3B";
-            DeepVlm.ApproxBytes = 3_170_000_000UL;
+            DeepVlm.DisplayLabel = "Gemma 3 4B";
+            DeepVlm.ApproxBytes = 3_351_000_000UL;
         }
         DebugLog.Info($"[INSTALL] Deep Analyze recommendation: {DeepVlm.DisplayLabel} (RAM={ramGB:F1} GB, VRAM={vramMB} MB, GPU={gpuVendor ?? "?"})");
     }
@@ -394,7 +475,11 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     {
         try
         {
-            var s = AppViewModel.Instance.Settings;
+            // Route through the shared singleton, NOT a fresh AppSettings.Load():
+            // a fresh instance shares the static debounce CTS, so its Save() cancels
+            // the singleton's pending write and persists a snapshot loaded from disk
+            // that lacks the singleton's in-memory changes (lost update). (audit A8)
+            var s = FileID.ViewModels.AppViewModel.Instance.Settings;
             if (s.SelectedVlmModelKind == kind) return;
             s.SelectedVlmModelKind = kind;
             s.Save();
@@ -422,13 +507,19 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
 
     private void RecomputeAggregates()
     {
+        // RAM++ is the primary in-scan tagger and is now hosted on
+        // Web-World-Wide/ram-plus-onnx (WS5 upload landed), so it gates
+        // onboarding completion alongside CLIP/ArcFace/DeepVlm. (If RAM++ is
+        // ever missing at runtime, tagging still degrades to CLIP scene-tags.)
         AllInstalled =
             Clip.Status == ModelInstallStatus.Installed
             && Arcface.Status == ModelInstallStatus.Installed
+            && RamPlus.Status == ModelInstallStatus.Installed
             && DeepVlm.Status == ModelInstallStatus.Installed;
         IsBusy =
             Clip.Status == ModelInstallStatus.Downloading
             || Arcface.Status == ModelInstallStatus.Downloading
+            || RamPlus.Status == ModelInstallStatus.Downloading
             || DeepVlm.Status == ModelInstallStatus.Downloading;
     }
 
@@ -448,6 +539,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     {
         SeedSlot(Clip, ClipSentinelIds, requireAll: true);
         SeedSlot(Arcface, ArcfaceSentinelIds);
+        SeedSlot(RamPlus, RamPlusSentinelIds);
         SeedSlot(DeepVlm, DeepVlmSentinelIds);
         // Accelerator slot — only flip to Installed if the
         // sentinel exists. Otherwise leave it as
@@ -457,7 +549,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         {
             Accelerator.Status = ModelInstallStatus.Installed;
             Accelerator.Fraction = 1.0;
-            Accelerator.Message = "cuDNN active — ~15% faster scanning enabled.";
+            Accelerator.Message = "GPU acceleration active — scanning runs on your GPU's native execution provider.";
             AcceleratorIsRealInstall = true;
         }
         RecomputeAggregates();
@@ -524,6 +616,15 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         {
             await EngineClient.Instance.WaitForReadyAsync(WaitForReadyTimeout).ConfigureAwait(false);
         }
+        catch (TimeoutException ex)
+        {
+            // A timeout means the engine is still spinning up (cold-start model
+            // load on a slow disk / ARM box), NOT that it crashed — tell the
+            // user to wait a moment and retry rather than implying a failure.
+            DebugLog.Warn($"[INSTALL] WaitForReadyAsync timed out for '{modelKind}': {ex.Message}");
+            slot.Fail("Engine still starting up — give it a moment, then retry.");
+            return;
+        }
         catch (Exception ex)
         {
             DebugLog.Warn($"[INSTALL] WaitForReadyAsync threw for '{modelKind}': {ex.Message}");
@@ -567,10 +668,14 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     private void ScheduleNoProgressWatchdog(ModelSlot slot, string modelKind, CancellationToken ct = default)
     {
         var sentAt = DateTime.UtcNow;
-        // Use the dispatcher captured on a UI-thread entry point. This method
-        // runs after ConfigureAwait(false) hops, so GetForCurrentThread() here
-        // would return null and the watchdog could never marshal slot.Fail().
-        var ui = _uiDispatcher;
+        // This method is reached after `await ...ConfigureAwait(false)`, so the
+        // ambient DispatcherQueue.GetForCurrentThread() would return null here
+        // and silently disable the watchdog (a genuinely stuck install would
+        // then never surface "No response — try again"). slot.Fail mutates
+        // x:Bind-observed state, so it must marshal to the UI thread: prefer
+        // the dispatcher captured at the public install entry points, falling
+        // back to the ctor-time capture (APP-2).
+        var ui = _uiDispatcher ?? _ui;
         _ = Task.Run(async () =>
         {
             try
@@ -627,12 +732,19 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             case "arcface_iresnet50":
             case "arcface_mobileface":
                 return Arcface;
-            case "qwen2_5_vl_3b":
             case "qwen2_5_vl_7b":
             case "gemma_3_4b":
+            case "mistral_small_3_2":
+            case "mistral-small-3.2":
                 return DeepVlm;
-            // cuDNN routes to the welcome-sheet Accelerator slot.
+            case "ram_plus":
+            case "ram-plus":
+                return RamPlus;
+            // The CUDA provider pack + cuDNN (NVIDIA) and the OpenVINO pack
+            // (Intel) all route to the single Accelerator slot.
+            case "ort_cuda_x64":
             case "cudnn_runtime_x64":
+            case "ort_openvino_x64":
                 return Accelerator;
             default:
                 return null;
@@ -667,10 +779,12 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         if (path.Contains("MobileCLIP", StringComparison.OrdinalIgnoreCase)) return Clip;
         if (path.Contains("arcface", StringComparison.OrdinalIgnoreCase)) return Arcface;
         if (path.Contains("Qwen", StringComparison.OrdinalIgnoreCase)
-            || path.Contains("Gemma", StringComparison.OrdinalIgnoreCase))
+            || path.Contains("Gemma", StringComparison.OrdinalIgnoreCase)
+            || path.Contains("Mistral", StringComparison.OrdinalIgnoreCase))
         {
             return DeepVlm;
         }
+        if (path.Contains("ram_plus", StringComparison.OrdinalIgnoreCase)) return RamPlus;
         return null;
     }
 
@@ -761,11 +875,29 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             kind == "model_download_failed"
             || kind == "zip_extract_failed"
             || kind == "pack_not_available"
+            // A stale engine that doesn't know a model_kind, or one that can't
+            // resolve its models dir, stamps the originating model id on the
+            // error. Route both to the install slot so the welcome row flips to
+            // Failed with the engine's actionable message instead of spinning
+            // forever behind a raw red toast.
+            || kind == "unknown_model"
+            || kind == "models_dir_unavailable"
             || kind.StartsWith("prewarm_", StringComparison.OrdinalIgnoreCase);
         if (!isInstallError) return;
 
-        // prewarm_cancelled is user-initiated; don't surface as a failure.
-        if (kind == "prewarm_cancelled") return;
+        // prewarm_cancelled is user-initiated: not a failure (no red Retry toast),
+        // but the slot must still LEAVE Downloading or it sticks at "Cancelling…"
+        // forever — wedging IsBusy/AllInstalled (and the Install-all gate). Reset it
+        // to NotInstalled so the user can re-install. ModelSlot.Set marshals to the
+        // UI thread internally, so this is safe off the engine-event thread.
+        if (kind == "prewarm_cancelled")
+        {
+            if (!string.IsNullOrEmpty(error.ModelKind))
+            {
+                SlotFor(error.ModelKind)?.ResetForRetry();
+            }
+            return;
+        }
 
         // D-track fix: route by error.ModelKind first. The engine now stamps
         // every install-failure event with the originating model id, so we
@@ -780,6 +912,16 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             DebugLog.Warn($"[INSTALL] engine error '{kind}' has no routable slot (modelKind={error.ModelKind ?? "<null>"}, path={error.Path ?? "<null>"})");
             return;
         }
+        // OpenVINO is an OPTIONAL Intel accelerator that auto-installs in the
+        // background, and its pack may not be hosted yet (404) — DirectML is the
+        // always-fine fallback. Don't alarm the user with a red Failed card;
+        // log and leave the Accelerator slot on its DirectML (pseudo-Installed)
+        // state. (CUDA, by contrast, is hosted + user-installed, so it surfaces.)
+        if (string.Equals(error.ModelKind, "ort_openvino_x64", StringComparison.OrdinalIgnoreCase))
+        {
+            DebugLog.Info($"[INSTALL] OpenVINO pack unavailable ({kind}); staying on DirectML. {error.Message}");
+            return;
+        }
         DebugLog.Info($"[INSTALL] engine error → {slot.DisplayLabel}.Fail(): {error.Message}");
         slot.Fail(error.Message);
     }
@@ -788,6 +930,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     {
         if (ReferenceEquals(slot, Instance.Clip)) return ClipSentinelIds;
         if (ReferenceEquals(slot, Instance.Arcface)) return ArcfaceSentinelIds;
+        if (ReferenceEquals(slot, Instance.RamPlus)) return RamPlusSentinelIds;
         if (ReferenceEquals(slot, Instance.DeepVlm)) return DeepVlmSentinelIds;
         if (ReferenceEquals(slot, Instance.Accelerator)) return AcceleratorSentinelIds;
         return Array.Empty<string>();
@@ -823,6 +966,21 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     {
         if (EqualityComparer<T>.Default.Equals(field, value)) return;
         field = value;
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        // x:Bind reads these aggregates on the UI thread, so PropertyChanged must
+        // fire there. Reset()/SeedFromSentinels (and other engine-driven paths)
+        // can run on a thread-pool continuation; marshal through the captured UI
+        // dispatcher to avoid an RPC_E_WRONG_THREAD native fast-fail — the same
+        // pattern ModelSlot.Set uses. (audit A2)
+        var handler = PropertyChanged;
+        if (handler is null) return;
+        var args = new PropertyChangedEventArgs(propertyName);
+        if (_ui is null || _ui.HasThreadAccess)
+        {
+            handler(this, args);
+        }
+        else
+        {
+            _ui.TryEnqueue(() => handler(this, args));
+        }
     }
 }

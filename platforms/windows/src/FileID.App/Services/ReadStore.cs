@@ -18,6 +18,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -25,12 +26,31 @@ using Microsoft.Data.Sqlite;
 
 namespace FileID.Services;
 
-internal sealed class ReadStore : IAsyncDisposable, IDisposable
+internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyPropertyChanged
 {
     private readonly string _dbPath;
     private readonly string _connString;
     private SqliteConnection? _connection;
     private readonly SemaphoreSlim _gate = new(1, 1);
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    /// <summary>Humanized last error from <see cref="OpenAsync"/> — a DB-open
+    /// timeout, permission denial, lock, or corruption. Null when the store
+    /// opened cleanly (or is still waiting for the engine's first-scan DB).
+    /// Callers (LibraryViewModel / search) bind/read this to surface a
+    /// dismissible message instead of an indistinguishable silent-empty grid.</summary>
+    private string? _lastOpenError;
+    public string? LastOpenError
+    {
+        get => _lastOpenError;
+        private set
+        {
+            if (_lastOpenError == value) return;
+            _lastOpenError = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(LastOpenError)));
+        }
+    }
 
     public ReadStore(string dbPath)
     {
@@ -83,25 +103,56 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
                 }
                 catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                 {
+                    // A 5s stall on the DB path is an actionable degradation
+                    // (disconnected SMB share / unplugged USB), not the silent
+                    // first-launch "DB not yet created" case — surface it so the
+                    // caller shows a dismissible "drive unreachable" message
+                    // rather than an indistinguishable empty grid.
                     DebugLog.Warn($"ReadStore.OpenAsync: File.Exists timed out for {PathRedactor.Redact(dbPath)}; treating as missing.");
+                    LastOpenError = "FileID couldn't reach the library folder (the drive may be disconnected or slow). Check the drive is connected and try again.";
                     return;
                 }
             }
             if (!dbExists)
             {
+                // Genuine first-launch: the engine hasn't created the DB yet.
+                // Stay silent (no error) — this is an expected transient state.
                 return;
             }
-            var conn = new SqliteConnection(_connString);
-            await conn.OpenAsync(ct).ConfigureAwait(false);
-            // Match the engine's PRAGMA shape so reads see the same cache /
-            // mmap behavior as the writer (these are no-ops on read-only,
-            // but documented for parity).
-            using (var cmd = conn.CreateCommand())
+            SqliteConnection? conn = null;
+            try
             {
-                cmd.CommandText = "PRAGMA query_only = ON;";
-                await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                conn = new SqliteConnection(_connString);
+                await conn.OpenAsync(ct).ConfigureAwait(false);
+                // Match the engine's PRAGMA shape so reads see the same cache /
+                // mmap behavior as the writer (these are no-ops on read-only,
+                // but documented for parity).
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = "PRAGMA query_only = ON;";
+                    await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                }
+                _connection = conn;
+                conn = null;
+                LastOpenError = null;
             }
-            _connection = conn;
+            catch (OperationCanceledException)
+            {
+                conn?.Dispose();
+                throw; // caller-initiated cancellation — not an error to surface
+            }
+            catch (Exception ex)
+            {
+                // DB open / first-PRAGMA failure: locked (BUSY), permission
+                // denied (CANTOPEN), corrupt image, full disk, IO error. These
+                // used to propagate raw and get swallowed by the caller's bare
+                // catch — surface a humanized, actionable message AND rethrow so
+                // an awaiting caller still observes the failure.
+                conn?.Dispose();
+                LastOpenError = SqliteErrorTranslator.Humanize(ex);
+                DebugLog.Warn($"ReadStore.OpenAsync: open failed for {PathRedactor.Redact(_dbPath)}: {ex.Message}");
+                throw;
+            }
         }
         finally
         {
@@ -114,7 +165,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
     /// same match-expression shape as macOS — whitespace-joined terms.
     /// </summary>
     public async Task<IReadOnlyList<FileRow>> SearchAsync(
-        string query, int limit, CancellationToken ct)
+        string query, int limit, CancellationToken ct, string? kind = null)
     {
         if (_connection == null)
         {
@@ -123,7 +174,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
         var trimmedSearch = query?.Trim();
         if (string.IsNullOrEmpty(trimmedSearch))
         {
-            return await RecentAsync(limit, ct).ConfigureAwait(false);
+            return await RecentAsync(limit, ct, kind).ConfigureAwait(false);
         }
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -140,13 +191,15 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             var like = $"%{escapedSearch}%";
             var match = BuildMatchExpression(trimmedSearch);
             var hasMatch = !string.IsNullOrEmpty(match);
+            // PAR-116: filter kind in SQL (before LIMIT) so a kind-restricted grid fills.
+            var kindClause = string.IsNullOrEmpty(kind) || kind == "all" ? "" : " AND f.kind = $kind";
 
             cmd.CommandText = $"""
             SELECT f.id, f.path_text, f.kind, f.size_bytes, f.modified_at, f.has_faces, f.has_text,
                    (SELECT GROUP_CONCAT(tag, '|') FROM (SELECT tag FROM tags WHERE file_id = f.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, score DESC, rowid)) AS auto_tags,
                    f.vlm_proposed_name
             FROM files f
-            WHERE f.failed = 0
+            WHERE f.failed = 0{kindClause}
               AND (
                    {(hasMatch ? "f.id IN (SELECT rowid FROM ocr_fts WHERE ocr_fts MATCH $match) OR f.id IN (SELECT rowid FROM doc_fts WHERE doc_fts MATCH $match)" : "0")}
                    OR f.path_text LIKE $like ESCAPE '\'
@@ -161,7 +214,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
                           OR p.last_name LIKE $like ESCAPE '\'
                    )
               )
-            ORDER BY f.modified_at DESC NULLS LAST
+            ORDER BY f.scanned_at DESC, f.id DESC
             LIMIT $limit
             """;
 
@@ -171,6 +224,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             }
             cmd.Parameters.AddWithValue("$like", like);
             cmd.Parameters.AddWithValue("$limit", limit);
+            if (kindClause.Length > 0) cmd.Parameters.AddWithValue("$kind", kind!);
 
             using (var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false))
             {
@@ -189,10 +243,11 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
     }
 
     /// <summary>
-    /// Most-recently-modified files as a fallback when the search box is
-    /// empty (or when CLIP isn't installed yet).
+    /// Most-recently-scanned files as a fallback when the search box is empty
+    /// (or when CLIP isn't installed yet). scanned_at DESC puts freshly scanned
+    /// files at the TOP (macOS parity); id DESC breaks sub-second ties.
     /// </summary>
-    public async Task<IReadOnlyList<FileRow>> RecentAsync(int limit, CancellationToken ct)
+    public async Task<IReadOnlyList<FileRow>> RecentAsync(int limit, CancellationToken ct, string? kind = null)
     {
         if (_connection == null) return Array.Empty<FileRow>();
         await _gate.WaitAsync(ct).ConfigureAwait(false);
@@ -201,15 +256,21 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             if (_connection == null) return Array.Empty<FileRow>();
             var rows = new List<FileRow>(limit);
             using var cmd = _connection.CreateCommand();
-            cmd.CommandText = """
+            // PAR-116: filter kind in SQL (before LIMIT). `failed = 0` is the
+            // BASE predicate (matches SearchAsync / SemanticSearchAsync and the
+            // macOS reference) so files the engine flagged failed (corrupt /
+            // unreadable / permission-denied) don't leak into the default grid as
+            // broken placeholder tiles and inflate the count-vs-grid mismatch.
+            var kindClause = string.IsNullOrEmpty(kind) || kind == "all" ? "" : " AND kind = $kind";
+            cmd.CommandText = $"""
                 SELECT id, path_text, kind, size_bytes, modified_at, has_faces, has_text,
                        (SELECT GROUP_CONCAT(tag, '|') FROM (SELECT tag FROM tags WHERE file_id = files.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, score DESC, rowid)) AS auto_tags,
                        vlm_proposed_name
-                FROM files
-                WHERE failed = 0
-                ORDER BY modified_at DESC NULLS LAST LIMIT $limit
+                FROM files WHERE failed = 0{kindClause}
+                ORDER BY scanned_at DESC, id DESC LIMIT $limit
                 """;
             cmd.Parameters.AddWithValue("$limit", limit);
+            if (kindClause.Length > 0) cmd.Parameters.AddWithValue("$kind", kind!);
             using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
             {
@@ -228,7 +289,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
     /// swaps in an HNSW or IVF index if benchmarks demand it.
     /// </summary>
     public async Task<IReadOnlyList<FileRowWithScore>> SemanticSearchAsync(
-        float[] queryEmbedding, int limit, CancellationToken ct)
+        float[] queryEmbedding, int limit, CancellationToken ct, string? kind = null)
     {
         if (_connection == null || queryEmbedding.Length == 0)
         {
@@ -240,7 +301,12 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             if (_connection == null) return Array.Empty<FileRowWithScore>();
             var heap = new PriorityQueue<FileRowWithScore, float>(limit);
             using var cmd = _connection.CreateCommand();
-            cmd.CommandText = """
+            // PAR-117: exclude failed files — a corrupt file with a stale CLIP
+            // embedding must not surface in semantic results. PAR-116: filter by
+            // kind in SQL so a kind-restricted grid isn't under-filled by the
+            // post-fetch C# filter.
+            var kindClause = string.IsNullOrEmpty(kind) || kind == "all" ? "" : " AND f.kind = $kind";
+            cmd.CommandText = $"""
             SELECT f.id, f.path_text, f.kind, f.size_bytes, f.modified_at,
                    f.has_faces, f.has_text,
                    (SELECT GROUP_CONCAT(tag, '|') FROM (SELECT tag FROM tags WHERE file_id = f.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, score DESC, rowid)) AS auto_tags,
@@ -248,22 +314,33 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
                    e.embedding
             FROM clip_embeddings e
             JOIN files f ON f.id = e.file_id
-            WHERE f.failed = 0
+            WHERE f.failed = 0{kindClause}
             """;
+            if (kindClause.Length > 0) cmd.Parameters.AddWithValue("$kind", kind!);
             using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
             {
                 var blob = (byte[])reader.GetValue(9);
+                // Skip dimension-mismatched/corrupt embeddings instead of
+                // scoring them 0 and occupying a result slot — parity with the
+                // macOS reference guard (#15).
+                if (blob.Length != queryEmbedding.Length * 4) continue;
                 float score = DotProduct(queryEmbedding, blob);
-                var row = ReadRow(reader);
+                // Materialize the FileRow (GROUP_CONCAT split + List + record)
+                // only for rows the bounded top-K heap actually retains — the
+                // vast majority of embedding rows are discarded, so ReadRow on
+                // every row was pure Gen0 churn. SimilarFilesAsync already heaps
+                // ids and fetches survivors afterward; mirror that here. Reading
+                // by column index stays valid until the next ReadAsync, so a lazy
+                // materialize inside the enqueue branches is byte-identical.
                 if (heap.Count < limit)
                 {
-                    heap.Enqueue(new FileRowWithScore(row, score), score);
+                    heap.Enqueue(new FileRowWithScore(ReadRow(reader), score), score);
                 }
                 else if (heap.TryPeek(out _, out var minScore) && score > minScore)
                 {
                     heap.Dequeue();
-                    heap.Enqueue(new FileRowWithScore(row, score), score);
+                    heap.Enqueue(new FileRowWithScore(ReadRow(reader), score), score);
                 }
             }
             // Heap holds best `limit` ordered worst→best; reverse to best→worst.
@@ -322,6 +399,8 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
                 {
                     var fid = reader.GetInt64(0);
                     var blob = (byte[])reader.GetValue(1);
+                    // Skip dimension-mismatched embeddings (parity w/ macOS, #15).
+                    if (blob.Length != seedVec.Length * 4) continue;
                     float score = DotProduct(seedVec, blob);
 
                     if (heap.Count < limit)
@@ -484,7 +563,22 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
             var raw = reader.GetString(7);
             if (!string.IsNullOrEmpty(raw))
             {
-                tags = raw.Split('|', StringSplitOptions.RemoveEmptyEntries);
+                // Drop generic/medium RAM++ tags that read as noise on a card
+                // (mirrors ram_plus.rs SUPPRESSED_TAGS) so libraries scanned
+                // before the engine-side filter don't surface them. The file
+                // *is* a photo; faces are surfaced by the People tab.
+                var parts = raw.Split('|', StringSplitOptions.RemoveEmptyEntries);
+                var kept = new System.Collections.Generic.List<string>(parts.Length);
+                foreach (var p in parts)
+                {
+                    var lower = p.Trim().ToLowerInvariant();
+                    if (lower is "image" or "photo" or "photograph" or "photography" or "picture" or "face")
+                    {
+                        continue;
+                    }
+                    kept.Add(p);
+                }
+                tags = kept;
             }
         }
         // Optional 9th column: vlm_proposed_name (smart-rename
@@ -560,20 +654,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable
         for (; i < qSpan.Length; i++)
         {
             acc += qSpan[i] * blobFloats[i];
-        }
-        return acc;
-    }
-
-    // Legacy per-element loop kept for reference / debugging. Not used.
-    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1859", Justification = "Reference impl")]
-    private static float DotProductScalar(float[] q, byte[] blob)
-    {
-        if (blob.Length != q.Length * 4) return 0f;
-        float acc = 0f;
-        for (int i = 0; i < q.Length; i++)
-        {
-            float v = BitConverter.ToSingle(blob, i * 4);
-            acc += q[i] * v;
         }
         return acc;
     }

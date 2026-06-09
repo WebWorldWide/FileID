@@ -24,23 +24,40 @@ internal sealed class UndoStack : INotifyPropertyChanged
 
     private const int Capacity = 16;
     private readonly LinkedList<UndoEntry> _entries = new();
+    // APP-1: `Push` is invoked from EngineClient PropertyChanged handlers (the
+    // "untrusted" engine-event path) while `UndoAsync`/`Clear`/`CanUndo`/
+    // `TopLabel` run on the UI thread. A LinkedList is not thread-safe, so the
+    // unsynchronized mix could corrupt list pointers (NRE / InvalidOperation)
+    // and fast-fail the process. All `_entries` access is now under `_gate`;
+    // the async reverse closure runs OUTSIDE the lock.
+    private readonly object _gate = new();
 
-    public bool CanUndo => _entries.Count > 0;
-    public string TopLabel => _entries.Count == 0 ? string.Empty : _entries.First!.Value.Label;
+    public bool CanUndo { get { lock (_gate) { return _entries.Count > 0; } } }
+    public string TopLabel
+    {
+        get { lock (_gate) { return _entries.Count == 0 ? string.Empty : _entries.First!.Value.Label; } }
+    }
 
     public void Push(string label, Func<Task<bool>> reverse)
     {
-        _entries.AddFirst(new UndoEntry(label, reverse));
-        while (_entries.Count > Capacity) _entries.RemoveLast();
+        lock (_gate)
+        {
+            _entries.AddFirst(new UndoEntry(label, reverse));
+            while (_entries.Count > Capacity) _entries.RemoveLast();
+        }
         OnChanged();
     }
 
     /// <summary>Pop + invoke. Returns the label that was undone, or null on failure / empty.</summary>
     public async Task<string?> UndoAsync()
     {
-        if (_entries.Count == 0) return null;
-        var entry = _entries.First!.Value;
-        _entries.RemoveFirst();
+        UndoEntry entry;
+        lock (_gate)
+        {
+            if (_entries.Count == 0) return null;
+            entry = _entries.First!.Value;
+            _entries.RemoveFirst();
+        }
         OnChanged();
         try
         {
@@ -56,8 +73,11 @@ internal sealed class UndoStack : INotifyPropertyChanged
 
     public void Clear()
     {
-        if (_entries.Count == 0) return;
-        _entries.Clear();
+        lock (_gate)
+        {
+            if (_entries.Count == 0) return;
+            _entries.Clear();
+        }
         OnChanged();
     }
 
@@ -99,9 +119,14 @@ internal sealed class UndoStack : INotifyPropertyChanged
 
             if (System.Threading.Interlocked.CompareExchange(ref consumed, 1, 0) != 0) return;
 
+            // Action is "trashFiles:<uuid>". A missing/empty suffix (no colon,
+            // or a trailing ':' with nothing after it) yields no batch id; skip
+            // rather than push an undo entry whose reverse can never resolve.
+            // IndexOf+Substring is bounds-safe — never throws on a malformed suffix.
             var colonIdx = bar.Action.IndexOf(':');
             var batchId = colonIdx >= 0 ? bar.Action.Substring(colonIdx + 1) : string.Empty;
             ec.PropertyChanged -= once;
+            if (batchId.Length == 0) return;
             Instance.Push(undoLabel, () => reverse(batchId));
         };
         ec.PropertyChanged += once;

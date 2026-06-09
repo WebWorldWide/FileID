@@ -12,6 +12,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:vm="using:FileID.ViewModels"
     mc:Ignorable="d"
     MinWidth="640"
     MinHeight="440">
@@ -25,6 +26,7 @@
 
         <StackPanel Grid.Row="0" Spacing="6">
             <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                       AutomationProperties.HeadingLevel="Level1"
                        Text="Suggested merges" />
             <TextBlock x:Name="HeaderText"
                        Style="{StaticResource CaptionTextBlockStyle}"
@@ -36,10 +38,64 @@
         <ScrollViewer Grid.Row="1"
                       VerticalScrollBarVisibility="Auto"
                       HorizontalScrollMode="Disabled">
-            <ItemsRepeater x:Name="PairRepeater">
+            <ItemsRepeater x:Name="PairRepeater"
+                           ItemsSource="{x:Bind _rows, Mode=OneWay}">
                 <ItemsRepeater.Layout>
                     <StackLayout Orientation="Vertical" Spacing="10" />
                 </ItemsRepeater.Layout>
+                <ItemsRepeater.ItemTemplate>
+                    <DataTemplate x:DataType="vm:MergeSuggestionVm">
+                        <Grid Padding="12,10,12,10"
+                              CornerRadius="10"
+                              Background="#33141414"
+                              AutomationProperties.Name="{x:Bind Title}"
+                              Opacity="{x:Bind RowOpacity, Mode=OneWay}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+
+                            <Border Grid.Column="0"
+                                    Width="80" Height="80" CornerRadius="80"
+                                    Background="{ThemeResource SubtleFillColorTertiaryBrush}">
+                                <Image Source="{x:Bind SourceFaceImage, Mode=OneTime}"
+                                       Stretch="UniformToFill" Width="80" Height="80" />
+                            </Border>
+                            <Border Grid.Column="1"
+                                    Width="80" Height="80" CornerRadius="80" Margin="6,0,0,0"
+                                    Background="{ThemeResource SubtleFillColorTertiaryBrush}">
+                                <Image Source="{x:Bind DestFaceImage, Mode=OneTime}"
+                                       Stretch="UniformToFill" Width="80" Height="80" />
+                            </Border>
+
+                            <StackPanel Grid.Column="2"
+                                        Margin="14,0,14,0"
+                                        VerticalAlignment="Center">
+                                <TextBlock Text="{x:Bind Title}"
+                                           Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                <TextBlock Text="{x:Bind SimilarityText}"
+                                           Style="{StaticResource CaptionTextBlockStyle}"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            </StackPanel>
+
+                            <Button Grid.Column="3"
+                                    Content="Different people"
+                                    Margin="0,0,8,0"
+                                    IsEnabled="{x:Bind ActionsEnabled, Mode=OneWay}"
+                                    AutomationProperties.HelpText="Mark this pair as different people so it isn't suggested again."
+                                    Click="OnDifferentClicked" />
+                            <Button Grid.Column="4"
+                                    Content="Merge"
+                                    Style="{StaticResource AccentButtonStyle}"
+                                    IsEnabled="{x:Bind ActionsEnabled, Mode=OneWay}"
+                                    AutomationProperties.HelpText="Merge this pair of clusters into one person."
+                                    Click="OnMergeClicked" />
+                        </Grid>
+                    </DataTemplate>
+                </ItemsRepeater.ItemTemplate>
             </ItemsRepeater>
         </ScrollViewer>
 

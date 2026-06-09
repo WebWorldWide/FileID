@@ -56,13 +56,23 @@ public enum IdentityClustering {
         /// coverage to connect each face to its same-person neighbors.
         public let kNN: Int
 
+        // Defaults calibrated on-hardware for SFace (128-d) — the commercial-clean
+        // embedder that replaced ArcFace (512-d). SFace's cosine distribution
+        // differs: a known single identity (studio portraits) clusters at mean
+        // cosine-to-centroid ~0.93, while chained mega-blobs sit ~0.50. Pass 1's
+        // single-linkage connected-components chains different people through
+        // bridge faces unless its threshold sits well above the verification
+        // boundary (OpenCV SFace EER ≈ 0.363), so pass1 is tight (0.66) and the
+        // Pass-3 split floor sits in the genuine/chained gap (0.60). Mirrors the
+        // Windows `identity_clustering.rs` calibration (largest cluster on a
+        // 1475-face library: 90% → 7%). PROVISIONAL — fine-tune on a labeled set.
         public init(
-            pass1Cosine: Float = 0.55,
-            pass2Cosine: Float = 0.45,
-            pass2Margin: Float = 0.05,
-            pass3VarianceThreshold: Float = 0.05,
-            pass3MinMeanCosine: Float = 0.50,
-            pass3MaxSplits: Int = 3,
+            pass1Cosine: Float = 0.66,
+            pass2Cosine: Float = 0.54,
+            pass2Margin: Float = 0.10,
+            pass3VarianceThreshold: Float = 0.04,
+            pass3MinMeanCosine: Float = 0.60,
+            pass3MaxSplits: Int = 7,
             kNN: Int = 10
         ) {
             self.pass1Cosine = pass1Cosine

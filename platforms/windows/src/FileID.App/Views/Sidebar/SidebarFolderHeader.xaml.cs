@@ -131,9 +131,9 @@ public sealed partial class SidebarFolderHeader : UserControl
             var dialog = new ContentDialog
             {
                 XamlRoot = XamlRoot,
-                Title = "Wipe library + rescan?",
-                Content = "This deletes everything FileID has learned about this folder — tags, face clusters, captions, smart names. The folder itself isn't touched. After wiping, FileID will rescan from scratch.\n\nThis can't be undone.",
-                PrimaryButtonText = "Wipe and rescan",
+                Title = "Wipe everything?",
+                Content = "This deletes everything FileID has learned — tags, face clusters, captions, smart names — and returns the app to a clean slate. Your actual files are never touched, and your downloaded AI models are kept.\n\nThis can't be undone.",
+                PrimaryButtonText = "Wipe",
                 CloseButtonText = "Cancel",
                 DefaultButton = ContentDialogButton.Close,
             };
@@ -186,6 +186,34 @@ public sealed partial class SidebarFolderHeader : UserControl
         catch (Exception ex)
         {
             DebugLog.Warn("[WIPE] ResetForWipe threw (non-fatal): " + ex.Message);
+        }
+
+        // Preferred path: ask the running engine to wipe in-process. It owns
+        // the only SQLite handle, so truncating tables there can't hit the
+        // "file in use by another process" race the app-side delete did — no
+        // shutdown/restart. On success we go straight to a fresh rescan.
+        if (EngineClient.Instance.State == EngineClient.LifecycleState.Ready)
+        {
+            try
+            {
+                DebugLog.Info("[WIPE] engine-side wipeLibrary");
+                var wipeResult = await EngineClient.Instance.WipeLibraryAndWaitAsync(TimeSpan.FromSeconds(30));
+                if (wipeResult.Ok)
+                {
+                    DebugLog.Info("[WIPE] engine confirmed libraryWiped");
+                    await FinishWipeAsync(success: true);
+                    return;
+                }
+                DebugLog.Warn("[WIPE] engine wipe ok=false: " + (wipeResult.Message ?? "(no message)") + " — using fallback");
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn("[WIPE] engine-side wipe failed; using fallback: " + ex.Message);
+            }
+        }
+        else
+        {
+            DebugLog.Info($"[WIPE] engine not Ready (state={EngineClient.Instance.State}); using fallback wipe");
         }
 
         DebugLog.Info("[WIPE] stage 2: shutdown engine");
@@ -261,13 +289,36 @@ public sealed partial class SidebarFolderHeader : UserControl
             DebugLog.Warn("[WIPE] stage 4 (StartAsync) threw: " + ex);
         }
 
-        if (deleteError is not null)
+        await FinishWipeAsync(success: deleteError is null, failureDetail: deleteError);
+    }
+
+    /// <summary>Final step of a wipe: reset the app to its first-run clean
+    /// state and tell the user. We deliberately do NOT rescan — "Wipe" leaves
+    /// the library empty until the user picks a folder again. Clearing
+    /// FolderPath nulls LastFolderPath/LastFolderDisplay in settings and raises
+    /// HasFolder, which drives the sidebar back to the empty picker (the same
+    /// path "Clear folder" takes). Downloaded models under %LOCALAPPDATA%\FileID\
+    /// Models are intentionally kept — they're not library state and are
+    /// expensive to re-download.</summary>
+    private async Task FinishWipeAsync(bool success, string? failureDetail = null)
+    {
+        try { AppViewModel.Instance.FolderPath = null; }
+        catch (Exception ex) { DebugLog.Warn("[WIPE] clearing folder threw (non-fatal): " + ex.Message); }
+
+        if (success)
+        {
+            DebugLog.Info("[WIPE] complete — reset to clean state");
+            await ShowAlertAsync(
+                "Library wiped",
+                "FileID is back to a clean slate. Your files and downloaded models are untouched — pick a folder whenever you want to start a fresh scan.");
+        }
+        else
         {
             await ShowAlertAsync(
                 "Wipe partially failed",
-                $"Couldn't delete DB files: {deleteError}\n\n" +
-                "The engine has been restarted, but the old library state may still be present. " +
-                "If a scan still surfaces old data, close FileID, delete " +
+                $"Couldn't delete some database files: {failureDetail}\n\n" +
+                "The engine has been restarted and the folder cleared, but old library data may still be present. " +
+                "If a later scan surfaces old data, close FileID, delete " +
                 "%LOCALAPPDATA%\\FileID\\fileid.sqlite manually, and relaunch.");
         }
     }
@@ -278,16 +329,25 @@ public sealed partial class SidebarFolderHeader : UserControl
     // the caller's try/catch (which surfaces the user-visible error dialog).
     private static async Task TryDeleteWithRetryAsync(string path)
     {
-        for (int attempt = 0; attempt < 3; attempt++)
+        // The engine-side wipeLibrary path avoids the post-exit FILE_OBJECT
+        // race entirely; this retry only backstops the fallback delete.
+        // Exponential backoff (~3 s total) gives the kernel ample time to
+        // release the handle before the IOException propagates to the caller.
+        const int maxAttempts = 6;
+        for (int attempt = 0; attempt < maxAttempts; attempt++)
         {
             try
             {
                 if (System.IO.File.Exists(path)) System.IO.File.Delete(path);
                 return;
             }
-            catch (System.IO.IOException) when (attempt < 2)
+            catch (System.IO.IOException) when (attempt < maxAttempts - 1)
             {
-                await Task.Delay(200);
+                await Task.Delay(100 * (1 << attempt));
+            }
+            catch (UnauthorizedAccessException) when (attempt < maxAttempts - 1)
+            {
+                await Task.Delay(100 * (1 << attempt));
             }
         }
     }

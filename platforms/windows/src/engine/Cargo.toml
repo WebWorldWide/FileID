@@ -1,5 +1,10 @@
 [package]
 name = "fileid-engine"
+# Canonical product version lives in platforms/windows/VERSION; the engine
+# mirrors it here because Cargo can't read an external file without a build
+# script (no new deps) and exposes its own version via CARGO_PKG_VERSION
+# (main.rs / hardware.rs). Keep in sync — the MSI build (FileID.Msi.wixproj)
+# cross-checks this literal against VERSION and fails the build on drift.
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.90"
@@ -231,7 +236,13 @@ opt-level     = 3
 lto           = "fat"
 codegen-units = 1
 strip         = "symbols"
-panic         = "abort"
+# panic = "unwind" (the default) on purpose, NOT "abort". The stdio loop
+# dispatches every IPC command handler on a bare `tokio::spawn` /
+# `spawn_blocking` (main.rs). Under unwind, a panic in one handler unwinds
+# just that task — tokio surfaces it as a JoinError and the engine keeps
+# serving other commands. Under "abort" the panic killed the whole process,
+# turning any reachable handler panic into a full-engine crash (B7). Do not
+# re-add panic = "abort".
 
 [profile.release-debuginfo]
 inherits = "release"

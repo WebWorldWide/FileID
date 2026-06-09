@@ -30,6 +30,13 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     /// in-flight ClipSearchService.SearchAsync resumes against a disposed
     /// service → ObjectDisposedException escapes to AppDomain.Unhandled".</summary>
     private readonly CancellationTokenSource _disposalCts = new();
+    // Refresh coordination (audit A4/A5): every public refresh entry point bumps
+    // _refreshGen and captures it; ApplyOnUi discards a result whose generation is
+    // no longer current, so a slow earlier refresh can't clobber the latest grid.
+    // _activeLoads counts in-flight refreshes so the spinner stays on until the
+    // LAST one finishes (an earlier finally no longer clears it prematurely).
+    private long _refreshGen;
+    private int _activeLoads;
     private string _query = string.Empty;
     private string _kindFilter = "all";
     private bool _isLoading;
@@ -41,11 +48,30 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         _store = store;
         _clip = clip;
         _ui = ui;
+        // ReadStore.LastOpenError / ClipSearchService.LastSearchError carry
+        // humanized open/search failures but raise PropertyChanged off the UI
+        // thread (both run with ConfigureAwait(false)). Surface them into
+        // ErrorMessage — which StatusText reads — marshaled to the UI thread, so a
+        // DB-open or search failure shows the message instead of an indistinguishable
+        // empty grid. This also covers the path where OpenAsync throws and the view's
+        // Loaded handler skips RefreshAsync (ErrorMessage would otherwise never be set).
+        _store.PropertyChanged += OnServiceErrorChanged;
+        _clip.PropertyChanged += OnServiceErrorChanged;
         // Per-tile PropertyChanged subscription happens via this hook —
         // FileTile only raises IsSelected on itself, so without forwarding
         // here the VM's SelectedCount stays stale and the bulk-action
         // toolbar visibility breaks.
         Items.CollectionChanged += OnItemsCollectionChanged;
+    }
+
+    private void OnServiceErrorChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is not (nameof(ReadStore.LastOpenError) or nameof(ClipSearchService.LastSearchError)))
+            return;
+        // Prefer the open error (more fundamental) over a transient search error.
+        var msg = !string.IsNullOrEmpty(_store.LastOpenError) ? _store.LastOpenError : _clip.LastSearchError;
+        if (string.IsNullOrEmpty(msg)) return;
+        _ui.TryEnqueue(() => { if (!_disposed) ErrorMessage = msg; });
     }
 
     public void Dispose()
@@ -60,6 +86,8 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         try { _searchCts?.Cancel(); } catch { /* swallow */ }
         _searchCts?.Dispose();
         _searchCts = null;
+        _store.PropertyChanged -= OnServiceErrorChanged;
+        _clip.PropertyChanged -= OnServiceErrorChanged;
         Items.CollectionChanged -= OnItemsCollectionChanged;
         foreach (var t in Items) t.PropertyChanged -= OnTilePropertyChanged;
         _selected.Clear();
@@ -245,6 +273,8 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     public async Task RefreshAsync(CancellationToken ct)
     {
         if (_disposed) return;
+        long myGen = Interlocked.Increment(ref _refreshGen);
+        Interlocked.Increment(ref _activeLoads);
         try
         {
             // Linked token created inside the try: a Dispose() race after the
@@ -252,17 +282,27 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             // caught below as a clean teardown no-op instead of escaping to the caller.
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
             var token = linked.Token;
-            IsLoading = true;
-            ErrorMessage = null;
+            OnUi(() =>
+            {
+                IsLoading = true;
+                ErrorMessage = null;
+            });
 
             IReadOnlyList<FileRow> rows;
             if (string.IsNullOrWhiteSpace(_query))
             {
-                rows = await _store.RecentAsync(PageSize, token).ConfigureAwait(false);
+                // Microsoft.Data.Sqlite is fake-async (the query runs inline on
+                // whatever thread acquires the gate). On the UI-thread invocation
+                // paths (Loaded / per-batch RequestLibraryRefresh / OnUndoLast)
+                // the correlated GROUP_CONCAT-per-row RecentAsync would freeze
+                // first paint and stutter the grid; offload it like the sibling
+                // CleanupViewModel/PeopleViewModel. The search branch already
+                // yields via the IPC round-trip, so leave it as-is.
+                rows = await Task.Run(() => _store.RecentAsync(PageSize, token, _kindFilter == "all" ? null : _kindFilter), token).ConfigureAwait(false);
             }
             else
             {
-                rows = await _clip.SearchAsync(_query, PageSize, token).ConfigureAwait(false);
+                rows = await _clip.SearchAsync(_query, PageSize, token, _kindFilter == "all" ? null : _kindFilter).ConfigureAwait(false);
             }
 
             if (_disposed || token.IsCancellationRequested) return;
@@ -276,7 +316,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
                 filtered.Add(FileTile.From(r));
             }
 
-            ApplyOnUi(filtered);
+            ApplyOnUi(filtered, myGen);
         }
         catch (OperationCanceledException)
         {
@@ -288,11 +328,12 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         }
         catch (Exception ex)
         {
-            if (!_disposed) ErrorMessage = ex.Message;
+            OnUi(() => { if (!_disposed) ErrorMessage = ex.Message; });
         }
         finally
         {
-            if (!_disposed) IsLoading = false;
+            Interlocked.Decrement(ref _activeLoads);
+            OnUi(() => { if (!_disposed) IsLoading = Volatile.Read(ref _activeLoads) > 0; });
         }
     }
 
@@ -304,13 +345,22 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     public async Task SemanticSearchWithSeedAsync(float[] seed, CancellationToken ct)
     {
         if (_disposed) return;
+        long myGen = Interlocked.Increment(ref _refreshGen);
+        Interlocked.Increment(ref _activeLoads);
         try
         {
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
             var token = linked.Token;
-            IsLoading = true;
-            ErrorMessage = null;
-            var ranked = await _store.SemanticSearchAsync(seed, PageSize, token).ConfigureAwait(false);
+            OnUi(() =>
+            {
+                IsLoading = true;
+                ErrorMessage = null;
+            });
+            // Full clip_embeddings table scan + dot-product loop — and this VM
+            // is reached from an async-void context-menu handler on the UI
+            // thread, where Microsoft.Data.Sqlite's fake-async runs the scan
+            // inline. Offload to the thread pool so it can't freeze the UI.
+            var ranked = await Task.Run(() => _store.SemanticSearchAsync(seed, PageSize, token, _kindFilter == "all" ? null : _kindFilter), token).ConfigureAwait(false);
             if (_disposed || token.IsCancellationRequested) return;
             var filtered = new List<FileTile>(ranked.Count);
             foreach (var hit in ranked)
@@ -321,12 +371,16 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
                 }
                 filtered.Add(FileTile.From(hit.Row));
             }
-            ApplyOnUi(filtered);
+            ApplyOnUi(filtered, myGen);
         }
         catch (OperationCanceledException) { /* expected */ }
         catch (ObjectDisposedException) { /* expected during teardown */ }
-        catch (Exception ex) { if (!_disposed) ErrorMessage = ex.Message; }
-        finally { if (!_disposed) IsLoading = false; }
+        catch (Exception ex) { OnUi(() => { if (!_disposed) ErrorMessage = ex.Message; }); }
+        finally
+        {
+            Interlocked.Decrement(ref _activeLoads);
+            OnUi(() => { if (!_disposed) IsLoading = Volatile.Read(ref _activeLoads) > 0; });
+        }
     }
 
     /// <summary>
@@ -336,13 +390,23 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     public async Task FindSimilarAsync(long fileId, CancellationToken ct)
     {
         if (_disposed) return;
+        long myGen = Interlocked.Increment(ref _refreshGen);
+        Interlocked.Increment(ref _activeLoads);
         try
         {
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
             var token = linked.Token;
-            IsLoading = true;
-            ErrorMessage = null;
-            var similar = await _store.SimilarFilesAsync(fileId, PageSize, token).ConfigureAwait(false);
+            OnUi(() =>
+            {
+                IsLoading = true;
+                ErrorMessage = null;
+            });
+            // Unbounded clip_embeddings scan + per-row blob materialization +
+            // DotProduct (SimilarFilesAsync has no LIMIT on the embedding fetch).
+            // Reached from an async-void context-menu handler on the UI thread;
+            // Microsoft.Data.Sqlite's fake-async would run the whole scan inline.
+            // Offload to the thread pool.
+            var similar = await Task.Run(() => _store.SimilarFilesAsync(fileId, PageSize, token), token).ConfigureAwait(false);
             if (_disposed || token.IsCancellationRequested) return;
             var filtered = new List<FileTile>(similar.Count);
             foreach (var r in similar)
@@ -353,24 +417,48 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
                 }
                 filtered.Add(FileTile.From(r));
             }
-            ApplyOnUi(filtered);
+            ApplyOnUi(filtered, myGen);
         }
         catch (OperationCanceledException) { /* expected */ }
         catch (ObjectDisposedException) { /* expected during teardown */ }
-        catch (Exception ex) { if (!_disposed) ErrorMessage = ex.Message; }
-        finally { if (!_disposed) IsLoading = false; }
+        catch (Exception ex) { OnUi(() => { if (!_disposed) ErrorMessage = ex.Message; }); }
+        finally
+        {
+            Interlocked.Decrement(ref _activeLoads);
+            OnUi(() => { if (!_disposed) IsLoading = Volatile.Read(ref _activeLoads) > 0; });
+        }
     }
 
-    private void ApplyOnUi(IReadOnlyList<FileTile> next)
+    private void ApplyOnUi(IReadOnlyList<FileTile> next, long gen)
     {
+        // Drop results from a refresh a newer one has already superseded — checked
+        // on the UI thread right before the swap so it also catches a refresh that
+        // started during the dispatch gap. (audit A4)
+        void Apply()
+        {
+            if (Interlocked.Read(ref _refreshGen) != gen) return;
+            ReplaceItems(next);
+        }
         if (_ui.HasThreadAccess)
         {
-            ReplaceItems(next);
+            Apply();
         }
         else
         {
-            _ui.TryEnqueue(() => ReplaceItems(next));
+            _ui.TryEnqueue(Apply);
         }
+    }
+
+    /// Run a UI-affined mutation on the captured dispatcher. RefreshAsync's
+    /// synchronous prologue/finally run on a thread-pool thread when invoked via
+    /// ScheduleRefresh (search debounce → Task.Run + ConfigureAwait(false)), so
+    /// raising IsLoading/ErrorMessage PropertyChanged there would drive x:Bind
+    /// writes (ProgressRing.IsActive, StatusText) off the captured UI thread — a
+    /// native fast-fail. No-op marshaling when already on the UI thread.
+    private void OnUi(Action action)
+    {
+        if (_ui.HasThreadAccess) action();
+        else _ui.TryEnqueue(() => { if (!_disposed) action(); });
     }
 
     private void ReplaceItems(IReadOnlyList<FileTile> next)

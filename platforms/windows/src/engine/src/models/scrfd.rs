@@ -5,6 +5,14 @@
 // We default to the 10g model. The ONNX export is stride-fused with
 // anchor decoding done outside the graph; this implementation does the
 // post-processing on the CPU after the GPU forward pass.
+//
+// NOTE: after the commercial-clean swap, YuNet (`models/yunet.rs`) is the active
+// face detector. The `Scrfd` struct here is retained as the anchor-decode
+// reference, while this module's shared helpers — `Detection`, `Pose`,
+// `estimate_pose`, `validate_face_geometry`, `nms`, `iou`, `resize_nearest` —
+// stay live (used by YuNet + the pipeline). Module-level allow keeps the
+// retained detector from tripping the dead-code gate.
+#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 
@@ -31,6 +39,9 @@ pub struct Pose {
 
 pub struct Scrfd {
     session: Session,
+    /// The ONNX's single input tensor name, read once at load and reused on
+    /// every forward instead of re-walking `session.inputs.first()`.
+    input_name: String,
     input_size: (u32, u32),
 }
 
@@ -40,7 +51,7 @@ impl Scrfd {
         if !path.exists() {
             anyhow::bail!("SCRFD weights missing at {}", path.display());
         }
-        let probe = RuntimeProbe::detect();
+        let probe = RuntimeProbe::shared();
         let chain = priority_chain(probe.vendor);
         let builder = Session::builder().context("ORT session builder")?;
         let mut builder = configure_session_builder(builder)
@@ -56,9 +67,16 @@ impl Scrfd {
         let session = builder
             .commit_from_file(path)
             .context("ORT session commit (SCRFD)")?;
+        let input_name = session
+            .inputs
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("SCRFD ONNX has no inputs"))?
+            .name
+            .clone();
         // SCRFD-10g default input is 640×640. We resize before feed.
         let mut model = Self {
             session,
+            input_name,
             input_size: (640, 640),
         };
         // Warmup with a zero 640×640 frame so first-call kernel compile
@@ -102,13 +120,7 @@ impl Scrfd {
         }
 
         let input = Tensor::from_array(chw).context("SCRFD input tensor")?;
-        let input_name = self
-            .session
-            .inputs
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("SCRFD ONNX has no inputs"))?
-            .name
-            .clone();
+        let input_name = self.input_name.clone();
         let outputs: SessionOutputs = self
             .session
             .run(vec![(input_name, SessionInputValue::from(input))])
@@ -363,7 +375,7 @@ fn decode_scrfd_single_anchor(
 
 /// Greedy NMS by descending score. O(n²) is fine: SCRFD-10g emits at
 /// most a few hundred candidates per image after the score filter.
-fn nms(mut candidates: Vec<Detection>, iou_threshold: f32) -> Vec<Detection> {
+pub(crate) fn nms(mut candidates: Vec<Detection>, iou_threshold: f32) -> Vec<Detection> {
     candidates.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
@@ -500,7 +512,7 @@ pub fn default_weights_path() -> Result<PathBuf> {
         .join("scrfd_10g_bnkps.onnx"))
 }
 
-fn resize_nearest(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+pub(crate) fn resize_nearest(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
     if dw == 0 || dh == 0 {
         return Vec::new();
     }

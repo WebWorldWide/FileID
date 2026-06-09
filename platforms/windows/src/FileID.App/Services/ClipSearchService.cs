@@ -34,6 +34,14 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
     private readonly ConcurrentDictionary<string, TaskCompletionSource<float[]?>> _inflight = new();
     private bool _disposed;
 
+    // Bounded LRU of query-string → embedding. The CLIP text encoder is
+    // deterministic (same string ⇒ same vector, even across engine respawns),
+    // so repeated searches for the same term — kind-filter toggle, clear+retype,
+    // nav-back — can skip the IPC round-trip + encode entirely. No
+    // generation-based invalidation needed; only a model swap would change the
+    // mapping, which is not a supported in-session operation.
+    private readonly QueryEmbeddingCache _queryCache = new(capacity: 24);
+
     // generation counter, bumped each time the engine's lifecycle
     // transitions away from Ready (respawn or crash). Each in-flight TCS
     // captures the generation it was created in; an embedding that arrives
@@ -80,6 +88,13 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
     private void OnEngineClientChanged(object? sender, PropertyChangedEventArgs e)
         => DebugLog.SafeRun("ClipSearchService.OnEngineClientChanged", () =>
         {
+            // This handler can fire after Dispose() — Dispose() detaches the
+            // subscription, but a notification already in flight on another
+            // thread (tab-nav disposal racing an engine state change) can land
+            // here with _disposed already true. Bail before touching _inflight
+            // (drained + cleared in Dispose) or the now-stale generation so we
+            // don't complete a disposed caller's TCS with stale/null results.
+            if (_disposed) return;
             if (e.PropertyName == nameof(EngineClient.State))
             {
                 DebugLog.Debug($"[ENGINE-SUB:ClipSearchService] {e.PropertyName}");
@@ -126,6 +141,12 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
         {
             return null;
         }
+        var cacheKey = query.Trim();
+        if (_queryCache.TryGet(cacheKey, out var cached))
+        {
+            LastSearchError = null;
+            return cached;
+        }
         var queryId = Guid.NewGuid().ToString("N");
         var tcs = new TaskCompletionSource<float[]?>(TaskCreationOptions.RunContinuationsAsynchronously);
         _inflight[queryId] = tcs;
@@ -165,8 +186,13 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
             // Empty embedding = CLIP disabled engine-side —
             // treat as null so SearchAsync falls back to FTS5, no error banner.
             if (result is { Length: 0 }) { LastSearchError = null; return null; }
-            // Successful round-trip — clear any stale error banner.
-            if (result is not null) LastSearchError = null;
+            // Successful round-trip — clear any stale error banner + cache the
+            // deterministic embedding so an identical query skips the next encode.
+            if (result is not null)
+            {
+                LastSearchError = null;
+                _queryCache.Store(cacheKey, result);
+            }
             return result;
         }
         catch (OperationCanceledException)
@@ -191,21 +217,89 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
     }
 
     public async Task<IReadOnlyList<FileRow>> SearchAsync(
-        string query, int limit, CancellationToken ct)
+        string query, int limit, CancellationToken ct, string? kind = null)
     {
         var embed = await EmbedQueryAsync(query, ct).ConfigureAwait(false);
         if (embed != null)
         {
-            var ranked = await _store.SemanticSearchAsync(embed, limit, ct).ConfigureAwait(false);
+            var ranked = await _store.SemanticSearchAsync(embed, limit, ct, kind).ConfigureAwait(false);
             var rows = new List<FileRow>(ranked.Count);
             foreach (var r in ranked)
             {
                 rows.Add(r.Row);
             }
+            // If the store never opened (DB locked/permission/corrupt — see
+            // ReadStore.LastOpenError) the query above returns empty with no
+            // signal. Surface the store's open error so search shows a clear,
+            // dismissible message instead of an indistinguishable empty grid.
+            if (rows.Count == 0 && _store.LastOpenError is { Length: > 0 } storeErr)
+            {
+                LastSearchError = storeErr;
+            }
             return rows;
         }
         // FTS5 fallback (filename + OCR) — covers the case where CLIP
         // models aren't installed yet OR the query embedded to all-zeros.
-        return await _store.SearchAsync(query, limit, ct).ConfigureAwait(false);
+        var fts = await _store.SearchAsync(query, limit, ct, kind).ConfigureAwait(false);
+        if (fts.Count == 0 && _store.LastOpenError is { Length: > 0 } openErr)
+        {
+            LastSearchError = openErr;
+        }
+        return fts;
+    }
+}
+
+/// <summary>Thread-safe bounded LRU mapping a trimmed query string to its CLIP
+/// text embedding. A hit moves the entry to the front (most-recently-used); a
+/// store dedupes the key then evicts the oldest beyond <c>capacity</c>. Extracted
+/// from <see cref="ClipSearchService"/> so the hit/evict policy is unit-testable
+/// without the engine singleton.</summary>
+internal sealed class QueryEmbeddingCache
+{
+    private readonly int _capacity;
+    private readonly object _lock = new();
+    private readonly LinkedList<KeyValuePair<string, float[]>> _entries = new();
+
+    public QueryEmbeddingCache(int capacity)
+    {
+        _capacity = capacity < 1 ? 1 : capacity;
+    }
+
+    public int Count
+    {
+        get { lock (_lock) { return _entries.Count; } }
+    }
+
+    public bool TryGet(string key, out float[]? embedding)
+    {
+        lock (_lock)
+        {
+            for (var node = _entries.First; node != null; node = node.Next)
+            {
+                if (node.Value.Key != key) continue;
+                embedding = node.Value.Value;
+                _entries.Remove(node);
+                _entries.AddFirst(node);
+                return true;
+            }
+        }
+        embedding = null;
+        return false;
+    }
+
+    public void Store(string key, float[] embedding)
+    {
+        lock (_lock)
+        {
+            for (var node = _entries.First; node != null; node = node.Next)
+            {
+                if (node.Value.Key == key) { _entries.Remove(node); break; }
+            }
+            _entries.AddFirst(new KeyValuePair<string, float[]>(key, embedding));
+            while (_entries.Count > _capacity)
+            {
+                _entries.RemoveLast();
+            }
+        }
     }
 }

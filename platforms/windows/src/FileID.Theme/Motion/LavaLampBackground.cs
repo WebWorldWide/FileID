@@ -60,6 +60,7 @@ public sealed class LavaLampBackground : Control
         if (_root is not null) return;
         BuildVisualTree();
         StartAnimations();
+        ReducedMotion.Instance.PropertyChanged += OnReducedMotionChanged;
         if (XamlRoot is { } root)
         {
             root.Changed += OnXamlRootChanged;
@@ -69,10 +70,16 @@ public sealed class LavaLampBackground : Control
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
+        ReducedMotion.Instance.PropertyChanged -= OnReducedMotionChanged;
         if (XamlRoot is { } root)
         {
             root.Changed -= OnXamlRootChanged;
         }
+        // Stop + release the resize-debounce timer so no Tick fires post-unload
+        // and the timer stops rooting the control (#25). OnSizeChanged recreates
+        // it lazily on the next resize, so a control reload stays correct.
+        _resizeDebounce?.Stop();
+        _resizeDebounce = null;
         StopAnimations();
         if (_root is not null)
         {
@@ -102,7 +109,11 @@ public sealed class LavaLampBackground : Control
             {
                 _resizeDebounce!.Stop();
                 StopAnimations();
-                StartAnimations();
+                // Restart through ApplyVisibility so visibility stays the
+                // single source of truth — an unconditional StartAnimations()
+                // would resume drift while occluded/minimized, defeating the
+                // XamlRoot.IsHostVisible occlusion pause.
+                ApplyVisibility();
             };
         }
         _resizeDebounce.Stop();
@@ -111,6 +122,19 @@ public sealed class LavaLampBackground : Control
 
     private void OnXamlRootChanged(XamlRoot sender, XamlRootChangedEventArgs args)
         => ApplyVisibility();
+
+    private void OnReducedMotionChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        // The rate scale is only read inside StartAnimations(); a restart
+        // applies the new value. Marshal to the UI thread (the OS fires this
+        // off-thread) and route the restart through ApplyVisibility so we
+        // don't resume drift while occluded.
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            StopAnimations();
+            ApplyVisibility();
+        });
+    }
 
     private void ApplyVisibility()
     {

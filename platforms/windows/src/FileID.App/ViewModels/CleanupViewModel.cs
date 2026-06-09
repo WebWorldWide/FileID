@@ -1,9 +1,11 @@
 ﻿// CleanupViewModel — backs the Cleanup tab duplicate groups list.
 //
-// Groups files by matching `phash` (perceptual hash, 64-bit) to find
-// near-duplicate images. Each group lets the user mark one keeper and
-// trash the others (engine `trashFiles` IPC command, parallel
-// IFileOperation::DeleteItem with FOF_ALLOWUNDO).
+// Groups files by exact `content_hash` (BLAKE3 for files <=16 MB, else a
+// head+tail+size composite; migration v8) so each group is byte-for-byte
+// identical, not merely visually similar. An identical size_bytes is required
+// too as a cheap guard. Each group lets the user mark one keeper and trash the
+// others (engine `trashFiles` IPC command, parallel IFileOperation::DeleteItem
+// with FOF_ALLOWUNDO).
 
 using System;
 using System.Collections.Generic;
@@ -68,17 +70,41 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
             // caught below as a clean teardown no-op instead of escaping to the caller.
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
             var token = linked.Token;
-            IsLoading = true;
-            ErrorMessage = null;
+            OnUi(() => { IsLoading = true; ErrorMessage = null; });
             var groups = await Task.Run(() => Load(token), token).ConfigureAwait(false);
             if (_disposed || token.IsCancellationRequested) return;
             ApplyOnUi(groups);
         }
         catch (OperationCanceledException) { /* expected */ }
         catch (ObjectDisposedException) { /* expected during teardown */ }
-        catch (Exception ex) { if (!_disposed) ErrorMessage = ex.Message; }
-        finally { if (!_disposed) IsLoading = false; }
+        // Surface DB/IO failures as an actionable message instead of the raw
+        // SQLite jargon ("database disk image is malformed") the user can't act on.
+        // ConfigureAwait(false) above resumes these catch/finally arms on a
+        // thread-pool thread; ErrorMessage/IsLoading raise PropertyChanged that
+        // drives x:Bind XAML writes (ProgressRing.IsActive, StatusText), so marshal
+        // them to the captured UI thread — else a native fast-fail
+        // (RPC_E_WRONG_THREAD). Mirrors LibraryViewModel.
+        catch (SqliteException ex) { OnUi(() => { if (!_disposed) ErrorMessage = SqliteErrorTranslator.Humanize(ex); }); }
+        catch (IOException ex) { OnUi(() => { if (!_disposed) ErrorMessage = SqliteErrorTranslator.Humanize(ex); }); }
+        catch (Exception ex) { OnUi(() => { if (!_disposed) ErrorMessage = ex.Message; }); }
+        finally { OnUi(() => { if (!_disposed) IsLoading = false; }); }
     }
+
+    /// Marshal a UI-affined mutation onto the captured dispatcher. RefreshAsync's
+    /// catch/finally run on a thread-pool thread (Task.Run + ConfigureAwait(false)),
+    /// so raising ErrorMessage/IsLoading PropertyChanged there would drive x:Bind
+    /// XAML writes off the UI thread — a native fast-fail. No-op when already on the
+    /// UI thread. Mirrors LibraryViewModel.OnUi.
+    private void OnUi(Action action)
+    {
+        if (_ui.HasThreadAccess) action();
+        else _ui.TryEnqueue(() => { if (!_disposed) action(); });
+    }
+
+    /// <summary>Files larger than this use a head+tail+size COMPOSITE
+    /// content_hash in the engine, not a full BLAKE3 — so matching hashes are
+    /// "likely", not byte-verified. Mirror of the engine's FULL_HASH_MAX_BYTES.</summary>
+    private const long FullHashMaxBytes = 16L * 1024 * 1024;
 
     private List<DuplicateGroup> Load(CancellationToken ct)
     {
@@ -94,76 +120,60 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         }.ToString();
         using var conn = new SqliteConnection(connString);
         conn.Open();
-        // Group files by exact phash match. Fuzzy matching via Hamming
-        // distance ≤ 4 bits (64-bit popcount on XOR of hash pairs) is a
-        // future extension.
+        // Pull every file with a content hash and group by EXACT equality —
+        // identical content_hash AND size_bytes is byte-for-byte identical (1:1
+        // duplicates), not just visually similar. content_hash is a BLOB
+        // (BLAKE3 / composite, migration v8); read it as bytes and hex-encode
+        // for a stable dictionary key. Grouping is O(n) via a dictionary, so
+        // there's no per-pair scan and no candidate cap.
         using var cmd = conn.CreateCommand();
-        // Pull every image with a phash, then group:
-        //   1. Exact-phash matches (cheap — straight equality).
-        //   2. Near-matches via Hamming distance ≤ 4 bits (fuzzy).
-        // The fuzzy pass is O(n²) on the in-memory candidate list but
-        // we cap at 5000 phashes so worst-case 12.5M XOR-popcounts → ~100ms.
+        // modified_at rides along so the per-member thumbnail request can use the
+        // same path|mtime cache key LibraryView uses (ReadStore reads the same
+        // column) — a file shown in both tabs then shares one L1/L2 cache entry
+        // instead of being decoded + cached twice under divergent keys.
         cmd.CommandText = """
-            SELECT id, path_text, size_bytes, phash
+            SELECT id, path_text, size_bytes, content_hash, modified_at
             FROM files
-            WHERE phash IS NOT NULL AND kind = 'image'
-            ORDER BY phash
-            LIMIT 5000
+            WHERE content_hash IS NOT NULL AND failed = 0
             """;
-        var rawMembers = new List<(long Id, string Path, long Size, long Phash)>(2048);
+        var rawMembers = new List<(long Id, string Path, long Size, string Hash, double? ModifiedAt)>(2048);
         using (var reader = cmd.ExecuteReader())
         {
             while (reader.Read())
             {
                 ct.ThrowIfCancellationRequested();
-                rawMembers.Add((reader.GetInt64(0), reader.GetString(1), reader.GetInt64(2), reader.GetInt64(3)));
+                var hashBytes = (byte[])reader[3];
+                if (hashBytes is null || hashBytes.Length == 0) continue;
+                var hashHex = Convert.ToHexString(hashBytes);
+                var modifiedAt = reader.IsDBNull(4) ? (double?)null : reader.GetDouble(4);
+                rawMembers.Add((reader.GetInt64(0), reader.GetString(1), reader.GetInt64(2), hashHex, modifiedAt));
             }
         }
 
-        var groups = new List<DuplicateGroup>();
-        // Use a union-find structure over indices to merge near-matches
-        // into clusters. Two phashes belong to the same cluster if their
-        // popcount(XOR) ≤ FuzzyThreshold.
-        const int FuzzyThreshold = 4;
-        int n = rawMembers.Count;
-        var parent = new int[n];
-        for (int i = 0; i < n; i++) parent[i] = i;
-        int Find(int x) { while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
-        void Union(int a, int b) { int ra = Find(a), rb = Find(b); if (ra != rb) parent[ra] = rb; }
-
-        for (int i = 0; i < n; i++)
+        // Group by composite key (content_hash + size): identical content AND
+        // size means byte-for-byte identical. O(n) via a dictionary.
+        var byHash = new Dictionary<string, List<int>>(rawMembers.Count);
+        for (int i = 0; i < rawMembers.Count; i++)
         {
             ct.ThrowIfCancellationRequested();
-            for (int j = i + 1; j < n; j++)
-            {
-                long xor = rawMembers[i].Phash ^ rawMembers[j].Phash;
-                if (System.Numerics.BitOperations.PopCount((ulong)xor) <= FuzzyThreshold)
-                {
-                    Union(i, j);
-                }
-            }
-        }
-
-        var byRoot = new Dictionary<int, List<int>>();
-        for (int i = 0; i < n; i++)
-        {
-            int r = Find(i);
-            if (!byRoot.TryGetValue(r, out var list)) { list = new List<int>(); byRoot[r] = list; }
+            var key = rawMembers[i].Hash + ":" + rawMembers[i].Size.ToString();
+            if (!byHash.TryGetValue(key, out var list)) { list = new List<int>(); byHash[key] = list; }
             list.Add(i);
         }
 
-        foreach (var (_, indices) in byRoot)
+        var groups = new List<DuplicateGroup>();
+        foreach (var (_, indices) in byHash)
         {
             if (indices.Count < 2) continue;
-            // Pick the largest file as default keeper (best resolution
-            // typically). User can re-pick in the UI.
-            indices.Sort((a, b) => rawMembers[b].Size.CompareTo(rawMembers[a].Size));
-            var phash = rawMembers[indices[0]].Phash;
-            // shared GroupName for the keeper RadioButton so
-            // mutual exclusion within a duplicate group works. Hex
-            // representation of the perceptual hash uniquely identifies
-            // the group across the whole tab.
-            var groupKey = $"dup-{phash:X16}";
+            // All members share identical bytes (and size); order by path for a
+            // stable display and keep the first as the default keeper. The user
+            // can re-pick in the UI.
+            indices.Sort((a, b) => string.CompareOrdinal(rawMembers[a].Path, rawMembers[b].Path));
+            var hash = rawMembers[indices[0]].Hash;
+            // shared GroupName for the keeper RadioButton so mutual exclusion
+            // within a duplicate group works. The content hash uniquely
+            // identifies the group across the whole tab.
+            var groupKey = $"dup-{hash}";
             var members = new List<DuplicateMember>(indices.Count);
             for (int k = 0; k < indices.Count; k++)
             {
@@ -174,14 +184,21 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
                     Path = m.Path,
                     FileName = System.IO.Path.GetFileName(m.Path),
                     SizeBytes = m.Size,
+                    ModifiedAt = m.ModifiedAt,
                     GroupKey = groupKey,
                     IsKeeper = k == 0,
                 });
             }
             groups.Add(new DuplicateGroup
             {
-                PerceptualHash = phash,
+                ContentHash = hash,
                 Members = members,
+                // For files > 16 MB the engine's content_hash is a head+tail+size
+                // COMPOSITE, not a full BLAKE3 — matching composites are "likely
+                // duplicates", not byte-for-byte verified. Mark the group so the
+                // caption drops the false "identical" guarantee that drives the
+                // unsafe one-click delete (#3).
+                IsApproximate = rawMembers[indices[0]].Size > FullHashMaxBytes,
             });
         }
 
@@ -197,9 +214,98 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
     }
 
     private void Replace(IReadOnlyList<DuplicateGroup> rows)
+        => MergeByContentHash(Groups, rows);
+
+    /// <summary>Reconcile <paramref name="groups"/> to match <paramref name="rows"/>
+    /// by <see cref="DuplicateGroup.ContentHash"/>, in place (mirrors
+    /// <c>LibraryViewModel.MergeById</c>). The old Clear+Add raised a
+    /// CollectionChanged.Reset ~1 Hz during a scan, re-realizing the whole
+    /// ItemsRepeater, re-decoding every member thumbnail, and discarding the
+    /// user's in-flight keeper/skip state. Surviving groups whose membership is
+    /// unchanged keep their existing instance (and its IsKeeper / IsSkipped /
+    /// loaded thumbnails); only genuine deltas emit Add/Remove. A group whose
+    /// member set changed is replaced (its <c>Members</c> binding is OneTime, so
+    /// the list must re-realize to reflect the new membership). Static +
+    /// collection-only so it carries no UI-thread affinity beyond the
+    /// ObservableCollection it mutates.</summary>
+    internal static void MergeByContentHash(
+        ObservableCollection<DuplicateGroup> groups,
+        IReadOnlyList<DuplicateGroup> rows)
     {
-        Groups.Clear();
-        foreach (var r in rows) Groups.Add(r);
+        if (groups.Count == 0)
+        {
+            foreach (var r in rows) groups.Add(r);
+            return;
+        }
+
+        var existingByHash = new Dictionary<string, DuplicateGroup>(groups.Count);
+        foreach (var g in groups) existingByHash[g.ContentHash] = g;
+
+        // Target sequence: reuse a surviving group instance only when its member
+        // set is identical (so the OneTime Members binding stays valid and the
+        // keeper/skip state is preserved); otherwise take the fresh instance.
+        // `reused` tracks the surviving instances we keep by reference, so step 1
+        // can drop the old instance of a group whose membership changed (its hash
+        // survives but we're replacing it with the fresh one).
+        var desired = new List<DuplicateGroup>(rows.Count);
+        var nextHashes = new HashSet<string>(rows.Count);
+        var reused = new HashSet<DuplicateGroup>();
+        foreach (var fresh in rows)
+        {
+            if (!nextHashes.Add(fresh.ContentHash)) continue;
+            if (existingByHash.TryGetValue(fresh.ContentHash, out var keep)
+                && SameMembers(keep, fresh))
+            {
+                reused.Add(keep);
+                desired.Add(keep);
+            }
+            else
+            {
+                desired.Add(fresh);
+            }
+        }
+
+        // 1) Remove any existing group we're not reusing by reference — both
+        //    genuinely-gone hashes and replaced-instance survivors.
+        for (int i = groups.Count - 1; i >= 0; i--)
+        {
+            if (!reused.Contains(groups[i])) groups.RemoveAt(i);
+        }
+
+        // 2) Align order to `desired` via Remove+Insert of the instance, so a
+        //    surviving-but-reordered group keeps its instance.
+        for (int j = 0; j < desired.Count; j++)
+        {
+            var want = desired[j];
+            if (j < groups.Count && ReferenceEquals(groups[j], want)) continue;
+            int cur = IndexOfInstance(groups, want, j);
+            if (cur >= 0) groups.RemoveAt(cur);
+            groups.Insert(j, want);
+        }
+    }
+
+    /// <summary>True when two groups hold the same member Ids (order-insensitive).
+    /// Same ContentHash + same member set ⇒ the surviving instance is reusable
+    /// and its keeper/skip state worth preserving.</summary>
+    private static bool SameMembers(DuplicateGroup a, DuplicateGroup b)
+    {
+        if (a.Members.Count != b.Members.Count) return false;
+        var ids = new HashSet<long>(a.Members.Count);
+        foreach (var m in a.Members) ids.Add(m.Id);
+        foreach (var m in b.Members) if (!ids.Contains(m.Id)) return false;
+        return true;
+    }
+
+    private static int IndexOfInstance(
+        ObservableCollection<DuplicateGroup> groups,
+        DuplicateGroup want,
+        int startAt)
+    {
+        for (int i = startAt; i < groups.Count; i++)
+        {
+            if (ReferenceEquals(groups[i], want)) return i;
+        }
+        return -1;
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -209,9 +315,16 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
 
 internal sealed class DuplicateGroup : INotifyPropertyChanged
 {
-    public required long PerceptualHash { get; init; }
+    /// <summary>The shared content hash (BLAKE3 / composite, hex) of every
+    /// member — the group's identity. Bound as the keeper RadioButton's Tag.</summary>
+    public required string ContentHash { get; init; }
     public required IReadOnlyList<DuplicateMember> Members { get; init; }
     public int MemberCount => Members.Count;
+
+    /// <summary>True when members exceed the engine's full-hash threshold, so
+    /// the shared content_hash is a head+tail+size composite — "likely", not
+    /// byte-verified duplicates. Drives the cautious caption (#3).</summary>
+    public bool IsApproximate { get; init; }
 
     // FEAT-CRIT-2: per-group skip flag. Members of a skipped group are
     // excluded from "Trash non-keepers". Mirrors the macOS Cleanup
@@ -229,10 +342,23 @@ internal sealed class DuplicateGroup : INotifyPropertyChanged
         }
     }
 
-    public string Caption =>
-        IsSkipped
-            ? $"{MemberCount} duplicates · phash {PerceptualHash:X16} · SKIPPED"
-            : $"{MemberCount} duplicates · phash {PerceptualHash:X16}";
+    public string Caption
+    {
+        get
+        {
+            // Approximate (>16 MB composite-hash) groups are NOT byte-verified —
+            // present them as "likely duplicates — verify before deleting" so the
+            // caption never makes a false byte-for-byte guarantee (#3).
+            var label = IsApproximate
+                ? $"{MemberCount} likely duplicates — verify before deleting · {ShortHash}"
+                : $"{MemberCount} identical copies · {ShortHash}";
+            return IsSkipped ? $"{label} · SKIPPED" : label;
+        }
+    }
+
+    /// <summary>First 12 chars of the content hash for a compact caption.</summary>
+    private string ShortHash =>
+        ContentHash.Length > 12 ? ContentHash[..12] : ContentHash;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 }
@@ -244,10 +370,15 @@ internal sealed class DuplicateMember : INotifyPropertyChanged
     public required string FileName { get; init; }
     public required long SizeBytes { get; init; }
 
+    /// <summary>Modified-at unix seconds. Part of the thumbnail cache key so a
+    /// member shown in both Cleanup and Library resolves to the same path|mtime
+    /// L1/L2 entry instead of being cached twice.</summary>
+    public double? ModifiedAt { get; init; }
+
     /// <summary>shared per-group key for the keeper RadioButton's
     /// GroupName. Was previously bound to `Path` per member, which made
     /// mutual exclusion impossible (each member had its own group). Set
-    /// to the parent group's perceptual hash hex string at construction.</summary>
+    /// to the parent group's content hash at construction.</summary>
     public required string GroupKey { get; init; }
 
     public string SizeDisplay

@@ -45,21 +45,21 @@ public sealed record BulkActionResult(
     System.Collections.Generic.IReadOnlyList<BulkActionItem> Messages);
 
 public sealed record BulkActionItem(
-    long? FileId,
+    [property: JsonPropertyName("fileID")] long? FileId,
     bool Ok,
     string? Message = null);
 
 public sealed record ClipTextEmbedding(
-    string QueryId,
+    [property: JsonPropertyName("queryID")] string QueryId,
     string Query,
     System.Collections.Generic.IReadOnlyList<float> Embedding);
 
 public sealed record MergeSuggestion(
-    long SourcePersonId,
-    long DestinationPersonId,
+    [property: JsonPropertyName("sourcePersonID")] long SourcePersonId,
+    [property: JsonPropertyName("destinationPersonID")] long DestinationPersonId,
     float Similarity,
-    long SourceAnchorFaceId,
-    long DestinationAnchorFaceId,
+    [property: JsonPropertyName("sourceAnchorFaceID")] long SourceAnchorFaceId,
+    [property: JsonPropertyName("destinationAnchorFaceID")] long DestinationAnchorFaceId,
     long SourceMemberCount,
     long DestinationMemberCount);
 
@@ -120,7 +120,11 @@ public sealed record FileDoneEvent(
     string Kind,
     double TotalMs,
     bool Failed,
-    string? ErrorMessage);
+    string? ErrorMessage,
+    // Schema/Rust/Swift parity: the Rust + macOS DTOs carry skippedStages; the
+    // Windows engine doesn't emit fileDone today, so this is contract hygiene
+    // (a future fileDone with skippedStages no longer silently drops the field).
+    IReadOnlyList<string>? SkippedStages = null);
 
 public sealed record BatchSummary(
     uint BatchIndex,
@@ -206,3 +210,19 @@ public sealed record QueuedJob(
     JobCategory Category,
     string Title,
     double? EtaSeconds);
+
+/// <summary>Reply to wipeLibrary. Ok is true when the engine truncated every
+/// table in-process; Message carries the error when it couldn't.</summary>
+public sealed record LibraryWiped(bool Ok, string? Message = null);
+
+/// <summary>Payload of the `thumbnailGenerated` event. Engine renders a video
+/// keyframe out-of-process and returns it as a base64-encoded 192px JPEG
+/// (aspect-preserved, long side = 192). <c>ModifiedAt</c> is the file's
+/// modified-unix time (f64 seconds) and is REQUIRED end-to-end because the
+/// app's thumbnail cache key is (Path, ModifiedAt) — without it the written
+/// thumbnail is never found. <c>Bytes</c> is a base64 string, NOT a byte
+/// array.</summary>
+public sealed record ThumbnailGenerated(
+    string Path,
+    double? ModifiedAt,
+    string Bytes);

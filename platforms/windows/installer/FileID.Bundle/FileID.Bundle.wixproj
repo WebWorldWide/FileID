@@ -38,7 +38,10 @@
        entry (not an ItemGroup; that style is WiX 3 and silently no-ops in
        WiX 4, producing "Undefined preprocessor variable" errors). -->
   <PropertyGroup>
-    <DefineConstants>BundleUpgradeCode=$(BundleUpgradeCode);MsiX64Path=$(MSBuildThisFileDirectory)..\..\dist\installer\FileID-x64.msi;MsiArm64Path=$(MSBuildThisFileDirectory)..\..\dist\installer\FileID-arm64.msi</DefineConstants>
+    <!-- $(FileIDVersion) comes from Directory.Build.props (single source:
+         platforms/windows/VERSION); Bundle.wxs uses $(var.Version) so the
+         bootstrapper version is never a hardcoded literal. -->
+    <DefineConstants>BundleUpgradeCode=$(BundleUpgradeCode);Version=$(FileIDVersion);MsiX64Path=$(MSBuildThisFileDirectory)..\..\dist\installer\FileID-x64.msi;MsiArm64Path=$(MSBuildThisFileDirectory)..\..\dist\installer\FileID-arm64.msi</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>

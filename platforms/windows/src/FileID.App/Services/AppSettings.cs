@@ -94,13 +94,22 @@ internal sealed class AppSettings
     /// + cuDNN if they prefer the BYO path.</summary>
     public bool DisableAutoInstallCudnn { get; set; } = false;
 
+    /// <summary>Default false (auto-install enabled). On engine-ready AND Intel
+    /// hardware, the ONNX Runtime OpenVINO pack (Apache-2.0) is fetched so the
+    /// scan pipeline runs on the OpenVINO EP instead of DirectML. True disables.
+    /// (Snapdragon's QNN is NOT auto-installed — the QNN SDK is proprietary and
+    /// can't be redistributed under the project's commercial-clean rule; QNN is
+    /// used only if the device already provides it.)</summary>
+    public bool DisableAutoInstallOpenVino { get; set; } = false;
+
     /// <summary>Persisted Deep Analyze VLM model — the model the Deep Analyze
     /// tab uses for full caption + smart-rename + tags. Auto-tagging during
-    /// scans uses CLIP scene tags (no VLM required); this is the opt-in
+    /// scans uses RAM++ (CLIP scene tags as fallback); this is the opt-in
     /// higher-quality path. Accepted values mirror registry.rs ids
-    /// (qwen2_5_vl_3b, qwen2_5_vl_7b, gemma_3_4b); Sanitize() coerces anything
-    /// else to the default qwen2_5_vl_3b.</summary>
-    public string SelectedVlmModelKind { get; set; } = "qwen2_5_vl_3b";
+    /// (qwen2_5_vl_7b, gemma_3_4b, mistral_small_3_2); Sanitize() coerces
+    /// anything else to the default qwen2_5_vl_7b. The non-commercial
+    /// qwen2_5_vl_3b (Qwen Research License) was removed.</summary>
+    public string SelectedVlmModelKind { get; set; } = "qwen2_5_vl_7b";
 
     /// <summary>Schema version of this settings.json. Fresh installs start at
     /// the current version so one-time Sanitize migrations only ever touch
@@ -121,7 +130,13 @@ internal sealed class AppSettings
     /// model_kind into the auto-chain deepAnalyzeAll call.</summary>
     private static readonly HashSet<string> AllowedVlmKinds =
         new(StringComparer.OrdinalIgnoreCase)
-        { "qwen2_5_vl_3b", "qwen2_5_vl_7b", "gemma_3_4b" };
+        { "qwen2_5_vl_7b", "gemma_3_4b", "mistral_small_3_2" };
+
+    /// <summary>True if <paramref name="kind"/> is a VLM model_kind the engine
+    /// can install. The Deep Analyze card guards use this to reject removed /
+    /// non-commercial models (e.g. the dropped qwen2_5_vl_3b).</summary>
+    public static bool IsAllowedVlmKind(string? kind) =>
+        kind is { } k && AllowedVlmKinds.Contains(k);
 
     public static AppSettings Load()
     {
@@ -150,10 +165,11 @@ internal sealed class AppSettings
     /// incompatible field renames or one-time value migrations. Sanitize()
     /// clamps loaded values to this. v2: SmolVLM became the default tagger.
     /// v3: tagging/Deep-Analyze split — SelectedVlmModelKind is the Deep
-    /// Analyze model (default qwen2_5_vl_3b). v4: SmolVLM removed — CLIP scene
-    /// tags are the canonical auto-tagger; any leftover "smolvlm" value is
-    /// migrated to qwen2_5_vl_3b.</summary>
-    private const int CurrentSchemaVersion = 4;
+    /// Analyze model. v4: SmolVLM removed — CLIP scene tags are the canonical
+    /// auto-tagger. v5: non-commercial qwen2_5_vl_3b removed (Qwen Research
+    /// License) — RAM++ is the auto-tagger and Qwen2.5-VL-7B (Apache) is the
+    /// default Deep Analyze model; any leftover 3B value migrates to 7B.</summary>
+    private const int CurrentSchemaVersion = 5;
 
     /// <summary>Defensive cleanup of fields a malicious settings.json
     /// could otherwise smuggle through. Currently scrubs the EP override
@@ -168,15 +184,23 @@ internal sealed class AppSettings
             s.GpuExecutionProviderOverride = null;
         }
         // One-time migration: SmolVLM was removed in v4. Any stored "smolvlm"
-        // (whether from the v1→v2 step's tagger flip, or a user pick) is now
-        // an invalid model_kind; migrate to qwen2_5_vl_3b. AllowedVlmKinds
-        // below also coerces, but doing it as an explicit migration emits a
-        // log line so the change is traceable.
+        // is now an invalid model_kind; migrate straight to the current default
+        // (qwen2_5_vl_7b; the intermediate 3B was also removed in v5).
         if (s.SchemaVersion < 4
             && string.Equals(s.SelectedVlmModelKind, "smolvlm", StringComparison.OrdinalIgnoreCase))
         {
-            DebugLog.Info("AppSettings: migrating Deep Analyze model smolvlm → qwen2_5_vl_3b (schema v4; SmolVLM removed).");
-            s.SelectedVlmModelKind = "qwen2_5_vl_3b";
+            DebugLog.Info("AppSettings: migrating Deep Analyze model smolvlm → qwen2_5_vl_7b (SmolVLM removed).");
+            s.SelectedVlmModelKind = "qwen2_5_vl_7b";
+        }
+        // v5: the non-commercial Qwen2.5-VL-3B (Qwen Research License) was
+        // dropped for Mistral-Small-3.2 + Qwen-7B (both Apache). Migrate any
+        // persisted 3B pick to the 7B default. (The AllowedVlmKinds clamp below
+        // would coerce it regardless; this emits a traceable log line.)
+        if (s.SchemaVersion < 5
+            && string.Equals(s.SelectedVlmModelKind, "qwen2_5_vl_3b", StringComparison.OrdinalIgnoreCase))
+        {
+            DebugLog.Info("AppSettings: migrating Deep Analyze model qwen2_5_vl_3b → qwen2_5_vl_7b (schema v5; non-commercial 3B removed).");
+            s.SelectedVlmModelKind = "qwen2_5_vl_7b";
         }
 
         // clamp SchemaVersion to a known range. A corrupt or
@@ -200,7 +224,7 @@ internal sealed class AppSettings
         if (string.IsNullOrWhiteSpace(s.SelectedVlmModelKind)
             || !AllowedVlmKinds.Contains(s.SelectedVlmModelKind))
         {
-            s.SelectedVlmModelKind = "qwen2_5_vl_3b";
+            s.SelectedVlmModelKind = "qwen2_5_vl_7b";
         }
     }
 

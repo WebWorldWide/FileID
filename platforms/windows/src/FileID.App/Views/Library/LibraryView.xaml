@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
     LibraryView — search bar + kind filter + thumbnail grid.
 
@@ -43,7 +43,8 @@
 
         <!-- Page header -->
         <StackPanel Grid.Row="0" Spacing="4">
-            <TextBlock Text="Library" Style="{StaticResource TitleTextBlockStyle}" />
+            <TextBlock Text="Library" Style="{StaticResource TitleTextBlockStyle}"
+                       AutomationProperties.HeadingLevel="Level1" />
             <TextBlock Text="Search across filenames, OCR text, and CLIP semantic embeddings."
                        Style="{StaticResource BodyTextBlockStyle}"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
@@ -63,13 +64,16 @@
                      Grid.Column="0"
                      Height="36"
                      PlaceholderText="Search filenames + OCR text — Ctrl+F"
-                     TextChanged="OnSearchChanged"/>
+                     TextChanged="OnSearchChanged"
+                     AutomationProperties.Name="Search files"
+                     AutomationProperties.HelpText="Search across filenames, OCR text, and CLIP semantic embeddings"/>
 
             <ComboBox x:Name="KindFilter"
                       Grid.Column="1"
                       Width="160"
                       SelectionChanged="OnKindChanged"
-                      SelectedIndex="0">
+                      SelectedIndex="0"
+                      AutomationProperties.Name="Filter by file kind">
                 <ComboBoxItem Content="All kinds" Tag="all"/>
                 <ComboBoxItem Content="Images" Tag="image"/>
                 <ComboBoxItem Content="Videos" Tag="video"/>
@@ -85,7 +89,9 @@
             <Button x:Name="SelectAllButton"
                     Grid.Column="2"
                     Click="OnSelectAllClicked"
-                    ToolTipService.ToolTip="Select all visible files (Ctrl+A)">
+                    ToolTipService.ToolTip="Select all visible files (Ctrl+A)"
+                    AutomationProperties.Name="Select all visible files"
+                    AutomationProperties.HelpText="Selects every visible file; toggles to clear the selection (Ctrl+A)">
                 <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
                     <FontIcon Glyph="&#xE762;" FontSize="13" />
                     <TextBlock x:Name="SelectAllText" Text="Select" />
@@ -99,7 +105,9 @@
                     Grid.Column="3"
                     Click="OnUndoLastClicked"
                     Visibility="Collapsed"
-                    ToolTipService.ToolTip="Undo last destructive action (Ctrl+Z)">
+                    ToolTipService.ToolTip="Undo last destructive action (Ctrl+Z)"
+                    AutomationProperties.Name="Undo last action"
+                    AutomationProperties.HelpText="Undoes the last destructive action such as rename, trash, tag, or restructure (Ctrl+Z)">
                 <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
                     <FontIcon Glyph="&#xE7A7;" FontSize="13" />
                     <TextBlock x:Name="UndoButtonText" Text="Undo" />
@@ -132,7 +140,9 @@
                     <TextBlock Grid.Column="1" TextWrapping="Wrap"
                                Style="{StaticResource CaptionTextBlockStyle}"
                                Text="Install MobileCLIP for semantic image search — your typed words can match what's in each photo, not just the filename." />
-                    <Button Grid.Column="2" Content="Install" Click="OnInstallClipFromBannerClicked" VerticalAlignment="Center" />
+                    <Button Grid.Column="2" Content="Install" Click="OnInstallClipFromBannerClicked" VerticalAlignment="Center"
+                            AutomationProperties.Name="Install MobileCLIP"
+                            AutomationProperties.HelpText="Installs the MobileCLIP model to enable semantic image search" />
                 </Grid>
             </Border>
             <Border x:Name="DeepAnalyzeBanner"
@@ -200,21 +210,24 @@
                        VerticalAlignment="Center"
                        Style="{StaticResource BodyStrongTextBlockStyle}" />
             <Button Grid.Column="1" Click="OnTagSelectedClicked"
-                    ToolTipService.ToolTip="Apply tags to selected files">
+                    ToolTipService.ToolTip="Apply tags to selected files"
+                    AutomationProperties.Name="Tag selected files">
                 <StackPanel Orientation="Horizontal" Spacing="6">
                     <FontIcon Glyph="&#xE8EC;" FontSize="13"/>
                     <TextBlock Text="Tag…"/>
                 </StackPanel>
             </Button>
             <Button Grid.Column="2" Click="OnRenameSelectedClicked"
-                    ToolTipService.ToolTip="Rename selected files">
+                    ToolTipService.ToolTip="Rename selected files"
+                    AutomationProperties.Name="Rename selected files">
                 <StackPanel Orientation="Horizontal" Spacing="6">
                     <FontIcon Glyph="&#xE8AC;" FontSize="13"/>
                     <TextBlock Text="Rename…"/>
                 </StackPanel>
             </Button>
             <Button Grid.Column="3" Click="OnTrashSelectedClicked"
-                    ToolTipService.ToolTip="Move selected files to the Recycle Bin">
+                    ToolTipService.ToolTip="Move selected files to the Recycle Bin"
+                    AutomationProperties.Name="Move selected files to the Recycle Bin">
                 <StackPanel Orientation="Horizontal" Spacing="6">
                     <FontIcon Glyph="&#xE74D;" FontSize="13"/>
                     <TextBlock Text="Trash…"/>
@@ -229,8 +242,12 @@
             </Button>
         </Grid>
 
-        <!-- Grid of tiles. -->
-        <ScrollViewer Grid.Row="4"
+        <!-- Grid of tiles. IsTabStop so Tab can land focus on the grid and
+             arrow-key navigation (OnGridPreviewKeyDown) takes over; a tile
+             click also routes focus here. -->
+        <ScrollViewer x:Name="GridScroller"
+                      Grid.Row="4"
+                      IsTabStop="True"
                       VerticalScrollBarVisibility="Auto"
                       HorizontalScrollBarVisibility="Disabled"
                       ZoomMode="Disabled">
@@ -281,7 +298,9 @@
                               DragStarting="OnTileDragStarting"
                               PointerEntered="OnTilePointerEntered"
                               PointerExited="OnTilePointerExited"
-                              ToolTipService.ToolTip="{x:Bind Path}">
+                              ToolTipService.ToolTip="{x:Bind Path}"
+                              AutomationProperties.Name="{x:Bind FileName}"
+                              AutomationProperties.HelpText="Double-tap to preview, or right-tap for more actions">
                             <!-- Inline so each tile gets a unique animatable instance.
                                  macOS LibraryView.swift:676-677 ramps stroke opacity
                                  0.08 → 0.18 on hover (easeOut 0.18s). -->
@@ -394,12 +413,6 @@
                                         Background="{ThemeResource TileScrimBrush}"
                                         ToolTipService.ToolTip="{x:Bind KindDisplay}">
                                     <FontIcon Glyph="{x:Bind KindBadgeGlyph}" FontSize="12" Foreground="White" />
-                                </Border>
-                                <Border Padding="4,2"
-                                        CornerRadius="4"
-                                        Background="{ThemeResource TileScrimBrush}"
-                                        Visibility="{x:Bind HasFaces, Converter={StaticResource BoolToVisibility}}">
-                                    <FontIcon Glyph="&#xE77B;" FontSize="12" Foreground="{ThemeResource GoldBrush}" />
                                 </Border>
                                 <Border Padding="4,2"
                                         CornerRadius="4"

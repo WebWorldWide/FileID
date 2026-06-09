@@ -16,6 +16,35 @@ namespace FileID.Views.Restructure;
 
 public sealed partial class DrillDownSheet : UserControl
 {
+    // Badge colors are a small fixed set (confidence: auto/review/hold,
+    // tier: Anchor/Mixed/Junk). Pill() formerly allocated 3 SolidColorBrush
+    // per badge per file; with a large move list that's thousands of
+    // DispatcherObject constructions. Pre-build the brush triples once and
+    // reuse — fill (accent @ 0x33 alpha) + border/foreground (full accent).
+    // Gold (#FFCC00) is shared by "review" + "Anchor"; one entry covers both.
+    private static readonly Windows.UI.Color GreenAccent = Windows.UI.Color.FromArgb(0xFF, 0x6C, 0xC2, 0x4A);
+    private static readonly Windows.UI.Color GoldAccent = Windows.UI.Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00);
+    private static readonly Windows.UI.Color AmberAccent = Windows.UI.Color.FromArgb(0xFF, 0xF5, 0xB7, 0x4D);
+    private static readonly Windows.UI.Color CyanAccent = Windows.UI.Color.FromArgb(0xFF, 0xA0, 0xE2, 0xEA);
+    private static readonly Windows.UI.Color PinkAccent = Windows.UI.Color.FromArgb(0xFF, 0xF2, 0xA6, 0xC0);
+
+    private static readonly System.Collections.Generic.Dictionary<uint, (SolidColorBrush Fill, SolidColorBrush Accent)> PillBrushes =
+        BuildPillBrushes();
+
+    private static System.Collections.Generic.Dictionary<uint, (SolidColorBrush, SolidColorBrush)> BuildPillBrushes()
+    {
+        var map = new System.Collections.Generic.Dictionary<uint, (SolidColorBrush, SolidColorBrush)>();
+        foreach (var accent in new[] { GreenAccent, GoldAccent, AmberAccent, CyanAccent, PinkAccent })
+        {
+            var fill = accent; fill.A = 0x33;
+            map[Key(accent)] = (new SolidColorBrush(fill), new SolidColorBrush(accent));
+        }
+        return map;
+    }
+
+    private static uint Key(Windows.UI.Color c)
+        => ((uint)c.A << 24) | ((uint)c.R << 16) | ((uint)c.G << 8) | c.B;
+
     public DrillDownSheet()
     {
         InitializeComponent();
@@ -25,14 +54,39 @@ public sealed partial class DrillDownSheet : UserControl
     public void SetSankeyFilter(RestructurePlan plan, string source, string category)
     {
         HeaderText.Text = $"{source} → {category}";
-        var moves = new List<RestructureMove>();
         var libRoot = plan.LibraryRoot ?? "";
-        foreach (var m in plan.Moves)
+        var all = plan.Moves;
+        string SrcRaw(RestructureMove m) => TopLevel(TrimRoot(m.Source, libRoot));
+
+        // Reproduce the Sankey's top-N fold so clicking the folded "Other" ribbon
+        // drills into the SAME moves it represented (the long tail), not an empty
+        // set. MUST stay in sync with SankeyFlowControl.SourceBucket/CategoryBucket
+        // (MaxNodes=12, long tail -> "Other"); TopLevel/TrimRoot already match the
+        // Sankey's SourceOf. (audit A10)
+        const int MaxNodes = 12;
+        const string OtherKey = "Other";
+        int distinctSources = all.Select(SrcRaw).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+        var topSources = all.GroupBy(SrcRaw).OrderByDescending(g => g.Count())
+            .Take(MaxNodes - 1).Select(g => g.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        string SrcBucket(RestructureMove m)
         {
-            var srcRel = TrimRoot(m.Source, libRoot);
-            var srcBucket = TopLevel(srcRel);
-            if (string.Equals(srcBucket, source, StringComparison.OrdinalIgnoreCase) &&
-                string.Equals(m.Category, category, StringComparison.OrdinalIgnoreCase))
+            var s = SrcRaw(m);
+            return distinctSources > MaxNodes && !topSources.Contains(s) ? OtherKey : s;
+        }
+        int distinctCats = all.Select(m => m.Category).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+        var topCats = all.GroupBy(m => m.Category).OrderByDescending(g => g.Count())
+            .Take(MaxNodes - 1).Select(g => g.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        string CatBucket(RestructureMove m)
+        {
+            var c = m.Category;
+            return distinctCats > MaxNodes && !topCats.Contains(c) ? OtherKey : c;
+        }
+
+        var moves = new List<RestructureMove>();
+        foreach (var m in all)
+        {
+            if (string.Equals(SrcBucket(m), source, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(CatBucket(m), category, StringComparison.OrdinalIgnoreCase))
             {
                 moves.Add(m);
             }
@@ -57,6 +111,23 @@ public sealed partial class DrillDownSheet : UserControl
         Render(moves);
     }
 
+    /// <summary>Filter to the moves whose engine Tier maps to the given outcome
+    /// (Tidy = Mixed-tier, Reorganize = Junk-tier). Backs a recommendation card's
+    /// "See all N files" — mirrors macOS drillDownSheet(.outcome(...)).</summary>
+    internal void SetOutcomeFilter(RestructurePlan plan, FileID.ViewModels.RestructureOutcome outcome, string title)
+    {
+        HeaderText.Text = title;
+        var moves = new List<RestructureMove>();
+        foreach (var m in plan.Moves)
+        {
+            if (FileID.ViewModels.RestructureGrouping.OutcomeForTier(m.Tier) == outcome)
+            {
+                moves.Add(m);
+            }
+        }
+        Render(moves);
+    }
+
     private void Render(IList<RestructureMove> moves)
     {
         CountText.Text = $"{moves.Count} file{(moves.Count == 1 ? "" : "s")}";
@@ -74,9 +145,12 @@ public sealed partial class DrillDownSheet : UserControl
         {
             Padding = new Thickness(10, 6, 10, 6),
             CornerRadius = new CornerRadius(8),
-            Background = (Brush)Application.Current.Resources["SubtleFillColorSecondaryBrush"],
+            Background = FileID.Services.ThemeHelper.GetBrushSafe("SubtleFillColorSecondaryBrush"),
             ColumnSpacing = 12,
         };
+        // Accessible name for the whole row = the file name, so a screen reader
+        // reading the drill-down list announces each file.
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(grid, Path.GetFileName(m.Source));
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -86,7 +160,7 @@ public sealed partial class DrillDownSheet : UserControl
             Width = 56,
             Height = 56,
             CornerRadius = new CornerRadius(6),
-            Background = (Brush)Application.Current.Resources["SubtleFillColorTertiaryBrush"],
+            Background = FileID.Services.ThemeHelper.GetBrushSafe("SubtleFillColorTertiaryBrush"),
         };
         var img = new Image { Stretch = Stretch.UniformToFill, Width = 56, Height = 56 };
         thumbHost.Child = img;
@@ -98,61 +172,96 @@ public sealed partial class DrillDownSheet : UserControl
         labelStack.Children.Add(new TextBlock
         {
             Text = Path.GetFileName(m.Source),
-            Style = (Style)Application.Current.Resources["BodyStrongTextBlockStyle"],
+            Style = FileID.Services.ThemeHelper.GetStyleSafe("BodyStrongTextBlockStyle")!,
             TextTrimming = TextTrimming.CharacterEllipsis,
         });
+        // Plain-language "why filed here" (RESTRUCTURE.md §6 trust mechanic).
+        if (!string.IsNullOrEmpty(m.Reason))
+        {
+            labelStack.Children.Add(new TextBlock
+            {
+                Text = m.Reason,
+                Style = FileID.Services.ThemeHelper.GetStyleSafe("CaptionTextBlockStyle")!,
+                Foreground = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorSecondaryBrush"),
+                TextWrapping = TextWrapping.Wrap,
+            });
+        }
         labelStack.Children.Add(new TextBlock
         {
             Text = $"{m.Source} → {m.Destination}",
-            Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
-            Foreground = (Brush)Application.Current.Resources["TextFillColorTertiaryBrush"],
+            Style = FileID.Services.ThemeHelper.GetStyleSafe("CaptionTextBlockStyle")!,
+            Foreground = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorTertiaryBrush"),
             TextTrimming = TextTrimming.CharacterEllipsis,
         });
         Grid.SetColumn(labelStack, 1);
         grid.Children.Add(labelStack);
 
-        // engine-stamped tier badge (Anchor / Mixed / Junk).
-        // Anchor = gold (#FFCC00), Mixed = cyan (#A0E2EA), Junk = pink (#F2A6C0).
-        if (BuildTierBadge(m.Tier) is FrameworkElement badge)
+        // Right rail: butler confidence pill (auto / review / hold) above the
+        // engine-stamped Anchor / Mixed / Junk tier pill.
+        var badges = new StackPanel { Spacing = 4, VerticalAlignment = VerticalAlignment.Center };
+        if (BuildConfidenceBadge(m.Confidence) is FrameworkElement cb) badges.Children.Add(cb);
+        if (BuildTierBadge(m.Tier) is FrameworkElement tb) badges.Children.Add(tb);
+        if (badges.Children.Count > 0)
         {
-            Grid.SetColumn(badge, 2);
-            grid.Children.Add(badge);
+            Grid.SetColumn(badges, 2);
+            grid.Children.Add(badges);
         }
         return grid;
     }
 
-    /// <summary>render an Anchor/Mixed/Junk badge for a move,
-    /// using the FileID palette colors. Returns null when the move
-    /// has no tier (engine version mismatch or skipped move).</summary>
+    /// <summary>Butler confidence pill — auto (green) / review (gold) / hold
+    /// (amber). Null when the engine didn't stamp a confidence.</summary>
+    private static FrameworkElement? BuildConfidenceBadge(string? confidence)
+    {
+        (string label, Windows.UI.Color accent) = confidence switch
+        {
+            "auto" => ("Auto-file", GreenAccent),
+            "review" => ("Review", GoldAccent),
+            "ask" => ("Hold", AmberAccent),
+            _ => ("", default),
+        };
+        return string.IsNullOrEmpty(label) ? null : Pill(label, accent);
+    }
+
+    /// <summary>Anchor (gold) / Mixed (cyan) / Junk (pink) folder-tier pill.
+    /// Null when the move has no tier (engine mismatch or skipped move).</summary>
     private static FrameworkElement? BuildTierBadge(string? tier)
     {
-        if (string.IsNullOrEmpty(tier)) return null;
-        Windows.UI.Color colorAccent;
-        switch (tier)
+        Windows.UI.Color accent = tier switch
         {
-            case "Anchor": colorAccent = Windows.UI.Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00); break;
-            case "Mixed": colorAccent = Windows.UI.Color.FromArgb(0xFF, 0xA0, 0xE2, 0xEA); break;
-            case "Junk": colorAccent = Windows.UI.Color.FromArgb(0xFF, 0xF2, 0xA6, 0xC0); break;
-            default: return null;
+            "Anchor" => GoldAccent,
+            "Mixed" => CyanAccent,
+            "Junk" => PinkAccent,
+            _ => default,
+        };
+        return string.IsNullOrEmpty(tier) || accent.A == 0 ? null : Pill(tier!, accent);
+    }
+
+    /// <summary>A small rounded color-coded badge ("pill") used for both the
+    /// confidence and folder-tier labels.</summary>
+    private static Border Pill(string text, Windows.UI.Color accent)
+    {
+        if (!PillBrushes.TryGetValue(Key(accent), out var brushes))
+        {
+            var fill = accent; fill.A = 0x33;
+            brushes = (new SolidColorBrush(fill), new SolidColorBrush(accent));
         }
-        var fill = colorAccent; fill.A = 0x33;
-        var border = new Border
+        return new Border
         {
-            Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(fill),
-            BorderBrush = new Microsoft.UI.Xaml.Media.SolidColorBrush(colorAccent),
+            Background = brushes.Fill,
+            BorderBrush = brushes.Accent,
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(8),
             Padding = new Thickness(8, 2, 8, 2),
-            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Child = new TextBlock
+            {
+                Text = text,
+                FontSize = 11,
+                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                Foreground = brushes.Accent,
+            },
         };
-        border.Child = new TextBlock
-        {
-            Text = tier,
-            FontSize = 11,
-            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-            Foreground = new Microsoft.UI.Xaml.Media.SolidColorBrush(colorAccent),
-        };
-        return border;
     }
 
     private static async System.Threading.Tasks.Task LoadThumbAsync(Image img, string path)
@@ -165,6 +274,10 @@ public sealed partial class DrillDownSheet : UserControl
         try
         {
             if (!File.Exists(path)) return;
+            // In-proc shell video/audio thumbnail providers can native-fast-fail the
+            // whole app. This path calls GetThumbnailAsync directly (bypasses
+            // ThumbnailService), so apply the same skip — single source of truth.
+            if (Services.ThumbnailService.SkipShellThumbnailForExtension(path)) return;
             var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(path);
             thumb = await file.GetThumbnailAsync(
                 Windows.Storage.FileProperties.ThumbnailMode.SingleItem, 128,

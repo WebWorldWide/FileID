@@ -148,6 +148,12 @@ public sealed partial class SidebarQueueList : UserControl
         grid.Children.Add(icon);
         grid.Children.Add(title);
         grid.Children.Add(eta);
+
+        // Screen-reader name for the queue row: running/queued + title + ETA,
+        // so each pending job announces as one coherent line.
+        var name = (isRunning ? "Running: " : "Queued: ") + job.Title;
+        if (eta.Text.Length > 0) name += $", {eta.Text} remaining";
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(grid, name);
         return grid;
     }
 

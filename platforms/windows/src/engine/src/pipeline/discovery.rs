@@ -94,6 +94,11 @@ pub struct DiscoveredFile {
     /// Last-modified timestamp as Unix seconds. Used for incremental
     /// rescans: files unchanged since their `scanned_at` row are skipped.
     pub modified_unix: f64,
+    /// Creation timestamp as Unix seconds, when the platform exposes one.
+    /// Threaded through to `files.created_at` for parity with the macOS
+    /// engine (which populates it). `None` when the filesystem doesn't
+    /// record a birth time or the metadata read failed.
+    pub created_unix: Option<f64>,
     /// True when the file is a cloud placeholder (OneDrive Files-On-Demand /
     /// `OFFLINE` / `RECALL_ON_*`). Reading its content would trigger a
     /// network hydration (a surprise download — and the only non-model
@@ -237,7 +242,8 @@ impl Discovery {
                     children.retain(|res| {
                         let Ok(entry) = res.as_ref() else { return true; };
                         let file_type = entry.file_type();
-                        let name = entry.file_name().to_string_lossy().to_string();
+                        let name = entry.file_name();
+                        let name = name.to_string_lossy();
                         if file_type.is_dir() {
                             if is_noise_directory(&name) {
                                 return false;
@@ -300,6 +306,11 @@ impl Discovery {
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_secs_f64())
                     .unwrap_or(0.0);
+                let created_unix = metadata
+                    .created()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs_f64());
 
                 // Cloud placeholder detection. OneDrive / generic
                 // Files-On-Demand mark dehydrated files with these
@@ -346,6 +357,7 @@ impl Discovery {
                     kind,
                     size_bytes: size,
                     modified_unix: modified,
+                    created_unix,
                     online_only,
                     file_ref,
                 };

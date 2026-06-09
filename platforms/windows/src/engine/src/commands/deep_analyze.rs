@@ -55,6 +55,18 @@ pub(crate) async fn handle_deep_analyze_file(
                 model_kind: None,
             }))))
             .await;
+            // Always send a terminal Complete so the UI clears the
+            // "Loading model…" card instead of stranding forever (#6).
+            sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
+                DeepAnalyzeComplete {
+                    processed: 0,
+                    failed: 1,
+                    total_seconds: 0.0,
+                    model_kind: payload.model_kind.clone(),
+                    cancelled: true,
+                },
+            ))))
+            .await;
             return;
         }
     };
@@ -144,6 +156,24 @@ pub(crate) async fn handle_deep_analyze_file(
                 model_kind: None,
             }))))
             .await;
+            // Terminal Complete on the analyze failure too, mirroring the batch
+            // handler's convention so the card clears / Analyze-All re-enables (#6).
+            // Derive `cancelled` from the cooperative cancel flag: a genuine
+            // analyze failure (decode/VLM/persist) must report cancelled:false so
+            // the app's "(1 failed)" warning fires; only a real user-cancel reports
+            // cancelled:true. Hard-coding true mislabeled every failure as a cancel
+            // and suppressed the warning toast.
+            let was_cancelled = cancel.load(Ordering::Relaxed);
+            sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
+                DeepAnalyzeComplete {
+                    processed: 0,
+                    failed: 1,
+                    total_seconds: started_at.elapsed().as_secs_f64(),
+                    model_kind,
+                    cancelled: was_cancelled,
+                },
+            ))))
+            .await;
         }
     }
 }
@@ -154,20 +184,38 @@ pub(crate) async fn handle_deep_analyze_folder(
     payload: ipc::DeepAnalyzeFolderPayload,
     cancel: Arc<AtomicBool>,
 ) {
-    let prefix = format!("{}%", payload.path_prefix);
-    let ids = match collect_file_ids(
-        &db,
-        "WHERE path_text LIKE ?1 AND kind IN ('image','video')",
-        &[&prefix],
-    ) {
+    // P16: sargable range seek on the path_text index instead of a
+    // non-sargable `LIKE 'prefix%'` full-table scan.
+    let lo = payload.path_prefix.clone();
+    let ids_result = match crate::scan_session::prefix_upper_bound(&lo) {
+        Some(hi) => collect_file_ids(
+            &db,
+            "WHERE path_text >= ?1 AND path_text < ?2 AND kind IN ('image','video')",
+            &[&lo, &hi],
+        ),
+        None => collect_file_ids(&db, "WHERE kind IN ('image','video')", &[]),
+    };
+    let ids = match ids_result {
         Ok(v) => v,
         Err(err) => {
             tracing::warn!(?err, "deep_analyze_folder query");
+            // Terminal Complete on the query failure so the UI clears the
+            // "Preparing…" card instead of stranding forever (#6).
+            sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
+                DeepAnalyzeComplete {
+                    processed: 0,
+                    failed: 1,
+                    total_seconds: 0.0,
+                    model_kind: payload.model_kind.clone(),
+                    cancelled: true,
+                },
+            ))))
+            .await;
             return;
         }
     };
     // Folder-scoped Deep Analyze is a manual action → full enrichment (Both).
-    run_deep_analyze_batch(sink, db, &payload.model_kind, ids, cancel, true, false).await;
+    run_deep_analyze_batch(sink, db, &payload.model_kind, ids, cancel, true, false, true).await;
 }
 
 pub(crate) async fn handle_deep_analyze_all(
@@ -180,6 +228,18 @@ pub(crate) async fn handle_deep_analyze_all(
         Ok(v) => v,
         Err(err) => {
             tracing::warn!(?err, "deep_analyze_all query");
+            // Terminal Complete on the query failure so the UI clears the
+            // "Preparing…" card instead of stranding forever (#6).
+            sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
+                DeepAnalyzeComplete {
+                    processed: 0,
+                    failed: 1,
+                    total_seconds: 0.0,
+                    model_kind: payload.model_kind.clone(),
+                    cancelled: true,
+                },
+            ))))
+            .await;
             return;
         }
     };
@@ -191,6 +251,7 @@ pub(crate) async fn handle_deep_analyze_all(
         cancel,
         payload.skip_existing,
         payload.tags_only,
+        payload.propose_renames,
     )
     .await;
 }
@@ -215,13 +276,16 @@ async fn run_deep_analyze_batch(
     cancel: Arc<AtomicBool>,
     skip_existing: bool,
     tags_only: bool,
+    propose_renames: bool,
 ) {
     // TagsOnly = one VLM call/file (background auto-tag, ~3× faster); Both =
     // caption + tags + rename (the manual Deep Analyze pass).
     let mode = if tags_only {
         AnalyzeMode::TagsOnly
-    } else {
+    } else if propose_renames {
         AnalyzeMode::Both
+    } else {
+        AnalyzeMode::CaptionAndTags
     };
 
     // Resolve both VLM backends up front so we can gate correctly BEFORE
@@ -313,6 +377,10 @@ async fn run_deep_analyze_batch(
     let total = file_ids.len() as u64;
     let mut processed = 0u64;
     let mut failed = 0u64;
+    // Use the persistent server until it errors; if it dies mid-batch and a CLI
+    // runner exists, fall back to per-file CLI for the remaining files instead of
+    // failing every one. (audit E5)
+    let mut use_server = server.is_some();
     let started_at = Instant::now();
 
     // No runtime can run the (present) weights: the persistent server didn't
@@ -362,14 +430,19 @@ async fn run_deep_analyze_batch(
             let already = {
                 let conn = db.lock();
                 if tags_only {
-                    // TagsOnly never writes vlm_description, so "already done"
-                    // means the file already has ≥1 source='vlm' tag. Checking
-                    // vlm_description here (as the Both path does) would never
-                    // match → the auto-tag pass would re-tag the whole library
-                    // on every scan instead of resuming on untagged files only.
+                    // ENG-40: TagsOnly never writes vlm_description, but it DOES
+                    // write vlm_model (persist_vlm_results sets it on every
+                    // successful pass). Keying "already done" on ≥1 source='vlm'
+                    // tag row re-analyzed any file whose VLM tags were all
+                    // stopword/empty-filtered (zero rows persisted) on every run.
+                    // Mirror the macOS reference (DeepAnalyzeRunner.swift): a file
+                    // is DONE when it was analyzed BY THIS MODEL (vlm_model match)
+                    // — the processed marker is written even when no tag survives
+                    // filtering, while genuinely-unprocessed files (vlm_model NULL
+                    // or a different model) still run.
                     conn.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM tags WHERE file_id=?1 AND source='vlm')",
-                        rusqlite::params![file_id],
+                        "SELECT EXISTS(SELECT 1 FROM files WHERE id=?1 AND vlm_model=?2)",
+                        rusqlite::params![file_id, model_kind],
                         |r| r.get::<_, bool>(0),
                     )
                     .unwrap_or(false)
@@ -457,8 +530,10 @@ async fn run_deep_analyze_batch(
                 }),
             )));
         };
-        // Persistent server when up (model already resident); else per-file CLI.
-        let outcome = if let Some(srv) = server.as_ref() {
+        // Persistent server while it's healthy (model already resident); else
+        // per-file CLI. `use_server` flips off below if the server dies. (audit E5)
+        let server_active = if use_server { server.as_ref() } else { None };
+        let outcome = if let Some(srv) = server_active {
             analyze_file_via_server(db.clone(), srv, file_id, model_kind, mode, cancel.clone(), on_token)
                 .await
         } else if let Some(r) = runner.as_ref() {
@@ -487,6 +562,15 @@ async fn run_deep_analyze_batch(
             Err(err) => {
                 failed += 1;
                 tracing::warn!(?err, file_id, "deep analyze file failed");
+                // If the persistent server errored but a CLI runner is available,
+                // assume the server died and fall back to per-file CLI for the
+                // REMAINING files rather than failing every one. (audit E5)
+                if use_server && runner.is_some() {
+                    tracing::warn!(
+                        "[DEEP-ANALYZE] persistent server call failed; falling back to per-file CLI for the rest of the batch"
+                    );
+                    use_server = false;
+                }
             }
         }
     }

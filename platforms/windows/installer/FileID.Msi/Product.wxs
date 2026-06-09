@@ -30,7 +30,7 @@
   <Package
       Name="FileID"
       Manufacturer="FileID"
-      Version="0.1.0"
+      Version="$(var.Version)"
       UpgradeCode="$(var.UpgradeCode)"
       InstallerVersion="500"
       Compressed="yes"
@@ -41,7 +41,15 @@
 
     <!-- Replace any older version. Schedule afterInstallExecute so files
          from the new install land before old files come out — minimizes
-         flicker if the user has the app open. -->
+         flicker if the user has the app open.
+
+         A single MSI's install is already an atomic Windows Installer
+         transaction (it rolls back wholesale on failure), so there is no
+         MSI-level RollbackBoundary here — that element is a Burn <Chain>
+         construct. The chain-level RollbackBoundary lives in
+         ../FileID.Bundle/Bundle.wxs so a failure installing one packaged
+         MSI doesn't unwind packages that already committed past the
+         checkpoint. -->
     <MajorUpgrade
         Schedule="afterInstallExecute"
         DowngradeErrorMessage="A newer version of FileID is already installed." />

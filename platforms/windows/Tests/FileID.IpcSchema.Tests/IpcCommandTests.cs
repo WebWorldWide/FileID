@@ -56,7 +56,6 @@ public class IpcCommandTests
     [InlineData(typeof(ShutdownCommand),          "shutdown")]
     [InlineData(typeof(RunFaceClusteringCommand), "runFaceClustering")]
     [InlineData(typeof(DeepAnalyzeCancelCommand), "deepAnalyzeCancel")]
-    [InlineData(typeof(CancelPrewarmCommand),     "cancelPrewarm")]
     [InlineData(typeof(VerifyCudaPackCommand),    "verifyCudaPack")]
     public void EmptyPayloadVariants_EncodeAsObjectNotString(Type t, string expectedKey)
     {
@@ -69,12 +68,30 @@ public class IpcCommandTests
         Assert.IsType(t, rt.Payload);
     }
 
+    // cancelPrewarm gained an optional modelKind (per-model cancel; null = all),
+    // so it is no longer an empty payload — it round-trips its field both ways.
+    [Fact]
+    public void CancelPrewarm_RoundTripsWithAndWithoutModelKind()
+    {
+        var all = new IpcCommand("c", new CancelPrewarmCommand());
+        var allJson = IpcCoder.Encode(all);
+        Assert.Contains("\"cancelPrewarm\":{", allJson);
+        var allCmd = Assert.IsType<CancelPrewarmCommand>(IpcCoder.Decode<IpcCommand>(allJson).Payload);
+        Assert.Null(allCmd.ModelKind);
+
+        var one = new IpcCommand("c", new CancelPrewarmCommand("clip_text"));
+        var oneJson = IpcCoder.Encode(one);
+        Assert.Contains("\"modelKind\":\"clip_text\"", oneJson);
+        var oneCmd = Assert.IsType<CancelPrewarmCommand>(IpcCoder.Decode<IpcCommand>(oneJson).Payload);
+        Assert.Equal("clip_text", oneCmd.ModelKind);
+    }
+
     [Fact]
     public void DeepAnalyzeFile_PreservesFileIDExactCasing()
     {
         // Field name on the wire is "fileID" (matches Swift Codable's
         // synthesis for `fileID: Int64`). Lower-case "fileId" is wrong.
-        var cmd = new IpcCommand("d", new DeepAnalyzeFileCommand(12345, "qwen2_5_vl_3b"));
+        var cmd = new IpcCommand("d", new DeepAnalyzeFileCommand(12345, "qwen2_5_vl_7b"));
         var json = IpcCoder.Encode(cmd);
         Assert.Contains("\"fileID\":12345", json);
         Assert.DoesNotContain("\"fileId\"", json);
@@ -82,7 +99,7 @@ public class IpcCommandTests
         var rt = IpcCoder.Decode<IpcCommand>(json);
         var p = Assert.IsType<DeepAnalyzeFileCommand>(rt.Payload);
         Assert.Equal(12345, p.FileId);
-        Assert.Equal("qwen2_5_vl_3b", p.ModelKind);
+        Assert.Equal("qwen2_5_vl_7b", p.ModelKind);
     }
 
     [Fact]
@@ -103,7 +120,7 @@ public class IpcCommandTests
     {
         // Older clients omit tagsOnly; it must decode as false (serde default
         // on the Rust side, defaulted record param on the C# side).
-        const string json = """{"id":"a","payload":{"deepAnalyzeAll":{"modelKind":"qwen2_5_vl_3b","skipExisting":false}}}""";
+        const string json = """{"id":"a","payload":{"deepAnalyzeAll":{"modelKind":"qwen2_5_vl_7b","skipExisting":false}}}""";
         var rt = IpcCoder.Decode<IpcCommand>(json);
         var p = Assert.IsType<DeepAnalyzeAllCommand>(rt.Payload);
         Assert.False(p.TagsOnly);

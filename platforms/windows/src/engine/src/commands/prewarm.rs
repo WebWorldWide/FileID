@@ -35,11 +35,68 @@ impl Drop for ReleaseOnDrop {
     }
 }
 
+/// Per-model-kind cancel flags. A prewarm download polls ITS kind's flag, so
+/// cancelling one model (the per-row Cancel button) no longer aborts every other
+/// concurrent download, and a fresh prewarm of one kind can't un-cancel a
+/// different kind's pending cancel — both were bugs of the old single
+/// process-global flag.
+static PREWARM_CANCELS: OnceLock<Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>> =
+    OnceLock::new();
+
+/// Get-or-create this kind's cancel flag WITHOUT changing its value. The
+/// fresh-start reset is [`reset_prewarm_cancel`], called synchronously at
+/// dispatch time, so this getter can't clobber a cancel that raced in after the
+/// handler task was spawned.
+fn prewarm_cancel_flag(model_kind: &str) -> Arc<AtomicBool> {
+    let map = PREWARM_CANCELS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    map.lock()
+        .entry(model_kind.to_string())
+        .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+        .clone()
+}
+
+/// Reset (creating if needed) this kind's cancel flag to un-cancelled. Called
+/// from the PrewarmModel dispatch arm BEFORE the handler task is spawned, so the
+/// flag always exists (and is false) before any subsequent CancelPrewarm for
+/// this kind is processed by the serial stdio loop — closing the lazy-create
+/// race where a cancel landing in the spawn→register window was silently
+/// dropped. Resets ONLY this kind; a different kind's pending cancel is untouched.
+pub fn reset_prewarm_cancel(model_kind: &str) {
+    let map = PREWARM_CANCELS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    map.lock()
+        .entry(model_kind.to_string())
+        .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+        .store(false, Ordering::Relaxed);
+}
+
+/// Signal cancellation for one model kind (create-or-set, so a cancel is never
+/// lost even if processed before the handler first reads the flag), or ALL known
+/// prewarm flags when `model_kind` is None (the "cancel everything" form).
+/// In-flight `download_parallel` calls poll their flag after every chunk and bail.
+pub fn cancel_prewarm(model_kind: Option<&str>) {
+    let map = PREWARM_CANCELS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut guard = map.lock();
+    match model_kind {
+        Some(kind) => {
+            guard
+                .entry(kind.to_string())
+                .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+                .store(true, Ordering::Relaxed);
+            tracing::info!(model_kind = kind, "CancelPrewarm received (per-model)");
+        }
+        None => {
+            for flag in guard.values() {
+                flag.store(true, Ordering::Relaxed);
+            }
+            tracing::info!("CancelPrewarm received (all in-flight)");
+        }
+    }
+}
+
 pub(crate) async fn handle_prewarm_model(
     sink: Sink,
     model_kind: String,
     http_client: Arc<reqwest::Client>,
-    cancel: Arc<AtomicBool>,
 ) {
     // Emit an immediate "Queued" progress event so the welcome sheet row
     // flips out of the captionless-spinner state the moment the engine
@@ -92,14 +149,47 @@ pub(crate) async fn handle_prewarm_model(
         set: in_flight,
     };
 
+    // Per-model cancel flag (reset to un-cancelled for this fresh prewarm).
+    // download_parallel below polls it after every chunk.
+    let cancel = prewarm_cancel_flag(&model_kind);
+
+    // (Re)installing a GPU EP pack is an explicit "try this EP again" — clear
+    // any prior crash-disable (ep_guard) so the next launch re-attempts the bind.
+    match model_kind.as_str() {
+        "ort_cuda_x64" => crate::models::ep_guard::reenable_ep("cuda"),
+        "ort_openvino_x64" => crate::models::ep_guard::reenable_ep("openvino"),
+        _ => {}
+    }
+
+    // Distinguish "the engine can't resolve its models dir" (a storage/env
+    // misconfig that makes `lookup_full` return Unknown for EVERY kind) from a
+    // genuinely unregistered kind — otherwise the unknown-kind message below
+    // would mislead the user into thinking the model itself is the problem.
+    if let Err(err) = crate::paths::models_dir() {
+        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+            kind: "models_dir_unavailable".into(),
+            message: format!(
+                "FileID couldn't resolve its models folder, so '{model_kind}' \
+                 can't be installed: {err}. Check that the %LOCALAPPDATA% (or \
+                 %USERPROFILE%) environment variable is set."
+            ),
+            path: None,
+            model_kind: Some(model_kind.clone()),
+        }))))
+        .await;
+        tracing::warn!(model_kind = %model_kind, outcome = "models_dir_unavailable", "[PREWARM] exiting");
+        return;
+    }
+
     let model = match registry::lookup_full(&model_kind) {
         LookupResult::Found(m) => m,
         LookupResult::Unknown => {
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                 kind: "unknown_model".into(),
                 message: format!(
-                    "Model '{model_kind}' is not registered. \
-                     Add it to engine/src/models/registry.rs."
+                    "This FileID engine doesn't recognize the model '{model_kind}'. \
+                     The engine is most likely older than the app — reinstall or \
+                     rebuild FileID so the app and engine match, then try again."
                 ),
                 path: None,
                 model_kind: Some(model_kind.clone()),
@@ -185,10 +275,12 @@ pub(crate) async fn handle_prewarm_model(
                     total_bytes: Some(total_estimate),
                 },
             )));
-            let s = sink_for_progress.clone();
-            tokio::spawn(async move {
-                s.send(event).await;
-            });
+            // Send inline (drop-on-full) rather than via a spawned task. Spawning
+            // a task per callback gave no ordering guarantee, so a later,
+            // higher-fraction event could reach the channel before an earlier,
+            // lower one and bounce the progress bar backward. try_send preserves
+            // emission order; progress is throttled upstream so drops are benign.
+            let _ = sink_for_progress.try_send(event);
         }
     };
 
@@ -222,6 +314,7 @@ pub(crate) async fn handle_prewarm_model(
             url: file.url.clone(),
             destination: file.dest.clone(),
             expected_sha256: file.sha256.clone(),
+            expected_bytes: Some(file.approx_bytes),
         };
         let label_for_err = label.clone();
         let dest_for_err = file.dest.clone();
@@ -232,37 +325,62 @@ pub(crate) async fn handle_prewarm_model(
         }));
     }
 
-    let mut first_err: Option<(String, PathBuf, anyhow::Error)> = None;
+    // Collect EVERY failed file, not just the first — a multi-file or
+    // multi-pack failure must not be masked by reporting only one. Each is
+    // logged on its own, then surfaced as a single combined error.
+    let mut errs: Vec<(String, PathBuf, anyhow::Error)> = Vec::new();
     for h in regular_handles {
         match h.await {
             Ok(Ok(())) => {}
-            Ok(Err(triple)) => {
-                if first_err.is_none() {
-                    first_err = Some(triple);
-                }
-            }
+            Ok(Err(triple)) => errs.push(triple),
             Err(join_err) => {
-                if first_err.is_none() {
-                    first_err = Some(("(task)".into(), PathBuf::new(), anyhow::anyhow!(join_err)));
-                }
+                errs.push(("(task)".into(), PathBuf::new(), anyhow::anyhow!(join_err)));
             }
         }
     }
-    if let Some((label, dest, err)) = first_err {
-        tracing::warn!(?err, file = %label, "model download failed");
+    if !errs.is_empty() {
+        // A user-initiated cancel is not a network failure: surface a benign
+        // event the app suppresses (ModelInstallerService treats
+        // "prewarm_cancelled" as a no-op) instead of a red "download failed —
+        // check your connection / Retry" pill.
+        if cancel.load(Ordering::Relaxed) {
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "prewarm_cancelled".into(),
+                message: format!("Download of {model_kind} cancelled."),
+                path: None,
+                model_kind: Some(model_kind.clone()),
+            }))))
+            .await;
+            tracing::info!(model_kind = %model_kind, outcome = "cancelled", "[PREWARM] exiting");
+            return;
+        }
+        for (label, _dest, err) in &errs {
+            tracing::warn!(?err, file = %label, "model download failed");
+        }
+        let detail = errs
+            .iter()
+            .map(|(label, _dest, err)| format!("{label}: {err}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (first_label, first_dest, _) = &errs[0];
+        let summary = if errs.len() == 1 {
+            format!("Couldn't download {first_label}")
+        } else {
+            format!("Couldn't download {} files", errs.len())
+        };
         sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
             kind: "model_download_failed".into(),
             message: format!(
-                "Couldn't download {label}: {err}\n\n\
+                "{summary}:\n{detail}\n\n\
                  Large model downloads can take several minutes — \
                  check your connection and click Retry. Downloads \
                  resume from where they stopped, so no progress is lost."
             ),
-            path: Some(dest.display().to_string()),
+            path: Some(first_dest.display().to_string()),
             model_kind: Some(model_kind.clone()),
         }))))
         .await;
-        tracing::warn!(model_kind = %model_kind, outcome = "download_failed", file = %label, "[PREWARM] exiting");
+        tracing::warn!(model_kind = %model_kind, outcome = "download_failed", failed = errs.len(), "[PREWARM] exiting");
         return;
     }
     // Lock in the final byte counts for regular files so zip progress
@@ -294,10 +412,22 @@ pub(crate) async fn handle_prewarm_model(
             url: file.url.clone(),
             destination: file.dest.clone(),
             expected_sha256: file.sha256.clone(),
+            expected_bytes: Some(file.approx_bytes),
         };
         if let Err(err) =
             download_parallel(http_client.clone(), req, cancel.clone(), progress_cb).await
         {
+            if cancel.load(Ordering::Relaxed) {
+                sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                    kind: "prewarm_cancelled".into(),
+                    message: format!("Download of {model_kind} cancelled."),
+                    path: None,
+                    model_kind: Some(model_kind.clone()),
+                }))))
+                .await;
+                tracing::info!(model_kind = %model_kind, outcome = "cancelled", "[PREWARM] exiting");
+                return;
+            }
             tracing::warn!(?err, file = %label, "model download failed");
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                 kind: "model_download_failed".into(),
@@ -331,7 +461,16 @@ pub(crate) async fn handle_prewarm_model(
         }
         let _ = std::fs::remove_file(&file.dest);
         if let Some(parent) = file.dest.parent() {
-            platform::register_dll_dirs_under(parent);
+            // Returns the dirs whose AddDllDirectory call failed; an empty Vec is
+            // full success. Log failures (path-redacted) so a pack whose GPU DLLs
+            // won't be on the search path at load is diagnosable.
+            let failed = platform::register_dll_dirs_under(parent);
+            for dir in &failed {
+                tracing::warn!(
+                    dir = %platform::redact_path_for_log(dir),
+                    "[PREWARM] AddDllDirectory failed for pack dir; its DLLs may not load"
+                );
+            }
         }
         per_file_done[idx].store(file.approx_bytes, Ordering::Relaxed);
     }
@@ -359,9 +498,16 @@ pub(crate) async fn handle_prewarm_model(
         let tmp = sentinel.with_extension("installed.tmp");
         if let Err(err) = tokio::fs::write(&tmp, model.id.as_bytes()).await {
             tracing::error!(?err, tmp = %tmp.display(), "sentinel tmp write failed");
+            // A failed write can leave a partial .tmp behind; remove it (mirroring
+            // the rename path below) so a half-written marker isn't left on disk.
+            let _ = tokio::fs::remove_file(&tmp).await;
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                 kind: "sentinel_write_failed".into(),
-                message: format!("Couldn't write the install marker for {}: {err}", model.display_name),
+                message: format!(
+                    "Couldn't write the install marker for {}: {err}. The model is \
+                     downloaded but not registered as installed; try again.",
+                    model.display_name
+                ),
                 path: Some(tmp.display().to_string()),
                 model_kind: Some(model_kind.clone()),
             }))))
@@ -374,7 +520,8 @@ pub(crate) async fn handle_prewarm_model(
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                 kind: "sentinel_rename_failed".into(),
                 message: format!(
-                    "Couldn't finalize the install marker for {}: {err}",
+                    "Couldn't finalize the install marker for {}: {err}. The model is \
+                     downloaded but not registered as installed; try again.",
                     model.display_name
                 ),
                 path: Some(sentinel.display().to_string()),
@@ -396,4 +543,32 @@ pub(crate) async fn handle_prewarm_model(
     ))))
     .await;
     tracing::info!(model_kind = %model_kind, outcome = "installed", "[PREWARM] exiting");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Per-model cancel registry: cancelling one kind must not touch another, and
+    // a fresh prewarm of a kind resets only its own flag. Unique kind names keep
+    // the process-global static from cross-contaminating parallel tests.
+    #[test]
+    fn per_model_cancel_is_isolated() {
+        let a = prewarm_cancel_flag("test_kind_alpha");
+        let b = prewarm_cancel_flag("test_kind_beta");
+        cancel_prewarm(Some("test_kind_alpha"));
+        assert!(a.load(Ordering::Relaxed), "the cancelled kind's flag must be set");
+        assert!(!b.load(Ordering::Relaxed), "a different kind's flag must NOT be set");
+        // reset_prewarm_cancel (the dispatch-time fresh start) clears only its kind.
+        reset_prewarm_cancel("test_kind_alpha");
+        assert!(!a.load(Ordering::Relaxed), "reset clears its own kind's flag");
+        assert!(!b.load(Ordering::Relaxed), "and still leaves the other kind untouched");
+        // A cancel that arrives BEFORE the flag was ever fetched must still record
+        // (create-or-set) — this is the lazy-create-race fix.
+        cancel_prewarm(Some("test_kind_gamma"));
+        assert!(
+            prewarm_cancel_flag("test_kind_gamma").load(Ordering::Relaxed),
+            "a cancel before first fetch must still be recorded"
+        );
+    }
 }

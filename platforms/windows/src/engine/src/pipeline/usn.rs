@@ -19,7 +19,9 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+#[cfg(windows)]
+use anyhow::Context;
 
 /// Summary returned by `FSCTL_QUERY_USN_JOURNAL`. `journal_id` is stable
 /// across the journal's lifetime; if it changes (the journal was deleted and
@@ -113,7 +115,7 @@ pub(crate) fn query_journal(_volume_root: &Path) -> Result<JournalInfo> {
     anyhow::bail!("USN journal is only available on Windows / NTFS")
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
 

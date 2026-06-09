@@ -4,7 +4,7 @@
 //! uniformly regardless of source.
 
 use crate::ipc::{
-    self, sink::Sink, ClipTextEmbedding, EngineError, EventPayload, IpcEvent, Wrap,
+    self, sink::Sink, ClipTextEmbedding, EventPayload, IpcEvent, Wrap,
 };
 
 /// Pull the stored CLIP image embedding for a file_id from `clip_embeddings`
@@ -66,20 +66,43 @@ pub(crate) async fn handle_embed_image_query(
             .await;
         }
         Ok(Ok(None)) => {
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "embedding_missing".into(),
-                message: "This file doesn't have a CLIP embedding yet. Re-scan with CLIP installed."
-                    .into(),
-                path: None,
-                model_kind: None,
-            }))))
+            // No embedding for this file yet — resolve the awaiting query with
+            // an empty embedding so "find similar" falls back cleanly instead
+            // of stalling 5s on a reply that never carries this query_id (#12).
+            sink.send(IpcEvent::now(EventPayload::ClipTextEmbedding(Wrap::new(
+                ClipTextEmbedding {
+                    query_id,
+                    query: format!("file:{}", payload.file_id),
+                    embedding: Vec::new(),
+                },
+            ))))
             .await;
         }
         Ok(Err(err)) => {
             tracing::warn!(?err, "embed_image_query failed");
+            sink.send(IpcEvent::now(EventPayload::ClipTextEmbedding(Wrap::new(
+                ClipTextEmbedding {
+                    query_id,
+                    query: format!("file:{}", payload.file_id),
+                    embedding: Vec::new(),
+                },
+            ))))
+            .await;
         }
         Err(err) => {
+            // JoinError = the embed task panicked. Resolve the awaiting query
+            // with an empty embedding (same shape as the Ok(Err) arm) so "find
+            // similar" falls back cleanly instead of stalling 5s on a reply that
+            // never carries this query_id (#12).
             tracing::warn!(?err, "embed_image_query spawn failed");
+            sink.send(IpcEvent::now(EventPayload::ClipTextEmbedding(Wrap::new(
+                ClipTextEmbedding {
+                    query_id,
+                    query: format!("file:{}", payload.file_id),
+                    embedding: Vec::new(),
+                },
+            ))))
+            .await;
         }
     }
 }
@@ -128,8 +151,19 @@ pub(crate) async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQ
                 anyhow::anyhow!("merges.txt missing at {}: {}", merges_path.display(), e)
             })?;
             let tokenizer = crate::models::ClipTokenizer::new(&vocab, &merges)?;
-            let model = crate::models::clip_text::ClipText::load(weights, tokenizer)?;
-            *guard = Some(model);
+            // EP crash-safety: this is the one GPU-EP session bind that happens
+            // OUTSIDE the scan's load_default arm window — the CLIP-text encoder
+            // loads lazily on the first search query. Without arming here, a hard
+            // native crash while binding a freshly-installed CUDA/OpenVINO pack on
+            // the search path leaves no `.ep_attempt` breadcrumb, so the engine
+            // crash-loops on every search instead of reverting to DirectML. Mirror
+            // scan.rs: arm the override-aware EP, bind, then disarm (a Rust error
+            // still disarms below; only a hard crash leaves the breadcrumb).
+            let armed_ep = crate::models::runtime::armed_provider();
+            crate::models::ep_guard::arm(armed_ep.as_str());
+            let loaded = crate::models::clip_text::ClipText::load(weights, tokenizer);
+            crate::models::ep_guard::disarm(armed_ep.as_str());
+            *guard = Some(loaded?);
         }
         let model = guard.as_mut().expect("just set");
         model.embed(&payload.query)
@@ -148,19 +182,35 @@ pub(crate) async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQ
             .await;
         }
         Ok(Err(err)) => {
+            // Resolve the awaiting query with an empty embedding (the same shape
+            // the CLIP-disabled fast path uses) so the search box drops to the
+            // clean FTS fallback immediately instead of stalling 5s and tripping
+            // the global red error pill on every keystroke (#12). A user-facing
+            // "install CLIP" nudge, if wanted, belongs on the search-box-local
+            // channel, not the global engine-status error.
             tracing::warn!(?err, "CLIP text embed failed");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "clip_text_embed_failed".into(),
-                message: format!(
-                    "CLIP text embed failed: {err}. Install CLIP via Welcome / Settings."
-                ),
-                path: None,
-                model_kind: None,
-            }))))
+            sink.send(IpcEvent::now(EventPayload::ClipTextEmbedding(Wrap::new(
+                ClipTextEmbedding {
+                    query_id,
+                    query,
+                    embedding: Vec::new(),
+                },
+            ))))
             .await;
         }
         Err(err) => {
+            // JoinError = the embed task panicked. Resolve with an empty
+            // embedding (same shape as the Ok(Err) arm) so the search box drops
+            // to the FTS fallback immediately instead of stalling 5s (#12).
             tracing::warn!(?err, "CLIP embed spawn failed");
+            sink.send(IpcEvent::now(EventPayload::ClipTextEmbedding(Wrap::new(
+                ClipTextEmbedding {
+                    query_id,
+                    query,
+                    embedding: Vec::new(),
+                },
+            ))))
+            .await;
         }
     }
 }

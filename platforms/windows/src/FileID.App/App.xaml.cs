@@ -62,8 +62,13 @@ public partial class App : Application
             Trace($"State dir = {AppPaths.Root}");
             // Prime the disk thumbnail cache size counter so Settings →
             // Diagnostics shows a real number without waiting for the
-            // first sweep. Cheap one-shot directory walk.
-            ThumbnailDiskCache.Prime();
+            // first sweep. Off the UI thread: a warm cache is a recursive
+            // walk + per-file stat over tens of thousands of .bin files, which
+            // on a cold MFT / slow disk stalls first paint. _index is a
+            // ConcurrentDictionary and _cachedBytes uses Interlocked, so a write
+            // landing before Prime finishes is race-safe (worst case a transient
+            // diagnostics blip, not an eviction-correctness bug).
+            _ = Task.Run(ThumbnailDiskCache.Prime);
             // last-session breadcrumb. Detects whether the
             // previous session died via a native fast-fail (which
             // bypasses every managed crash sink) and writes a

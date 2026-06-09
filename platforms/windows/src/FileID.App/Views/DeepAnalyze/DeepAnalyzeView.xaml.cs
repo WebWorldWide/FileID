@@ -20,16 +20,33 @@ namespace FileID.Views.DeepAnalyze;
 
 public sealed partial class DeepAnalyzeView : UserControl
 {
-    private string _activeModel = "qwen2_5_vl_3b";
+    private string _activeModel = "qwen2_5_vl_7b";
     private string _captionAccumulator = string.Empty;
     private bool _unloaded;
+
+    // Monotonic generation for the streamed-thumbnail load. Each progress event
+    // fires LoadStreamThumbAsync fire-and-forget; a slow decode for an earlier
+    // file can resolve after a later one's. We bump this at the start of every
+    // load and only commit StreamImage.Source if our captured generation is
+    // still the latest, so a stale thumbnail never overwrites the current file's.
+    private int _streamThumbGeneration;
+
+    // Warm-up watchdog: the engine emits DeepAnalyzeStarting (IsIndeterminate
+    // "Preparing…") BEFORE the first DeepAnalyzeProgress/stream token while the
+    // VLM loads (~5-30 s first run). If the load stalls there's no failure
+    // event, so the spinner would otherwise spin forever. This timer fires if
+    // no progress/stream token arrives in time; it's cancelled the moment any
+    // progress/last/complete lands or the view unloads. Runs on the UI thread
+    // (DispatcherQueueTimer.Tick), so touching XAML in the handler is safe.
+    private static readonly TimeSpan WarmupTimeout = TimeSpan.FromSeconds(45);
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _warmupTimer;
 
     public DeepAnalyzeView()
     {
         InitializeComponent();
         // Restore the user's last VLM choice so the auto-chain after
         // face clustering and a manual Analyze All both use the same
-        // weights the user last picked. Falls back to qwen2_5_vl_3b.
+        // weights the user last picked. Falls back to qwen2_5_vl_7b.
         try { _activeModel = AppViewModel.Instance.Settings.SelectedVlmModelKind; }
         catch { /* keep default */ }
         Loaded += OnLoadedHandler;
@@ -39,11 +56,43 @@ public sealed partial class DeepAnalyzeView : UserControl
     private void OnUnloadedHandler(object sender, RoutedEventArgs e)
     {
         _unloaded = true;
+        CancelWarmupTimer();
         ModelInstallerService.Instance.DeepVlm.PropertyChanged -= OnInstallerChanged;
         EngineClient.Instance.PropertyChanged -= OnEngineChanged;
         SelectionRegistry.Instance.PropertyChanged -= OnSelectionRegistryChanged;
         Loaded -= OnLoadedHandler;
         Unloaded -= OnUnloadedHandler;
+    }
+
+    // Resident-RAM budget per VLM, in GB. Mirrors the macOS AIModelKind
+    // .ramBudgetGB (platforms/apple .../AIModels.swift) so the OOM gate is
+    // identical across platforms. A model whose budget can't fit under the
+    // headroom is disabled — loading it would OOM-kill the engine.
+    private static double RamBudgetGB(string kind) => kind switch
+    {
+        "mistral_small_3_2" => 16.0,
+        "qwen2_5_vl_7b" => 7.0,
+        "gemma_3_4b" => 4.5,
+        _ => 7.0,
+    };
+
+    // Reserves ~8 GB for the OS + scan engine + DB cache, exactly like macOS
+    // AIModelKind.fits(ramGB:). Returns the machine's physical RAM in GB from
+    // EngineClient.Info (PhysicalMemoryGB, with Hardware.ramTotalMB as the
+    // fallback), or null when the engine hasn't reported yet.
+    private static double? PhysicalRamGB()
+    {
+        var info = EngineClient.Instance.Info;
+        if (info is null) return null;
+        if (info.PhysicalMemoryGB > 0) return info.PhysicalMemoryGB;
+        if (info.Hardware is { RamTotalMb: > 0 } hw) return hw.RamTotalMb / 1024.0;
+        return null;
+    }
+
+    private static bool Fits(string kind, double ramGB)
+    {
+        var headroom = Math.Max(0, ramGB - 8.0);
+        return RamBudgetGB(kind) <= headroom;
     }
 
     private void OnLoadedHandler(object sender, RoutedEventArgs e)
@@ -122,11 +171,14 @@ public sealed partial class DeepAnalyzeView : UserControl
             {
                 NamePeopleGateBanner.Visibility = Visibility.Visible;
                 NamePeopleGateText.Text = unnamed == 1
-                    ? "1 face cluster doesn't have a name yet. Name it for sharper captions."
-                    : $"{unnamed} face clusters don't have names yet. Name them for sharper captions.";
-                AnalyzeAllButton.IsEnabled = false;
-                ToolTipService.SetToolTip(AnalyzeAllButton,
-                    "Name unnamed people first so smart-name proposals can use their names.");
+                    ? "1 face cluster isn't named yet. Naming it first gives sharper captions — or analyze now and name later."
+                    : $"{unnamed} face clusters aren't named yet. Naming them first gives sharper captions — or analyze now and name later.";
+                // Advisory, NOT blocking — mirrors the macOS two-path banner: the
+                // user can name people via the banner button OR run Deep Analyze
+                // now. (Previously this hard-disabled Analyze All, which stranded
+                // anyone who didn't want to name clusters first.)
+                AnalyzeAllButton.IsEnabled = true;
+                ToolTipService.SetToolTip(AnalyzeAllButton, null);
             }
             else
             {
@@ -166,6 +218,12 @@ public sealed partial class DeepAnalyzeView : UserControl
                     DebugLog.Debug($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
                     _ = RefreshNamePeopleGateAsync();
                     break;
+                case nameof(EngineClient.Info):
+                    // The engine just reported physical RAM — re-gate the model
+                    // cards so any VLM that would OOM-kill the engine is disabled.
+                    DebugLog.Debug($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
+                    DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncCards(); });
+                    break;
             }
         });
 
@@ -176,9 +234,10 @@ public sealed partial class DeepAnalyzeView : UserControl
         // not the shared "any VLM installed" slot, otherwise installing one model
         // makes the other cards mis-report as installed and Deep Analyze fails
         // every file with "VLM weights not installed".
-        ApplyVlmCard(QwenSmallStatus, QwenSmallProgress, QwenSmallInstallButton, "qwen2_5_vl_3b", slot);
-        ApplyVlmCard(QwenLargeStatus, QwenLargeProgress, QwenLargeInstallButton, "qwen2_5_vl_7b", slot);
-        ApplyVlmCard(GemmaStatus, GemmaProgress, GemmaInstallButton, "gemma_3_4b", slot);
+        var ramGB = PhysicalRamGB();
+        ApplyVlmCard(MistralCard, MistralStatus, MistralProgress, MistralInstallButton, "mistral_small_3_2", slot, ramGB);
+        ApplyVlmCard(QwenLargeCard, QwenLargeStatus, QwenLargeProgress, QwenLargeInstallButton, "qwen2_5_vl_7b", slot, ramGB);
+        ApplyVlmCard(GemmaCard, GemmaStatus, GemmaProgress, GemmaInstallButton, "gemma_3_4b", slot, ramGB);
         HighlightActiveCard();
     }
 
@@ -197,8 +256,29 @@ public sealed partial class DeepAnalyzeView : UserControl
         catch { return false; }
     }
 
-    private static void ApplyVlmCard(TextBlock status, ProgressBar bar, Button installButton, string kind, ModelSlot slot)
+    private static void ApplyVlmCard(Border card, TextBlock status, ProgressBar bar, Button installButton, string kind, ModelSlot slot, double? ramGB)
     {
+        // RAM gate — mirrors macOS ModelOptionRow. When the engine has reported
+        // physical RAM and this VLM's budget can't fit under the ~8 GB headroom,
+        // disable install/select and show a "Needs N GB (you have M)" affordance
+        // instead of letting the model OOM-kill the engine on load.
+        if (ramGB is double available && !Fits(kind, available))
+        {
+            status.Text = $"Needs {RamBudgetGB(kind):0} GB (you have {available:0})";
+            status.Foreground = ThemeHelper.GetBrushSafe("DestructiveTextBrush");
+            bar.Visibility = Visibility.Collapsed;
+            installButton.IsEnabled = false;
+            ToolTipService.SetToolTip(card,
+                $"This model needs {RamBudgetGB(kind):0} GB resident RAM. With your {available:0} GB machine and the scan engine running, loading it would OOM-kill the engine. Pick a smaller model.");
+            card.Opacity = 0.55;
+            card.IsHitTestVisible = false;
+            return;
+        }
+        status.Foreground = ThemeHelper.GetBrushSafe("AiBrush");
+        ToolTipService.SetToolTip(card, null);
+        card.Opacity = 1.0;
+        card.IsHitTestVisible = true;
+
         // The shared Vlm slot tracks at most one in-flight download; attribute its
         // Downloading/Failed state to a card only when CurrentModelKind matches.
         bool isThisModel = string.Equals(slot.CurrentModelKind, kind, StringComparison.OrdinalIgnoreCase);
@@ -234,12 +314,12 @@ public sealed partial class DeepAnalyzeView : UserControl
 
     private void HighlightActiveCard()
     {
-        var idle = (Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"];
-        var gold = (Brush)Application.Current.Resources["GoldBrush"];
-        QwenSmallCard.BorderBrush = _activeModel == "qwen2_5_vl_3b" ? gold : idle;
+        var idle = ThemeHelper.GetBrushSafe("CardStrokeColorDefaultBrush");
+        var gold = ThemeHelper.GetBrushSafe("GoldBrush");
+        MistralCard.BorderBrush = _activeModel == "mistral_small_3_2" ? gold : idle;
         QwenLargeCard.BorderBrush = _activeModel == "qwen2_5_vl_7b" ? gold : idle;
         GemmaCard.BorderBrush = _activeModel == "gemma_3_4b" ? gold : idle;
-        QwenSmallCard.BorderThickness = _activeModel == "qwen2_5_vl_3b" ? new Thickness(2) : new Thickness(1);
+        MistralCard.BorderThickness = _activeModel == "mistral_small_3_2" ? new Thickness(2) : new Thickness(1);
         QwenLargeCard.BorderThickness = _activeModel == "qwen2_5_vl_7b" ? new Thickness(2) : new Thickness(1);
         GemmaCard.BorderThickness = _activeModel == "gemma_3_4b" ? new Thickness(2) : new Thickness(1);
     }
@@ -250,7 +330,8 @@ public sealed partial class DeepAnalyzeView : UserControl
         {
             "qwen2_5_vl_7b" => "Active model: Qwen 2.5-VL 7B (best quality)",
             "gemma_3_4b" => "Active model: Gemma 3 4B (balanced)",
-            _ => "Active model: Qwen 2.5-VL 3B (recommended)",
+            "mistral_small_3_2" => "Active model: Mistral-Small 3.2 (max quality)",
+            _ => "Active model: Qwen 2.5-VL 7B (best quality)",
         };
     }
 
@@ -266,6 +347,13 @@ public sealed partial class DeepAnalyzeView : UserControl
 
         if (starting is null && prog is null && last is null && complete is null) return;
 
+        // Any real progress/result/terminal event proves the model loaded and
+        // tokens are flowing — disarm the warm-up watchdog so it can't false-fire.
+        if (prog is not null || last is not null || complete is not null)
+        {
+            CancelWarmupTimer();
+        }
+
         // starting-card pre-progress. Engine emits
         // DeepAnalyzeStarting with phase = Queued / Loading / Resolving
         // BEFORE the first DeepAnalyzeProgress event. Surface the phase
@@ -279,9 +367,17 @@ public sealed partial class DeepAnalyzeView : UserControl
             StreamFileNameText.Text = $"{starting.Phase}: {starting.ModelKind}";
             StreamCaptionText.Text = starting.Message ?? string.Empty;
             StreamProposedNameText.Text = string.Empty;
+            // Reset the smart-rename tally at the start of each run so the pill
+            // reflects only THIS run, not a cumulative count across runs. (audit A13)
+            _proposedNameCount = 0;
+            SyncProposedNamesPill();
             OverallProgress.Value = 0;
             OverallProgress.IsIndeterminate = true;
             OverallProgressText.Text = "Preparing…";
+            // Arm the warm-up watchdog so a stalled model load surfaces a
+            // dismissible error + reverts the optimistic UI instead of
+            // spinning "Preparing…" indefinitely.
+            ArmWarmupTimer();
         }
 
         if (prog is not null)
@@ -343,6 +439,58 @@ public sealed partial class DeepAnalyzeView : UserControl
             SyncProposedNamesPill();
         }
     }
+
+    // (Re)arm the warm-up watchdog. Always restarts the interval so a fresh
+    // DeepAnalyzeStarting (e.g. a re-queued run, or a phase transition still in
+    // the pre-progress window) gives the model the full WarmupTimeout to load.
+    private void ArmWarmupTimer()
+    {
+        if (_unloaded) return;
+        var dq = DispatcherQueue;
+        if (dq is null) return;
+        if (_warmupTimer is null)
+        {
+            _warmupTimer = dq.CreateTimer();
+            _warmupTimer.IsRepeating = false;
+            _warmupTimer.Tick += OnWarmupTimerTick;
+        }
+        _warmupTimer.Stop();
+        _warmupTimer.Interval = WarmupTimeout;
+        _warmupTimer.Start();
+    }
+
+    private void CancelWarmupTimer()
+    {
+        try { _warmupTimer?.Stop(); } catch { /* best-effort */ }
+    }
+
+    private void OnWarmupTimerTick(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
+        => DebugLog.SafeRun("DeepAnalyzeView.OnWarmupTimerTick", () =>
+        {
+            sender.Stop();
+            if (_unloaded) return;
+            // Only fire if we're still in the pre-progress warm-up window — if a
+            // progress/last/complete event already landed, CancelWarmupTimer was
+            // called and we shouldn't be here, but guard defensively.
+            var ec = EngineClient.Instance;
+            if (ec.DeepAnalyzeProgress is not null
+                || ec.DeepAnalyzeLast is not null
+                || ec.DeepAnalyzeComplete is not null)
+            {
+                return;
+            }
+            // Revert the optimistic UI so it doesn't look like a run is still in
+            // flight, then surface a dismissible, actionable error.
+            StreamCard.Visibility = Visibility.Collapsed;
+            OverallProgress.IsIndeterminate = false;
+            OverallProgress.Value = 0;
+            OverallProgressText.Text = string.Empty;
+            CancelButton.IsEnabled = false;
+            AnalyzeAllButton.IsEnabled = true;
+            SyncSelectionButtons();
+            _ = ShowAlertAsync("Model took too long to load",
+                "The Deep Analyze model didn't finish loading in time. Check the engine logs and try again.");
+        });
 
     /// <summary>smart-names pending-rename pill. Shows the
     /// running count of ProposedName values the engine has produced
@@ -441,6 +589,15 @@ public sealed partial class DeepAnalyzeView : UserControl
         // the dispatcher before any await and do the construct + StreamImage.Source
         // set inside one TryEnqueue; null the source on failure (placeholder, not stale).
         if (_unloaded) return;
+        // Sequence guard: a slow decode for an earlier file must not overwrite a
+        // later file's thumbnail. Capture this load's generation; only commit if
+        // it's still the latest when the decode completes.
+        var generation = System.Threading.Interlocked.Increment(ref _streamThumbGeneration);
+        // In-proc shell video/audio thumbnail providers can native-fast-fail the
+        // whole app (no managed exception). This path calls GetThumbnailAsync
+        // directly, bypassing ThumbnailService, so it must apply the same skip —
+        // single source of truth in ThumbnailService.SkipShellThumbnailForExtension.
+        if (Services.ThumbnailService.SkipShellThumbnailForExtension(path)) return;
         var dispatcher = DispatcherQueue;
         Windows.Storage.FileProperties.StorageItemThumbnail? thumb = null;
         try
@@ -461,12 +618,22 @@ public sealed partial class DeepAnalyzeView : UserControl
                     {
                         var bmp = new BitmapImage();
                         await bmp.SetSourceAsync(captured);
-                        StreamImage.Source = bmp;
+                        // Only commit if this is still the latest load — a slower
+                        // decode for an earlier file must not clobber a newer one.
+                        if (!_unloaded
+                            && System.Threading.Volatile.Read(ref _streamThumbGeneration) == generation)
+                        {
+                            StreamImage.Source = bmp;
+                        }
                     }
                     catch (Exception ex)
                     {
                         DebugLog.Warn($"LoadStreamThumbAsync UI render: {ex.Message}");
-                        try { StreamImage.Source = null; } catch { }
+                        if (!_unloaded
+                            && System.Threading.Volatile.Read(ref _streamThumbGeneration) == generation)
+                        {
+                            try { StreamImage.Source = null; } catch { }
+                        }
                     }
                     finally
                     {
@@ -480,12 +647,12 @@ public sealed partial class DeepAnalyzeView : UserControl
                 }
                 return;
             }
-            ClearStreamImageOnDispatcher(dispatcher);
+            ClearStreamImageOnDispatcher(dispatcher, generation);
         }
         catch (Exception ex)
         {
             DebugLog.Warn($"LoadStreamThumbAsync({PathRedactor.Redact(path)}) failed: {ex.Message}");
-            ClearStreamImageOnDispatcher(dispatcher);
+            ClearStreamImageOnDispatcher(dispatcher, generation);
         }
         finally
         {
@@ -493,16 +660,30 @@ public sealed partial class DeepAnalyzeView : UserControl
         }
     }
 
-    private void ClearStreamImageOnDispatcher(Microsoft.UI.Dispatching.DispatcherQueue? dispatcher)
+    private void ClearStreamImageOnDispatcher(Microsoft.UI.Dispatching.DispatcherQueue? dispatcher, int generation)
     {
         if (dispatcher is null || _unloaded) return;
-        dispatcher.TryEnqueue(() => { if (!_unloaded) try { StreamImage.Source = null; } catch { } });
+        // Only clear if this is still the latest load — a stale "no thumbnail"
+        // result must not wipe a newer file's freshly-set image.
+        dispatcher.TryEnqueue(() =>
+        {
+            if (_unloaded
+                || System.Threading.Volatile.Read(ref _streamThumbGeneration) != generation)
+            {
+                return;
+            }
+            try { StreamImage.Source = null; } catch { }
+        });
     }
 
     private void OnModelCardTapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e)
     {
         if (sender is FrameworkElement el && el.Tag is string id)
         {
+            // Don't let the user select a model that would OOM-kill the engine —
+            // mirrors the macOS `guard fits else { return }`. The card is also
+            // IsHitTestVisible=false in that state, but guard here defensively.
+            if (PhysicalRamGB() is double ramGB && !Fits(id, ramGB)) return;
             _activeModel = id;
             HighlightActiveCard();
             UpdateActiveModelLabel();
@@ -510,6 +691,9 @@ public sealed partial class DeepAnalyzeView : UserControl
             // chain) caption with the same model the user just picked.
             try
             {
+                // Shared singleton, not a fresh Load() — avoids the static-debounce
+                // lost-update where a fresh instance's Save() cancels the singleton's
+                // pending write. (audit A8)
                 var s = AppViewModel.Instance.Settings;
                 s.SelectedVlmModelKind = id;
                 s.Save();
@@ -546,17 +730,30 @@ public sealed partial class DeepAnalyzeView : UserControl
 
     private async void OnAnalyzeAllClicked(object sender, RoutedEventArgs e)
     {
+        // Set the optimistic/working UI state BEFORE the await: if the send
+        // throws, the catch reverts it and surfaces the error. Setting it after
+        // the await meant a send failure showed the user nothing — the run
+        // silently never started while the UI looked idle/ready.
+        StreamCard.Visibility = Visibility.Visible;
+        CancelButton.IsEnabled = true;
+        AnalyzeAllButton.IsEnabled = false;
         try
         {
             // Manual pass = full enrichment (caption + smart-rename + tags), so
             // tagsOnly stays false. The background auto-pass uses tagsOnly:true.
-            await EngineClient.Instance.DeepAnalyzeAllAsync(_activeModel, SkipExistingToggle.IsOn, tagsOnly: false);
-            StreamCard.Visibility = Visibility.Visible;
-            CancelButton.IsEnabled = true;
+            await EngineClient.Instance.DeepAnalyzeAllAsync(_activeModel, SkipExistingToggle.IsOn, tagsOnly: false, proposeRenames: ProposeRenamesCheck.IsChecked == true);
         }
         catch (Exception ex)
         {
             DebugLog.Warn("DeepAnalyzeAll failed: " + ex);
+            // Revert the optimistic state so the UI doesn't falsely look like a
+            // run is in flight, then surface a dismissible error.
+            StreamCard.Visibility = Visibility.Collapsed;
+            CancelButton.IsEnabled = false;
+            AnalyzeAllButton.IsEnabled = true;
+            await ShowAlertAsync("Couldn't start Deep Analyze",
+                "Deep Analyze couldn't be started: " + ex.Message +
+                "\n\nMake sure the model is installed and the engine is running, then try again.");
         }
     }
 
@@ -595,5 +792,33 @@ public sealed partial class DeepAnalyzeView : UserControl
     {
         try { await EngineClient.Instance.DeepAnalyzeCancelAsync(); }
         catch (Exception ex) { DebugLog.Warn("Cancel failed: " + ex); }
+    }
+
+    private async System.Threading.Tasks.Task ShowAlertAsync(string title, string body)
+    {
+        // ContentDialog.ShowAsync can throw on a broken XamlRoot (mid-shutdown,
+        // tab re-host). Catch + log so a failed alert never escalates to
+        // App.UnhandledException. Mirrors SidebarProcessingControl.ShowAlertAsync.
+        try
+        {
+            if (XamlRoot is null)
+            {
+                DebugLog.Warn($"ShowAlertAsync: XamlRoot is null ({title}); skipping dialog.");
+                return;
+            }
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = title,
+                Content = body,
+                CloseButtonText = "OK",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            await dialog.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"ShowAlertAsync({title}) threw: " + ex.Message);
+        }
     }
 }

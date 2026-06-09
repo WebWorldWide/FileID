@@ -29,6 +29,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Reactive.Subjects;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Threading;
 using FileID.IpcSchema;
 using FileID.Services;
@@ -50,6 +51,34 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     private readonly DispatcherQueue _ui;
     private readonly Subject<IpcEvent> _events = new();
     private readonly object _writeLock = new();
+
+    // S4: bounded engine-stdout framing — a wedged/garbled engine that never
+    // emits a newline can't grow an unbounded read buffer and OOM the UI process.
+    // The 1 MiB cap this once used silently DROPPED the restructurePlan event (one
+    // move per file × ~300 B) above ~3.5k moves, leaving the Restructure tab empty
+    // on a real "tens of thousands of files" library. The engine's MAX_FRAME_BYTES
+    // guard only bounds INBOUND commands, so outbound plan events are unbounded on
+    // the wire; size this cap to hold a full plan for the product target (~200k
+    // moves) while still bounding a runaway line. An oversize drop is now also
+    // surfaced as a visible error (see StdoutLoopAsync), never silent.
+    private const int MaxFrameChars = 32 * 1024 * 1024;
+
+    /// <summary>Per-loop stdout framing state (#22). Owned by a single
+    /// StdoutLoopAsync invocation — never shared across loops, so an overlapping
+    /// loop from a respawn can't race another's buffer/resync flag.</summary>
+    private sealed class StdoutFraming
+    {
+        public readonly StringBuilder Buffer = new();
+        public readonly char[] Chunk = new char[16 * 1024];
+        // How many leading buffer chars are already confirmed newline-free, so a
+        // multi-MB frame isn't rescanned from index 0 on every chunk (the old
+        // O(n^2) that pegged a core for minutes on a large restructurePlan). (audit A0)
+        public int Scanned;
+        public bool Resyncing;
+        // Set when an over-cap frame was discarded, so StdoutLoopAsync can surface
+        // a one-shot visible error instead of failing silently.
+        public bool OversizeDropped;
+    }
 
     private Process? _process;
     private CancellationTokenSource? _readCts;
@@ -87,6 +116,15 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     // in the DeepAnalyzeCompleteEvent arm.
     private int _autoDeepAnalyzeInFlight;
 
+    // PAR-111: re-entrancy gate for the auto-triggered face-clustering pass.
+    // A rescan emits a SECOND ScanComplete in the same session; without this
+    // gate each one fire-and-forgets another RunFaceClustering, and the engine
+    // spawns one clustering task per IPC with no dedup of its own — so two
+    // passes race the same persons / face_prints.person_id writes. Acquired in
+    // AutoTriggerFaceClusteringAsync, released on FaceClusteringComplete or a
+    // clustering error. Mirrors macOS EngineClient.faceClusteringInFlight.
+    private int _faceClusterAutoInFlight;
+
     // Throttle for scan FileDone events. A fast scan can emit hundreds per
     // second; publishing each through the Rx Subject inflates UI work for
     // every subscriber (LibraryView, transcript, etc.). Sample every Nth
@@ -102,6 +140,30 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     // throttle (rare; user-visible).
     private DateTime _lastProgressEmit = DateTime.MinValue;
     private ScanPhase? _lastProgressPhase;
+
+    // Highest phase rank shown during the current scan. Discovery and tagging
+    // run concurrently, so their ProgressEvents interleave; without this the
+    // displayed Phase — and the sidebar label/icon/pipeline dot bound to it —
+    // flicker Discovering<->Tagging several times a second. A ProgressEvent may
+    // only ADVANCE the displayed phase, never regress it within a scan. The
+    // authoritative PhaseChangedEvent still sets Phase directly and re-syncs
+    // this latch. Reset to -1 at each scan start (see EngineClient.Commands.cs).
+    private int _shownPhaseRank = -1;
+
+    private static int PhaseRank(ScanPhase phase) => phase switch
+    {
+        ScanPhase.Idle => 0,
+        ScanPhase.Discovering => 1,
+        ScanPhase.Tagging => 2,
+        ScanPhase.PostScan => 3,
+        ScanPhase.Completed => 4,
+        // Terminal states sit above the progression so a late interleaved
+        // ProgressEvent can never clamp them away once PhaseChanged has synced
+        // the latch to them.
+        ScanPhase.Cancelled => 5,
+        ScanPhase.Failed => 5,
+        _ => 0,
+    };
     private static readonly TimeSpan ProgressThrottle = TimeSpan.FromMilliseconds(100); // 10 Hz
 
     // throttled diagnostic counter for inbound progress events.
@@ -251,6 +313,16 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         private set => Set(ref _lastMergeSuggestions, value);
     }
 
+    /// <summary>Most recent out-of-process video thumbnail rendered by the
+    /// engine. ThumbnailService observes this (via PropertyChanged) to write
+    /// the base64 JPEG under its (Path, ModifiedAt) cache key.</summary>
+    private ThumbnailGenerated? _lastThumbnailGenerated;
+    public ThumbnailGenerated? LastThumbnailGenerated
+    {
+        get => _lastThumbnailGenerated;
+        private set => Set(ref _lastThumbnailGenerated, value);
+    }
+
     /// <summary>latest CUDA/cuDNN re-probe result from the engine.
     /// Settings → Performance "Verify install" binds to this to flip the
     /// card to ✓ or surface a diagnostics string on failure.</summary>
@@ -259,6 +331,15 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     {
         get => _lastHardwareReprobe;
         private set => Set(ref _lastHardwareReprobe, value);
+    }
+
+    /// <summary>Result of the most recent engine-side wipeLibrary. The wipe
+    /// flow (SidebarFolderHeader) waits on this via WipeLibraryAndWaitAsync.</summary>
+    private LibraryWiped? _lastLibraryWiped;
+    public LibraryWiped? LastLibraryWiped
+    {
+        get => _lastLibraryWiped;
+        set => Set(ref _lastLibraryWiped, value);
     }
 
     private DeepAnalyzeStarting? _deepAnalyzeStarting;
@@ -354,12 +435,14 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             // in play, ship with the constant defined and the strict path
             // refuses Unsigned + tamper-mismatched binaries.
             var expectedThumb = Environment.GetEnvironmentVariable("FILEID_EV_THUMBPRINT");
-            // Run the Authenticode check off the UI thread. Even with cache-only
-            // revocation it touches the filesystem (and historically the
-            // network), so doing it inline froze the window at launch and on
-            // every crash-respawn. The first await here yields the UI thread;
-            // the State/CrashReason mutations below resume back on it.
-            var verdict = await Task.Run(() => WinVerifyTrustChecker.Verify(enginePath, expectedThumbprintHex: expectedThumb));
+            // Off the UI thread: WinVerifyTrust does SHA-256 over the multi-MB engine
+            // binary AND can make an OCSP/CRL revocation round-trip — synchronously on
+            // the startup (UI) thread before the first frame, and again on every
+            // crash-respawn. await Task.Run keeps the security gate (the spawn still
+            // waits for the verdict) while unblocking first paint; the continuation
+            // resumes on the UI thread. (audit Pc / H11)
+            var verdict = await Task.Run(
+                () => WinVerifyTrustChecker.Verify(enginePath, expectedThumbprintHex: expectedThumb));
             switch (verdict)
             {
                 case IntegrityVerdict.NotFound:
@@ -519,8 +602,90 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         }
     }
 
+    /// <summary>S4: read one newline-delimited engine frame, bounded to
+    /// <see cref="MaxFrameChars"/>. A frame that exceeds the cap before a
+    /// newline arrives is discarded and we resync to the next newline, so a
+    /// never-terminating line can't OOM the UI. Returns null at EOF. All framing
+    /// state lives in the caller-owned <paramref name="st"/>, so each
+    /// StdoutLoopAsync owns its own — no cross-loop sharing (#22).</summary>
+    private static async Task<string?> ReadBoundedFrameAsync(StreamReader reader, StdoutFraming st, CancellationToken ct)
+    {
+        while (true)
+        {
+            // Emit a completed frame if the buffer already holds a newline. Scan
+            // only the not-yet-scanned tail ([Scanned..Length)): during a long
+            // frame's accumulation Scanned == Length so this is a no-op, and after
+            // a Remove it rescans only the small (<= one chunk) leftover — so the
+            // multi-MB buffer is never re-indexed per chunk. (audit A0)
+            int nl = -1;
+            for (int i = st.Scanned; i < st.Buffer.Length; i++)
+            {
+                if (st.Buffer[i] == '\n') { nl = i; break; }
+            }
+            if (nl >= 0)
+            {
+                string frame = st.Buffer.ToString(0, nl);
+                st.Buffer.Remove(0, nl + 1);
+                st.Scanned = 0;
+                if (st.Resyncing)
+                {
+                    // This frame is the tail of an oversize line — drop it and
+                    // resume normal framing from the next one.
+                    st.Resyncing = false;
+                    continue;
+                }
+                if (frame.Length > 0 && frame[^1] == '\r') frame = frame[..^1];
+                return frame;
+            }
+            // Everything currently buffered is newline-free.
+            st.Scanned = st.Buffer.Length;
+            // No newline yet: if the buffer crossed the cap, the engine is
+            // emitting an oversize/garbage frame. Drop it and resync.
+            if (st.Buffer.Length > MaxFrameChars)
+            {
+                DebugLog.Warn($"Engine emitted an oversize IPC frame (> {MaxFrameChars} chars); discarding and resyncing.");
+                st.Buffer.Clear();
+                st.Scanned = 0;
+                st.Resyncing = true;
+                st.OversizeDropped = true;
+            }
+            int read = await reader.ReadAsync(st.Chunk.AsMemory(), ct).ConfigureAwait(false);
+            if (read == 0)
+            {
+                // EOF. Surface a trailing partial frame, unless we were mid-resync.
+                if (!st.Resyncing && st.Buffer.Length > 0)
+                {
+                    string tail = st.Buffer.ToString();
+                    st.Buffer.Clear();
+                    st.Scanned = 0;
+                    if (tail.Length > 0 && tail[^1] == '\r') tail = tail[..^1];
+                    return tail;
+                }
+                return null;
+            }
+            // Detect a newline in the freshly-read chunk via a FLAT array scan
+            // (O(read)) instead of re-indexing the StringBuilder. If this chunk
+            // carries a newline, rewind Scanned to just before it so the loop's
+            // indexed scan examines only this chunk's bytes — never the whole
+            // accumulated buffer (the O(n^2) on a large frame). (audit A0)
+            int bufLenBefore = st.Buffer.Length;
+            st.Buffer.Append(st.Chunk, 0, read);
+            if (Array.IndexOf(st.Chunk, '\n', 0, read) >= 0)
+            {
+                st.Scanned = bufLenBefore;
+            }
+            else
+            {
+                st.Scanned = st.Buffer.Length;
+            }
+        }
+    }
+
     private async Task StdoutLoopAsync(StreamReader reader, CancellationToken ct)
     {
+        // Per-loop framing state — a respawn starts a fresh loop with its own
+        // buffer, so stale bytes can never carry over or race (#22).
+        var framing = new StdoutFraming();
         // No stdout idle watchdog: it killed healthy idle engines (e.g.
         // after auto-install of llama runtimes the engine sits quietly
         // waiting for the user — 5 min
@@ -540,13 +705,27 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             string? line;
             try
             {
-                line = await reader.ReadLineAsync(ct).ConfigureAwait(false);
+                line = await ReadBoundedFrameAsync(reader, framing, ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) { return; }
             catch (Exception ex)
             {
                 DebugLog.Warn("Engine stdout read error: " + ex.Message);
                 return;
+            }
+            if (framing.OversizeDropped)
+            {
+                framing.OversizeDropped = false;
+                // Surface the drop through the normal event-dispatch path: Apply
+                // runs on the UI thread, so observable state is never written from
+                // this loop thread (the off-UI-thread fast-fail class).
+                var oversize = IpcEvent.Now(new ErrorEvent(new EngineError(
+                    "ipc_frame_too_large",
+                    "The engine sent a response too large for the app to read, so it was dropped. " +
+                    "If this was a Restructure plan on a very large library, the plan may be incomplete — " +
+                    "try restructuring a subfolder.",
+                    null)));
+                _ui.TryEnqueue(() => Apply(oversize));
             }
             if (line is null)
             {
@@ -628,6 +807,24 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         try { exitCode = exited?.ExitCode; } catch { /* not-exited / disposed */ }
         _ui.TryEnqueue(() =>
         {
+            // Ignore a stale exit from a process we've already replaced. In the
+            // RestartAsync path (StopAndWaitForExitAsync → StartAsync), the OLD
+            // process's Exited callback is queued to the UI thread and can run
+            // AFTER StartAsync installed the NEW _process/_stdin/_readCts. `sender`
+            // is the exact Process that exited; if it is no longer the live
+            // _process, running Cleanup() here would tear down the freshly-spawned
+            // engine (cancel its read loops, null its stdin) and mis-count it as a
+            // crash — wedging IPC with State stuck Starting. Dispose the dead sender
+            // and bail, leaving the live engine untouched.
+            if (!ReferenceEquals(sender, _process))
+            {
+                if (sender is Process dead)
+                {
+                    try { dead.Exited -= OnProcessExited; } catch { }
+                    try { dead.Dispose(); } catch { }
+                }
+                return;
+            }
             DebugLog.Warn($"EngineClient: process exited (code={exitCode?.ToString() ?? "?"}).");
             Cleanup();
 
@@ -873,14 +1070,27 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         _failureWindowStart = DateTime.MinValue;
                         break;
                     case ProgressEvent p:
-                        // Throttle to 10 Hz. The engine emits a Progress per
-                        // discovery/tagging batch; on a fast scan that's 100+
-                        // events/s, each rebuilding the sidebar progress bar +
-                        // labels via x:Bind. 10 Hz is plenty for human
-                        // perception and keeps the UI thread idle. The phase
-                        // transition itself (Discovering → Tagging → Completed)
-                        // is captured by PhaseChangedEvent which is NOT
-                        // throttled — it fires once per phase boundary.
+                        // Discovery + tagging emit ProgressEvents CONCURRENTLY
+                        // during the pipeline overlap (discovery still walking
+                        // while tagging workers consume). A late Discovering event
+                        // carries processed=0, eta=None, fps=0 and its own memory
+                        // reading; letting it replace LastProgress after Tagging
+                        // started made the sidebar's Tagged / ETA / Memory flicker
+                        // (N→0→N, real→"computing"→real, two RSS readings
+                        // alternating). Gate the WHOLE event on a monotonic phase
+                        // rank: drop any ProgressEvent whose phase is below the
+                        // latch, so LastProgress only ever holds one phase's stats
+                        // at a time. Tagging events carry the LIVE discovered count
+                        // (scan_session.rs), so "Discovered" keeps climbing from
+                        // them through the overlap. Equal-or-higher rank advances
+                        // the latch; the authoritative PhaseChangedEvent below also
+                        // syncs it.
+                        var progRank = PhaseRank(p.Progress.Phase);
+                        if (progRank < _shownPhaseRank) break;
+                        _shownPhaseRank = progRank;
+                        // Throttle the heavy LastProgress-bound sidebar repaint to
+                        // 10 Hz; a phase boundary bypasses the throttle so the
+                        // Discovering→Tagging stat handoff is immediate (no blip).
                         var nowProg = DateTime.UtcNow;
                         if (nowProg - _lastProgressEmit >= ProgressThrottle
                             || p.Progress.Phase != _lastProgressPhase)
@@ -893,6 +1103,10 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         break;
                     case PhaseChangedEvent pc:
                         Phase = pc.Phase;
+                        // Authoritative phase boundary — sync the monotonic latch
+                        // so a late interleaved ProgressEvent can't pull the
+                        // displayed phase back below it.
+                        _shownPhaseRank = PhaseRank(pc.Phase);
                         // On cancel, also clear the in-flight tracking state.
                         // The sidebar's CompletedPanel binds to LastScanDuration
                         // + LastProgress; without this clear the prior-scan
@@ -903,6 +1117,19 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                             _scanStartedAt = null;
                             LastProgress = null;
                             LastBatch = null;
+                        }
+                        // Faces persist incrementally during a scan (dbwriter
+                        // commits per-batch), but auto-clustering otherwise fires
+                        // ONLY on ScanComplete. A Failed scan would leave
+                        // already-detected faces with no persons row, so fire the
+                        // (idempotent, zero-face-safe) auto-cluster there too so
+                        // persisted faces still surface. A user-Cancelled scan
+                        // instead DEFERS clustering to a manual re-cluster — the
+                        // user explicitly stopped, and auto-firing a clustering
+                        // pass on cancel races the engine's own teardown.
+                        if (pc.Phase == ScanPhase.Failed)
+                        {
+                            _ = AutoTriggerFaceClusteringAsync();
                         }
                         break;
                     case DiscoveryCompleteEvent:
@@ -917,8 +1144,12 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                     case BatchSummaryEvent b:
                         LastBatch = b.Summary;
                         break;
-                    case ScanCompleteEvent:
+                    case ScanCompleteEvent sce:
+                        // Authoritative final count for the completed-scan summary
+                        // (LastProgress.Processed can be throttle-stale by a batch).
+                        LastScanProcessedFiles = sce.Result.ProcessedFiles;
                         Phase = ScanPhase.Completed;
+                        _shownPhaseRank = PhaseRank(ScanPhase.Completed);
                         IsPaused = false;
                         if (_scanStartedAt.HasValue)
                         {
@@ -949,6 +1180,19 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                             LastError = e.Error;
                             DebugLog.Warn($"[IPC IN] engine error: kind={e.Error.Kind} msg={e.Error.Message} path={PathRedactor.Redact(e.Error.Path)}");
                         }
+                        // PAR-111: a clustering FAILURE must release the auto gate,
+                        // else auto-clustering stays suppressed for the rest of the
+                        // session. Match the EXACT failure kind — not a broad
+                        // Contains("cluster"), which also matched the newer
+                        // "face_clustering_busy" bounce (a pass is still running — the
+                        // opposite of a failure) and wrongly cleared the gate, letting
+                        // a later rescan's auto-cluster be silently dropped. The
+                        // in-flight pass emits its own FaceClusteringComplete /
+                        // face_clustering_failed that legitimately releases the gate.
+                        if (e.Error.Kind == "face_clustering_failed")
+                        {
+                            Interlocked.Exchange(ref _faceClusterAutoInFlight, 0);
+                        }
                         break;
                     case LogEvent:
                         // Engine LogLine events go to the transcript via Events.
@@ -956,9 +1200,24 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         break;
                     case FaceClusteringCompleteEvent fc:
                         LastFaceClustering = fc.Result;
+                        Interlocked.Exchange(ref _faceClusterAutoInFlight, 0); // PAR-111: release the auto gate
                         break;
                     case DeepAnalyzeStartingEvent das:
                         DeepAnalyzeStarting = das.Starting;
+                        // Clear the previous run's terminal result. DeepAnalyzeComplete
+                        // is otherwise only cleared on the single-file path, so on a
+                        // 2nd+ "Analyze All" run the stale Complete makes the view's
+                        // SyncStream `complete` block clobber the live progress every
+                        // tick — the buttons + status text visibly fight between live
+                        // "{processed}/{total}" and the stale "Done — N captioned" at
+                        // ~4 Hz, with Cancel wrongly greyed out for the whole run.
+                        DeepAnalyzeComplete = null;
+                        // Also clear the prior run's last-file result so a new run
+                        // starts with no carried-over DeepAnalyzeLast — otherwise the
+                        // view's run-start _proposedNameCount reset is immediately
+                        // undone when SyncStream reprocesses the stale last in the
+                        // same pass (over-counting smart-renames). (audit A13 re-audit)
+                        DeepAnalyzeLast = null;
                         break;
                     case DeepAnalyzeProgressEvent dap:
                         DeepAnalyzeProgress = dap.Progress;
@@ -1030,6 +1289,13 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                                 hw);
                         }
                         break;
+                    case LibraryWipedEvent lw:
+                        LastLibraryWiped = lw.Result;
+                        break;
+                    case ThumbnailGeneratedEvent tg:
+                        LastThumbnailGenerated = tg.Generated;
+                        DebugLog.Info($"[IPC IN] thumbnailGenerated path={PathRedactor.Redact(tg.Generated.Path)} ({tg.Generated.Bytes.Length} b64 chars)");
+                        break;
                 }
             }
             catch (Exception ex)
@@ -1073,6 +1339,14 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     /// clustering hiccup to surface as a scan failure.</summary>
     private async Task AutoTriggerFaceClusteringAsync()
     {
+        // PAR-111: skip if an auto-clustering pass is already in flight (e.g. a
+        // rescan completing while the prior pass still runs). Released on
+        // FaceClusteringComplete or a clustering error.
+        if (Interlocked.CompareExchange(ref _faceClusterAutoInFlight, 1, 0) != 0)
+        {
+            DebugLog.Info("[AUTO-ADVANCE] face clustering already in flight — skipping duplicate trigger");
+            return;
+        }
         try
         {
             await Task.Yield(); // let the rest of Apply complete first
@@ -1081,6 +1355,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         }
         catch (Exception ex)
         {
+            // The IPC send failed — release the gate so a later scan can retry.
+            Interlocked.Exchange(ref _faceClusterAutoInFlight, 0);
             DebugLog.Warn("[AUTO-ADVANCE] face clustering trigger threw: " + ex.Message);
         }
     }

@@ -28,16 +28,19 @@ pub(crate) async fn handle_start_scan(
 
     // Atomic check-and-reserve under one lock: gate + slot reservation must
     // be a single critical section, or two StartScan commands queued back-to-
-    // back can both pass the gate before either reserves the slot. We park a
-    // placeholder coordinator now; it gets replaced after model load with the
-    // real one. If anyone else reaches here while we hold the slot, they
-    // bounce with `scan_already_running`.
+    // back can both pass the gate before either reserves the slot. Construct
+    // the REAL coordinator now and park its clone, so a pause/cancel arriving
+    // after reservation lands on the coordinator the session actually uses —
+    // not a throwaway placeholder that the old code swapped out post-model-load
+    // (#20). If anyone else reaches here while we hold the slot, they bounce
+    // with `scan_already_running`.
+    let coord = ScanCoordinator::new();
     let already_running = {
         let mut guard = scan_state.lock();
         if guard.is_some() {
             true
         } else {
-            *guard = Some(ScanCoordinator::new());
+            *guard = Some(coord.clone());
             false
         }
     };
@@ -56,7 +59,18 @@ pub(crate) async fn handle_start_scan(
     // Pre-flight before ModelStack::load_default. Without this, a user who
     // clicked Scan before completing Welcome would wedge ORT for the full
     // timeout window with no actionable feedback.
-    let missing_models: Vec<&str> = ["mobileclip_s2", "arcface", "clip_text"]
+    //
+    // ONLY the models the SCAN pipeline actually consumes belong here. `arcface`
+    // (the YuNet detector + SFace embedder bundle) drives faces; `mobileclip_s2`
+    // drives per-file image embedding. `clip_text` (the CLIP *text* encoder) is
+    // a QUERY-TIME-only model — it is loaded lazily on the first semantic search
+    // (commands/embed.rs) and is never touched by load_default or any
+    // scan→detect→embed→cluster stage. Requiring it here was a bug: a stalled or
+    // incomplete clip_text install (its sentinel never written) aborted the
+    // ENTIRE scan with models_not_installed, so face scanning produced zero
+    // faces even though YuNet+SFace+MobileCLIP were fully installed. clip_text's
+    // absence must only degrade query-time search, never block a scan.
+    let missing_models: Vec<&str> = ["mobileclip_s2", "arcface"]
         .iter()
         .filter_map(|kind| {
             let model = match models::registry::lookup_full(kind) {
@@ -118,10 +132,8 @@ pub(crate) async fn handle_start_scan(
     }))))
     .await;
 
-    // Swap the placeholder for the real coordinator that the worker pool
-    // and the IPC pause/resume/cancel handlers will hold a clone of.
-    let coord = ScanCoordinator::new();
-    *scan_state.lock() = Some(coord.clone());
+    // (The real coordinator was reserved into scan_state above, before the
+    // first .await — no placeholder swap, so no pause/cancel can be lost #20.)
 
     // Load ML model weights once per session. Heavy enough to belong on a
     // blocking thread (ORT session create can take 100-500ms per model).
@@ -136,12 +148,23 @@ pub(crate) async fn handle_start_scan(
     // first build (scene_vocab.rs), so later launches load in a few seconds;
     // 120 s still catches a genuinely hung or corrupt model file.
     let models_worker_count = platform::default_worker_cap() as usize;
-    let models = match tokio::time::timeout(
+    // EP crash-safety: arm a breadcrumb around the first ORT session bind (this
+    // is where a bad GPU pack DLL crashes the process). If we get past the
+    // `.await` at all — success, Rust error, or timeout — the process survived,
+    // so disarm; only a hard native crash leaves the breadcrumb for the next
+    // launch's ep_guard to disable the EP. See models::ep_guard.
+    // Arm the override-aware EP that will actually attempt the first native
+    // GPU bind (honors gpuExecutionProviderOverride), not the auto-detected
+    // active_provider() which ignores the override — see runtime::armed_provider.
+    let armed_ep = models::runtime::armed_provider();
+    models::ep_guard::arm(armed_ep.as_str());
+    let load_result = tokio::time::timeout(
         Duration::from_secs(120),
         tokio::task::spawn_blocking(move || ModelStack::load_default(models_worker_count)),
     )
-    .await
-    {
+    .await;
+    models::ep_guard::disarm(armed_ep.as_str());
+    let models = match load_result {
         Ok(Ok(m)) => Arc::new(m),
         Ok(Err(err)) => {
             tracing::error!(?err, "model stack load panicked");
@@ -172,9 +195,13 @@ pub(crate) async fn handle_start_scan(
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                 kind: "model_load_timeout".into(),
                 message:
-                    "Loading inference models took longer than 120 seconds — \
-                     a model file may be corrupted. Reinstall from Settings \
-                     → Local AI."
+                    "Loading inference models took longer than 120 seconds and was \
+                     stopped.\n\nThis usually means the model is too large for the \
+                     available memory or GPU, or a model file is incomplete. Try:\n\
+                     • Close other memory- or GPU-heavy apps and start the scan again.\n\
+                     • Reinstall the models from Settings → Local AI to repair an \
+                     incomplete download.\n\
+                     • Pick a smaller Deep Analyze model in Settings → Local AI."
                         .into(),
                 path: None,
                 model_kind: None,
@@ -186,31 +213,66 @@ pub(crate) async fn handle_start_scan(
         }
     };
 
-    // One banner per scan beats N per-file toasts when models are absent.
+    // A model whose install SENTINEL passed the pre-flight above but whose
+    // weights won't actually LOAD (corrupt/incomplete .onnx, AV-quarantined
+    // file, or an EP bind failure on every provider) must ABORT the scan — not
+    // silently skip its stage. A skipped stage still writes every file row with
+    // failed=0 and a fresh scanned_at; the incremental skip-set
+    // (scan_session.rs) is purely timestamp-based, so those files are NEVER
+    // re-tried on later default scans — the face / image-embedding stage stays
+    // permanently empty even after the model is repaired (a real "face scanning
+    // is totally broken, and stays broken" trap). Aborting (mirroring the
+    // missing-sentinel pre-flight) leaves the files un-stamped so a later scan
+    // re-processes them once the model loads. Both checked models are pre-flight
+    // requirements, so reaching here with one None means a genuine load failure.
     {
-        let mut missing_stages: Vec<&str> = Vec::new();
+        let mut failed_to_load: Vec<&str> = Vec::new();
         if models.scrfd.is_none() || models.arcface.is_none() {
-            missing_stages.push("face_detection");
+            failed_to_load.push("face detection + recognition");
         }
         if models.mobileclip_pool.is_none() && models.mobileclip_batch.is_none() {
-            missing_stages.push("image_embedding");
+            failed_to_load.push("image embedding");
         }
-        if !missing_stages.is_empty() {
+        if !failed_to_load.is_empty() {
+            tracing::error!(
+                models = ?failed_to_load,
+                "[SCAN] installed models failed to load; aborting so files aren't stranded face-less"
+            );
+            sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
+                ScanPhase::Failed,
+            ))))
+            .await;
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "stages_skipped_missing_models".into(),
+                kind: "model_load_failed".into(),
                 message: format!(
-                    "Some pipeline stages will be skipped this scan because their models didn't load: {}. \
-                     Reinstall from Settings → Local AI to populate those features.",
-                    missing_stages.join(", ")
+                    "These installed AI models failed to load, so the scan was stopped: {}.\n\n\
+                     The model files are likely incomplete or blocked by antivirus. \
+                     Reinstall them from Settings → Local AI, then scan again. \
+                     (The scan was stopped on purpose so your library isn't recorded as \
+                     scanned-with-these-features-missing, which would skip those files \
+                     on future scans.)",
+                    failed_to_load.join(", ")
                 ),
                 path: None,
                 model_kind: None,
             }))))
             .await;
+            *scan_state.lock() = None;
+            tracing::warn!("[SCAN] handle_start_scan exiting: model_load_failed (post-load)");
+            return;
         }
     }
 
-    let worker_count = platform::default_worker_cap() as usize;
+    // The single largest live allocation during a scan is the set of full
+    // decoded RGB frames each in-flight worker future owns. On a low-RAM box
+    // (MemoryTier::Low, <8 GB) cap the worker count so that working set stays
+    // bounded; non-Low tiers keep the full CPU-topology cap unchanged. Pool
+    // arrays are indexed worker_idx % pool.len(), so worker_count and pool_size
+    // stay decoupled.
+    let worker_count = match platform::memory_tier() {
+        platform::MemoryTier::Low => platform::default_worker_cap().min(6) as usize,
+        _ => platform::default_worker_cap() as usize,
+    };
     let session = ScanSession::new_with_options(
         coord,
         db,
@@ -226,7 +288,7 @@ pub(crate) async fn handle_start_scan(
     *scan_state_release.lock() = None;
 
     if let Err(err) = outcome {
-        tracing::warn!(?err, root = %root.display(), "scan failed");
+        tracing::warn!(?err, root = %platform::redact_path_for_log(&root), "scan failed");
         sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
             ScanPhase::Failed,
         ))))

@@ -95,6 +95,14 @@ async fn async_main() -> Result<()> {
         tracing::info!("[VRAM] no dedicated GPU detected; ML pool will run at minimum");
     }
 
+    // EP crash-safety gate: if the previous run died while binding a GPU
+    // execution provider (a bad/mismatched pack DLL), disable that EP now so
+    // this run falls back to DirectML instead of crash-looping. Must run
+    // before the ORT_DYLIB_PATH pin below and before the first ML session.
+    if let Some(ep) = models::ep_guard::resolve_poison_at_startup() {
+        tracing::warn!(ep = %ep, "[EP-GUARD] execution provider disabled after a prior crash; using DirectML until re-enabled");
+    }
+
     // Replay AddDllDirectory for any Performance Packs already extracted from
     // a prior install. Packs land in %LOCALAPPDATA%\FileID\Models\packs\<vendor>\
     // and the llama.cpp runtime lands in Models\llama.cpp\. After SEC-3 locked
@@ -107,10 +115,32 @@ async fn async_main() -> Result<()> {
         let _ = platform::register_dll_dirs_under(&models_dir.join("packs").join("qnn"));
         let _ = platform::register_dll_dirs_under(&models_dir.join("llama.cpp"));
         let _ = platform::register_dll_dirs_under(&models_dir.join("llama.cpp-cuda"));
-        // Private cuDNN drop (auto-installed on NVIDIA via CudnnAutoInstaller).
+        // Private cuDNN drop (installed on demand via the GPU acceleration pack).
         // The archive extracts a versioned dir containing bin/, so register the
         // parent — register_dll_dirs_under walks subdirs for DLLs.
         let _ = platform::register_dll_dirs_under(&models_dir.join("cudnn"));
+
+        // Accelerator pack: pyke's `download-binaries` ships only the base
+        // onnxruntime.dll + onnxruntime_providers_shared.dll (DirectML/CPU) —
+        // NOT the vendor provider DLL (onnxruntime_providers_{cuda,openvino}.dll)
+        // — so the vendor EP can't bind and we fall through to DirectML
+        // (~3-5x slower). The pack supplies a COMPLETE matched ORT runtime for
+        // this GPU's vendor (NVIDIA→cuda, Intel→openvino); pin ORT's
+        // load-dynamic loader at the pack's onnxruntime.dll so the provider
+        // binds against the SAME ORT build (mismatched base vs provider =
+        // silent fallback or crash). Guarded on file presence + no pre-existing
+        // override + not crash-disabled (ep_guard) → INERT until a matching
+        // pack is installed. Must run before the first ORT session.
+        if std::env::var_os("ORT_DYLIB_PATH").is_none() {
+            if let Some((ep, pack_dir)) = models::runtime::active_pack_dir() {
+                if !models::ep_guard::is_disabled(ep) {
+                    if let Some(dll) = platform::find_file_under(&pack_dir, "onnxruntime.dll", 4) {
+                        tracing::info!(ep, path = %dll.display(), "[EP] accelerator pack present; pinning ORT_DYLIB_PATH to matched runtime");
+                        std::env::set_var("ORT_DYLIB_PATH", &dll);
+                    }
+                }
+            }
+        }
     }
 
     // If a system-wide NVIDIA CUDA Toolkit + cuDNN is present, register the
@@ -185,6 +215,31 @@ async fn async_main() -> Result<()> {
         return Ok(());
     }
 
+    // Structural integrity check on the now-open writer. A torn page or a
+    // truncated file (power-loss mid-checkpoint, failing disk) would otherwise
+    // surface later as opaque per-query failures; quick_check catches it once,
+    // up front, with actionable guidance. Non-fatal — the engine keeps running
+    // so the user can wipe + rescan to rebuild (the DB may be partly readable).
+    if let Some(conn) = db_conn.as_ref() {
+        // Bind in its own statement so the lock guard drops at the semicolon —
+        // a temporary in an `if let` scrutinee would otherwise be held across
+        // the `.await` below (clippy::await_holding_lock).
+        let verdict = db::quick_check(&conn.lock());
+        if let Err(detail) = verdict {
+            tracing::error!(%detail, "database failed PRAGMA quick_check");
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "db_integrity_check_failed".into(),
+                message: format!(
+                    "The library database failed an integrity check ({detail}). It may be \
+                     corrupted. Open Settings and wipe the library, then run a scan to rebuild it."
+                ),
+                path: Some(db_path.display().to_string()),
+                model_kind: None,
+            }))))
+            .await;
+        }
+    }
+
     // Emit `ready` first thing so the app sidebar can transition out of
     // .starting. The handshake is one-way; the app doesn't ack.
     commands::hardware::emit_ready(&sink).await;
@@ -241,6 +296,19 @@ async fn async_main() -> Result<()> {
     let deep_analyze_cancel: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
     let dispatch_deep_cancel = deep_analyze_cancel.clone();
+    // Single-in-flight gate: a second Deep Analyze command must bounce cleanly
+    // rather than re-arm the shared cancel flag (mode A) or cross-cancel the
+    // running pass (mode B). Only a successful acquire resets `cancel` (#10).
+    let deep_analyze_active: Arc<std::sync::atomic::AtomicBool> =
+        Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dispatch_deep_active = deep_analyze_active.clone();
+    // Single-flight gate for face clustering: a second runFaceClustering must
+    // bounce cleanly rather than race the persist transaction (the writer lock
+    // is now released during cluster()+consolidate(), so two runs could overlap).
+    let face_cluster_active: Arc<std::sync::atomic::AtomicBool> =
+        Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dispatch_face_cluster_active = face_cluster_active.clone();
+    let dispatch_db_path = db_path.clone();
 
     // Shared HTTP client (HTTP/2 + connection pool) for the 12-way parallel
     // downloader. Built once at engine startup; cloned cheaply via Arc into
@@ -255,17 +323,16 @@ async fn async_main() -> Result<()> {
     };
     let dispatch_http_client = http_client.clone();
 
-    // Per-download cancel tokens. Each PrewarmModel gets its OWN token, so
-    // starting a new download can't reset/un-cancel others (the old single
-    // shared flag did exactly that). CancelPrewarm flips every registered
-    // token — a blanket cancel, since the IPC payload carries no per-model
-    // selector. download_parallel polls its token after every chunk.
-    let prewarm_cancels: Arc<parking_lot::Mutex<Vec<Arc<std::sync::atomic::AtomicBool>>>> =
-        Arc::new(parking_lot::Mutex::new(Vec::new()));
-    let dispatch_prewarm_cancels = prewarm_cancels.clone();
-
+    // Prewarm cancellation is per-model-kind, owned by a static registry inside
+    // commands::prewarm (see prewarm_cancel_flag / cancel_prewarm) — no global
+    // flag to thread through here.
     let stdio_loop = tokio::spawn(async move {
-        const MAX_FRAME_BYTES: usize = 1024 * 1024;
+        // 32 MiB, symmetric with the app's outbound command cap (MaxIpcFrameBytes)
+        // and its inbound read cap (MaxFrameChars). A large applyRestructure carries
+        // the same multi-MB move set the engine emitted in restructurePlan; the old
+        // 1 MiB cap silently rejected + drained it. Still bounded vs a runaway line;
+        // the engine already holds the whole plan in memory. (audit E10)
+        const MAX_FRAME_BYTES: usize = 32 * 1024 * 1024;
         let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
         loop {
             tokio::select! {
@@ -293,10 +360,12 @@ async fn async_main() -> Result<()> {
                                 &dispatch_sink,
                                 &dispatch_shutdown,
                                 dispatch_db.as_ref(),
+                                &dispatch_db_path,
                                 &dispatch_scan_state,
                                 &dispatch_deep_cancel,
+                                &dispatch_deep_active,
+                                &dispatch_face_cluster_active,
                                 &dispatch_http_client,
-                                &dispatch_prewarm_cancels,
                                 &text,
                             ).await;
                         }
@@ -361,14 +430,55 @@ async fn async_main() -> Result<()> {
     Ok(())
 }
 
+/// Clears the Deep-Analyze single-in-flight flag on drop, so the slot frees even
+/// if the spawned handler panics or early-returns (#10).
+struct DeepActiveGuard(Arc<std::sync::atomic::AtomicBool>);
+impl Drop for DeepActiveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Clears the face-clustering single-flight flag on drop — releases on task
+/// success, error, OR panic (same RAII shape as DeepActiveGuard).
+struct FaceClusterActiveGuard(Arc<std::sync::atomic::AtomicBool>);
+impl Drop for FaceClusterActiveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+async fn emit_face_clustering_busy(sink: &Sink) {
+    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+        kind: "face_clustering_busy".into(),
+        message: "Face clustering is already running.".into(),
+        path: None,
+        model_kind: None,
+    }))))
+    .await;
+}
+
+async fn emit_deep_analyze_busy(sink: &Sink) {
+    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+        kind: "deep_analyze_already_running".into(),
+        message: "A Deep Analyze pass is already running — wait for it to finish or cancel it first.".into(),
+        path: None,
+        model_kind: None,
+    }))))
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn handle_line(
     sink: &Sink,
     shutdown: &Arc<Notify>,
     db: Option<&std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>>,
+    db_path: &std::path::Path,
     scan_state: &Arc<parking_lot::Mutex<Option<coordinator::ScanCoordinator>>>,
     deep_analyze_cancel: &Arc<std::sync::atomic::AtomicBool>,
+    deep_analyze_active: &Arc<std::sync::atomic::AtomicBool>,
+    face_cluster_active: &Arc<std::sync::atomic::AtomicBool>,
     http_client: &Arc<reqwest::Client>,
-    prewarm_cancels: &Arc<parking_lot::Mutex<Vec<Arc<std::sync::atomic::AtomicBool>>>>,
     line: &str,
 ) {
     // Strip a leading UTF-8 BOM defensively. The C# side ships BOM-less UTF-8,
@@ -402,29 +512,22 @@ async fn handle_line(
             shutdown.notify_waiters();
         }
         CommandPayload::PrewarmModel(payload) => {
-            // Fresh per-download cancel token (starts un-cancelled). Register it
-            // so CancelPrewarm can reach it, and prune already-cancelled tokens
-            // so the registry can't grow unbounded across a long session.
-            // Downloads run concurrently against the shared http_client pool.
-            let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            {
-                let mut reg = prewarm_cancels.lock();
-                reg.retain(|c| !c.load(std::sync::atomic::Ordering::Relaxed));
-                reg.push(cancel.clone());
-            }
+            // Reset THIS kind's cancel flag SYNCHRONOUSLY, before the spawn, so a
+            // CancelPrewarm dispatched right after lands on an existing flag (the
+            // serial stdio loop runs this before reading the next frame) — closing
+            // the lazy-create race. Resets only this kind; others are untouched.
+            commands::prewarm::reset_prewarm_cancel(&payload.model_kind);
             let sink = sink.clone();
             let model_kind = payload.model_kind.clone();
             let http_client = http_client.clone();
             tokio::spawn(async move {
-                commands::prewarm::handle_prewarm_model(sink, model_kind, http_client, cancel).await;
+                commands::prewarm::handle_prewarm_model(sink, model_kind, http_client).await;
             });
         }
-        CommandPayload::CancelPrewarm(_) => {
-            let reg = prewarm_cancels.lock();
-            for c in reg.iter() {
-                c.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-            tracing::info!(count = reg.len(), "CancelPrewarm received; in-flight downloads will abort");
+        CommandPayload::CancelPrewarm(payload) => {
+            // Per-model when modelKind is set (one row's Cancel), all in-flight
+            // when None (the legacy payload-less "cancel everything").
+            commands::prewarm::cancel_prewarm(payload.model_kind.as_deref());
         }
         CommandPayload::PlanRestructure(payload) => {
             let Some(db) = db else {
@@ -551,14 +654,28 @@ async fn handle_line(
             });
         }
         CommandPayload::FindMergeSuggestions(_) => {
-            let Some(db) = db else {
+            // Availability guard preserved (no DB → no read connection), but the
+            // handler opens its own read-only connection from db_path so it never
+            // contends on the writer mutex.
+            let Some(_db) = db else {
                 emit_db_unavailable(sink, "findMergeSuggestions").await;
+                return;
+            };
+            let sink_c = sink.clone();
+            let path_c = db_path.to_path_buf();
+            tokio::spawn(async move {
+                commands::bulk::handle_find_merge_suggestions(sink_c, path_c).await;
+            });
+        }
+        CommandPayload::MarkPersonsDifferent(payload) => {
+            let Some(db) = db else {
+                emit_db_unavailable(sink, "markPersonsDifferent").await;
                 return;
             };
             let sink_c = sink.clone();
             let db_c = db.clone();
             tokio::spawn(async move {
-                commands::bulk::handle_find_merge_suggestions(sink_c, db_c).await;
+                commands::bulk::handle_mark_persons_different(sink_c, db_c, payload).await;
             });
         }
         CommandPayload::EmbedImageQuery(payload) => {
@@ -577,11 +694,20 @@ async fn handle_line(
                 emit_db_unavailable(sink, "deepAnalyzeFile").await;
                 return;
             };
+            if deep_analyze_active
+                .compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Relaxed)
+                .is_err()
+            {
+                emit_deep_analyze_busy(sink).await;
+                return;
+            }
+            deep_analyze_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+            let guard = DeepActiveGuard(deep_analyze_active.clone());
             let sink_c = sink.clone();
             let db_c = db.clone();
             let cancel = deep_analyze_cancel.clone();
-            cancel.store(false, std::sync::atomic::Ordering::Relaxed);
             tokio::spawn(async move {
+                let _guard = guard;
                 commands::deep_analyze::handle_deep_analyze_file(sink_c, db_c, payload, cancel).await;
             });
         }
@@ -590,11 +716,20 @@ async fn handle_line(
                 emit_db_unavailable(sink, "deepAnalyzeFolder").await;
                 return;
             };
+            if deep_analyze_active
+                .compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Relaxed)
+                .is_err()
+            {
+                emit_deep_analyze_busy(sink).await;
+                return;
+            }
+            deep_analyze_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+            let guard = DeepActiveGuard(deep_analyze_active.clone());
             let sink_c = sink.clone();
             let db_c = db.clone();
             let cancel = deep_analyze_cancel.clone();
-            cancel.store(false, std::sync::atomic::Ordering::Relaxed);
             tokio::spawn(async move {
+                let _guard = guard;
                 commands::deep_analyze::handle_deep_analyze_folder(sink_c, db_c, payload, cancel).await;
             });
         }
@@ -603,11 +738,20 @@ async fn handle_line(
                 emit_db_unavailable(sink, "deepAnalyzeAll").await;
                 return;
             };
+            if deep_analyze_active
+                .compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Relaxed)
+                .is_err()
+            {
+                emit_deep_analyze_busy(sink).await;
+                return;
+            }
+            deep_analyze_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+            let guard = DeepActiveGuard(deep_analyze_active.clone());
             let sink_c = sink.clone();
             let db_c = db.clone();
             let cancel = deep_analyze_cancel.clone();
-            cancel.store(false, std::sync::atomic::Ordering::Relaxed);
             tokio::spawn(async move {
+                let _guard = guard;
                 commands::deep_analyze::handle_deep_analyze_all(sink_c, db_c, payload, cancel).await;
             });
         }
@@ -642,10 +786,46 @@ async fn handle_line(
                 emit_db_unavailable(sink, "runFaceClustering").await;
                 return;
             };
+            // Single-flight: the handler now drops the writer lock during
+            // cluster()+consolidate(), so two overlapping runs could race the
+            // persist transaction. Bounce a second request rather than spawn it.
+            if face_cluster_active
+                .compare_exchange(
+                    false,
+                    true,
+                    std::sync::atomic::Ordering::Acquire,
+                    std::sync::atomic::Ordering::Relaxed,
+                )
+                .is_err()
+            {
+                emit_face_clustering_busy(sink).await;
+                return;
+            }
+            let guard = FaceClusterActiveGuard(face_cluster_active.clone());
             let sink_c = sink.clone();
             let db_c = db.clone();
             tokio::spawn(async move {
+                let _guard = guard;
                 commands::face_clustering::handle_run_face_clustering(sink_c, db_c).await;
+            });
+        }
+        CommandPayload::WipeLibrary(_) => {
+            let Some(db) = db else {
+                emit_db_unavailable(sink, "wipeLibrary").await;
+                return;
+            };
+            let sink_c = sink.clone();
+            let db_c = db.clone();
+            let state_c = scan_state.clone();
+            let fca_c = face_cluster_active.clone();
+            tokio::spawn(async move {
+                commands::wipe::handle_wipe_library(sink_c, db_c, state_c, fca_c).await;
+            });
+        }
+        CommandPayload::GenerateVideoThumbnail(payload) => {
+            let sink_c = sink.clone();
+            tokio::spawn(async move {
+                commands::thumbnail::handle_generate_video_thumbnail(sink_c, payload).await;
             });
         }
     }

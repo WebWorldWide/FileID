@@ -43,7 +43,7 @@ fn perf_trace(stage: &str, path: &std::path::Path, elapsed_ms: f64) {
 
 use crate::coordinator::ScanCoordinator;
 use crate::models::runtime::error_has_device_removed_marker;
-use crate::models::{arcface::ArcFace, bge_text::BgeText, mobileclip::MobileClipImage, scene_vocab::SceneLabeler, scrfd::{self, Scrfd}};
+use crate::models::{bge_text::BgeText, face_align, mobileclip::MobileClipImage, scene_vocab::SceneLabeler, scrfd, sface::SFace, yunet::YuNet};
 use crate::pipeline::batch_clip::ClipBatchCoordinator;
 use crate::pipeline::discovery::{DiscoveredFile, FileKind};
 use crate::shell;
@@ -60,6 +60,13 @@ static STATS_CLIP_US: AtomicU64 = AtomicU64::new(0);
 static STATS_OCR_US: AtomicU64 = AtomicU64::new(0);
 static STATS_OCR_RAN: AtomicU64 = AtomicU64::new(0);
 static STATS_TOTAL_US: AtomicU64 = AtomicU64::new(0);
+// HW-4 diagnostics: RAM++ inference time (was unaccounted — folded into the
+// total_us gap) and the time spent WAITING to acquire `vision_sem` (both the
+// faces and RAM++ acquisitions). Together with vision_us/clip_us these explain
+// where per-file wall time actually goes, so the throughput bottleneck can be
+// fixed with data rather than guesses.
+static STATS_RAMPLUS_US: AtomicU64 = AtomicU64::new(0);
+static STATS_VISION_WAIT_US: AtomicU64 = AtomicU64::new(0);
 const STATS_PERIOD: u64 = 100;
 
 fn record_stage(stage: &AtomicU64, started: Instant) {
@@ -79,6 +86,8 @@ fn maybe_emit_stats() {
     let vision = STATS_VISION_US.load(Ordering::Relaxed) / n;
     let clip = STATS_CLIP_US.load(Ordering::Relaxed) / n;
     let total = STATS_TOTAL_US.load(Ordering::Relaxed) / n;
+    let ramplus = STATS_RAMPLUS_US.load(Ordering::Relaxed) / n;
+    let vision_wait = STATS_VISION_WAIT_US.load(Ordering::Relaxed) / n;
     let ocr_ran = STATS_OCR_RAN.load(Ordering::Relaxed);
     let ocr_avg = STATS_OCR_US
         .load(Ordering::Relaxed)
@@ -99,6 +108,8 @@ fn maybe_emit_stats() {
         ocr_us = ocr_avg,
         ocr_ran = ocr_ran,
         total_us = total,
+        ramplus_us = ramplus,
+        vision_wait_us = vision_wait,
         clip_batches = batch_count,
         clip_avg_batch_x10 = avg_batch,
         "[STATS] per-file avg microseconds"
@@ -134,6 +145,11 @@ pub struct TaggedFile {
     pub kind: FileKind,
     pub size_bytes: u64,
     pub modified_unix: f64,
+    /// Creation timestamp as Unix seconds (propagated from
+    /// `DiscoveredFile.created_unix`). Persisted to `files.created_at`; a
+    /// rescan never clobbers the original (it's excluded from the INSERT's
+    /// ON CONFLICT DO UPDATE set). `None` when the platform has no birth time.
+    pub created_unix: Option<f64>,
     pub scanned_unix: f64,
 
     pub has_faces: bool,
@@ -193,6 +209,31 @@ pub struct TaggedFile {
     /// optional Deep-Analyze VLM pass as `source='vlm'`, when the user installs
     /// a Qwen / Gemma model.)
     pub tags: Vec<(String, Option<f32>)>,
+
+    /// True iff the face detect/embed stage actually executed for this file
+    /// this scan (models present AND the GPU was alive). The dbwriter keys its
+    /// stale-`face_prints` DELETE on this flag, not on `faces.is_empty()`: an
+    /// edited/zero-face re-process must clear orphaned faces, but a
+    /// face-disabled or GPU-dead session must NOT wipe still-valid rows. See
+    /// dbwriter face-flush.
+    pub faces_evaluated: bool,
+
+    /// True iff the OCR / doc-text extraction stages actually ran for this file
+    /// this scan. Same contract as `faces_evaluated`: the dbwriter
+    /// delete-then-reinserts `ocr_*` / `doc_*` (clearing now-empty text) ONLY
+    /// when the stage ran, never on the ambiguous default-skip path.
+    pub ocr_stage_ran: bool,
+    pub doc_stage_ran: bool,
+
+    /// True iff the tagging stage(s) actually produced this file's tag set this
+    /// session (RAM++ / CLIP-scene / enriched extras for images; keyword / audio
+    /// extraction for docs / audio). Same contract as `faces_evaluated`: the
+    /// dbwriter delete-then-reinserts `source='auto'` tags ONLY when this is set,
+    /// so a per-file timeout row or a GPU-dead short-circuit — both of which emit
+    /// an empty `tags` vec — can never wipe a file's previously-persisted
+    /// auto-tags. Set just before the normal return (false if the GPU died), and
+    /// left false on the timeout / GPU-dead-bail rows.
+    pub tags_evaluated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -221,8 +262,11 @@ pub struct DetectedFace {
 /// against the GPU's command queue. Pool size capped at MODEL_POOL_SIZE
 /// to keep VRAM bounded.
 pub struct ModelStack {
-    pub arcface: Option<Vec<Mutex<ArcFace>>>,
-    pub scrfd: Option<Vec<Mutex<Scrfd>>>,
+    // Commercial-clean face models: YuNet (detect, MIT) + SFace (embed, Apache,
+    // 128-d). Field names are legacy (`scrfd`/`arcface`) to keep the pipeline
+    // call sites unchanged; the types are the new MIT/Apache models.
+    pub arcface: Option<Vec<Mutex<SFace>>>,
+    pub scrfd: Option<Vec<Mutex<YuNet>>>,
     /// MobileCLIP has two paths (the default is chosen in `load_default`):
     /// - `mobileclip_batch` (DEFAULT) — single Session behind
     ///   `ClipBatchCoordinator`, fed batched (N,3,256,256) tensors. On a 6 GB
@@ -245,6 +289,17 @@ pub struct ModelStack {
     /// document's extracted text so the library can do semantic search beyond
     /// FTS5 keyword match. Optional: missing model → no embedding emitted.
     pub bge_text: Option<Mutex<BgeText>>,
+    /// RAM++ multi-label image tagger pool (the PRIMARY in-scan tagger).
+    /// Optional: a missing ONNX (e.g. the self-hosted HF repo not yet
+    /// populated) → tagging falls back to the CLIP zero-shot `scene_labeler`,
+    /// so there is zero regression when RAM++ isn't installed.
+    pub ram_plus: Option<Vec<Mutex<crate::models::ram_plus::RamPlusTagger>>>,
+    /// RAM++ batch-coordinator path (HW-4): one Session driven with batched
+    /// (N,3,384,384) tensors, filling the GPU kernels that a single 384² image
+    /// leaves <1% utilized. Spawned only when `FILEID_RAMPLUS_BATCH_SIZE > 1`
+    /// AND a dynamic-batch ONNX is installed; otherwise `ram_plus` (the
+    /// single-image pool) is used. When this is `Some`, `ram_plus` is `None`.
+    pub ram_plus_batch: Option<Arc<crate::models::ram_plus_batch::RamPlusBatchCoordinator>>,
 }
 
 /// Aspirational pool size — actual cap is `min(this, vram_cap, worker_count)`
@@ -254,18 +309,31 @@ pub struct ModelStack {
 /// Tunable per-user via `FILEID_MODEL_POOL_SIZE` (also gated).
 const MODEL_POOL_SIZE: usize = 4;
 
-/// Estimated VRAM headroom per pooled-Session of (ArcFace + SCRFD +
-/// MobileCLIP combined): weights + DirectML allocator + intermediate
-/// tensors. Conservative upper bound — used to clamp pool size to fit
-/// available `DedicatedVideoMemory`. Real per-session residency varies
-/// by model and EP; treat this as a ceiling, not a measurement.
+/// Estimated VRAM headroom per pooled-Session of the SCALING model families —
+/// SFace (ArcFace) + YuNet (SCRFD) + RAM++ — each loaded `pool_size` times:
+/// weights + DirectML allocator + intermediate tensors. MobileCLIP is NOT part
+/// of this per-slot figure: it defaults to a SINGLE batch-coordinator session
+/// that does not scale with pool_size (fixed overhead, like the reserved
+/// headroom). Conservative upper bound — used to clamp pool size to fit
+/// available `DedicatedVideoMemory`. Real per-session residency varies by model
+/// and EP; treat this as a ceiling, not a measurement.
 ///
 /// Measured on RTX 2060 6 GB during a scan against ~40 JPEGs in
 /// %USERPROFILE%\Pictures: total dedicated VRAM peaked at ~2.6 GB from a
-/// ~1.65 GB idle baseline, i.e. ~940 MB attributed to the engine. Keeping
-/// the ceiling at 1500 MB preserves a ~560 MB safety margin for DirectML
-/// allocator fragmentation under longer-running scans.
-const VRAM_PER_POOL_INSTANCE_MB: u64 = 1500;
+/// ~1.65 GB idle baseline, i.e. ~940 MB attributed to the engine. Raised from
+/// 1500 to 2000 MB when RAM++ joined the per-slot model set (Swin-L @384 fp16
+/// adds ~882 MB resident weights + inference intermediates), preserving a
+/// safety margin for DirectML allocator
+/// fragmentation under longer-running scans. On a 6 GB card the gate now
+/// clamps the ArcFace/SCRFD/RAM++ pools to 2.
+const VRAM_PER_POOL_INSTANCE_MB: u64 = 2000;
+// HW-4 (RTX 2060, 2026-06-01): a CUDA-specific smaller estimate to fit pool=3
+// was TESTED on hardware and REGRESSED throughput (5.1→3.9 files/s, RAM++
+// 670→812 ms/file, peak RSS 5.7→7.6 GB) — 3 RAM++ Swin-L sessions over-subscribe
+// the single GPU and thrash rather than parallelize. RAM++ throughput is
+// GPU-COMPUTE-bound, not concurrency-bound; the only real win is BATCHED RAM++
+// inference (a dynamic-axis ONNX re-export, see NEXT.md) or a lighter tagger.
+// Do NOT raise the pool to "fix" throughput — it makes it worse.
 
 /// Always-reserved VRAM headroom (Windows desktop compositor + other
 /// apps). Subtracted from the dedicated total before dividing by
@@ -275,25 +343,80 @@ const VRAM_PER_POOL_INSTANCE_MB: u64 = 1500;
 /// single-Session batch path, so this clamp mainly bounds the face models.)
 const VRAM_RESERVED_MB: u64 = 1500;
 
+/// ENG-71: ceiling on the pre-allocation HINT for the per-file read buffer.
+/// `file.size_bytes` comes from a filesystem stat; a bogus/huge value (sparse
+/// file, corrupt metadata, or a misclassified multi-GB blob) makes
+/// `Vec::with_capacity(size)` abort the whole process on the failed allocation
+/// — across all decoder threads. Clamping the hint prevents the abort;
+/// `read_to_end` still grows the Vec to the file's true length, so the
+/// hash/EXIF/decode of a normally-sized file is byte-for-byte unchanged.
+const MAX_PREALLOC_BYTES: usize = 64 * 1024 * 1024;
+
 fn resolve_pool_size(worker_count: usize) -> usize {
     let env_override = std::env::var("FILEID_MODEL_POOL_SIZE")
         .ok()
         .and_then(|s| s.parse::<usize>().ok());
     let mut cap = env_override.unwrap_or(MODEL_POOL_SIZE);
-    if let Some(vram_mb) = crate::platform::dedicated_vram_mb() {
-        let usable = vram_mb.saturating_sub(VRAM_RESERVED_MB);
-        let vram_cap = ((usable / VRAM_PER_POOL_INSTANCE_MB).max(1)) as usize;
-        if cap > vram_cap {
+    match crate::platform::dedicated_vram_mb() {
+        Some(vram_mb) => {
+            let usable = vram_mb.saturating_sub(VRAM_RESERVED_MB);
+            let vram_cap = ((usable / VRAM_PER_POOL_INSTANCE_MB).max(1)) as usize;
+            if cap > vram_cap {
+                tracing::warn!(
+                    requested = cap,
+                    vram_cap,
+                    vram_mb,
+                    "clamping ML pool to fit VRAM"
+                );
+                cap = vram_cap;
+            }
+        }
+        None => {
+            // Fail SAFE, not open: with no VRAM reading we can't size the pool,
+            // so default to a single session rather than MODEL_POOL_SIZE=4 (the
+            // config the comments say wedges a 6 GB card). Matches main.rs's "ML
+            // pool will run at minimum" log on probe failure.
             tracing::warn!(
-                requested = cap,
-                vram_cap,
-                vram_mb,
-                "clamping ML pool to fit VRAM"
+                "VRAM unreadable; clamping ML pool to 1 (fail-safe — pool would otherwise default to {MODEL_POOL_SIZE})"
             );
-            cap = vram_cap;
+            cap = cap.min(1);
         }
     }
+    // Additional Low-tier ceiling on a low-RAM box: each pooled SFace/YuNet/RAM++
+    // session adds resident weights, so cap the pool to 1 under MemoryTier::Low.
+    // Stacks with (does not replace) the VRAM clamp; non-Low tiers unchanged.
+    if crate::platform::memory_tier() == crate::platform::MemoryTier::Low {
+        cap = cap.min(1);
+    }
     cap.max(1).min(worker_count.max(1))
+}
+
+/// EP-aware vision-inference concurrency. DirectML keeps the explicit TDR floor
+/// (`VISION_CONCURRENCY`): past the 2 s deadline Windows removes the GPU device.
+/// CUDA/TensorRT have no TDR ceiling, so concurrency rises to the (VRAM-clamped)
+/// pool size — every loaded Session can run at once instead of being artificially
+/// throttled below the pool. Other EPs stay at the conservative floor until
+/// measured. NOTE: on a small-VRAM card the pool itself clamps to ~2, so this is
+/// a no-op there; the win is on larger CUDA cards. Growing the pool on a 6 GB
+/// CUDA card needs a CUDA-specific `VRAM_PER_POOL_INSTANCE_MB` retune measured on
+/// hardware (DirectML's estimate is allocator-conservative) — tracked separately.
+fn ep_vision_concurrency(ep: crate::models::runtime::ExecutionProvider, pool_size: usize) -> usize {
+    use crate::models::runtime::ExecutionProvider as Ep;
+    match ep {
+        Ep::Cuda | Ep::TensorRt => pool_size.max(VISION_CONCURRENCY),
+        _ => VISION_CONCURRENCY,
+    }
+}
+
+/// EP-aware CLIP-embed concurrency (governs the opt-in `FILEID_CLIP_USE_BATCH=0`
+/// pool path; the default batch coordinator uses one Session and ignores this).
+/// Same EP rationale as [`ep_vision_concurrency`].
+fn ep_clip_concurrency(ep: crate::models::runtime::ExecutionProvider, pool_size: usize) -> usize {
+    use crate::models::runtime::ExecutionProvider as Ep;
+    match ep {
+        Ep::Cuda | Ep::TensorRt => pool_size.max(CLIP_CONCURRENCY),
+        _ => CLIP_CONCURRENCY,
+    }
 }
 
 impl ModelStack {
@@ -302,10 +425,8 @@ impl ModelStack {
     /// run inference in parallel without serializing on a single Mutex.
     pub fn load_default(worker_count: usize) -> Self {
         let pool_size = resolve_pool_size(worker_count);
-        let arcface = load_pool("ArcFace", pool_size, crate::models::arcface::default_weights_path(), |p| {
-            ArcFace::load(p)
-        });
-        let scrfd = load_pool("SCRFD", pool_size, scrfd::default_weights_path(), Scrfd::load);
+        let arcface = load_pool("SFace", pool_size, crate::models::sface::default_weights_path(), SFace::load);
+        let scrfd = load_pool("YuNet", pool_size, crate::models::yunet::default_weights_path(), YuNet::load);
 
         // Batch path is the default. Rationale: the VRAM clamp drops the pool
         // to ~1-3 Sessions on a 6 GB card, and the separate CLIP_CONCURRENCY=2
@@ -399,7 +520,55 @@ impl ModelStack {
             }
         };
 
-        Self { arcface, scrfd, mobileclip_pool, mobileclip_batch, scene_labeler, bge_text }
+        // RAM++ multi-label tagger pool — the primary in-scan tagger. Loaded
+        // like the other pooled models; a missing ONNX (e.g. the HF repo not
+        // yet populated) yields None and tagging falls back to CLIP scene-tags
+        // (zero regression). The tag-list path is captured into the loader
+        // closure since `load_pool` passes only the resolved ONNX path.
+        // RAM++ default = single-image pool. When FILEID_RAMPLUS_BATCH_SIZE > 1
+        // AND a dynamic-batch ONNX is installed, use the batch coordinator
+        // instead (one Session, batched forward — the HW-4 throughput fix). The
+        // two paths are mutually exclusive.
+        let ram_batch_size =
+            crate::models::ram_plus_batch::RamPlusBatchCoordinator::configured_batch_size();
+        let (ram_plus, ram_plus_batch) = match crate::models::ram_plus::default_tags_path() {
+            Ok(tags_path) if ram_batch_size > 1 => {
+                match crate::models::ram_plus::default_onnx_path() {
+                    Ok(p) if p.exists() => {
+                        match crate::models::ram_plus::RamPlusTagger::load(p.clone(), tags_path) {
+                            Ok(tagger) => {
+                                tracing::info!(model = "RAM++", path = %p.display(), batch_size = ram_batch_size, "model loaded (batch-coordinator mode)");
+                                let coord = crate::models::ram_plus_batch::RamPlusBatchCoordinator::spawn(tagger);
+                                (None, Some(coord))
+                            }
+                            Err(err) => {
+                                tracing::warn!(model = "RAM++", ?err, "batch load failed; tagging falls back to CLIP scene-tags");
+                                (None, None)
+                            }
+                        }
+                    }
+                    _ => {
+                        tracing::info!(model = "RAM++", "ONNX not installed; tagging falls back to CLIP scene-tags");
+                        (None, None)
+                    }
+                }
+            }
+            Ok(tags_path) => {
+                let pool = load_pool(
+                    "RAM++",
+                    pool_size,
+                    crate::models::ram_plus::default_onnx_path(),
+                    move |p| crate::models::ram_plus::RamPlusTagger::load(p, tags_path.clone()),
+                );
+                (pool, None)
+            }
+            Err(err) => {
+                tracing::warn!(model = "RAM++", ?err, "tag-list path unresolved; tagging falls back to CLIP scene-tags");
+                (None, None)
+            }
+        };
+
+        Self { arcface, scrfd, mobileclip_pool, mobileclip_batch, scene_labeler, bge_text, ram_plus, ram_plus_batch }
     }
 
     #[allow(dead_code)]
@@ -411,6 +580,8 @@ impl ModelStack {
             mobileclip_batch: None,
             scene_labeler: None,
             bge_text: None,
+            ram_plus: None,
+            ram_plus_batch: None,
         }
     }
 }
@@ -518,26 +689,77 @@ impl Tagger {
         // don't oversaturate the GPU side or starve the WinUI 3 app.
         let topo = crate::platform::cpu_topology();
         let decoder_count = ((topo.p_cores + topo.e_cores) as usize).clamp(2, 12);
-        // Channel cap: 2× worker count keeps a small read-ahead buffer
-        // ready, without ballooning RAM with decoded RGB bytes (each
-        // frame can be ~50 MB for a 12 MP photo).
-        let predecoded_cap = (self.worker_count * 2).max(8);
+        // Channel cap: bound decoded-RGB read-ahead by a MEMORY budget, not a
+        // flat frame count. A 12 MP frame is ~36 MB, so the old (worker*2) count
+        // pinned ~0.5-1 GB of pure read-ahead slack the GPU never needs — decode
+        // (CPU, the [2,12] decoder pool) vastly outruns the GPU-bound RAM++
+        // tagger (~6-8 files/s), so the channel sits full all scan and a
+        // shallower queue cannot starve the GPU. Size to ~256 MB of typical
+        // frames while still guaranteeing every worker can hold one frame ready
+        // (floor = worker_count). Per-frame pixels are already capped at
+        // MAX_DECODED_PIXELS, so this also tightens the pathological-frame ceiling.
+        const PREDECODE_BUDGET_MB: usize = 256;
+        const TYPICAL_FRAME_MB: usize = 24; // ~8 MP RGB8
+        let budget_cap = PREDECODE_BUDGET_MB / TYPICAL_FRAME_MB;
+        // The worker_count floor guarantees every worker can hold one frame
+        // ready, but on a low-RAM box a high worker_count would override the
+        // ~256 MB budget. Under MemoryTier::Low respect the budget instead so the
+        // read-ahead can't outgrow it (a shallower queue can't starve the GPU
+        // stage — decode vastly outruns inference). Non-Low tiers keep the floor.
+        let predecoded_cap = match crate::platform::memory_tier() {
+            crate::platform::MemoryTier::Low => budget_cap.max(1),
+            _ => budget_cap.max(self.worker_count),
+        };
         let (predecoded_tx, predecoded_rx) =
             async_channel::bounded::<PreDecoded>(predecoded_cap);
         for decoder_idx in 0..decoder_count {
             let rx = raw_rx.clone();
             let tx = predecoded_tx.clone();
             let coord = self.coordinator.clone();
-            std::thread::Builder::new()
+            let spawn_result = std::thread::Builder::new()
                 .name(format!("fileid-decode-{decoder_idx}"))
-                .spawn(move || run_decoder_thread(rx, tx, coord))
-                .expect("spawn decoder thread");
+                .spawn(move || run_decoder_thread(rx, tx, coord));
+            if let Err(e) = spawn_result {
+                // Don't panic mid-scan if the OS refuses a new thread (handle or
+                // memory pressure on a very large library). Log and continue with
+                // the decoders that did start; rx/tx/coord drop here, which is
+                // safe (the channels just have one fewer consumer/producer).
+                tracing::warn!(
+                    "fileid-decode-{decoder_idx} failed to spawn ({e}); continuing with fewer decode threads"
+                );
+            }
         }
         drop(raw_rx);
         drop(predecoded_tx);
 
-        let vision_sem = Arc::new(Semaphore::new(VISION_CONCURRENCY));
-        let clip_sem = Arc::new(Semaphore::new(CLIP_CONCURRENCY));
+        // P3: derive the GPU-inference concurrency caps from the active EP. On
+        // DirectML these stay at the TDR floor (4/2); on CUDA/TensorRT they rise
+        // to the VRAM-clamped pool size so the semaphore doesn't throttle below
+        // the number of loaded Sessions.
+        let active_ep = crate::models::runtime::active_provider();
+        let ep_pool_size = resolve_pool_size(self.worker_count);
+        // When the pool clamps to a SINGLE session, every vision permit-holder
+        // serializes on that one parking_lot Mutex across the GPU forward, so the
+        // extra permits just park OS threads instead of running. Issue exactly 1
+        // permit so excess workers await the ASYNC semaphore (yielding the tokio
+        // thread) rather than blocking on the mutex. Gated to pool_size==1 ONLY:
+        // for pool_size>=2 keep the full VISION_CONCURRENCY so a multi-session box
+        // (e.g. the 6 GB RTX 2060 at pool=2) is unchanged.
+        let vision_cap = if ep_pool_size == 1 {
+            1
+        } else {
+            ep_vision_concurrency(active_ep, ep_pool_size)
+        };
+        let clip_cap = ep_clip_concurrency(active_ep, ep_pool_size);
+        tracing::info!(
+            ep = active_ep.as_str(),
+            pool_size = ep_pool_size,
+            vision_cap,
+            clip_cap,
+            "[TAGGING] EP-aware inference concurrency caps"
+        );
+        let vision_sem = Arc::new(Semaphore::new(vision_cap));
+        let clip_sem = Arc::new(Semaphore::new(clip_cap));
 
         for worker_idx in 0..self.worker_count {
             let rx = predecoded_rx.clone();
@@ -565,6 +787,7 @@ impl Tagger {
                     let timeout_kind = predecoded.file.kind;
                     let timeout_size = predecoded.file.size_bytes;
                     let timeout_modified = predecoded.file.modified_unix;
+                    let timeout_created = predecoded.file.created_unix;
                     // Per-file timeout — image decoders or network UNC reads
                     // can hang indefinitely.
                     let fut = process_file_predecoded(predecoded, &models, &vision_sem, &clip_sem, worker_idx, &coord);
@@ -585,6 +808,7 @@ impl Tagger {
                                 kind: timeout_kind,
                                 size_bytes: timeout_size,
                                 modified_unix: timeout_modified,
+                                created_unix: timeout_created,
                                 scanned_unix: std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
@@ -611,6 +835,10 @@ impl Tagger {
                                 text_embedding: None,
                                 doc_text: None,
                                 tags: Vec::new(),
+                                faces_evaluated: false,
+                                ocr_stage_ran: false,
+                                doc_stage_ran: false,
+                                tags_evaluated: false,
                             }
                         }
                     };
@@ -735,7 +963,7 @@ fn run_decoder_thread(
                     if file.size_bytes <= crate::util::content_hash::FULL_HASH_MAX_BYTES =>
                 {
                     if let Ok(mut f) = open_image_file(&file.path) {
-                        let mut bytes = Vec::with_capacity(file.size_bytes as usize);
+                        let mut bytes = Vec::with_capacity((file.size_bytes as usize).min(MAX_PREALLOC_BYTES));
                         if std::io::Read::read_to_end(&mut f, &mut bytes).is_ok() {
                             content_hash = Some(*blake3::hash(&bytes).as_bytes());
                             file_bytes = Some(bytes);
@@ -972,6 +1200,7 @@ async fn process_file_predecoded(
         kind: file.kind,
         size_bytes: file.size_bytes,
         modified_unix: file.modified_unix,
+        created_unix: file.created_unix,
         scanned_unix,
         has_faces: false,
         faces: Vec::new(),
@@ -995,6 +1224,10 @@ async fn process_file_predecoded(
         text_embedding: None,
         doc_text: None,
         tags: Vec::new(),
+        faces_evaluated: false,
+        ocr_stage_ran: false,
+        doc_stage_ran: false,
+        tags_evaluated: false,
     };
 
     // Content identity for rename/move heal. Skipped for cloud placeholders
@@ -1011,6 +1244,12 @@ async fn process_file_predecoded(
     // for FileKind::Doc. Run a cheap RAKE-style keyword extractor → tag chips
     // (source='auto'), and stash the text on the row so the dbwriter can
     // persist it into doc_text/doc_fts for full-text search.
+    //
+    // The doc-text stage "ran" iff extraction was attempted this session (a
+    // doc-kind input that isn't a cloud placeholder) — the dbwriter keys its
+    // stale doc_text/doc_fts DELETE on this so a re-process that now yields
+    // empty text clears phantom FTS hits (#11).
+    tagged.doc_stage_ran = matches!(file.kind, FileKind::Doc | FileKind::Pdf) && !file.online_only;
     if let Some(text) = doc_text {
         if !text.trim().is_empty() {
             for (label, score) in crate::util::keywords::extract(&text) {
@@ -1044,19 +1283,42 @@ async fn process_file_predecoded(
     // Audio metadata (Phase 5): artist/album/title/genre/year, surfaced as
     // tag chips so the user can filter their library by these facts. Each
     // tag carries score=None — these are facts, not model probabilities.
-    for (label, score) in audio_tags {
-        tagged.tags.push((label, score));
-    }
+    tagged.tags.extend(audio_tags);
 
     // SEC/perf: once the GPU is marked dead (TDR or device-removed),
     // skip the whole ML pipeline for the rest of this process lifetime.
     // mark_gpu_dead is one-shot (see coordinator.rs:96 — never reset),
     // so this also prevents the remaining Discovery queue from queueing
-    // up tens of thousands of doomed inference calls behind us. The row
-    // is still emitted (with failed=false, empty embeddings) so the
-    // file row exists in the DB and a future scan after restart picks
-    // it up.
+    // up tens of thousands of doomed inference calls behind us.
+    //
+    // Mark the row failed=true (NOT false): this file never reached the ML
+    // stages, so it has no faces/tags/embeddings. The incremental skip-set
+    // only skips failed=0 rows, so failed=1 forces a re-process on the next
+    // scan after a restart. Emitting failed=false here would stamp the file
+    // scanned-and-fine-with-no-faces and the timestamp-only skip-set would
+    // skip it forever — stranding it face-less permanently (the row still
+    // exists either way, so the resume cursor advances regardless).
     if coord.is_gpu_dead() {
+        // Only files that NEED the now-skipped GPU ML stages should be marked
+        // failed for retry — images/videos (face detect + embed). A Doc/Pdf/Audio
+        // row already finished its CPU-only extraction above, so marking it
+        // failed would wrongly hide a fully-processed file from the Library until
+        // the next healthy scan. (Their optional BGE embedding is skipped, but
+        // FTS keyword search still works, so leaving them failed=false is correct.)
+        let needed_gpu = matches!(file.kind, FileKind::Image | FileKind::Video);
+        tagged.failed = needed_gpu;
+        if needed_gpu {
+            tagged.error_message = Some(
+                "GPU device removed mid-scan; file not processed (will retry next scan)".into(),
+            );
+        } else {
+            // Doc/Audio finished their CPU-only tag extraction (audio metadata,
+            // doc keywords) before the GPU died. Mark the set authoritative so
+            // the dbwriter persists it — otherwise tags_evaluated stays false,
+            // the dbwriter drops the freshly-extracted tags, AND failed=false
+            // strands the row in the skip-set, losing them permanently. (audit E2)
+            tagged.tags_evaluated = true;
+        }
         tagged.total_ms = started.elapsed().as_secs_f64() * 1000.0;
         return tagged;
     }
@@ -1109,7 +1371,9 @@ async fn process_file_predecoded(
                 let gpu_alive = !coord.is_gpu_dead();
                 if gpu_alive {
                 if let (Some(scrfd_pool), Some(arcface_pool)) = (&models.scrfd, &models.arcface) {
+                    let vwait = Instant::now();
                     let permit = vision_sem.acquire().await;
+                    STATS_VISION_WAIT_US.fetch_add(vwait.elapsed().as_micros() as u64, Ordering::Relaxed);
                     let vision_started = Instant::now();
                     if permit.is_ok() {
                         let scrfd_mu = &scrfd_pool[worker_idx % scrfd_pool.len()];
@@ -1141,7 +1405,12 @@ async fn process_file_predecoded(
                                         (det.bbox[2] - det.bbox[0]).max(0.0),
                                         (det.bbox[3] - det.bbox[1]).max(0.0),
                                     ];
-                                    if let Some(crop) = crop_and_resize_face(&rgb, w, h, &bbox_xywh) {
+                                    // Aligned 112×112 (5-pt similarity → ArcFace
+                                    // template) for SFace; fall back to a plain bbox
+                                    // crop if the landmark fit is degenerate.
+                                    let crop = face_align::align_112(&rgb, w, h, &det.landmarks)
+                                        .or_else(|| crop_and_resize_face(&rgb, w, h, &bbox_xywh));
+                                    if let Some(crop) = crop {
                                         let embed_result = {
                                             let mut a = arcface_mu.lock();
                                             a.embed(&crop)
@@ -1163,11 +1432,11 @@ async fn process_file_predecoded(
                                             Err(err) => {
                                                 if error_has_device_removed_marker(&err) {
                                                     if coord.mark_gpu_dead() {
-                                                        tracing::error!(?err, "[GPU-TDR] ArcFace device-removed; cancelling scan");
+                                                        tracing::error!(?err, "[GPU-TDR] SFace device-removed; cancelling scan");
                                                     }
                                                     break;
                                                 }
-                                                tracing::warn!(?err, "ArcFace embed failed");
+                                                tracing::warn!(?err, "SFace embed failed");
                                             }
                                         }
                                     }
@@ -1189,6 +1458,13 @@ async fn process_file_predecoded(
                     STATS_VISION_US.fetch_add(vision_started.elapsed().as_micros() as u64, Ordering::Relaxed);
                 }
                 }
+                // The face stage truly ran this session iff the GPU was alive at
+                // entry, the face models were loaded, AND the GPU did not die
+                // mid-pass. The dbwriter keys its stale-face DELETE on this (not
+                // on `faces.is_empty()`) so a zero-face re-process clears orphans
+                // while a models-missing / GPU-dead session preserves valid rows.
+                tagged.faces_evaluated =
+                    gpu_alive && models.scrfd.is_some() && models.arcface.is_some() && !coord.is_gpu_dead();
                 tagged.has_faces = !tagged.faces.is_empty();
 
                 if !coord.is_gpu_dead() {
@@ -1198,7 +1474,7 @@ async fn process_file_predecoded(
                     let clip_started = Instant::now();
                     if permit.is_ok() {
                         let clip_mu = &clip_pool[worker_idx % clip_pool.len()];
-                        let resized = resize_rgb_nearest(&rgb, w as usize, h as usize, 256, 256);
+                        let resized = resize_rgb_quality(&rgb, w as usize, h as usize, 224, 224);
                         let embed_result = {
                             let mut c = clip_mu.lock();
                             c.embed(&resized)
@@ -1223,7 +1499,7 @@ async fn process_file_predecoded(
                     // Opt-in batch path: workers submit to coordinator,
                     // get batched embedding back via oneshot.
                     let clip_started = Instant::now();
-                    let resized = resize_rgb_nearest(&rgb, w as usize, h as usize, 256, 256);
+                    let resized = resize_rgb_quality(&rgb, w as usize, h as usize, 224, 224);
                     match clip_coord.embed(resized).await {
                         Ok(emb) => tagged.clip_embedding = Some(emb),
                         Err(err) => {
@@ -1242,6 +1518,101 @@ async fn process_file_predecoded(
                 }
                 }
 
+                // RAM++ multi-label tagging — the PRIMARY in-scan tagger. One
+                // Swin-L forward pass on the same GPU/NPU EP chain as faces;
+                // its 4585-tag vocabulary supersedes the CLIP zero-shot scene
+                // labeler (gated below on `!ram_plus_ran`). Runs AFTER the
+                // MobileCLIP embed so semantic-search embeddings are always
+                // computed regardless of which tagger is active. Shares the
+                // `vision_sem` GPU budget; device-removed → cancel the scan.
+                let mut ram_plus_ran = false;
+                if !coord.is_gpu_dead() {
+                    // Tags come from EITHER the batch coordinator (one batched
+                    // Session — HW-4 throughput path; no vision_sem because the
+                    // coordinator owns the Session and serializes batches itself,
+                    // mirroring the CLIP batch path) OR the per-worker pool
+                    // (single-image, vision_sem-gated). Both yield the same
+                    // Result<Vec<(tag, score)>>, handled by the shared match.
+                    let ram_started = Instant::now();
+                    let tag_result: Option<anyhow::Result<Vec<(String, f32)>>> =
+                        if let Some(ram_coord) = &models.ram_plus_batch {
+                            Some(ram_coord.tag(rgb.clone(), w, h).await)
+                        } else if let Some(ram_pool) = &models.ram_plus {
+                            // Run the CPU preprocess (resize + ImageNet-normalize)
+                            // BEFORE acquiring the GPU permit + session Mutex, so it
+                            // overlaps other workers' GPU forwards instead of
+                            // serializing under the scarce session lock; the lock +
+                            // permit now wrap only the GPU forward pass.
+                            match crate::models::ram_plus::RamPlusTagger::preprocess_tensor(
+                                &rgb, w, h,
+                            ) {
+                                Ok(chw) => {
+                                    let rwait = Instant::now();
+                                    let permit = vision_sem.acquire().await;
+                                    STATS_VISION_WAIT_US.fetch_add(
+                                        rwait.elapsed().as_micros() as u64,
+                                        Ordering::Relaxed,
+                                    );
+                                    if permit.is_ok() {
+                                        let ram_mu = &ram_pool[worker_idx % ram_pool.len()];
+                                        let mut g = ram_mu.lock();
+                                        Some(g.tag_prepared(chw))
+                                    } else {
+                                        None
+                                    }
+                                }
+                                Err(e) => Some(Err(e)),
+                            }
+                        } else {
+                            None
+                        };
+                    if let Some(tag_result) = tag_result {
+                        STATS_RAMPLUS_US
+                            .fetch_add(ram_started.elapsed().as_micros() as u64, Ordering::Relaxed);
+                        match tag_result {
+                            Ok(tags) => {
+                                let redacted = crate::platform::redact_path_for_log(&file.path);
+                                let ram_emit_count = tags.len();
+                                let max_score = tags.first().map(|(_, s)| *s).unwrap_or(0.0);
+                                for (label, score) in tags {
+                                    tracing::debug!(
+                                        target: "FileIDEngine::tagging",
+                                        path = %redacted,
+                                        label,
+                                        score,
+                                        "[TAGGING] ram_plus"
+                                    );
+                                    tagged.tags.push((label, Some(score)));
+                                }
+                                tracing::info!(
+                                    target: "FileIDEngine::tagging",
+                                    path = %redacted,
+                                    ram_emit_count,
+                                    max_score,
+                                    "[TAGGING] ram_plus_summary"
+                                );
+                                // Treat RAM++ as "satisfied the tagger contract"
+                                // only when it actually emitted content tags. A
+                                // zero-tag success (hard/abstract image) must NOT
+                                // suppress the lower-threshold CLIP scene-tag
+                                // fallback below, else the file gets only Year/
+                                // camera chips (#7).
+                                ram_plus_ran = ram_emit_count > 0;
+                            }
+                            Err(err) => {
+                                if error_has_device_removed_marker(&err) {
+                                    if coord.mark_gpu_dead() {
+                                        tracing::error!(?err, "[GPU-TDR] RAM++ device-removed; cancelling scan");
+                                    }
+                                } else {
+                                    tracing::warn!(?err, "RAM++ tag failed");
+                                }
+                            }
+                        }
+                        perf_trace("ram_plus_done", &file.path, ram_started.elapsed().as_secs_f64() * 1000.0);
+                    }
+                }
+
                 // Scene tags — CLIP zero-shot. Scores the MobileCLIP image
                 // embedding computed just above against the scene-label
                 // matrix: a tiny CPU mat-vec + softmax, NOT a GPU inference,
@@ -1255,7 +1626,11 @@ async fn process_file_predecoded(
                 // text model not installed) or the embedding is missing.
                 // Gated by ENABLE_CLIP_SCENE_TAGS — flip that const to false to
                 // drop CLIP scan-time tagging and rely solely on VLM tags.
-                if crate::models::scene_vocab::ENABLE_CLIP_SCENE_TAGS {
+                // CLIP zero-shot scene tags are the FALLBACK tagger — only run
+                // when RAM++ didn't (not installed / device-dead / errored), so
+                // a RAM++-tagged file isn't double-tagged with noisier CLIP
+                // scene guesses.
+                if !ram_plus_ran && crate::models::scene_vocab::ENABLE_CLIP_SCENE_TAGS {
                     let redacted = crate::platform::redact_path_for_log(&file.path);
                     if let (Some(labeler), Some(emb)) = (&models.scene_labeler, &tagged.clip_embedding) {
                         let scene_started = Instant::now();
@@ -1309,8 +1684,15 @@ async fn process_file_predecoded(
                 // Also short-circuit when the GPU is already known dead, to
                 // avoid any recursive device-init after a TDR.
                 if matches!(file.kind, FileKind::Image) && !coord.is_gpu_dead() && should_run_ocr(&file.path, &tagged, file.size_bytes) {
+                    // The OCR stage ran this session regardless of whether text
+                    // came back — lets the dbwriter clear stale ocr_text/ocr_fts
+                    // on a re-process that now yields nothing (#11).
+                    tagged.ocr_stage_ran = true;
                     let ocr_started = Instant::now();
-                    if let Ok(Some(ocr)) = run_ocr_blocking(rgb.clone(), w, h).await {
+                    // Move (not clone) the decoded frame into OCR: this is the
+                    // last use of `rgb` in the block, so the clone was a wasted
+                    // full-frame allocation + memcpy per OCR'd file. (audit P5)
+                    if let Ok(Some(ocr)) = run_ocr_blocking(rgb, w, h).await {
                         if !ocr.text.trim().is_empty() {
                             tagged.has_text = true;
                             tagged.ocr_text = Some(ocr.text);
@@ -1354,6 +1736,30 @@ async fn process_file_predecoded(
         );
     }
     maybe_emit_stats();
+    // Mark the tag set authoritative for the dbwriter only if the GPU survived
+    // the full tagging pass AND a decode actually happened. If the GPU died
+    // mid-file, OR an image decode failed transiently (failed=true skips the
+    // whole tagging block leaving `tags` empty), the set is partial/empty and
+    // must NOT replace previously-persisted auto-tags. (The timeout and
+    // GPU-dead-bail rows are built with tags_evaluated=false and never reach
+    // here; the `!failed` term covers the no-decode path, mirroring
+    // faces_evaluated which is set only inside the successful-decode block.)
+    // If the GPU died DURING this file's ML stages — after the pre-flight
+    // gpu-dead bail above let it through — an image/video reached neither a
+    // complete face-detect nor embed. Mark it failed so the incremental
+    // skip-set re-processes it next scan instead of stranding it at
+    // failed=false (scanned-fine-but-face-less forever, same class as the
+    // pre-ML bail). (audit E1)
+    if coord.is_gpu_dead()
+        && matches!(file.kind, FileKind::Image | FileKind::Video)
+        && !tagged.failed
+    {
+        tagged.failed = true;
+        tagged.error_message.get_or_insert_with(|| {
+            "GPU device removed mid-scan; file not fully processed (will retry next scan)".into()
+        });
+    }
+    tagged.tags_evaluated = !coord.is_gpu_dead() && !tagged.failed && !file.online_only;
     tagged
 }
 
@@ -1561,8 +1967,11 @@ fn crop_and_resize_face(
     Some(resize_rgb_nearest(&crop, crop_w, crop_h, 112, 112))
 }
 
-/// Nearest-neighbor resize for interleaved RGB. Fast, fine for ML
-/// preprocessing where the model is robust to interpolation choice.
+/// Nearest-neighbor resize for interleaved RGB. Fast, and acceptable for the
+/// dHash fingerprint (9×8) and the tight 112px face-crop, where the downscale
+/// ratio is small or the model is insensitive. NOT for CLIP — a multi-megapixel
+/// source decimated in one nearest step injects heavy aliasing that shifts the
+/// embedding; use [`resize_rgb_quality`] there.
 pub fn resize_rgb_nearest(
     rgb: &[u8],
     src_w: usize,
@@ -1590,6 +1999,40 @@ pub fn resize_rgb_nearest(
         }
     }
     out
+}
+
+/// High-quality (bilinear) resize for interleaved RGB — the CLIP 224×224 image
+/// input. Nearest one-step decimation of a multi-megapixel photo injects
+/// aliasing that shifts the embedding and diverges from the macOS reference
+/// (which draws at `.high` interpolation after a 512px pre-shrink), degrading
+/// semantic search, zero-shot scene tags, and CLIP dedup. Triangle (bilinear)
+/// closely matches macOS at this downscale ratio and reuses the same filter
+/// RAM++ preprocessing already trusts. Falls back to nearest only if the raw
+/// buffer can't form an image (size mismatch).
+pub fn resize_rgb_quality(
+    rgb: &[u8],
+    src_w: usize,
+    src_h: usize,
+    dst_w: usize,
+    dst_h: usize,
+) -> Vec<u8> {
+    // Borrow the source buffer rather than cloning it; same Triangle filter,
+    // identical output. Falls back to nearest if the size doesn't form an image.
+    let src = match image::ImageBuffer::<image::Rgb<u8>, &[u8]>::from_raw(
+        src_w as u32,
+        src_h as u32,
+        rgb,
+    ) {
+        Some(img) => img,
+        None => return resize_rgb_nearest(rgb, src_w, src_h, dst_w, dst_h),
+    };
+    image::imageops::resize(
+        &src,
+        dst_w as u32,
+        dst_h as u32,
+        image::imageops::FilterType::Triangle,
+    )
+    .into_raw()
 }
 
 /// Difference-hash perceptual fingerprint. 9×8 grayscale → 64 bits, one
@@ -1639,6 +2082,7 @@ mod tests {
             kind: FileKind::Image,
             size_bytes: 1024,
             modified_unix: 1.0,
+            created_unix: None,
             online_only: false,
             file_ref: None,
         })
@@ -1724,6 +2168,7 @@ mod tests {
             kind: FileKind::Image,
             size_bytes,
             modified_unix: 1_710_504_000.0,
+            created_unix: None,
             scanned_unix: 1_710_504_001.0,
             has_faces: false,
             faces: Vec::new(),
@@ -1747,6 +2192,10 @@ mod tests {
             text_embedding: None,
             doc_text: None,
             tags: Vec::new(),
+            faces_evaluated: false,
+            ocr_stage_ran: false,
+            doc_stage_ran: false,
+            tags_evaluated: true,
         }
     }
 

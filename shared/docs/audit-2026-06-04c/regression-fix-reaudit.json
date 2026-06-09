@@ -1,0 +1,13 @@
+{
+  "summary": "Focused re-audit of the 3 non-trivial regression fixes from the first re-audit (ep_guard rewrite, A9 placeholder guard, A13 DeepAnalyzeLast clear)",
+  "agentCount": 3,
+  "logs": [
+    "Regression-fix re-audit: 0 raw; 0 CONFIRMED; 0 contested"
+  ],
+  "result": {
+    "area": "regression-fix-reaudit",
+    "totalRaw": 0,
+    "confirmed": [],
+    "contested": []
+  }
+}

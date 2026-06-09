@@ -15,6 +15,7 @@ pub mod identity_clustering;
 pub mod deep_analyze;
 pub mod restructure;
 pub mod restructure_apply;
+pub mod restructure_semantic;
 pub mod cluster_suggestions;
 pub mod audio_meta;
 pub mod doc_extract;

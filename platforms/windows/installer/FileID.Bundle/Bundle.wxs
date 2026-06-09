@@ -23,7 +23,7 @@
   <Bundle
       Name="FileID"
       Manufacturer="FileID"
-      Version="0.1.0"
+      Version="$(var.Version)"
       UpgradeCode="$(var.BundleUpgradeCode)"
       AboutUrl="https://fileid.app"
       HelpUrl="https://fileid.app/help"
@@ -55,6 +55,18 @@
                    Message="FileID requires a 64-bit edition of Windows." />
 
     <Chain>
+      <!-- Rollback boundary: a standalone checkpoint at the head of the
+           chain. On a failed install, Burn only unwinds packages installed
+           AFTER the most recent boundary — packages committed before it stay
+           put. With exactly one MSI chained today this is belt-and-suspenders,
+           but it's the correct place to declare it (RollbackBoundary is a
+           Chain construct, not an MSI/Package one) and future-proofs the chain
+           for prerequisite packages (e.g. the WinAppSDK runtime ExePackage the
+           app csproj notes it depends on). Transaction="no" keeps each MSI's
+           own atomic Windows Installer transaction rather than wrapping the
+           whole chain in one MSI transaction. -->
+      <RollbackBoundary Id="InstallStart" Vital="yes" Transaction="no" />
+
       <!-- x64 MSI: install on AMD64. NativeMachine 34404 (0x8664) ==
            IMAGE_FILE_MACHINE_AMD64. -->
       <MsiPackage

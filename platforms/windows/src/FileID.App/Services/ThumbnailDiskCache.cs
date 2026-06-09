@@ -33,6 +33,10 @@ internal static class ThumbnailDiskCache
 {
     private const int MaxBytesToCache = 500 * 1024;
     private const long CacheCapBytes = 500L * 1024 * 1024;
+    // Above this the cache is far enough over the soft cap that we sweep
+    // immediately, bypassing the 30 s time throttle — otherwise a burst of
+    // writes between sweeps could overshoot the cap by hundreds of MB.
+    private const long HardCeilingBytes = (long)(CacheCapBytes * 1.2);
     private static readonly TimeSpan SweepInterval = TimeSpan.FromSeconds(30);
 
     private static DateTime _lastSweep = DateTime.MinValue;
@@ -107,10 +111,6 @@ internal static class ThumbnailDiskCache
         try
         {
             bytes = await File.ReadAllBytesAsync(cached, ct).ConfigureAwait(false);
-            if (_index.TryGetValue(cached, out var entry))
-            {
-                Interlocked.Exchange(ref entry.LastAccessTicks, DateTime.UtcNow.Ticks);
-            }
         }
         catch (Exception ex)
         {
@@ -123,6 +123,13 @@ internal static class ThumbnailDiskCache
         var bmp = await RenderFromBytesOnDispatcherAsync(bytes, dispatcher, ct).ConfigureAwait(false);
         if (bmp != null)
         {
+            // Only a successful decode counts as an LRU hit — a poisoned file
+            // (decode null, below) is dropped, so refreshing its timestamp first
+            // would be moot and could keep a bad file alive on a transient null.
+            if (_index.TryGetValue(cached, out var entry))
+            {
+                Interlocked.Exchange(ref entry.LastAccessTicks, DateTime.UtcNow.Ticks);
+            }
             Interlocked.Increment(ref _diskHits);
         }
         else
@@ -160,11 +167,27 @@ internal static class ThumbnailDiskCache
                 Directory.CreateDirectory(dir);
                 if (File.Exists(cached) && new FileInfo(cached).Length == bytes.Length)
                 {
+                    // Identical payload already on disk — count it as a touch so
+                    // the LRU sweep doesn't treat this live entry as stale.
+                    if (_index.TryGetValue(cached, out var existing))
+                    {
+                        Interlocked.Exchange(ref existing.LastAccessTicks, DateTime.UtcNow.Ticks);
+                    }
                     return;
                 }
                 var tmp = cached + ".tmp";
-                File.WriteAllBytes(tmp, bytes);
-                File.Move(tmp, cached, overwrite: true);
+                try
+                {
+                    File.WriteAllBytes(tmp, bytes);
+                    File.Move(tmp, cached, overwrite: true);
+                }
+                catch
+                {
+                    // Don't leave an orphaned half-written .tmp behind on a
+                    // failed write/move; the outer catch logs the exception.
+                    try { File.Delete(tmp); } catch { /* swallow */ }
+                    throw;
+                }
 
                 long delta = bytes.Length;
                 var now = DateTime.UtcNow.Ticks;
@@ -189,22 +212,35 @@ internal static class ThumbnailDiskCache
 
     private static void MaybeSweep()
     {
-        if (Interlocked.Read(ref _cachedBytes) <= CacheCapBytes) { return; }
+        var cached = Interlocked.Read(ref _cachedBytes);
+        if (cached <= CacheCapBytes) { return; }
+        // The 30 s throttle bounds disk churn for the common soft-headroom trim.
+        // But once the cache has blown past a hard ceiling the cap is no longer a
+        // soft target, so we sweep regardless of how recently we last swept.
+        bool overHardCeiling = cached > HardCeilingBytes;
         var now = DateTime.UtcNow;
-        if (now - _lastSweep < SweepInterval) { return; }
+        if (!overHardCeiling && now - _lastSweep < SweepInterval) { return; }
         lock (_sweepLock)
         {
-            if (DateTime.UtcNow - _lastSweep < SweepInterval) { return; }
+            if (!overHardCeiling && DateTime.UtcNow - _lastSweep < SweepInterval) { return; }
             _lastSweep = DateTime.UtcNow;
         }
 
         try
         {
             var headroom = (long)(CacheCapBytes * 0.8);
+            var sweepStartTicks = DateTime.UtcNow.Ticks;
             var evicted = SelectEvictions(_index, Interlocked.Read(ref _cachedBytes), headroom);
             long freed = 0;
             foreach (var path in evicted)
             {
+                // Best-effort race guard: a read/write between the snapshot and
+                // here may have touched this entry — don't evict a now-hot file.
+                if (_index.TryGetValue(path, out var current) &&
+                    Interlocked.Read(ref current.LastAccessTicks) > sweepStartTicks)
+                {
+                    continue;
+                }
                 try
                 {
                     File.Delete(path);
@@ -304,21 +340,28 @@ internal static class ThumbnailDiskCache
         {
             if (!Directory.Exists(CacheRoot)) { return; }
             var dirInfo = new DirectoryInfo(CacheRoot);
-            long total = 0;
+            // Prime runs off the UI thread, so a WriteAsync can land mid-walk.
+            // TryAdd (not the indexer) yields to a concurrent write's newer entry,
+            // and we Add only the bytes WE inserted (never Exchange) so a write's
+            // own Interlocked.Add isn't clobbered — no double-count, no lost total.
+            long added = 0;
             foreach (var fi in dirInfo.EnumerateFiles("*.bin", SearchOption.AllDirectories))
             {
                 try
                 {
-                    _index[fi.FullName] = new CacheEntry
+                    var entry = new CacheEntry
                     {
                         SizeBytes = fi.Length,
                         LastAccessTicks = fi.LastAccessTimeUtc.Ticks,
                     };
-                    total += fi.Length;
+                    if (_index.TryAdd(fi.FullName, entry))
+                    {
+                        added += fi.Length;
+                    }
                 }
                 catch { /* swallow */ }
             }
-            Interlocked.Exchange(ref _cachedBytes, total);
+            Interlocked.Add(ref _cachedBytes, added);
         }
         catch { /* swallow */ }
     }

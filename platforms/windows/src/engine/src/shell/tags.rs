@@ -83,6 +83,19 @@ fn write_sidecar(path: &Path, tags: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Move the tags sidecar to follow a renamed/moved file. Best-effort: a missing
+/// sidecar (the common case — most files carry none) is a no-op, and any rename
+/// error is swallowed so it can never turn a successful move into a reported
+/// failure. Closes the on-disk-tag-loss + cross-attribution gap on rename /
+/// restructure (#27).
+pub fn move_sidecar(old: &Path, new: &Path) {
+    let from = sidecar_path(old);
+    if std::fs::symlink_metadata(&from).is_err() {
+        return;
+    }
+    let _ = std::fs::rename(&from, sidecar_path(new));
+}
+
 /// Read the file's tag list. Merges the IPropertyStore PKEY_Keywords
 /// (on Windows) with the sidecar JSON, deduped case-insensitively. The
 /// sidecar's casing wins when both tiers carry the same tag spelled

@@ -70,19 +70,25 @@ public actor DeepAnalyze {
     /// Map AIModelKind → MLX ModelConfiguration.
     nonisolated static func vlmConfig(for kind: AIModelKind) -> ModelConfiguration {
         switch kind {
-        case .qwen2VL3B:    return VLMRegistry.qwen2_5VL3BInstruct4Bit
-        case .qwen3VL4B:    return VLMRegistry.qwen3VL4BInstruct4Bit
-        case .gemma3_4B:    return VLMRegistry.gemma3_4B_qat_4bit
-        case .gemma3_12B:   return VLMRegistry.gemma3_12B_qat_4bit
-        case .paligemma3B:  return VLMRegistry.paligemma3bMix448_8bit
+        // Qwen2.5-VL 7B shares the registered 3B's architecture, so a repo-id
+        // ModelConfiguration resolves it. Mistral-Small-3.2 is mapped by repo
+        // id too; if this MLX-VLM build lacks its architecture, `ensureLoaded`
+        // surfaces a load error rather than crashing (verify on-device).
+        case .qwen2VL7B:      return ModelConfiguration(id: kind.sourceRepo)
+        case .qwen3VL4B:      return VLMRegistry.qwen3VL4BInstruct4Bit
+        case .gemma3_4B:      return VLMRegistry.gemma3_4B_qat_4bit
+        case .gemma3_12B:     return VLMRegistry.gemma3_12B_qat_4bit
+        case .mistralSmall32: return ModelConfiguration(id: kind.sourceRepo)
+        case .paligemma3B:    return VLMRegistry.paligemma3bMix448_8bit
         }
     }
 
     nonisolated static func gpuCacheBudgetMB(for kind: AIModelKind) -> Int {
         switch kind {
-        case .gemma3_12B:                       return 8_192
+        case .gemma3_12B, .mistralSmall32:      return 8_192
+        case .qwen2VL7B:                        return 4_096
         case .qwen3VL4B, .gemma3_4B,
-             .paligemma3B, .qwen2VL3B:          return 3_072
+             .paligemma3B:                      return 3_072
         }
     }
 
@@ -434,25 +440,47 @@ public actor DeepAnalyze {
         return AnalysisResult(description: description, proposedName: name)
     }
 
-    /// Strip extension, slugify, cap length.
+    /// Clean up a VLM-proposed filename: lowercase, hyphen-separated, strip
+    /// quotes / extra punctuation, cap at 80 chars on a `-` boundary. Byte-faithful
+    /// mirror of the Windows engine's `sanitize_proposed_name`
+    /// (pipeline/deep_analyze.rs): `_` is preserved (NOT mapped to `-`),
+    /// whitespace becomes `-`, runs of `-` collapse, and an empty/over-trimmed
+    /// result falls back to the literal "untitled" (never nil) so the column
+    /// round-trips identically across platforms.
     private static func sanitize(filename raw: String) -> String? {
-        var s = raw
-        // Strip any trailing extension the model added.
-        if let dot = s.lastIndex(of: ".") {
-            let ext = s[s.index(after: dot)...]
-            if ext.count <= 5 { s = String(s[..<dot]) }
-        }
-        // Slugify.
-        let allowed = Set("abcdefghijklmnopqrstuvwxyz0123456789_-")
-        let lower = s.lowercased()
-            .replacingOccurrences(of: " ", with: "_")
-            .replacingOccurrences(of: "-", with: "_")
-        let cleaned = String(lower.unicodeScalars.compactMap { sc -> Character? in
-            let c = Character(sc)
-            return allowed.contains(c) ? c : nil
+        // 1. Trim, then strip surrounding quotes, then trim again — mirrors
+        //    raw.trim().trim_matches('"').trim_matches('\'').trim().
+        let trimmed = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            .trimmingCharacters(in: CharacterSet(charactersIn: "'"))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowered = trimmed.lowercased()
+        // 2. Per-char map: ascii-alphanumeric kept; `-`/`_` kept; whitespace → `-`;
+        //    everything else → ' ' (collapsed away by the split below).
+        let cleaned = String(lowered.map { c -> Character in
+            if c.isASCII && (c.isLetter || c.isNumber) { return c }
+            if c == "-" || c == "_" { return c }
+            if c.isWhitespace { return "-" }
+            return " "
         })
-        guard cleaned.count >= 3, cleaned.count <= 80 else { return nil }
-        return cleaned
+        // 3. split_whitespace().join("-") — drops leading/trailing/runs of spaces.
+        let collapsedRuns = cleaned.split(whereSeparator: { $0 == " " })
+        var out = collapsedRuns.joined(separator: "-")
+        // 4. Collapse repeated '-' → single '-'.
+        while out.contains("--") {
+            out = out.replacingOccurrences(of: "--", with: "-")
+        }
+        // 5. Cap at 80 chars; don't end mid-word (truncate at last '-').
+        if out.count > 80 {
+            out = String(out.prefix(80))
+            if let idx = out.lastIndex(of: "-") {
+                out = String(out[..<idx])
+            }
+        }
+        // 6. Empty → literal "untitled" (NOT nil); callers flatMap over a
+        //    non-nil value so the signature stays String?.
+        return out.isEmpty ? "untitled" : out
     }
 
     // MARK: - Self-heal old model dirs

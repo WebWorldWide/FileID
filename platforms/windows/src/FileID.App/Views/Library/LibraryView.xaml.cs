@@ -37,6 +37,10 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     // makes the Add/Remove pair safe regardless.
     private readonly System.Collections.Concurrent.ConcurrentDictionary<FileTile, CancellationTokenSource> _inflight = new();
     private readonly ClipSearchService _clip;
+    // Owned so OnUnloaded can dispose its SQLite connection + SemaphoreSlim.
+    // Neither ClipSearchService.Dispose nor LibraryViewModel.Dispose releases it,
+    // so without this it leaked one connection per tab navigation. (audit A7)
+    private readonly ReadStore _store;
     // One-shot tile-entrance gate. ItemsRepeater reuses element instances and
     // re-realizes them on every collection Reset — the throttled mid-scan
     // refresh raises a Reset ~1 Hz, so replaying the entrance on each
@@ -47,12 +51,19 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<UIElement, object> _enteredTiles = new();
     private static readonly object _enteredMarker = new();
 
+    // Keyboard-navigation cursor into ViewModel.Items. -1 until the first
+    // arrow key or tile click establishes it. Drives single-select movement
+    // (arrows), range-extend (Shift+arrows), Enter (open preview), Space
+    // (toggle select). The selection highlight doubles as the focus cue.
+    private int _focusedIndex = -1;
+    private Microsoft.UI.Xaml.Input.KeyEventHandler? _gridKeyHandler;
+
     public LibraryView()
     {
         var paths = AppPaths.DbPath;
-        var store = new ReadStore(paths);
-        _clip = new ClipSearchService(store);
-        ViewModel = new LibraryViewModel(store, _clip, Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
+        _store = new ReadStore(paths);
+        _clip = new ClipSearchService(_store);
+        ViewModel = new LibraryViewModel(_store, _clip, Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
 
         InitializeComponent();
         Unloaded += OnUnloaded;
@@ -64,17 +75,28 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         UndoStack.Instance.PropertyChanged += OnUndoStackChanged;
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
 
+        // Arrow-key navigation for the tile grid. ItemsRepeater has NO built-in
+        // keyboard nav (unlike GridView), so we drive it ourselves. Wire on the
+        // tunneling Preview pass with handledEventsToo — same reason the preview
+        // sheet does (9dd7785): the ScrollViewer's own OnKeyDown would otherwise
+        // eat arrows as scroll before our bubbling handler sees them.
+        _gridKeyHandler = new Microsoft.UI.Xaml.Input.KeyEventHandler(OnGridPreviewKeyDown);
+        GridScroller.AddHandler(UIElement.PreviewKeyDownEvent, _gridKeyHandler, handledEventsToo: true);
+
         Loaded += async (_, _) =>
         {
             try
             {
-                await store.OpenAsync(CancellationToken.None);
+                await _store.OpenAsync(CancellationToken.None);
                 await ViewModel.RefreshAsync(CancellationToken.None);
             }
             catch
             {
-                // ReadStore.OpenAsync surfaces errors via ErrorMessage on
-                // refresh — initial open before scan is allowed to no-op.
+                // ReadStore.OpenAsync sets LastOpenError on a real open failure,
+                // which LibraryViewModel surfaces into ErrorMessage (StatusText) via
+                // its service-PropertyChanged subscription — so the error shows even
+                // though this throw skips RefreshAsync. An initial open before the
+                // first scan (DB not yet created) sets nothing and no-ops silently.
             }
             SyncUndoPill();
             SyncBanners();
@@ -292,6 +314,11 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             cts.Dispose();
         }
         _inflight.Clear();
+        if (_gridKeyHandler is not null)
+        {
+            try { GridScroller.RemoveHandler(UIElement.PreviewKeyDownEvent, _gridKeyHandler); } catch { /* swallow */ }
+            _gridKeyHandler = null;
+        }
         // Step 2: dispose ViewModel FIRST. See the method-level remark
         // above for why the order is load-bearing.
         try { ViewModel.Dispose(); } catch { /* swallow */ }
@@ -299,10 +326,15 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         // tear down the services its in-flight tasks may still touch.
         try { _clip.Dispose(); } catch { /* swallow */ }
         try { _thumbnails.Dispose(); } catch { /* swallow */ }
+        // Step 4: dispose the ReadStore LAST — after ViewModel + _clip, whose
+        // in-flight reads use its connection — so the SQLite connection +
+        // SemaphoreSlim are released instead of leaking per tab nav. (audit A7)
+        try { _store.Dispose(); } catch { /* swallow */ }
     }
 
     private void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
     {
+        if (_unloaded) return;
         if (e.PropertyName is nameof(LibraryViewModel.IsLoading)
             or nameof(LibraryViewModel.ErrorMessage))
         {
@@ -313,6 +345,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 
     private void OnItemsCollectionChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
     {
+        if (_unloaded) return;
         OnPropertyChanged(nameof(StatusText));
         OnPropertyChanged(nameof(FooterVisibility));
     }
@@ -732,6 +765,11 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         {
             if (sender is not FrameworkElement el || el.DataContext is not FileTile tile) return;
 
+            // Keep the keyboard cursor in sync with the click and route focus to
+            // the grid so arrow keys continue from here without an extra Tab.
+            _focusedIndex = ViewModel.Items.IndexOf(tile);
+            try { GridScroller.Focus(FocusState.Programmatic); } catch { /* swallow */ }
+
             var ctrl = Microsoft.UI.Input.InputKeyboardSource
                 .GetKeyStateForCurrentThread(VirtualKey.Control)
                 .HasFlag(CoreVirtualKeyStates.Down);
@@ -788,6 +826,159 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             _ => $"{count} files selected",
         };
         SelectionBar.Visibility = count > 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    // Arrow-key navigation over the ItemsRepeater grid. Wired on GridScroller's
+    // tunneling PreviewKeyDown (handledEventsToo) so it preempts the
+    // ScrollViewer's built-in arrow-scroll.
+    private void OnGridPreviewKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnGridPreviewKeyDown), () =>
+        {
+            int count = ViewModel.Items.Count;
+            if (count == 0) return;
+
+            int cur = _focusedIndex >= 0 ? Math.Min(_focusedIndex, count - 1) : 0;
+            int last = count - 1;
+
+            switch (e.Key)
+            {
+                case VirtualKey.Enter:
+                    OpenPreviewAt(cur);
+                    e.Handled = true;
+                    return;
+                case VirtualKey.Space:
+                    ToggleSelectAt(cur);
+                    e.Handled = true;
+                    return;
+            }
+
+            // First navigation key just lands the cursor on the first tile.
+            if (_focusedIndex < 0 &&
+                e.Key is VirtualKey.Left or VirtualKey.Right or VirtualKey.Up
+                    or VirtualKey.Down or VirtualKey.Home or VirtualKey.End
+                    or VirtualKey.PageUp or VirtualKey.PageDown)
+            {
+                MoveFocusTo(0, extend: false);
+                e.Handled = true;
+                return;
+            }
+
+            int cols = ColumnsPerRow();
+            int page = cols * Math.Max(1, VisibleRows());
+            int target;
+            switch (e.Key)
+            {
+                case VirtualKey.Left: target = cur - 1; break;
+                case VirtualKey.Right: target = cur + 1; break;
+                case VirtualKey.Up: target = cur - cols; break;
+                case VirtualKey.Down: target = cur + cols; break;
+                case VirtualKey.Home: target = 0; break;
+                case VirtualKey.End: target = last; break;
+                case VirtualKey.PageUp: target = cur - page; break;
+                case VirtualKey.PageDown: target = cur + page; break;
+                default: return;
+            }
+
+            var shift = Microsoft.UI.Input.InputKeyboardSource
+                .GetKeyStateForCurrentThread(VirtualKey.Shift)
+                .HasFlag(CoreVirtualKeyStates.Down);
+            MoveFocusTo(target, extend: shift);
+            e.Handled = true;
+        });
+
+    // Columns the UniformGridLayout currently shows. MinItemWidth=180 +
+    // MinColumnSpacing=12 (LibraryView.xaml); ItemsStretch=Fill widens cells
+    // but the column COUNT is governed by the minimum width.
+    private int ColumnsPerRow()
+    {
+        double avail = GridScroller.ViewportWidth;
+        if (avail <= 0) avail = Repeater.ActualWidth;
+        const double minItemWidth = 180, colSpacing = 12;
+        int cols = (int)Math.Floor((avail + colSpacing) / (minItemWidth + colSpacing));
+        return Math.Max(1, cols);
+    }
+
+    // Rows visible in the viewport, for PageUp/PageDown. MinItemHeight=248 +
+    // MinRowSpacing=12.
+    private int VisibleRows()
+    {
+        const double rowHeight = 248 + 12;
+        int rows = (int)Math.Floor(GridScroller.ViewportHeight / rowHeight);
+        return Math.Max(1, rows);
+    }
+
+    private void MoveFocusTo(int target, bool extend)
+    {
+        int count = ViewModel.Items.Count;
+        if (count == 0) return;
+        target = Math.Clamp(target, 0, count - 1);
+
+        if (extend && _lastClickedTile is not null)
+        {
+            int anchor = ViewModel.Items.IndexOf(_lastClickedTile);
+            if (anchor >= 0)
+            {
+                int lo = Math.Min(anchor, target);
+                int hi = Math.Max(anchor, target);
+                using (ViewModel.BulkSelectionScope())
+                {
+                    foreach (var t in ViewModel.Items) t.IsSelected = false;
+                    for (int i = lo; i <= hi; i++) ViewModel.Items[i].IsSelected = true;
+                }
+            }
+        }
+        else
+        {
+            var tile = ViewModel.Items[target];
+            using (ViewModel.BulkSelectionScope())
+            {
+                foreach (var t in ViewModel.Items) t.IsSelected = false;
+                tile.IsSelected = true;
+            }
+            // The anchor follows a plain move (matches click); Shift+move keeps it.
+            _lastClickedTile = tile;
+        }
+
+        _focusedIndex = target;
+        BringIndexIntoView(target);
+        UpdateSelectionBar();
+    }
+
+    // Realize + scroll the target tile into view. Realization can race a
+    // mid-scan Reset, so it's defensive.
+    private void BringIndexIntoView(int index)
+    {
+        try
+        {
+            if (Repeater.TryGetElement(index) is FrameworkElement existing)
+            {
+                existing.StartBringIntoView();
+                return;
+            }
+            if (Repeater.GetOrCreateElement(index) is FrameworkElement created)
+            {
+                created.UpdateLayout();
+                created.StartBringIntoView();
+            }
+        }
+        catch { /* realization raced a refresh — non-fatal */ }
+    }
+
+    private async void OpenPreviewAt(int index)
+        => await DebugLog.SafeRunAsync(nameof(OpenPreviewAt), async () =>
+        {
+            if (index < 0 || index >= ViewModel.Items.Count) return;
+            await OpenPreview(ViewModel.Items[index], index);
+        });
+
+    private void ToggleSelectAt(int index)
+    {
+        if (index < 0 || index >= ViewModel.Items.Count) return;
+        var tile = ViewModel.Items[index];
+        tile.IsSelected = !tile.IsSelected;
+        _focusedIndex = index;
+        _lastClickedTile = tile;
+        UpdateSelectionBar();
     }
 
     private async void OnTagSelectedClicked(object sender, RoutedEventArgs e)
@@ -871,38 +1062,109 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         var choice = await confirm.ShowAsync();
         if (choice != ContentDialogResult.Primary) return;
 
+        // Listen for the engine's BulkActionResult — it tags the
+        // action with "trashFiles:<batch_id>" so we can plumb undo. The
+        // UndoStack listener and WaitForBulkActionResultAsync below both
+        // subscribe independently for the same result; WaitFor resets
+        // LastBulkAction to null first (which CaptureNextBulkResult guards
+        // against), so they coexist.
+        Services.UndoStack.CaptureNextBulkResult(
+            "trashFiles:",
+            $"trash {ids.Length} file{(ids.Length == 1 ? "" : "s")}",
+            async batchId =>
+            {
+                if (string.IsNullOrEmpty(batchId)) return false;
+                try
+                {
+                    await EngineClient.Instance.RestoreFromTrashAsync(batchId);
+                    return true;
+                }
+                catch { return false; }
+            });
+
+        FileID.IpcSchema.BulkActionResult? result = null;
         try
         {
-            // Listen for the engine's BulkActionResult — it tags the
-            // action with "trashFiles:<batch_id>" so we can plumb undo.
-            Services.UndoStack.CaptureNextBulkResult(
-                "trashFiles:",
-                $"trash {ids.Length} file{(ids.Length == 1 ? "" : "s")}",
-                async batchId =>
-                {
-                    if (string.IsNullOrEmpty(batchId)) return false;
-                    try
-                    {
-                        await EngineClient.Instance.RestoreFromTrashAsync(batchId);
-                        return true;
-                    }
-                    catch { return false; }
-                });
-            await EngineClient.Instance.TrashFilesAsync(ids);
+            // Await the engine's BulkActionResult instead of fire-and-forget:
+            // the dbwriter may fail to trash a file (open handle / permission),
+            // and unconditionally removing every selected tile told the user
+            // files were recycled when they're still on disk (silent-failure).
+            result = await EngineClient.Instance.WaitForBulkActionResultAsync(
+                "trashFiles",
+                () => EngineClient.Instance.TrashFilesAsync(ids),
+                TimeSpan.FromSeconds(30));
         }
-        catch
+        catch (TimeoutException ex)
         {
-            // Failure surfaces through BulkActionResult event.
+            Services.DebugLog.Warn("Trash timed out: " + ex.Message);
+            await ShowAlertAsync(
+                "Trash didn't confirm",
+                "The engine didn't confirm the move to the Recycle Bin within 30 seconds. The files may or may not have been recycled — re-run the scan to check before retrying.");
+            return;
+        }
+        catch (Exception ex)
+        {
+            Services.DebugLog.Warn("Trash failed: " + ex.Message);
+            await ShowAlertAsync("Trash failed", $"Couldn't move the selected files to the Recycle Bin: {ex.Message}");
+            return;
         }
 
-        // Optimistic local removal from the grid; engine will catch up via
-        // its DELETE in the dbwriter and a future refresh.
-        foreach (var id in ids)
+        // Remove ONLY tiles the engine actually trashed — a per-file Ok in the
+        // result. Files it couldn't recycle stay on the grid so the user sees
+        // they're still there.
+        var trashedIds = new HashSet<long>(
+            result.Messages?.Where(m => m.Ok && m.FileId is not null).Select(m => m.FileId!.Value)
+                ?? Enumerable.Empty<long>());
+        foreach (var id in trashedIds)
         {
             var match = ViewModel.Items.FirstOrDefault(t => t.Id == id);
             if (match is not null) ViewModel.Items.Remove(match);
         }
         UpdateSelectionBar();
+
+        // `Succeeded == 0` (with Failed == 0) is the engine's wholesale-error shape
+        // (e.g. a busy/locked DB: emit_bulk_result's Ok(Err) arm → succeeded:0,
+        // failed:0, one ok:false message). Guarding on Failed>0 alone would leave
+        // that path silent. ids is non-empty here, so Succeeded==0 only happens on
+        // a real total failure — surface it + refresh, matching the sibling flows.
+        if (result.Failed > 0 || result.Succeeded == 0)
+        {
+            var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
+            var detail = string.IsNullOrWhiteSpace(first) ? "" : $" — {first}";
+            var body = result.Succeeded == 0 && result.Failed == 0
+                ? $"The recycle operation didn't complete{detail}. The files are unchanged; try again."
+                : $"Moved {result.Succeeded}; {result.Failed} couldn't be moved to the Recycle Bin{detail}. They may be open in another app or you may not have permission.";
+            await ShowAlertAsync("Some files couldn't be recycled", body);
+            RequestLibraryRefresh(force: true);
+        }
+    }
+
+    // Dismissible alert mirroring CleanupView.ShowAlertAsync — surfaces a
+    // partial/failed bulk op so the user is never left thinking a trash
+    // succeeded when some (or all) of it didn't.
+    private async Task ShowAlertAsync(string title, string body)
+    {
+        try
+        {
+            if (_unloaded || XamlRoot is null)
+            {
+                DebugLog.Warn($"LibraryView.ShowAlertAsync: XamlRoot null/unloaded ({title}); skipping dialog.");
+                return;
+            }
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = title,
+                Content = body,
+                CloseButtonText = "OK",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            await dialog.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"LibraryView.ShowAlertAsync({title}) threw: " + ex.Message);
+        }
     }
 
     private void OnClearSelectionClicked(object sender, RoutedEventArgs e)
@@ -920,28 +1182,33 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         var deferral = args.GetDeferral();
         try
         {
-            var paths = ViewModel.SelectedCount > 0
-                ? ViewModel.SelectedItems.Select(t => t.Path).ToList()
-                : (sender is FrameworkElement el && el.DataContext is FileTile tile
-                    ? new List<string> { tile.Path }
-                    : new List<string>());
-            var items = new List<Windows.Storage.IStorageItem>(paths.Count);
-            foreach (var p in paths)
+            await DebugLog.SafeRunAsync(nameof(OnTileDragStarting), async () =>
             {
-                if (System.IO.File.Exists(p))
+                var paths = ViewModel.SelectedCount > 0
+                    ? ViewModel.SelectedItems.Select(t => t.Path).ToList()
+                    : (sender is FrameworkElement el && el.DataContext is FileTile tile
+                        ? new List<string> { tile.Path }
+                        : new List<string>());
+                var items = new List<Windows.Storage.IStorageItem>(paths.Count);
+                foreach (var p in paths)
                 {
+                    // No synchronous File.Exists pre-check: on a slow/disconnected
+                    // SMB share or USB stick it can stall the UI thread for
+                    // seconds (the same hazard ReadStore.OpenAsync wraps in a
+                    // timeout). GetFileFromPathAsync's catch below already skips
+                    // missing/inaccessible paths, so the stat was redundant.
                     try
                     {
                         items.Add(await Windows.Storage.StorageFile.GetFileFromPathAsync(p));
                     }
-                    catch { /* path inaccessible — skip */ }
+                    catch { /* missing / inaccessible — skip */ }
                 }
-            }
-            if (items.Count > 0)
-            {
-                args.Data.SetStorageItems(items);
-                args.Data.RequestedOperation = Windows.ApplicationModel.DataTransfer.DataPackageOperation.Copy;
-            }
+                if (items.Count > 0)
+                {
+                    args.Data.SetStorageItems(items);
+                    args.Data.RequestedOperation = Windows.ApplicationModel.DataTransfer.DataPackageOperation.Copy;
+                }
+            });
         }
         finally
         {
@@ -976,7 +1243,14 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             if (ViewModel.Items[i].Path == path) { tile = ViewModel.Items[i]; tileIndex = i; break; }
         }
         if (tile is null) return;
+        await OpenPreview(tile, tileIndex);
+    }
 
+    // Shared preview-open path — used by double-tap and by keyboard Enter
+    // (OnGridPreviewKeyDown). Opens the FilePreviewSheet modal for the given
+    // tile, freezing the sibling list at open time.
+    private async System.Threading.Tasks.Task OpenPreview(FileTile tile, int tileIndex)
+    {
         // Snapshot siblings so a live BatchSummary refresh mid-preview
         // can't reorder under our feet (matches macOS frozen previewSiblings).
         var siblings = ViewModel.Items.ToList();
@@ -1000,6 +1274,16 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         dialog.Resources["ContentDialogMaxWidth"] = 1600.0;
         dialog.Resources["ContentDialogMaxHeight"] = 1100.0;
         sheet.RequestClose += (_, _) => { try { dialog.Hide(); } catch { /* swallow */ } };
+
+        // The ContentDialog — not the sheet — owns keyboard focus once shown, so
+        // the sheet's own PreviewKeyDown never fires (arrow keys + Space were
+        // dead). Intercept on the dialog's tunneling Preview pass: handledEventsToo
+        // so the XY-focus engine can't swallow the arrows first, and tunneling
+        // reaches the dialog (an ancestor) BEFORE a focused Button consumes Space.
+        dialog.AddHandler(
+            Microsoft.UI.Xaml.UIElement.PreviewKeyDownEvent,
+            new Microsoft.UI.Xaml.Input.KeyEventHandler((_, ev) => sheet.HandleKeyDown(ev)),
+            handledEventsToo: true);
 
         try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
     }

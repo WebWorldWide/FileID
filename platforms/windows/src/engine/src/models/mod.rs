@@ -18,17 +18,22 @@
 // submodule. Cross-cutting concerns (EP priority, DLL-search hardening,
 // pack detection) live in `runtime.rs`.
 
-pub mod arcface;
 pub mod bge_text;
 pub mod clip_text;
 pub mod clip_tokenizer;
+pub mod ep_guard;
 pub mod mobileclip;
+pub mod ram_plus;
+pub mod ram_plus_batch;
 pub mod registry;
 pub mod runtime;
 pub mod florence2;
 pub mod scene_vocab;
+pub mod face_align;
 pub mod scrfd;
+pub mod sface;
 pub mod variants;
+pub mod yunet;
 pub mod vlm;
 pub mod vlm_server;
 pub mod wordpiece_tokenizer;

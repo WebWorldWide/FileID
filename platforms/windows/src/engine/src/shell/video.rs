@@ -192,6 +192,13 @@ pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
             if w == 0 || h == 0 {
                 continue;
             }
+            // Guard against absurd dimensions from malformed frame metadata:
+            // (w*h*3) as usize can overflow on 64-bit (→ a tiny alloc → an OOB
+            // write in the copy loop below). Skip any implausibly-large frame.
+            const MAX_VIDEO_PIXELS: u64 = 64_000_000; // 64 MP — far above any real frame
+            if (w as u64) * (h as u64) > MAX_VIDEO_PIXELS {
+                continue;
+            }
 
             let mut p_data: *mut u8 = std::ptr::null_mut();
             let mut max_len = 0u32;

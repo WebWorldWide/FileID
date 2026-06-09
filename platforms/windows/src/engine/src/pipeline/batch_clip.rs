@@ -32,12 +32,29 @@ use crate::models::mobileclip::MobileClipImage;
 /// — drop to 4 if a smaller GPU OOMs under sustained scan load.
 const DEFAULT_BATCH_SIZE: usize = 8;
 
-/// Hard ceiling on how long the coordinator waits for batch fill once
-/// it has at least one request. Tunable via `FILEID_CLIP_BATCH_TIMEOUT_MS`.
+/// Hard ceiling on how long the coordinator waits for batch fill once it has at
+/// least one request. Tunable via `FILEID_CLIP_BATCH_TIMEOUT_MS`.
+///
+/// HW-4 finding (RTX 2060, 2026-06-01): widening this 20 ms → 75 ms did NOT
+/// help — batch avg rose only 1.5 → ~2.0 and throughput stayed ~5 files/s while
+/// per-file CLIP latency grew 190 → ~250 ms. The root cause is upstream/
+/// downstream, NOT this window: only ~2 files are ever concurrently in the CLIP
+/// stage even though there are 9 tagging workers, so the coordinator never has
+/// more than ~2 requests queued no matter how long it waits. Per-stage
+/// instrumentation (`ramplus_us`/`vision_wait_us` in [STATS]) then PINNED the
+/// real bottleneck — NOT DBWriter, NOT this window: RAM++ Swin-L @384 costs
+/// ~670 ms/file and runs on only pool_size=2 sessions (VRAM-clamped on the 6 GB
+/// card), so workers spend ~680 ms just WAITING for the vision-sem/RAM++ pool;
+/// CLIP (~190 ms) sits downstream and is starved. The real lever is RAM++
+/// throughput (a CUDA-specific larger pool, or a batched RAM++ ONNX re-export).
+/// Kept at 20 ms (a longer wait only adds latency). See NEXT.md.
 const DEFAULT_BATCH_TIMEOUT_MS: u64 = 20;
 
 /// Channel depth — backs up tagging workers if CLIP is the bottleneck
-/// instead of letting decode race ahead and balloon memory.
+/// instead of letting decode race ahead and balloon memory. Benign on any tier:
+/// each `ClipRequest` carries only the pre-resized 224×224 buffer (~150 KB), so
+/// a full 256-deep queue is ~38 MB even though the value is 6 GB-tuned. (Unlike
+/// the RAM++ batch channel, which carries FULL frames — see ram_plus_batch.rs.)
 const REQUEST_CHANNEL_CAP: usize = 256;
 
 /// Stats: lets `[STATS]` log average batch size so we can verify
@@ -67,15 +84,24 @@ impl ClipBatchCoordinator {
         let batch_size = read_env_usize("FILEID_CLIP_BATCH_SIZE", DEFAULT_BATCH_SIZE).max(1);
         let batch_timeout_ms = read_env_usize("FILEID_CLIP_BATCH_TIMEOUT_MS", DEFAULT_BATCH_TIMEOUT_MS as usize) as u64;
         let (sender, receiver) = bounded::<ClipRequest>(REQUEST_CHANNEL_CAP);
-        std::thread::Builder::new()
+        // Don't panic mid-scan if the OS refuses a new thread (handle/memory
+        // pressure on a very large library). On failure the closure — and with
+        // it `receiver` — is dropped, disconnecting the channel; `embed()` then
+        // returns its graceful "channel closed" Err per request and the CLIP
+        // stage degrades (no per-file embeddings) instead of aborting the engine.
+        match std::thread::Builder::new()
             .name("fileid-clip-batch".to_string())
             .spawn(move || run_coordinator(&mut model, receiver, batch_size, batch_timeout_ms))
-            .expect("spawn fileid-clip-batch thread");
-        tracing::info!(
-            batch_size,
-            batch_timeout_ms,
-            "[CLIP-BATCH] coordinator spawned"
-        );
+        {
+            Ok(_) => tracing::info!(
+                batch_size,
+                batch_timeout_ms,
+                "[CLIP-BATCH] coordinator spawned"
+            ),
+            Err(e) => tracing::error!(
+                "[CLIP-BATCH] coordinator thread failed to spawn ({e}); CLIP embeddings disabled for this scan"
+            ),
+        }
         Arc::new(Self { sender })
     }
 
@@ -149,17 +175,24 @@ fn run_coordinator(
         STATS_BATCH_COUNT.fetch_add(1, Ordering::Relaxed);
         STATS_BATCH_SIZE_SUM.fetch_add(batch.len() as u64, Ordering::Relaxed);
 
-        let imgs: Vec<Vec<u8>> = batch.iter().map(|r| r.rgb_256.clone()).collect();
+        // Move the 224×224 buffers out instead of cloning them — the batch is
+        // fully consumed below either way. Senders ride alongside in order.
+        let mut imgs: Vec<Vec<u8>> = Vec::with_capacity(batch.len());
+        let mut senders: Vec<oneshot::Sender<Result<Vec<f32>>>> = Vec::with_capacity(batch.len());
+        for req in batch {
+            imgs.push(req.rgb_256);
+            senders.push(req.response);
+        }
         match model.embed_batch(&imgs) {
-            Ok(embeddings) if embeddings.len() == batch.len() => {
-                for (i, req) in batch.into_iter().enumerate() {
-                    let _ = req.response.send(Ok(embeddings[i].clone()));
+            Ok(mut embeddings) if embeddings.len() == senders.len() => {
+                for (sender, emb) in senders.into_iter().zip(embeddings.drain(..)) {
+                    let _ = sender.send(Ok(emb));
                 }
             }
             Ok(_) => {
                 // Pathological: model returned a wrong-shaped output.
-                for req in batch {
-                    let _ = req.response.send(Err(anyhow!(
+                for sender in senders {
+                    let _ = sender.send(Err(anyhow!(
                         "MobileCLIP embed_batch returned wrong-sized embedding vec"
                     )));
                 }
@@ -167,8 +200,8 @@ fn run_coordinator(
             Err(err) => {
                 let err_str = format!("{:#}", err);
                 tracing::warn!(?err, "[CLIP-BATCH] embed_batch failed; failing whole batch");
-                for req in batch {
-                    let _ = req.response.send(Err(anyhow!(err_str.clone())));
+                for sender in senders {
+                    let _ = sender.send(Err(anyhow!(err_str.clone())));
                 }
             }
         }

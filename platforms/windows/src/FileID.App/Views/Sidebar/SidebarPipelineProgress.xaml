@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
     SidebarPipelineProgress — five-stage workflow visualization.
     Scan → Tag → People → Captions → Done. Filled / active / inactive
@@ -24,7 +24,8 @@
                    Style="{StaticResource CaptionTextBlockStyle}"
                    FontWeight="SemiBold"
                    CharacterSpacing="40"
-                   Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                   AutomationProperties.HeadingLevel="Level2" />
 
         <!-- 5 equal columns. Each column owns one stage: dot + label
              stacked vertically, connector halves in the same column. -->

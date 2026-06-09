@@ -189,9 +189,69 @@ pub(crate) fn strip_extended_length(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// Map an arbitrary string to a filename component safe on Windows NTFS, Linux,
+/// and BSD — byte-faithful with macOS `FilesystemNameSafe.componentSafe` so the
+/// restructure planner produces IDENTICAL folder names on every platform
+/// (otherwise the same library lays out two incompatible trees and learn-your-
+/// style folder prototypes never match cross-platform). Unlike the old
+/// restructure sanitizer it REPLACES illegal/control chars with `_` (not
+/// delete), trims trailing dots/spaces, suffixes Windows reserved basenames,
+/// caps length, and never returns empty. (PAR-69 / PAR-96)
+pub fn safe_filename_component(raw: &str) -> String {
+    const ILLEGAL: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+    const MAX_LEN: usize = 200;
+    const RESERVED: &[&str] = &[
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5",
+        "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5",
+        "lpt6", "lpt7", "lpt8", "lpt9",
+    ];
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if (ch as u32) < 32 || ILLEGAL.contains(&ch) {
+            out.push('_');
+        } else {
+            out.push(ch);
+        }
+    }
+    // Cap by Unicode scalar count (matches Swift's unicodeScalars.prefix).
+    if out.chars().count() > MAX_LEN {
+        out = out.chars().take(MAX_LEN).collect();
+    }
+    // Windows strips trailing dots/spaces; do it ourselves so the name is stable.
+    while matches!(out.chars().last(), Some('.' | ' ')) {
+        out.pop();
+    }
+    if out.is_empty() {
+        return "_".to_string();
+    }
+    let basename = match out.find('.') {
+        Some(dot) => out[..dot].to_ascii_lowercase(),
+        None => out.to_ascii_lowercase(),
+    };
+    if RESERVED.contains(&basename.as_str()) {
+        out.insert(0, '_');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn component_safe_matches_macos_rules() {
+        // Illegal chars → '_', not deleted (parity with macOS componentSafe).
+        assert_eq!(safe_filename_component("Mom: Vacation"), "Mom_ Vacation");
+        // Windows reserved basename → '_' prefix.
+        assert_eq!(safe_filename_component("CON"), "_CON");
+        assert_eq!(safe_filename_component("com1.txt"), "_com1.txt");
+        // Trailing dots/spaces stripped; control chars → '_'.
+        assert_eq!(safe_filename_component("trip.  "), "trip");
+        assert_eq!(safe_filename_component("a\tb"), "a_b");
+        // All-illegal collapses to placeholders, never empty.
+        assert_eq!(safe_filename_component("///"), "___");
+        assert_eq!(safe_filename_component(""), "_");
+    }
 
     #[test]
     fn safe_filenames_accepted() {

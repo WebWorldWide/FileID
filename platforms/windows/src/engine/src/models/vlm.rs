@@ -20,11 +20,11 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 /// Default caption prompt.
-pub const CAPTION_PROMPT: &str = "Describe this image in one detailed sentence focused on the most prominent subjects, scene, and any text. No filler.";
+pub const CAPTION_PROMPT: &str = "Describe this image in one specific, factual sentence: name the main subjects (people by count, notable objects, the place, the activity) and transcribe any visible text verbatim. Be concrete and definite — no hedging like \"appears to be\" or \"likely\", no generic filler, no preamble.";
 
 /// Default rename prompt — produces a short, kebab-cased filename
 /// suitable for `sanitize_proposed_name`.
-pub const RENAME_PROMPT: &str = "Suggest a 3 to 5 word lowercase filename for this image, separated by hyphens, no quotes, no extension.";
+pub const RENAME_PROMPT: &str = "Suggest a 3 to 5 word lowercase filename that names the SPECIFIC subject of this image (never generic words like photo, image, or picture), hyphen-separated, no quotes, no extension.";
 
 /// Tagging prompt — produces 1–2 specific, concrete content tags. Parsed by
 /// `deep_analyze::parse_vlm_tags` (which caps at 2 and drops generic tokens)
@@ -194,12 +194,27 @@ pub async fn caption(
         }
         // Don't print the prompt back at us; we only want the completion.
         cmd.arg("--no-display-prompt");
+        // P2: offload all layers to the GPU, mirroring the persistent server
+        // (vlm_server.rs). Modern llama.cpp defaults to 0 GPU layers, so without
+        // this the per-file CLI path ran the entire VLM decode + vision
+        // projector on the CPU — many-fold slower. Quality-neutral (same
+        // weights/prompt/sampling); a no-op on a CPU-only llama.cpp build, and
+        // on a small-VRAM card llama.cpp spills the overflow layers back to CPU.
+        cmd.arg("-ngl").arg("99");
         // Pin to the discrete GPU on hybrid iGPU+dGPU systems (no-op otherwise).
         if let Some(dev) = discrete_gpu_device(&runner.binary).await {
             cmd.arg("--device").arg(dev);
         }
         cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
+        // Discard stderr rather than pipe-and-not-read it. llama-mtmd-cli writes
+        // a large volume of diagnostics to stderr (model/mmproj load, ggml +
+        // GPU-backend init, per-token timing). If we `piped()` it but only drain
+        // stdout, the child blocks on a full stderr pipe (~64 KB) while we block
+        // on stdout it can no longer produce — a classic undrained-pipe deadlock
+        // that hangs the per-file Deep Analyze caption with no outer timeout.
+        // The completion text comes on stdout; stderr is diagnostics only.
+        // Mirrors vlm_server.rs / probe_discrete_gpu_device, which also null it.
+        cmd.stderr(std::process::Stdio::null());
         cmd.stdin(std::process::Stdio::null());
         // Kill the child if the parent task is dropped mid-caption so we
         // don't orphan llama-mtmd-cli for the OS session.

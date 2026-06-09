@@ -62,18 +62,47 @@
   </ItemGroup>
 
   <PropertyGroup>
-    <!-- Surface PublishRoot + UpgradeCode to the .wxs preprocessor. WiX 4
-         takes DefineConstants as a semicolon-separated PropertyGroup
-         entry, NOT an ItemGroup like older versions. -->
+    <!-- Surface PublishRoot + UpgradeCode + Version to the .wxs preprocessor.
+         WiX 4 takes DefineConstants as a semicolon-separated PropertyGroup
+         entry, NOT an ItemGroup like older versions. $(FileIDVersion) comes
+         from Directory.Build.props (single source: platforms/windows/VERSION),
+         so Product.wxs uses $(var.Version) instead of a hardcoded literal. -->
     <DefineConstants Condition="'$(Platform)' == 'x64'"
-        >PublishRoot=$(PublishRoot);UpgradeCode=$(UpgradeCodeX64);AssetsRoot=$(AssetsRoot)</DefineConstants>
+        >PublishRoot=$(PublishRoot);UpgradeCode=$(UpgradeCodeX64);AssetsRoot=$(AssetsRoot);Version=$(FileIDVersion)</DefineConstants>
     <DefineConstants Condition="'$(Platform)' == 'arm64'"
-        >PublishRoot=$(PublishRoot);UpgradeCode=$(UpgradeCodeArm64);AssetsRoot=$(AssetsRoot)</DefineConstants>
+        >PublishRoot=$(PublishRoot);UpgradeCode=$(UpgradeCodeArm64);AssetsRoot=$(AssetsRoot);Version=$(FileIDVersion)</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="WixToolset.UI.wixext" />
   </ItemGroup>
+
+  <!-- Single-source guard: the MSI version comes from VERSION (via
+       $(FileIDVersion) in Directory.Build.props); the Rust engine mirrors
+       the same literal in src/engine/Cargo.toml because Cargo can't read an
+       external file without a build script. Fail the installer build if the
+       two drift, so a stale Cargo.toml can never ship a mismatched engine
+       version inside an installer stamped with a different ProductVersion.
+       (Not gated by CI — the WiX projects aren't CI-built — but catches it
+       on every local release build via publish-bundle.ps1.) -->
+  <Target Name="VerifyEngineVersionMatchesVersionFile" BeforeTargets="CoreCompile">
+    <!-- Read Cargo.toml line-by-line (avoids feeding multiline text with
+         embedded quotes into an inline property-function, which corrupts the
+         MSBuild expression parser) and pull the first `version = "x.y.z"`. -->
+    <ReadLinesFromFile File="$(MSBuildThisFileDirectory)..\..\src\engine\Cargo.toml">
+      <Output TaskParameter="Lines" ItemName="_CargoTomlLine" />
+    </ReadLinesFromFile>
+    <ItemGroup>
+      <_CargoVersionMatch Include="@(_CargoTomlLine)"
+                          Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('%(Identity)', '^\s*version\s*=\s*&quot;[^&quot;]+&quot;'))" />
+    </ItemGroup>
+    <PropertyGroup>
+      <_CargoVersionParsed>$([System.Text.RegularExpressions.Regex]::Match('@(_CargoVersionMatch)', 'version\s*=\s*&quot;([^&quot;]+)&quot;').Groups[1].Value)</_CargoVersionParsed>
+    </PropertyGroup>
+    <Error
+        Condition="'$(_CargoVersionParsed)' != '$(FileIDVersion)'"
+        Text="Version drift: platforms/windows/VERSION is '$(FileIDVersion)' but src/engine/Cargo.toml is '$(_CargoVersionParsed)'. Update Cargo.toml to match VERSION (the single source of truth)." />
+  </Target>
 
   <!-- Generate the PublishedFiles.wxs component fragment from the publish/
        directory. Replaces heat.exe (HEAT5151 on .NET 8 self-contained

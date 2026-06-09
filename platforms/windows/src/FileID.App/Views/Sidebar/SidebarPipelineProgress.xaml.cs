@@ -31,11 +31,12 @@ public sealed partial class SidebarPipelineProgress : UserControl
     private readonly Rectangle?[] _leftConnectors = new Rectangle?[Stages.Length];
     private readonly Rectangle?[] _rightConnectors = new Rectangle?[Stages.Length];
     private readonly TextBlock[] _labels = new TextBlock[Stages.Length];
+    private readonly StackPanel[] _cells = new StackPanel[Stages.Length];
 
     // Cache the SyncStage brushes once: it fires ~10 Hz during a scan, and
     // allocating four SolidColorBrushes (DispatcherObjects) per call churned the
     // UI thread. Built in the ctor (UI thread) since SolidColorBrush is UI-affined.
-    private SolidColorBrush? _goldBrush;
+    private Brush? _goldBrush;
     private SolidColorBrush? _fadedGold;
     private SolidColorBrush? _goldStroke;
     private Brush? _primaryText;
@@ -51,12 +52,12 @@ public sealed partial class SidebarPipelineProgress : UserControl
         BuildStages();
         // Ctor runs on UI thread; cache UI-thread-affined brushes here
         // so SyncStage never allocates during the scan-event burst.
-        _goldBrush = (SolidColorBrush)Application.Current.Resources["GoldBrush"];
+        _goldBrush = FileID.Services.ThemeHelper.GetBrushSafe("GoldBrush");
         _fadedGold = new SolidColorBrush(Color.FromArgb(0x99, 0xFF, 0xCC, 0x00));
         _goldStroke = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00));
-        _primaryText = (Brush)Application.Current.Resources["TextFillColorPrimaryBrush"];
-        _secondaryText = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"];
-        _tertiaryText = (Brush)Application.Current.Resources["TextFillColorTertiaryBrush"];
+        _primaryText = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorPrimaryBrush");
+        _secondaryText = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorSecondaryBrush");
+        _tertiaryText = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorTertiaryBrush");
         _inactiveDot = InactiveDotBrush();
         _inactiveDotStroke = InactiveDotStrokeBrush();
         _inactiveConnector = InactiveConnectorBrush();
@@ -150,10 +151,15 @@ public sealed partial class SidebarPipelineProgress : UserControl
                 HorizontalAlignment = HorizontalAlignment.Center,
                 TextWrapping = TextWrapping.NoWrap,
                 TextTrimming = TextTrimming.None,
-                Foreground = (Brush)Application.Current.Resources["TextFillColorTertiaryBrush"],
+                Foreground = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorTertiaryBrush"),
             };
             cellStack.Children.Add(labelText);
             _labels[i] = labelText;
+
+            // Each stage cell announces its name + state to a screen reader;
+            // SyncStage refreshes the state suffix as the pipeline advances.
+            _cells[i] = cellStack;
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(cellStack, $"{label} stage");
 
             Grid.SetColumn(cellStack, i);
             StagesRow.Children.Add(cellStack);
@@ -174,6 +180,10 @@ public sealed partial class SidebarPipelineProgress : UserControl
                 DispatcherQueue.TryEnqueue(SyncStage);
             }
         });
+
+    // Last activeIndex actually rendered; lets SyncStage early-return on the
+    // ~10 Hz LastProgress storm when the pipeline stage hasn't changed.
+    private int _lastRenderedIndex = int.MinValue;
 
     private void SyncStage()
     {
@@ -204,7 +214,20 @@ public sealed partial class SidebarPipelineProgress : UserControl
             if (captionsDone) activeIndex = 4;
             else if (captionsRunning) activeIndex = 3;
             else if (peopleDone) activeIndex = 2;
+            // A finished scan never regresses below the People stage: face
+            // clustering auto-runs right after ScanComplete, so before its event
+            // lands all the latches above are still unset and activeIndex would
+            // stay -1 — blanking the whole strip to grey for a beat on EVERY scan
+            // completion. Hold at People (2) instead of going dark.
+            else if (phase == ScanPhase.Completed) activeIndex = 2;
         }
+
+        // The rendered strip is a pure function of activeIndex, but LastProgress
+        // fires ~10 Hz throughout a scan while activeIndex changes only a handful
+        // of times. Skip the redundant 5-cell rewrite (Fill/Width/Height + a
+        // per-cell AutomationProperties string allocation) when nothing changed.
+        if (activeIndex == _lastRenderedIndex) return;
+        _lastRenderedIndex = activeIndex;
 
         // brushes cached at ctor time — see field comments.
         for (int i = 0; i < Stages.Length; i++)
@@ -217,6 +240,7 @@ public sealed partial class SidebarPipelineProgress : UserControl
             {
                 _dots[i].Fill = _goldBrush;
                 _dots[i].Stroke = _goldStroke;
+                _dots[i].StrokeThickness = 1; // reset the 1.5 left over from the active state
                 _dots[i].Width = 10; _dots[i].Height = 10;
             }
             else if (active)
@@ -236,6 +260,11 @@ public sealed partial class SidebarPipelineProgress : UserControl
 
             // Label color: active → gold, filled → primary, else → tertiary.
             _labels[i].Foreground = active ? _goldBrush : (filled ? _primaryText : _tertiaryText);
+
+            // Refresh the screen-reader state suffix for this stage cell.
+            string state = active ? "in progress" : (filled ? "complete" : "pending");
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+                _cells[i], $"{Stages[i].Label} stage, {state}");
 
             // Connectors: a half is "filled" iff the dot it connects to AND
             // the dot it leads from are filled (or the half belongs to the

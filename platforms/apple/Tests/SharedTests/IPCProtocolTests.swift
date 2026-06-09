@@ -11,7 +11,7 @@ struct IPCProtocolTests {
     @Test("Command: every payload variant survives JSON round-trip")
     func commandRoundTrip() throws {
         let commands: [IPCCommand.Payload] = [
-            .startScan(rootBookmark: Data([0x01, 0x02, 0x03]), rootPathDisplay: "/Users/adam/photos"),
+            .startScan(rootPath: "/Users/adam/photos", rootDisplay: "/Users/adam/photos", rescan: false),
             .pauseScan,
             .resumeScan,
             .cancelScan,
@@ -98,6 +98,9 @@ struct IPCProtocolTests {
             .restoreFromTrash(batchID: "batch-uuid"),
             .revertMerge(sourcePersonID: 4, destinationPersonID: 7, faceIDsToRevert: [11, 12]),
             .verifyCudaPack,
+            .markPersonsDifferent(sourcePersonID: 4, destinationPersonID: 7,
+                                  sourceAnchorFaceID: 11, destinationAnchorFaceID: 22),
+            .wipeLibrary,
         ]
         for payload in commands {
             let cmd = IPCCommand(payload: payload)

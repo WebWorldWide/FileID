@@ -19,6 +19,37 @@ pub struct ProposedMove {
     /// Logical category that drove the destination — surfaced in the
     /// Sankey ribbon hover tooltip.
     pub category: String,
+    /// Butler confidence band (RESTRUCTURE.md §6): drives auto-file / review /
+    /// ask routing in the UI.
+    pub confidence: Confidence,
+    /// Plain-language "why filed here" (RESTRUCTURE.md §6 trust mechanics).
+    pub reason: Option<String>,
+}
+
+/// Three-band autonomy tier for a single proposed move.
+///
+/// - **Auto**   = high confidence; safe to auto-file (still fully reversible).
+/// - **Review** = medium; show for one-click confirm.
+/// - **Ask**    = low; hold and ask, or leave in place.
+///
+/// Orthogonal to [`FolderClassification`] (which scores a *source folder's*
+/// homogeneity); this scores a *single move's* placement certainty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Confidence {
+    Auto,
+    #[default]
+    Review,
+    Ask,
+}
+
+impl Confidence {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Confidence::Auto => "auto",
+            Confidence::Review => "review",
+            Confidence::Ask => "ask",
+        }
+    }
 }
 
 /// Three-tier folder classification.
@@ -105,6 +136,34 @@ pub fn classify_folders(moves: &[ProposedMove]) -> Vec<ClassifiedFolder> {
     out
 }
 
+/// Drop every move whose source folder was classified
+/// [`FolderClassification::Anchor`]. Anchor folders are deliberately left
+/// untouched — the macOS reference emits NO proposals for them ("Files inside
+/// Anchor folders stay put") — so their moves must never reach the plan the app
+/// applies, even though the per-file classifier computes a canonical destination
+/// for them. The anchor COUNT for the informational "Keep" tile is the caller's
+/// responsibility, computed from the same `classified` slice BEFORE stripping.
+/// (audit A1/A3)
+pub fn strip_anchor_folder_moves(
+    moves: Vec<ProposedMove>,
+    classified: &[ClassifiedFolder],
+) -> Vec<ProposedMove> {
+    let anchor_folders: std::collections::HashSet<PathBuf> = classified
+        .iter()
+        .filter(|c| c.classification == FolderClassification::Anchor)
+        .map(|c| c.source_folder.clone())
+        .collect();
+    moves
+        .into_iter()
+        .filter(|m| {
+            m.source
+                .parent()
+                .map(|p| !anchor_folders.contains(p))
+                .unwrap_or(true)
+        })
+        .collect()
+}
+
 /// Priority-based restructure matching macOS Restructure.swift. First
 /// match wins:
 ///   1. Named person  → People/<Name>/<Year>/
@@ -124,29 +183,41 @@ pub fn classify(
         let (y, m) = year_month(ts);
         let mname = month_name(m);
 
-        let (dest, category) = if let Some(ref name) = f.person_name {
+        let (dest, category, confidence, reason) = if let Some(ref name) = f.person_name {
             let safe = sanitize_path_component(name);
             (library_root.join("People").join(&safe).join(format!("{y}")),
-             format!("People/{safe}"))
+             format!("People/{safe}"),
+             Confidence::Auto,
+             format!("Named person: {safe}"))
         } else if let (Some(lat), Some(lon)) = (f.location_lat, f.location_lon) {
             let lat_b = (lat * 2.0).round() / 2.0;
             let lon_b = (lon * 2.0).round() / 2.0;
             let bucket = format!("{lat_b:.1}_{lon_b:.1}");
             (library_root.join("Places").join(&bucket).join(format!("{y}")),
-             format!("Places/{bucket}"))
+             format!("Places/{bucket}"),
+             Confidence::Review,
+             "Taken at a shared location".to_string())
         } else if f.has_text || matches!(f.kind, FileKind::Pdf | FileKind::Doc) {
             (library_root.join("Documents").join(format!("{y}")),
-             "document".to_string())
+             "document".to_string(),
+             Confidence::Review,
+             format!("Document from {y}"))
         } else if matches!(f.kind, FileKind::Image) {
             (library_root.join("Photos").join(format!("{y}")).join(&mname),
-             "photo".to_string())
+             "photo".to_string(),
+             Confidence::Review,
+             format!("Photo from {mname} {y}"))
         } else if matches!(f.kind, FileKind::Video) {
             (library_root.join("Videos").join(format!("{y}")),
-             "video".to_string())
+             "video".to_string(),
+             Confidence::Review,
+             format!("Video from {y}"))
         } else if matches!(f.kind, FileKind::Audio) {
-            (library_root.join("Audio"), "audio".to_string())
+            (library_root.join("Audio"), "audio".to_string(),
+             Confidence::Review, "Audio file".to_string())
         } else {
-            (library_root.join("Misc"), "misc".to_string())
+            (library_root.join("Misc"), "misc".to_string(),
+             Confidence::Ask, "No strong signal — left for you to decide".to_string())
         };
 
         out.push(ProposedMove {
@@ -154,6 +225,8 @@ pub fn classify(
             source: f.source.clone(),
             destination: dest.join(f.source.file_name().unwrap_or_default()),
             category,
+            confidence,
+            reason: Some(reason),
         });
     }
     out
@@ -173,11 +246,12 @@ pub struct FileForClassify {
 }
 
 fn sanitize_path_component(s: &str) -> String {
-    s.chars()
-        .filter(|c| !matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'))
-        .collect::<String>()
-        .trim()
-        .to_string()
+    // PAR-69/PAR-96: byte-faithful with macOS componentSafe (replace illegal +
+    // control chars with `_`, handle Windows reserved names / trailing dots /
+    // length / empty). The old version only DELETED illegal chars, which
+    // diverged from macOS and produced NTFS-invalid names (e.g. a category
+    // "CON" failed MoveFileExW with a cryptic error).
+    crate::util::path_safety::safe_filename_component(s)
 }
 
 fn month_name(m: u32) -> String {
@@ -254,6 +328,50 @@ mod tests {
     }
 
     #[test]
+    fn anchor_folder_moves_are_stripped_from_plan() {
+        // Three same-month photos in one well-named folder => that folder
+        // classifies Anchor (>=80% one category, >2 files, non-generic name).
+        // The macOS reference leaves anchor folders untouched, so their moves
+        // must be dropped before the plan reaches the app. (audit A1/A3)
+        let ts = 1_710_504_000.0;
+        let files = vec![
+            img(1, "D:/Library/Vacation2019/a.jpg", ts),
+            img(2, "D:/Library/Vacation2019/b.jpg", ts),
+            img(3, "D:/Library/Vacation2019/c.jpg", ts),
+        ];
+        let moves = classify(&files, Path::new("D:/Library"));
+        assert_eq!(moves.len(), 3);
+        let classified = classify_folders(&moves);
+        assert!(
+            classified
+                .iter()
+                .any(|c| c.classification == FolderClassification::Anchor),
+            "Vacation2019 should classify Anchor: {classified:?}"
+        );
+        let kept = strip_anchor_folder_moves(moves, &classified);
+        assert!(kept.is_empty(), "anchor-folder moves must be dropped: {kept:?}");
+    }
+
+    #[test]
+    fn non_anchor_folder_moves_survive_the_strip() {
+        // A generic-named folder ("Downloads") classifies Junk, not Anchor, so
+        // its moves must survive the strip — guards against over-stripping.
+        let ts = 1_710_504_000.0;
+        let files = vec![
+            img(1, "D:/Library/Downloads/a.jpg", ts),
+            img(2, "D:/Library/Downloads/b.jpg", ts),
+            img(3, "D:/Library/Downloads/c.jpg", ts),
+        ];
+        let moves = classify(&files, Path::new("D:/Library"));
+        let classified = classify_folders(&moves);
+        assert!(classified
+            .iter()
+            .all(|c| c.classification != FolderClassification::Anchor));
+        let kept = strip_anchor_folder_moves(moves, &classified);
+        assert_eq!(kept.len(), 3);
+    }
+
+    #[test]
     fn person_priority_over_date() {
         let mut f = img(1, "C:/scan/face.jpg", 1_710_504_000.0);
         f.person_name = Some("Alice".to_string());
@@ -327,11 +445,15 @@ mod tests {
 
     #[test]
     fn category_counts_summed_and_sorted() {
-        let moves = vec![
-            ProposedMove { file_id: 1, source: PathBuf::new(), destination: PathBuf::new(), category: "photo".into() },
-            ProposedMove { file_id: 2, source: PathBuf::new(), destination: PathBuf::new(), category: "photo".into() },
-            ProposedMove { file_id: 3, source: PathBuf::new(), destination: PathBuf::new(), category: "video".into() },
-        ];
+        let mv = |id: i64, category: &str| ProposedMove {
+            file_id: id,
+            source: PathBuf::new(),
+            destination: PathBuf::new(),
+            category: category.into(),
+            confidence: Confidence::default(),
+            reason: None,
+        };
+        let moves = vec![mv(1, "photo"), mv(2, "photo"), mv(3, "video")];
         let cats = category_counts(&moves);
         assert_eq!(cats[0].category, "photo");
         assert_eq!(cats[0].count, 2);

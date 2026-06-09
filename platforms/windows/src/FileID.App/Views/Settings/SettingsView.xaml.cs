@@ -30,6 +30,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         Svc.PropertyChanged += OnInstallerChanged;
         Svc.Clip.PropertyChanged += OnSlotChanged;
         Svc.Arcface.PropertyChanged += OnSlotChanged;
+        Svc.RamPlus.PropertyChanged += OnSlotChanged;
         Svc.DeepVlm.PropertyChanged += OnSlotChanged;
         Unloaded += (_, _) =>
         {
@@ -38,6 +39,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             Svc.PropertyChanged -= OnInstallerChanged;
             Svc.Clip.PropertyChanged -= OnSlotChanged;
             Svc.Arcface.PropertyChanged -= OnSlotChanged;
+            Svc.RamPlus.PropertyChanged -= OnSlotChanged;
             Svc.DeepVlm.PropertyChanged -= OnSlotChanged;
         };
         Loaded += (_, _) =>
@@ -176,7 +178,9 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             InstallCudaLlamaButton.IsEnabled = false;
             CudaLlamaStatusText.Text = "✓ CUDA llama.cpp installed. Deep Analyze will use it on next run.";
         }
-        if (SentinelExists("cudnn_runtime_x64"))
+        // Gate on the ORT CUDA provider (the pack that actually enables the
+        // CUDA EP); cuDNN alone never flipped scanning off DirectML.
+        if (SentinelExists("ort_cuda_x64"))
         {
             InstallCudnnButton.Content = "Installed";
             InstallCudnnButton.IsEnabled = false;
@@ -206,8 +210,8 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             });
         }
         // Deep Analyze VLM has 3 alternative weights — any one sentinel marks it installed.
-        if ((SentinelExists("qwen2_5_vl_3b") || SentinelExists("qwen2_5_vl_7b")
-             || SentinelExists("gemma_3_4b"))
+        if ((SentinelExists("qwen2_5_vl_7b") || SentinelExists("gemma_3_4b")
+             || SentinelExists("mistral_small_3_2"))
             && Svc.DeepVlm.Status != Services.ModelInstallStatus.Installed)
         {
             DispatcherQueue.TryEnqueue(() =>
@@ -289,8 +293,8 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         {
             var ep = (hw?.ExecutionProvider ?? "").ToLowerInvariant();
             CudnnStatusText.Text = ep == "cuda"
-                ? "✓ CUDA execution provider is active. Scanning uses cuDNN."
-                : "Install NVIDIA cuDNN to unlock the CUDA execution provider for scanning (10-15% faster than DirectML on RTX-class GPUs). FileID can't redistribute cuDNN — get it from NVIDIA's developer site.";
+                ? "✓ CUDA execution provider is active — scanning runs on the CUDA EP."
+                : "Install the CUDA pack to unlock the CUDA execution provider for scanning (~3-5x faster than DirectML on RTX-class GPUs). One click fetches the ONNX Runtime CUDA provider + cuDNN.";
         }
     }
 
@@ -635,6 +639,14 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     /// of truth for status; the x:Bind paths on the card update automatically
     /// via the slot's PropertyChanged. No more local OnProgress subscription
     /// (which couldn't pick up state changes that originated in Welcome).</summary>
+    // Per-card install re-entry guard. Mirrors WelcomeSheet: PrewarmAsync
+    // only flips Status to Downloading after awaiting WaitForReadyAsync, so a
+    // rapid double-click on Install/Retry could otherwise fire two
+    // slot.InstallAsync() (→ duplicate prewarm IPC) while Status is still
+    // NotInstalled/Failed. UI-thread-confined (click handler + ConfigureAwait
+    // (true) continuation).
+    private readonly System.Collections.Generic.HashSet<Services.ModelSlot> _installInFlight = new();
+
     private void OnInstallModelClicked(object sender, RoutedEventArgs e)
     {
         if (sender is not Button button || button.Tag is not string modelKind || string.IsNullOrWhiteSpace(modelKind))
@@ -643,10 +655,11 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         {
             "arcface_buffalo" => Svc.Arcface,
             "mobileclip_s2" => Svc.Clip,
+            "ram_plus" => Svc.RamPlus,
             _ => null,
         };
         if (slot is null) return;
-        // Cancel = re-trigger CancelAllAsync (engine has no per-model cancel).
+        // Cancel this row's in-flight model (the engine now supports per-model cancel).
         if (slot.Status == Services.ModelInstallStatus.Downloading)
         {
             // Pre-flip caption to "Cancelling…" so the user gets instant
@@ -655,10 +668,53 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             slot.Message = "Cancelling…";
             slot.BytesPerSecond = 0;
             slot.EtaSeconds = 0;
-            _ = SafeRunAsync(() => Svc.CancelAllAsync(), "Cancel " + slot.DisplayLabel);
+            _ = CancelSlotAsync(slot);
             return;
         }
-        _ = SafeRunAsync(() => slot.InstallAsync(), "Install " + slot.DisplayLabel);
+        if (!_installInFlight.Add(slot))
+        {
+            DebugLog.Info($"[SETTINGS] {slot.DisplayLabel} install already in flight; ignoring duplicate click.");
+            return;
+        }
+        _ = SafeRunAsync(async () =>
+        {
+            try { await slot.InstallAsync().ConfigureAwait(true); }
+            finally { _installInFlight.Remove(slot); }
+        }, "Install " + slot.DisplayLabel);
+    }
+
+    // Drive the cancel and surface failure. If CancelAllAsync throws (engine
+    // crashed / IPC dead), the slot would otherwise sit at "Cancelling…"
+    // forever with the button still reading "Cancel". Reset it back to the
+    // Downloading caption and tell the user the cancel couldn't be delivered.
+    private async Task CancelSlotAsync(Services.ModelSlot slot)
+    {
+        try
+        {
+            await Svc.CancelModelAsync(slot.CurrentModelKind).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"[SETTINGS] Cancel {slot.DisplayLabel} threw: {ex}");
+            if (_unloaded) return;
+            // Clear the optimistic "Cancelling…" caption so the row no longer
+            // claims a cancel is in progress; the slot stays Downloading and
+            // the button reverts to "Cancel" for another attempt.
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (slot.Status == Services.ModelInstallStatus.Downloading
+                    && slot.Message == "Cancelling…")
+                {
+                    slot.Message = null;
+                }
+            });
+            await ShowAlertAsync(
+                "Couldn't cancel the download",
+                $"FileID couldn't reach the engine to cancel {slot.DisplayLabel}. "
+                + "The download may still be running.\n\n"
+                + "Try again in a moment. If it persists, restart FileID from the Engine card in Settings.\n\n"
+                + "Details: " + ex.Message).ConfigureAwait(true);
+        }
     }
 
     private static async Task SafeRunAsync(Func<Task> action, string label)
@@ -670,6 +726,35 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         catch (Exception ex)
         {
             DebugLog.Warn($"[SETTINGS] {label} threw: {ex}");
+        }
+    }
+
+    private async Task ShowAlertAsync(string title, string body)
+    {
+        // ContentDialog.ShowAsync can throw on a broken XamlRoot
+        // (mid-shutdown, tab re-host). Catch + log so a failed alert never
+        // escalates to App.UnhandledException. Mirrors
+        // SidebarProcessingControl.ShowAlertAsync.
+        try
+        {
+            if (XamlRoot is null)
+            {
+                DebugLog.Warn($"ShowAlertAsync: XamlRoot is null ({title}); skipping dialog.");
+                return;
+            }
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = title,
+                Content = body,
+                CloseButtonText = "OK",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            await dialog.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"ShowAlertAsync({title}) threw: " + ex.Message);
         }
     }
 
@@ -687,8 +772,12 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     // Single ProgressBar per model card: indeterminate until the first byte,
     // then determinate. Replaces the old ProgressBar↔ProgressRing Visibility
     // swap that flickered each time Fraction crossed 0.
-    internal bool IsStarting(Services.ModelInstallStatus s, double frac) =>
-        s == Services.ModelInstallStatus.Downloading && frac <= 0;
+    //
+    // Gate indeterminate on NOT-yet-started (HasStarted is sticky for the
+    // session), not on an instantaneous frac<=0 — so a multi-pack fraction
+    // rewind can't re-flap the bar to its marquee. Mirrors WelcomeSheet.
+    internal bool IsStarting(Services.ModelInstallStatus s, bool hasStarted) =>
+        s == Services.ModelInstallStatus.Downloading && !hasStarted;
 
     internal Visibility ShowActionButton(Services.ModelInstallStatus s) =>
         s != Services.ModelInstallStatus.Installed ? Visibility.Visible : Visibility.Collapsed;
@@ -700,8 +789,11 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         _ => "Install",
     };
 
-    internal Visibility ShowRateEta(Services.ModelInstallStatus status, double bytesPerSecond) =>
-        status == Services.ModelInstallStatus.Downloading && bytesPerSecond > 0
+    // Sticky once started — see WelcomeSheet.ShowRateEta. Avoids flapping the
+    // row in/out on a single transient sub-100 B/s stall sample; RateEtaLabel
+    // renders empty text while stalled so the row holds a blank line.
+    internal Visibility ShowRateEta(Services.ModelInstallStatus status, bool hasStarted) =>
+        status == Services.ModelInstallStatus.Downloading && hasStarted
             ? Visibility.Visible : Visibility.Collapsed;
 
     internal string ProgressLabel(string? message, double fraction, ulong? bytesDone, ulong? totalBytes)
@@ -779,12 +871,14 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
-    /// <summary>In-app cuDNN install. PrewarmModelAsync asks the engine to
-    /// fetch the cuDNN redist (~430 MB) from NVIDIA's CDN, extract it
-    /// under Models/cudnn/, and call register_dll_dirs_under so the ORT
-    /// CUDA EP can load it on next engine restart. After completion the
-    /// user hits "Verify install" (or restarts the engine) to flip the
-    /// scanning pipeline from DirectML to CUDA EP.</summary>
+    /// <summary>In-app CUDA pack install. Fetches the ONNX Runtime CUDA provider
+    /// (onnxruntime_providers_cuda.dll, ~313 MB from Microsoft's GitHub release —
+    /// the piece pyke's binaries omit, so the thing that actually enables the
+    /// CUDA EP) plus the cuDNN redist (~430 MB from NVIDIA's CDN). The engine
+    /// extracts both under Models/, registers their DLL dirs, and pins
+    /// ORT_DYLIB_PATH to the matched GPU runtime. After completion the user hits
+    /// "Verify install" (or restarts the engine) to flip scanning from DirectML
+    /// to the CUDA EP (~3-5x faster).</summary>
     private async void OnInstallCudnnClicked(object sender, RoutedEventArgs e)
     {
         if (sender is not Button button) return;
@@ -793,14 +887,17 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         {
             button.IsEnabled = false;
             button.Content = "Installing…";
-            CudnnStatusText.Text = "Downloading cuDNN (~430 MB) from NVIDIA's CDN…";
+            CudnnStatusText.Text = "Downloading CUDA pack (~745 MB): cuDNN + ORT CUDA provider…";
+            // Provider last — it's the "installed" gate; finishing it last keeps
+            // the status accurate (see ModelInstallerService.Accelerator).
             await EngineClient.Instance.PrewarmModelAsync("cudnn_runtime_x64");
+            await EngineClient.Instance.PrewarmModelAsync("ort_cuda_x64");
             button.Content = "Installed";
-            CudnnStatusText.Text = "✓ cuDNN installed. Click \"Verify install\" or restart FileID to switch scanning to the CUDA EP.";
+            CudnnStatusText.Text = "✓ CUDA pack installed. Click \"Verify install\" or restart FileID to switch scanning to the CUDA EP.";
         }
         catch (Exception ex)
         {
-            DebugLog.Warn($"Install cuDNN failed: {ex.Message}");
+            DebugLog.Warn($"Install CUDA pack failed: {ex.Message}");
             button.Content = originalContent;
             button.IsEnabled = true;
             CudnnStatusText.Text = $"Install failed: {ex.Message}";
@@ -924,6 +1021,56 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         {
             RestartEngineButton.IsEnabled = true;
             RestartEngineButton.Content = "Restart engine";
+        }
+    }
+
+    /// <summary>PAR-148: always-available "Restart engine" in the Engine
+    /// card (the only other restart is buried in the conditional cuDNN
+    /// pill). Shutdown + auto-respawn so the engine re-runs the EP picker;
+    /// cancels any in-flight scan. Mirrors macOS SettingsView's "Restart
+    /// Engine" button.</summary>
+    private async void OnRestartEngineCardClicked(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            RestartEngineCardButton.IsEnabled = false;
+            StopEngineCardButton.IsEnabled = false;
+            RestartEngineCardButton.Content = "Restarting…";
+            await EngineClient.Instance.RestartAsync();
+            DebugLog.Info("Engine restart requested by user from the Engine card.");
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("Engine restart (card) failed: " + ex.Message);
+        }
+        finally
+        {
+            RestartEngineCardButton.Content = "Restart engine";
+            RestartEngineCardButton.IsEnabled = true;
+            StopEngineCardButton.IsEnabled = true;
+        }
+    }
+
+    /// <summary>PAR-148: always-available "Stop engine" in the Engine card.
+    /// Cleanly shuts the engine down (user-initiated, so no auto-respawn).
+    /// Mirrors macOS SettingsView's "Stop Engine" button.</summary>
+    private async void OnStopEngineCardClicked(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            StopEngineCardButton.IsEnabled = false;
+            StopEngineCardButton.Content = "Stopping…";
+            await EngineClient.Instance.ShutdownAsync();
+            DebugLog.Info("Engine shutdown requested by user from the Engine card.");
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("Engine shutdown (card) failed: " + ex.Message);
+        }
+        finally
+        {
+            StopEngineCardButton.Content = "Stop engine";
+            StopEngineCardButton.IsEnabled = true;
         }
     }
 

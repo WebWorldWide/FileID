@@ -1,4 +1,4 @@
-﻿// SankeyFlowControl — pure-XAML Sankey diagram (no Win2D dep).
+// SankeyFlowControl — pure-XAML Sankey diagram (no Win2D dep).
 //
 // Renders source-folder → category
 // flows with cubic-bezier ribbons whose thickness is proportional to
@@ -63,16 +63,29 @@ public sealed class SankeyFlowControl : Control
     private readonly SolidColorBrush _whiteHighlight;
     private readonly Brush _sourceBrush;
 
+    // Last size we actually laid out at. SizeChanged fires on every pixel of a
+    // resize drag; the layout is pixel-quantized, so only re-render when the
+    // rounded size actually changed (debounce). -1 forces the first render.
+    private int _lastRenderW = -1;
+    private int _lastRenderH = -1;
+
     public SankeyFlowControl()
     {
         DefaultStyleKey = typeof(SankeyFlowControl);
 
         _sourceBrush = ResolveBrush("GoldBrush", Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00));
+        // Okabe-Ito colour-blind-safe categorical palette (RESTRUCTURE.md §7):
+        // distinct destination-category hues legible across all CVD types.
+        // Brand gold/lavender/cyan/pink stay chrome-only (source rects, shell).
         var categoryColors = new[]
         {
-            ResolveColor("AiBrush",      Color.FromArgb(0xFF, 0xB1, 0x9B, 0xCE)),
-            ResolveColor("InfoBrush",    Color.FromArgb(0xFF, 0xA0, 0xE2, 0xEA)),
-            ResolveColor("DelightBrush", Color.FromArgb(0xFF, 0xF2, 0xA6, 0xC0)),
+            Color.FromArgb(0xFF, 0xE6, 0x9F, 0x00), // orange
+            Color.FromArgb(0xFF, 0x56, 0xB4, 0xE9), // sky blue
+            Color.FromArgb(0xFF, 0x00, 0x9E, 0x73), // bluish green
+            Color.FromArgb(0xFF, 0xF0, 0xE4, 0x42), // yellow
+            Color.FromArgb(0xFF, 0x00, 0x72, 0xB2), // blue
+            Color.FromArgb(0xFF, 0xD5, 0x5E, 0x00), // vermillion
+            Color.FromArgb(0xFF, 0xCC, 0x79, 0xA7), // reddish purple
         };
         _ribbonIdleBrushes = new Brush[categoryColors.Length];
         _ribbonHoverBrushes = new Brush[categoryColors.Length];
@@ -89,17 +102,19 @@ public sealed class SankeyFlowControl : Control
         Loaded += (_, _) => Render();
         // Debounce resize: a drag-resize fires SizeChanged many times per
         // second; coalesce into one Render ~80 ms after the last change.
+        // RenderIfResized then skips renders where the pixel-quantized size
+        // didn't actually change.
         _renderDebounce = DispatcherQueue?.CreateTimer();
         if (_renderDebounce is not null)
         {
             _renderDebounce.Interval = TimeSpan.FromMilliseconds(80);
             _renderDebounce.IsRepeating = false;
-            _renderDebounce.Tick += (_, _) => Render();
+            _renderDebounce.Tick += (_, _) => RenderIfResized();
             SizeChanged += (_, _) => { _renderDebounce.Stop(); _renderDebounce.Start(); };
         }
         else
         {
-            SizeChanged += (_, _) => Render();
+            SizeChanged += OnSizeChanged;
         }
         PointerMoved += OnPointerMoved;
         PointerExited += OnPointerExited;
@@ -108,8 +123,6 @@ public sealed class SankeyFlowControl : Control
 
     /// <summary>Fires (source, category) when the user clicks a ribbon.</summary>
     public event EventHandler<(string Source, string Category)>? RibbonInvoked;
-
-    private Ribbon? _hovered;
 
     public void SetPlan(RestructurePlan? plan)
     {
@@ -124,9 +137,30 @@ public sealed class SankeyFlowControl : Control
         Render();
     }
 
+    private void OnSizeChanged(object sender, SizeChangedEventArgs e) => RenderIfResized();
+
+    // SizeChanged fires for every pixel during a resize drag. The layout is
+    // quantized to integer pixels, so re-rendering only when the rounded size
+    // actually changes keeps the O(S * C) layout off the hot drag path.
+    private void RenderIfResized()
+    {
+        int w = (int)Math.Round(ActualWidth);
+        int h = (int)Math.Round(ActualHeight);
+        if (w == _lastRenderW && h == _lastRenderH) return;
+        Render();
+    }
+
     private void Render()
     {
         if (_canvas is null) return;
+        // Record the size being evaluated UP FRONT — even when we bail sub-threshold
+        // below — so the RenderIfResized debounce doesn't suppress a later restore to a
+        // prior size after a sub-threshold pass blanked the canvas (which would leave
+        // the diagram permanently blank, e.g. after the Flow/Tree toggle or a
+        // narrow-then-widen). The cache must reflect the last size SEEN, not the last
+        // size successfully DRAWN.
+        _lastRenderW = (int)Math.Round(ActualWidth);
+        _lastRenderH = (int)Math.Round(ActualHeight);
         _canvas.Children.Clear();
         _ribbons.Clear();
         _sourceRects.Clear();
@@ -151,30 +185,52 @@ public sealed class SankeyFlowControl : Control
             return parts.Length > 1 ? parts[0] : "(root)";
         }
 
-        var rawSourceGroups = moves.GroupBy(SourceOf)
+        // Cap each column at MaxNodes; fold the long tail into a single "Other"
+        // node rather than silently dropping it (RESTRUCTURE.md §7).
+        const int MaxNodes = 12;
+        const string OtherKey = "Other";
+
+        var distinctSources = moves.Select(SourceOf).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+        var topSources = moves.GroupBy(SourceOf).OrderByDescending(g => g.Count())
+            .Take(MaxNodes - 1).Select(g => g.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        string SourceBucket(RestructureMove m)
+        {
+            var s = SourceOf(m);
+            return distinctSources > MaxNodes && !topSources.Contains(s) ? OtherKey : s;
+        }
+
+        var distinctCats = moves.Select(m => m.Category).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+        var topCats = moves.GroupBy(m => m.Category).OrderByDescending(g => g.Count())
+            .Take(MaxNodes - 1).Select(g => g.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        string CategoryBucket(RestructureMove m)
+        {
+            var c = m.Category;
+            return distinctCats > MaxNodes && !topCats.Contains(c) ? OtherKey : c;
+        }
+
+        var rawSourceGroups = moves.GroupBy(SourceBucket)
                                    .OrderByDescending(g => g.Count())
-                                   .Take(12)
                                    .ToList();
-        var rawCategoryGroups = moves.GroupBy(m => m.Category)
+        var rawCategoryGroups = moves.GroupBy(CategoryBucket)
                                      .OrderByDescending(g => g.Count())
-                                     .Take(12)
                                      .ToList();
 
         var sourceList = rawSourceGroups.Select(g => g.Key).ToList();
         var categoryList = rawCategoryGroups.Select(g => g.Key).ToList();
 
-        // Precompute (source, category) flow counts ONCE — O(moves) — and reuse
-        // them in the barycentric loops below. Previously each loop iteration
-        // re-scanned the entire moves list (moves.Count(... SourceOf(m) ...)),
-        // making the sort O(2 × |sources| × |categories| × |moves|) — hundreds
-        // of full scans on a large plan, re-run on every Render/SizeChanged.
-        var flowMatrix = new Dictionary<(string, string), int>();
+        // Precompute the (source, category) flow matrix in a single pass over
+        // moves. The barycentric sort below + the ribbon-draw loop used to call
+        // moves.Count(predicate) for every (source, category) cell — O(2 * S * C
+        // * Moves) per Render, re-firing on every SizeChanged during a resize
+        // drag. One pass + dictionary lookups makes each cell O(1).
+        var flow = new Dictionary<(string Src, string Cat), int>();
         foreach (var m in moves)
         {
-            var key = (SourceOf(m), m.Category);
-            flowMatrix.TryGetValue(key, out var c);
-            flowMatrix[key] = c + 1;
+            var key = (SourceBucket(m), CategoryBucket(m));
+            flow.TryGetValue(key, out var n);
+            flow[key] = n + 1;
         }
+        int FlowOf(string src, string cat) => flow.TryGetValue((src, cat), out var n) ? n : 0;
 
         // 2 iterations of barycentric sorting to minimize ribbon crossings
         for (int iter = 0; iter < 2; iter++)
@@ -186,12 +242,11 @@ public sealed class SankeyFlowControl : Control
                 double totalWeight = 0;
                 for (int sIdx = 0; sIdx < sourceList.Count; sIdx++)
                 {
-                    var srcName = sourceList[sIdx];
-                    var flow = flowMatrix.TryGetValue((srcName, cat), out var fv) ? fv : 0;
-                    if (flow > 0)
+                    var f = FlowOf(sourceList[sIdx], cat);
+                    if (f > 0)
                     {
-                        weightedSum += sIdx * flow;
-                        totalWeight += flow;
+                        weightedSum += sIdx * f;
+                        totalWeight += f;
                     }
                 }
                 catWeights[cat] = totalWeight > 0 ? (weightedSum / totalWeight) : 0.0;
@@ -205,12 +260,11 @@ public sealed class SankeyFlowControl : Control
                 double totalWeight = 0;
                 for (int cIdx = 0; cIdx < categoryList.Count; cIdx++)
                 {
-                    var catName = categoryList[cIdx];
-                    var flow = flowMatrix.TryGetValue((src, catName), out var fv) ? fv : 0;
-                    if (flow > 0)
+                    var f = FlowOf(src, categoryList[cIdx]);
+                    if (f > 0)
                     {
-                        weightedSum += cIdx * flow;
-                        totalWeight += flow;
+                        weightedSum += cIdx * f;
+                        totalWeight += f;
                     }
                 }
                 srcWeights[src] = totalWeight > 0 ? (weightedSum / totalWeight) : 0.0;
@@ -272,7 +326,7 @@ public sealed class SankeyFlowControl : Control
             for (int c = 0; c < byCategory.Count; c++)
             {
                 var cat = byCategory[c];
-                var pairCount = src.Count(m => m.Category == cat.Key);
+                var pairCount = FlowOf(src.Key, cat.Key);
                 if (pairCount == 0) continue;
 
                 var srcPos = srcYs[src.Key];
@@ -431,13 +485,14 @@ public sealed class SankeyFlowControl : Control
             b0 * p0.Y + b1 * p1.Y + b2 * p2.Y + b3 * p3.Y);
     }
 
-    private void OnPointerMoved(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    // Nearest ribbon within the proximity threshold of the canvas-space point,
+    // or null. Shared by hover (PointerMoved) and tap (OnTapped) so a touch/pen
+    // tap — which never produces a hover phase — still resolves a ribbon.
+    private Ribbon? HitTest(Point pos)
     {
-        if (_canvas is null || _ribbons.Count == 0) return;
-        var pos = e.GetCurrentPoint(_canvas).Position;
-        const double HoverThreshold = 14.0;
+        const double HitThreshold = 14.0;
         Ribbon? best = null;
-        double bestDist = HoverThreshold;
+        double bestDist = HitThreshold;
         foreach (var r in _ribbons)
         {
             foreach (var s in r.Samples)
@@ -448,7 +503,13 @@ public sealed class SankeyFlowControl : Control
                 if (d < bestDist) { bestDist = d; best = r; }
             }
         }
-        ApplyHover(best);
+        return best;
+    }
+
+    private void OnPointerMoved(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        if (_canvas is null || _ribbons.Count == 0) return;
+        ApplyHover(HitTest(e.GetCurrentPoint(_canvas).Position));
     }
 
     private void OnPointerExited(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
@@ -458,7 +519,12 @@ public sealed class SankeyFlowControl : Control
 
     private void OnTapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e)
     {
-        if (_hovered is { } h)
+        if (_canvas is null || _ribbons.Count == 0) return;
+        // Hit-test at the tap point rather than relying on _hovered: touch/pen
+        // taps have no preceding hover phase, so _hovered would be null and the
+        // tap was silently dropped.
+        var hit = HitTest(e.GetPosition(_canvas));
+        if (hit is { } h)
         {
             RibbonInvoked?.Invoke(this, (h.Source, h.Category));
         }
@@ -466,7 +532,6 @@ public sealed class SankeyFlowControl : Control
 
     private void ApplyHover(Ribbon? hovered)
     {
-        _hovered = hovered;
         // Reset all to idle.
         foreach (var r in _ribbons) r.Path.Fill = r.IdleFill;
         foreach (var (rect, fill) in _rectIdleFill) rect.Fill = fill;
@@ -503,15 +568,5 @@ public sealed class SankeyFlowControl : Control
         => s.Length <= max ? s : string.Concat(s.AsSpan(0, max - 1), "…");
 
     private static Brush ResolveBrush(string key, Color fallback)
-    {
-        if (Application.Current?.Resources[key] is Brush b) return b;
-        return new SolidColorBrush(fallback);
-    }
-
-    private static Color ResolveColor(string key, Color fallback)
-    {
-        if (Application.Current?.Resources[key] is SolidColorBrush b) return b.Color;
-        if (Application.Current?.Resources[key] is Color c) return c;
-        return fallback;
-    }
+        => FileID.Services.ThemeHelper.GetBrushSafe(key, new SolidColorBrush(fallback));
 }

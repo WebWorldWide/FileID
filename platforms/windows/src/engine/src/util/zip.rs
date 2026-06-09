@@ -68,6 +68,8 @@ pub(crate) fn extract_into_parent(zip_path: &Path) -> anyhow::Result<()> {
                 MAX_ENTRY_BYTES
             );
         }
+        // Cheap early-out on an honest header; the AUTHORITATIVE cumulative cap
+        // is charged the ACTUAL decompressed bytes after the copy below (ENG-88).
         if total_bytes.saturating_add(entry_size) > MAX_BYTES {
             anyhow::bail!("zip rejected: cumulative size exceeds {} bytes", MAX_BYTES);
         }
@@ -94,8 +96,9 @@ pub(crate) fn extract_into_parent(zip_path: &Path) -> anyhow::Result<()> {
             .with_context(|| format!("creating {}", dest.display()))?;
         // Bound the ACTUAL decompressed output, not the attacker-controlled
         // declared entry.size(): a lying central directory could otherwise
-        // make io::copy inflate far past the caps (zip bomb). Cap each entry
-        // and the cumulative total by the real byte count.
+        // make io::copy inflate far past the caps (zip bomb, ENG-88). The cap
+        // shrinks to the remaining cumulative budget; +1 so an entry exactly
+        // at the cap copies fully while an over-cap one is still detected.
         let entry_cap = MAX_ENTRY_BYTES.min(MAX_BYTES.saturating_sub(total_written));
         let mut limited = std::io::Read::take(&mut entry, entry_cap.saturating_add(1));
         let written = std::io::copy(&mut limited, &mut out)

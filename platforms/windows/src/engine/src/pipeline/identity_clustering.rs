@@ -41,13 +41,41 @@ pub struct Hyperparameters {
 
 impl Default for Hyperparameters {
     fn default() -> Self {
+        // SFace (128-d) defaults, calibrated on-hardware against G:\TrueNAS.
+        // Two empirical anchors drove these: (1) a known single identity
+        // (27 studio portraits) clusters with cosine-to-centroid 0.88–0.95
+        // (median 0.93) — so GENUINE same-person SFace cosines are very high,
+        // far above OpenCV's 0.363 verification EER; (2) Pass 1 is single-
+        // linkage connected-components, which chains different people through
+        // bridge faces (a 1475-face run at pass1=0.42 collapsed 1339 into one
+        // blob of mean cohesion ~0.40). The fix exploits the wide gap between
+        // genuine clusters (~0.85+ mean) and chained blobs (~0.50 mean):
+        // keep Pass-1 cores tight (0.66, above most cross-identity false
+        // matches), and set the Pass-3 split floor IN that gap (0.60) so the
+        // 2-means refinement shreds any non-tight cluster while leaving real
+        // identities whole. Fails toward over-split (mergeable in the UI), not
+        // the un-fixable over-merge. PROVISIONAL — single-linkage Pass 1 still
+        // chains on very large libraries; the real fix is mutual-kNN / density
+        // edges (see NEXT.md). Final calibration on a labeled library.
+        //
+        // Two Pass-3 knobs are env-overridable for on-hardware tuning of the
+        // over-split aggressiveness (a lower mean floor / higher variance bar
+        // splits less): FILEID_FACE_PASS3_MIN_MEAN_COSINE and
+        // FILEID_FACE_PASS3_VARIANCE_THRESHOLD (both f32; unset/unparseable →
+        // the defaults below).
+        let env_f32 = |key: &str, default: f32| -> f32 {
+            std::env::var(key)
+                .ok()
+                .and_then(|s| s.trim().parse::<f32>().ok())
+                .unwrap_or(default)
+        };
         Self {
-            pass1_cosine: 0.55,
-            pass2_cosine: 0.45,
-            pass2_margin: 0.05,
-            pass3_variance_threshold: 0.05,
-            pass3_min_mean_cosine: 0.50,
-            pass3_max_splits: 3,
+            pass1_cosine: 0.66,
+            pass2_cosine: 0.54,
+            pass2_margin: 0.10,
+            pass3_variance_threshold: env_f32("FILEID_FACE_PASS3_VARIANCE_THRESHOLD", 0.04),
+            pass3_min_mean_cosine: env_f32("FILEID_FACE_PASS3_MIN_MEAN_COSINE", 0.60),
+            pass3_max_splits: 7,
             k_nn: 10,
         }
     }
@@ -116,16 +144,52 @@ where
     }
 
     // ── Pass 1: connected components above pass1_cosine ───────────
+    // Single-linkage (default) unions i with every kNN hit above the
+    // threshold — one high-cosine "bridge" face can chain two identities into
+    // one mega-cluster (documented above). FILEID_FACE_MUTUAL_KNN=1 switches to
+    // MUTUAL-kNN: an edge i—j is kept only when each is in the other's
+    // above-threshold neighborhood, which breaks single-bridge chains at the
+    // cost of failing toward over-split (UI-mergeable, the safe direction — and
+    // Pass 3's 2-means split is unchanged). Gated default-off pending
+    // on-hardware calibration on a labeled library (see NEXT.md).
+    let mutual_knn = std::env::var("FILEID_FACE_MUTUAL_KNN")
+        .ok()
+        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
     let mut uf = UnionFind::new(n);
-    for i in 0..n {
-        for hit in searcher(i) {
-            if hit.idx == i || hit.idx >= n {
-                continue;
+    if mutual_knn {
+        let mut directed: std::collections::HashSet<(usize, usize)> =
+            std::collections::HashSet::new();
+        let mut candidates: Vec<(usize, usize)> = Vec::new();
+        for i in 0..n {
+            for hit in searcher(i) {
+                if hit.idx == i || hit.idx >= n {
+                    continue;
+                }
+                if hit.similarity < params.pass1_cosine {
+                    continue;
+                }
+                directed.insert((i, hit.idx));
+                candidates.push((i, hit.idx));
             }
-            if hit.similarity < params.pass1_cosine {
-                continue;
+        }
+        for (i, j) in candidates {
+            // Union only mutual edges (j also lists i above threshold).
+            if directed.contains(&(j, i)) {
+                uf.union(i, j);
             }
-            uf.union(i, hit.idx);
+        }
+    } else {
+        for i in 0..n {
+            for hit in searcher(i) {
+                if hit.idx == i || hit.idx >= n {
+                    continue;
+                }
+                if hit.similarity < params.pass1_cosine {
+                    continue;
+                }
+                uf.union(i, hit.idx);
+            }
         }
     }
     let mut root_members: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -150,10 +214,18 @@ where
     let pass1_cores = cores.len();
 
     // ── Pass 2: outlier assignment with margin ────────────────────
-    let mut core_centroids: Vec<Vec<f32>> = cores
+    // Maintain a parallel unnormalized running sum per core alongside the
+    // normalized centroid. Recomputing centroid_normalized over the full
+    // membership on every outlier add is O(S) per add → O(S^2) over a pass;
+    // folding the outlier into the running sum is O(dim) per add and the
+    // normalized copy is recomputed from that sum. Mathematically identical
+    // (only floating-point reassociation differs).
+    let mut core_sums: Vec<Vec<f32>> = cores
         .iter()
-        .map(|c| centroid_normalized(c, embeddings, dim))
+        .map(|c| centroid_sum(c, embeddings, dim))
         .collect();
+    let mut core_centroids: Vec<Vec<f32>> =
+        core_sums.iter().map(|s| normalize_sum(s, dim)).collect();
     let mut outliers_assigned = 0;
     let mut outliers_as_singletons = 0;
     for outlier in outliers {
@@ -179,10 +251,17 @@ where
         if passes_floor && passes_margin {
             let target = c1_idx as usize;
             cores[target].push(outlier);
-            core_centroids[target] = centroid_normalized(&cores[target], embeddings, dim);
+            let sum = &mut core_sums[target];
+            for d in 0..dim.min(v.len()) {
+                sum[d] += v[d];
+            }
+            core_centroids[target] = normalize_sum(sum, dim);
             outliers_assigned += 1;
         } else {
             cores.push(vec![outlier]);
+            // A singleton's unnormalized sum is the embedding itself; its
+            // normalized centroid is the (already L2-normalized) embedding.
+            core_sums.push(v.clone());
             core_centroids.push(v.clone());
             outliers_as_singletons += 1;
         }
@@ -225,22 +304,40 @@ where
 
 /// L2-normalized mean of the indexed embeddings.
 fn centroid_normalized(indices: &[usize], embeddings: &[Vec<f32>], dim: usize) -> Vec<f32> {
+    let sum = centroid_sum(indices, embeddings, dim);
+    normalize_sum(&sum, dim)
+}
+
+/// Unnormalized component-wise sum of the indexed embeddings. Pass 2 keeps this
+/// alongside the normalized centroid so an outlier add is O(dim), not O(S).
+fn centroid_sum(indices: &[usize], embeddings: &[Vec<f32>], dim: usize) -> Vec<f32> {
     let mut sum = vec![0f32; dim];
     for &i in indices {
         let v = &embeddings[i];
-        for d in 0..dim {
+        // Callers guarantee uniform dim (the face loader filters to the modal
+        // dimension; restructure passes one CLIP space). The `.min` is a
+        // release-safe backstop so a stray short vector can never index out of
+        // bounds and panic here.
+        debug_assert_eq!(v.len(), dim, "centroid_sum: embedding dim mismatch");
+        for d in 0..dim.min(v.len()) {
             sum[d] += v[d];
         }
     }
+    sum
+}
+
+/// L2-normalize a running sum vector into a unit centroid.
+fn normalize_sum(sum: &[f32], dim: usize) -> Vec<f32> {
+    let mut out = vec![0f32; dim];
     let mut norm: f32 = 0.0;
     for d in 0..dim {
         norm += sum[d] * sum[d];
     }
     let inv_n = 1.0 / norm.sqrt().max(f32::MIN_POSITIVE);
     for d in 0..dim {
-        sum[d] *= inv_n;
+        out[d] = sum[d] * inv_n;
     }
-    sum
+    out
 }
 
 /// Cosine on pre-normalized vectors = dot product.

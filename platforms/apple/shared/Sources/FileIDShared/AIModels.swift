@@ -4,85 +4,100 @@
 import Foundation
 
 public enum AIModelKind: String, CaseIterable, Sendable, Codable {
-    case qwen2VL3B       = "qwen2_vl_3b"
+    // Commercial-clean lineup (2026-05): the non-commercial Qwen2.5-VL-3B
+    // (Qwen Research license) was dropped for the Apache-2.0 7B. Gemma /
+    // PaliGemma stay (Gemma Terms permit commercial use); Mistral-Small-3.2
+    // (Apache-2.0) is the max-quality pick. Mirrors the Windows VLM ladder.
+    // rawValues are the canonical cross-platform model-kind tokens — they
+    // must match the Windows engine (registry.rs ids / AppSettings
+    // AllowedVlmKinds) byte-for-byte so a DB shared across platforms
+    // round-trips the "analyzed" state (skipExisting matches, badge lights).
+    case qwen2VL7B       = "qwen2_5_vl_7b"
     case qwen3VL4B       = "qwen3_vl_4b"
-    case gemma3_4B       = "gemma3_4b"
-    case gemma3_12B      = "gemma3_12b"
+    case gemma3_4B       = "gemma_3_4b"
+    case gemma3_12B      = "gemma_3_12b"
+    case mistralSmall32  = "mistral_small_3_2"
     case paligemma3B     = "paligemma_3b"
 
     public var displayName: String {
         switch self {
-        case .qwen2VL3B:    return "Qwen2.5-VL 3B (4-bit)"
-        case .qwen3VL4B:    return "Qwen3-VL 4B (4-bit)"
-        case .gemma3_4B:    return "Gemma 3 4B (QAT 4-bit)"
-        case .gemma3_12B:   return "Gemma 3 12B (QAT 4-bit)"
-        case .paligemma3B:  return "PaliGemma 3B (8-bit)"
+        case .qwen2VL7B:     return "Qwen2.5-VL 7B (4-bit)"
+        case .qwen3VL4B:     return "Qwen3-VL 4B (4-bit)"
+        case .gemma3_4B:     return "Gemma 3 4B (QAT 4-bit)"
+        case .gemma3_12B:    return "Gemma 3 12B (QAT 4-bit)"
+        case .mistralSmall32: return "Mistral Small 3.2 24B (4-bit)"
+        case .paligemma3B:   return "PaliGemma 3B (8-bit)"
         }
     }
 
     public var subtitle: String {
         switch self {
-        case .qwen2VL3B:    return "Default. Strong all-rounder; solid OCR + scene understanding."
-        case .qwen3VL4B:    return "Newer architecture. Better OCR + reasoning than Qwen2.5."
-        case .gemma3_4B:    return "Google's open model. Strong on grounded VQA."
-        case .gemma3_12B:   return "Highest quality. Heavy: ~9 GB resident, ~3× slower."
-        case .paligemma3B:  return "Strong on grounding, OCR, and visual question answering."
+        case .qwen2VL7B:     return "Recommended. Apache-2.0; strong OCR + scene understanding."
+        case .qwen3VL4B:     return "Newer architecture. Better OCR + reasoning; lighter than 7B."
+        case .gemma3_4B:     return "Google's open model. Strong on grounded VQA. Lightest pick."
+        case .gemma3_12B:    return "High quality. Heavy: ~9 GB resident, ~3× slower."
+        case .mistralSmall32: return "Max quality. Apache-2.0; ~14 GB, slowest. 32 GB Macs."
+        case .paligemma3B:   return "Strong on grounding, OCR, and visual question answering."
         }
     }
 
     public var sourceRepo: String {
         switch self {
-        case .qwen2VL3B:    return "mlx-community/Qwen2.5-VL-3B-Instruct-4bit"
-        case .qwen3VL4B:    return "lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit"
-        case .gemma3_4B:    return "mlx-community/gemma-3-4b-it-qat-4bit"
-        case .gemma3_12B:   return "mlx-community/gemma-3-12b-it-qat-4bit"
-        case .paligemma3B:  return "mlx-community/paligemma-3b-mix-448-8bit"
+        case .qwen2VL7B:     return "mlx-community/Qwen2.5-VL-7B-Instruct-4bit"
+        case .qwen3VL4B:     return "lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit"
+        case .gemma3_4B:     return "mlx-community/gemma-3-4b-it-qat-4bit"
+        case .gemma3_12B:    return "mlx-community/gemma-3-12b-it-qat-4bit"
+        case .mistralSmall32: return "mlx-community/Mistral-Small-3.2-24B-Instruct-2506-4bit"
+        case .paligemma3B:   return "mlx-community/paligemma-3b-mix-448-8bit"
         }
     }
 
     public var approxBytes: Int64 {
         switch self {
-        case .qwen2VL3B:    return 3_146_000_000
-        case .qwen3VL4B:    return 3_500_000_000
-        case .gemma3_4B:    return 3_300_000_000
-        case .gemma3_12B:   return 7_500_000_000
-        case .paligemma3B:  return 3_300_000_000
+        case .qwen2VL7B:     return 4_300_000_000
+        case .qwen3VL4B:     return 3_500_000_000
+        case .gemma3_4B:     return 3_300_000_000
+        case .gemma3_12B:    return 7_500_000_000
+        case .mistralSmall32: return 13_500_000_000
+        case .paligemma3B:   return 3_300_000_000
         }
     }
 
     public var ramBudgetGB: Double {
         switch self {
-        case .qwen2VL3B:    return 4.0
-        case .qwen3VL4B:    return 5.0
-        case .gemma3_4B:    return 4.5
-        case .gemma3_12B:   return 9.0
-        case .paligemma3B:  return 4.0
+        case .qwen2VL7B:     return 7.0
+        case .qwen3VL4B:     return 5.0
+        case .gemma3_4B:     return 4.5
+        case .gemma3_12B:    return 9.0
+        case .mistralSmall32: return 16.0
+        case .paligemma3B:   return 4.0
         }
     }
 
     /// Per-image inference cost (seconds). Used to estimate batch ETA.
     public var secondsPerImage: Double {
         switch self {
-        case .qwen2VL3B:    return 1.5
-        case .qwen3VL4B:    return 2.0
-        case .gemma3_4B:    return 1.7
-        case .gemma3_12B:   return 5.0
-        case .paligemma3B:  return 1.6
+        case .qwen2VL7B:     return 2.5
+        case .qwen3VL4B:     return 2.0
+        case .gemma3_4B:     return 1.7
+        case .gemma3_12B:    return 5.0
+        case .mistralSmall32: return 6.0
+        case .paligemma3B:   return 1.6
         }
     }
 
     public var licenseName: String {
         switch self {
-        case .qwen2VL3B, .qwen3VL4B:                return "Apache License 2.0"
-        case .gemma3_4B, .gemma3_12B, .paligemma3B: return "Gemma Terms of Use"
+        case .qwen2VL7B, .qwen3VL4B, .mistralSmall32: return "Apache License 2.0"
+        case .gemma3_4B, .gemma3_12B, .paligemma3B:   return "Gemma Terms of Use"
         }
     }
 
     /// Top three picks for a given RAM tier, ranked best-first.
     public static func recommendedFor(ramGB: Double) -> [AIModelKind] {
-        if ramGB >= 32       { return [.gemma3_12B, .qwen3VL4B, .qwen2VL3B] }
-        else if ramGB >= 16  { return [.qwen3VL4B, .qwen2VL3B, .gemma3_4B] }
-        else                 { return [.qwen2VL3B, .gemma3_4B, .paligemma3B] }
+        if ramGB >= 32       { return [.mistralSmall32, .gemma3_12B, .qwen2VL7B] }
+        else if ramGB >= 16  { return [.qwen2VL7B, .qwen3VL4B, .gemma3_4B] }
+        else                 { return [.gemma3_4B, .qwen3VL4B, .paligemma3B] }
     }
 
     /// Reserves ~8 GB for system + scan engine + DB cache. A model that
@@ -93,86 +108,72 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
         return ramBudgetGB <= headroom
     }
 
-    /// First recommendation that fits, falling back to Qwen2.5-VL 3B.
+    /// First recommendation that fits, falling back to the lightest
+    /// commercial-clean pick (Gemma 3 4B).
     public static func safeDefaultFor(ramGB: Double) -> AIModelKind {
-        recommendedFor(ramGB: ramGB).first { $0.fits(ramGB: ramGB) } ?? .qwen2VL3B
+        recommendedFor(ramGB: ramGB).first { $0.fits(ramGB: ramGB) } ?? .gemma3_4B
+    }
+
+    /// Migrate a persisted rawValue that may predate the commercial-clean
+    /// lineup (e.g. the dropped "qwen2_vl_3b") or the cross-platform
+    /// model-kind token rename (the rawValues now match the Windows engine
+    /// tokens exactly). Call this when decoding a stored selection so an old
+    /// value maps to a supported model instead of failing to decode. Mirrors
+    /// the Windows AppSettings v5 migration.
+    public static func migrated(rawValue: String) -> AIModelKind {
+        if let kind = AIModelKind(rawValue: rawValue) { return kind }
+        switch rawValue {
+        // Pre-rename tokens for kinds whose rawValue changed to the Windows
+        // canonical form (qwen2_vl_7b → qwen2_5_vl_7b, gemma3_* → gemma_3_*).
+        case "qwen2_vl_7b":                  return .qwen2VL7B
+        case "gemma3_4b":                    return .gemma3_4B
+        case "gemma3_12b":                   return .gemma3_12B
+        // Dropped non-commercial Qwen2.5-VL-3B (Qwen Research License).
+        case "qwen2_vl_3b", "qwen2_5_vl_3b": return .qwen2VL7B
+        default:                              return .qwen2VL7B
+        }
     }
 }
 
 // MARK: - FaceEmbedderKind
 
-/// Per-face embedder used for clustering. Distinct from `AIModelKind`
-/// (which lists VLMs for Deep Analyze) because face embedders have a
-/// different shape: small (~13–166 MB), fast (<50 ms per face on ANE),
-/// invoked inside the scan loop, and have their own .mlpackage cache
-/// path separate from MLX's HF cache.
+/// Per-face embedder used for clustering. SFace (OpenCV Zoo, Apache-2.0,
+/// 128-d) — the commercial-clean replacement for the non-commercial
+/// InsightFace ArcFace. Still run as ONNX via ONNX Runtime + CoreML EP
+/// (same `ArcFaceService` path); only the model file, the embedding
+/// dimension (512 → 128), and the input preprocessing changed — SFace
+/// takes RAW [0,255] RGB (it bakes its own normalization) rather than
+/// ArcFace's `(px − 127.5) / 127.5`. See `ArcFaceService`.
 public enum FaceEmbedderKind: String, CaseIterable, Sendable, Codable {
-    case arcfaceIResNet50  = "arcface_iresnet50"
-    case arcfaceMobileFace = "arcface_mobileface"
+    case sface = "sface"
 
-    public var displayName: String {
-        switch self {
-        case .arcfaceIResNet50:  return "ArcFace iResNet50 (Buffalo-L)"
-        case .arcfaceMobileFace: return "ArcFace MobileFace (Buffalo-S)"
-        }
-    }
+    public var displayName: String { "SFace (OpenCV Zoo)" }
 
     public var subtitle: String {
-        switch self {
-        case .arcfaceIResNet50:
-            return "Industry standard. Same model Immich uses; tightest same-person clusters across age, lighting, and pose."
-        case .arcfaceMobileFace:
-            return "Compact (~13 MB) alternative — small by design, not by mistake. Near-equal accuracy, picked automatically on 8 GB Macs."
-        }
+        "Commercial-clean (Apache-2.0) face recognition — 128-d embeddings. Replaces the non-commercial InsightFace ArcFace."
     }
 
-    /// Where the ONNX model file lives on disk. We pull the original
-    /// Buffalo ONNX from Immich's HF mirror at runtime — no on-device
-    /// conversion, no redistribution of the InsightFace pre-trained
-    /// weights on our part.
-    public var modelFileName: String {
-        switch self {
-        case .arcfaceIResNet50:  return "arcface_iresnet50.onnx"
-        case .arcfaceMobileFace: return "arcface_mobileface.onnx"
-        }
-    }
+    /// ONNX model filename on disk. Pulled from OpenCV Zoo's HF mirror at
+    /// runtime — no redistribution, no on-device conversion.
+    public var modelFileName: String { "face_recognition_sface_2021dec.onnx" }
 
-    /// Source HF repo containing the original ONNX. Used by the
-    /// conversion script and by the engine's status-check on first run.
-    public var sourceRepo: String {
-        switch self {
-        case .arcfaceIResNet50:  return "immich-app/buffalo_l"
-        case .arcfaceMobileFace: return "immich-app/buffalo_s"
-        }
-    }
+    /// Source HF repo containing the original ONNX.
+    public var sourceRepo: String { "opencv/face_recognition_sface" }
 
-    public var approxBytes: Int64 {
-        switch self {
-        case .arcfaceIResNet50:  return 175_000_000   // ~166 MB ONNX, similar after CoreML pack
-        case .arcfaceMobileFace: return 14_000_000    // ~13 MB
-        }
-    }
+    public var approxBytes: Int64 { 38_700_000 }   // ~37 MB ONNX
 
-    /// L2-normalized 512-d float32. Same for both variants — ArcFace
-    /// trains all heads to the same embedding dimension.
-    public var embeddingDim: Int { 512 }
+    /// L2-normalized 128-d float32 (= 512-byte DB blob). Replaces ArcFace's
+    /// 512-d (2048-byte) — old prints are wiped by migration v12.
+    public var embeddingDim: Int { 128 }
 
-    /// Approximate per-face embedding cost on M1 Pro ANE (ms). Used for
-    /// migration ETA and progress estimates.
-    public var msPerFace: Double {
-        switch self {
-        case .arcfaceIResNet50:  return 25.0
-        case .arcfaceMobileFace: return 10.0
-        }
-    }
+    /// Approximate per-face embedding cost on M1 Pro ANE (ms).
+    public var msPerFace: Double { 8.0 }
 
-    public var licenseName: String { "MIT (InsightFace) / Apache 2.0 (Immich packaging)" }
+    public var licenseName: String { "Apache License 2.0 (OpenCV Zoo)" }
 
-    /// Default for the user's Mac. iResNet50 above 16 GB; MobileFace
-    /// below. The user can override in Settings.
-    public static func defaultFor(ramGB: Double) -> FaceEmbedderKind {
-        ramGB >= 16 ? .arcfaceIResNet50 : .arcfaceMobileFace
-    }
+    /// SFace is the only (commercial-clean) embedder now; the `ramGB`
+    /// parameter is retained for call-site compatibility.
+    public static func defaultFor(ramGB _: Double) -> FaceEmbedderKind { .sface }
 
     /// Installation directory shared between engine + app. Both check
     /// here when deciding whether the upgrade banner should show.

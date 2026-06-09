@@ -33,8 +33,8 @@ public final class CLIPModelInstaller {
     public static var requiredFiles: [URL] {
         let models = modelsRoot
         return [
-            models.appendingPathComponent("mobileclip_image/mobileclip_s2_image.mlpackage"),
-            models.appendingPathComponent("clip_text/clip_text.mlpackage"),
+            models.appendingPathComponent("mobileclip_image/clip_vitb32_image.onnx"),
+            models.appendingPathComponent("clip_text/clip_text.onnx"),
             models.appendingPathComponent("clip_text/vocab.json"),
             models.appendingPathComponent("clip_text/merges.txt"),
         ]
@@ -44,37 +44,24 @@ public final class CLIPModelInstaller {
 
     private static var fetchPlan: [(remote: URL, dest: URL)] {
         let m = modelsRoot
-        let imgPkg = m.appendingPathComponent("mobileclip_image/mobileclip_s2_image.mlpackage")
-        // Apple's file is mobileclip_s2_text.mlpackage; CLIPTextEncoder
-        // looks under clip_text.mlpackage, so we rename on landing.
-        let txtPkg = m.appendingPathComponent("clip_text/clip_text.mlpackage")
         let txtDir = m.appendingPathComponent("clip_text")
-        func appleImg(_ rel: String) -> URL? {
-            URL(string: "https://huggingface.co/apple/coreml-mobileclip/resolve/main/mobileclip_s2_image.mlpackage/\(rel)")
-        }
-        func appleTxt(_ rel: String) -> URL? {
-            URL(string: "https://huggingface.co/apple/coreml-mobileclip/resolve/main/mobileclip_s2_text.mlpackage/\(rel)")
+        // OpenCLIP ViT-B/32 (MIT) ONNX — commercial-clean replacement for the
+        // research-only Apple MobileCLIP-S2 CoreML packages. Same 512-d space
+        // as the Windows engine; BPE vocab/merges still from OpenAI's repo.
+        func xenova(_ rel: String) -> URL? {
+            URL(string: "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/\(rel)")
         }
         func openaiBpe(_ name: String) -> URL? {
             URL(string: "https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/\(name)")
         }
-        // compactMap drops any entry whose URL doesn't parse — currently
-        // never possible since all paths are static literals, but the
-        // compactMap means a future typo or accidental whitespace can't
-        // crash the installer.
+        // compactMap drops any entry whose URL doesn't parse — currently never
+        // possible (static literals), but it means a future typo can't crash
+        // the installer.
         let pairs: [(URL?, URL)] = [
-            (appleImg("Manifest.json"),
-             imgPkg.appendingPathComponent("Manifest.json")),
-            (appleImg("Data/com.apple.CoreML/model.mlmodel"),
-             imgPkg.appendingPathComponent("Data/com.apple.CoreML/model.mlmodel")),
-            (appleImg("Data/com.apple.CoreML/weights/weight.bin"),
-             imgPkg.appendingPathComponent("Data/com.apple.CoreML/weights/weight.bin")),
-            (appleTxt("Manifest.json"),
-             txtPkg.appendingPathComponent("Manifest.json")),
-            (appleTxt("Data/com.apple.CoreML/model.mlmodel"),
-             txtPkg.appendingPathComponent("Data/com.apple.CoreML/model.mlmodel")),
-            (appleTxt("Data/com.apple.CoreML/weights/weight.bin"),
-             txtPkg.appendingPathComponent("Data/com.apple.CoreML/weights/weight.bin")),
+            (xenova("onnx/vision_model.onnx"),
+             m.appendingPathComponent("mobileclip_image/clip_vitb32_image.onnx")),
+            (xenova("onnx/text_model.onnx"),
+             txtDir.appendingPathComponent("clip_text.onnx")),
             (openaiBpe("vocab.json"), txtDir.appendingPathComponent("vocab.json")),
             (openaiBpe("merges.txt"), txtDir.appendingPathComponent("merges.txt")),
         ]

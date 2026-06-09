@@ -97,7 +97,8 @@
               "properties": {
                 "modelKind":    { "type": "string" },
                 "skipExisting": { "type": "boolean", "description": "If true, skip files where vlm_description IS NOT NULL for this model." },
-                "tagsOnly":     { "type": "boolean", "description": "If true, run the fast tags-only pass (one VLM call/file) instead of full caption + smart-rename + tags. Used by the background auto-tag chain. Optional; defaults to false." }
+                "tagsOnly":     { "type": "boolean", "description": "If true, run the fast tags-only pass (one VLM call/file) instead of full caption + smart-rename + tags. Used by the background auto-tag chain. Optional; defaults to false." },
+                "proposeRenames": { "type": "boolean", "description": "If true (default), the full manual pass also proposes smart filenames; set false for caption + tags without the rename VLM call. Ignored when tagsOnly is true." }
               }
             }
           }
@@ -118,7 +119,7 @@
             }
           }
         },
-        { "type": "object", "required": ["cancelPrewarm"], "additionalProperties": false, "properties": { "cancelPrewarm": { "type": "object", "additionalProperties": false } } },
+        { "type": "object", "required": ["cancelPrewarm"], "additionalProperties": false, "properties": { "cancelPrewarm": { "type": "object", "additionalProperties": false, "properties": { "modelKind": { "type": ["string", "null"], "description": "Cancel this model's in-flight download; null/absent cancels ALL in-flight prewarms." } } } } },
 
         { "type": "object", "required": ["planRestructure"], "additionalProperties": false,
           "properties": { "planRestructure": { "type": "object", "additionalProperties": false,
@@ -138,7 +139,9 @@
                   "source": { "type": "string" },
                   "destination": { "type": "string" },
                   "category": { "type": "string" },
-                  "tier": { "type": ["string", "null"] }
+                  "tier": { "type": ["string", "null"] },
+                  "confidence": { "type": "string" },
+                  "reason": { "type": ["string", "null"] }
                 }
               } },
               "useSymlinks": { "type": "boolean" }
@@ -208,12 +211,31 @@
         { "type": "object", "required": ["findMergeSuggestions"], "additionalProperties": false,
           "properties": { "findMergeSuggestions": { "type": "object", "additionalProperties": false } } },
 
+        { "type": "object", "required": ["markPersonsDifferent"], "additionalProperties": false,
+          "properties": { "markPersonsDifferent": { "type": "object", "additionalProperties": false,
+            "required": ["sourcePersonID", "destinationPersonID", "sourceAnchorFaceID", "destinationAnchorFaceID"],
+            "properties": {
+              "sourcePersonID": { "type": "integer" },
+              "destinationPersonID": { "type": "integer" },
+              "sourceAnchorFaceID": { "type": "integer" },
+              "destinationAnchorFaceID": { "type": "integer" }
+            } } } },
+
         { "type": "object", "required": ["embedImageQuery"], "additionalProperties": false,
           "properties": { "embedImageQuery": { "type": "object", "additionalProperties": false,
             "required": ["fileID", "queryID"],
             "properties": {
               "fileID": { "type": "integer" },
               "queryID": { "type": "string" }
+            } } } },
+
+        { "type": "object", "required": ["generateVideoThumbnail"], "additionalProperties": false,
+          "properties": { "generateVideoThumbnail": { "type": "object", "additionalProperties": false,
+            "required": ["path"],
+            "description": "Generate a 192px JPEG thumbnail for a video on demand. Engine extracts a 25%-duration keyframe, resizes (long side = 192, aspect-preserved), JPEG- + base64-encodes it, and replies with a thumbnailGenerated event.",
+            "properties": {
+              "path": { "type": "string", "description": "Absolute filesystem path to the video file." },
+              "modifiedAt": { "type": ["number", "null"], "description": "File's modified-unix time (f64 seconds). Echoed back on the reply so the app can key its (path, modifiedAt) thumbnail cache. Optional." }
             } } } },
 
         { "type": "object", "required": ["restoreFromTrash"], "additionalProperties": false,
@@ -228,7 +250,9 @@
               "sourcePersonID": { "type": "integer" },
               "destinationPersonID": { "type": "integer" },
               "faceIDsToRevert": { "type": "array", "items": { "type": "integer" } }
-            } } } }
+            } } } },
+
+        { "type": "object", "required": ["wipeLibrary"], "additionalProperties": false, "properties": { "wipeLibrary": { "type": "object", "additionalProperties": false, "description": "Truncate all learned library state (tags, faces, captions, embeddings) in-process on the engine's writer connection — no file deletion, so it never races the OS file-lock. Replies with a libraryWiped event." } } }
       ]
     },
 
@@ -290,7 +314,9 @@
               }
             }
           }
-        }
+        },
+        { "type": "object", "required": ["libraryWiped"], "additionalProperties": false, "properties": { "libraryWiped": { "$ref": "#/$defs/SinglePositional/LibraryWiped" } } },
+        { "type": "object", "required": ["thumbnailGenerated"],     "additionalProperties": false, "properties": { "thumbnailGenerated":     { "$ref": "#/$defs/SinglePositional/ThumbnailGenerated" } } }
       ]
     },
 
@@ -363,7 +389,8 @@
               "kind":         { "type": "string", "enum": ["image", "video", "pdf", "doc", "audio", "other"] },
               "totalMs":      { "type": "number", "minimum": 0 },
               "failed":       { "type": "boolean" },
-              "errorMessage": { "type": ["string", "null"] }
+              "errorMessage": { "type": ["string", "null"] },
+              "skippedStages": { "type": "array", "items": { "type": "string" }, "default": [] }
             }
           }
         }
@@ -505,6 +532,7 @@
               "total":       { "type": "integer", "minimum": 0 },
               "etaSeconds":  { "type": ["number", "null"] },
               "currentPath": { "type": ["string", "null"] },
+              "currentCaption": { "type": ["string", "null"] },
               "modelKind":   { "type": "string" }
             }
           }
@@ -607,7 +635,9 @@
                   "source":      { "type": "string" },
                   "destination": { "type": "string" },
                   "category":    { "type": "string" },
-                  "tier":        { "type": ["string", "null"], "description": "V14.9 A7: per-move tier — Anchor / Mixed / Junk." }
+                  "tier":        { "type": ["string", "null"], "description": "V14.9 A7: per-move tier — Anchor / Mixed / Junk." },
+                  "confidence":  { "type": "string", "description": "Butler confidence band — auto / review / ask (RESTRUCTURE.md §6). Empty on older engines." },
+                  "reason":      { "type": ["string", "null"], "description": "Plain-language 'why filed here', shown in the drill-down." }
                 }
               } },
               "categoryCounts":        { "type": "array", "items": { "type": "object", "additionalProperties": false,
@@ -652,7 +682,7 @@
       },
 
       "BulkActionResult": {
-        "description": "Reply to applyTags / renameFiles / trashFiles / mergeClusters. Action is one of those four string literals; messages carries per-file results.",
+        "description": "Reply to a bulk action (applyTags / renameFiles / trashFiles / mergeClusters / renamePerson / markPersonsAsUnknown / restoreFromTrash / revertMerge). `action` is the originating command's discriminator; the trashFiles reply additionally carries the undo batch id as a ':<uuid>' suffix (e.g. 'trashFiles:5f2c…'), which UndoStack parses. messages carries per-file results.",
         "type": "object",
         "additionalProperties": false,
         "required": ["_0"],
@@ -662,7 +692,7 @@
             "additionalProperties": false,
             "required": ["action", "succeeded", "failed", "messages"],
             "properties": {
-              "action":    { "type": "string", "enum": ["applyTags", "renameFiles", "trashFiles", "mergeClusters"] },
+              "action":    { "type": "string", "pattern": "^(applyTags|renameFiles|trashFiles|mergeClusters|renamePerson|markPersonsAsUnknown|restoreFromTrash|revertMerge)(:[0-9a-fA-F-]+)?$" },
               "succeeded": { "type": "integer", "minimum": 0 },
               "failed":    { "type": "integer", "minimum": 0 },
               "messages":  { "type": "array", "items": { "type": "object", "additionalProperties": false,
@@ -720,6 +750,43 @@
                   "destinationMemberCount":  { "type": "integer", "minimum": 0 }
                 }
               } }
+            }
+          }
+        }
+      },
+
+      "LibraryWiped": {
+        "description": "Reply to wipeLibrary. ok=true when every table was truncated; message carries the error on failure so the app can fall back to its own wipe path.",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["_0"],
+        "properties": {
+          "_0": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["ok"],
+            "properties": {
+              "ok":      { "type": "boolean" },
+              "message": { "type": ["string", "null"] }
+            }
+          }
+        }
+      },
+
+      "ThumbnailGenerated": {
+        "description": "Reply to generateVideoThumbnail. `bytes` is a base64-encoded 192px JPEG (aspect-preserved, long side = 192) — a base64 string, NOT a number array. `modifiedAt` is echoed from the request so the app can write the bytes under its (path, modifiedAt) cache key.",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["_0"],
+        "properties": {
+          "_0": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "bytes"],
+            "properties": {
+              "path":       { "type": "string" },
+              "modifiedAt": { "type": ["number", "null"] },
+              "bytes":      { "type": "string", "description": "Base64-encoded 192px JPEG." }
             }
           }
         }

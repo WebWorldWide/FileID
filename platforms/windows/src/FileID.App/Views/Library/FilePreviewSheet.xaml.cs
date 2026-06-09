@@ -31,6 +31,7 @@ public sealed partial class FilePreviewSheet : UserControl
 
     private IReadOnlyList<FileID.ViewModels.FileTile>? _siblings;
     private int _siblingIndex;
+    private bool _unloaded;
 
     /// <summary>Raised by the toolbar X button + Esc. Host (LibraryView)
     /// subscribes and calls <c>ContentDialog.Hide()</c>.</summary>
@@ -46,6 +47,10 @@ public sealed partial class FilePreviewSheet : UserControl
         Loaded += OnSheetLoaded;
         Unloaded += (_, _) =>
         {
+            _unloaded = true;
+            // Stop the deferred loading-ring timer so a queued tick can't touch
+            // the torn-down content tree.
+            try { _loadingDelayTimer?.Stop(); } catch { /* swallow */ }
             // Stop playback + fully dispose the MediaPlayer so audio can't keep
             // playing and the file handle is released after the dialog dismisses.
             StopAndClearMedia();
@@ -91,30 +96,63 @@ public sealed partial class FilePreviewSheet : UserControl
     }
 
     private void OnPreviewKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+        => HandleKeyDown(e);
+
+    /// <summary>Arrow-key sibling nav + Space play/pause + Esc close. Public
+    /// because the host wires it on the ContentDialog via
+    /// AddHandler(PreviewKeyDownEvent, …, handledEventsToo:true): once the
+    /// dialog is shown IT owns keyboard focus (not this UserControl), so the
+    /// sheet's own PreviewKeyDown never fires. The dialog is an ancestor of the
+    /// focused element, so its tunneling Preview pass reaches us BEFORE a focused
+    /// Button consumes Space — letting us intercept it for play/pause.</summary>
+    internal void HandleKeyDown(Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
     {
-        // While typing in the tag box, let Left/Right move the text cursor.
-        if (e.Key is Windows.System.VirtualKey.Left or Windows.System.VirtualKey.Right)
-        {
-            var focused = XamlRoot is null
-                ? null
-                : Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(XamlRoot);
-            if (focused is TextBox) return;
-        }
+        if (e.Handled) return;
+        // While typing in the tag box, let Left/Right/Space act as text input.
+        var focused = XamlRoot is null
+            ? null
+            : Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(XamlRoot);
+        bool typing = focused is TextBox;
         switch (e.Key)
         {
             case Windows.System.VirtualKey.Left:
+                if (typing) return;
                 NavigateSibling(-1);
                 e.Handled = true;
                 break;
             case Windows.System.VirtualKey.Right:
+                if (typing) return;
                 NavigateSibling(+1);
                 e.Handled = true;
+                break;
+            case Windows.System.VirtualKey.Space:
+                // Space starts/pauses video+audio (the file loads paused —
+                // AutoPlay=False). Only when a media surface is up; otherwise let
+                // Space fall through (e.g. activating a focused button).
+                if (typing) return;
+                if (TryTogglePlayback()) e.Handled = true;
                 break;
             case Windows.System.VirtualKey.Escape:
                 RaiseClose();
                 e.Handled = true;
                 break;
         }
+    }
+
+    /// <summary>Toggle the MediaPlayerElement between play and pause. Returns
+    /// false when no media surface is active (caller lets the key pass through).
+    /// The MediaPlayer is created lazily when Source is set, so it exists by the
+    /// time a video/audio preview is visible.</summary>
+    private bool TryTogglePlayback()
+    {
+        if (PreviewMedia.Visibility != Visibility.Visible) return false;
+        var mp = PreviewMedia.MediaPlayer;
+        if (mp is null) return false;
+        if (mp.PlaybackSession.PlaybackState == Windows.Media.Playback.MediaPlaybackState.Playing)
+            mp.Pause();
+        else
+            mp.Play();
+        return true;
     }
 
     private void OnPrevClicked(object sender, RoutedEventArgs e) => NavigateSibling(-1);
@@ -141,12 +179,13 @@ public sealed partial class FilePreviewSheet : UserControl
     public async void SetFile(string path, string kind, long sizeBytes, double? modifiedAt, long fileId = 0,
                                bool hasFaces = false, bool hasText = false)
     {
+        // Stamp this navigation so async loads from a prior file bail. (audit A9)
+        int navGen = System.Threading.Interlocked.Increment(ref _navGen);
         FileId = fileId;
         // Publish the active file so the Deep Analyze tab's "Analyze
         // current" button can target it without LibraryView wiring.
         FileID.Services.SelectionRegistry.Instance.PreviewedFileId =
             fileId > 0 ? fileId : null;
-        FacesBadge.Visibility = hasFaces ? Visibility.Visible : Visibility.Collapsed;
         TextBadge.Visibility = hasText ? Visibility.Visible : Visibility.Collapsed;
 
         TagInput.Text = string.Empty;
@@ -154,37 +193,92 @@ public sealed partial class FilePreviewSheet : UserControl
         // Refresh the proposed-rename card from the DB (separate query
         // because the sheet may be opened for a file the LibraryView
         // hasn't loaded yet).
-        _ = LoadProposedNameAsync(fileId);
+        _ = LoadProposedNameAsync(fileId, navGen);
         // Refresh the Vision Tags card (auto + user tags for this file).
-        _ = LoadVisionTagsAsync(fileId);
+        _ = LoadVisionTagsAsync(fileId, navGen);
 
-        // Hide every preview surface up front; the kind dispatcher below
-        // re-shows exactly one. Without this a navigation from video →
-        // image would leave both visible.
+        // Media + placeholder are cleared up front (media must stop the instant
+        // we navigate away; neither flashes a loading ring). The prior IMAGE
+        // frame is deliberately left on screen until the new thumbnail binds —
+        // see the deferred LoadingPanel below. The kind dispatcher's success
+        // paths each collapse PreviewImage when they show their own surface.
         StopAndClearMedia();
-        PreviewImage.Visibility = Visibility.Collapsed;
         PreviewMedia.Visibility = Visibility.Collapsed;
         PlaceholderPanel.Visibility = Visibility.Collapsed;
-        LoadingPanel.Visibility = Visibility.Visible;
+        // Defer the loading ring: arrow-key sibling nav is usually a cache-warm
+        // load that resolves in well under 100 ms. Collapsing the prior image
+        // and showing LoadingPanel synchronously made the ring flash between
+        // every sibling. Arm a short timer instead so only a genuinely slow
+        // decode shows it; the continuation that binds the new image (or shows
+        // media / placeholder) cancels the timer first.
+        ArmLoadingDelay();
 
         // Async-void → must wrap the entire body. Any unhandled exception
         // here would terminate the dispatcher and crash the window.
         try
         {
-            await SetFileCoreAsync(path, kind, sizeBytes, modifiedAt);
+            await SetFileCoreAsync(path, kind, sizeBytes, modifiedAt, navGen);
         }
         catch (Exception ex)
         {
+            // The sheet may have unloaded while SetFileCoreAsync awaited; a
+            // post-continuation ShowPlaceholder would touch a torn-down tree.
+            if (_unloaded) return;
             Services.DebugLog.Warn("FilePreviewSheet.SetFile threw: " + ex);
             ShowPlaceholder(kind, "Preview failed: " + ex.Message);
         }
         finally
         {
-            LoadingPanel.Visibility = Visibility.Collapsed;
+            if (!_unloaded) HideLoadingChrome();
         }
     }
 
-    private async Task SetFileCoreAsync(string path, string kind, long sizeBytes, double? modifiedAt)
+    // Deferred loading-ring timer. Shows LoadingPanel only if the new preview
+    // surface hasn't bound within the delay, so sub-100 ms cached sibling
+    // navigations never flash a ring. Single instance reused across SetFile
+    // calls; each call re-arms it and every terminal show-path cancels it.
+    private Microsoft.UI.Xaml.DispatcherTimer? _loadingDelayTimer;
+    private static readonly TimeSpan LoadingDelay = TimeSpan.FromMilliseconds(120);
+
+    private void ArmLoadingDelay()
+    {
+        if (_loadingDelayTimer is null)
+        {
+            _loadingDelayTimer = new Microsoft.UI.Xaml.DispatcherTimer { Interval = LoadingDelay };
+            _loadingDelayTimer.Tick += (_, _) =>
+            {
+                _loadingDelayTimer?.Stop();
+                if (_unloaded) return;
+                // If a fast decode already bound a surface before this 120ms delay
+                // elapsed (the Tick can be queued just after the bind continuation
+                // but before HideLoadingChrome stops the timer), do NOT blank it —
+                // collapsing PreviewImage here with no re-show would leave a blank
+                // preview. Only reveal the ring while still genuinely loading.
+                if (PreviewImage.Visibility == Visibility.Visible
+                    || PreviewMedia.Visibility == Visibility.Visible)
+                {
+                    return;
+                }
+                // Still loading after the delay — now it's worth showing the
+                // ring. Collapse the prior frame so the ring isn't drawn over it.
+                PreviewImage.Visibility = Visibility.Collapsed;
+                LoadingPanel.Visibility = Visibility.Visible;
+            };
+        }
+        _loadingDelayTimer.Stop();
+        _loadingDelayTimer.Start();
+    }
+
+    // Cancel the pending loading-ring timer and hide the ring. Called the
+    // instant a new preview surface binds (or the load finishes) so a fast
+    // cache-warm load never reveals the ring.
+    private void HideLoadingChrome()
+    {
+        _loadingDelayTimer?.Stop();
+        LoadingPanel.Visibility = Visibility.Collapsed;
+    }
+
+    private async Task SetFileCoreAsync(string path, string kind, long sizeBytes, double? modifiedAt, int navGen)
     {
         FilePath = path;
         FileNameText.Text = Path.GetFileName(path);
@@ -207,7 +301,7 @@ public sealed partial class FilePreviewSheet : UserControl
             case "image":
             case "pdf":
             case "doc":
-                await LoadShellThumbnailAsync(path, kind);
+                await LoadShellThumbnailAsync(path, kind, modifiedAt, navGen);
                 break;
             case "video":
             case "audio":
@@ -224,7 +318,16 @@ public sealed partial class FilePreviewSheet : UserControl
     /// / .pages / PDF all render correctly when their providers are
     /// installed. Falls back to the placeholder if the provider returns
     /// nothing.</summary>
-    private async Task LoadShellThumbnailAsync(string path, string kind)
+    /// <summary>Bounded MRU cache of the 1024px preview BitmapImages, keyed by
+    /// path|modifiedAt. Arrow-keying back and forth over the same siblings would
+    /// otherwise re-run the shell extract + ~4 MB decode every step (this is the
+    /// 1024px preview path — separate from ThumbnailService's 192px L1/L2). All
+    /// access is UI-thread-affine: BitmapImage is a DispatcherObject, so this is
+    /// only ever read/written from the dispatcher-marshaled paths below.</summary>
+    private const int PreviewCacheCap = 4;
+    private readonly LinkedList<KeyValuePair<string, BitmapImage>> _previewCache = new();
+
+    private async Task LoadShellThumbnailAsync(string path, string kind, double? modifiedAt, int navGen)
     {
         // BitmapImage is a DispatcherObject. The await on
         // GetThumbnailAsync can resume on a worker thread; constructing the
@@ -233,6 +336,11 @@ public sealed partial class FilePreviewSheet : UserControl
         // before any await and marshal the BitmapImage construction +
         // PreviewImage.Source/Visibility assignment inside one TryEnqueue.
         var dispatcher = DispatcherQueue;
+        var cacheKey = modifiedAt.HasValue ? $"{path}|{modifiedAt.Value:R}" : path;
+        if (dispatcher != null && TryShowCachedPreview(cacheKey, dispatcher, navGen))
+        {
+            return;
+        }
         Windows.Storage.FileProperties.StorageItemThumbnail? thumb = null;
         try
         {
@@ -250,10 +358,18 @@ public sealed partial class FilePreviewSheet : UserControl
                 {
                     try
                     {
-                        var bmp = new BitmapImage();
+                        // Stale navigation — don't overwrite a newer file's preview. (audit A9)
+                        if (_unloaded || _navGen != navGen) { tcs.TrySetResult(false); return; }
+                        // Cap the decoded surface at the displayed 1024 px edge
+                        // regardless of what the shell hands back, so the 4-entry
+                        // preview cache stays within its ~16 MB budget instead of
+                        // holding native-resolution (e.g. 48 MP) decodes. (audit P6)
+                        var bmp = new BitmapImage { DecodePixelWidth = 1024 };
                         await bmp.SetSourceAsync(captured);
                         PreviewImage.Source = bmp;
                         PreviewImage.Visibility = Visibility.Visible;
+                        // On the UI thread here — safe to populate the DispatcherObject cache.
+                        StorePreview(cacheKey, bmp);
                         tcs.TrySetResult(true);
                     }
                     catch (Exception ex)
@@ -285,6 +401,11 @@ public sealed partial class FilePreviewSheet : UserControl
         {
             try { thumb?.Dispose(); } catch { }
         }
+        // Don't show the failure placeholder if we navigated away (or the stale
+        // guard above set tcs=false for a superseded nav) — otherwise the prior
+        // file's load clobbers the CURRENT sibling's preview with a placeholder.
+        // A genuine decode failure on the still-current file falls through. (audit A9 re-audit)
+        if (_unloaded || _navGen != navGen) return;
         ShowPlaceholder(kind, kind switch
         {
             "image" => "Image couldn't be decoded by any installed provider.",
@@ -292,6 +413,43 @@ public sealed partial class FilePreviewSheet : UserControl
             "doc" => "No preview available — Office handler may not be installed.",
             _ => "No preview available for this file type.",
         });
+    }
+
+    /// <summary>UI-thread-only. On a cache hit, marshal the cached BitmapImage
+    /// onto PreviewImage and bump it to most-recently-used. Returns true when a
+    /// cached preview was shown (caller skips the shell extract + decode).</summary>
+    private bool TryShowCachedPreview(string cacheKey, Microsoft.UI.Dispatching.DispatcherQueue dispatcher, int navGen)
+    {
+        for (var node = _previewCache.First; node != null; node = node.Next)
+        {
+            if (node.Value.Key != cacheKey) continue;
+            var bmp = node.Value.Value;
+            _previewCache.Remove(node);
+            _previewCache.AddFirst(node);
+            dispatcher.TryEnqueue(() =>
+            {
+                if (_unloaded || _navGen != navGen) return; // stale navigation (audit A9)
+                PreviewImage.Source = bmp;
+                PreviewImage.Visibility = Visibility.Visible;
+            });
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>UI-thread-only (BitmapImage is a DispatcherObject). Insert at MRU
+    /// front, dedupe the key, and evict the oldest beyond the cap.</summary>
+    private void StorePreview(string cacheKey, BitmapImage bmp)
+    {
+        for (var node = _previewCache.First; node != null; node = node.Next)
+        {
+            if (node.Value.Key == cacheKey) { _previewCache.Remove(node); break; }
+        }
+        _previewCache.AddFirst(new KeyValuePair<string, BitmapImage>(cacheKey, bmp));
+        while (_previewCache.Count > PreviewCacheCap)
+        {
+            _previewCache.RemoveLast();
+        }
     }
 
     /// <summary>Hand the file to MediaPlayerElement. Windows ships a
@@ -311,6 +469,11 @@ public sealed partial class FilePreviewSheet : UserControl
     // Bumped on every SetFile / teardown so a slow async media load that
     // resolves AFTER the user has navigated away detects it's stale and bails.
     private int _mediaGen;
+    // Bumped at the top of every SetFile. The image preview + metadata-card
+    // loaders capture it and skip their UI write if it changed, so a slow async
+    // result from a prior file can't overwrite the sibling the user navigated to.
+    // (audit A9)
+    private int _navGen;
 
     /// <summary>Load a video/audio file into the MediaPlayerElement via
     /// CreateFromStorageFile (the StorageFile broker — the same path the
@@ -327,6 +490,9 @@ public sealed partial class FilePreviewSheet : UserControl
             _currentMediaKind = kind;
             var src = Windows.Media.Core.MediaSource.CreateFromStorageFile(file);
             _currentMediaSource = src;
+            // The prior image frame is kept on screen until a new surface binds
+            // (deferred-loading); collapse it now that the media surface is up.
+            PreviewImage.Visibility = Visibility.Collapsed;
             PreviewMedia.Source = src;
             PreviewMedia.Visibility = Visibility.Visible;
             // Attach failure handler on the (lazily-created) MediaPlayer; detach
@@ -440,7 +606,6 @@ public sealed partial class FilePreviewSheet : UserControl
             var dt = DateTimeOffset.FromUnixTimeMilliseconds((long)(modifiedAt.Value * 1000)).LocalDateTime;
             AddMetadataRow("Modified", dt.ToString("g"));
         }
-        if (FacesBadge.Visibility == Visibility.Visible) AddMetadataRow("Faces", "Detected");
         if (TextBadge.Visibility == Visibility.Visible) AddMetadataRow("Text", "Detected (OCR)");
     }
 
@@ -452,8 +617,8 @@ public sealed partial class FilePreviewSheet : UserControl
         var labelText = new TextBlock
         {
             Text = label,
-            Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
-            Foreground = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+            Style = FileID.Services.ThemeHelper.GetStyleSafe("CaptionTextBlockStyle")!,
+            Foreground = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorSecondaryBrush"),
             VerticalAlignment = VerticalAlignment.Top,
         };
         Grid.SetRow(labelText, rowIdx);
@@ -463,7 +628,7 @@ public sealed partial class FilePreviewSheet : UserControl
         var valueText = new TextBlock
         {
             Text = value,
-            Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
+            Style = FileID.Services.ThemeHelper.GetStyleSafe("CaptionTextBlockStyle")!,
             TextWrapping = wrap ? TextWrapping.Wrap : TextWrapping.NoWrap,
             TextTrimming = wrap ? TextTrimming.None : TextTrimming.CharacterEllipsis,
             IsTextSelectionEnabled = true,
@@ -490,7 +655,7 @@ public sealed partial class FilePreviewSheet : UserControl
     // ─── Proposed rename card ─────────────────────────────────────────
     private string? _pendingProposedName;
 
-    private async System.Threading.Tasks.Task LoadProposedNameAsync(long fileId)
+    private async System.Threading.Tasks.Task LoadProposedNameAsync(long fileId, int navGen)
     {
         ProposedRenameCard.Visibility = Visibility.Collapsed;
         _pendingProposedName = null;
@@ -503,7 +668,7 @@ public sealed partial class FilePreviewSheet : UserControl
                 try
                 {
                     if (!System.IO.File.Exists(Services.AppPaths.DbPath)) return null;
-                    var conn = new Microsoft.Data.Sqlite.SqliteConnection(
+                    using var conn = new Microsoft.Data.Sqlite.SqliteConnection(
                         new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
                         {
                             DataSource = Services.AppPaths.DbPath,
@@ -524,9 +689,10 @@ public sealed partial class FilePreviewSheet : UserControl
 
         if (string.IsNullOrWhiteSpace(name)) return;
         _pendingProposedName = name;
-        // Defensive: sheet may have closed during the async query. Wrap
-        // the UI mutation so a torn-down dialog content tree doesn't
-        // fast-fail the dispatcher.
+        // Defensive: sheet may have closed during the async query. Bail before
+        // touching XAML, then wrap the UI mutation so a torn-down dialog
+        // content tree doesn't fast-fail the dispatcher.
+        if (_unloaded || _navGen != navGen) return; // navigated away during the await (audit A9)
         try
         {
             ProposedRenameText.Text = name;
@@ -545,12 +711,35 @@ public sealed partial class FilePreviewSheet : UserControl
             if (FileId <= 0 || string.IsNullOrWhiteSpace(name)) return;
             try
             {
-                await ViewModels.EngineClient.Instance.RenameFilesAsync(new[]
+                // Await the engine's BulkActionResult instead of fire-and-forget:
+                // handle_rename_files reports per-file failure (unsafe name,
+                // destination exists, source missing, DB-update failed) in the
+                // result, not as a thrown exception. Collapsing the card on the
+                // IPC send alone told the user the rename succeeded when it hadn't
+                // (the silent-failure class). Mirrors BulkRenameSheet.
+                var result = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
+                    "renameFiles",
+                    () => ViewModels.EngineClient.Instance.RenameFilesAsync(new[]
+                    {
+                        new IpcSchema.RenameEntry(FileId, name!),
+                    }),
+                    TimeSpan.FromSeconds(30));
+                // Succeeded==0 (with Failed==0) is the engine's wholesale-error
+                // shape (e.g. a busy/locked DB → emit_bulk_result Ok(Err)); guard
+                // it too so a total failure isn't treated as success.
+                if (result.Failed > 0 || result.Succeeded == 0)
                 {
-                    new IpcSchema.RenameEntry(FileId, name!),
-                });
+                    // Keep the proposed-name card open so the user can see it
+                    // didn't apply and retry, rather than silently vanishing.
+                    Services.DebugLog.Warn("Apply rename reported failure; leaving card open");
+                    return;
+                }
                 ProposedRenameCard.Visibility = Visibility.Collapsed;
                 _pendingProposedName = null;
+            }
+            catch (TimeoutException ex)
+            {
+                Services.DebugLog.Warn("Apply rename timed out: " + ex.Message);
             }
             catch (Exception ex)
             {
@@ -569,7 +758,7 @@ public sealed partial class FilePreviewSheet : UserControl
     // Reads every auto + user tag for this file from the DB and renders
     // them as TagChip controls inside VisionTagsHost. Mirrors the Library
     // card chip strip — same control, same formatting, same visual weight.
-    private async System.Threading.Tasks.Task LoadVisionTagsAsync(long fileId)
+    private async System.Threading.Tasks.Task LoadVisionTagsAsync(long fileId, int navGen)
     {
         VisionTagsCard.Visibility = Visibility.Collapsed;
         VisionTagsHost.Children.Clear();
@@ -584,7 +773,7 @@ public sealed partial class FilePreviewSheet : UserControl
                 try
                 {
                     if (!System.IO.File.Exists(Services.AppPaths.DbPath)) return list;
-                    var conn = new Microsoft.Data.Sqlite.SqliteConnection(
+                    using var conn = new Microsoft.Data.Sqlite.SqliteConnection(
                         new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
                         {
                             DataSource = Services.AppPaths.DbPath,
@@ -613,6 +802,7 @@ public sealed partial class FilePreviewSheet : UserControl
         if (tags.Count == 0) return;
         // UI mutation in a try/catch — sheet may have closed during the
         // async DB read; the XAML element references could be disposed.
+        if (_unloaded || _navGen != navGen) return; // navigated away during the await (audit A9)
         try
         {
             // Build a wrapping chip layout via runtime row construction:
@@ -627,6 +817,7 @@ public sealed partial class FilePreviewSheet : UserControl
             {
                 var formatted = FileID.Theme.Controls.TagChip.FormatTag(t);
                 var chip = new FileID.Theme.Controls.TagChip { TagText = formatted };
+                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(chip, $"Tag: {formatted}");
                 // Estimate chip width — TagChip is 11pt font; rough heuristic
                 // is "~7 DIP per char + 10 DIP padding", capped at 120.
                 double estDip = System.Math.Min(120, 7.0 * System.Math.Max(2, formatted.Length) + 10.0);
@@ -674,7 +865,7 @@ public sealed partial class FilePreviewSheet : UserControl
         try
         {
             AnalyzeButton.IsEnabled = false;
-            await ViewModels.EngineClient.Instance.DeepAnalyzeFileAsync(FileId, "qwen2_5_vl_3b");
+            await ViewModels.EngineClient.Instance.DeepAnalyzeFileAsync(FileId, Services.AppSettings.Load().SelectedVlmModelKind);
         }
         catch (Exception ex)
         {
@@ -732,9 +923,29 @@ public sealed partial class FilePreviewSheet : UserControl
         try
         {
             ApplyTagsButton.IsEnabled = false;
-            await ViewModels.EngineClient.Instance.ApplyTagsAsync(new long[] { FileId }, tags, mode: "add");
+            // Await the engine's BulkActionResult instead of fire-and-forget:
+            // declaring success on the IPC send alone told the user the tags
+            // applied even when the engine reported failure (the silent-failure
+            // class). Mirrors OnApplyRenameClicked above.
+            var result = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
+                "applyTags",
+                () => ViewModels.EngineClient.Instance.ApplyTagsAsync(new long[] { FileId }, tags, mode: "add"),
+                TimeSpan.FromSeconds(30));
+            // Also guard Succeeded==0 (the engine's wholesale-error shape, e.g. a
+            // busy/locked DB), so a total failure isn't reported as "Added N tags".
+            if (result.Failed > 0 || result.Succeeded == 0)
+            {
+                var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
+                ShowTagStatus(string.IsNullOrWhiteSpace(first) ? "Couldn't apply tags." : "Failed: " + first);
+                return;
+            }
             ShowTagStatus($"Added {tags.Length} tag" + (tags.Length == 1 ? string.Empty : "s") + ".");
             TagInput.Text = string.Empty;
+        }
+        catch (TimeoutException ex)
+        {
+            Services.DebugLog.Warn("FilePreviewSheet.ApplyDraftTags timed out: " + ex.Message);
+            ShowTagStatus("Tagging didn't confirm — try again.");
         }
         catch (Exception ex)
         {

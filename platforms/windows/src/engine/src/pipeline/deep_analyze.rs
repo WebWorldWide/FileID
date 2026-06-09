@@ -1,7 +1,7 @@
 // Deep Analyze — VLM-powered captioning + smart-rename.
 //
 // Pipeline:
-//   1. Pick a model (Qwen2.5-VL 3B / 7B / Gemma 3 4B).
+//   1. Pick a model (Qwen2.5-VL 7B / Gemma 3 4B / Mistral-Small 3.2).
 //   2. Load via llama.cpp (Vulkan / CUDA / DirectML / CPU backend by EP).
 //   3. Per file: render the image / extract a video keyframe / pdfium
 //      first-page render → resize to model context → caption + smart name.
@@ -15,26 +15,26 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum VlmModelKind {
-    QwenVl3B,
     QwenVl7B,
     Gemma3_4B,
+    MistralSmall3_2,
 }
 
 #[allow(dead_code)]
 impl VlmModelKind {
     pub fn id(self) -> &'static str {
         match self {
-            VlmModelKind::QwenVl3B => "qwen2.5-vl-3b",
             VlmModelKind::QwenVl7B => "qwen2.5-vl-7b",
             VlmModelKind::Gemma3_4B => "gemma-3-4b",
+            VlmModelKind::MistralSmall3_2 => "mistral-small-3.2",
         }
     }
 
     pub fn human_name(self) -> &'static str {
         match self {
-            VlmModelKind::QwenVl3B => "Qwen2.5-VL 3B (recommended)",
-            VlmModelKind::QwenVl7B => "Qwen2.5-VL 7B",
+            VlmModelKind::QwenVl7B => "Qwen2.5-VL 7B (recommended)",
             VlmModelKind::Gemma3_4B => "Gemma 3 4B",
+            VlmModelKind::MistralSmall3_2 => "Mistral-Small 3.2",
         }
     }
 
@@ -42,18 +42,19 @@ impl VlmModelKind {
     /// Drives the install-disk-budget warning in the model picker UI.
     pub fn approx_size_mb(self) -> u32 {
         match self {
-            VlmModelKind::QwenVl3B => 1900,
             VlmModelKind::QwenVl7B => 4500,
             VlmModelKind::Gemma3_4B => 2500,
+            // Mistral-Small-3.2-24B Q4_K_M (~14.3 GB) + mmproj (~878 MB).
+            VlmModelKind::MistralSmall3_2 => 15178,
         }
     }
 
     /// Approximate runtime VRAM/RAM ceiling in MB at Q4_K_M.
     pub fn approx_ram_mb(self) -> u32 {
         match self {
-            VlmModelKind::QwenVl3B => 3500,
             VlmModelKind::QwenVl7B => 7500,
             VlmModelKind::Gemma3_4B => 4500,
+            VlmModelKind::MistralSmall3_2 => 16000,
         }
     }
 }
@@ -81,12 +82,28 @@ pub enum AnalyzeMode {
     /// pass is ~3× faster. Caption + proposed-name columns are left untouched.
     TagsOnly,
     Both,
+    /// Caption + tags, but NO smart-rename — the full manual pass with the
+    /// "Propose renames" checkbox unticked. Same VLM calls as Both minus the
+    /// rename call; the proposed-name column is left untouched.
+    CaptionAndTags,
 }
 
 /// Run Deep Analyze on a single file: pull image bytes (image, video
 /// keyframe, or PDF page-1 via shell helpers) → call the VLM via the
 /// subprocess wrapper → write results back to the DB. Cancellation
 /// honored via the shared `AtomicBool`.
+/// Removes the temp rasterized frame on EVERY exit path (`?` error, cancel
+/// bail, success), so VLM error paths no longer leak temp files (#24). Mirrors
+/// the discovery.rs `TempDir` Drop pattern.
+struct TempFileGuard(Option<std::path::PathBuf>);
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+}
+
 pub async fn analyze_file(
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
     runner: &crate::models::vlm::VlmRunner,
@@ -106,11 +123,14 @@ pub async fn analyze_file(
 
     // Resolve + rasterize the source (image as-is; video keyframe; PDF page-1).
     let (rasterized, temp_to_clean) = rasterize_for_vlm(&db, file_id).await?;
+    // Guard cleans the temp frame on any exit, including the `?`/bail paths
+    // below that previously leaked it (#24).
+    let _temp_guard = TempFileGuard(temp_to_clean);
 
     let mut description: Option<String> = None;
     let mut proposed_name: Option<String> = None;
 
-    if matches!(mode, AnalyzeMode::CaptionOnly | AnalyzeMode::Both) {
+    if matches!(mode, AnalyzeMode::CaptionOnly | AnalyzeMode::Both | AnalyzeMode::CaptionAndTags) {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
@@ -131,7 +151,7 @@ pub async fn analyze_file(
     // zero-shot if the user drops CLIP. Clones the weights + rasterized frame so
     // the rename branch below can still take ownership.
     let mut tags: Vec<String> = Vec::new();
-    if matches!(mode, AnalyzeMode::Both | AnalyzeMode::TagsOnly) {
+    if matches!(mode, AnalyzeMode::Both | AnalyzeMode::TagsOnly | AnalyzeMode::CaptionAndTags) {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
@@ -175,10 +195,7 @@ pub async fn analyze_file(
         )?;
     }
 
-    // Best-effort cleanup of any temp rasterized frame.
-    if let Some(temp) = temp_to_clean {
-        let _ = std::fs::remove_file(&temp);
-    }
+    // (temp frame removed by `_temp_guard` on drop — #24)
 
     Ok(AnalyzeOutcome {
         file_id,
@@ -252,6 +269,23 @@ async fn transcode_image_to_jpeg(
 ) -> anyhow::Result<std::path::PathBuf> {
     let p = path.to_path_buf();
     tokio::task::spawn_blocking(move || -> anyhow::Result<std::path::PathBuf> {
+        // Peek dimensions before decode so a tiny adversarial file that expands
+        // to a multi-GB raw buffer can't OOM this blocking thread — mirrors the
+        // MAX_DECODED_PIXELS guard in tagging::decode_image_sync_imagecrate.
+        const MAX_DECODED_PIXELS: u64 = 50_000_000;
+        let (pw, ph) = image::ImageReader::open(&p)
+            .map_err(|e| anyhow::anyhow!("open {}: {e}", p.display()))?
+            .with_guessed_format()
+            .map_err(|e| anyhow::anyhow!("guess format {}: {e}", p.display()))?
+            .into_dimensions()
+            .map_err(|e| anyhow::anyhow!("dimensions {}: {e}", p.display()))?;
+        let pixels = pw as u64 * ph as u64;
+        if pixels > MAX_DECODED_PIXELS {
+            anyhow::bail!(
+                "image dimensions {}×{} ({} pixels) exceed cap of {} — refusing to decode",
+                pw, ph, pixels, MAX_DECODED_PIXELS
+            );
+        }
         let img = image::open(&p)
             .map_err(|e| anyhow::anyhow!("decode {}: {e}", p.display()))?;
         let dest = std::env::temp_dir().join(format!("fileid-vlm-{}.jpg", uuid::Uuid::new_v4()));
@@ -279,24 +313,30 @@ fn persist_vlm_results(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0);
-    conn.execute(
+    // Single transaction so the caption/name UPDATE and the vlm-tag
+    // DELETE+INSERT-replace commit atomically — a crash between the DELETE and
+    // the INSERT loop must not drop a file's VLM tags (#23). `unchecked_`
+    // because the callers hold `conn` behind a parking_lot::Mutex and pass &ref.
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "UPDATE files SET vlm_description=COALESCE(?1, vlm_description), \
                           vlm_proposed_name=COALESCE(?2, vlm_proposed_name), \
                           vlm_model=?3, vlm_analyzed_at=?4 WHERE id=?5",
         rusqlite::params![description, proposed_name, model_kind, now, file_id],
     )?;
     if !tags.is_empty() {
-        conn.execute(
+        tx.execute(
             "DELETE FROM tags WHERE file_id=?1 AND source='vlm'",
             rusqlite::params![file_id],
         )?;
-        let mut stmt = conn.prepare(
+        let mut stmt = tx.prepare(
             "INSERT OR IGNORE INTO tags (file_id, tag, source, score) VALUES (?1, ?2, 'vlm', NULL)",
         )?;
         for t in tags {
             stmt.execute(rusqlite::params![file_id, t])?;
         }
     }
+    tx.commit()?;
     Ok(())
 }
 
@@ -328,6 +368,31 @@ pub(crate) async fn vlm_server_payload_ok(
     result.map(|_| ())
 }
 
+/// Poll the cancel flag until it's set. Raced against an in-flight VLM request
+/// so a user cancel abandons the request promptly. (audit E4)
+async fn wait_cancelled(cancel: &std::sync::atomic::AtomicBool) {
+    while !cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+/// Run one `server.complete` but bail the moment the cancel flag flips, instead
+/// of blocking up to the client's (300 s) timeout. Dropping the losing branch's
+/// future cancels the underlying reqwest request. (audit E4)
+async fn complete_cancellable(
+    server: &crate::models::vlm_server::VlmServer,
+    image: &std::path::Path,
+    prompt: &str,
+    max_tokens: u32,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> anyhow::Result<String> {
+    tokio::select! {
+        biased;
+        _ = wait_cancelled(cancel) => anyhow::bail!("cancelled"),
+        r = server.complete(image, prompt, max_tokens) => r,
+    }
+}
+
 /// Analyze one file through the PERSISTENT llama-server (model already loaded),
 /// with NO per-call model reload. `mode` selects which VLM calls run: `Both`
 /// does caption + tags + smart-rename (3 HTTP calls); `TagsOnly` does just the
@@ -348,25 +413,30 @@ pub(crate) async fn analyze_file_via_server(
     use crate::models::vlm;
     let started = std::time::Instant::now();
     let (rasterized, temp_to_clean) = rasterize_for_vlm(&db, file_id).await?;
+    // Guard cleans the temp frame on any exit, including the cancel-bail/`?`
+    // paths below that previously leaked it (#24).
+    let _temp_guard = TempFileGuard(temp_to_clean);
 
     let mut description: Option<String> = None;
     let mut proposed_name: Option<String> = None;
     let mut tags: Vec<String> = Vec::new();
 
-    if matches!(mode, AnalyzeMode::CaptionOnly | AnalyzeMode::Both) {
+    if matches!(mode, AnalyzeMode::CaptionOnly | AnalyzeMode::Both | AnalyzeMode::CaptionAndTags) {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
-        let d = server.complete(&rasterized, vlm::CAPTION_PROMPT, 80).await?;
+        let d = complete_cancellable(server, &rasterized, vlm::CAPTION_PROMPT, 80, &cancel).await?;
         on_token(&d);
         description = Some(d);
     }
 
-    if matches!(mode, AnalyzeMode::TagsOnly | AnalyzeMode::Both) {
+    if matches!(mode, AnalyzeMode::TagsOnly | AnalyzeMode::Both | AnalyzeMode::CaptionAndTags) {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
-        tags = parse_vlm_tags(&server.complete(&rasterized, vlm::TAG_PROMPT, 40).await?);
+        tags = parse_vlm_tags(
+            &complete_cancellable(server, &rasterized, vlm::TAG_PROMPT, 40, &cancel).await?,
+        );
         // Surface tags in the live stream so a tags-only pass shows feedback.
         if !tags.is_empty() {
             on_token(&tags.join(", "));
@@ -378,7 +448,7 @@ pub(crate) async fn analyze_file_via_server(
             anyhow::bail!("cancelled");
         }
         proposed_name = Some(sanitize_proposed_name(
-            &server.complete(&rasterized, vlm::RENAME_PROMPT, 30).await?,
+            &complete_cancellable(server, &rasterized, vlm::RENAME_PROMPT, 30, &cancel).await?,
         ));
     }
 
@@ -393,9 +463,7 @@ pub(crate) async fn analyze_file_via_server(
             &tags,
         )?;
     }
-    if let Some(temp) = temp_to_clean {
-        let _ = std::fs::remove_file(&temp);
-    }
+    // (temp frame removed by `_temp_guard` on drop — #24)
 
     Ok(AnalyzeOutcome {
         file_id,
@@ -407,9 +475,8 @@ pub(crate) async fn analyze_file_via_server(
 }
 
 /// Pull a 25%-duration keyframe from a video into a temp JPEG via the
-/// existing Media Foundation helper, return the temp path. Caller is
-/// responsible for cleanup (we leak the temp; OS cleans the temp dir on
-/// reboot — fine for one-off analysis).
+/// existing Media Foundation helper, return the temp path. The caller wraps
+/// the returned path in a `TempFileGuard` so it is removed on every exit path.
 async fn rasterize_video_keyframe(path: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
     let p = path.to_path_buf();
     // First attempt the 25 %-of-duration keyframe. If Media Foundation
@@ -494,16 +561,11 @@ fn sanitize_proposed_name(raw: &str) -> String {
     let lowered = trimmed.to_lowercase();
     let cleaned: String = lowered
         .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c
-            } else if c == '-' || c == '_' {
-                c
-            } else if c.is_whitespace() {
-                '-'
-            } else {
-                ' '
-            }
+        .map(|c| match c {
+            c if c.is_ascii_alphanumeric() => c,
+            '-' | '_' => c,
+            c if c.is_whitespace() => '-',
+            _ => ' ',
         })
         .collect();
     let collapsed = cleaned
@@ -661,9 +723,9 @@ mod tests {
     #[test]
     fn model_kinds_have_unique_ids() {
         let kinds = [
-            VlmModelKind::QwenVl3B,
             VlmModelKind::QwenVl7B,
             VlmModelKind::Gemma3_4B,
+            VlmModelKind::MistralSmall3_2,
         ];
         let mut seen = std::collections::HashSet::new();
         for k in kinds {
@@ -673,8 +735,8 @@ mod tests {
 
     #[test]
     fn size_estimates_increase_with_capability() {
-        assert!(VlmModelKind::QwenVl3B.approx_size_mb() < VlmModelKind::QwenVl7B.approx_size_mb());
-        assert!(VlmModelKind::Gemma3_4B.approx_size_mb() > VlmModelKind::QwenVl3B.approx_size_mb());
+        assert!(VlmModelKind::Gemma3_4B.approx_size_mb() < VlmModelKind::QwenVl7B.approx_size_mb());
+        assert!(VlmModelKind::MistralSmall3_2.approx_size_mb() > VlmModelKind::QwenVl7B.approx_size_mb());
     }
 
     #[cfg(feature = "pdf-analyze")]

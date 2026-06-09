@@ -75,7 +75,7 @@ pub enum CommandPayload {
     #[serde(rename = "prewarmModel")]
     PrewarmModel(PrewarmModelPayload),
     #[serde(rename = "cancelPrewarm")]
-    CancelPrewarm(Empty),
+    CancelPrewarm(CancelPrewarmPayload),
 
     #[serde(rename = "planRestructure")]
     PlanRestructure(PlanRestructurePayload),
@@ -125,6 +125,13 @@ pub enum CommandPayload {
     #[serde(rename = "findMergeSuggestions")]
     FindMergeSuggestions(Empty),
 
+    /// Record a user "different people" verdict for a suggested pair so
+    /// findMergeSuggestions stops re-suggesting it. Routed through the
+    /// engine's single-writer DB connection (the app must never open its own
+    /// writer) and keyed on stable anchor face ids so it survives re-cluster.
+    #[serde(rename = "markPersonsDifferent")]
+    MarkPersonsDifferent(MarkPersonsDifferentPayload),
+
     /// Pull a file's stored CLIP image embedding from the DB and emit
     /// it via `clipTextEmbedding` (reusing the same channel — the app's
     /// SemanticSearchAsync doesn't care whether the seed is from text or
@@ -152,6 +159,21 @@ pub enum CommandPayload {
     /// re-creates the source person row + reassigns the faces.
     #[serde(rename = "revertMerge")]
     RevertMerge(RevertMergePayload),
+
+    /// Wipe all learned library state (tags, faces, captions, embeddings)
+    /// in-process on the engine's writer connection, then reply `libraryWiped`.
+    /// The app uses this instead of deleting `fileid.sqlite` itself, which
+    /// races the OS file-lock the engine still holds just after process exit.
+    #[serde(rename = "wipeLibrary")]
+    WipeLibrary(Empty),
+
+    /// Generate a 192px JPEG thumbnail for a video on demand. The engine
+    /// extracts a 25%-duration keyframe, resizes it (long side = 192,
+    /// aspect-preserved), JPEG-encodes + base64-encodes it, and replies with a
+    /// `thumbnailGenerated` event. `modifiedAt` is the file's modified-unix
+    /// time, carried through so the app can key its thumbnail cache.
+    #[serde(rename = "generateVideoThumbnail")]
+    GenerateVideoThumbnail(GenerateVideoThumbnailPayload),
 }
 
 /// Empty object — `{}`. Serde encodes a unit struct as `null`, which is wrong;
@@ -199,12 +221,30 @@ pub struct DeepAnalyzeAllPayload {
     /// tags). `#[serde(default)]` keeps older clients that omit the field valid.
     #[serde(default)]
     pub tags_only: bool,
+    /// Propose smart filenames during the full pass. Defaults to true (the
+    /// "Propose renames" checkbox is ticked by default); set false for
+    /// caption + tags without the rename VLM call. Ignored when tags_only.
+    #[serde(default = "default_true")]
+    pub propose_renames: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrewarmModelPayload {
     pub model_kind: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelPrewarmPayload {
+    /// Which model's download to cancel. `None`/absent cancels ALL in-flight
+    /// prewarms (back-compat with the original payload-less `cancelPrewarm`).
+    #[serde(default)]
+    pub model_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,6 +271,7 @@ pub struct ApplyRestructurePayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RestructureMove {
+    #[serde(rename = "fileID")]
     pub file_id: i64,
     pub source: String,
     pub destination: String,
@@ -240,11 +281,19 @@ pub struct RestructureMove {
     /// engines; the app falls back to its local heuristic when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
+    /// Butler confidence band — "auto" / "review" / "ask" (RESTRUCTURE.md §6).
+    /// Drives the app's auto-file / review / ask grouping. Empty on older engines.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub confidence: String,
+    /// Plain-language "why filed here" shown in the drill-down. None when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyTagsPayload {
+    #[serde(rename = "fileIDs")]
     pub file_ids: Vec<i64>,
     pub tags: Vec<String>,
     /// "add" (default) appends; "replace" overwrites.
@@ -273,6 +322,7 @@ pub struct RenameFilesPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenameEntry {
+    #[serde(rename = "fileID")]
     pub file_id: i64,
     /// New filename only (no directory components). Engine resolves the
     /// destination as `dirname(current) + new_name`.
@@ -282,13 +332,16 @@ pub struct RenameEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrashFilesPayload {
+    #[serde(rename = "fileIDs")]
     pub file_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MergeClustersPayload {
+    #[serde(rename = "sourcePersonID")]
     pub source_person_id: i64,
+    #[serde(rename = "destinationPersonID")]
     pub destination_person_id: i64,
 }
 
@@ -298,34 +351,53 @@ pub struct EmbedTextQueryPayload {
     pub query: String,
     /// Echoed back on the response event so the caller can correlate
     /// (multiple in-flight queries won't get crossed).
+    #[serde(rename = "queryID")]
     pub query_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EmbedImageQueryPayload {
+    #[serde(rename = "fileID")]
     pub file_id: i64,
+    #[serde(rename = "queryID")]
     pub query_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateVideoThumbnailPayload {
+    pub path: String,
+    /// File's modified-unix time (f64 seconds). Echoed back on the reply so
+    /// the app can key its `(path, modifiedAt)` thumbnail cache. Optional so
+    /// callers that don't know it can omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_at: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RestoreFromTrashPayload {
     /// Identifier from the trash_log JSON (UUID emitted by trashFiles).
+    #[serde(rename = "batchID")]
     pub batch_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RevertMergePayload {
+    #[serde(rename = "sourcePersonID")]
     pub source_person_id: i64,
+    #[serde(rename = "destinationPersonID")]
     pub destination_person_id: i64,
+    #[serde(rename = "faceIDsToRevert")]
     pub face_ids_to_revert: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenamePersonPayload {
+    #[serde(rename = "personID")]
     pub person_id: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -343,16 +415,37 @@ pub struct RenamePersonPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MarkPersonsAsUnknownPayload {
+    #[serde(rename = "personIDs")]
     pub person_ids: Vec<i64>,
+}
+
+/// Payload for `markPersonsDifferent`. Carries both the (volatile) person ids
+/// and the (stable) anchor face ids from the suggestion so the engine persists
+/// a verdict key that survives re-clustering.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkPersonsDifferentPayload {
+    #[serde(rename = "sourcePersonID")]
+    pub source_person_id: i64,
+    #[serde(rename = "destinationPersonID")]
+    pub destination_person_id: i64,
+    #[serde(rename = "sourceAnchorFaceID")]
+    pub source_anchor_face_id: i64,
+    #[serde(rename = "destinationAnchorFaceID")]
+    pub destination_anchor_face_id: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MergeSuggestion {
+    #[serde(rename = "sourcePersonID")]
     pub source_person_id: i64,
+    #[serde(rename = "destinationPersonID")]
     pub destination_person_id: i64,
     pub similarity: f32,
+    #[serde(rename = "sourceAnchorFaceID")]
     pub source_anchor_face_id: i64,
+    #[serde(rename = "destinationAnchorFaceID")]
     pub destination_anchor_face_id: i64,
     pub source_member_count: i64,
     pub destination_member_count: i64,
@@ -442,6 +535,16 @@ pub enum EventPayload {
     /// details about why a negative probe came back negative.
     #[serde(rename = "hardwareReprobed")]
     HardwareReprobed(Wrap<HardwareReprobed>),
+
+    /// Reply to `wipeLibrary`: the engine truncated all user tables in-process.
+    #[serde(rename = "libraryWiped")]
+    LibraryWiped(Wrap<LibraryWiped>),
+
+    /// Reply to `generateVideoThumbnail`: a base64-encoded 192px JPEG keyframe
+    /// for the requested video. `modifiedAt` is echoed back because the app's
+    /// thumbnail cache is keyed on `(path, modifiedAt)`.
+    #[serde(rename = "thumbnailGenerated")]
+    ThumbnailGenerated(Wrap<ThumbnailGenerated>),
 }
 
 /// Wraps a single positional value in `{"_0": ...}` to match Swift Codable
@@ -829,10 +932,21 @@ pub struct BulkActionResult {
     pub messages: Vec<BulkActionItem>,
 }
 
+/// Reply to `wipeLibrary`. `ok` is true when every table was truncated; on
+/// failure `message` carries the error so the app can fall back to its own
+/// stop→delete→restart wipe path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryWiped {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BulkActionItem {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "fileID", default, skip_serializing_if = "Option::is_none")]
     pub file_id: Option<i64>,
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -842,12 +956,26 @@ pub struct BulkActionItem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipTextEmbedding {
+    #[serde(rename = "queryID")]
     pub query_id: String,
     pub query: String,
     /// 512-d L2-normalized float32 embedding from the CLIP text encoder.
     /// App dot-products this against `clip_embeddings` to rank Library
     /// rows by semantic similarity.
     pub embedding: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThumbnailGenerated {
+    pub path: String,
+    /// File's modified-unix time (f64 seconds), echoed from the request so the
+    /// app can write the bytes under its `(path, modifiedAt)` cache key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_at: Option<f64>,
+    /// Base64-encoded 192px JPEG (aspect-preserved, long side = 192). A base64
+    /// string, NOT a number array.
+    pub bytes: String,
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -953,22 +1081,23 @@ mod tests {
             CommandPayload::RunFaceClustering(Empty {}),
             CommandPayload::DeepAnalyzeFile(DeepAnalyzeFilePayload {
                 file_id: 42,
-                model_kind: "qwen2_5_vl_3b".into(),
+                model_kind: "qwen2_5_vl_7b".into(),
             }),
             CommandPayload::DeepAnalyzeFolder(DeepAnalyzeFolderPayload {
                 path_prefix: r"C:\Users\adam\Pictures\2024".into(),
-                model_kind: "qwen2_5_vl_3b".into(),
+                model_kind: "qwen2_5_vl_7b".into(),
             }),
             CommandPayload::DeepAnalyzeAll(DeepAnalyzeAllPayload {
-                model_kind: "qwen2_5_vl_3b".into(),
+                model_kind: "qwen2_5_vl_7b".into(),
                 skip_existing: true,
                 tags_only: true,
+                propose_renames: true,
             }),
             CommandPayload::DeepAnalyzeCancel(Empty {}),
             CommandPayload::PrewarmModel(PrewarmModelPayload {
                 model_kind: "arcface".into(),
             }),
-            CommandPayload::CancelPrewarm(Empty {}),
+            CommandPayload::CancelPrewarm(CancelPrewarmPayload { model_kind: None }),
             CommandPayload::PlanRestructure(PlanRestructurePayload {
                 library_root: r"C:\Users\adam\Pictures".into(),
             }),
@@ -980,6 +1109,8 @@ mod tests {
                     destination: r"C:\Users\adam\Pictures\Photos\2024\01\IMG_0001.jpg".into(),
                     category: "Photos/2024/01".into(),
                     tier: Some("Anchor".into()),
+                    confidence: "auto".into(),
+                    reason: Some("Photo from 2024".into()),
                 }],
                 use_symlinks: false,
             }),
@@ -1017,6 +1148,12 @@ mod tests {
                 person_ids: vec![1, 2],
             }),
             CommandPayload::FindMergeSuggestions(Empty {}),
+            CommandPayload::MarkPersonsDifferent(MarkPersonsDifferentPayload {
+                source_person_id: 1,
+                destination_person_id: 2,
+                source_anchor_face_id: 10,
+                destination_anchor_face_id: 20,
+            }),
             CommandPayload::EmbedImageQuery(EmbedImageQueryPayload {
                 file_id: 1,
                 query_id: "q-2".into(),
@@ -1029,6 +1166,11 @@ mod tests {
                 source_person_id: 1,
                 destination_person_id: 2,
                 face_ids_to_revert: vec![10, 11, 12],
+            }),
+            CommandPayload::WipeLibrary(Empty {}),
+            CommandPayload::GenerateVideoThumbnail(GenerateVideoThumbnailPayload {
+                path: r"C:\Users\adam\Videos\clip.mp4".into(),
+                modified_at: Some(1_700_000_000.0),
             }),
         ];
 
@@ -1047,6 +1189,42 @@ mod tests {
                 "variant changed during round-trip:\n  original = {payload:?}\n  json     = {json}\n  parsed   = {:?}",
                 decoded.payload,
             );
+        }
+    }
+
+    /// The `thumbnailGenerated` event must serialize in the Wrap<T> `_0`-nested
+    /// camelCase shape, carry `modifiedAt` through, and round-trip without
+    /// losing its base64 string payload.
+    #[test]
+    fn thumbnail_generated_event_round_trips() {
+        let evt = IpcEvent::now(EventPayload::ThumbnailGenerated(Wrap::new(
+            ThumbnailGenerated {
+                path: r"C:\Users\adam\Videos\clip.mp4".into(),
+                modified_at: Some(1_700_000_000.0),
+                bytes: "/9j/4AAQSkZJRg==".into(),
+            },
+        )));
+        let v = serde_json::to_value(&evt).unwrap();
+        let inner = v
+            .get("payload")
+            .unwrap()
+            .get("thumbnailGenerated")
+            .unwrap()
+            .get("_0")
+            .unwrap();
+        assert_eq!(inner.get("path").unwrap(), r"C:\Users\adam\Videos\clip.mp4");
+        assert_eq!(inner.get("modifiedAt").unwrap(), 1_700_000_000.0);
+        assert!(inner.get("bytes").unwrap().is_string());
+
+        let json = serde_json::to_string(&evt).unwrap();
+        let decoded: IpcEvent = serde_json::from_str(&json).unwrap();
+        match decoded.payload {
+            EventPayload::ThumbnailGenerated(w) => {
+                assert_eq!(w.inner.path, r"C:\Users\adam\Videos\clip.mp4");
+                assert_eq!(w.inner.modified_at, Some(1_700_000_000.0));
+                assert_eq!(w.inner.bytes, "/9j/4AAQSkZJRg==");
+            }
+            other => panic!("expected ThumbnailGenerated, got {other:?}"),
         }
     }
 

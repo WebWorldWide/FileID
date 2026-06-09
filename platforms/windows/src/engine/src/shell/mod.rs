@@ -46,6 +46,7 @@ pub mod tags {
     pub fn read_tags(_path: &Path) -> Result<Vec<String>> {
         Ok(Vec::new())
     }
+    pub fn move_sidecar(_old: &Path, _new: &Path) {}
 }
 
 #[cfg(not(windows))]
@@ -61,6 +62,7 @@ pub mod thumbnail {
         pub height: u32,
         pub rgba: Vec<u8>,
     }
+    #[allow(dead_code)]
     pub fn render(_path: &Path) -> Result<Thumbnail> {
         anyhow::bail!("shell::thumbnail::render not implemented on this platform")
     }
@@ -125,6 +127,7 @@ pub mod video {
 pub mod heic {
     use anyhow::Result;
     use std::path::Path;
+    #[allow(dead_code)]
     pub fn decode(_path: &Path) -> Result<(Vec<u8>, u32, u32)> {
         anyhow::bail!("shell::heic::decode not implemented on this platform")
     }

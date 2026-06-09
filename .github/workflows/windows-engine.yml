@@ -89,6 +89,22 @@ jobs:
         # Cargo.toml with a comment, not a CI exception here.
         run: cargo clippy --target ${{ matrix.target }} --all-targets -- -D warnings
 
+      - name: Model integrity — every registry artifact pins a SHA256 (x64 only)
+        if: matrix.label == 'x64'
+        shell: pwsh
+        # Supply-chain gate: a downloadable model/runtime with `sha256: None`
+        # would load (into ONNX Runtime / llama.cpp) UNVERIFIED — a compromised
+        # mirror could serve a malicious artifact (RCE during inference). Every
+        # FileEntry in registry.rs MUST pin a SHA256; the downloader verifies it.
+        run: |
+          $none = Select-String -Path "src/models/registry.rs" -Pattern 'sha256:\s*None,'
+          if ($none) {
+            Write-Host "::error::$(@($none).Count) registry FileEntry still has sha256: None — pin a SHA256 (the oid from the HF LFS pointer, or sha256 of the release asset) for every downloadable artifact."
+            $none | ForEach-Object { Write-Host "  line $($_.LineNumber): $($_.Line.Trim())" }
+            exit 1
+          }
+          Write-Host "Model integrity OK: every registry artifact pins a SHA256."
+
       - name: Cache cargo-audit + cargo-deny binaries
         if: matrix.label == 'x64'
         # V15.3 N9 followup: caches the compiled cargo-audit + cargo-deny
@@ -117,6 +133,15 @@ jobs:
         # gate stays hard — deny.toml's advisories.ignore list lets us
         # document specific RUSTSEC IDs we've reviewed and accepted.
         run: cargo deny check
+
+      - name: Cargo.lock freshness (x64 only)
+        if: matrix.label == 'x64'
+        shell: pwsh
+        # Fail if Cargo.lock is stale vs Cargo.toml (--locked errors instead of
+        # updating it). Keeps the committed lockfile authoritative — required for
+        # reproducible + SHA-pinnable release builds (ties to the WS-CD model-hash
+        # work). Cheap; no network.
+        run: cargo metadata --locked --format-version 1 | Out-Null
 
       - name: Audit dependencies (x64 only)
         if: matrix.label == 'x64'

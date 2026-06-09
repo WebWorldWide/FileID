@@ -22,6 +22,13 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     internal PeopleViewModel ViewModel { get; }
     private const string MergeFormatId = "fileid/person-cluster-id";
 
+    // Drag-over highlight brush. SolidColorBrush is a DispatcherObject;
+    // constructing one per drag-over event (fired continuously while a
+    // cluster card hovers) is the V15.2-class native fast-fail shape —
+    // cache once on the dispatcher this view owns and reuse. Mirrors
+    // SidebarEngineStatus's ctor-cached brushes.
+    private readonly SolidColorBrush _goldBrush = new(Microsoft.UI.Colors.Gold);
+
     private bool _unloaded;
     public PeopleView()
     {
@@ -84,7 +91,9 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
                 try
                 {
                     if (!System.IO.File.Exists(AppPaths.DbPath)) return 0;
-                    var conn = new Microsoft.Data.Sqlite.SqliteConnection(
+                    // `using` so the connection is deterministically returned to the
+                    // pool when the lambda exits (was leaked per footer refresh). (audit A14)
+                    using var conn = new Microsoft.Data.Sqlite.SqliteConnection(
                         new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
                         {
                             DataSource = AppPaths.DbPath,
@@ -135,6 +144,9 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         {
             try
             {
+                // Shared singleton, not a fresh Load() — avoids the static-debounce
+                // lost-update (a fresh instance's Save() cancels the singleton's
+                // pending write). (audit A8)
                 var s = AppViewModel.Instance.Settings;
                 s.PeopleHideUnknown = false;
                 s.Save();
@@ -157,6 +169,51 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         if (_unloaded) return;
         OnPropertyChanged(nameof(StatusText));
         OnPropertyChanged(nameof(FooterVisibility));
+
+        // Keep select-mode wiring consistent across refreshes. The
+        // identity-stable merge (PeopleViewModel.MergeByClusterId) preserves
+        // surviving instances and their IsSelected subscription, but a refresh
+        // can still Add brand-new clusters (which arrive unwired, with a
+        // Collapsed checkbox) or Remove gone ones (whose subscription would
+        // leak). Re-apply wiring + checkbox visibility + count so the select UI
+        // never goes stale after a re-cluster while the user is mid-selection.
+        if (!ViewModel.IsSelectMode) return;
+
+        if (e.OldItems != null)
+        {
+            foreach (var removed in e.OldItems)
+            {
+                if (removed is PersonCluster oc) oc.PropertyChanged -= OnClusterIsSelectedChanged;
+            }
+        }
+        if (e.NewItems != null)
+        {
+            foreach (var added in e.NewItems)
+            {
+                if (added is PersonCluster nc)
+                {
+                    nc.PropertyChanged -= OnClusterIsSelectedChanged;
+                    nc.PropertyChanged += OnClusterIsSelectedChanged;
+                }
+            }
+        }
+        if (e.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Reset)
+        {
+            foreach (var c in ViewModel.Clusters)
+            {
+                c.PropertyChanged -= OnClusterIsSelectedChanged;
+                c.PropertyChanged += OnClusterIsSelectedChanged;
+            }
+        }
+
+        // Newly-added cards may not be realized yet on this synchronous event;
+        // defer the visual-tree checkbox sweep so it sees them.
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (_unloaded || !ViewModel.IsSelectMode) return;
+            UpdateCheckboxVisibility();
+        });
+        UpdateSelectionCountText();
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
@@ -166,6 +223,11 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         Loaded -= OnLoadedAsync;
         try { ViewModel.PropertyChanged -= OnViewModelPropertyChanged; } catch { /* swallow */ }
         try { ViewModel.Clusters.CollectionChanged -= OnClustersCollectionChanged; } catch { /* swallow */ }
+        // Detach the per-cluster IsSelected handlers wired during select mode.
+        // Now that the identity-stable merge keeps PersonCluster instances alive
+        // across refreshes, a still-subscribed cluster would pin this view after
+        // unload.
+        try { foreach (var c in ViewModel.Clusters) c.PropertyChanged -= OnClusterIsSelectedChanged; } catch { /* swallow */ }
         try { FileID.ViewModels.EngineClient.Instance.PropertyChanged -= OnEngineClientChanged; } catch { /* swallow */ }
         // Dispose the ViewModel — cancels its _disposalCts so any in-flight
         // RefreshAsync task running on a thread-pool thread unwinds with
@@ -258,11 +320,17 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         // "old data shown briefly" flicker.
         try
         {
+            // The engine may still be starting/respawning, in which case
+            // RunFaceClusteringAsync faults synchronously (State != Ready) and
+            // Re-cluster silently did nothing. Give it a brief window to come up,
+            // then run; log any abort so the formerly-swallowed failure is
+            // diagnosable instead of looking like a dead button.
+            await ViewModels.EngineClient.Instance.WaitForReadyAsync(TimeSpan.FromSeconds(15));
             await ViewModels.EngineClient.Instance.RunFaceClusteringAsync();
         }
-        catch
+        catch (Exception ex)
         {
-            // engine offline — fall through to a plain reload
+            Services.DebugLog.Warn($"People Re-cluster: clustering not run — {ex.Message}");
         }
         await ViewModel.RefreshAsync(CancellationToken.None);
     }
@@ -341,7 +409,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             // animation would be nicer; brush swap is cheaper + lands now).
             if (sender is Grid g)
             {
-                g.BorderBrush = new SolidColorBrush(Microsoft.UI.Colors.Gold);
+                g.BorderBrush = _goldBrush;
                 g.BorderThickness = new Thickness(2);
             }
         }
@@ -355,7 +423,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     {
         if (sender is Grid g)
         {
-            g.BorderBrush = (SolidColorBrush)Application.Current.Resources["CardStrokeColorDefaultBrush"];
+            g.BorderBrush = FileID.Services.ThemeHelper.GetBrushSafe("CardStrokeColorDefaultBrush");
             g.BorderThickness = new Thickness(1);
         }
     }
@@ -390,7 +458,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     {
         if (sender is not Grid g) return;
         // Restore styling first so a failure mid-drop doesn't leave the gold ring.
-        g.BorderBrush = (SolidColorBrush)Application.Current.Resources["CardStrokeColorDefaultBrush"];
+        g.BorderBrush = FileID.Services.ThemeHelper.GetBrushSafe("CardStrokeColorDefaultBrush");
         g.BorderThickness = new Thickness(1);
 
         if (!args.DataView.Properties.TryGetValue(MergeFormatId, out var raw)) return;
@@ -417,11 +485,27 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
 
         try
         {
-            await ViewModels.EngineClient.Instance.MergeClustersAsync(sourceId, destId);
+            // Await the engine's bulkActionResult instead of fire-and-forget:
+            // a swallowed merge made the user think the merge happened, then
+            // the refresh re-showed the old state. Surface any failure.
+            var r = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
+                "mergeClusters",
+                () => ViewModels.EngineClient.Instance.MergeClustersAsync(sourceId, destId),
+                TimeSpan.FromSeconds(30));
+            if (r.Failed > 0 || r.Succeeded == 0)
+            {
+                var detail = r.Messages.FirstOrDefault(m => m is not null && !m.Ok)?.Message
+                             ?? (r.Messages.Count > 0 ? r.Messages[0] : null)?.Message
+                             ?? "The engine did not confirm the merge.";
+                await ShowAlertAsync("Merge failed",
+                    $"Couldn't merge #{sourceId} into #{destId} — {detail}");
+            }
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            // Failure surfaces through the BulkActionResult event.
+            DebugLog.Warn("MergeClusters drop IPC failed: " + ex.Message);
+            await ShowAlertAsync("Merge failed",
+                $"Couldn't merge #{sourceId} into #{destId} — {SqliteErrorTranslator.Humanize(ex)}");
         }
 
         await ViewModel.RefreshAsync(CancellationToken.None);
@@ -522,17 +606,44 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         // Merge cluster ids[1..N] into ids[0] (the first selected).
         // Engine `mergeClusters` is 1:1; loop the call N-1 times.
         var dest = ids[0];
-        try
+        int merged = 0;
+        int failed = 0;
+        string? firstFailure = null;
+        for (int i = 1; i < ids.Count; i++)
         {
-            for (int i = 1; i < ids.Count; i++)
+            try
             {
-                await EngineClient.Instance.MergeClustersAsync(ids[i], dest);
+                // Await each merge's bulkActionResult so a swallowed failure
+                // can't masquerade as success (the refresh would then re-show
+                // the unmerged clusters with no explanation).
+                var r = await EngineClient.Instance.WaitForBulkActionResultAsync(
+                    "mergeClusters",
+                    () => EngineClient.Instance.MergeClustersAsync(ids[i], dest),
+                    TimeSpan.FromSeconds(30));
+                if (r.Failed > 0 || r.Succeeded == 0)
+                {
+                    failed++;
+                    firstFailure ??= r.Messages.FirstOrDefault(m => m is not null && !m.Ok)?.Message
+                                     ?? (r.Messages.Count > 0 ? r.Messages[0] : null)?.Message
+                                     ?? $"#{ids[i]} could not be merged.";
+                }
+                else
+                {
+                    merged++;
+                }
             }
-            DebugLog.Info($"Bulk-merged {ids.Count - 1} clusters into {dest}");
+            catch (Exception ex)
+            {
+                DebugLog.Warn("BulkMerge IPC failed: " + ex.Message);
+                failed++;
+                firstFailure ??= SqliteErrorTranslator.Humanize(ex);
+            }
         }
-        catch (Exception ex)
+        DebugLog.Info($"Bulk-merged {merged} clusters into {dest}; {failed} failed");
+        if (failed > 0)
         {
-            DebugLog.Warn("BulkMerge IPC failed: " + ex.Message);
+            await ShowAlertAsync("Some merges failed",
+                $"Merged {merged} into #{dest}; {failed} failed — {firstFailure}");
         }
         // Exit select mode + refresh.
         ViewModel.IsSelectMode = false;
@@ -546,23 +657,71 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     {
         var ids = ViewModel.SelectedClusterIds;
         if (ids.Count == 0) return;
+        // PersonCluster.ClusterId is int; engine wants long.
+        var longIds = new System.Collections.Generic.List<long>(ids.Count);
+        foreach (var id in ids) longIds.Add(id);
         try
         {
-            // PersonCluster.ClusterId is int; engine wants long.
-            var longIds = new System.Collections.Generic.List<long>(ids.Count);
-            foreach (var id in ids) longIds.Add(id);
-            await EngineClient.Instance.MarkPersonsAsUnknownAsync(longIds);
+            // Await the engine's bulkActionResult instead of fire-and-forget:
+            // a swallowed mark-as-unknown made the user think it happened, then
+            // the refresh re-showed the old state. Surface any failure and do
+            // NOT exit select mode / refresh so the user can retry.
+            var r = await EngineClient.Instance.WaitForBulkActionResultAsync(
+                "markPersonsAsUnknown",
+                () => EngineClient.Instance.MarkPersonsAsUnknownAsync(longIds),
+                TimeSpan.FromSeconds(30));
+            if (r.Failed > 0 || r.Succeeded == 0)
+            {
+                var detail = r.Messages.FirstOrDefault(m => m is not null && !m.Ok)?.Message
+                             ?? (r.Messages.Count > 0 ? r.Messages[0] : null)?.Message
+                             ?? "The engine did not confirm the change.";
+                await ShowAlertAsync("Mark as unknown failed",
+                    $"Couldn't mark {ids.Count} cluster{(ids.Count == 1 ? "" : "s")} as unknown — {detail}");
+                return;
+            }
             DebugLog.Info($"Marked {ids.Count} clusters as unknown");
         }
         catch (Exception ex)
         {
             DebugLog.Warn("BulkMarkUnknown IPC failed: " + ex.Message);
+            await ShowAlertAsync("Mark as unknown failed",
+                $"Couldn't mark {ids.Count} cluster{(ids.Count == 1 ? "" : "s")} as unknown — {SqliteErrorTranslator.Humanize(ex)}");
+            return;
         }
         ViewModel.IsSelectMode = false;
         BulkActionBar.Visibility = Visibility.Collapsed;
         SelectButtonText.Text = "Select";
         UpdateCheckboxVisibility();
         await ViewModel.RefreshAsync(CancellationToken.None);
+    }
+
+    // Mirrors SidebarProcessingControl.ShowAlertAsync: a dismissible
+    // ContentDialog for surfacing a failure. ShowAsync can throw on a
+    // broken XamlRoot (mid-shutdown, tab re-host) so the call is wrapped
+    // and logged — a failed alert must never escalate to UnhandledException.
+    private async Task ShowAlertAsync(string title, string body)
+    {
+        try
+        {
+            if (_unloaded || XamlRoot is null)
+            {
+                DebugLog.Warn($"PeopleView.ShowAlertAsync: XamlRoot null/unloaded ({title}); skipping dialog.");
+                return;
+            }
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = title,
+                Content = body,
+                CloseButtonText = "OK",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            await dialog.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"PeopleView.ShowAlertAsync threw ({title}): " + ex.Message);
+        }
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;

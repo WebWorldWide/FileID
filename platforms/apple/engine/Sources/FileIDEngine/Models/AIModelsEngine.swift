@@ -9,11 +9,13 @@ extension AIModelKind {
     /// app's Settings tab), else the top recommendation for this hardware.
     public static func currentlyActive() -> AIModelKind {
         if let raw = UserDefaults.standard.string(forKey: "deepAnalyzeActiveModel"),
-           let k = AIModelKind(rawValue: raw) {
-            return k
+           !raw.isEmpty {
+            // migrated() maps a dropped/legacy rawValue (e.g. "qwen2_vl_3b")
+            // onto a supported model instead of silently ignoring it.
+            return AIModelKind.migrated(rawValue: raw)
         }
         let ram = Hardware.physicalMemoryGB
-        return recommendedFor(ramGB: ram).first ?? .qwen2VL3B
+        return recommendedFor(ramGB: ram).first ?? .qwen2VL7B
     }
 
     /// Heuristic: weights live in MLX's HuggingFace hub cache. We treat

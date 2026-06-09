@@ -14,13 +14,36 @@ pub fn redact_path_for_log(path: impl AsRef<Path>) -> String {
     use std::path::Component;
     let s = path.as_ref().to_string_lossy().to_string();
     let s_lower = s.to_lowercase();
-    // App-structural paths: pass through.
-    if s_lower.contains("\\fileid\\")
-        || s_lower.contains("/fileid/")
-        || s_lower.contains("appdata\\local\\fileid")
-    {
-        return s;
+    // App-structural paths: pass through ONLY the engine's own state dir
+    // (`%LOCALAPPDATA%\FileID\…` / the per-OS equivalent). ENG-97: the old broad
+    // `\fileid\` / `/fileid/` substring match leaked any USER path that merely
+    // contained a folder named "FileID" (e.g. a dev checkout at C:\Code\FileID\…)
+    // verbatim, username and all — defeating redaction for a whole class of real
+    // paths. Anchor on the actual resolved root instead.
+    if let Ok(root) = crate::paths::root() {
+        let mut root_prefix = root.to_string_lossy().to_lowercase();
+        if !root_prefix.is_empty() {
+            if s_lower == root_prefix {
+                return s;
+            }
+            // Require a path-separator boundary so a sibling dir whose name
+            // merely STARTS with the app root (e.g. `…\Local\FileIDBackup\…`)
+            // does not string-prefix-match and leak. (ENG-97)
+            if !root_prefix.ends_with(['\\', '/']) {
+                root_prefix.push(std::path::MAIN_SEPARATOR);
+            }
+            if s_lower.starts_with(&root_prefix) {
+                return s;
+            }
+        }
     }
+    // NOTE: no `contains("appdata\\local\\fileid\\")` fallback. The `root()`
+    // branch above already passes through THIS engine's own state tree (root()
+    // resolves from LOCALAPPDATA to exactly `…\AppData\Local\FileID`). A path
+    // under a DIFFERENT `AppData\Local\FileID` (another user, or a backup like
+    // `D:\Backups\AppData\Local\FileID\…`) is NOT this engine's tree and MUST be
+    // redacted — the old unanchored `contains` leaked those verbatim (#26).
+    //
     // Only Normal components are PII candidates — Prefix (drive letter,
     // UNC server\share) and RootDir are protocol/topology, never PII.
     // Excluding them ensures C:\ → "…" and \\server\share\user\file.jpg
@@ -54,6 +77,7 @@ mod redaction_tests {
     use super::*;
 
     #[test]
+    #[cfg(windows)]
     fn redacts_deep_user_path() {
         let r = redact_path_for_log(r"C:\Users\Adam\Pictures\Vacation\IMG.jpg");
         assert!(r.starts_with("…/"));
@@ -63,8 +87,18 @@ mod redaction_tests {
 
     #[test]
     fn passes_through_app_structural_path() {
-        let s = r"C:\Users\Adam\AppData\Local\FileID\Models\arcface\weights.onnx";
-        assert_eq!(redact_path_for_log(s), s);
+        // The engine's OWN state tree (under the resolved root) passes through
+        // for debugging — derive it from root() rather than hardcoding a
+        // username, since only THIS engine's tree is exempt from redaction (#26).
+        if let Ok(root) = crate::paths::root() {
+            let s = root
+                .join("Models")
+                .join("arcface")
+                .join("weights.onnx")
+                .to_string_lossy()
+                .to_string();
+            assert_eq!(redact_path_for_log(&s), s);
+        }
     }
 
     #[test]
@@ -94,11 +128,38 @@ mod redaction_tests {
 
     /// App structural paths are returned UNCHANGED — they refer to
     /// FileID's own dirs (logs, models, sentinels) and are useful for
-    /// debugging without redaction.
+    /// debugging without redaction. Derived from the resolved root so the
+    /// passthrough is keyed on THIS engine's tree, not a hardcoded username.
     #[test]
     fn app_structural_logs_path_unchanged() {
-        let s = r"C:\Users\Adam\AppData\Local\FileID\logs\app.log";
-        assert_eq!(redact_path_for_log(s), s);
+        if let Ok(root) = crate::paths::root() {
+            let s = root.join("logs").join("app.log").to_string_lossy().to_string();
+            assert_eq!(redact_path_for_log(&s), s);
+        }
+    }
+
+    /// #26: a USER path that merely CONTAINS `AppData\Local\FileID` but lives
+    /// outside this engine's resolved root (e.g. a backup on another volume) is
+    /// NOT the app's state tree and MUST be redacted — the old unanchored
+    /// `contains` fallback leaked these verbatim.
+    #[test]
+    #[cfg(windows)]
+    fn redacts_user_backup_path_containing_appdata_local_fileid() {
+        let r = redact_path_for_log(r"D:\Backups\AppData\Local\FileID\notes.txt");
+        assert_eq!(r, "…/FileID/notes.txt");
+        assert!(!r.contains("Backups"), "backup path leaked: {r}");
+    }
+
+    /// ENG-97: a USER path that merely contains a folder named "FileID" (a dev
+    /// checkout, a backup dir, …) is NOT the app's state tree and MUST be
+    /// redacted — the old broad `\fileid\` substring match leaked these verbatim
+    /// with the username.
+    #[test]
+    #[cfg(windows)]
+    fn redacts_user_path_merely_containing_fileid() {
+        let r = redact_path_for_log(r"C:\Users\Adam\Code\FileID\src\secret.rs");
+        assert_eq!(r, "…/src/secret.rs");
+        assert!(!r.contains("Adam"), "username leaked: {r}");
     }
 }
 
@@ -250,10 +311,13 @@ pub fn available_memory_mb() -> u64 {
     sys.available_memory() / (1024 * 1024)
 }
 
-/// Memory-pressure tier. Drives `dbwriter_batch_size_for`, ML pool size,
-/// channel caps, thumbnail cache size. Refreshed periodically by the
-/// scan loop (every 30s) so a memory-pressure shift mid-scan downshifts
-/// throughput instead of OOM'ing.
+/// Memory-pressure tier. On `Low` it additionally caps the tagging worker
+/// count, the ML session pool (to 1), and the predecode read-ahead channel —
+/// see `commands::scan` + `pipeline::tagging` — so a low-RAM box keeps fewer
+/// full decoded frames resident; `Balanced`/`High` leave those at their CPU/VRAM
+/// defaults. Also drives `dbwriter_batch_size_for`. Refreshed at scan start (the
+/// dbwriter re-polls every 30s) so a mid-scan pressure shift downshifts instead
+/// of OOM'ing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryTier {
     /// <8 GB available — be conservative, smaller batches + pool=1.
@@ -313,6 +377,7 @@ pub fn dbwriter_batch_size_for(tier: MemoryTier) -> usize {
 // with `GetDriveTypeW` to distinguish removable / network from local fixed.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub enum StorageType {
     Nvme,
     /// Reserved for a future BusType-discriminator pass (would use
@@ -524,6 +589,7 @@ pub fn file_ref(_path: &Path) -> Option<u64> {
 // ─── Battery / AC power detection ───────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub enum PowerSource {
     Ac,
     Battery,
@@ -911,17 +977,58 @@ pub fn register_dll_dirs_under(_root: &std::path::Path) -> Vec<std::path::PathBu
     Vec::new()
 }
 
+/// Find the first file named `filename` (case-insensitive) anywhere under
+/// `root`, up to `max_depth` levels deep. Used to locate a Performance Pack's
+/// `onnxruntime.dll` (it extracts into a versioned `.../lib/` subdir) so
+/// `ORT_DYLIB_PATH` can be pinned to the matched GPU runtime. Returns None if
+/// `root` doesn't exist or the file isn't found — callers treat that as "no
+/// pack installed" and leave ORT on its default (pyke) base.
+pub fn find_file_under(root: &std::path::Path, filename: &str, max_depth: usize) -> Option<std::path::PathBuf> {
+    if !root.is_dir() {
+        return None;
+    }
+    let rd = std::fs::read_dir(root).ok()?;
+    let mut subdirs: Vec<std::path::PathBuf> = Vec::new();
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            subdirs.push(path);
+        } else if path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .is_some_and(|f| f.eq_ignore_ascii_case(filename))
+        {
+            return Some(path);
+        }
+    }
+    if max_depth == 0 {
+        return None;
+    }
+    for sub in subdirs {
+        if let Some(found) = find_file_under(&sub, filename, max_depth - 1) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 /// Returns the primary (largest-VRAM) non-software adapter's
 /// `DedicatedVideoMemory` in MB. None if DXGI enumeration fails or no
 /// physical adapter is present. Used to gate the ML Session pool —
 /// without this, a multi-Session config can exhaust a 6 GB card's VRAM
 /// and wedge the DirectML driver (full system hang).
 ///
-/// Cheap to call (~1 ms); the DXGI factory + adapter enumeration is the
-/// same primitive `models::runtime::probe_gpu_vendor` uses for vendor
-/// detection. Safe to call from any thread.
-#[cfg(windows)]
+/// VRAM is constant for the process, so the DXGI factory + adapter walk is
+/// memoized after the first call (same pattern as `RuntimeProbe::shared`,
+/// which exists because the adapters were otherwise re-walked 7-15× at
+/// startup). Safe to call from any thread.
 pub fn dedicated_vram_mb() -> Option<u64> {
+    static CELL: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *CELL.get_or_init(probe_dedicated_vram_mb)
+}
+
+#[cfg(windows)]
+fn probe_dedicated_vram_mb() -> Option<u64> {
     use windows::Win32::Graphics::Dxgi::{
         CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, DXGI_ADAPTER_FLAG,
         DXGI_ADAPTER_FLAG_SOFTWARE,
@@ -954,7 +1061,7 @@ pub fn dedicated_vram_mb() -> Option<u64> {
 }
 
 #[cfg(not(windows))]
-pub fn dedicated_vram_mb() -> Option<u64> {
+fn probe_dedicated_vram_mb() -> Option<u64> {
     None
 }
 

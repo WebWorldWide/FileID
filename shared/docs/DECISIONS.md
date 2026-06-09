@@ -37,7 +37,249 @@ is deferred to a Windows-hardware session (see NEXT.md). The schema's "alphabeti
 byte-deterministic" wording was also corrected — it was aspirational and unimplemented by the
 Rust/C# emitters; key order is platform-dependent and consumers are key-order-independent.
 
----
+## 2026-06-04 (latest) — Six-workflow deep audit: the non-obvious fix choices + 4 self-introduced regressions the re-audit caught
+
+**Context**: A second, larger "maximum coverage, bulletproof" sweep off `main` (built on the prior uncommitted sweep). Six SERIALIZED workflows (engine·app·perf·security correctness, then a fix-diff re-audit, then a regression-repair re-audit), ~270 agents. ~35 fixes; the re-audit caught 4 regressions the fixes themselves introduced. Uncommitted; full record `shared/docs/audit-2026-06-04c/`. Serialization rule reaffirmed (see the prior entry) — all six ran one-at-a-time and produced clean multi-M-token runs.
+
+- **Clustering-vs-People-edit data-loss (S0): re-read the identity snapshot in phase 3 UNDER the persist lock — do NOT gate the bulk handlers.** The lock-free phase-2 window let a rename/merge/mark-unknown commit, then phase-3's unconditional `DELETE FROM persons` + re-INSERT from the *phase-1* snapshot threw it away. Two fixes were possible: (a) gate every person-mutating handler on `face_cluster_active` (mirrors the wipe interlock), or (b) move the snapshot read into phase 3, inside the persist tx, after re-acquiring the writer lock. Chose (b): it's airtight (any edit that committed during phase 2 had to take the same writer lock, so phase 3 now sees it) and carries ZERO deadlock risk, whereas (a) is a multi-handler/multi-flag interlock — exactly the shape that deadlocks. (b) also closes the analogous lost-update for any future lock-free phase.
+- **Restructure "Keep"/Anchor moves: drop them ENGINE-side from the plan, not app-side from the apply set.** Windows `classify()` ALWAYS computes a canonical destination (Photos/Year/Month…), so an Anchor-folder file genuinely moves — yet the UI's Keep tile says "folders kept intact" and ApplyAsync applied them by default with no review affordance. The macOS reference (the behavioral source of truth) emits NO proposals for anchor folders. Dropping anchor moves in `handle_plan_restructure` (after computing the `anchor_folders` count that feeds the Keep tile) makes the Sankey/TreeDiff/apply all naturally exclude them with ZERO app changes — the truest 1:1 port. The app-side alternative (exclude Keep rows from `_allFileRows`/counts) would also need the Sankey/TreeDiff (which read `plan.Moves` directly) patched, more surface for drift.
+- **ep_guard breadcrumb: an armed-EP SET, after the re-audit killed the refcount-only version.** Original E7 fix made `arm` write only on the 0→1 transition (refcount) to stop a sibling `disarm` removing a still-needed breadcrumb. The fix re-audit (HIGH) showed this records only the FIRST armer's EP: with both a CUDA and an OpenVINO pack present, a scan-startup bind + a search-query bind can arm DIFFERENT guarded EPs, and if the second crashes, the breadcrumb names the first → a HEALTHY EP gets disabled while the real crasher crash-loops. Final design: the `.ep_attempt` file holds the SET of currently-arming EPs (per-EP refcount in a `OnceLock<Mutex<HashMap>>`), and startup disables EVERY guarded EP the stale crumb names. Over-disabling a concurrently-arming healthy EP is recoverable (Settings → re-enable); a crash-loop is not — so erring toward disabling is correct.
+- **DebugLog async sink: REVERTED to synchronous after the re-audit proved it defeats fast-fail forensics.** P2 moved the per-IPC-event disk write off the UI thread (queue + 200 ms batch timer). The re-audit (HIGH) caught that a NATIVE fast-fail (RaiseFailFastException — the exact thing the `[APPLY:N]`/`[ENGINE-SUB]` tracing exists to post-mortem, per CLAUDE.md) kills the process before the flush, losing the last <200 ms of lines INCLUDING the smoking-gun line right before the crash. Forensic durability is load-bearing and non-negotiable, so synchronous won. The perf concern is real but its fix must preserve per-line durability (a persistent flushed StreamWriter, verified on hardware) — naive batching is forbidden (noted in the code + NEXT.md).
+- **Deferral over runtime-unverifiable risk in the file-move / settings / ML-quality paths.** Several confirmed MED findings (applyRestructure outbound chunking, AppSettings lost-update, CLIP-tokenizer punctuation, Sankey "Other" drill-down, rename-heal `UPDATE OR REPLACE` FTS desync, wipe-vs-bulk interlock) were DEFERRED with documentation rather than fixed blind: each touches a path where a wrong fix is worse than the bug (moves real files / loses more settings / corrupts search / degrades ML quality / risks deadlock) AND can't be headless-verified on this dev box. For a "make no mistakes" pass, shipping ~35 verified-correct fixes + honest deferrals beats forcing risky changes into those paths.
+- **The fix re-audit is load-bearing (again): it caught 4 of my own regressions.** A green clippy/build/test gate did NOT catch: the async-log forensic loss, the ep_guard wrong-EP, an A9 stale-nav placeholder clobber (the guard set tcs=false but the caller fell through to an unguarded `ShowPlaceholder`), and an A13 counter reset undone by a stale `DeepAnalyzeLast` in the same SyncStream pass. All four were repaired and a focused second re-audit over the repairs returned clean. Reaffirms the prior entry's lesson: refute-by-default re-audit over the fix diff is mandatory, not optional.
+
+## 2026-06-04 (later) — Five-workflow bug-audit sweep: scope, serialization, and the non-obvious fix choices
+
+**Context**: A from-scratch "make it bulletproot" audit of the whole Windows app off `main`. Four parallel find→refute-by-default→verify workflows (engine · app · IPC+perf · recent-diff) + a fifth re-audit/completeness-critic over the fix diff. 11 bugs fixed; the re-audit caught a hang the fixes introduced. Uncommitted; full record in `shared/docs/audit-2026-06-04b/`.
+
+- **Workflows MUST be serialized, not run concurrently.** Launching all four audit workflows at once (~28 finder agents) tripped a server-side rate-limit ("temporarily limiting requests") that aborted every finder mid-investigation before it could emit structured output — the whole batch returned empty. Run one workflow at a time (each already caps internal fan-out at min(16, cores-2)); that stayed under the limit and produced 1.1–1.5M-token runs cleanly. The failure was invisible as "0 findings" until a subagent transcript showed the rate-limit error — check transcripts, not just the empty result, when a workflow returns nothing.
+- **The two People/Cleanup `RefreshAsync` crashes are the same V15.x DispatcherObject class, fixed the same way.** `ConfigureAwait(false)` resumes the catch/finally on a thread-pool thread; raising `IsLoading`/`ErrorMessage` there drove x:Bind XAML writes (`ProgressRing.IsActive`/`StatusText`) off the UI thread → RPC_E_WRONG_THREAD native fast-fail. LibraryViewModel already had the `OnUi()` marshal for exactly this; the fix back-ports it to the two siblings that were missed. These were genuinely crashing, not theoretical — the off-UI-thread write is in the always-taken `finally`.
+- **RestartAsync stale-`Exited` race: a `sender != _process` identity guard, NOT a lifecycle-lock refactor.** The OLD engine's `Process.Exited` (queued to the UI thread) could run after `StartAsync` installed the new `_process`/`_stdin`/`_readCts`, so `Cleanup()` tore down the freshly-spawned engine and mis-counted it a crash. The fully-general fix (a `_lifecycleLock` serializing the field swap + a generation counter) is a sizable change to the single most safety-critical method in the app; the chosen minimal guard (`sender` is the exact Process that exited; if it's no longer the live `_process`, dispose it and bail) eliminates the reported failure in all realistic timings. A nanosecond interleave (StartAsync swapping `_process` between the guard read and Cleanup's field writes) remains but is no worse than the pre-fix behavior — accepted over the regression risk of a lock refactor in process-lifecycle code.
+- **`restructurePlan` overflow: raise the C# frame cap to 32 MiB + surface a visible error, NOT engine-side paging (yet).** The 1 MiB read-frame cap silently dropped the whole-plan event above ~3.5k moves → empty Restructure tab. 32 MiB holds a full plan for the product target (~200k moves at ~300 B/move) while still bounding a runaway line; the engine already builds the whole plan in memory, so the transient StringBuilder is no new ceiling. Paging the plan over a new bounded IPC event is the architecturally-robust answer but a contract change across schema+Rust+C#+accumulation — deferred (NEXT.md) until a library is shown to exceed the cap. The oversize-drop is now also a visible `ipc_frame_too_large` error routed through `Apply` on the UI thread (never an off-thread observable write), so it can never fail silently again.
+- **The `face_clustering_busy` gate-release bug is a substring-collision regression from the face-fix commit.** The app released the auto-cluster single-flight on `Kind.Contains("cluster")`, which predated the new `face_clustering_busy` kind; a busy bounce (a pass is STILL running) then wrongly cleared the gate. Narrowed to exact `== "face_clustering_failed"` — the in-flight pass emits its own terminal event that legitimately releases the gate.
+- **SEC-5 junction-TOCTOU: normalize with `strip_extended_length`, never `canonicalize`.** `has_reparse_point_in_chain` compared a raw destination parent against a verbatim `\\?\` canonical root, so `starts_with` failed on iteration 1 and the ancestor walk checked only the leaf. The tempting "canonicalize the parent too" fix is actively wrong — `std::fs::canonicalize` RESOLVES the junction and defeats the very detection. `strip_extended_length` removes the `\\?\` prefix without following the link, so both operands compare in the same form and the walk runs to the real root.
+- **Deliberately LEFT the early `llama_cpp_missing` Deep-Analyze arm at `cancelled:true`.** The fix (E2) made a genuine single-file analyze FAILURE report `cancelled:false` so the app's "(1 failed)" warning fires. The completeness-critic flagged that the runtime-missing arm still hard-codes `cancelled:true`; this is intentional — that arm pairs with a specific, actionable `llama_cpp_missing` error toast, and `cancelled:true` suppresses a redundant generic warning stacking on top. One clear error beats error+generic-warning. Not an oversight.
+- **ML-preprocess perf wins were DEFERRED, not applied.** The IPC+perf audit surfaced real per-pixel scalar-indexing and redundant-memset costs on the RAM++/MobileCLIP hot path. A mistake there silently degrades tag/embedding QUALITY, which the headless gate cannot catch (no GPU) — and CLAUDE.md mandates tuning ML against real data. Fixing clear correctness bugs headlessly while deferring unverifiable-quality perf rewrites to on-hardware A/B is the higher-integrity call for a "make no mistakes" pass. (Output-identical perf fixes WERE taken — e.g. BGE CPU thread count, which can't change embeddings.)
+- **The re-audit earned its keep: it caught a hang the fix introduced.** E4 moved group-folder dedup into the sanitized namespace; building `safe_filename_component("{base} {n}")` truncates to 200 scalars, so a ~200-char base made every numeric suffix collapse to the same string → infinite loop hanging plan generation (the pre-fix code deduped on the un-truncated `pretty`, which always terminated). Fixed by reserving suffix room so each candidate is distinct + a regression test. Lesson reaffirmed: a green clippy/test gate does not prove a refactor is regression-free — the refute-by-default re-audit over the fix diff is load-bearing.
+
+## 2026-06-04 — Suggested-merges hang (read-only conns + lock-narrowing), AUTOMERGE 0.75 + HNSW consolidate, and an exhaustive conservative perf audit
+
+**Context**: On-hardware, People → Suggested-merges hung for minutes and faces still over-split (`shared/docs/PLAN-suggested-faces-fix.md`). Separately a full performance pass was wanted for the weak 4 GB DirectML / low-memory target. Done on branch `win-face-fix-perf` off origin/main.
+
+- **The hang was architectural, not algorithmic.** The engine has one `Arc<Mutex<Connection>>`; `db/mod.rs` documented "reads use ephemeral read-only connections" but `open_read` was never implemented, so every read serialized behind the writer. The suggestion query (already lock-free during its O(P²) sweep) still took the writer mutex to *load*, parking behind `handle_run_face_clustering` which held the lock across its entire load→cluster→consolidate→persist. Fix: add `db::open_read` (RO + `query_only`) and open it in the suggestion handler (WAL → concurrent with the writer); restructure clustering to hold the lock only for the initial reads and the final persist, running `cluster()`+`consolidate()` lock-free; add an engine-side single-flight guard so two clustering runs can't race the persist.
+- **Lock-narrowing tradeoff (accepted):** with the writer lock released during the multi-second compute, a sibling writer (manual MergeClusters / MarkPersonsDifferent) performed in that window is rebuilt by the persist phase's wipe-and-rebuild — a lost *manual* merge, not corruption (names + "different" verdicts are carried forward via the snapshot + `face_verifications`, so no user data is destroyed, and the next re-cluster re-derives). Gating only `runFaceClustering` keeps the fix simple; full mutual exclusion across all face-mutating commands was judged not worth the added contention.
+- **`AUTOMERGE_COS_DEFAULT` 0.85 → 0.75 (Balanced)** and **the 12k-cluster `consolidate()` no-op replaced by an HNSW centroid neighbor search** (exact-cosine edge weights; cap lifted; brute-force parity test), with Pass-3 floors exposed as `FILEID_FACE_PASS3_MIN_MEAN_COSINE` / `_VARIANCE_THRESHOLD`. The 0.75 default and the >2k-cluster HNSW path are on-hardware calibration items (owner's gate).
+- **Perf audit — apply aggressively, but conservatively and GATED.** 15-finder refute-by-default audit over the whole Windows tree (33 confirmed / 7 refuted; the C# list-virtualization + LavaLamp/Win2D dimensions were refuted — no waste). Safe findings (full-frame clone elimination on the primary tagger, UI-thread SQLite offload, lazy top-K materialization, statement/probe caching, span decode, query LRU, …) are headless-verified. Hardware-sensitive findings (memory_tier → worker_count/pool/predecode clamps, VRAM-probe-None fail-safe to pool=1, pool=1 vision-semaphore clamp, BGE-on-CPU, downloader streaming) are applied but **gated so the verified 6 GB RTX 2060 reference box is byte-identical** (every gate is `MemoryTier::Low` or `pool_size==1`) — they can only reduce resource use on constrained boxes, never wedge the GPU. Their runtime benefit is NOT headless-verifiable and remains the owner's on-hardware gate. The decisive insight: on the 4 GB box the VRAM clamp already forces pool=1, so the dominant uncapped lever was `worker_count` (full decoded frames held in-flight), now Low-tier-clamped.
+- **Obsolete branch `windows-v16.22-v16.26` dropped, not merged.** Its 2 commits (RAM++ ONNX tagger + drop non-commercial Qwen-3B) are superseded by origin/main, which already ships RAM++ as the primary tagger + `ram_plus_batch`, already dropped Qwen-3B, and deliberately deleted `arcface.rs` (embedding is now SFace). A force-merge (~28 conflicts) would re-add the deleted file and regress main, so the branch was abandoned per the "what I find contradicts how it was described → surface it" principle.
+
+## 2026-06-04 — Face fixes: clip_text is not a scan dependency; conservative verification-aware auto-merge; band retune; load-failure aborts
+
+**Context**: On-hardware (RTX 2060), face scanning was "totally broken" + over-split + slow suggested-merges + a clip_text install-stall toast. Diagnosed via three adversarial workflows (full face-pipeline audit → gap-verify → fix-diff re-audit; a gap agent empirically loaded the on-disk YuNet ONNX and proved its outputs + decode are correct, ruling out the detector).
+
+- **`clip_text` removed from the scan model-gate** (`scan.rs` pre-flight is now `[mobileclip_s2, arcface]`). clip_text is the CLIP *text* encoder, loaded lazily only on the first semantic search (`embed.rs`); it is never referenced by the scan/detect/embed/cluster chain (the scene-label matrix uses a precomputed constant, not ClipText). Gating scans on it meant a stalled clip_text install (a 254 MB file, the likeliest to stall) aborted ALL scanning → zero faces. A query-time-only model must never block a scan.
+- **Model LOAD failure (sentinel present but weights won't load) now ABORTS the scan** rather than warn-and-continue. The incremental skip-set is timestamp-only (`failed=0 AND scanned_at>=modified_at`), so a scan that completes with a stage silently skipped stamps every file current+ok and strands it from that stage forever. Aborting leaves files un-stamped to retry once the (corrupt/AV-quarantined) model is repaired. A mid-scan GPU TDR marks only image/video rows `failed=true` (docs already finished CPU extraction → kept visible, not hidden behind `failed=1`).
+- **Conservative, verification-aware centroid auto-merge (`consolidate()`)** folds over-split duplicate clusters at centroid cosine ≥ `FILEID_FACE_AUTOMERGE_COS` (default 0.85 — deep in genuine same-person territory per the on-hardware 0.88–0.95 calibration, far above the ~0.66 cross-identity ceiling; `=1.0` disables). This intentionally narrows the project's "fail-safe to over-split, never auto-merge" stance, but ONLY in the provably-safe gap — the over-split was bad enough on-hardware to make the People tab unusable. Two blocked-pair sources keep it safe: (a) "different people" verdicts re-projected onto current clusters, and (b) never merge two clusters with DIFFERENT user-assigned names — names survive the persons-table rebuild, so (b) is stable across re-scans where the face-id-keyed (a) link is not. The fully-durable orphaned-verdict fix (content-keyed verifications) is deferred (NEXT.md).
+- **Merge-suggestion band retuned `0.32..0.66 → 0.55..0.97`.** The old floor flooded the sheet with impostor-territory pairs; the old ceiling (= Pass-1 core threshold) excluded the genuine same-person FRAGMENTS that over-split stranded at 0.66–0.95 (never auto-merged, never suggested). The new band drops noise and surfaces the real duplicates at the top.
+- **Install stall-guard latches the per-kind terminal (`Fraction >= 1.0`) via a PropertyChanged subscription** instead of polling the shared progress slot (which concurrent Install-All downloads overwrite, causing a false "clip_text stopped responding" toast for a finished install). `>= 1.0` (not 0.999) matches the engine's terminal contract — in-progress events are clamped to `min(0.999)`, so 1.0 is unambiguously "done" and a near-done in-progress value can't silence the guard during the no-progress finalize phase. Downloader `read_timeout` 120→60s so a stalled stream resumes (~61s) and re-arms the 120s app watchdog before it alarms.
+
+## 2026-06-02 — WS3 resumable-scan: already implemented (discovery skip-set); the planned checkpoint is redundant
+
+**Context**: The plan's WS3 "resumable scan checkpoint (persist `scan_sessions.last_file_index`, resume a running session)" assumed resume needed building. A focused investigation of the current scan pipeline found it is ALREADY resumable — more robustly than a linear index would be.
+
+- **How resume already works:** `ScanSession::run` pre-loads a skip-set from the DB — `SELECT path_text FROM files WHERE failed=0 AND scanned_at >= modified_at` (scan_session.rs ~197) — and Discovery silently filters those paths at walk time (discovery.rs ~263). Re-running a scan after a crash skips every file that completed a batch flush and re-processes only the in-flight (un-flushed) batch + not-yet-reached files. `rescan=true` empties the skip-set for a forced full re-scan; dbwriter's `ON CONFLICT(path_text) DO UPDATE` makes a re-touched file idempotent.
+- **Why the planned `last_file_index` checkpoint is REDUNDANT (and deliberately not built):** a per-file skip-set keyed on `scanned_at >= modified_at` is strictly better than a linear `last_file_index` cursor — correct under out-of-order batch completion, survives file add/remove between runs, and needs no per-batch write on the hot flush path. Building the checkpoint would add dead complexity for zero behavioral gain (the `last_file_index` column stays unused/harmless; a future USN-journal rescan could repurpose it). Per the project's "verify directives against current code" rule, the directive was already satisfied.
+- **The only real gap (optional polish, not built):** `db::open_writer` marks an interrupted `running` session → `failed` on startup (db/mod.rs ~52); the user is never told "your last scan was interrupted; the next scan resumes automatically." A recovery-UX notice (engine surfaces the orphaned session via a new EngineInfo field/event → a sidebar "Resume / Start fresh" banner) is a moderate IPC+app change for informational value only — resume happens regardless. Deferred as low-value polish.
+
+## 2026-06-02 — WS-CD pt.1: signing-correctness + release CD shipped; rest scoped with correct approaches
+
+**Context**: WS-CD is the consolidated CI/CD/release phase. A 5-cell investigation mapped the full pipeline (3 CI workflows, publish-bundle.ps1/sign.ps1, WiX MSI+Burn, version sourcing, model hashes, the release gap). Landed the ship-critical + headless-verifiable pieces; scoped the rest.
+
+- **Shipped (inspection + parse verified — CI never builds the installer and the headless gate builds only app+engine, so these can't be CI-verified):** (1) `publish-bundle.ps1` `Sign-Binary` now checks `$LASTEXITCODE` — THE "ships UNSIGNED silently" blocker: signtool failures (expired cert, timestamp timeout, denied) were swallowed, the script sailed on, and the bundle tripped SmartScreen on every user. (2) Release-build guard: `CI_RELEASE=true` forbids `-SkipSign`/`-SkipPrivacyGate` (local dev unaffected). (3) Signature verify extended bundle→per-arch MSIs. (4) `release.yml` — a tag-triggered (`v*`) Windows CD workflow, **ready-but-dormant**: fails loudly without the cert (never ships unsigned), a `workflow_dispatch dry_run` exercises the build cert-less, `contents: write` + `gh release create`. Doesn't touch the 3 existing CI workflows.
+- **Single external blocker:** the Authenticode **EV cert** (~$300/yr + identity vetting) + its SHA1 thumbprint as the `FILEID_EV_THUMBPRINT` repo secret. Everything in release.yml except the literal signing is code-ready + conditional on the secret.
+- **Deferred with correct approaches (NEXT.md "(later 4)"):**
+  - **WiX MSI RollbackBoundary** — the audit's "`<RollbackBoundary/>` as a `<MajorUpgrade>` CHILD" is **invalid WiX**: RollbackBoundary is a standalone element in the install sequence (Package/Feature) that marks the transaction commit point, NOT a MajorUpgrade child. Needs the WiX toolchain to verify → build-capable session.
+  - **Version single-sourcing** — Cargo.toml `[package].version` → `/p:Version` into the .csproj (`<Version Condition="'$(Version)'==''">`) + both .wixproj (DefineConstants → `$(var.Version)` in Product.wxs/Bundle.wxs). 5 hardcoded `0.1.0` sites; MSI-build-gated → build-capable session.
+  - **SHA256 population + non-`None` CI gate** (WS0's deferred data) — 39 artifacts; canonical hash = the `oid sha256:` in each HF LFS pointer (`GET <repo>/raw/main/<path>`) for LFS blobs, byte-hash for small raw + pinned GitHub/NVIDIA files. Network/release step; the gate can't hard-fail until populated (would red CI) and RAM++'s hash is provisional until the (blocked) WS5 256 re-export. WS0 size-sanity guards meanwhile.
+  - **Telemetry + source-URL allowlist canonicalization** — lists duplicated across windows-engine/app/macos.yml + publish-bundle.ps1 (drift hazard). Extract to `shared/ci/*.txt`, load via `Get-Content`/`mapfile`. Touches 3 LIVE workflows → local-test-the-loader + push-verify follow-up. windows-app.yml also lacks the source-URL scan.
+  - **Cargo.lock-freshness + BOM-verify CI gates** — low-risk additive gates; careful push-verify follow-up. (Signed-binary CI verify has no cert in CI → lives in release.yml, done.)
+
+## 2026-06-02 — WS0 model-integrity: download-path hardening now, hash values + CI gate in WS-CD
+
+**Context**: The verify-or-bail path in `downloader.rs` is fully wired (both the simple and 12-way parallel paths re-hash on completion and bail on mismatch) and `prewarm.rs` already passes `expected_sha256: file.sha256.clone()` — but every `registry.rs` entry is `sha256: None`, so verification is inert (the S2 note, 2026-05-31). WS0 is split into machinery-now / values-later.
+
+- **Shipped now (headless-verifiable; real protection even with no hashes):** (1) a loose post-download **size-sanity check** (`check_size_plausible`) applied in both download paths before the atomic rename. `approx_bytes` is an estimate, so it rejects only an implausibly-small result (`actual < approx_bytes/4`) — which catches the common no-hash corruption (a truncated stream, or a few-KB HTML error / auth page standing in for a multi-GB model) while never false-rejecting a loose estimate. A failed check deletes the `.part` so it never becomes the destination. (2) a **`.part-N` orphan guard** in `download_range_with_retry`: a part file larger than its planned range is stale (leftover from a prior download of a different-sized remote file) and would corrupt the concatenation — discard + re-fetch, instead of the old behavior that treated an oversized part as "already done" and kept the bad bytes. `DownloadRequest` gains `expected_bytes`, wired from `approx_bytes`; 3 unit tests cover the size band.
+- **Deferred to WS-CD (the consolidated CI/CD phase) — and why:** populating the ~30 `registry.rs` `sha256` values + the CI gate that fails on any `sha256: None`. (a) The values require the real pinned artifacts — the canonical, fresh-download-matching hash for each LFS file is the `oid sha256:` in its HuggingFace LFS pointer (GET `…/resolve/<rev>/<path>` returns the pointer text for LFS blobs, raw bytes for small config/tokenizer files), so population is a network/release step, and the **CI gate enforcing non-`None`** is explicitly a WS-CD deliverable. (b) The RAM++ artifact isn't final — WS5's planned 384→256 re-export changes its hash, so pinning now would just be re-pinned later. Making verification *mandatory* (bail on `sha256: None`) is coupled to population (else nothing installs) and lands with the values in WS-CD.
+- **On-disk rot (a previously-installed file corrupting after install) is not yet covered** — the size/SHA checks guard the download path; a load-time re-verify + sentinel-clear is grouped with the hash gate in WS-CD (without pinned hashes a load-time check could only size-check, which is weak).
+
+## 2026-06-01 — Full Windows audit: method + key calls (branch `audit-fixes-2026-06-01`)
+
+**Context**: A top-to-bottom audit of the entire Windows app (engine + WinUI), driven by multi-agent Workflow orchestration. Report: [`AUDIT-2026-06-01.md`](AUDIT-2026-06-01.md).
+
+- **4-stream adversarial method.** Engine static, app static, macOS parity, and a live on-hardware run — ~675 agents, every finding **refute-by-default verified** before it entered the report. Rationale: exhaustive coverage with a low false-positive rate. Raw findings (618) vastly exceed confirmed (153) precisely because the adversarial verify pass culls plausible-but-wrong claims; a synthesis pass then de-dupes the same root issue across streams (e.g. the SFace/ArcFace embedding mismatch surfaced in both engine and parity).
+- **On-hardware isolation harness** (`build/audit_onhw.ps1`), non-destructive by construction: redirect the engine via `LOCALAPPDATA=<temp>` with the real `Models/` junctioned in, so the user's 24k-file library DB is never opened and no destructive command (apply/rename/trash) is ever sent. **Gotcha recorded:** `paths::root()` appends `FileID` to `LOCALAPPDATA`, so the junction must sit at `<temp>\FileID\Models`, not `<temp>\Models`. The first run's "DirectML / models_not_installed / scan failed" was THIS harness bug, not a product fault — so the synthesis's HW-1 "DirectML never completes" was reclassified **UNVERIFIED**. The corrected run bound **CUDA** and completed cleanly.
+- **CUDA pack DOES bind on the RTX 2060** (supersedes the long-standing "unverified, needs hardware" note): `ort_cuda_x64` + cuDNN present → `executionProvider=cuda`, pack + cuDNN DLL dirs registered, scan completes. The throughput ceiling (4.9 files/s, well under the ≥140 target) is **CLIP under-batching + per-file serialization, not the EP** — so the next perf work is the batch coordinator, not the EP chain.
+- **ENG-18: `file_ref` is stored as a bitcast `i64`, not `u64`.** rusqlite's `ToSql for u64` rejects values `> i64::MAX`; an NTFS MFT reference with a non-zero sequence number (top 16 bits) exceeds it and aborted the entire flush batch. `r as i64` is a lossless reinterpret; the `HEAL_LOOKUP` equality still holds because write and lookup bind the same bitcast, and nothing reads the column back as `u64` (SQLite INTEGER is i64). Chosen over widening the column (no schema change, byte-compatible with macOS, which stores the same inode identity).
+- **ENG-2: `wipe_all` re-enables `foreign_keys` on every exit path** via a closure-captured result, because `PRAGMA foreign_keys` is per-*connection* (not transaction-scoped) and the engine reuses one long-lived writer — a naked early-return on a failed DELETE/commit would leave FK enforcement off for the rest of the session.
+
+## 2026-05-31 — Suggested-merges crash + faces/merge audit (branch `fix/win-face-merge-crash`)
+
+**Context**: User report — opening People → Suggested merges hard-crashes the Windows app. Fixed + audited the faces/merge subsystem.
+
+- **The sheet crashed because it rendered rows imperatively.** `SuggestedMergesSheet.Render()` ran in a raw `DispatcherQueue.TryEnqueue` callback (no try/catch on its stack) and (a) indexed theme-dictionary brushes off `Application.Current.Resources[...]` (throws `KeyNotFoundException` — those live in `ThemeDictionaries`, reachable only via `{ThemeResource}`), and (b) rebuilt full `UIElement` subtrees as ItemsRepeater *items* per engine event (the documented V15.4 layout-pass `RaiseFailFastException` shape that bypasses every managed handler — and `App.OnUnhandledException`'s `e.Handled=true` can't catch a `TryEnqueue`-callback throw regardless). **Chose the DataTemplate refactor over a surgical try/catch + brush-cache**: the surgical patch fixes the brush throw but leaves the native fast-fail latent (it re-fires whenever `LastMergeSuggestions` updates while the sheet is open). The DataTemplate conforms to the working `PeopleView.xaml` pattern in the same tab, resolves `{ThemeResource}` natively, and lets the ItemsRepeater recycle containers — the canonical fix the CLAUDE.md WinUI conventions point to.
+- **"Different people" routes through a new `markPersonsDifferent` IPC command, keyed on stable anchor face ids (migration v13).** The old code opened a second app-side `ReadWrite` SQLite connection (violates the single-writer invariant; `SQLITE_BUSY` under WAL) and keyed the verdict on `person_id`, which is regenerated every re-cluster (`DELETE FROM persons` + fresh autoincrement) — so suppression silently rotted after one re-cluster. The verdict now also stores the `(min,max)` anchor `face_prints.id` pair (stable across re-cluster) and `findMergeSuggestions` filters on it (legacy person-pair rows still honored). **Chose IPC + a v13 ADD COLUMN migration over a `busy_timeout` band-aid** — the band-aid only narrows the race and keeps a forbidden second writer. macOS must register an identical `v13_face_verification_anchors` for DB parity.
+- **`findMergeSuggestions` anchor lookup is a rep-face JOIN, not per-person correlated subqueries.** Relies on `representative_face_id` being the highest-quality embedded face (true post-clustering; `handle_merge_clusters` now recomputes it on merge, and guards self-merge so a person row is never deleted out from under its own faces). The O(persons²) cosine scan is unchanged — fine ≤ ~1–2k persons, capped at 50 results; ANN deferred (P12/P13).
+
+## 2026-05-31 — Audit-driven hardening: ETA, data-loss/crash fixes, security, perf, quality (branch `phase0-critical-fixes`)
+
+**Context**: A workflow audit (parity + ETA design + adversarially-verified bug/security/perf hunt) drove a multi-phase pass. User direction: parity = *best-of-each, document divergences* (not blind lockstep); macOS edits written for the user's Mac (unverified-until-build); perf = maximum-aggressive but with a **hard "no quality loss"** constraint.
+
+- **ETA: measure real throughput, label by stage — don't fabricate per-stage estimates.** The Windows "13s for an hour" bug was `files_per_second = files_in_batch / flush_wall` (dbwriter.rs) measuring only the DB-INSERT rate. Replaced with a rolling wall-clock EMA (`ScanProgress.files_per_second` now = processed-delta / real-elapsed, 0.7/0.3 weights, mirroring macOS `ScanCoordinator`). **Chose NOT to add a `stages[]` array to the IPC schema.** A scan has only two *live, measurable* stages (discovery, tagging); People (face clustering) and Captions (Deep Analyze) are separate JobQueue jobs with their own ETA events. Emitting speculative ETAs for not-yet-started stages would reintroduce exactly the wrong-number class the user complained about. Instead the Windows UI attributes the (correct) ETA to the active stage ("Tagging — 48m left", "Counting files…" during discovery). macOS keeps its stat-card ETA presentation (a documented, both-correct platform difference).
+- **macOS B8**: `ScanCoordinator` runs many scans per process; `rollingFilesPerSecond` was never reset between sessions, so scan #2+ seeded its EMA from scan #1's stale rate. Reset per session.
+- **Rename-heal (B1) only re-binds a row that genuinely MOVED.** A `content_hash` (BLAKE3) match also fires for a *coexisting byte-identical copy*; healing it stole the original's row and FK-cascaded its tags/faces away (silent data loss). Now: `file_ref` (NTFS MFT) match heals unconditionally (a true move); a hash-only match heals only when the old path is gone from disk. The macOS engine must mirror this guard *once it writes content_hash* (EG4).
+- **Restructure never clobbers (B3) and never trusts a stale plan (B4).** Dropped `MOVEFILE_REPLACE_EXISTING` and uniquify colliding destinations (`name (2).ext`); re-read the live DB row for `file_id` and require it still names `source` before moving. The module's old "updated in the same transaction as the move" claim was false (a separate UPDATE after the move) — corrected, plus a durable recovery sidecar + error log on update failure (also self-heals on next scan via rename-heal).
+- **ep_guard arms the override-aware EP (B6).** It armed `active_provider()` (which ignores `gpuExecutionProviderOverride`) while the wrappers bind the override-aware `priority_chain` head — so a user-forced CUDA/OpenVINO crash left no breadcrumb and crash-looped. New `runtime::armed_provider()` arms the first *guarded + actually-present* EP in the real chain.
+- **Dropped `panic = "abort"` (B7).** The stdio loop dispatches every IPC handler on a bare `tokio::spawn`; under `abort` any handler panic killed the whole engine. Unwind restores per-task isolation. (`abort` + `catch_unwind` does NOT work — abort precedes unwind.)
+- **Quality changes that can't be verified headlessly ship gated or deferred — to honor "no quality loss."** P18 (widen merge-suggestion band) is additive (user-reviewed suggestions) so it ships on a *dedicated* `MERGE_SUGGEST_COS_HIGH=0.66` (leaving the shared `COS_HIGH` for the VLM-verifier band untouched). P17 (mutual-kNN Pass-1, the documented fix for single-linkage chaining) ships behind `FILEID_FACE_MUTUAL_KNN` (default off) for on-hardware A/B against labeled faces — it fails toward over-split (UI-mergeable) but isn't provably recall-neutral. P22 (RAM++ precision floor) is already env-tunable. P19/P20/P21 deferred (need ground-truth tuning / both-platform lockstep / bucketing).
+- **P3 EP-aware concurrency is a no-op on 6 GB by design.** The semaphore caps now rise to the pool size on CUDA/TensorRT (no TDR ceiling), but the *pool itself* is VRAM-clamped to ~2 on a 6 GB card, so the win is only on larger cards; growing the pool on 6 GB CUDA needs an on-hardware `VRAM_PER_POOL_INSTANCE_MB` retune (DirectML's estimate is allocator-conservative). DirectML keeps the 4/2 TDR floor.
+- **Security: bounded IPC framing both sides (S4/S5); SHA256 enforcement is wired but inert (S2).** The C# and Swift readers now cap a frame at 1 MiB and resync, matching the engine. The downloader already bails on a SHA256 mismatch — but every `registry.rs` entry is `sha256: None`, so verification is skipped; *activating* it requires fetching+hashing each pinned artifact (a network release step, not fabricated here). macOS `/usr/bin/unzip` (S1) replacement with an in-process hardened extractor is deferred to the Mac session (the archive is user-picked, not a network vector).
+- **Intentional, documented divergences kept (best-of-each):** llama.cpp (Win) vs MLX (mac) VLM backend; YuNet (Win) vs Apple Vision (mac) face *detection* — both feed the shared SFace 128-d embedder; Windows-only Library grid keyboard nav; the ETA presentation difference above. RAM++ tagging, BLAKE3 content-hash rebind, and 5-point FaceAlign remain genuine *quality/correctness* gaps to close on macOS (not native-better), specced in NEXT.md.
+
+## 2026-05-31 — All-vendor HW acceleration: auto-install behind a crash-safety gate; keep llama.cpp over vLLM
+
+**Context**: The user asked to auto-enable GPU acceleration on every vendor and to evaluate vLLM vs llama.cpp.
+
+- **Keep llama.cpp; do NOT adopt vLLM.** vLLM is a server/datacenter throughput engine (PagedAttention, continuous batching, pre-allocates ~90% VRAM, NVIDIA/Linux-first, no Metal). FileID is single-user on-device across Windows + macOS on consumer/low-VRAM GPUs (a 6 GB RTX 2060) — llama.cpp's lane (GGUF quant, CUDA/Vulkan/Metal/CPU, self-contained binary, runs a 7B VLM on 6 GB with CPU spill). FileID's VLM bottleneck is model-load + sequential UI, not throughput; the persistent `llama-server.exe` already captured the throughput win. vLLM would add a Python/server dependency and VRAM pressure for zero benefit, and can't serve macOS (MLX) at all. Revisit only if a server-side deployment ever appears.
+
+- **EP crash-safety gate (`models/ep_guard.rs`) makes auto-enabling unverified GPU EPs safe.** Auto-pinning a pack's ORT runtime + provider DLL (CUDA on the 2060, OpenVINO with no Intel hardware to test) risks a native crash at bind time. The gate arms a `packs/.ep_attempt` breadcrumb around the first ORT session and disarms on success; a stale breadcrumb at next startup → the bind crashed → promote to a persistent `.ep_disabled` and fall back to DirectML until the user re-enables (Settings "Verify install" / pack reinstall / explicit override). Worst case is **one** crash, then auto-revert — so we can ship auto-install before per-vendor on-hardware verification.
+
+- **No hosted QNN pack (Snapdragon).** Qualcomm's QNN SDK is proprietary; redistributing it conflicts with the commercial-clean / Apache-2.0 rule. Snapdragon stays on DirectML and uses the Hexagon NPU only if the device already provides `QnnHtp.dll` (the EP chain `Qnn → DirectMl` already does this). CUDA (MIT, Microsoft-hosted on github) and OpenVINO (Apache-2.0, HF-hosted) are the auto-installed packs; the OpenVINO artifact must be assembled + uploaded to `Web-World-Wide/fileid-ort-openvino` and verified on Intel hardware (handoff). The `ORT_DYLIB_PATH` pin is now vendor-parameterized (`runtime::active_pack_dir`): NVIDIA→packs/cuda, Intel→packs/openvino.
+
+## 2026-05-30 — CUDA Performance Pack: matched ORT-GPU build + ORT_DYLIB_PATH, not a provider-only drop
+
+**Context**: NVIDIA scans ran on DirectML (~5 files/s) despite the EP chain preferring CUDA. Root
+cause: pyke `ort`'s `download-binaries` ships only `onnxruntime.dll` + `onnxruntime_providers_shared.dll`
+(no `onnxruntime_providers_cuda.dll`), so CUDA can't bind and falls through to DirectML — the engine's
+own log quantifies it as ~3-5x slower.
+
+- **Ship the COMPLETE matched ORT-GPU runtime, pinned via `ORT_DYLIB_PATH` — not a provider-only DLL
+  dropped next to pyke's base.** The CUDA provider DLL is ABI-bound to its exact ORT build; mixing
+  Microsoft's provider with pyke's base risks a silent no-bind or crash. So the `ort_cuda_x64` pack is
+  Microsoft's full `onnxruntime-win-x64-gpu-1.22.0.zip`, and `main.rs` sets `ORT_DYLIB_PATH` to the
+  pack's `onnxruntime.dll` so the provider binds against the same build. **Version MUST match the pyke
+  ort-sys build** (read off the shipped `onnxruntime.dll` ProductVersion — 1.22.0); a bump requires
+  re-pinning both. Guarded on file presence → inert until installed (zero risk to the DirectML path).
+- **Host on github.com, not HF.** ONNX Runtime is MIT and Microsoft publishes the GPU zip on GitHub
+  (already in the CI source-URL allowlist), so no HF hosting is needed for CUDA. cudart/cublas come
+  from the existing `llama_runtime_cuda_x64` pack (CUDA 12.4); cuDNN auto-installs. (OpenVINO is
+  Apache-2.0 and would host on HF; QNN is proprietary/device-provided.)
+- **Provider presence, not "any DLL", gates CUDA.** `cuda_provider_present()` checks specifically for
+  `onnxruntime_providers_cuda.dll` so a stray DLL can't make us advertise CUDA and skip DirectML's
+  discrete-adapter `device_id` pin. The app's Accelerator/Settings "installed" state likewise gates on
+  the provider (`ort_cuda_x64`), since cuDNN alone never enabled the EP.
+
+## 2026-05-30 — Audio thumbnails skip the in-process shell provider (crash mitigation)
+
+**Context**: A ~2h scan crashed the WinUI app by **native fast-fail** (no managed exception) on the UI
+thread while extracting `.mp3` album art. Windows shell `IThumbnailProvider`s run **in-process**, so a
+flaky audio art handler fast-faults the whole app — uncatchable by managed handlers.
+
+**Decision**: `ThumbnailService` skips the shell provider for audio extensions (after the L2 disk-cache
+read, so previously-cached covers still render). Removes the exact in-proc native surface that crashed.
+Diverges from macOS (QLThumbnailGenerator runs out-of-process, so it's safe there). Pending a WER
+LocalDump from a repro to confirm the faulting provider; `build/enable-crash-dumps.ps1` arms capture.
+Also dropped audio/video **duration** strings (`3 sec`/`1 min`) from the tag stream — metadata, not
+content (same reasoning that earlier dropped Has-Faces/Has-Text/aspect tags); `iPhone`/`Year_*` kept.
+
+## 2026-05-30 — Butler restructure: cluster-then-name, confidence bands, deferred VLM naming
+
+**Context**: The flat rule cascade (Person→Place→Doc→Year) ignored CLIP/tags/clusters and
+felt bland + loose. A cited deep-research pass (`RESTRUCTURE.md`) recommended a cluster-then-name
+architecture. Decisions made building it:
+
+- **Math finds structure; names come from signal — not an LLM clustering pass.** Geometric
+  density clustering (reusing `identity_clustering`, no new deps) on fused CLIP+tags+time
+  vectors discovers groups; we never ask an LLM to cluster tens of thousands of files (doesn't
+  scale on-device). Learn-your-style routes each cluster to the nearest existing folder
+  prototype (Dropbox "Smart Move" / Nearest-Class-Mean) before proposing a new group.
+- **c-TF-IDF naming now; live VLM naming deferred to a background pass.** Group names use
+  distinctive terms (frequent in-cluster, rare globally) — the always-on de-bland win, fully
+  testable. The VLM (Qwen2.5-VL) was *not* wired into the interactive plan: `llama-mtmd-cli`
+  spawns a fresh subprocess and reloads the model per call (image-mandatory), so naming N
+  clusters synchronously would add tens of seconds and can't be verified headlessly. It belongs
+  as deferred idle/charging enrichment (RESTRUCTURE.md §3), with the cluster profile as the
+  drop-in input.
+- **Confidence is a separate axis from folder tier.** Added a per-move `confidence` band
+  (auto/review/ask) alongside the existing `tier` (Anchor/Mixed/Junk = source-folder
+  homogeneity). Bands derive from folder-match strength + top-1−top-2 margin (abstain on
+  ambiguity) + cluster cohesion. Thresholds are **provisional cosine cutoffs**, explicitly to be
+  calibrated to *measured* per-category accuracy before any standing auto-file — not shipped as
+  calibrated. The app holds the "ask" tier out of the default apply set.
+- **Sankey: augment, don't replace.** Kept the existing pure-XAML Sankey (barycentre ordering,
+  hover, drill-down already present); added the Okabe-Ito CVD-safe palette for destination
+  categories (brand hues stay chrome-only) and an "Other" long-tail node so capping at the top-N
+  never silently drops flows.
+- **macOS mirrors the engine logic, written unverified.** Per the established "I write Swift,
+  the user builds on Mac" model — `RestructureSemantic.swift` is a faithful port; the app-side
+  UI wiring is documented, not blind-edited, because macOS uses a different (Keep/Tidy/Reorganize)
+  restructure UX that needs a design pass on a Mac.
+
+## 2026-05-29 — Commercial-clean (Apache-2.0) model stack + RAM++ adopted as primary tagger
+
+**Context**: A license audit found that three core, always-installed weights were **not**
+commercially redistributable: the InsightFace face stack (ArcFace `w600k_r50` + SCRFD, via
+`immich-app/buffalo_l`, "non-commercial research only"), Apple **MobileCLIP-S2** (ML Research
+license — weights research-only), and **Qwen2.5-VL-3B** (Qwen Research license). The user
+chose to keep FileID fully open-source **and** preserve every future monetization path, so the
+project adopts **Apache-2.0** (root `LICENSE`) and replaces all non-commercial weights on both
+platforms in lockstep. Separately, the user reversed the 2026-05-22 "no self-hosting" call to
+adopt **RAM++** (Recognize Anything Plus) as the primary tagger.
+
+**Decision**:
+- **License**: project is **Apache-2.0**. Default/recommended weights are all Apache/MIT.
+- **Faces**: ArcFace/SCRFD → **SFace (Apache-2.0) + YuNet (MIT)** from OpenCV Zoo. Embedding
+  dimension drops **512-d → 128-d**; a v12 migration wipes `face_prints`/`persons`/
+  `face_verifications` so prints re-derive cleanly. 5-point similarity alignment to the
+  ArcFace 112×112 template is shared cross-platform so embeddings agree. macOS keeps Apple
+  Vision for detection, swaps ArcFace→SFace for embedding.
+- **CLIP**: MobileCLIP-S2 → **OpenAI/OpenCLIP ViT-B/32 (MIT)**, 512-d (schema unchanged),
+  reuses the existing BPE tokenizer. `model_kind`/dest kept as `mobileclip_s2` as a stable key.
+- **Tagger**: **RAM++** (Apache-2.0, Swin-L @384, 4585 tags) self-hosted at
+  `Web-World-Wide/ram-plus-onnx` (the one self-hosted model — no upstream ONNX exists; SHA-pinned,
+  unmodified). When installed it is the primary tagger; CLIP zero-shot scene tags are the
+  fallback. Per-class thresholds (`ram_plus_thresholds.txt`) ship alongside for precision.
+- **VLM ladder**: drop Qwen-3B; **Qwen2.5-VL-7B** (Apache) recommended default, **Gemma-3-4B**
+  optional (Gemma Terms — commercially usable, terms surfaced at install), **Mistral-Small-3.2**
+  (Apache) max-quality.
+
+**Three baked-in choices (flippable)**: (1) RAM++ primary, CLIP fallback — *not* both merged
+(favors precision); (2) VLM ladder 7B→Gemma→Mistral; (3) keep Gemma-3-4B despite its non-Apache
+(but commercially-permissive) terms rather than a pure-Apache 7B+Mistral ladder.
+
+**Reasoning**: Apache-2.0 is permissive OSS that also permits commercial use, so open-sourcing
+costs no future optionality. ViT-B/32 is 512-d/ANE-friendly → perf-neutral on macOS and a
+schema no-op. SFace at 128-d is lighter than ArcFace; the one-time face-table wipe is acceptable
+because prints are derived, not authored. RAM++ trades throughput (Swin-L is heavier than CLIP)
+for materially better, *specific* tags — validated on a real corpus (senior portraits →
+`graduation`/`gown`/`backdrop`; a yard shoot → `lawn`/`mower`/`tripod`).
+
+**Verified on hardware (RTX 2060, DirectML)**: faces detect + embed (128-d, 512-byte prints),
+HEIC decodes + tags, RAM++ tags are specific + accurate, all models bind a GPU EP. Throughput on
+DirectML is ~7–9 files/s (RAM++ Swin-L-bound); the CUDA Pack is the 3–5× fast path. **Face
+clustering required on-hardware calibration**: at the initial SFace bands, a 1475-face library
+over-merged catastrophically (1339 faces chained into one cluster, mean cohesion 0.40). Anchoring
+on the measured gap between genuine clusters (a known single identity = 27 studio portraits
+clustered at mean cohesion 0.93) and chained blobs (~0.50), the bands were retuned (Pass-1 cores
+at 0.66; Pass-3 2-means split floor at 0.60, inside that gap) — cutting the largest cluster to 7%
+(103 faces, mean 0.66) while the known identity stays one cluster. Values are provisional (fail
+safe toward mergeable over-split); the residual is that Pass 1 is single-linkage (chains on huge
+libraries — real fix is mutual-kNN/density edges) + labeled fine-tuning. **Separate finding
+(orthogonal, pre-existing)**: rename-heal in `dbwriter.rs` re-binds on content-identity without
+checking the old path still exists, so coexisting byte-identical duplicates collapse onto one row
+— tracked in `NEXT.md` (needs macOS parity); not introduced by this change.
+
+**Alternatives considered**: SigLIP2 (Apache, stronger search) rejected for its 768-d schema
+change + macOS perf cost; running RAM++ *and* CLIP merged for recall rejected in favor of
+precision; EdgeFace/jina-clip-v2/nomic-embed-vision rejected (all CC-BY-NC).
 
 ## 2026-05-27 — SmolVLM removed; CLIP scene tags become the canonical auto-tagger
 
@@ -2373,3 +2615,269 @@ These already live in `FileID.Theme/Theme.xaml` as `SpringResponseStandard` / `S
 **Alternatives considered.** (a) Replace with a single check using `OpenAt2` + `RESOLVE_NO_SYMLINKS` — only available on Linux, not Win32. (b) Move the file via a sandboxed worker process — over-engineered for a desktop app. (c) Accept the TOCTOU window — rejected; the cost of the second check is negligible.
 
 **Consequence.** Restructure apply is now slightly slower (~microseconds per move). The wire contract (`applyRestructure` IPC) is unchanged.
+
+
+## 2026-05-30 — Windows wipe + stale-engine guard (P1/P4)
+
+- Engine-side `wipeLibrary` over app-side file delete. "Wipe partially failed" was a
+  cross-process race (app deleted fileid.sqlite right after engine exit; Windows holds
+  the FILE_OBJECT ~100-200ms, retry window only ~600ms). Rather than just lengthen the
+  retry, the engine — the single DB-handle owner — now truncates every user table
+  in-process (no file deletion -> no cross-process handle race). Table list discovered
+  from sqlite_master (future-migration-proof); FTS5 reset via 'delete-all'; grdb_migrations
+  preserved. App keeps stop->delete->restart only as a fallback when the engine is down.
+- `ram_plus` guard: react to `unknown_model` instead of a build-stamp handshake. The
+  approved plan proposed an app<->engine version handshake (build.rs git stamp +
+  engineBuild IPC field); we shipped a leaner equivalent (engine emits a user-facing
+  unknown_model message; app routes unknown_model / models_dir_unavailable to the install
+  slot as "engine out of date — reinstall/rebuild"). Same outcome, no schema/build
+  plumbing. The real fix for the live toast is a clean engine rebuild (stale binary).
+
+
+## 2026-05-30 — Scan/Cleanup UX: app-side monotonic phase, RAM++ sidecar, Cleanup exact dupes (A-D)
+
+- **Processing-flicker fix lives in the app, not the engine.** The engine legitimately runs
+  discovery + tagging concurrently and emits a `ProgressEvent` per batch from each, so the
+  *phase* genuinely oscillates on the wire. Rather than serialize the engine pipeline (a real
+  throughput cost) or throttle harder (masks it, adds latency), the app clamps the *displayed*
+  phase monotonically (`_shownPhaseRank`/`PhaseRank` in `EngineClient.Apply`): a ProgressEvent
+  may only advance it, never regress. `PhaseChangedEvent`/`ScanComplete` remain authoritative
+  and re-sync the latch (terminal Cancelled/Failed rank above the progression so a late
+  interleaved ProgressEvent can't clamp them away). One change fixes label + icon + pipeline dot.
+- **RAM++ junk-tag suppression is a no-rebuild sidecar; precision floor raised + env-tunable.**
+  Tuning the suppress set was a `cargo build` per iteration (compile-time const). Added
+  `ram_plus_suppress.txt` next to the tag list (same pattern as the existing
+  `ram_plus_thresholds.txt`), merged case-insensitively with the const — so killing a bad tag is
+  a text edit + rescan. The const keeps the built-in defaults (now incl. `"catch"`, a frequent
+  content-free false-positive that fired on dogs/bears/sports alike). Default precision floor
+  raised 0.5->0.62 (bias precision over recall per the "tags too generic" report) and made
+  env-overridable (`FILEID_RAMPLUS_PRECISION_FLOOR`) so the floor can be swept without a rebuild.
+  The borrow checker forced `is_suppressed` to be a free fn taking `&suppress_extra` (the tag()
+  closure holds a `&mut self.session` via `outputs` until end-of-fn, so a `&self` method there is
+  an E0502 — bind disjoint fields as locals instead).
+- **restructure DISTINCT crash: deduped correlated subquery, not Rust-side dedup.** `GROUP_CONCAT(
+  DISTINCT p.name, char(31))` is invalid SQLite (separator arg illegal under DISTINCT) and threw
+  at *run* (prepare succeeded — hence no compile/test catch before). Chose a correlated subquery
+  `GROUP_CONCAT(name, char(31)) FROM (SELECT DISTINCT p.name … ORDER BY p.name)` over keeping the
+  LEFT JOIN + de-duping names in Rust: it keeps the dedup in one place (SQL), drops the now-
+  unnecessary `GROUP BY f.id`, and is pinned by a unit test that *runs* the query on an in-memory
+  DB. Extracted to a `PLAN_FILES_SQL` const so the test and the handler share the exact bytes.
+- **Cleanup switched from perceptual (phash) to exact (content_hash) — a deliberate macOS
+  divergence.** The user asked for "1:1 bit identical" dupes; the Windows Cleanup grouped by phash
+  with Hamming<=4 fuzzy clustering (visually-similar, O(n^2), capped at 5000). Replaced with exact
+  `content_hash` (BLAKE3 <=16 MB, else head+tail+size composite; migration v8) + `size_bytes`
+  grouping, O(n). This is byte-identical, not visually-similar, and **diverges from the macOS
+  reference (which still uses phash)** — accepted because it's the explicit user requirement;
+  flagged for a macOS follow-up. The missing Cleanup previews were a *symptom*: phash clustering
+  formed no/empty groups, so there were no tiles for the (sound) `ThumbnailService` path to fill;
+  real byte-dupe groups restore them. Equality is "virtually certain identical" (full hash only
+  <=16 MB); a true byte-compare on hash collision is a noted future hardening, not shipped here.
+- **gold "Faces" badge removed from Library (preview pill + tile overlay + detail row); Text/OCR
+  badge kept.** Also a macOS divergence (the badge exists on macOS) — Windows-first per this
+  session's pattern; mirror-or-accept tracked in NEXT.
+
+## 2026-05-30 — macOS lockstep of the Windows scan/cleanup fixes + RAM++ posture-tag lock-in
+
+The user asked for macOS/Windows lockstep + an on-hardware RAM++ "lock in." Per
+`platforms/apple/CLAUDE.md`, Swift can't be built in the Windows dev env, so the macOS edits are
+**unverified until a Mac build**; only the obviously-correct, mechanical fixes were ported.
+
+- **RAM++ locked in against real data.** A 100-photo RTX 2060 scan (`G:\TrueNAS\Users`, seed 42)
+  confirmed the 0.5→0.62 floor killed weak tags (no "catch", no animal misclassification, content
+  tags at 0.88–0.97). The residual "too generic" offenders were posture/clothing-state fillers
+  (stand 47×, pose 20×, wear, lay, sit), so those joined `catch` in the built-in `SUPPRESSED_TAGS`
+  (unit-tested, case-insensitive) — on top of the no-rebuild `ram_plus_suppress.txt` sidecar for
+  further per-user tuning. Emotion/activity words (smile, play, birthday) were deliberately *kept*
+  — they carry real organizational signal.
+- **macOS ports (mechanical, low-risk):** the restructure `GROUP_CONCAT(DISTINCT …, char(31))`
+  crash — macOS `Restructure.swift` had the identical illegal SQL (the prior investigation wrongly
+  called it "safe"); now the same deduped correlated subquery — and Faces-badge removal from
+  `LibraryView.swift` (tile overlay + "Faces: Detected" row).
+- **NOT ported, by design:** (a) RAM++ tag tuning — macOS has no RAM++ (Apple Vision
+  `VNClassifyImageRequest`, 0.30 floor, top-8); the suppress sidecar + precision floor apply only
+  once RAM++ lands on macOS. (b) Cleanup exact dupes — the macOS engine writes only `phash`;
+  `content_hash` is a NULL schema-parity column with no writer, and BLAKE3 isn't in CryptoKit (a
+  new dep needs sign-off). Switching now would show zero groups, so macOS Cleanup stays phash.
+  (c) The monotonic phase clamp — unnecessary on macOS: `ScanCoordinator.setTotal` forces a
+  one-way discovering→tagging transition, so the phase can't oscillate.
+- **Consolidation:** merged `windows-e2e-correctness` (this session) and the standing
+  `macos-lockstep` branch (commercial-clean SFace + 5-pt alignment, OpenCLIP ViT-B/32, VLM ladder,
+  v12 migration) into `main`, then deleted every other local branch so only `main` remains. The
+  fully-merged `claude/*` and feature branches were redundant with `main`; nothing unique was lost
+  (each verified `git rev-list --count main..<branch> == 0` before deletion).
+
+## 2026-06-01 - Windows wipe reset + Restructure macOS-parity overhaul
+
+- **Wipe = no rescan + reset-to-first-run, keep models.** "Wipe + Rescan" looked broken because
+  `RunWipeAsync` always re-scanned after wiping, repopulating the library instantly. Dropped the
+  rescan; on success the app clears the selected folder (`AppViewModel.FolderPath = null` -> nulls
+  `LastFolderPath`/`LastFolderDisplay`, sidebar returns to the empty picker) so it lands in a
+  fresh-install state. Downloaded models under `Models/` are deliberately kept (not library state,
+  multi-GB to refetch) - the user chose "reset to a totally clean state, keep models." The
+  engine-side `db::wipe_all` + face/thumb cache clears are unchanged.
+- **Restructure overhaul is pure app-side.** The Windows engine plan already carried everything the
+  macOS UI needs (`RestructureMove.Tier/Confidence/Reason`, `FolderClassifications`), so the "more
+  like macOS" overhaul touched no engine/IPC/Rust - only WinUI. Tier -> outcome: Mixed->Tidy,
+  Junk->Reorganize, Anchor->Keep (shared `RestructureGrouping.OutcomeForTier`, unit-tested,
+  replaces the mapping that had been duplicated in the view + DrillDownSheet).
+- **Inlined the stat hero + hover into the view; one tinted DataTemplate, no selector.** The plan
+  considered a separate `RestructureStatHero` control + `RestructureHoverBus` + a per-outcome
+  `DataTemplateSelector`. Inlining the three hero tiles + hover handling into `RestructureView`
+  removed cross-control plumbing (less fast-fail surface), and exposing the tint/glyph from
+  `RestructureRecommendationVm` (brushes built lazily in getters, evaluated by x:Bind on the UI
+  thread - the `MergeSuggestionVm` BitmapImage precedent) collapsed three near-identical templates
+  into one. Recommendation + file rows are ItemsRepeater + DataTemplate over observable VMs with
+  `Click` handlers resolving `DataContext` (the `SuggestedMergesSheet` crash-safe pattern), never
+  imperative children.
+- **Deep-Analyze nudge gated on caption fraction.** The Restructure banner switched from "name your
+  people" (-> People tab) to macOS's "Run Deep Analyze" (-> `DeepAnalyzeAllAsync`), shown when
+  < 40% of `files` rows have a non-empty `vlm_description`. A wrong/missing column degrades to
+  total=0 -> banner hidden (never a crash).
+- **Encoding:** new `.cs`/`.xaml` files are CRLF + UTF-8 BOM to satisfy the app `dotnet format`
+  gate; glyphs come from int code points / XML `&#xHEX;` entities, never embedded private-use-area
+  characters (which the editor tooling silently dropped). The Tests project is not format-gated -
+  its existing files are LF/no-BOM - so the new test file's encoding is cosmetic there.
+
+## 2026-06-01 — Batched RAM++ inference: MEASURED on RTX 2060, DISPROVEN, kept opt-in OFF
+
+The long-standing perf hypothesis was that RAM++ at batch=1 leaves the GPU "<1% utilized"
+(latency-bound), so batching N images per forward would fill the kernels for a 2-4× win. We
+built the infrastructure (dynamic-batch ONNX export + a `RamPlusBatchCoordinator` mirroring
+`batch_clip.rs`, env-gated by `FILEID_RAMPLUS_BATCH_SIZE`), then **measured it on the RTX 2060**
+and the hypothesis is **false**:
+
+- **GPU profile during a single-path scan:** GPU util **mean 73% / p50 87% / p90 97%**, VRAM
+  **5348/5955 MB (90% full)**. The card is compute- AND VRAM-saturated at batch=1 — the
+  single-image *pool* (pool_size=2) already overlaps inference and fills the GPU.
+- **A/B (same ONNX, same 311-file corpus, only `FILEID_RAMPLUS_BATCH_SIZE` differs):**
+  single-pool **2.1 files/s** vs batched=4 **1.6 files/s** — batching is **~23% SLOWER**
+  (RAM++ per-file 2.4s → 4.7s). With no idle compute to fill and no spare VRAM to grow into,
+  one big serialized session loses the pool's concurrency for nothing. The production fp16
+  model on the pool path hits **6.2 files/s** — near this card's ceiling for Swin-L @384.
+
+**Decision:** RAM++ is GPU-compute/VRAM-bound on this hardware, not latency-bound. The batched
+coordinator is **retained as an opt-in knob (OFF by default)** for GPUs that do NOT saturate at
+batch=1 (high-SM-count / high-VRAM cards, per the all-vendor HW-accel roadmap) — RE-VALIDATE per
+card before enabling. It must NEVER be defaulted on without a per-card measurement. The genuine
+throughput levers for the 2060 are a faster-kernel EP (TensorRT) or a lighter tagger, not
+batching. (Supersedes the NEXT.md "batched RAM++ is the only real win" note.)
+
+## 2026-06-01 — Cleanup dedupe key: Windows stays on exact content_hash (NOT macOS's phash) — by design, for delete safety
+
+The macOS Cleanup tab groups duplicates by **phash** (perceptual); Windows groups by
+**content_hash** (exact: full BLAKE3 ≤16 MB, head+tail+size composite >16 MB). A parity audit
+flagged the divergence. We deliberately keep the exact-content key on Windows because Cleanup is
+**destructive** (trashes non-keepers): phash-equal files are perceptually identical but NOT
+byte-identical, so a perceptual key would trash files that differ in real bytes (EXIF, edits,
+re-encodes). Exact-content is the safer default for a one-click delete. The >16 MB composite-hash
+groups are now surfaced as **"likely duplicates — verify before deleting"** (not a false
+"identical" claim) so the UI never over-promises (#3). A perceptual/Hamming "near-duplicate" mode
+is a reasonable FUTURE opt-in (separate review-only surface), but it would diverge from a 1:1
+delete-on-exact-match contract and needs a product call — tracked in NEXT.md, not silently adopted.
+
+## 2026-06-01 — Accuracy + residual-bug sweep: 28 fixes (branch `accuracy-residual-fixes-2026-06-01`)
+
+A 10-dimension fan-out workflow (45 agents, adversarially verified) surfaced **30 confirmed
+worth-fixing findings**; 28 landed headless-green. Non-obvious calls:
+
+- **CLIP input resize nearest → bilinear (#1).** Both CLIP call sites nearest-decimated the
+  full-res decode straight to 224² — heavy aliasing that shifts the embedding and diverges from
+  the macOS reference (`.high` interpolation + 512px pre-shrink). Switched to `Triangle` (the
+  filter RAM++ already trusts). This shifts the CLIP cosine distribution, so `SCENE_COSINE_THRESHOLD`
+  (0.15) should be re-tuned against the corpus — tracked in NEXT.md.
+- **Stage-ran flags for stale-row clearing (#5/#11).** Added `faces_evaluated` / `ocr_stage_ran`
+  / `doc_stage_ran` to `TaggedFile`; the dbwriter now keys its stale-row DELETE on "did the stage
+  actually run this session" (GPU alive + models present), NOT on "is the result non-empty" — so
+  a zero-result re-process clears orphans while a models-missing/GPU-dead session preserves valid
+  rows. The naive "always delete" would wipe valid faces on a models-missing rescan.
+- **IPC `action` schema honesty (#13).** The reply emits 8 discriminators + a `trashFiles:<uuid>`
+  undo-batch suffix, but the schema enum listed only 4. Chose the minimal-risk honest fix — a
+  documented `pattern` covering all 8 + the optional suffix — over moving the batch id to a new
+  field (which would touch the working C# `IndexOf(':')` undo parse across 4 files).
+- **Path-redaction fallback DROPPED (#26).** The `contains("appdata\\local\\fileid\\")` fallback
+  leaked any path merely containing that substring (e.g. `D:\Backups\AppData\Local\FileID\…`). The
+  primary `paths::root()`-anchored branch already passes THIS engine's own tree; the fallback only
+  ever fired for foreign trees that SHOULD be redacted. Removed + tests rewritten to derive the
+  passthrough from the real resolved root, not a hardcoded username.
+- **Deferred: CLIP tokenizer reference-regex (#16).** Correct but requires regenerating the
+  precomputed scene matrix AND re-tuning `SCENE_COSINE_THRESHOLD`; compounding it with #1's
+  cosine shift un-revalidated risks scene-tag quality. Left for an on-hardware retune pass.
+
+## 2026-06-02 (later) — Perf reality, INT8 dead-end, lower-res the lever, IPC-casing deferred
+
+Multi-workflow perf/bug/lockstep sweep. Non-obvious calls:
+
+- **RAM++ is GENUINELY fp16 — verified, not assumed (so NO fp16 conversion lever).** The on-disk
+  `ram_plus.onnx` is 882 MB, which a research pass *guessed* meant fp32 (an easy ~2×/half-VRAM win).
+  Inspecting the ONNX (`build/inspect_onnx.py`) settled it: **924.5 MB FLOAT16 vs 0.4 MB FLOAT32**, all
+  MatMul/Conv weights fp16; the size is the baked frozen tag-description constants
+  (`[1,4585,51,512]` + `[512,233835]` = 478 MB of fp16). The `registry.rs` comment ("fp16 export is
+  ~882 MB: RAM++ bakes the 4585×51 tag embeddings as constants") was RIGHT. Lesson reinforced: verify
+  the artifact, don't infer precision from file size.
+- **INT8 quantization is a dead end on this stack (do not pursue for GPU).** Cited reality: DirectML
+  has no INT8 fast path for Swin's ops on Turing (microsoft/DirectML#282 measured a quantized conv
+  ~10× *slower*); the ORT CUDA EP cannot consume INT8/QDQ nodes (runs them in float anyway); TensorRT
+  *automatic* INT8 gives Swin ≈1.0× ("FP16 recommended" — Swin-Transformer-TensorRT). The 1.4–1.85×
+  Swin INT8 numbers are NVIDIA FasterTransformer's hand-written kernels, unreachable from ORT. Dynamic
+  INT8 is a CPU-only win. So INT8 is removed from the perf roadmap.
+- **The one real throughput lever is a lower-res 384→256 re-export (~1.8–2.7×), and it is offline /
+  release-step work — NOT headless-now on this box.** It works on the *shipped* DirectML EP (no new
+  pack), relieves the 90 %-full VRAM, and the export script + A/B harness are staged. It is blocked
+  HERE only by Python 3.14 forcing transformers 5.x, which `recognize-anything`'s 2023 vendored BERT
+  can't import against (symbols moved/removed from `transformers.modeling_utils`). Needs a Py 3.11–3.13
+  env (transformers ~4.25 + timm<1.0). The shipped 384 checkpoint is 384-tuned, so 256 MUST pass a
+  tag-F1 ship gate vs 384 on the real corpus before adoption. (Recipe + gate in NEXT.md.)
+- **The two perf wins this pass are correct hygiene, NOT a measured throughput win — said plainly.**
+  `perf_bench.ps1` showed ~25 % run-to-run variance on the 2060 (RAM++ 517↔671 ms on byte-identical
+  code, GPU-clock/thermal), and the wins (preprocess-out-of-lock, byte-budget read-ahead) are <5 %
+  effects, below that floor. They are kept because they are architecturally sound + non-regressing
+  (preprocess shouldn't hold a GPU permit; a memory budget is more principled than a frame count and
+  bounds the pathological-frame case), not because a macro-benchmark could isolate them. Detecting
+  them needs a clock-pinned, multi-run, `[STATS]`-counter A/B (NEXT.md).
+- **IPC field-name casing fix (eng-ipc-1/2) DEFERRED to one atomic, test-guarded PR — by design.** The
+  drift (Rust/C# emit lowercase-`d` `queryId`/`personId`/… vs the schema's + macOS's capital-`ID`) is
+  a real contract violation that breaks the macOS round-trip, but it is NOT a live Windows bug
+  (both Windows peers agree on lowercase-d). It spans ~25 fields across Rust + C#, commands + events,
+  with several non-unique field names — a partial edit would break the live app. Doing it half-way is
+  worse than not doing it, so it is specced complete in NEXT.md (full field table) to land as one PR
+  with serialize-and-assert-the-schema-key tests on both sides as the safety net. Only eng-ipc-0
+  (JoinError → terminal event; a real UI-hang bug) was fixed this pass.
+- **macOS lockstep reconciliation is DOCUMENTED, not blind-edited.** The audit found 39 divergences,
+  almost all macOS-side (the macOS engine trails the Windows+schema reference). Since none of the
+  Swift can be built/verified in this Windows dev env, blind-writing ~30 Swift edits (esp. the CRITICAL
+  timestamp-epoch fix, which must reconcile several *internally inconsistent* macOS read/write sites —
+  a wrong edit corrupts macOS's own timestamps) is higher-risk than valuable. Captured instead as a
+  file:line-precise, per-side plan in `LOCKSTEP-2026-06-02.md` for a Mac session + CI verification.
+
+## 2026-06-03 — Full-repo audit fix pass (non-obvious calls)
+
+Branch `win-prod-hardening-2026-06-03`; full inventory + deferred list in `AUDIT-2026-06-03.md`.
+
+- **rename-heal now requires old-path-gone for ALL matches, not just content_hash.** The
+  `heal_candidate_moved` `by_ref ||` short-circuit was REMOVED — it healed a `file_ref` (NTFS MFT)
+  match unconditionally on the assumption "a volume reuses a ref only for the same file." That is
+  false ACROSS volumes (the ref is volume-local) and for hardlinks, so a collision collapsed two
+  distinct files into one row (FK-cascading the loser's tags/faces). Requiring the old path absent for
+  every heal closes the data-loss with zero schema change (a genuine move always leaves its old path
+  gone, so no legitimate heal is blocked). Volume-scoping `file_ref` itself is the deeper fix but is a
+  persisted-column + cross-platform change — deferred. `file_ref_match_heals_unconditionally` was
+  rewritten into the corrected pair (rename-when-gone heals; collision-with-both-present stays
+  distinct).
+- **Only the `cpu` EP override was made exclusive**, not all overrides.
+  `execution_providers_for_chain` emits no dispatch for CPU (ORT's implicit fallback), so `[Cpu,
+  Cuda, …]` silently bound the GPU EP; non-CPU overrides emit a real dispatch that binds first, so
+  prepend-then-fall-through stays correct for them (graceful GPU→DirectML→CPU). Targeted = lowest risk.
+- **Tagging data-loss gated with a new `tags_evaluated` flag**, mirroring the faces/OCR/doc stage-ran
+  gates rather than a new mechanism. Set `!coord.is_gpu_dead()` at the normal return; false on the
+  timeout + GPU-dead-bail rows. The dbwriter tag delete+reinsert is gated on it, so an interrupted
+  pass never wipes prior auto-tags.
+- **Wipe-during-scan enforced in the ENGINE** (sole DB owner): `handle_wipe_library` cancels any
+  in-flight scan and bounded-waits (≤5 s) for the writer slot to clear before truncating.
+- **Deferred-with-rationale (NOT blind-fixed):** ORT_DYLIB_PATH override-blind pin + rename TOCTOU
+  need real GPU / Windows-overwrite verification (rule: no unverified pipeline/EP regression);
+  LibraryView-trash false-success (HIGH) coexists with `UndoStack.CaptureNextBulkResult` (the
+  await-result rewrite needs the WinUI runtime to verify trash+undo, and it self-heals on refresh
+  meanwhile); per-model prewarm cancel + schema-drift are IPC-contract lockstep changes; composite
+  `(kind,scanned_at)` index + `created_at` are cross-platform migrations. All file:line-precise in
+  `AUDIT-2026-06-03.md`.
+  file:line-precise, per-side plan in `LOCKSTEP-2026-06-02.md` for a Mac session + CI verification.

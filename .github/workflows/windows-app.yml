@@ -138,6 +138,74 @@ jobs:
         if: matrix.arch == 'x64'
         run: dotnet format FileID.sln --verify-no-changes
 
+      - name: Charset — UTF-8 BOM on .cs/.xaml (x64 only)
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        # CLAUDE.md convention: .cs/.xaml ship as UTF-8 WITH a BOM. `dotnet format`
+        # enforces it for .cs but NOT .xaml, so a .xaml could silently drop the BOM
+        # (3 had — normalized in this commit). Fail the build if any does, so the
+        # charset contract can't drift back.
+        run: |
+          $files = Get-ChildItem -Path src -Recurse -Include *.cs,*.xaml -File |
+            Where-Object { $_.FullName -notmatch '[\\/](obj|bin)[\\/]' }
+          $bad = @()
+          foreach ($f in $files) {
+            $b = [System.IO.File]::ReadAllBytes($f.FullName)
+            if ($b.Length -lt 3 -or $b[0] -ne 0xEF -or $b[1] -ne 0xBB -or $b[2] -ne 0xBF) { $bad += $f.FullName }
+          }
+          if ($bad.Count -gt 0) {
+            Write-Host "::error::$($bad.Count) .cs/.xaml file(s) missing the required UTF-8 BOM:"
+            $bad | ForEach-Object { Write-Host "  $_" }
+            exit 1
+          }
+          Write-Host "Charset OK: $($files.Count) .cs/.xaml files all UTF-8 BOM."
+
+      # Privacy gate — outbound-URL allowlist over the APP source. Parity with
+      # windows-engine.yml's source-URL scan: that scan globs all of
+      # platforms/windows/src (incl. app .cs/.xaml) but only RUNS when an
+      # engine-path change triggers windows-engine.yml — an app-only PR would
+      # bypass it. This step closes that gap so app-only changes are
+      # URL-scanned too. The allowlist + loopback exemption MUST stay in sync
+      # with windows-engine.yml (see shared/docs/DECISIONS.md to add a host).
+      - name: Privacy — source URL allowlist scan (x64 only)
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $allowedHosts = @(
+            "huggingface.co",
+            "github.com",
+            "developer.download.nvidia.com",
+            "developer.nvidia.com",
+            "schemas.microsoft.com",
+            "schemas.openxmlformats.org"
+          )
+          $sources = Get-ChildItem -Path src -Recurse -File `
+            -Include *.cs,*.xaml,*.xaml.cs |
+            Where-Object { $_.FullName -notmatch '\\(bin|obj|target|packages)\\' }
+          # Loopback is exempt: a 127.0.0.1 / localhost URL never leaves the
+          # machine (matches windows-engine.yml's rationale, DECISIONS V16.20).
+          $loopbackHosts = @("127.0.0.1", "localhost", "0.0.0.0", "::1")
+          $hits = @()
+          foreach ($file in $sources) {
+            $content = Get-Content -Raw $file.FullName
+            if (-not $content) { continue }
+            $matches = [regex]::Matches($content, 'https?://([a-zA-Z0-9._-]+)')
+            foreach ($m in $matches) {
+              $hostName = $m.Groups[1].Value.ToLowerInvariant()
+              if ($loopbackHosts -contains $hostName) { continue }
+              if ($allowedHosts -notcontains $hostName) {
+                $hits += "$($file.FullName): $($m.Value)"
+              }
+            }
+          }
+          Write-Host "App source files scanned: $($sources.Count)"
+          if ($hits.Count -gt 0) {
+            Write-Error "URLs found that are not on the allowlist:"
+            $hits | ForEach-Object { Write-Error "  $_" }
+            exit 1
+          }
+          Write-Host "All app source URLs are on the allowlist. ✅"
+
       - name: Vulnerability scan (x64 only)
         if: matrix.arch == 'x64'
         run: |

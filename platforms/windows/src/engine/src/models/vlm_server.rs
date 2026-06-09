@@ -120,7 +120,15 @@ impl VlmServer {
             if let Ok(Some(status)) = child.try_wait() {
                 bail!("llama-server exited early ({status}) — likely missing GPU runtime DLLs");
             }
-            if let Ok(resp) = client.get(&health_url).send().await {
+            // Short per-request timeout so a server that accepts the connection
+            // but stalls the /health response can't defeat the 120s deadline by
+            // hanging on the client's 300s default. (audit E13)
+            if let Ok(resp) = client
+                .get(&health_url)
+                .timeout(Duration::from_secs(2))
+                .send()
+                .await
+            {
                 if resp.status().is_success() {
                     break;
                 }

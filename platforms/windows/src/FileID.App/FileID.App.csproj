@@ -52,11 +52,11 @@
     <!-- WinUI sources — Generators write into obj/, exclude from compile. -->
     <DefaultLanguage>en-US</DefaultLanguage>
 
-    <!-- Application identity — surfaces in About + the user's Apps & Features list. -->
+    <!-- Application identity — surfaces in About + the user's Apps & Features list.
+         <Version>/<FileVersion> are NOT set here: they come from the single
+         source of truth (platforms/windows/VERSION via Directory.Build.props). -->
     <AssemblyTitle>FileID</AssemblyTitle>
     <Description>On-device AI file organization for Windows.</Description>
-    <Version>0.1.0</Version>
-    <FileVersion>0.1.0.0</FileVersion>
   </PropertyGroup>
 
   <ItemGroup>

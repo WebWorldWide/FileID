@@ -1,13 +1,20 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
-    RestructureView — plan + apply UI.
+    RestructureView — recommendation-first + file-first reorg UI, ported 1:1
+    from macOS RestructureView.swift.
 
-    Plan: button → engine planRestructure IPC → category-summary list.
-    Apply: floating bar → engine applyRestructure IPC → result count.
-    Sankey (pure-XAML via Path/BezierSegment, no Win2D) renders source-
-    folder → category ribbons; TreeDiff renders side-by-side current vs.
-    proposed trees. Both feed off the same engine plan; the
-    VisualizationModeCombo flips between them.
+    Plan auto-generates on open (engine planRestructure IPC). The body reads the
+    engine plan and groups moves by Tier into plain-language recommendation cards
+    (Keep / Tidy / Reorganize). Each card expands in place to the actual files
+    (checkbox + "from <folder>") and a "See all N files" drill-down. A stat hero,
+    a Flow/Tree diagram toggle (Sankey ribbons / before-after tree), a Run Deep
+    Analyze nudge, and a "Staying put" disclosure round out the surface. The
+    floating ApplyBar applies the *selected* moves as shortcuts, then real moves.
+
+    Crash-safety (platforms/windows/CLAUDE.md): every list is an ItemsRepeater +
+    DataTemplate over an observable VM — never imperatively-built children — and
+    all tints resolve via {x:Bind ...Brush} / {ThemeResource}, never a code-side
+    theme-dictionary lookup.
 -->
 <UserControl
     x:Class="FileID.Views.Restructure.RestructureView"
@@ -20,6 +27,11 @@
     mc:Ignorable="d">
 
     <UserControl.Resources>
+        <!-- Outcome tints (macOS RestructureOutcome.tint): Keep green, Tidy
+             orange, Reorganize gold. Reorganize reuses the app GoldBrush. -->
+        <SolidColorBrush x:Key="RestructureKeepBrush" Color="#6CC24A" />
+        <SolidColorBrush x:Key="RestructureTidyBrush" Color="#FF9F45" />
+
         <Style TargetType="r:SankeyFlowControl">
             <Setter Property="Template">
                 <Setter.Value>
@@ -48,7 +60,16 @@
                                            Style="{StaticResource CaptionTextBlockStyle}"
                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                            FontWeight="SemiBold" />
-                                <TreeView x:Name="PART_CurrentTree" Grid.Row="1" />
+                                <TreeView x:Name="PART_CurrentTree" Grid.Row="1">
+                                    <TreeView.ItemTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding Content.DisplayName}"
+                                                       Foreground="{Binding Content.HighlightBrush}"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       Style="{StaticResource CaptionTextBlockStyle}" />
+                                        </DataTemplate>
+                                    </TreeView.ItemTemplate>
+                                </TreeView>
                             </Grid>
                             <Grid Grid.Column="1">
                                 <Grid.RowDefinitions>
@@ -60,7 +81,16 @@
                                            Style="{StaticResource CaptionTextBlockStyle}"
                                            Foreground="{ThemeResource GoldBrush}"
                                            FontWeight="SemiBold" />
-                                <TreeView x:Name="PART_ProposedTree" Grid.Row="1" />
+                                <TreeView x:Name="PART_ProposedTree" Grid.Row="1">
+                                    <TreeView.ItemTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding Content.DisplayName}"
+                                                       Foreground="{Binding Content.HighlightBrush}"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       Style="{StaticResource CaptionTextBlockStyle}" />
+                                        </DataTemplate>
+                                    </TreeView.ItemTemplate>
+                                </TreeView>
                             </Grid>
                         </Grid>
                     </ControlTemplate>
@@ -77,208 +107,436 @@
         </Grid.RowDefinitions>
 
         <StackPanel Grid.Row="0" Spacing="6">
-            <TextBlock Text="Restructure" Style="{StaticResource TitleTextBlockStyle}"/>
+            <TextBlock Text="Restructure" Style="{StaticResource TitleTextBlockStyle}"
+                       AutomationProperties.HeadingLevel="Level1"/>
             <TextBlock TextWrapping="Wrap"
                        Style="{StaticResource BodyTextBlockStyle}"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                       Text="Plan a folder reorganization. Photos by year/month, videos by year, documents flat. Preview as symlinks first; commit as moves when you're happy."/>
-            <!-- Deep Analyze hint banner. macOS RestructureView surfaces
-                 this whenever Deep Analyze has produced captions but the
-                 user hasn't named people yet — the restructure layout's
-                 People/ bucket reads "Person N" instead of "Alice" without
-                 names. Tap-through routes to People. -->
-            <Border x:Name="DeepAnalyzeHintBanner"
-                    Visibility="Collapsed"
-                    CornerRadius="10"
-                    Padding="12,10"
-                    Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                    BorderBrush="{ThemeResource AiBrush}"
-                    BorderThickness="1">
-                <Grid ColumnSpacing="10">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                    </Grid.ColumnDefinitions>
-                    <FontIcon Grid.Column="0" Glyph="&#xE77B;" FontSize="14"
-                              Foreground="{ThemeResource AiBrush}"
-                              VerticalAlignment="Top" Margin="0,1,0,0" />
-                    <TextBlock Grid.Column="1" TextWrapping="Wrap"
-                               Style="{StaticResource CaptionTextBlockStyle}"
-                               Text="Name your people first so the People/ folders are organized by real names instead of 'Person 1'." />
-                    <Button Grid.Column="2" Content="Open People"
-                            Click="OnOpenPeopleHintClicked" VerticalAlignment="Center" />
-                </Grid>
-            </Border>
+                       Text="FileID looks at your folders, keeps the well-named ones, and proposes a tidier home for the rest. Nothing moves until you apply."/>
         </StackPanel>
 
         <ScrollViewer Grid.Row="1"
                       VerticalScrollBarVisibility="Auto"
                       HorizontalScrollBarVisibility="Disabled">
-            <StackPanel Spacing="14">
-                <Border CornerRadius="12"
+            <StackPanel Spacing="16">
+                <!-- Plan status + manual re-plan. -->
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0"
+                               x:Name="PlanStatusText"
+                               VerticalAlignment="Center"
+                               TextWrapping="Wrap"
+                               Style="{StaticResource BodyTextBlockStyle}"
+                               Text="Computing plan&#x2026;"/>
+                    <Button Grid.Column="1"
+                            x:Name="ReplanButton"
+                            Click="OnPlanClicked"
+                            Padding="12,6"
+                            Background="Transparent"
+                            BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="8"
+                            ToolTipService.ToolTip="Recompute the proposed reorganization."
+                            AutomationProperties.Name="Re-plan"
+                            AutomationProperties.HelpText="Recompute the proposed reorganization.">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <FontIcon Glyph="&#xE72C;" FontSize="12" />
+                            <TextBlock Text="Re-plan" Style="{StaticResource CaptionTextBlockStyle}" />
+                        </StackPanel>
+                    </Button>
+                </Grid>
+
+                <!-- Deep Analyze nudge — shown when few files have captions yet.
+                     Mirrors macOS deepAnalyzeHintBanner: reading file contents
+                     sharpens bucketing. -->
+                <Border x:Name="DeepAnalyzeHintBanner"
+                        Visibility="Collapsed"
+                        CornerRadius="10"
+                        Padding="12,10"
+                        Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                        BorderBrush="{ThemeResource AiBrush}"
+                        BorderThickness="1">
+                    <Grid ColumnSpacing="10">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <FontIcon Grid.Column="0" Glyph="&#xE77B;" FontSize="16"
+                                  Foreground="{ThemeResource AiBrush}"
+                                  VerticalAlignment="Top" Margin="0,2,0,0" />
+                        <StackPanel Grid.Column="1" Spacing="2">
+                            <TextBlock x:Name="DeepAnalyzeHintTitle"
+                                       Text="Sharper proposals with Deep Analyze"
+                                       FontWeight="SemiBold" />
+                            <TextBlock x:Name="DeepAnalyzeHintBody"
+                                       TextWrapping="Wrap"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       Text="Deep Analyze reads the contents of each file &#x2014; captions, OCR text, scene tags &#x2014; so receipts go to Documents, screenshots to Photos, and people are recognized by name."/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="2" Spacing="6" VerticalAlignment="Center">
+                            <Button x:Name="RunDeepAnalyzeButton"
+                                    Click="OnRunDeepAnalyzeClicked"
+                                    Style="{StaticResource GoldButtonStyle}"
+                                    Padding="12,6">
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <FontIcon Glyph="&#xE77B;" FontSize="12" />
+                                    <TextBlock Text="Run Deep Analyze" FontWeight="SemiBold" />
+                                </StackPanel>
+                            </Button>
+                            <Button Content="Dismiss"
+                                    Click="OnDismissHintClicked"
+                                    Background="Transparent"
+                                    BorderThickness="0"
+                                    Padding="6,2"
+                                    HorizontalAlignment="Right" />
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
+                <!-- Stat hero — three big-number tiles. Hover cross-highlights
+                     the matching recommendation card. -->
+                <Grid x:Name="StatHero" Visibility="Collapsed" ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <Border x:Name="KeepTile" Grid.Column="0"
+                            Padding="14,12" CornerRadius="12"
+                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            PointerEntered="OnKeepTileEntered" PointerExited="OnTileExited">
+                        <StackPanel Spacing="6">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <FontIcon Glyph="&#xE72E;" FontSize="13" Foreground="{StaticResource RestructureKeepBrush}" />
+                                <TextBlock Text="STAYING PUT" FontSize="10" FontWeight="SemiBold"
+                                           CharacterSpacing="60"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            </StackPanel>
+                            <TextBlock x:Name="KeepValue" Text="0" FontSize="36" FontWeight="Bold" />
+                            <TextBlock x:Name="KeepHint" Text="" FontSize="11"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                        </StackPanel>
+                    </Border>
+
+                    <Border x:Name="TidyTile" Grid.Column="1"
+                            Padding="14,12" CornerRadius="12"
+                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            PointerEntered="OnTidyTileEntered" PointerExited="OnTileExited">
+                        <StackPanel Spacing="6">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <FontIcon Glyph="&#xE8DE;" FontSize="13" Foreground="{StaticResource RestructureTidyBrush}" />
+                                <TextBlock Text="TIDYING" FontSize="10" FontWeight="SemiBold"
+                                           CharacterSpacing="60"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            </StackPanel>
+                            <TextBlock x:Name="TidyValue" Text="0" FontSize="36" FontWeight="Bold" />
+                            <TextBlock x:Name="TidyHint" Text="" FontSize="11"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                        </StackPanel>
+                    </Border>
+
+                    <Border x:Name="ReorgTile" Grid.Column="2"
+                            Padding="14,12" CornerRadius="12"
+                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            PointerEntered="OnReorgTileEntered" PointerExited="OnTileExited">
+                        <StackPanel Spacing="6">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <FontIcon Glyph="&#xE8CB;" FontSize="13" Foreground="{ThemeResource GoldBrush}" />
+                                <TextBlock Text="REORGANIZING" FontSize="10" FontWeight="SemiBold"
+                                           CharacterSpacing="60"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            </StackPanel>
+                            <TextBlock x:Name="ReorgValue" Text="0" FontSize="36" FontWeight="Bold" />
+                            <TextBlock x:Name="ReorgHint" Text="" FontSize="11"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                        </StackPanel>
+                    </Border>
+                </Grid>
+
+                <!-- Flow / Tree diagram toggle. -->
+                <StackPanel x:Name="ViewModeToggle" Visibility="Collapsed"
+                            Orientation="Horizontal" Spacing="6">
+                    <ToggleButton x:Name="FlowModeToggle" IsChecked="True" Click="OnViewModeClicked"
+                                  Padding="12,6" CornerRadius="8"
+                                  AutomationProperties.Name="Flow"
+                                  AutomationProperties.HelpText="Show the reorganization as a flow diagram.">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <FontIcon Glyph="&#xE9D2;" FontSize="12" />
+                            <TextBlock Text="Flow" FontWeight="SemiBold" />
+                        </StackPanel>
+                    </ToggleButton>
+                    <ToggleButton x:Name="TreeModeToggle" Click="OnViewModeClicked"
+                                  Padding="12,6" CornerRadius="8"
+                                  AutomationProperties.Name="Tree"
+                                  AutomationProperties.HelpText="Show the reorganization as a before-and-after folder tree.">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <FontIcon Glyph="&#xE8A1;" FontSize="12" />
+                            <TextBlock Text="Tree" FontWeight="SemiBold" />
+                        </StackPanel>
+                    </ToggleButton>
+                </StackPanel>
+
+                <!-- Unified hero surface: Sankey hero + recommendation cards. -->
+                <Border x:Name="UnifiedSurface"
+                        Visibility="Collapsed"
+                        CornerRadius="12"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1">
+                    <StackPanel>
+                        <StackPanel Padding="20,18,20,14" Spacing="10">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8">
+                                    <FontIcon Glyph="&#xE9D2;" FontSize="15" Foreground="{ThemeResource GoldBrush}" VerticalAlignment="Center" />
+                                    <TextBlock x:Name="VisualizationHeader"
+                                               Text="Folder map"
+                                               Style="{StaticResource SubtitleTextBlockStyle}"
+                                               AutomationProperties.HeadingLevel="Level2" />
+                                </StackPanel>
+                                <TextBlock Grid.Column="1"
+                                           x:Name="SankeyHeroStat"
+                                           VerticalAlignment="Center"
+                                           FontSize="12"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            </Grid>
+                            <TextBlock Text="Hover any folder, ribbon, or card to trace where its files go. Tap a ribbon to drill into the exact list."
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                       TextWrapping="Wrap" />
+                            <r:SankeyFlowControl x:Name="Sankey" Height="300" />
+                            <r:TreeDiffControl x:Name="TreeDiff" Height="300" Visibility="Collapsed" />
+                        </StackPanel>
+
+                        <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" Opacity="0.5" />
+
+                        <StackPanel x:Name="RecommendationsSection" Padding="20,16,20,18" Spacing="2">
+                            <TextBlock Text="Recommendations"
+                                       Style="{StaticResource SubtitleTextBlockStyle}"
+                                       Margin="0,0,0,8"
+                                       AutomationProperties.HeadingLevel="Level2" />
+                            <ItemsRepeater x:Name="RecommendationsRepeater"
+                                           ItemsSource="{x:Bind _recommendations, Mode=OneWay}">
+                                <ItemsRepeater.Layout>
+                                    <StackLayout Orientation="Vertical" Spacing="6" />
+                                </ItemsRepeater.Layout>
+                                <ItemsRepeater.ItemTemplate>
+                                    <!-- One recommendation card: Keep / Tidy / Reorganize.
+                                         Single inline template for all three (handlers resolve
+                                         to the code-behind); tint + glyph come from the VM. -->
+                                    <DataTemplate x:DataType="vm:RestructureRecommendationVm">
+                                        <Grid>
+                                            <!-- Hover cross-highlight: faint fill + left edge bar. -->
+                                            <Border CornerRadius="10"
+                                                    Background="{x:Bind TintSoftBrush}"
+                                                    Opacity="0.5"
+                                                    Visibility="{x:Bind HighlightVisibility, Mode=OneWay}" />
+                                            <Border Width="2"
+                                                    HorizontalAlignment="Left"
+                                                    Background="{x:Bind TintBrush}"
+                                                    Visibility="{x:Bind HighlightVisibility, Mode=OneWay}" />
+
+                                            <StackPanel Padding="16,14"
+                                                        Opacity="{x:Bind RowOpacity, Mode=OneWay}"
+                                                        PointerEntered="OnRecPointerEntered"
+                                                        PointerExited="OnRecPointerExited">
+                                                <Grid ColumnSpacing="14">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                        <ColumnDefinition Width="*"/>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                    </Grid.ColumnDefinitions>
+
+                                                    <Border Grid.Column="0"
+                                                            Width="38" Height="38"
+                                                            CornerRadius="10"
+                                                            Background="{x:Bind TintSoftBrush}"
+                                                            VerticalAlignment="Top">
+                                                        <FontIcon Glyph="{x:Bind Glyph}" FontSize="17" Foreground="{x:Bind TintBrush}" />
+                                                    </Border>
+
+                                                    <StackPanel Grid.Column="1" Spacing="4">
+                                                        <TextBlock Text="{x:Bind Headline}"
+                                                                   Style="{StaticResource BodyStrongTextBlockStyle}"
+                                                                   TextWrapping="Wrap" />
+                                                        <TextBlock Text="{x:Bind BodyText}"
+                                                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                                   TextWrapping="Wrap" />
+                                                        <StackPanel Orientation="Horizontal"
+                                                                    Spacing="8"
+                                                                    Margin="0,4,0,0"
+                                                                    Visibility="{x:Bind ActionsVisibility}">
+                                                            <Button Click="OnRecReviewClicked"
+                                                                    Padding="10,4"
+                                                                    CornerRadius="14"
+                                                                    Background="Transparent"
+                                                                    BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                                                                    BorderThickness="1"
+                                                                    AutomationProperties.Name="{x:Bind ReviewLabel, Mode=OneWay}">
+                                                                <StackPanel Orientation="Horizontal" Spacing="4">
+                                                                    <FontIcon Glyph="{x:Bind ReviewGlyph, Mode=OneWay}" FontSize="11" />
+                                                                    <TextBlock Text="{x:Bind ReviewLabel, Mode=OneWay}" FontSize="12" FontWeight="SemiBold" />
+                                                                </StackPanel>
+                                                            </Button>
+                                                            <Button Click="OnRecApproveClicked"
+                                                                    Padding="10,4"
+                                                                    CornerRadius="14"
+                                                                    Background="{x:Bind TintSoftBrush}"
+                                                                    BorderThickness="0"
+                                                                    AutomationProperties.Name="{x:Bind ApproveLabel, Mode=OneWay}">
+                                                                <StackPanel Orientation="Horizontal" Spacing="4">
+                                                                    <FontIcon Glyph="{x:Bind ApproveGlyph, Mode=OneWay}" FontSize="11" />
+                                                                    <TextBlock Text="{x:Bind ApproveLabel, Mode=OneWay}" FontSize="12" FontWeight="SemiBold" />
+                                                                </StackPanel>
+                                                            </Button>
+                                                        </StackPanel>
+                                                    </StackPanel>
+
+                                                    <StackPanel Grid.Column="2"
+                                                                Visibility="{x:Bind CountVisibility}"
+                                                                HorizontalAlignment="Right"
+                                                                VerticalAlignment="Top">
+                                                        <TextBlock Text="{x:Bind CountText}"
+                                                                   FontSize="22" FontWeight="Bold"
+                                                                   Foreground="{x:Bind TintBrush}"
+                                                                   HorizontalAlignment="Right" />
+                                                        <TextBlock Text="{x:Bind FolderText}"
+                                                                   FontSize="11"
+                                                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                                                   HorizontalAlignment="Right" />
+                                                    </StackPanel>
+                                                </Grid>
+
+                                                <!-- Expand-in-place file list. -->
+                                                <StackPanel Margin="52,10,0,0"
+                                                            Spacing="6"
+                                                            Visibility="{x:Bind ExpandedVisibility, Mode=OneWay}">
+                                                    <ItemsRepeater ItemsSource="{x:Bind Files, Mode=OneWay}">
+                                                        <ItemsRepeater.Layout>
+                                                            <StackLayout Orientation="Vertical" Spacing="4" />
+                                                        </ItemsRepeater.Layout>
+                                                        <ItemsRepeater.ItemTemplate>
+                                                            <DataTemplate x:DataType="vm:RestructureFileRowVm">
+                                                                <Grid Padding="6,4"
+                                                                      ColumnSpacing="10"
+                                                                      ToolTipService.ToolTip="{x:Bind FromToTooltip}"
+                                                                      AutomationProperties.Name="{x:Bind FileName}">
+                                                                    <Grid.ColumnDefinitions>
+                                                                        <ColumnDefinition Width="Auto"/>
+                                                                        <ColumnDefinition Width="Auto"/>
+                                                                        <ColumnDefinition Width="*"/>
+                                                                    </Grid.ColumnDefinitions>
+                                                                    <CheckBox Grid.Column="0"
+                                                                              MinWidth="0"
+                                                                              IsChecked="{x:Bind IsSelected, Mode=OneWay}"
+                                                                              Click="OnFileCheckClicked"
+                                                                              AutomationProperties.Name="{x:Bind FileName}"
+                                                                              AutomationProperties.HelpText="Include this file in the restructure." />
+                                                                    <FontIcon Grid.Column="1"
+                                                                              Glyph="{x:Bind FileGlyph}"
+                                                                              FontSize="14"
+                                                                              Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                                              VerticalAlignment="Center" />
+                                                                    <StackPanel Grid.Column="2" Spacing="0" VerticalAlignment="Center">
+                                                                        <TextBlock Text="{x:Bind FileName}"
+                                                                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                                                                   TextTrimming="CharacterEllipsis" />
+                                                                        <TextBlock Text="{x:Bind FromLabel}"
+                                                                                   FontSize="11"
+                                                                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                                                                   TextTrimming="CharacterEllipsis" />
+                                                                    </StackPanel>
+                                                                </Grid>
+                                                            </DataTemplate>
+                                                        </ItemsRepeater.ItemTemplate>
+                                                    </ItemsRepeater>
+                                                    <Button Visibility="{x:Bind SeeAllVisibility}"
+                                                            Click="OnSeeAllClicked"
+                                                            HorizontalAlignment="Left"
+                                                            Background="Transparent"
+                                                            BorderThickness="0"
+                                                            Padding="6,2">
+                                                        <TextBlock Text="{x:Bind SeeAllText}"
+                                                                   FontSize="12" FontWeight="SemiBold"
+                                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                                    </Button>
+                                                </StackPanel>
+                                            </StackPanel>
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsRepeater.ItemTemplate>
+                            </ItemsRepeater>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- Staying-put disclosure. -->
+                <Border x:Name="StayingPutCard"
+                        Visibility="Collapsed"
+                        CornerRadius="12"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1">
+                    <Expander HorizontalAlignment="Stretch"
+                              HorizontalContentAlignment="Stretch"
+                              Background="Transparent"
+                              BorderThickness="0">
+                        <Expander.Header>
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <FontIcon Glyph="&#xE72E;" FontSize="14" Foreground="{StaticResource RestructureKeepBrush}" VerticalAlignment="Center" />
+                                <TextBlock Text="Staying put" Style="{StaticResource BodyStrongTextBlockStyle}" VerticalAlignment="Center" />
+                                <TextBlock x:Name="StayingPutSubtitle"
+                                           Style="{StaticResource CaptionTextBlockStyle}"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                           VerticalAlignment="Center" />
+                            </StackPanel>
+                        </Expander.Header>
+                        <TextBlock Text="These folders already have clear names and matching contents, so FileID leaves them exactly where they are."
+                                   TextWrapping="Wrap"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   Margin="0,4,0,8" />
+                    </Expander>
+                </Border>
+
+                <!-- Nothing-to-move card. -->
+                <Border x:Name="NothingToMoveCard"
+                        Visibility="Collapsed"
+                        CornerRadius="12"
                         Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                         BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                         BorderThickness="1"
                         Padding="20">
-                    <StackPanel Spacing="12">
-                        <TextBlock Text="Plan summary" Style="{StaticResource SubtitleTextBlockStyle}"/>
-                        <TextBlock x:Name="PlanStatusText"
-                                   TextWrapping="Wrap"
-                                   Style="{StaticResource BodyTextBlockStyle}"
-                                   Text="No plan generated yet. Click Generate plan to compute the proposed reorganization for your library."/>
-                        <!-- FEAT-CRIT-3: three-tier classifier headline.
-                             Anchor folders (kept intact), Mixed folders (kept,
-                             outliers extracted), Junk folders (dissolved).
-                             Computed from per-source-folder move ratios. -->
-                        <Grid x:Name="ClassifierStrip"
-                              Visibility="Collapsed"
-                              ColumnSpacing="12"
-                              Margin="0,4,0,0">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="*"/>
-                            </Grid.ColumnDefinitions>
-                            <Border Grid.Column="0"
-                                    Padding="14,12"
-                                    CornerRadius="8"
-                                    Background="{ThemeResource SubtleFillColorTertiaryBrush}"
-                                    BorderBrush="{ThemeResource GoldBrush}"
-                                    BorderThickness="1">
-                                <StackPanel Spacing="2">
-                                    <TextBlock x:Name="AnchorCountText"
-                                               Text="0"
-                                               Style="{StaticResource SubtitleTextBlockStyle}"/>
-                                    <TextBlock Text="Anchor folders"
-                                               Style="{StaticResource CaptionTextBlockStyle}"
-                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
-                                    <TextBlock Text="Kept intact"
-                                               Style="{StaticResource CaptionTextBlockStyle}"
-                                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"/>
-                                </StackPanel>
-                            </Border>
-                            <Border Grid.Column="1"
-                                    Padding="14,12"
-                                    CornerRadius="8"
-                                    Background="{ThemeResource SubtleFillColorTertiaryBrush}"
-                                    BorderBrush="{ThemeResource AiBrush}"
-                                    BorderThickness="1">
-                                <StackPanel Spacing="2">
-                                    <TextBlock x:Name="MixedCountText"
-                                               Text="0"
-                                               Style="{StaticResource SubtitleTextBlockStyle}"/>
-                                    <TextBlock Text="Mixed folders"
-                                               Style="{StaticResource CaptionTextBlockStyle}"
-                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
-                                    <TextBlock Text="Outliers extracted"
-                                               Style="{StaticResource CaptionTextBlockStyle}"
-                                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"/>
-                                </StackPanel>
-                            </Border>
-                            <Border Grid.Column="2"
-                                    Padding="14,12"
-                                    CornerRadius="8"
-                                    Background="{ThemeResource SubtleFillColorTertiaryBrush}"
-                                    BorderBrush="{ThemeResource DestructiveBorderBrush}"
-                                    BorderThickness="1">
-                                <StackPanel Spacing="2">
-                                    <TextBlock x:Name="JunkCountText"
-                                               Text="0"
-                                               Style="{StaticResource SubtitleTextBlockStyle}"/>
-                                    <TextBlock Text="Junk folders"
-                                               Style="{StaticResource CaptionTextBlockStyle}"
-                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
-                                    <TextBlock Text="Dissolved"
-                                               Style="{StaticResource CaptionTextBlockStyle}"
-                                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"/>
-                                </StackPanel>
-                            </Border>
-                        </Grid>
-                        <Button x:Name="GeneratePlanButton"
-                                Content="Generate plan"
-                                Click="OnPlanClicked"
-                                Style="{StaticResource GoldButtonStyle}"
-                                Height="40"
-                                HorizontalAlignment="Left" />
-                    </StackPanel>
-                </Border>
-
-                <Border x:Name="SankeyCard"
-                        CornerRadius="12"
-                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                        BorderThickness="1"
-                        Padding="20"
-                        Visibility="Collapsed">
-                    <StackPanel Spacing="12">
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="Auto"/>
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="0" x:Name="VisualizationHeader"
-                                       Text="Source folder → category flow"
-                                       Style="{StaticResource SubtitleTextBlockStyle}" />
-                            <ComboBox Grid.Column="1"
-                                      x:Name="VisualizationModeCombo"
-                                      Width="180"
-                                      SelectionChanged="OnVisualizationModeChanged"
-                                      SelectedIndex="0">
-                                <ComboBoxItem Content="Sankey ribbons" Tag="sankey" />
-                                <ComboBoxItem Content="Tree diff"      Tag="tree"   />
-                            </ComboBox>
-                        </Grid>
-                        <r:SankeyFlowControl x:Name="Sankey" Height="320" />
-                        <r:TreeDiffControl x:Name="TreeDiff" Height="320" Visibility="Collapsed" />
-                    </StackPanel>
-                </Border>
-
-                <Border x:Name="CategoryListCard"
-                        CornerRadius="12"
-                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                        BorderThickness="1"
-                        Padding="20"
-                        Visibility="Collapsed">
-                    <StackPanel Spacing="12">
-                        <TextBlock Text="By category" Style="{StaticResource SubtitleTextBlockStyle}"/>
-                        <ItemsRepeater x:Name="CategoryRepeater">
-                            <ItemsRepeater.Layout>
-                                <StackLayout Orientation="Vertical" Spacing="8"/>
-                            </ItemsRepeater.Layout>
-                            <ItemsRepeater.ItemTemplate>
-                                <DataTemplate x:DataType="vm:RestructureCategoryRow">
-                                    <Grid Padding="14,10"
-                                          CornerRadius="8"
-                                          Background="{ThemeResource SubtleFillColorSecondaryBrush}">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="*"/>
-                                            <ColumnDefinition Width="Auto"/>
-                                        </Grid.ColumnDefinitions>
-                                        <TextBlock Grid.Column="0"
-                                                   Text="{x:Bind CategoryDisplay}"
-                                                   Style="{StaticResource BodyStrongTextBlockStyle}"
-                                                   VerticalAlignment="Center"/>
-                                        <TextBlock Grid.Column="1"
-                                                   Text="{x:Bind CountDisplay}"
-                                                   Style="{StaticResource BodyTextBlockStyle}"
-                                                   Foreground="{ThemeResource GoldBrush}"
-                                                   VerticalAlignment="Center"/>
-                                    </Grid>
-                                </DataTemplate>
-                            </ItemsRepeater.ItemTemplate>
-                        </ItemsRepeater>
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                        <FontIcon Glyph="&#xE73E;" FontSize="22" Foreground="{StaticResource RestructureKeepBrush}" VerticalAlignment="Center" />
+                        <StackPanel Spacing="2" VerticalAlignment="Center">
+                            <TextBlock Text="Nothing to move" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <TextBlock Text="Your library is already organized &#x2014; every folder is a recognized anchor."
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
                     </StackPanel>
                 </Border>
             </StackPanel>
         </ScrollViewer>
 
-        <!-- floating ApplyBar — port of macOS RestructureApplyBar.swift.
-             Frosted Acrylic backdrop, selection summary on the left, two-step
-             chip flow in the middle, gold-gradient primary + outline secondary
-             on the right. Springs at response 0.28 / dampingFraction 0.7 on
-             button hover via SpringScalarNaturalMotionAnimation. -->
+        <!-- floating ApplyBar — port of macOS RestructureApplyBar.swift. -->
         <Border Grid.Row="2"
                 CornerRadius="16"
                 BorderBrush="{ThemeResource GoldDimBrush}"
@@ -303,7 +561,6 @@
                     <ColumnDefinition Width="Auto"/>     <!-- primary button -->
                 </Grid.ColumnDefinitions>
 
-                <!-- Selection summary -->
                 <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
                     <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Bottom">
                         <TextBlock x:Name="ApplyBarSelectedCount"
@@ -342,7 +599,6 @@
                         VerticalAlignment="Center"
                         Margin="2,0,0,0"/>
 
-                <!-- Two-step chips: 1. Shortcuts (filled when canApply) → 2. Real moves -->
                 <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
                     <StackPanel Orientation="Horizontal" Spacing="6">
                         <Border x:Name="StepChip1Bg"
@@ -393,7 +649,6 @@
                     </StackPanel>
                 </StackPanel>
 
-                <!-- Status / spacer -->
                 <TextBlock Grid.Column="3"
                            x:Name="ApplyStatusText"
                            Text=""
@@ -404,7 +659,6 @@
                            TextWrapping="NoWrap"
                            TextTrimming="CharacterEllipsis" />
 
-                <!-- Secondary: outline gold "Convert to real moves" -->
                 <Button x:Name="ApplyMovesButton"
                         Grid.Column="4"
                         IsEnabled="False"
@@ -423,14 +677,13 @@
                     </StackPanel>
                 </Button>
 
-                <!-- Primary: gold-gradient "Apply as shortcuts (N)" -->
                 <Button x:Name="ApplySymlinkButton"
                         Grid.Column="5"
                         IsEnabled="False"
                         Click="OnApplySymlinksClicked"
                         Padding="16,9"
                         CornerRadius="10"
-                        ToolTipService.ToolTip="Lay down symlinks instead of moving files. Reversible — delete the symlinked tree to undo."
+                        ToolTipService.ToolTip="Lay down symlinks instead of moving files. Reversible &#x2014; delete the symlinked tree to undo."
                         AutomationProperties.Name="Preview restructure as symlinks">
                     <Button.Background>
                         <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">

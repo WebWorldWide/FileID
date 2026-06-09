@@ -48,13 +48,14 @@ public sealed record DeepAnalyzeFolderCommand(
 public sealed record DeepAnalyzeAllCommand(
     string ModelKind,
     bool SkipExisting,
-    bool TagsOnly = false) : CommandPayload;
+    bool TagsOnly = false,
+    bool ProposeRenames = true) : CommandPayload;
 
 public sealed record DeepAnalyzeCancelCommand : CommandPayload;
 
 public sealed record PrewarmModelCommand(string ModelKind) : CommandPayload;
 
-public sealed record CancelPrewarmCommand : CommandPayload;
+public sealed record CancelPrewarmCommand(string? ModelKind = null) : CommandPayload;
 
 public sealed record PlanRestructureCommand(string LibraryRoot) : CommandPayload;
 
@@ -64,38 +65,43 @@ public sealed record ApplyRestructureCommand(
     bool UseSymlinks = false) : CommandPayload;
 
 public sealed record RestructureMove(
-    long FileId,
+    [property: JsonPropertyName("fileID")] long FileId,
     string Source,
     string Destination,
     string Category,
     /// <summary>Engine-authoritative per-move tier (Anchor / Mixed / Junk).
     /// Null on plans from older engine builds — callers should fall back to
     /// a local heuristic in that case.</summary>
-    string? Tier = null);
+    string? Tier = null,
+    /// <summary>Butler confidence band — "auto" / "review" / "ask"
+    /// (RESTRUCTURE.md §6). Empty on older engines.</summary>
+    string Confidence = "",
+    /// <summary>Plain-language "why filed here", shown in the drill-down.</summary>
+    string? Reason = null);
 
 public sealed record ApplyTagsCommand(
-    System.Collections.Generic.IReadOnlyList<long> FileIds,
+    [property: JsonPropertyName("fileIDs")] System.Collections.Generic.IReadOnlyList<long> FileIds,
     System.Collections.Generic.IReadOnlyList<string> Tags,
     string Mode = "add") : CommandPayload;
 
 public sealed record RenameFilesCommand(
     System.Collections.Generic.IReadOnlyList<RenameEntry> Renames) : CommandPayload;
 
-public sealed record RenameEntry(long FileId, string NewName);
+public sealed record RenameEntry([property: JsonPropertyName("fileID")] long FileId, string NewName);
 
 public sealed record TrashFilesCommand(
-    System.Collections.Generic.IReadOnlyList<long> FileIds) : CommandPayload;
+    [property: JsonPropertyName("fileIDs")] System.Collections.Generic.IReadOnlyList<long> FileIds) : CommandPayload;
 
 public sealed record MergeClustersCommand(
-    long SourcePersonId,
-    long DestinationPersonId) : CommandPayload;
+    [property: JsonPropertyName("sourcePersonID")] long SourcePersonId,
+    [property: JsonPropertyName("destinationPersonID")] long DestinationPersonId) : CommandPayload;
 
 public sealed record EmbedTextQueryCommand(
     string Query,
-    string QueryId) : CommandPayload;
+    [property: JsonPropertyName("queryID")] string QueryId) : CommandPayload;
 
 public sealed record RenamePersonCommand(
-    long PersonId,
+    [property: JsonPropertyName("personID")] long PersonId,
     string? Title = null,
     string? FirstName = null,
     string? MiddleName = null,
@@ -104,20 +110,40 @@ public sealed record RenamePersonCommand(
 
 /// <summary>FEAT-CRIT-1: bulk mark-as-unknown for People multi-select.</summary>
 public sealed record MarkPersonsAsUnknownCommand(
-    System.Collections.Generic.IReadOnlyList<long> PersonIds) : CommandPayload;
+    [property: JsonPropertyName("personIDs")] System.Collections.Generic.IReadOnlyList<long> PersonIds) : CommandPayload;
 
 public sealed record FindMergeSuggestionsCommand : CommandPayload;
 
-public sealed record EmbedImageQueryCommand(
-    long FileId,
-    string QueryId) : CommandPayload;
+/// <summary>Record a user "different people" verdict for a suggested pair so
+/// findMergeSuggestions stops re-suggesting it. Routed through the engine's
+/// single-writer DB connection; keyed on stable anchor face ids.</summary>
+public sealed record MarkPersonsDifferentCommand(
+    [property: JsonPropertyName("sourcePersonID")] long SourcePersonId,
+    [property: JsonPropertyName("destinationPersonID")] long DestinationPersonId,
+    [property: JsonPropertyName("sourceAnchorFaceID")] long SourceAnchorFaceId,
+    [property: JsonPropertyName("destinationAnchorFaceID")] long DestinationAnchorFaceId) : CommandPayload;
 
-public sealed record RestoreFromTrashCommand(string BatchId) : CommandPayload;
+public sealed record EmbedImageQueryCommand(
+    [property: JsonPropertyName("fileID")] long FileId,
+    [property: JsonPropertyName("queryID")] string QueryId) : CommandPayload;
+
+public sealed record RestoreFromTrashCommand(
+    [property: JsonPropertyName("batchID")] string BatchId) : CommandPayload;
 
 public sealed record RevertMergeCommand(
-    long SourcePersonId,
-    long DestinationPersonId,
-    System.Collections.Generic.IReadOnlyList<long> FaceIdsToRevert) : CommandPayload;
+    [property: JsonPropertyName("sourcePersonID")] long SourcePersonId,
+    [property: JsonPropertyName("destinationPersonID")] long DestinationPersonId,
+    [property: JsonPropertyName("faceIDsToRevert")] System.Collections.Generic.IReadOnlyList<long> FaceIdsToRevert) : CommandPayload;
+
+public sealed record WipeLibraryCommand : CommandPayload;
+
+/// <summary>Ask the engine to render a video keyframe out-of-process and
+/// return it as a base64 192px JPEG via the `thumbnailGenerated` event.
+/// <c>ModifiedAt</c> (file modified-unix time, f64 seconds) is echoed back so
+/// the app can write the result under its (path, modifiedAt) cache key.</summary>
+public sealed record GenerateVideoThumbnailCommand(
+    string Path,
+    double? ModifiedAt) : CommandPayload;
 
 /// <summary>
 /// Reads/writes the externally-tagged shape Swift's Codable produces.
@@ -160,11 +186,14 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             "embedTextQuery" => JsonSerializer.Deserialize<EmbedTextQueryCommand>(ref reader, options) ?? throw new JsonException("embedTextQuery: null body"),
             "renamePerson" => JsonSerializer.Deserialize<RenamePersonCommand>(ref reader, options) ?? throw new JsonException("renamePerson: null body"),
             "markPersonsAsUnknown" => JsonSerializer.Deserialize<MarkPersonsAsUnknownCommand>(ref reader, options) ?? throw new JsonException("markPersonsAsUnknown: null body"),
+            "markPersonsDifferent" => JsonSerializer.Deserialize<MarkPersonsDifferentCommand>(ref reader, options) ?? throw new JsonException("markPersonsDifferent: null body"),
             "findMergeSuggestions" => Empty<FindMergeSuggestionsCommand>(ref reader),
             "embedImageQuery" => JsonSerializer.Deserialize<EmbedImageQueryCommand>(ref reader, options) ?? throw new JsonException("embedImageQuery: null body"),
             "restoreFromTrash" => JsonSerializer.Deserialize<RestoreFromTrashCommand>(ref reader, options) ?? throw new JsonException("restoreFromTrash: null body"),
             "revertMerge" => JsonSerializer.Deserialize<RevertMergeCommand>(ref reader, options) ?? throw new JsonException("revertMerge: null body"),
+            "generateVideoThumbnail" => JsonSerializer.Deserialize<GenerateVideoThumbnailCommand>(ref reader, options) ?? throw new JsonException("generateVideoThumbnail: null body"),
 
+            "wipeLibrary" => Empty<WipeLibraryCommand>(ref reader),
             "pauseScan" => Empty<PauseScanCommand>(ref reader),
             "resumeScan" => Empty<ResumeScanCommand>(ref reader),
             "cancelScan" => Empty<CancelScanCommand>(ref reader),
@@ -173,7 +202,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             "runFaceClustering" => Empty<RunFaceClusteringCommand>(ref reader),
             "verifyCudaPack" => Empty<VerifyCudaPackCommand>(ref reader),
             "deepAnalyzeCancel" => Empty<DeepAnalyzeCancelCommand>(ref reader),
-            "cancelPrewarm" => Empty<CancelPrewarmCommand>(ref reader),
+            "cancelPrewarm" => JsonSerializer.Deserialize<CancelPrewarmCommand>(ref reader, options) ?? throw new JsonException("cancelPrewarm: null body"),
 
             _ => throw new JsonException($"CommandPayload: unknown variant '{variant}'"),
         };
@@ -205,7 +234,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             case DeepAnalyzeAllCommand c: WriteVariant(writer, "deepAnalyzeAll", c, options); break;
             case DeepAnalyzeCancelCommand: WriteEmpty(writer, "deepAnalyzeCancel"); break;
             case PrewarmModelCommand c: WriteVariant(writer, "prewarmModel", c, options); break;
-            case CancelPrewarmCommand: WriteEmpty(writer, "cancelPrewarm"); break;
+            case CancelPrewarmCommand c: WriteVariant(writer, "cancelPrewarm", c, options); break;
             case PlanRestructureCommand c: WriteVariant(writer, "planRestructure", c, options); break;
             case ApplyRestructureCommand c: WriteVariant(writer, "applyRestructure", c, options); break;
             case ApplyTagsCommand c: WriteVariant(writer, "applyTags", c, options); break;
@@ -215,10 +244,13 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             case EmbedTextQueryCommand c: WriteVariant(writer, "embedTextQuery", c, options); break;
             case RenamePersonCommand c: WriteVariant(writer, "renamePerson", c, options); break;
             case MarkPersonsAsUnknownCommand c: WriteVariant(writer, "markPersonsAsUnknown", c, options); break;
+            case MarkPersonsDifferentCommand c: WriteVariant(writer, "markPersonsDifferent", c, options); break;
             case FindMergeSuggestionsCommand: WriteEmpty(writer, "findMergeSuggestions"); break;
             case EmbedImageQueryCommand c: WriteVariant(writer, "embedImageQuery", c, options); break;
             case RestoreFromTrashCommand c: WriteVariant(writer, "restoreFromTrash", c, options); break;
             case RevertMergeCommand c: WriteVariant(writer, "revertMerge", c, options); break;
+            case GenerateVideoThumbnailCommand c: WriteVariant(writer, "generateVideoThumbnail", c, options); break;
+            case WipeLibraryCommand: WriteEmpty(writer, "wipeLibrary"); break;
             default:
                 throw new JsonException($"CommandPayload: unknown C# type {value.GetType().FullName}");
         }

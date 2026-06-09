@@ -60,14 +60,58 @@ fn http_semaphore() -> &'static Arc<tokio::sync::Semaphore> {
 ///                        Qwen 2.5-VL 3B (2.1 GB) download running on
 ///                        a connection slower than ~7 MB/s — the
 ///                        original "reading chunk" failure on the
-///                        Welcome sheet.
+///                        Welcome sheet. Set to 60 s (not 120 s) so a
+///                        genuinely stalled stream errors → resumes via
+///                        download_range_with_retry within ~61 s, which
+///                        re-emits progress and re-arms the app's 120 s
+///                        no-progress install watchdog BEFORE it alarms
+///                        the user mid-recovery. 60 s of total silence is
+///                        a dead connection, never a healthy slow one
+///                        (any byte resets the timer).
 pub fn build_shared_client() -> Result<Arc<reqwest::Client>> {
+    // Restrict redirects to the host families we actually download from (HF +
+    // its CDN, GitHub + its objects CDN, NVIDIA). reqwest's default follows up to
+    // 10 redirects to ANY host — an on-path attacker could bounce a 302 chain to
+    // an off-allowlist host, dodging the source-URL allowlist that only checks
+    // the ORIGINAL URL. Suffix-match with a leading dot for subdomains so
+    // "evilhuggingface.co" never matches ".huggingface.co".
+    const REDIRECT_ALLOWED: &[&str] = &[
+        "huggingface.co",
+        "hf.co",
+        "github.com",
+        "githubusercontent.com",
+        "download.nvidia.com",
+        "developer.nvidia.com",
+    ];
+    let redirect_policy = reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 10 {
+            return attempt.stop();
+        }
+        // Never follow a redirect off https. The host allowlist alone would let
+        // a 302 downgrade to plaintext http:// on an allowlisted host, which an
+        // on-path attacker could MITM. Every allowlisted CDN serves https, so
+        // this never blocks a legitimate redirect. (audit E11)
+        if attempt.url().scheme() != "https" {
+            return attempt.stop();
+        }
+        match attempt.url().host_str() {
+            Some(h)
+                if REDIRECT_ALLOWED
+                    .iter()
+                    .any(|d| h == *d || h.ends_with(&format!(".{d}"))) =>
+            {
+                attempt.follow()
+            }
+            _ => attempt.stop(),
+        }
+    });
     let c = reqwest::Client::builder()
         .user_agent("FileID/0.1 (+local)")
         .pool_idle_timeout(Some(Duration::from_secs(60)))
         .pool_max_idle_per_host(PARALLEL_PARTS * 2)
         .connect_timeout(Duration::from_secs(30))
-        .read_timeout(Duration::from_secs(120))
+        .read_timeout(Duration::from_secs(60))
+        .redirect(redirect_policy)
         .build()
         .context("building shared reqwest client")?;
     Ok(Arc::new(c))
@@ -88,6 +132,33 @@ pub struct DownloadRequest {
     pub destination: PathBuf,
     /// Optional SHA256 (lowercase hex) for integrity check on completion.
     pub expected_sha256: Option<String>,
+    /// Registry size estimate (`approx_bytes`) for a loose post-download size
+    /// sanity check — catches a truncated stream / HTML error page standing in
+    /// for a model even when no SHA256 is pinned. An estimate, so only an
+    /// implausibly-small result is rejected (see `check_size_plausible`).
+    pub expected_bytes: Option<u64>,
+}
+
+/// Loose post-download size sanity. `approx_bytes` in the registry is an
+/// ESTIMATE, so we reject only implausibly-small results: a truncated stream,
+/// an HTML error page, or an auth wall standing in for a multi-GB model are
+/// orders of magnitude off, not a few percent. A 4× floor never false-rejects
+/// a reasonable estimate but always catches a KB-for-GB substitution. (SHA256,
+/// when pinned, is the exact check; this guards the common no-hash case.)
+fn check_size_plausible(actual: u64, expected: Option<u64>, url: &str) -> Result<()> {
+    if let Some(expected) = expected {
+        if expected > 0 {
+            let floor = (expected / 4).max(1);
+            if actual < floor {
+                anyhow::bail!(
+                    "size sanity failed for {url}: got {actual} bytes, expected \
+                     ~{expected} (floor {floor}) — likely a truncated download or \
+                     an error page, not the model"
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Download a single file. The simple non-parallel path — used when
@@ -324,6 +395,14 @@ where
             }
         }
 
+        // Size sanity before the atomic rename — a too-small .part (truncation
+        // / error page) must never become the destination.
+        let actual_len = tokio::fs::metadata(&tmp).await.map(|m| m.len()).unwrap_or(0);
+        if let Err(e) = check_size_plausible(actual_len, request.expected_bytes, &request.url) {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(e);
+        }
+
         tokio::fs::rename(&tmp, &request.destination).await
             .with_context(|| format!("rename {} -> {}", tmp.display(), request.destination.display()))?;
 
@@ -413,6 +492,13 @@ where
     };
 
     if total < MIN_BYTES_FOR_PARALLEL || !supports_ranges {
+        // Best-effort sweep of any .part-NN left by an earlier parallel attempt
+        // (e.g. a prior run that partially downloaded, then this retry sees the
+        // server no longer advertising ranges). download_simple uses its own
+        // "{}.part" temp and can't resume from these, so they'd leak. (audit E16)
+        for i in 0..PARALLEL_PARTS {
+            let _ = tokio::fs::remove_file(part_file_path(&request.destination, i)).await;
+        }
         return download_simple(client.clone(), request, cancel.clone(), |p| progress(p)).await;
     }
 
@@ -508,13 +594,25 @@ where
     let mut out = tokio::fs::File::create(&combined).await
         .with_context(|| format!("creating {}", combined.display()))?;
     let mut hasher = request.expected_sha256.as_ref().map(|_| Sha256::new());
+    // Stream each part through a fixed 64 KB buffer instead of reading the whole
+    // ~170 MB part into RAM (PARALLEL_PARTS of a multi-GB GGUF). Mirrors the
+    // download_simple SHA re-read loop above; integrity check is unchanged.
+    let mut buffer = vec![0u8; 65536];
     for i in 0..PARALLEL_PARTS {
         let part_path = part_file_path(&request.destination, i);
-        let bytes = tokio::fs::read(&part_path).await
+        let mut part = tokio::fs::File::open(&part_path).await
             .with_context(|| format!("reading part {}", part_path.display()))?;
-        if let Some(h) = hasher.as_mut() { h.update(&bytes); }
-        tokio::io::AsyncWriteExt::write_all(&mut out, &bytes).await
-            .context("writing combined part")?;
+        loop {
+            use tokio::io::AsyncReadExt;
+            let n = part.read(&mut buffer).await
+                .with_context(|| format!("reading chunk from {}", part_path.display()))?;
+            if n == 0 {
+                break;
+            }
+            if let Some(h) = hasher.as_mut() { h.update(&buffer[..n]); }
+            tokio::io::AsyncWriteExt::write_all(&mut out, &buffer[..n]).await
+                .context("writing combined part")?;
+        }
     }
     tokio::io::AsyncWriteExt::flush(&mut out).await.context("final flush")?;
     drop(out);
@@ -523,11 +621,30 @@ where
         let got = hex::encode(h.finalize());
         if !expected.eq_ignore_ascii_case(&got) {
             let _ = tokio::fs::remove_file(&combined).await;
+            // Also remove the per-range parts. A byte-complete-but-wrong part
+            // (corrupt/compromised mirror, or a same-size remote revision across
+            // attempts) would otherwise be treated as "already complete" on the
+            // next attempt (cur_start > end), re-concatenated, and re-fail the SHA
+            // forever — a permanently-stuck install until the user manually clears
+            // the cache. Removing them forces a clean re-fetch on Retry.
+            for i in 0..PARALLEL_PARTS {
+                let _ = tokio::fs::remove_file(part_file_path(&request.destination, i)).await;
+            }
             anyhow::bail!(
                 "SHA256 mismatch for {}: expected {expected}, got {got}",
                 request.url
             );
         }
+    }
+
+    // Size sanity before the atomic rename (mirrors download_simple).
+    let actual_len = tokio::fs::metadata(&combined).await.map(|m| m.len()).unwrap_or(0);
+    if let Err(e) = check_size_plausible(actual_len, request.expected_bytes, &request.url) {
+        let _ = tokio::fs::remove_file(&combined).await;
+        for i in 0..PARALLEL_PARTS {
+            let _ = tokio::fs::remove_file(part_file_path(&request.destination, i)).await;
+        }
+        return Err(e);
     }
 
     tokio::fs::rename(&combined, &request.destination).await
@@ -616,22 +733,24 @@ async fn download_range_with_retry(
             anyhow::bail!("range cancelled (start={start})");
         }
 
-        // Resumable: stat the part file. A partial part (< expected) resumes
-        // via Range; an OVERSIZED part is stale/corrupt from a prior run (a
-        // different file version or a half-written resume) — discard it and
-        // restart this range rather than treating it as "done" and stitching a
-        // corrupt model together.
-        let expected = end - start + 1;
+        // Resumable: stat the part file. If it has bytes, append from there.
+        let range_len = end - start + 1;
         let mut existing_len = tokio::fs::metadata(part_path).await
             .map(|m| m.len()).unwrap_or(0);
-        if existing_len > expected {
-            tracing::warn!(part=%part_path.display(), existing_len, expected,
-                "oversized resume part; discarding and restarting range");
+        // A part larger than its planned range is stale — leftover from a prior
+        // download of a different-sized remote file. Its bytes would corrupt the
+        // concat, so discard and re-fetch the range rather than the old behavior
+        // of treating an oversized part as "already done" (which kept bad bytes).
+        if existing_len > range_len {
+            tracing::warn!(
+                part = %part_path.display(), existing_len, range_len,
+                "discarding oversized stale part before resume"
+            );
             let _ = tokio::fs::remove_file(part_path).await;
             existing_len = 0;
         }
         let cur_start = start + existing_len;
-        if cur_start > end { return Ok(()); } // existing_len == expected → done
+        if cur_start > end { return Ok(()); } // exactly complete
 
         // Global HTTP concurrency cap — prevents three concurrent prewarms
         // × 12 range-GETs each from tripping HuggingFace's per-IP rate limit
@@ -665,6 +784,19 @@ async fn download_range_with_retry(
         }
         if !status.is_success() {
             anyhow::bail!("range {range_header}: HTTP {status}");
+        }
+        // If we're resuming a partially-downloaded range (bytes already on disk)
+        // but the server answered 200 (full body) instead of 206 (partial),
+        // appending would splice our partial prefix in front of the full file →
+        // a corrupt, oversized part. Discard the partial and restart this range
+        // cleanly. (download_simple handles the same 200-on-resume case.)
+        if existing_len > 0 && status.as_u16() != 206 {
+            tracing::warn!(
+                part = %part_path.display(), %status,
+                "range resume answered non-206; discarding partial and restarting"
+            );
+            let _ = tokio::fs::remove_file(part_path).await;
+            continue;
         }
 
         // Open part file in append mode (resumes on retry too).
@@ -700,4 +832,35 @@ async fn download_range_with_retry(
     }
 
     anyhow::bail!("range exhausted retries (start={start})");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_size_plausible;
+
+    #[test]
+    fn size_check_passes_when_no_estimate() {
+        assert!(check_size_plausible(0, None, "u").is_ok());
+        assert!(check_size_plausible(10, Some(0), "u").is_ok());
+    }
+
+    #[test]
+    fn size_check_passes_within_loose_band() {
+        // Exact, under, and over the estimate all pass — the estimate is loose.
+        assert!(check_size_plausible(1_000_000, Some(1_000_000), "u").is_ok());
+        assert!(check_size_plausible(800_000, Some(1_000_000), "u").is_ok());
+        assert!(check_size_plausible(5_000_000, Some(1_000_000), "u").is_ok());
+        // Just above the 4× floor passes.
+        assert!(check_size_plausible(260_000, Some(1_000_000), "u").is_ok());
+    }
+
+    #[test]
+    fn size_check_rejects_truncation_and_error_pages() {
+        // A few-KB HTML error page standing in for a ~900 MB model.
+        assert!(check_size_plausible(4_096, Some(925_600_000), "u").is_err());
+        // Truncated to well under the 4× floor.
+        assert!(check_size_plausible(100_000, Some(1_000_000), "u").is_err());
+        // Zero-byte result against a 38 MB expectation.
+        assert!(check_size_plausible(0, Some(38_696_353), "u").is_err());
+    }
 }

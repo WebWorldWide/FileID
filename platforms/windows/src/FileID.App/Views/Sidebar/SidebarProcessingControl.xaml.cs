@@ -26,12 +26,17 @@ public sealed partial class SidebarProcessingControl : UserControl
     // uses the same pattern.
     private readonly SolidColorBrush _memoryWarnBrush;
     private readonly SolidColorBrush _statDefaultBrush;
+    // Idle-status default foreground. Resolved once at ctor instead of via a
+    // Resources traversal on every Sync() (~10 Hz during a scan, even with the
+    // IdlePanel collapsed).
+    private readonly Brush _idleStatusDefaultBrush;
 
     public SidebarProcessingControl()
     {
         InitializeComponent();
         _memoryWarnBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0x99, 0x00));
         _statDefaultBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
+        _idleStatusDefaultBrush = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorSecondaryBrush");
         Loaded += (_, _) => { Sync(); SyncWarningBanner(); };
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         AppViewModel.Instance.PropertyChanged += OnAppChanged;
@@ -392,8 +397,9 @@ public sealed partial class SidebarProcessingControl : UserControl
         CompletedPanel.Visibility = isCompleted ? Visibility.Visible : Visibility.Collapsed;
 
         // Reset foreground so a successful follow-up scan doesn't keep the
-        // red text from the previous failed attempt.
-        IdleStatusText.Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"];
+        // red text from the previous failed attempt. Cached at ctor — avoids a
+        // Resources traversal on every Sync() (~10 Hz during a scan).
+        IdleStatusText.Foreground = _idleStatusDefaultBrush;
 
         // enable on HasFolder alone. The previous version also
         // required `EngineClient.State == Ready`, which made the button
@@ -419,6 +425,8 @@ public sealed partial class SidebarProcessingControl : UserControl
 
         // FEAT-1: Pause/Resume label always reflects engine truth.
         PauseResumeText.Text = EngineClient.Instance.IsPaused ? "Resume" : "Pause";
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+            PauseResumeButton, EngineClient.Instance.IsPaused ? "Resume scan" : "Pause scan");
 
         if (isInFlight && prog is not null)
         {
@@ -465,9 +473,30 @@ public sealed partial class SidebarProcessingControl : UserControl
             StatFailures.Text = prog.Failed.ToString("N0");
             StatFailures.Foreground = prog.Failed > 0 ? FailedTextBrush : _statDefaultBrush;
 
-            EtaText.Text = prog.EtaSeconds is { } eta && eta > 0
-                ? "ETA: " + FormatDuration(eta)
-                : "ETA: computing...";
+            // Screen-reader names combine label + value so each stat tile
+            // announces e.g. "Discovered: 1,240" rather than a bare label.
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+                DiscoveredStatBorder, $"Discovered: {StatDiscovered.Text}");
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+                TaggedStatBorder, $"Tagged: {StatTagged.Text}");
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+                MemoryStatBorder, $"Memory: {StatMemory.Text}");
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+                FailuresStatBorder, $"Failures: {StatFailures.Text}");
+
+            // Per-step ETA: attribute the estimate to the ACTIVE pipeline
+            // stage rather than showing a bare number. During discovery the
+            // total is unknowable (counting the files IS the work), so we never
+            // fabricate an ETA there — that was the class of wrong number the
+            // engine used to emit. The People/Captions stages are separate jobs
+            // that surface their own ETA when they run.
+            EtaText.Text = phase switch
+            {
+                ScanPhase.Discovering => "Counting files…",
+                _ when prog.EtaSeconds is { } eta && eta > 0 =>
+                    $"{StageLabel(phase)} — {FormatDuration(eta)} left",
+                _ => $"{StageLabel(phase)} — estimating…",
+            };
         }
         else if (isCompleted && prog is not null)
         {
@@ -476,9 +505,12 @@ public sealed partial class SidebarProcessingControl : UserControl
             // previous version showed "in 0s" because of a placeholder
             // typo `prog.Total > 0 ? 0 : 0`.
             var elapsed = EngineClient.Instance.LastScanDuration.TotalSeconds;
+            // Use the engine's authoritative ScanComplete count, not LastProgress
+            // (which can be throttle-stale by up to one batch on a fast scan).
+            var done = Math.Max(EngineClient.Instance.LastScanProcessedFiles, prog.Processed);
             CompletedSummary.Text = elapsed > 0
-                ? $"Scan complete -- {prog.Processed:N0} files in {FormatDuration(elapsed)}."
-                : $"Scan complete -- {prog.Processed:N0} files.";
+                ? $"Scan complete -- {done:N0} files in {FormatDuration(elapsed)}."
+                : $"Scan complete -- {done:N0} files.";
         }
         else if (!AppViewModel.Instance.HasFolder)
         {
@@ -504,6 +536,14 @@ public sealed partial class SidebarProcessingControl : UserControl
             }
         }
     }
+
+    private static string StageLabel(ScanPhase? phase) => phase switch
+    {
+        ScanPhase.Discovering => "Counting",
+        ScanPhase.Tagging => "Tagging",
+        ScanPhase.PostScan => "Finishing up",
+        _ => "Working",
+    };
 
     private static string FormatDuration(double seconds)
     {

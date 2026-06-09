@@ -324,7 +324,7 @@ public actor DBWriter {
             SELECT id, size_bytes, modified_at, failed FROM files WHERE path_text = ?
             """, arguments: [file.url.path])
 
-        let newModified = file.modifiedAt?.timeIntervalSinceReferenceDate
+        let newModified = file.modifiedAt?.timeIntervalSince1970
         // "Unchanged" only when the prior scan succeeded, this scan succeeded,
         // and both size and mtime match. A previously- or newly-failed file is
         // always reprocessed.
@@ -342,30 +342,48 @@ public actor DBWriter {
             }
         }()
 
-        // 1. files row — id-preserving UPSERT (never delete+reinsert).
+        // 1. files row — id-preserving UPSERT (never delete+reinsert),
+        // mirroring the Windows engine's INSERT_FILE_RETURNING_ID_SQL
+        // (platforms/windows/src/engine/src/pipeline/dbwriter.rs)
+        // column-for-column. The explicit `ON CONFLICT(path_text) DO UPDATE`
+        // overrides the v1 column's `ON CONFLICT REPLACE` action, so the row
+        // id and its FK-linked children survive a rescan.
+        //   created_at + aesthetic are inserted but intentionally NOT in the
+        //   DO UPDATE set (matches Windows): a rescan must not clobber the
+        //   originally-recorded creation time, and aesthetic is scored elsewhere.
+        //   content_hash/file_ref aren't computed by the macOS scan path yet, so
+        //   they bind NULL and COALESCE preserves any previously-stored value.
         try db.execute(sql: """
             INSERT INTO files
               (path_text, path_hash, size_bytes, created_at, modified_at,
                scanned_at, kind, extension, phash, aesthetic, has_faces,
                has_text, camera_model, location_lat, location_lon,
-               failed, error_message)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               failed, error_message, content_hash, file_ref)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(path_text) DO UPDATE SET
-              path_hash=excluded.path_hash, size_bytes=excluded.size_bytes,
-              created_at=excluded.created_at, modified_at=excluded.modified_at,
-              scanned_at=excluded.scanned_at, kind=excluded.kind,
-              extension=excluded.extension, phash=excluded.phash,
-              aesthetic=excluded.aesthetic, has_faces=excluded.has_faces,
-              has_text=excluded.has_text, camera_model=excluded.camera_model,
-              location_lat=excluded.location_lat, location_lon=excluded.location_lon,
-              failed=excluded.failed, error_message=excluded.error_message
+                path_hash     = excluded.path_hash,
+                size_bytes    = excluded.size_bytes,
+                modified_at   = excluded.modified_at,
+                scanned_at    = excluded.scanned_at,
+                kind          = excluded.kind,
+                extension     = excluded.extension,
+                phash         = excluded.phash,
+                has_faces     = excluded.has_faces,
+                has_text      = excluded.has_text,
+                camera_model  = excluded.camera_model,
+                location_lat  = excluded.location_lat,
+                location_lon  = excluded.location_lon,
+                failed        = excluded.failed,
+                error_message = excluded.error_message,
+                content_hash  = COALESCE(excluded.content_hash, content_hash),
+                file_ref      = COALESCE(excluded.file_ref, file_ref)
             """, arguments: [
                 file.url.path,
                 pathHash,
                 Int(file.sizeBytes),
-                file.createdAt?.timeIntervalSinceReferenceDate,
+                file.createdAt?.timeIntervalSince1970,
                 newModified,
-                Date().timeIntervalSinceReferenceDate,
+                Date().timeIntervalSince1970,
                 file.kind,
                 file.extension,
                 file.phash.map { Int(bitPattern: UInt(truncatingIfNeeded: $0)) },
@@ -376,11 +394,16 @@ public actor DBWriter {
                 file.locationLat,
                 file.locationLon,
                 file.failed ? 1 : 0,
-                file.errorMessage
+                file.errorMessage,
+                nil,
+                nil
             ]
         )
         // last_insert_rowid() is NOT updated on the UPDATE branch of an upsert,
-        // so resolve the id from the existing row when there was one.
+        // so resolve the id from the existing row when there was one. This
+        // mirrors the row-id stability the Windows `RETURNING id` provides on
+        // both branches, and is required so the child-row writes below (tags,
+        // faces, OCR, CLIP) attach to the correct, surviving row on a rescan.
         let fileID: Int64 = (existing?["id"]) ?? db.lastInsertedRowID
 
         // Unchanged file: leave every child row exactly as-is. Re-detecting
@@ -388,31 +411,33 @@ public actor DBWriter {
         // a file that didn't change.
         if unchanged { return }
 
-        // Changed or new file: rebuild the scan-derived child rows from scratch
-        // so a re-scan never accumulates duplicates. For a brand-new file these
-        // deletes are no-ops. FTS stays in sync via the v12 triggers.
-        try db.execute(sql: "DELETE FROM tags WHERE file_id = ? AND source = 'vision'",
-                       arguments: [fileID])
-        try db.execute(sql: "DELETE FROM face_prints WHERE file_id = ?", arguments: [fileID])
-
-        // 2. tags
+        // 2. tags — auto (classifier output). Delete any prior `source='auto'`
+        // rows first so a rescan replaces stale tags atomically; user tags
+        // (`source='user'`) are untouched. Mirrors the Windows `tag_delete` +
+        // `INSERT OR REPLACE` in dbwriter.rs.
+        try db.execute(sql: """
+            DELETE FROM tags WHERE file_id = ? AND source = 'auto'
+            """, arguments: [fileID])
         for tag in file.visionTags {
+            let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { continue }
             try db.execute(sql: """
-                INSERT OR IGNORE INTO tags (file_id, tag, source) VALUES (?, ?, ?)
-                """, arguments: [fileID, tag, "vision"])
+                INSERT OR REPLACE INTO tags (file_id, tag, source) VALUES (?, ?, ?)
+                """, arguments: [fileID, trimmed, "auto"])
         }
 
         // 3. OCR text. The ocr_fts external-content index is maintained by the
-        // AFTER INSERT/DELETE/UPDATE triggers installed in migration v12, so we
-        // only touch ocr_text here.
+        // AFTER INSERT/DELETE/UPDATE sync triggers (fts_sync_triggers
+        // migration), so we only touch ocr_text here. Explicit DELETE + INSERT
+        // rather than INSERT OR REPLACE: REPLACE's implicit delete fires the
+        // AFTER DELETE trigger only when recursive triggers are enabled, which
+        // would strand the old text's FTS postings. The bare DELETE also
+        // covers a changed file that no longer yields OCR text.
+        try db.execute(sql: "DELETE FROM ocr_text WHERE file_id = ?", arguments: [fileID])
         if let text = file.ocrText, !text.isEmpty {
             try db.execute(sql: """
-                INSERT OR REPLACE INTO ocr_text (file_id, text) VALUES (?, ?)
+                INSERT INTO ocr_text (file_id, text) VALUES (?, ?)
                 """, arguments: [fileID, text])
-        } else {
-            // Changed file that no longer yields OCR text — drop any stale row
-            // (the AFTER DELETE trigger evicts its FTS posting).
-            try db.execute(sql: "DELETE FROM ocr_text WHERE file_id = ?", arguments: [fileID])
         }
 
         // 4. face_prints — write one row per detected face. ArcFace
@@ -422,6 +447,13 @@ public actor DBWriter {
         // Quality + pose come from the inline detection pass and feed
         // the clustering quality filter (excluded=1 means "don't cluster
         // this face, but keep the row for display in PersonDetailSheet").
+        // The files row survives a rescan (ON CONFLICT DO UPDATE, no cascade
+        // delete), so clear this file's prior face rows even when this scan
+        // found none — otherwise a rescan accumulates duplicate or stale
+        // faces. Mirrors the Windows `face_delete` that precedes its inserts.
+        try db.execute(sql: """
+            DELETE FROM face_prints WHERE file_id = ?
+            """, arguments: [fileID])
         let bboxes = file.faceBBoxes
         if !bboxes.isEmpty {
             for i in 0..<bboxes.count {

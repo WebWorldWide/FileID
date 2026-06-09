@@ -111,12 +111,35 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         OnPropertyChanged(nameof(FooterVisibility));
     }
 
+    // Groups (+ their members) we've wired OnGroupOrMemberChanged on. Tracked
+    // explicitly so a CollectionChanged.Reset — which carries neither OldItems
+    // nor NewItems — can still unsubscribe the prior handlers instead of leaking
+    // them (and double-counting in HeaderStats). The identity-stable merge
+    // (CleanupViewModel.MergeByContentHash) normally emits granular Add/Remove,
+    // but any residual Clear()/Reset path must not leave dangling subscriptions.
+    private readonly System.Collections.Generic.HashSet<DuplicateGroup> _wiredGroups = new();
+
     private void OnGroupsCollectionChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
     {
         if (_unloaded) return;
         OnPropertyChanged(nameof(StatusText));
         OnPropertyChanged(nameof(FooterVisibility));
         OnPropertyChanged(nameof(HeaderStats));
+
+        // Reset (Clear) surfaces no Old/NewItems — unsubscribe everything we've
+        // tracked, then re-wire whatever the collection now holds.
+        if (e.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Reset)
+        {
+            foreach (var g in new System.Collections.Generic.List<DuplicateGroup>(_wiredGroups))
+            {
+                g.PropertyChanged -= OnGroupOrMemberChanged;
+                foreach (var m in g.Members) m.PropertyChanged -= OnGroupOrMemberChanged;
+            }
+            _wiredGroups.Clear();
+            foreach (var g in ViewModel.Groups) WireGroup(g);
+            return;
+        }
+
         // Wire HeaderStats live updates to every keeper-radio toggle.
         // The DataTemplate's RadioButton TwoWay-binds IsKeeper which
         // fires DuplicateMember.PropertyChanged; we listen once per
@@ -125,30 +148,30 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         {
             foreach (var added in e.NewItems)
             {
-                if (added is DuplicateGroup g)
-                {
-                    g.PropertyChanged += OnGroupOrMemberChanged;
-                    foreach (var m in g.Members)
-                    {
-                        m.PropertyChanged += OnGroupOrMemberChanged;
-                    }
-                }
+                if (added is DuplicateGroup g) WireGroup(g);
             }
         }
         if (e.OldItems != null)
         {
             foreach (var removed in e.OldItems)
             {
-                if (removed is DuplicateGroup g)
-                {
-                    g.PropertyChanged -= OnGroupOrMemberChanged;
-                    foreach (var m in g.Members)
-                    {
-                        m.PropertyChanged -= OnGroupOrMemberChanged;
-                    }
-                }
+                if (removed is DuplicateGroup g) UnwireGroup(g);
             }
         }
+    }
+
+    private void WireGroup(DuplicateGroup g)
+    {
+        if (!_wiredGroups.Add(g)) return;
+        g.PropertyChanged += OnGroupOrMemberChanged;
+        foreach (var m in g.Members) m.PropertyChanged += OnGroupOrMemberChanged;
+    }
+
+    private void UnwireGroup(DuplicateGroup g)
+    {
+        _wiredGroups.Remove(g);
+        g.PropertyChanged -= OnGroupOrMemberChanged;
+        foreach (var m in g.Members) m.PropertyChanged -= OnGroupOrMemberChanged;
     }
 
     private void OnGroupOrMemberChanged(object? sender, PropertyChangedEventArgs e)
@@ -167,6 +190,16 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         Loaded -= OnLoadedAsync;
         try { ViewModel.PropertyChanged -= OnViewModelPropertyChanged; } catch { /* swallow */ }
         try { ViewModel.Groups.CollectionChanged -= OnGroupsCollectionChanged; } catch { /* swallow */ }
+        // Detach the per-group/member handlers tracked in _wiredGroups. The
+        // identity-stable merge keeps DuplicateGroup instances alive across
+        // refreshes, so a still-subscribed group would pin this view after unload.
+        // Snapshot first — UnwireGroup mutates _wiredGroups.
+        try
+        {
+            foreach (var g in new System.Collections.Generic.List<DuplicateGroup>(_wiredGroups)) UnwireGroup(g);
+            _wiredGroups.Clear();
+        }
+        catch { /* swallow */ }
         try { ViewModels.EngineClient.Instance.PropertyChanged -= OnEngineChanged; } catch { /* swallow */ }
         foreach (var (_, cts) in _inflightThumbs) { try { cts.Cancel(); } catch { /* swallow */ } cts.Dispose(); }
         _inflightThumbs.Clear();
@@ -211,7 +244,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     {
         try
         {
-            var bmp = await _thumbnails.RequestAsync(member.Path, null, ct).ConfigureAwait(false);
+            var bmp = await _thumbnails.RequestAsync(member.Path, member.ModifiedAt, ct).ConfigureAwait(false);
             if (bmp == null || ct.IsCancellationRequested || _unloaded) return;
             DispatcherQueue.TryEnqueue(() =>
             {
@@ -302,6 +335,9 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         }
         if (ids.Count == 0)
         {
+            await ShowAlertAsync(
+                "Nothing to trash",
+                "Every file in the active groups is marked as a keeper (skipped groups are excluded), so there are no non-keepers to move to the Recycle Bin.");
             return;
         }
         var sizeDisplay = FormatSize(bytes);
@@ -317,26 +353,53 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         var choice = await confirm.ShowAsync();
         if (choice != ContentDialogResult.Primary) return;
 
+        // UndoStack still captures the same reply independently (it listens
+        // on its own PropertyChanged subscription); leave it in place.
+        Services.UndoStack.CaptureNextBulkResult(
+            "trashFiles:",
+            $"trash {ids.Count} duplicate{(ids.Count == 1 ? "" : "s")}",
+            async batchId =>
+            {
+                if (string.IsNullOrEmpty(batchId)) return false;
+                try
+                {
+                    await ViewModels.EngineClient.Instance.RestoreFromTrashAsync(batchId);
+                    return true;
+                }
+                catch { return false; }
+            });
+
+        // Await the engine's BulkActionResult so a partial/total failure is
+        // surfaced instead of fire-and-forgetting + unconditionally refreshing
+        // (the #1 silent failure: the user thinks files were trashed when some
+        // weren't). Only refresh on a clean run (Failed == 0).
         try
         {
-            Services.UndoStack.CaptureNextBulkResult(
-                "trashFiles:",
-                $"trash {ids.Count} duplicate{(ids.Count == 1 ? "" : "s")}",
-                async batchId =>
-                {
-                    if (string.IsNullOrEmpty(batchId)) return false;
-                    try
-                    {
-                        await ViewModels.EngineClient.Instance.RestoreFromTrashAsync(batchId);
-                        return true;
-                    }
-                    catch { return false; }
-                });
-            await ViewModels.EngineClient.Instance.TrashFilesAsync(ids);
+            var result = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
+                "trashFiles",
+                () => ViewModels.EngineClient.Instance.TrashFilesAsync(ids),
+                TimeSpan.FromSeconds(30));
+            if (result.Failed > 0)
+            {
+                var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
+                var detail = string.IsNullOrWhiteSpace(first) ? "" : $" — {first}";
+                await ShowAlertAsync(
+                    "Some files weren't trashed",
+                    $"Trashed {result.Succeeded}; {result.Failed} failed{detail}. The failed files are still in place — they may be open, read-only, or you may not have permission. Close them or check permissions, then try again.");
+                return;
+            }
         }
-        catch
+        catch (TimeoutException)
         {
-            // Result surfaces via BulkActionResultEvent.
+            await ShowAlertAsync(
+                "Trash didn't confirm",
+                "The engine didn't confirm the trash within 30 seconds. The files may or may not have moved — re-run the scan to check before retrying.");
+            return;
+        }
+        catch (Exception ex)
+        {
+            await ShowAlertAsync("Trash failed", $"Couldn't trash the selected files: {ex.Message}");
+            return;
         }
 
         await ViewModel.RefreshAsync(CancellationToken.None);
@@ -379,21 +442,33 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         }
     }
 
-    private void OnGroupKeepLargest(object sender, RoutedEventArgs e)
+    private void OnGroupKeepShallowest(object sender, RoutedEventArgs e)
     {
         var grp = GroupFromFlyoutItem(sender);
         if (grp == null || grp.Members.Count == 0) return;
-        var largestIdx = 0;
+        // Within a byte-identical group every member is the same size, so "keep
+        // largest" was always a no-op (kept index 0). Keep the copy in the
+        // least-nested / most-canonical location instead: fewest path
+        // separators, then shortest path, then ordinal (#19).
+        static int Depth(string p)
+        {
+            int n = 0;
+            foreach (var c in p) if (c == '\\' || c == '/') n++;
+            return n;
+        }
+        var bestIdx = 0;
         for (int i = 1; i < grp.Members.Count; i++)
         {
-            if (grp.Members[i].SizeBytes > grp.Members[largestIdx].SizeBytes)
-            {
-                largestIdx = i;
-            }
+            string a = grp.Members[i].Path, b = grp.Members[bestIdx].Path;
+            int da = Depth(a), db = Depth(b);
+            bool better = da < db
+                || (da == db && a.Length < b.Length)
+                || (da == db && a.Length == b.Length && string.CompareOrdinal(a, b) < 0);
+            if (better) bestIdx = i;
         }
         for (int i = 0; i < grp.Members.Count; i++)
         {
-            grp.Members[i].IsKeeper = (i == largestIdx);
+            grp.Members[i].IsKeeper = (i == bestIdx);
         }
     }
 
@@ -406,6 +481,9 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         {
             if (grp.Members[i].IsKeeper) { currentIdx = i; break; }
         }
+        // No keeper marked (currentIdx == -1): start the cycle deterministically
+        // at index 0 instead of relying on the (-1 + 1) % count wrap coincidence.
+        if (currentIdx == -1) currentIdx = grp.Members.Count - 1;
         var nextIdx = (currentIdx + 1) % grp.Members.Count;
         for (int i = 0; i < grp.Members.Count; i++)
         {
@@ -446,21 +524,76 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
             DefaultButton = ContentDialogButton.Close,
         };
         if (await confirm.ShowAsync() != ContentDialogResult.Primary) return;
+        // UndoStack still captures the same reply independently; leave it in place.
+        Services.UndoStack.CaptureNextBulkResult(
+            "trashFiles:",
+            $"trash {ids.Count} duplicate{(ids.Count == 1 ? "" : "s")}",
+            async batchId =>
+            {
+                if (string.IsNullOrEmpty(batchId)) return false;
+                try { await ViewModels.EngineClient.Instance.RestoreFromTrashAsync(batchId); return true; }
+                catch { return false; }
+            });
+
+        // Await the engine reply: surface partial/total failure and only
+        // refresh on a clean run, so a per-group trash can't falsely look done.
         try
         {
-            Services.UndoStack.CaptureNextBulkResult(
-                "trashFiles:",
-                $"trash {ids.Count} duplicate{(ids.Count == 1 ? "" : "s")}",
-                async batchId =>
-                {
-                    if (string.IsNullOrEmpty(batchId)) return false;
-                    try { await ViewModels.EngineClient.Instance.RestoreFromTrashAsync(batchId); return true; }
-                    catch { return false; }
-                });
-            await ViewModels.EngineClient.Instance.TrashFilesAsync(ids);
+            var result = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
+                "trashFiles",
+                () => ViewModels.EngineClient.Instance.TrashFilesAsync(ids),
+                TimeSpan.FromSeconds(30));
+            if (result.Failed > 0)
+            {
+                var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
+                var detail = string.IsNullOrWhiteSpace(first) ? "" : $" — {first}";
+                await ShowAlertAsync(
+                    "Some files weren't trashed",
+                    $"Trashed {result.Succeeded}; {result.Failed} failed{detail}. The failed files are still in place — they may be open, read-only, or you may not have permission. Close them or check permissions, then try again.");
+                return;
+            }
         }
-        catch { }
+        catch (TimeoutException)
+        {
+            await ShowAlertAsync(
+                "Trash didn't confirm",
+                "The engine didn't confirm the trash within 30 seconds. The files may or may not have moved — re-run the scan to check before retrying.");
+            return;
+        }
+        catch (Exception ex)
+        {
+            await ShowAlertAsync("Trash failed", $"Couldn't trash the selected files: {ex.Message}");
+            return;
+        }
         await ViewModel.RefreshAsync(CancellationToken.None);
+    }
+
+    // Dismissible alert mirroring SidebarProcessingControl.ShowAlertAsync —
+    // surfaces a partial/failed bulk op so the user is never left thinking a
+    // trash succeeded when some (or all) of it didn't.
+    private async System.Threading.Tasks.Task ShowAlertAsync(string title, string body)
+    {
+        try
+        {
+            if (_unloaded || XamlRoot is null)
+            {
+                DebugLog.Warn($"CleanupView.ShowAlertAsync: XamlRoot null/unloaded ({title}); skipping dialog.");
+                return;
+            }
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = title,
+                Content = body,
+                CloseButtonText = "OK",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            await dialog.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"CleanupView.ShowAlertAsync({title}) threw: " + ex.Message);
+        }
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
