@@ -7,6 +7,38 @@
 
 ---
 
+## 2026-06-09 — Full bug-audit sweep: WinVerifyTrust revocation goes cache-only; IPC ID-casing drift deferred
+
+**Context**: A read-only multi-agent static audit across macOS (Swift), the Windows Rust engine,
+and the Windows .NET app surfaced 73 confirmed bugs (2 critical, 13 high, 28 medium, 30 low) +
+4 uncertain. All were remediated on branch `fix/bug-audit-sweep` except the two items below.
+
+**Decision 1 — WinVerifyTrust revocation is now cache-only (no network egress).** The engine
+Authenticode check used `WTD_REVOKE_WHOLECHAIN` + `WTD_REVOCATION_CHECK_CHAIN`, which performs a
+live CRL/OCSP fetch to a third-party CA on every engine spawn — that is non-user-initiated
+network egress beyond the 5-host allowlist (a PRIVACY.md violation), blocked the UI thread, and
+made the signed build fail to launch offline. We added `WTD_CACHE_ONLY_URL_RETRIEVAL` so
+revocation uses only locally-cached data and never hits the network, and moved the whole check
+off the UI thread. Alternatives: drop revocation entirely (loses the revoked-cert protection) or
+keep online revocation (violates the no-egress invariant). Cache-only keeps the security benefit
+while honoring the offline-first / no-telemetry stance. The CI telemetry binary-scan should stay
+zero-hit (this *removes* a network call site).
+
+**Decision 2 — IPC identifier-field casing drift (schema `…ID` vs Windows `…Id`) is deferred,
+not force-fixed.** The schema + macOS Swift use capitalized identifier suffixes (`fileID`,
+`personIDs`, …); the Rust engine and C# app both use `…Id`. This is a contract-conformance gap,
+NOT a runtime bug: IPC is app↔engine *within* a platform, and each platform's pair is internally
+consistent (Swift↔Swift, Rust↔C#), so both platforms work today. Aligning Windows to the schema
+requires a coordinated wire-key rename on BOTH the Rust (`#[serde(rename)]`) and C#
+(`[JsonPropertyName]`) sides simultaneously; a one-sided slip would break Windows IPC entirely,
+and neither side's unit tests exercise the Rust↔C# cross-wire (only same-language round-trips).
+Since it has zero runtime impact and can only be validated by a real Windows app↔engine run, it
+is deferred to a Windows-hardware session (see NEXT.md). The schema's "alphabetical key order /
+byte-deterministic" wording was also corrected — it was aspirational and unimplemented by the
+Rust/C# emitters; key order is platform-dependent and consumers are key-order-independent.
+
+---
+
 ## 2026-05-27 — SmolVLM removed; CLIP scene tags become the canonical auto-tagger
 
 **Context**: V16.11 → V16.27 had SmolVLM as the canonical scan-time tagger (the "tagging =

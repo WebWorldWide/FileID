@@ -4,6 +4,52 @@
 
 ---
 
+## Verify the bug-audit sweep on hardware (branch `fix/bug-audit-sweep`, 2026-06-09)
+
+72/73 confirmed + 3/4 uncertain audit findings are fixed on the branch. **macOS `swift build`
+is green; everything else needs hardware verification.** Before merging:
+
+**Build gates**
+- macOS: `cd platforms/apple && DEVELOPER_DIR=<Xcode> swift test` (needs Xcode; this env had only
+  CommandLineTools so the swift-testing suite never ran). Then `bash run.sh`.
+- Windows: `pwsh build/build.ps1 -RunTests`; `cargo clippy --all-targets -- -D warnings && cargo test`
+  (engine); `dotnet test && dotnet format --verify-no-changes` (app); `pwsh build/iterate.ps1`.
+
+**Add regression tests (designed but not written — this env can't compile them):**
+- macOS: cancel-during-tagging emits `scanComplete(.cancelled)` and the JobQueue advances (C1);
+  re-scan preserves `face_prints.person_id` + `files.id` (H2); IPCSink full-buffer coalescing
+  keeps a buffered `scanComplete` (H3); FTS5 MATCH with metacharacters returns rows (M3).
+- Windows: `planRestructure` SQL prepares against bundled SQLite (H10, cargo); restructure
+  collision disambiguation (C2, cargo — added); `is_safe_filename` rejects `:` (M26, cargo —
+  added); OCR returns text from a known-text PNG via spawn_blocking (H9).
+
+**UAT (manual):**
+- macOS: scan large folder; pause→resume→cancel (no hang, Mac can sleep); re-scan a clustered
+  folder (People names survive); Restructure skip→regenerate→apply (skipped files not moved);
+  Deep Analyze completes; search with `"`/`*`/`:` returns results.
+- Windows: Deep Analyze completes (H8); Restructure plan renders (H10) + apply never overwrites,
+  colliding names get " (2)" (C2); OCR-derived search works (H9); settings persist across
+  relaunch (H12); offline launch shows the window immediately (H11/U2); a 2nd Windows user can
+  launch (M16).
+
+**Data migrations to run after deploy:** H7 (ArcFace RGB) invalidates existing Windows
+`arcface_embeddings` + derived face clusters — recompute them. H2 (UPSERT) changes re-scan
+semantics — validate on a real macOS DB.
+
+**Behavioral changes to confirm:** L24 (discovery no longer prunes generic `build`/`bin`/`obj`
+folders unless a build-marker is present — could now scan dev trees); the WinVerifyTrust
+cache-only revocation trade-off (DECISIONS.md).
+
+**Still open (deliberately deferred):**
+- **L1 — IPC ID-casing drift** (schema/Swift `…ID` vs Windows `…Id`). No runtime bug; needs a
+  coordinated Rust `#[serde(rename)]` + C# `[JsonPropertyName]` wire rename, verified by a real
+  Windows app↔engine run (per-language unit tests won't catch a cross-wire slip). See DECISIONS.md.
+- **U4 — macOS IPC shares fd 2 with MLX/runtime diagnostics** (no framing recovery). Lower-risk;
+  the proper fix (dup2 fd 2 to the JSONL log before MLX loads, IPC on a saved dup) is a transport
+  change that must be verified on a real macOS run before shipping.
+
+---
+
 ## V16.29 — SmolVLM removed, tag-quality fixes, sidebar + Deep Analyze (2026-05-27)
 
 **Landed (clippy + test green; dotnet build/test/format clean).** Response to user-reported

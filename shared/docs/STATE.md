@@ -8,6 +8,40 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-09 — Full cross-platform bug-audit sweep (branch `fix/bug-audit-sweep`)
+
+Ran a read-only multi-agent static audit across macOS (Swift), the Windows Rust engine, and the
+Windows .NET app (18 scoped finders + adversarial verifiers): **88 raw → 73 confirmed** (2
+critical, 13 high, 28 medium, 30 low) + 4 uncertain. Remediated **72 of 73 confirmed + 3 of 4
+uncertain** on this branch (≈30 atomic commits); the lone deferral is the IPC ID-casing drift
+(L1 — no runtime impact, needs a coordinated Windows-verified wire rename; see DECISIONS.md).
+
+Highlights:
+- **macOS (Swift)** — fixed: cancel/shutdown-during-scan **deadlock** (unbuffered AsyncChannel
+  producer never cancelled); `INSERT OR REPLACE` rowid churn that cascade-deleted faces/embeddings/
+  **manual person assignments** on every re-scan (now an id-preserving UPSERT + v12 FTS-sync
+  triggers + change-detection skip); IPCSink progress-coalescing clobbering `scanComplete`;
+  VisionWorker reused-VNRequest race; FTS5 MATCH injection-to-zero-results; person/FTS
+  reconciliation on delete; rename apply/undo disk↔DB consistency; CLIPTextEncoder UI-thread
+  freeze; download integrity (error propagation, size verify, no double-resume); +others.
+- **Windows Rust** — fixed: restructure **data-loss** overwrite (now non-overwriting +
+  disambiguation); pause→resume lost-wakeup **deadlock**; image-decode **OOM**; ArcFace **BGR→RGB**
+  (cross-platform parity); VLM stderr-pipe **hang**; OCR-never-runs (uninit COM apartment);
+  `planRestructure` dead SQL (illegal `GROUP_CONCAT(DISTINCT,sep)`); range-downloader permit
+  **deadlock** + 416/stale-part recovery; per-download cancel registry; zip-bomb actual-bytes
+  cap; ADS `:` rename guard; long-path moves; +others.
+- **Windows .NET** — fixed: WinVerifyTrust egress/UI-block/handle-leak (cache-only revocation,
+  off-thread); AppSettings split-brain (single canonical instance); OnProcessExited exit-code
+  race; expected-exit latch; `Local\` single-instance (multi-user); install watchdog null
+  dispatcher; path-redaction gaps (UNC/space/sibling-username); search debounce ODE; failed-file
+  filter consistency; ReadStore leak; Sankey O(N²)→O(N) + debounce; People virtualized
+  checkboxes; +others.
+
+**Verification status:** macOS `swift build` (app + engine) is **green**; the swift-testing suite
+can't run in this env (no Xcode — CommandLineTools only). Windows: the non-`cfg(windows)` Rust
+**`cargo check` is green** (cfg(windows) code + .NET unverifiable on macOS). All Windows build/run
+verification and the macOS UAT are pending on the user's hardware — see NEXT.md.
+
 ## 2026-05-27 — V16.29 SmolVLM removal, tag-quality diagnostic + threshold + audio duration, sidebar + Deep Analyze fixes
 
 Targeted response to a user-reported triple: (1) tag chips on images/videos/audio "still

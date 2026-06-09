@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
-  "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object keys are emitted in alphabetical order for byte-deterministic round-trips.\n\nGenerator targets: Swift (platforms/apple/shared/Sources/FileIDShared/IPCProtocol_Generated.swift), Rust (platforms/windows/src/engine/src/ipc/generated.rs), C# (platforms/windows/src/FileID.IpcSchema/Generated.cs).",
+  "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nGenerator targets: Swift (platforms/apple/shared/Sources/FileIDShared/IPCProtocol_Generated.swift), Rust (platforms/windows/src/engine/src/ipc/generated.rs), C# (platforms/windows/src/FileID.IpcSchema/Generated.cs).",
   "version": "1.0.0",
 
   "$defs": {

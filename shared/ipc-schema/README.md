@@ -8,7 +8,7 @@ Newline-delimited JSON over stdin/stdout (or any byte-stream transport that pres
 
 The discriminated union for `CommandPayload` and `EventPayload` uses **Swift Codable's externally-tagged shape**: a one-key object where the key is the variant name and the value is the payload object. Empty payloads are encoded as `{}`. Variants whose Swift case has a single unnamed associated value (e.g. `case ready(EngineInfo)`) wrap the payload in `{"_0": ...}` — this is Swift's auto-synthesis behavior, and the schema documents it explicitly so non-Swift implementations can match it byte-for-byte.
 
-JSON object keys are emitted in alphabetical order for byte-deterministic round-trips. Dates are ISO8601 strings. Binary blobs are base64.
+JSON object **key order is not significant and is platform-dependent** (Swift may sort; the Rust engine and C# app emit declaration order). Consumers MUST parse key-order-independently — every JSON parser does — and MUST NOT byte-compare serialized messages across platforms. (The earlier "alphabetical / byte-deterministic" wording was aspirational and not implemented by the Rust/C# emitters.) Dates are ISO8601 strings. Binary blobs are base64.
 
 ## Code generation
 
