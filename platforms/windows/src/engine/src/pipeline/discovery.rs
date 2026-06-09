@@ -403,17 +403,28 @@ fn is_ambiguous_build_directory(name: &str) -> bool {
 /// True if `name` is a build-system marker (sits next to the build dirs above).
 fn is_build_marker(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    lower == "cargo.toml"
-        || lower == "cmakelists.txt"
-        || lower == "makefile"
-        || lower == "package.json"
-        || lower == "pyproject.toml"
-        || lower == "setup.py"
-        || lower == "requirements.txt"
-        || lower == "pyvenv.cfg"
-        || lower.ends_with(".sln")
-        || lower.ends_with(".csproj")
-        || lower.ends_with(".vcxproj")
+    if matches!(
+        lower.as_str(),
+        "cargo.toml"
+            | "cmakelists.txt"
+            | "makefile"
+            | "package.json"
+            | "pyproject.toml"
+            | "setup.py"
+            | "requirements.txt"
+            | "pyvenv.cfg"
+    ) {
+        return true;
+    }
+    // Visual Studio / MSBuild project files — compare via the extension
+    // (case-insensitively) rather than str::ends_with(".sln"), which clippy's
+    // case_sensitive_file_extension_comparisons lint rejects under -D warnings.
+    std::path::Path::new(name).extension().is_some_and(|e| {
+        let e = e.to_string_lossy();
+        e.eq_ignore_ascii_case("sln")
+            || e.eq_ignore_ascii_case("csproj")
+            || e.eq_ignore_ascii_case("vcxproj")
+    })
 }
 
 /// Per-file noise filter. Cheap O(1) string match — kept separate from
