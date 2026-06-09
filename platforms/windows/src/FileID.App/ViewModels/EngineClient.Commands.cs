@@ -197,6 +197,7 @@ internal sealed partial class EngineClient
         // user-initiated exit — no auto-respawn, engine stays dead. Now
         // we set the flag only AFTER SendCommandAsync succeeds, and clear
         // it if SendCommandAsync throws.
+        Interlocked.Exchange(ref _expectingExitAtTicks, DateTime.UtcNow.Ticks);
         Interlocked.Exchange(ref _expectingExit, 1);
         try
         {

@@ -73,6 +73,12 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     // architectures, and OnProcessExited fires on whichever thread
     // detects process exit (not always the UI thread).
     private int _expectingExit; // 0 = false, 1 = true
+    // When _expectingExit was set (UTC ticks). A shutdown request that never
+    // produces an exit would otherwise latch the flag forever, so a real crash
+    // much later gets mis-read as user-initiated and never respawns. Only honor
+    // the flag if the exit follows the request within ExpectingExitWindow.
+    private long _expectingExitAtTicks;
+    private static readonly TimeSpan ExpectingExitWindow = TimeSpan.FromSeconds(60);
 
     private DateTime _lastDeepAnalyzeFileDone = DateTime.MinValue;
     private static readonly TimeSpan DeepAnalyzeFileDoneThrottle = TimeSpan.FromMilliseconds(500); // 2 Hz
@@ -348,7 +354,12 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             // in play, ship with the constant defined and the strict path
             // refuses Unsigned + tamper-mismatched binaries.
             var expectedThumb = Environment.GetEnvironmentVariable("FILEID_EV_THUMBPRINT");
-            var verdict = WinVerifyTrustChecker.Verify(enginePath, expectedThumbprintHex: expectedThumb);
+            // Run the Authenticode check off the UI thread. Even with cache-only
+            // revocation it touches the filesystem (and historically the
+            // network), so doing it inline froze the window at launch and on
+            // every crash-respawn. The first await here yields the UI thread;
+            // the State/CrashReason mutations below resume back on it.
+            var verdict = await Task.Run(() => WinVerifyTrustChecker.Verify(enginePath, expectedThumbprintHex: expectedThumb));
             switch (verdict)
             {
                 case IntegrityVerdict.NotFound:
@@ -392,9 +403,14 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             {
                 try
                 {
-                    using var sha = System.Security.Cryptography.SHA256.Create();
-                    using var fs = System.IO.File.OpenRead(enginePath);
-                    preSpawnHash = sha.ComputeHash(fs);
+                    // Off the UI thread — hashing a ~95 MB engine binary inline
+                    // would stutter the UI.
+                    preSpawnHash = await Task.Run(() =>
+                    {
+                        using var sha = System.Security.Cryptography.SHA256.Create();
+                        using var fs = System.IO.File.OpenRead(enginePath);
+                        return sha.ComputeHash(fs);
+                    });
                 }
                 catch (Exception ex)
                 {
@@ -467,9 +483,12 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 _stdoutLoop = Task.Run(() => StdoutLoopAsync(p.StandardOutput, ct), ct);
                 _stderrLoop = Task.Run(() => StderrLoopAsync(p.StandardError, ct), ct);
 
-                // Hook exit so we can auto-respawn.
-                p.EnableRaisingEvents = true;
+                // Hook exit so we can auto-respawn. Subscribe BEFORE enabling
+                // events — otherwise a process that exits in the gap between
+                // these two statements raises (and drops) Exited before the
+                // handler is attached, and the crash respawn never fires.
                 p.Exited += OnProcessExited;
+                p.EnableRaisingEvents = true;
             }
             catch (Exception ex)
             {
@@ -588,18 +607,28 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         return s_pathInLine.Replace(line, m => PathRedactor.Redact(m.Value));
     }
 
-    // Conservative match: drive letter, colon, backslash, then any
-    // non-whitespace / non-quote / non-bracket. Catches `C:\Users\…`
-    // anywhere in the line while leaving Unicode logging strings alone.
+    // Match a drive path (C:\…) OR a UNC path (\\server\…), terminating only
+    // on quotes / brackets / commas / line ends — NOT on spaces. Windows paths
+    // routinely contain spaces ("C:\Users\Bob Smith\…"); stopping at the first
+    // space truncated the match and leaked the remainder ("Smith\…") into the
+    // log. Over-matching a little trailing text is fine — PathRedactor still
+    // collapses the home prefix to ~ and nothing PII escapes.
     private static readonly System.Text.RegularExpressions.Regex s_pathInLine =
-        new(@"[A-Za-z]:\\[^\s""\)\}\>]+",
+        new(@"(?:[A-Za-z]:\\|\\\\)[^"",)\]}>\r\n]*",
             System.Text.RegularExpressions.RegexOptions.Compiled);
 
     private void OnProcessExited(object? sender, EventArgs e)
     {
+        // Capture the exit code from the process that ACTUALLY exited (sender),
+        // not the mutable _process field — by the time this UI-thread callback
+        // runs, _process may already point at a respawned process or be
+        // disposed, and reading its ExitCode then throws and aborts cleanup.
+        var exited = sender as System.Diagnostics.Process;
+        int? exitCode = null;
+        try { exitCode = exited?.ExitCode; } catch { /* not-exited / disposed */ }
         _ui.TryEnqueue(() =>
         {
-            DebugLog.Warn($"EngineClient: process exited (code={_process?.ExitCode}).");
+            DebugLog.Warn($"EngineClient: process exited (code={exitCode?.ToString() ?? "?"}).");
             Cleanup();
 
             // Notify install service immediately so any in-flight download
@@ -615,9 +644,17 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             // Interlocked.Exchange both reads + clears in one atomic op.
             if (Interlocked.Exchange(ref _expectingExit, 0) == 1)
             {
-                State = LifecycleState.Crashed; // "stopped" UI; user can manually start
-                CrashReason = string.Empty;
-                return;
+                var setAt = new DateTime(Interlocked.Read(ref _expectingExitAtTicks), DateTimeKind.Utc);
+                if (DateTime.UtcNow - setAt <= ExpectingExitWindow)
+                {
+                    State = LifecycleState.Crashed; // "stopped" UI; user can manually start
+                    CrashReason = string.Empty;
+                    return;
+                }
+                // Stale flag: a shutdown was requested long ago but the engine
+                // never exited then. This exit is a real (later) crash — fall
+                // through to the auto-respawn path.
+                DebugLog.Warn("EngineClient: stale _expectingExit ignored; treating exit as a crash.");
             }
 
             // Auto-respawn with bounded backoff. The 3-strike window is

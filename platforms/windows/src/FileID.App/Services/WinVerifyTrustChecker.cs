@@ -87,7 +87,13 @@ internal static class WinVerifyTrustChecker
                 dwStateAction = WTD_STATEACTION_VERIFY,
                 hWVTStateData = IntPtr.Zero,
                 pwszURLReference = null,
-                dwProvFlags = WTD_REVOCATION_CHECK_CHAIN,
+                // WTD_CACHE_ONLY_URL_RETRIEVAL: revocation uses ONLY locally
+                // cached CRL/OCSP and never makes a network request. This keeps
+                // the integrity/revocation check while honoring the product's
+                // no-extra-egress, offline-first stance — the live WHOLECHAIN
+                // fetch otherwise hit a third-party CA on every engine spawn
+                // and froze/blocked launch when offline or the CA was slow.
+                dwProvFlags = WTD_REVOCATION_CHECK_CHAIN | WTD_CACHE_ONLY_URL_RETRIEVAL,
                 dwUIContext = 0,
                 pSignatureSettings = IntPtr.Zero,
             };
@@ -97,6 +103,11 @@ internal static class WinVerifyTrustChecker
             int hr = NativeWinVerifyTrust(IntPtr.Zero, ref WINTRUST_ACTION_GENERIC_VERIFY_V2, trustDataPtr);
 
             // Always issue a Close to release the WVT state, regardless of hr.
+            // Read the struct back from unmanaged memory first: WinVerifyTrust
+            // wrote the allocated hWVTStateData handle there during VERIFY, and
+            // closing with our stale managed copy (handle == IntPtr.Zero) leaked
+            // that state on every single call.
+            trustData = Marshal.PtrToStructure<WinTrustData>(trustDataPtr);
             trustData.dwStateAction = WTD_STATEACTION_CLOSE;
             Marshal.StructureToPtr(trustData, trustDataPtr, fDeleteOld: true);
             _ = NativeWinVerifyTrust(IntPtr.Zero, ref WINTRUST_ACTION_GENERIC_VERIFY_V2, trustDataPtr);
@@ -172,6 +183,7 @@ internal static class WinVerifyTrustChecker
     private const uint WTD_STATEACTION_VERIFY = 1;
     private const uint WTD_STATEACTION_CLOSE = 2;
     private const uint WTD_REVOCATION_CHECK_CHAIN = 0x00000040;
+    private const uint WTD_CACHE_ONLY_URL_RETRIEVAL = 0x00001000; // revocation: cached data only, no network
 
     private static Guid WINTRUST_ACTION_GENERIC_VERIFY_V2 = new("00AAC56B-CD44-11D0-8CC2-00C04FC295EE");
 
