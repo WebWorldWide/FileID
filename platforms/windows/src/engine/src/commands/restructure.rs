@@ -27,14 +27,23 @@ pub(crate) async fn handle_plan_restructure(
     let files: Vec<FileForClassify> =
         match tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<FileForClassify>> {
             let conn = db.lock();
+            // SQLite forbids GROUP_CONCAT(DISTINCT expr, separator) — the
+            // DISTINCT form takes exactly ONE argument, so the old query failed
+            // at prepare() time and the whole Restructure planner was dead.
+            // Dedup (file_id, name) in a derived table, then aggregate with the
+            // single-argument-plus-separator GROUP_CONCAT (which IS legal).
             let mut stmt = conn.prepare(
                 "SELECT
                    f.id, f.path_text, f.kind, f.modified_at, f.created_at,
                    f.location_lat, f.location_lon, f.has_text,
-                   GROUP_CONCAT(DISTINCT p.name, char(31)) AS names
+                   GROUP_CONCAT(pn.name, char(31)) AS names
                  FROM files f
-                 LEFT JOIN face_prints fp ON fp.file_id = f.id
-                 LEFT JOIN persons p ON p.id = fp.person_id AND p.name IS NOT NULL AND p.name != ''
+                 LEFT JOIN (
+                   SELECT DISTINCT fp.file_id, p.name
+                   FROM face_prints fp
+                   JOIN persons p ON p.id = fp.person_id
+                   WHERE p.name IS NOT NULL AND p.name != ''
+                 ) pn ON pn.file_id = f.id
                  WHERE f.failed = 0
                  GROUP BY f.id"
             )?;
@@ -81,7 +90,7 @@ pub(crate) async fn handle_plan_restructure(
                 tracing::warn!(?err, "planRestructure query failed");
                 sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                     kind: "plan_restructure_db".into(),
-                    message: format!("Couldn't read files table: {err}"),
+                    message: format!("planRestructure query failed: {err}"),
                     path: None,
                     model_kind: None,
                 }))))

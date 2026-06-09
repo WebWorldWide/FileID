@@ -25,6 +25,15 @@ pub(crate) fn is_safe_filename(name: &str) -> bool {
     if name.contains('/') || name.contains('\\') {
         return false;
     }
+    // SEC: reject Windows-illegal filename characters. ':' is the dangerous
+    // one — "name:stream" addresses an NTFS Alternate Data Stream, so a
+    // rename to "photo.jpg:evil" would write a hidden stream that this guard
+    // is supposed to block. Also reject < > " | ? * and control chars, which
+    // are illegal in NTFS names and produce cryptic MoveFileExW failures.
+    if name.contains(|c: char| matches!(c, ':' | '<' | '>' | '"' | '|' | '?' | '*') || (c as u32) < 0x20)
+    {
+        return false;
+    }
     let p = Path::new(name);
     if p.is_absolute() {
         return false;
@@ -207,6 +216,15 @@ mod tests {
         assert!(!is_safe_filename("  "));
         assert!(!is_safe_filename(" leading-space.jpg"));
         assert!(!is_safe_filename("trailing-space.jpg "));
+        // NTFS Alternate Data Stream + other Windows-illegal characters.
+        assert!(!is_safe_filename("photo.jpg:evil"));
+        assert!(!is_safe_filename("a:b"));
+        assert!(!is_safe_filename("a<b"));
+        assert!(!is_safe_filename("a>b"));
+        assert!(!is_safe_filename("a|b"));
+        assert!(!is_safe_filename("a?b"));
+        assert!(!is_safe_filename("a*b"));
+        assert!(!is_safe_filename("a\"b"));
     }
 
     // Property-based tests proving is_safe_filename and

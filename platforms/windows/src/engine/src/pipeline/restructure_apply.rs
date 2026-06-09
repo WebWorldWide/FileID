@@ -1,10 +1,13 @@
 // Restructure apply — execute a `Vec<ProposedMove>` on disk.
 //
 // Two modes:
-//   * Real move (default): `MoveFileExW(MOVEFILE_REPLACE_EXISTING |
-//     MOVEFILE_COPY_ALLOWED)`. Atomic when same volume; copy+delete
-//     across volumes. The DB row's `path_text` is updated in the same
-//     transaction as the move (so a crash leaves no dangling pointers).
+//   * Real move (default): `MoveFileExW(MOVEFILE_COPY_ALLOWED)` — NON-
+//     overwriting. Atomic when same volume; copy+delete across volumes.
+//     Colliding destination names are disambiguated ("name (2).ext") so a
+//     move can never silently destroy an existing file. The filesystem move
+//     and the DB `path_text` update are SEPARATE, non-atomic steps; crash-
+//     consistency comes from the rename/move heal (content_hash / file_ref)
+//     reconciliation on the next scan, not from a shared transaction.
 //   * Symlink (advanced): `CreateSymbolicLinkW`. Requires either
 //     SeCreateSymbolicLinkPrivilege (admin) OR Developer Mode enabled.
 //     Lets the user preview the proposed structure without committing
@@ -14,6 +17,7 @@
 // inside `library_root`. We refuse to write outside the user's chosen
 // library — even if the planner is buggy or someone forges a payload.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -27,7 +31,7 @@ use crate::ipc::{RestructureApplyResult, RestructureMove};
 use windows::core::PCWSTR;
 #[cfg(windows)]
 use windows::Win32::Storage::FileSystem::{
-    CreateSymbolicLinkW, MoveFileExW, MOVEFILE_COPY_ALLOWED, MOVEFILE_REPLACE_EXISTING,
+    CreateSymbolicLinkW, MoveFileExW, MOVEFILE_COPY_ALLOWED,
     SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE, SYMBOLIC_LINK_FLAGS,
 };
 
@@ -51,6 +55,10 @@ impl RestructureApply {
 
         let mut applied = 0u32;
         let mut failed = 0u32;
+        // Destinations already claimed by an earlier move in THIS batch, so two
+        // NEW colliding files don't both target the same path before either is
+        // written.
+        let mut assigned: HashSet<PathBuf> = HashSet::new();
 
         for m in moves {
             let dest = PathBuf::from(&m.destination);
@@ -95,6 +103,13 @@ impl RestructureApply {
                 }
             }
 
+            // Pick a non-colliding destination — never overwrite an existing
+            // file or a sibling move in this batch. The move APIs are also
+            // non-overwriting (no MOVEFILE_REPLACE_EXISTING), so this is the
+            // sole place a collision is resolved.
+            let dest = unique_destination(&dest, &assigned);
+            assigned.insert(dest.clone());
+
             let result = if self.use_symlinks {
                 make_symlink(&m.source, &dest)
             } else {
@@ -138,20 +153,29 @@ enum ApplyError {
 #[cfg(windows)]
 fn move_file(src: &str, dst: &Path) -> std::result::Result<(), ApplyError> {
     use std::os::windows::ffi::OsStrExt;
-    let src_w: Vec<u16> = std::ffi::OsStr::new(src)
+    // Extended-length (\\?\) form so deep (>MAX_PATH) moves don't silently
+    // fail — matches every other FS-access site in the engine.
+    let src_p = crate::util::path_safety::to_extended_length(Path::new(src));
+    let dst_p = crate::util::path_safety::to_extended_length(dst);
+    let src_w: Vec<u16> = src_p
+        .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    let dst_w: Vec<u16> = dst
+    let dst_w: Vec<u16> = dst_p
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
     unsafe {
+        // NO MOVEFILE_REPLACE_EXISTING: collisions are pre-resolved by
+        // unique_destination, and without the flag MoveFileExW refuses to
+        // clobber (ERROR_ALREADY_EXISTS) as a last-resort safety net rather
+        // than destroying an existing file.
         MoveFileExW(
             PCWSTR(src_w.as_ptr()),
             PCWSTR(dst_w.as_ptr()),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED,
+            MOVEFILE_COPY_ALLOWED,
         )
         .map_err(|e| ApplyError::Other(anyhow::Error::msg(e.to_string())))
     }
@@ -160,11 +184,14 @@ fn move_file(src: &str, dst: &Path) -> std::result::Result<(), ApplyError> {
 #[cfg(windows)]
 fn make_symlink(src: &str, dst: &Path) -> std::result::Result<(), ApplyError> {
     use std::os::windows::ffi::OsStrExt;
-    let src_w: Vec<u16> = std::ffi::OsStr::new(src)
+    let src_p = crate::util::path_safety::to_extended_length(Path::new(src));
+    let dst_p = crate::util::path_safety::to_extended_length(dst);
+    let src_w: Vec<u16> = src_p
+        .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    let dst_w: Vec<u16> = dst
+    let dst_w: Vec<u16> = dst_p
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
@@ -285,6 +312,40 @@ fn has_reparse_point_in_chain(parent: &Path, root: &Path) -> bool {
 #[cfg(not(windows))]
 fn has_reparse_point_in_chain(_parent: &Path, _root: &Path) -> bool { false }
 
+/// Pick a destination that collides with neither an existing file on disk nor
+/// a destination already claimed by an earlier move in this batch. Appends
+/// " (2)", " (3)", … before the extension. This is what prevents two distinct
+/// source files that share a basename and route to the same bucket (e.g. two
+/// `IMG_0001.jpg` into Photos/2024/06, or every `audio.mp3` into a flat Audio/)
+/// from clobbering one another — the old MOVEFILE_REPLACE_EXISTING destroyed
+/// the first file irrecoverably.
+fn unique_destination(dest: &Path, assigned: &HashSet<PathBuf>) -> PathBuf {
+    if !dest.exists() && !assigned.contains(dest) {
+        return dest.to_path_buf();
+    }
+    let parent = dest.parent().map(Path::to_path_buf).unwrap_or_default();
+    let stem = dest
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = dest.extension().map(|s| s.to_string_lossy().into_owned());
+    let mut n: u32 = 2;
+    loop {
+        let name = match &ext {
+            Some(e) => format!("{stem} ({n}).{e}"),
+            None => format!("{stem} ({n})"),
+        };
+        let candidate = parent.join(name);
+        // Cap defensively; if we somehow can't find a free name, return the
+        // last candidate — the non-overwriting move then fails for that file
+        // (counted as `failed`) rather than destroying anything.
+        if (!candidate.exists() && !assigned.contains(&candidate)) || n >= 9999 {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,6 +358,27 @@ mod tests {
         let inside = root.join("Photos").join("2024").join("a.jpg");
         let canonical_root = canonicalize_safely(&root).unwrap();
         assert!(ensure_inside_root(&inside, &canonical_root).is_ok());
+    }
+
+    #[test]
+    fn unique_destination_disambiguates_collisions() {
+        let tmp = std::env::temp_dir().join("fileid-uniq-dest-test");
+        let _ = std::fs::create_dir_all(&tmp);
+        let dest = tmp.join("audio.mp3");
+        // Nothing assigned, file absent → original name.
+        let assigned0: HashSet<PathBuf> = HashSet::new();
+        assert_eq!(unique_destination(&dest, &assigned0), dest);
+        // A second move targeting the same name in-batch → " (2)".
+        let mut assigned1: HashSet<PathBuf> = HashSet::new();
+        assigned1.insert(dest.clone());
+        let d2 = unique_destination(&dest, &assigned1);
+        assert_eq!(d2, tmp.join("audio (2).mp3"));
+        assert_ne!(d2, dest);
+        // A file already on disk also forces disambiguation.
+        std::fs::write(&dest, b"x").unwrap();
+        let d3 = unique_destination(&dest, &assigned0);
+        assert_eq!(d3, tmp.join("audio (2).mp3"));
+        let _ = std::fs::remove_file(&dest);
     }
 
     #[test]
