@@ -59,12 +59,38 @@ public final class ReadStore: @unchecked Sendable {
             let queue = try DatabaseQueue(path: dbURL.path)
             let deleted = try queue.write { db -> Int in
                 var total = 0
+                var affectedPersons = Set<Int64>()
                 for chunk in stride(from: 0, to: ids.count, by: 500) {
                     let slice = ids[chunk..<min(chunk + 500, ids.count)]
                     let placeholders = slice.map { _ in "?" }.joined(separator: ", ")
+                    // Capture persons whose faces are about to be cascade-
+                    // deleted so we can fix their counts/representative below.
+                    let pids = try Int64.fetchAll(db, sql: """
+                        SELECT DISTINCT person_id FROM face_prints
+                        WHERE person_id IS NOT NULL AND file_id IN (\(placeholders))
+                        """, arguments: StatementArguments(slice))
+                    affectedPersons.formUnion(pids)
                     let stmt = "DELETE FROM files WHERE id IN (\(placeholders))"
                     try db.execute(sql: stmt, arguments: StatementArguments(slice))
                     total += db.changesCount
+                }
+                // Reconcile persons: ON DELETE CASCADE removed their face rows
+                // but leaves persons.file_count stale and representative_face_id
+                // dangling at a now-deleted face.
+                for pid in affectedPersons {
+                    try db.execute(sql: """
+                        UPDATE persons SET file_count =
+                            (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?)
+                        WHERE id = ?
+                        """, arguments: [pid, pid])
+                    try db.execute(sql: """
+                        UPDATE persons SET representative_face_id =
+                            (SELECT id FROM face_prints WHERE person_id = ? ORDER BY id LIMIT 1)
+                        WHERE id = ?
+                          AND (representative_face_id IS NULL
+                               OR representative_face_id NOT IN
+                                  (SELECT id FROM face_prints WHERE person_id = ?))
+                        """, arguments: [pid, pid, pid])
                 }
                 return total
             }
@@ -83,20 +109,32 @@ public final class ReadStore: @unchecked Sendable {
                 self.totalFiles  = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files") ?? 0
                 self.totalImages = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'image' AND failed = 0") ?? 0
 
-                // Duplicate groups by phash (groups of size > 1).
-                let dupRows = try Row.fetchAll(db, sql: """
-                    SELECT phash, COUNT(*) AS n, SUM(size_bytes) AS bytes, MAX(size_bytes) AS keeper_bytes
-                    FROM files
-                    WHERE phash IS NOT NULL AND phash != 0
-                    GROUP BY phash
-                    HAVING n > 1
+                // Duplicate groups by phash (groups of size > 1). Mirror the
+                // Cleanup list exactly: filter failed = 0, and compute
+                // reclaimable bytes against the ACTUAL keeper (the same
+                // aesthetic↓, size↓, createdAt↑, path-length↑ rank the list
+                // uses), not MAX(size). The old MAX(size) keeper diverged from
+                // the displayed keeper whenever aesthetic decided it.
+                let dupRow = try Row.fetchOne(db, sql: """
+                    WITH ranked AS (
+                        SELECT phash, size_bytes,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY phash
+                                   ORDER BY COALESCE(aesthetic, 0) DESC,
+                                            size_bytes DESC,
+                                            COALESCE(created_at, 1e18) ASC,
+                                            LENGTH(path_text) ASC
+                               ) AS rk,
+                               COUNT(*) OVER (PARTITION BY phash) AS n
+                        FROM files
+                        WHERE phash IS NOT NULL AND phash != 0 AND failed = 0
+                    )
+                    SELECT
+                        (SELECT COUNT(DISTINCT phash) FROM ranked WHERE n > 1) AS groups,
+                        COALESCE((SELECT SUM(size_bytes) FROM ranked WHERE n > 1 AND rk > 1), 0) AS reclaimable
                     """)
-                self.totalDuplicateGroups = dupRows.count
-                let reclaimableBytes: Int64 = dupRows.reduce(0) { acc, r in
-                    let total: Int64 = r["bytes"] ?? 0
-                    let keeper: Int64 = r["keeper_bytes"] ?? 0
-                    return acc + (total - keeper)
-                }
+                self.totalDuplicateGroups = dupRow?["groups"] ?? 0
+                let reclaimableBytes: Int64 = dupRow?["reclaimable"] ?? 0
                 self.totalReclaimableMB = Double(reclaimableBytes) / 1_048_576
             }
         } catch {
@@ -126,6 +164,17 @@ public final class ReadStore: @unchecked Sendable {
                         .replacingOccurrences(of: "%", with: "\\%")
                         .replacingOccurrences(of: "_", with: "\\_")
                     let like = "%\(escapedSearch)%"
+                    // FTS5 MATCH parses its argument as a QUERY EXPRESSION, so
+                    // binding the raw search string makes any input containing
+                    // FTS operators/metacharacters (" * : ( ) - AND OR NEAR …)
+                    // throw a syntax error — which the catch turns into ZERO
+                    // results for the whole search. Quote each whitespace token
+                    // as a literal phrase (doubling embedded quotes) and AND
+                    // them, so metacharacters are matched literally.
+                    let ftsQuery = trimmedSearch
+                        .split(whereSeparator: { $0.isWhitespace })
+                        .map { "\"" + $0.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }
+                        .joined(separator: " ")
                     // Keyword search across filename, OCR text,
                     // vision tags, smart names, and VLM captions.
                     // CLIP semantic search runs separately when
@@ -146,7 +195,7 @@ public final class ReadStore: @unchecked Sendable {
                               )
                             )
                         """
-                    args += [trimmedSearch, like, like, like, like, like, like, like]
+                    args += [ftsQuery, like, like, like, like, like, like, like]
                 }
                 if let k = kindFilter {
                     sql += " AND kind = ?"
@@ -940,15 +989,24 @@ public final class ReadStore: @unchecked Sendable {
             }
             do {
                 try fm.moveItem(at: newURL, to: oldURL)
-                undone += 1
-                // Restore path_text in the DB.
-                if let q = try? DatabaseQueue(path: dbURL.path) {
-                    try? q.write { db in
+                // Only count as undone once the DB agrees. The DB restore used
+                // to be a `try?`-swallow, leaving the row pointing at a
+                // now-nonexistent path on failure. If it fails, roll the file
+                // back so disk and DB stay consistent and report it as failed.
+                do {
+                    var config = Configuration()
+                    config.busyMode = .timeout(5)
+                    let q = try DatabaseQueue(path: dbURL.path, configuration: config)
+                    try q.write { db in
                         try db.execute(
                             sql: "UPDATE files SET path_text = ? WHERE id = ?",
                             arguments: [oldURL.path, r.fileID]
                         )
                     }
+                    undone += 1
+                } catch {
+                    try? fm.moveItem(at: oldURL, to: newURL)
+                    failed += 1
                 }
             } catch {
                 failed += 1
@@ -982,7 +1040,12 @@ public final class ReadStore: @unchecked Sendable {
             return nil
         }
         do {
-            let queue = try DatabaseQueue(path: dbURL.path)
+            // Busy timeout so momentary WAL contention with the engine writer
+            // retries instead of failing immediately (which used to strand the
+            // file: renamed on disk but the DB row still pointing at oldPath).
+            var config = Configuration()
+            config.busyMode = .timeout(5)
+            let queue = try DatabaseQueue(path: dbURL.path, configuration: config)
             try queue.write { db in
                 try db.execute(
                     sql: "UPDATE files SET path_text = ?, vlm_proposed_name = NULL WHERE id = ?",
@@ -992,7 +1055,10 @@ public final class ReadStore: @unchecked Sendable {
             self.notifyChanged()
             return target
         } catch {
+            // DB update failed after the on-disk move — roll the file back so
+            // disk and DB stay consistent and the rename remains undoable.
             self.lastError = "DB update after rename failed: \(error)"
+            try? FileManager.default.moveItem(at: target, to: oldURL)
             return nil
         }
     }
