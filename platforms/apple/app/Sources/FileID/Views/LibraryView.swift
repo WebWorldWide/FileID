@@ -38,6 +38,7 @@ struct LibraryView: View {
     @State private var bulkRenameSheetOpen: Bool = false
     @State private var pendingRenameCount: Int = 0
     @State private var lastBatchAvailable: Bool = false
+    @State private var lastTagBatchAvailable: Bool = false
     @State private var undoStatus: String?
 
     // Multi-select tag mode (P4).
@@ -137,9 +138,10 @@ struct LibraryView: View {
         .onChange(of: CLIPModelInstaller.shared.textEncoderReady) { _, ready in
             if ready { reload() }
         }
-        // Surface the undo-rename outcome (incl. partial/total failures) — it
-        // was written to `undoStatus` but never shown, so failures were silent.
-        .alert("Undo Renames", isPresented: Binding(
+        // Surface the undo outcome (renames or tags, incl. partial/total
+        // failures) — it was written to `undoStatus` but never shown, so
+        // failures were silent.
+        .alert("Undo", isPresented: Binding(
             get: { undoStatus != nil },
             set: { if !$0 { undoStatus = nil } }
         )) {
@@ -481,6 +483,18 @@ struct LibraryView: View {
                 .help("Reverse the most recent rename batch")
             }
 
+            if lastTagBatchAvailable {
+                Button(action: undoLastTagBatch) {
+                    Label("Undo last tags", systemImage: "arrow.uturn.backward")
+                        .font(.caption.bold())
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(Capsule().stroke(Theme.gold, lineWidth: 1))
+                        .foregroundStyle(Theme.gold)
+                }
+                .buttonStyle(.plain)
+                .help("Remove only the tags FileID added in the most recent bulk tag batch")
+            }
+
             }
         }
         .padding(20)
@@ -502,6 +516,7 @@ struct LibraryView: View {
     private func refreshBulkState() {
         pendingRenameCount = store.filesWithProposedNames(limit: 5000).count
         lastBatchAvailable = (BulkRenameSheet.loadLastBatch()?.isEmpty == false)
+        lastTagBatchAvailable = (BulkTagSheet.loadLastBatch()?.isEmpty == false)
     }
 
     private func undoLastBatch() {
@@ -517,6 +532,25 @@ struct LibraryView: View {
                     + (result.skipped > 0 ? " · skipped \(result.skipped)" : "")
                     + (result.failed > 0 ? " · failed \(result.failed)" : "")
                 refreshBulkState()
+                reload()
+            }
+        }
+    }
+
+    private func undoLastTagBatch() {
+        guard let batch = BulkTagSheet.loadLastBatch(), !batch.isEmpty else { return }
+        let storeRef = store
+        Task.detached(priority: .userInitiated) {
+            let result = TagWriter.undoBulkAdd(batch)
+            await MainActor.run {
+                if result.failed == 0 {
+                    BulkTagSheet.clearLastBatch()
+                }
+                undoStatus = "Removed tags from \(result.undone) file\(result.undone == 1 ? "" : "s")"
+                    + (result.failed > 0 ? " · failed \(result.failed)" : "")
+                    + (result.firstError.map { " — \($0)" } ?? "")
+                refreshBulkState()
+                storeRef.notifyChanged()
                 reload()
             }
         }
@@ -671,6 +705,7 @@ struct FileTile: View {
 
     @State private var thumb: NSImage?
     @State private var hovering = false
+    @State private var finderTags: [String] = []
 
     /// Shorten Vision's hierarchical labels for the chip ("animal_water_aquatic"
     /// → "Aquatic", "Year_2024" → "2024"). Last underscore segment wins,
@@ -693,6 +728,19 @@ struct FileTile: View {
         case "audio": return .pink
         default:      return .secondary
         }
+    }
+
+    // tagNamesKey carries names only (no colors, per the v1.0 decision),
+    // and String.hashValue is seeded per launch — FNV-1a keeps each tag's
+    // dot color stable across launches and tiles.
+    private static let dotPalette: [Color] = [Theme.gold, Theme.ai, Theme.info, Theme.delight]
+
+    private static func dotColor(for tag: String) -> Color {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in tag.lowercased().utf8 {
+            hash = (hash ^ UInt64(byte)) &* 0x0000_0100_0000_01b3
+        }
+        return dotPalette[Int(hash % UInt64(dotPalette.count))]
     }
 
     var body: some View {
@@ -787,10 +835,14 @@ struct FileTile: View {
                 }
             }
         }
-        .task(id: row.id) {
-            // Only the thumbnail is fetched per-tile; vision tags
-            // arrive as a prop and Finder shows native xattr tags.
+        // Keyed on store.version so tag edits / bulk undo refresh the
+        // Finder-tag dots in place (thumbnail re-fetches are NSCache hits).
+        .task(id: "\(row.id)·\(store.version)") {
             thumb = await ThumbnailService.shared.thumbnail(for: row.url, size: 264)
+            // Off-main like FinderTagsEditor — xattr reads can stall on
+            // slow / network volumes.
+            let url = row.url
+            finderTags = await Task.detached { TagWriter.readTags(at: url) }.value
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityDescription)
@@ -830,6 +882,9 @@ struct FileTile: View {
         }
         if row.hasFaces { parts.append("contains faces") }
         if row.hasText { parts.append("contains text") }
+        if !finderTags.isEmpty {
+            parts.append("\(finderTags.count) Finder tag\(finderTags.count == 1 ? "" : "s")")
+        }
         return parts.joined(separator: ", ")
     }
 
@@ -873,12 +928,23 @@ struct FileTile: View {
             // OCR-text / Finder-tag indicators top-right. (The "Faces"
             // badge was removed for Windows/macOS lockstep — faces surface
             // in the People tab; the badge read as noise on a Library tile.)
-            VStack(spacing: 4) {
+            VStack(alignment: .trailing, spacing: 4) {
                 if row.hasText {
                     Image(systemName: "text.viewfinder")
                         .font(.system(size: 13))
                         .foregroundStyle(.white, .black.opacity(0.6))
                         .help("OCR text available")
+                }
+                if !finderTags.isEmpty {
+                    HStack(spacing: -3) {
+                        ForEach(finderTags.prefix(3), id: \.self) { tag in
+                            Circle()
+                                .fill(Self.dotColor(for: tag))
+                                .frame(width: 8, height: 8)
+                                .overlay(Circle().stroke(.black.opacity(0.5), lineWidth: 1))
+                        }
+                    }
+                    .help("Finder tags: \(finderTags.joined(separator: ", "))")
                 }
             }
             .padding(6)

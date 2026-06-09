@@ -164,17 +164,7 @@ public final class ReadStore: @unchecked Sendable {
                         .replacingOccurrences(of: "%", with: "\\%")
                         .replacingOccurrences(of: "_", with: "\\_")
                     let like = "%\(escapedSearch)%"
-                    // FTS5 MATCH parses its argument as a QUERY EXPRESSION, so
-                    // binding the raw search string makes any input containing
-                    // FTS operators/metacharacters (" * : ( ) - AND OR NEAR …)
-                    // throw a syntax error — which the catch turns into ZERO
-                    // results for the whole search. Quote each whitespace token
-                    // as a literal phrase (doubling embedded quotes) and AND
-                    // them, so metacharacters are matched literally.
-                    let ftsQuery = trimmedSearch
-                        .split(whereSeparator: { $0.isWhitespace })
-                        .map { "\"" + $0.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }
-                        .joined(separator: " ")
+                    let ftsQuery = FTSQuery.quoted(trimmedSearch)
                     // Keyword search across filename, OCR text,
                     // vision tags, smart names, and VLM captions.
                     // CLIP semantic search runs separately when
@@ -949,12 +939,26 @@ public final class ReadStore: @unchecked Sendable {
     }
 
     public func applyProposedNamesBulk(_ files: [FileRow]) -> BulkRenameResult {
+        guard !files.isEmpty else {
+            return BulkRenameResult(renamed: [], failed: 0, firstError: nil)
+        }
+        // One connection for the whole batch — opening a fresh
+        // DatabaseQueue per file made a 100-file rename open 100
+        // connections.
+        let queue: DatabaseQueue
+        do {
+            queue = try renameWriteQueue()
+        } catch {
+            self.lastError = "DB open for rename failed: \(error)"
+            return BulkRenameResult(renamed: [], failed: files.count,
+                                    firstError: self.lastError)
+        }
         var renamed: [RenameOutcome] = []
         var failed = 0
         var firstError: String?
         for f in files {
             let oldPath = f.pathText
-            if let newURL = applyProposedName(file: f) {
+            if let newURL = applyProposedName(file: f, on: queue) {
                 if newURL.path != oldPath {
                     renamed.append(RenameOutcome(fileID: f.id,
                                                   oldPath: oldPath,
@@ -1019,6 +1023,24 @@ public final class ReadStore: @unchecked Sendable {
     /// Rename the file on disk to its proposed VLM name and update the
     /// DB row. Returns the new path or nil on failure.
     public func applyProposedName(file: FileRow) -> URL? {
+        do {
+            return applyProposedName(file: file, on: try renameWriteQueue())
+        } catch {
+            self.lastError = "DB open for rename failed: \(error)"
+            return nil
+        }
+    }
+
+    // Busy timeout so momentary WAL contention with the engine writer
+    // retries instead of failing immediately (which used to strand the
+    // file: renamed on disk but the DB row still pointing at oldPath).
+    private func renameWriteQueue() throws -> DatabaseQueue {
+        var config = Configuration()
+        config.busyMode = .timeout(5)
+        return try DatabaseQueue(path: dbURL.path, configuration: config)
+    }
+
+    private func applyProposedName(file: FileRow, on queue: DatabaseQueue) -> URL? {
         guard let proposed = file.vlmProposedName, !proposed.isEmpty else { return nil }
         let oldURL = file.url
         let dir = oldURL.deletingLastPathComponent()
@@ -1040,12 +1062,6 @@ public final class ReadStore: @unchecked Sendable {
             return nil
         }
         do {
-            // Busy timeout so momentary WAL contention with the engine writer
-            // retries instead of failing immediately (which used to strand the
-            // file: renamed on disk but the DB row still pointing at oldPath).
-            var config = Configuration()
-            config.busyMode = .timeout(5)
-            let queue = try DatabaseQueue(path: dbURL.path, configuration: config)
             try queue.write { db in
                 try db.execute(
                     sql: "UPDATE files SET path_text = ?, vlm_proposed_name = NULL WHERE id = ?",

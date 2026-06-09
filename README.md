@@ -100,6 +100,10 @@ Detailed instructions: [Build from source](#build-from-source).
 | **Restructure** | Folder reorganization with a Sankey flow diagram. Apply as shortcuts (reversible), then convert to real moves when you're happy. |
 | **Settings** | Model downloads, GPU acceleration picker, engine info, logs, privacy. |
 
+### Finder tags (macOS)
+
+FileID writes **real Finder tags** — the system-wide `tagNamesKey` xattrs, not a private database — so they show up everywhere macOS shows tags: the Finder sidebar, Smart Folders, and Spotlight (`tag:Vacation` queries). Tagging is reversible: "Undo last tags" removes only the tags FileID added, never tags you applied yourself, and the tags survive even if FileID is uninstalled.
+
 ### Platform status
 
 macOS is the canonical reference and ships every tab end-to-end. The Windows port is feature-complete on the six tabs (Library / People / Cleanup / Deep Analyze / Restructure / Settings) and the first-run Welcome sheet — engine + IPC schema + scan pipeline + UI all wired. Release build is warning-free across both Rust and .NET; on-hardware GPU verification is ongoing. Database migrations v1–v12 are byte-faithful with macOS GRDB, so a library scanned on one platform opens on the other. Every default model is permissively licensed (Apache-2.0 / MIT) — the project is commercial-clean. Linux is deferred to Phase 5 — the Rust engine builds standalone today, but the UI port (Avalonia or GTK4) hasn't started. See `shared/docs/SHIP.md` for the per-phase breakdown.
