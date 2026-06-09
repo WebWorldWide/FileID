@@ -123,10 +123,10 @@ struct DBWriterUpsertTests {
                 "SELECT COUNT(*) FROM face_prints WHERE file_id = ?", arguments: [id1]) ?? -1
             #expect(faceCount == 0, "stale face rows cleared when the file changed")
 
-            let autoTags = try [String].fetchAll(db, sql:
+            let autoTags = try String.fetchAll(db, sql:
                 "SELECT tag FROM tags WHERE file_id = ? AND source = 'auto'", arguments: [id1])
             #expect(autoTags == ["sunset"], "auto tags replaced atomically")
-            let userTags = try [String].fetchAll(db, sql:
+            let userTags = try String.fetchAll(db, sql:
                 "SELECT tag FROM tags WHERE file_id = ? AND source = 'user'", arguments: [id1])
             #expect(userTags == ["keepme"], "user tags untouched by re-scan")
 
