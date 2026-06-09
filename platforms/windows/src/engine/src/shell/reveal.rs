@@ -13,7 +13,22 @@ use std::path::Path;
 #[cfg(windows)]
 use windows::core::PCWSTR;
 #[cfg(windows)]
-use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+
+/// Balances a successful CoInitializeEx with CoUninitialize on drop (covers
+/// the early-return paths). Only uninitializes when we actually performed the
+/// init (S_OK / S_FALSE) — never on RPC_E_CHANGED_MODE, where another caller
+/// owns the apartment.
+#[cfg(windows)]
+struct ComGuard(bool);
+#[cfg(windows)]
+impl Drop for ComGuard {
+    fn drop(&mut self) {
+        if self.0 {
+            unsafe { CoUninitialize() };
+        }
+    }
+}
 #[cfg(windows)]
 use windows::Win32::UI::Shell::{
     ILCreateFromPathW, ILFree, SHOpenFolderAndSelectItems,
@@ -33,7 +48,9 @@ pub fn reveal(path: &Path) -> Result<()> {
     unsafe {
         // STA apartment is required; reveal is called from app dispatch
         // threads so this is usually a no-op. RPC_E_CHANGED_MODE is fine.
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        // Balance a successful init with CoUninitialize on every exit path.
+        let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let _com = ComGuard(hr.is_ok());
 
         let pidl = ILCreateFromPathW(PCWSTR(wide.as_ptr()));
         if pidl.is_null() {

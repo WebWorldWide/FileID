@@ -4,11 +4,37 @@
 // Multi-language (locales picked per call); falls back to English if the
 // requested locale isn't installed. Privacy: runs entirely on-device.
 
+use std::cell::Cell;
+
 use anyhow::{Context, Result};
 
 use windows::Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap};
 use windows::Media::Ocr::OcrEngine;
 use windows::Storage::Streams::DataWriter;
+use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+
+thread_local! {
+    static COM_INIT: Cell<bool> = const { Cell::new(false) };
+}
+
+/// WinRT class activation (DataWriter / SoftwareBitmap / OcrEngine) requires
+/// the calling thread's COM apartment to be initialized. `recognize()` runs
+/// via `spawn_blocking`, and tokio's blocking-pool threads are never
+/// COM-initialized — so the first WinRT call returned CO_E_NOTINITIALIZED,
+/// which the caller swallowed to `Ok(None)`: OCR silently never ran on
+/// Windows. Mirror the per-thread guard the other shell::* modules use. MTA
+/// (no message pump here); RPC_E_CHANGED_MODE on a thread already init STA is
+/// tolerated. No CoUninitialize — threads live for the scan, exit cleans up.
+fn ensure_com_initialized() {
+    COM_INIT.with(|flag| {
+        if !flag.get() {
+            unsafe {
+                let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            }
+            flag.set(true);
+        }
+    });
+}
 
 // Public API surface — current callers only consume `text`, but `lines`
 // and `locale` are populated so the UI can later render per-line OCR
@@ -43,6 +69,9 @@ pub fn recognize(rgb: &[u8], width: u32, height: u32) -> Result<OcrResult> {
     if rgb.len() < pixels * 3 {
         anyhow::bail!("OCR.recognize: invalid RGB buffer");
     }
+
+    // Must run before the first WinRT activation below.
+    ensure_com_initialized();
 
     let mut bgra = Vec::with_capacity(pixels * 4);
     for chunk in rgb.chunks_exact(3) {
