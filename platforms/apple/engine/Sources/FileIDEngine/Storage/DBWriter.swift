@@ -109,11 +109,18 @@ public actor DBWriter {
     private let maxBatchFiles = 100
     private let maxBatchMs    = 200
 
-    public init(db: Database, sink: IPCSink, coordinator: ScanCoordinator, sessionID: String) {
+    /// startScan's `rescan` flag: true forces every file through the full
+    /// child-row rebuild even when size+mtime say it's unchanged. Mirrors
+    /// the Windows engine (rescan=true empties the incremental skip set).
+    private let forceReprocess: Bool
+
+    public init(db: Database, sink: IPCSink, coordinator: ScanCoordinator, sessionID: String,
+                forceReprocess: Bool = false) {
         self.db = db
         self.sink = sink
         self.coordinator = coordinator
         self.sessionID = sessionID
+        self.forceReprocess = forceReprocess
     }
 
     /// Drain `taggedChannel` until the channel closes (= tagging stage done).
@@ -152,6 +159,7 @@ public actor DBWriter {
         let insertedFailed = batchFiles.count - insertedOK
         let resumeCursor   = self.processedTotal + self.failedTotal + batchFiles.count
         let sessionID      = self.sessionID
+        let forceReprocess = self.forceReprocess
 
         do {
             // Retry transient failures (SQLITE_BUSY/LOCKED/IOERR) with backoff
@@ -164,7 +172,7 @@ public actor DBWriter {
                 do {
                     try await db.pool.write { db in
                         for file in batchFiles {
-                            try Self.insertOne(file: file, db: db)
+                            try Self.insertOne(file: file, forceReprocess: forceReprocess, db: db)
                         }
                         // Update scan session high-water mark in the SAME
                         // transaction so a crash mid-batch can't leave the
@@ -311,7 +319,7 @@ public actor DBWriter {
     /// failure rolls back this file but not the rest of the batch.
     /// Static + nonisolated so the GRDB write closure can call it without
     /// crossing the actor's executor (Swift 6 strict concurrency).
-    private static func insertOne(file: TaggedFile, db: GRDB.Database) throws {
+    private static func insertOne(file: TaggedFile, forceReprocess: Bool, db: GRDB.Database) throws {
         let pathHash = Int(bitPattern: UInt(truncatingIfNeeded: file.url.path.hashValue))
 
         // Look up any existing row for this path. We need its id (to preserve
@@ -324,11 +332,22 @@ public actor DBWriter {
             SELECT id, size_bytes, modified_at, failed FROM files WHERE path_text = ?
             """, arguments: [file.url.path])
 
+        // A failure on a file that scanned before (transient decode error, NAS
+        // hiccup) must not clobber the prior metadata or its child rows — incl.
+        // manual person_id assignments. Record only the failure.
+        if file.failed, let existing {
+            let fileID: Int64 = existing["id"]
+            try db.execute(sql: """
+                UPDATE files SET failed = 1, error_message = ?, scanned_at = ? WHERE id = ?
+                """, arguments: [file.errorMessage, Date().timeIntervalSince1970, fileID])
+            return
+        }
+
         let newModified = file.modifiedAt?.timeIntervalSince1970
-        // "Unchanged" only when the prior scan succeeded, this scan succeeded,
-        // and both size and mtime match. A previously- or newly-failed file is
-        // always reprocessed.
-        let unchanged: Bool = {
+        // "Unchanged" only when this isn't a forced rescan, the prior scan
+        // succeeded, this scan succeeded, and both size and mtime match. A
+        // previously-failed file is always reprocessed.
+        let unchanged: Bool = !forceReprocess && { () -> Bool in
             guard let existing else { return false }
             let oldFailed: Int64 = existing["failed"] ?? 0
             guard oldFailed == 0, !file.failed else { return false }
@@ -408,8 +427,20 @@ public actor DBWriter {
 
         // Unchanged file: leave every child row exactly as-is. Re-detecting
         // would either duplicate rows or destroy manual person assignments for
-        // a file that didn't change.
-        if unchanged { return }
+        // a file that didn't change. One exception: a CLIP model installed
+        // AFTER the original scan means this scan produced an embedding the
+        // DB doesn't have — backfill it without rebuilding the other children.
+        if unchanged {
+            if let blob = file.clipEmbeddingBlob {
+                let hasEmbedding = try Bool.fetchOne(db, sql: """
+                    SELECT EXISTS(SELECT 1 FROM clip_embeddings WHERE file_id = ?)
+                    """, arguments: [fileID]) ?? false
+                if !hasEmbedding {
+                    try insertClipEmbedding(fileID: fileID, blob: blob, db: db)
+                }
+            }
+            return
+        }
 
         // 2. tags — auto (classifier output). Delete any prior `source='auto'`
         // rows first so a rescan replaces stale tags atomically; user tags
@@ -478,11 +509,15 @@ public actor DBWriter {
         // 5. CLIP embedding (M3) — only present for images where the model
         // was loaded and inference succeeded.
         if let blob = file.clipEmbeddingBlob {
-            try db.execute(sql: """
-                INSERT OR REPLACE INTO clip_embeddings (file_id, embedding, model)
-                VALUES (?, ?, ?)
-                """, arguments: [fileID, blob, "mobileclip_s2"])
+            try insertClipEmbedding(fileID: fileID, blob: blob, db: db)
         }
+    }
+
+    private static func insertClipEmbedding(fileID: Int64, blob: Data, db: GRDB.Database) throws {
+        try db.execute(sql: """
+            INSERT OR REPLACE INTO clip_embeddings (file_id, embedding, model)
+            VALUES (?, ?, ?)
+            """, arguments: [fileID, blob, "mobileclip_s2"])
     }
 
     // MARK: - Face quality filter

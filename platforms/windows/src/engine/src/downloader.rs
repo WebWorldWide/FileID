@@ -161,6 +161,61 @@ fn check_size_plausible(actual: u64, expected: Option<u64>, url: &str) -> Result
     Ok(())
 }
 
+const RETRY_BACKOFFS: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(4),
+    Duration::from_secs(16),
+];
+const MAX_ATTEMPTS_WITHOUT_PROGRESS: u32 = 4;
+
+/// Progress-aware retry budget shared by `download_simple` and
+/// `download_range_with_retry`. A fixed 4-attempt budget combined with the
+/// client's 60 s `read_timeout` to hard-fail a slow-but-progressing download
+/// (large GGUF on spotty wifi) after 4 stalls, even though every attempt
+/// resumed further along. Only attempts that left the part file un-grown burn
+/// budget — growth observed at the top of the next attempt resets the
+/// counter — so a long flaky download survives any number of stalls while it
+/// keeps moving. Zero-progress behavior is unchanged from H13 (same ladder,
+/// bail after `MAX_ATTEMPTS_WITHOUT_PROGRESS`): a dead connection still can't
+/// spin forever. The ladder is indexed by total failures, repeating its last
+/// step, so a chronically flaky link settles into 16 s pauses instead of
+/// hammering 1 s retries after every reset. Growth is judged against a
+/// high-water mark, not the previous stat, so a discard-and-refetch cycle
+/// (416 / non-206 resume / oversized stale part) can't refund budget by
+/// re-downloading the same bytes. (audit C3)
+struct RetryBudget {
+    total_failures: u32,
+    attempts_without_progress: u32,
+    high_water_len: u64,
+}
+
+impl RetryBudget {
+    fn new() -> Self {
+        Self {
+            total_failures: 0,
+            attempts_without_progress: 0,
+            high_water_len: 0,
+        }
+    }
+
+    fn observe_len(&mut self, len: u64) {
+        if len > self.high_water_len {
+            self.high_water_len = len;
+            self.attempts_without_progress = 0;
+        }
+    }
+
+    fn next_backoff(&mut self) -> Option<Duration> {
+        self.total_failures += 1;
+        self.attempts_without_progress += 1;
+        if self.attempts_without_progress >= MAX_ATTEMPTS_WITHOUT_PROGRESS {
+            return None;
+        }
+        let idx = ((self.total_failures - 1) as usize).min(RETRY_BACKOFFS.len() - 1);
+        Some(RETRY_BACKOFFS[idx])
+    }
+}
+
 /// Download a single file. The simple non-parallel path — used when
 /// the server doesn't support `Accept-Ranges: bytes` or the file is
 /// below `MIN_BYTES_FOR_PARALLEL`. Also used by the parallel path's
@@ -170,11 +225,11 @@ fn check_size_plausible(actual: u64, expected: Option<u64>, url: &str) -> Result
 /// call — without this, every small file (config.json, tokenizer.json,
 /// etc.) paid an extra TLS handshake.
 ///
-/// Retry policy: up to 3 retries with exponential backoff (1s, 4s, 16s)
-/// on stream errors, transport errors, and 429/5xx responses. Each retry
-/// stats the in-progress `.part` file and resumes via `Range:` so a
-/// 2 GB GGUF doesn't re-download from byte 0 after a single TLS hiccup.
-/// Mirrors the parallel path's per-range retry policy.
+/// Retry policy: progress-aware (`RetryBudget`) on stream errors, transport
+/// errors, and 429/5xx responses. Each retry stats the in-progress `.part`
+/// file and resumes via `Range:` so a 2 GB GGUF doesn't re-download from
+/// byte 0 after a single TLS hiccup; growth between attempts refunds the
+/// budget. Mirrors the parallel path's per-range retry policy.
 pub async fn download_simple<F>(
     client: Arc<reqwest::Client>,
     request: DownloadRequest,
@@ -196,24 +251,24 @@ where
             .unwrap_or("download")
     ));
 
-    let backoffs = [
-        Duration::from_secs(1),
-        Duration::from_secs(4),
-        Duration::from_secs(16),
-    ];
-
     let started = Instant::now();
     let bytes_done = Arc::new(AtomicU64::new(0));
     let mut total: Option<u64> = None;
     let mut last_err: Option<anyhow::Error> = None;
+    let mut budget = RetryBudget::new();
 
-    'attempts: for (attempt, backoff) in std::iter::once(Duration::ZERO)
-        .chain(backoffs.iter().copied())
-        .enumerate()
-    {
-        if attempt > 0 {
+    'attempts: loop {
+        // Resume: stat any prior .part bytes and ask for the remainder.
+        // Statted before the budget decision so a failed-but-progressing
+        // attempt refunds the no-progress counter before it can bail.
+        let existing_len = tokio::fs::metadata(&tmp).await
+            .map(|m| m.len()).unwrap_or(0);
+        budget.observe_len(existing_len);
+
+        if last_err.is_some() {
+            let Some(backoff) = budget.next_backoff() else { break 'attempts };
             tracing::warn!(
-                attempt,
+                attempt = budget.total_failures,
                 url = %request.url,
                 err = ?last_err,
                 "retrying simple download after stream error"
@@ -230,9 +285,6 @@ where
         let _permit = http_semaphore().clone().acquire_owned().await
             .context("acquiring http permit")?;
 
-        // Resume: stat any prior .part bytes and ask for the remainder.
-        let existing_len = tokio::fs::metadata(&tmp).await
-            .map(|m| m.len()).unwrap_or(0);
         let mut req_builder = client.get(&request.url);
         if existing_len > 0 {
             req_builder = req_builder.header("Range", format!("bytes={existing_len}-"));
@@ -435,8 +487,9 @@ where
 /// multiplexing + keep-alive pooling let 12 parallel GETs hit a single
 /// HuggingFace edge server without re-handshaking TLS each time.
 ///
-/// Retry policy: each range-GET retries up to 3 times on 429/503 with
-/// exponential backoff (1s, 4s, 16s) and Retry-After header honored.
+/// Retry policy: each range-GET retries on 429/503, transport, and stream
+/// errors with the progress-aware `RetryBudget` (backoff 1s/4s/16s,
+/// Retry-After honored); only zero-progress attempts burn budget.
 ///
 /// Cancellation: caller passes an `Arc<AtomicBool>`; tasks poll it after
 /// every chunk so cancel triggers within a chunk write boundary.
@@ -716,23 +769,10 @@ async fn download_range_with_retry(
     cancel: &AtomicBool,
     tx: tokio::sync::mpsc::Sender<usize>,
 ) -> Result<()> {
-    let backoffs = [
-        Duration::from_secs(1),
-        Duration::from_secs(4),
-        Duration::from_secs(16),
-    ];
+    let mut budget = RetryBudget::new();
+    let mut retrying = false;
 
-    'retry: for (attempt, backoff) in std::iter::once(Duration::ZERO)
-        .chain(backoffs.iter().copied())
-        .enumerate()
-    {
-        if attempt > 0 {
-            tokio::time::sleep(backoff).await;
-        }
-        if cancel.load(Ordering::Relaxed) {
-            anyhow::bail!("range cancelled (start={start})");
-        }
-
+    'retry: loop {
         // Resumable: stat the part file. If it has bytes, append from there.
         let range_len = end - start + 1;
         let mut existing_len = tokio::fs::metadata(part_path).await
@@ -749,8 +789,22 @@ async fn download_range_with_retry(
             let _ = tokio::fs::remove_file(part_path).await;
             existing_len = 0;
         }
+        // Observed after the stale-part discard so leftover bytes from a
+        // different remote file can't masquerade as progress.
+        budget.observe_len(existing_len);
         let cur_start = start + existing_len;
         if cur_start > end { return Ok(()); } // exactly complete
+
+        if retrying {
+            let Some(backoff) = budget.next_backoff() else {
+                anyhow::bail!("range exhausted retries (start={start})");
+            };
+            tokio::time::sleep(backoff).await;
+        }
+        retrying = true;
+        if cancel.load(Ordering::Relaxed) {
+            anyhow::bail!("range cancelled (start={start})");
+        }
 
         // Global HTTP concurrency cap — prevents three concurrent prewarms
         // × 12 range-GETs each from tripping HuggingFace's per-IP rate limit
@@ -817,8 +871,9 @@ async fn download_range_with_retry(
                     // under throttling all 8 permit-holders could recurse and
                     // block acquiring a 9th — a permanent deadlock. `continue`
                     // drops `_permit` at end of iteration; the loop re-stats the
-                    // .part file and resumes via Range, on the finite backoff
-                    // schedule (eventually bails instead of spinning forever).
+                    // .part file and resumes via Range, on the progress-aware
+                    // backoff schedule (zero-progress attempts still bail after
+                    // a finite budget instead of spinning forever).
                     tracing::warn!(?e, "stream error; retrying range");
                     continue 'retry;
                 }
@@ -830,13 +885,66 @@ async fn download_range_with_retry(
         tokio::io::AsyncWriteExt::flush(&mut file).await.ok();
         return Ok(());
     }
-
-    anyhow::bail!("range exhausted retries (start={start})");
 }
 
 #[cfg(test)]
 mod tests {
-    use super::check_size_plausible;
+    use super::{check_size_plausible, RetryBudget};
+    use std::time::Duration;
+
+    #[test]
+    fn retry_budget_zero_progress_matches_old_four_attempt_ladder() {
+        let mut b = RetryBudget::new();
+        b.observe_len(0);
+        assert_eq!(b.next_backoff(), Some(Duration::from_secs(1)));
+        b.observe_len(0);
+        assert_eq!(b.next_backoff(), Some(Duration::from_secs(4)));
+        b.observe_len(0);
+        assert_eq!(b.next_backoff(), Some(Duration::from_secs(16)));
+        b.observe_len(0);
+        assert_eq!(b.next_backoff(), None);
+    }
+
+    #[test]
+    fn retry_budget_growth_refunds_and_ladder_repeats_last_step() {
+        let mut b = RetryBudget::new();
+        let mut len = 0;
+        for expected in [1, 4, 16, 16, 16, 16] {
+            len += 1024;
+            b.observe_len(len);
+            assert_eq!(b.next_backoff(), Some(Duration::from_secs(expected)));
+        }
+    }
+
+    #[test]
+    fn retry_budget_re_exhausts_after_a_refund() {
+        let mut b = RetryBudget::new();
+        for _ in 0..3 {
+            b.observe_len(0);
+            assert!(b.next_backoff().is_some());
+        }
+        b.observe_len(1);
+        assert_eq!(b.next_backoff(), Some(Duration::from_secs(16)));
+        for _ in 0..2 {
+            b.observe_len(1);
+            assert!(b.next_backoff().is_some());
+        }
+        b.observe_len(1);
+        assert_eq!(b.next_backoff(), None);
+    }
+
+    #[test]
+    fn retry_budget_discard_and_refetch_below_high_water_is_not_progress() {
+        let mut b = RetryBudget::new();
+        b.observe_len(10_000);
+        assert!(b.next_backoff().is_some());
+        b.observe_len(0);
+        assert!(b.next_backoff().is_some());
+        b.observe_len(5_000);
+        assert!(b.next_backoff().is_some());
+        b.observe_len(9_999);
+        assert_eq!(b.next_backoff(), None);
+    }
 
     #[test]
     fn size_check_passes_when_no_estimate() {

@@ -919,21 +919,11 @@ fn run_decoder_thread(
                             && std::io::Read::read_to_end(&mut f, &mut bytes).is_ok()
                         {
                             // Baseline: a successful read always produces Some(_)
-                            // so the worker's parse_exif_blocking fallback is
-                            // unreachable for images. Non-EXIF formats (PNG, GIF,
-                            // screenshots) hit this branch and skip the wasted
-                            // re-open + re-fail.
-                            exif_data = Some((None, None, None));
-                            // Parse EXIF from memory
-                            if let Ok(exif) = exif::Reader::new().read_from_container(&mut std::io::Cursor::new(&bytes)) {
-                                let camera_model = exif
-                                    .get_field(exif::Tag::Model, exif::In::PRIMARY)
-                                    .map(|f| f.display_value().with_unit(&exif).to_string().trim_matches('"').to_string())
-                                    .filter(|s| !s.is_empty());
-                                let lat = read_gps_coord(&exif, exif::Tag::GPSLatitude, exif::Tag::GPSLatitudeRef);
-                                let lon = read_gps_coord(&exif, exif::Tag::GPSLongitude, exif::Tag::GPSLongitudeRef);
-                                exif_data = Some((camera_model, lat, lon));
-                            }
+                            // so non-EXIF formats (PNG, GIF, screenshots) record
+                            // an explicit no-EXIF result instead of looking
+                            // unparsed downstream.
+                            exif_data =
+                                Some(parse_exif_fields(&bytes).unwrap_or((None, None, None)));
                             // ≤16 MB → full BLAKE3.
                             content_hash = Some(*blake3::hash(&bytes).as_bytes());
                             file_bytes = Some(bytes);
@@ -945,12 +935,16 @@ fn run_decoder_thread(
                     // crafted/sparse file with a huge logical length). Do NOT
                     // read it into a Vec — with up to 12 decoder threads that
                     // OOMs, and Vec::with_capacity on a bogus size aborts the
-                    // process. Hash via the bounded head+tail+size composite and
-                    // leave file_bytes = None so decode_image_sync mmaps the
-                    // file (the OS pages it lazily under the MAX_DECODED_PIXELS
-                    // guard). EXIF falls back to the worker's bounded parse.
+                    // process. Hash via the bounded composite (head + interior
+                    // samples + tail + size) and leave file_bytes = None so
+                    // decode_image_sync mmaps the file (the OS pages it lazily
+                    // under the MAX_DECODED_PIXELS guard). EXIF parses from a
+                    // bounded head read — there is no later fallback, so
+                    // skipping it here would lose camera/GPS for every over-cap
+                    // image.
                     content_hash =
                         crate::util::content_hash::content_hash(&file.path, file.size_bytes).ok();
+                    exif_data = exif_from_head(&file.path);
                 }
                 // Doc / PDF / Audio share the image-style single-read pattern
                 // when the file fits in the full-hash window (16 MB). The
@@ -1906,6 +1900,32 @@ async fn run_ocr_blocking(rgb: Vec<u8>, w: u32, h: u32) -> anyhow::Result<Option
     .await?
 }
 
+fn parse_exif_fields(bytes: &[u8]) -> Option<(Option<String>, Option<f64>, Option<f64>)> {
+    let exif = exif::Reader::new()
+        .read_from_container(&mut std::io::Cursor::new(bytes))
+        .ok()?;
+    let camera_model = exif
+        .get_field(exif::Tag::Model, exif::In::PRIMARY)
+        .map(|f| f.display_value().with_unit(&exif).to_string().trim_matches('"').to_string())
+        .filter(|s| !s.is_empty());
+    let lat = read_gps_coord(&exif, exif::Tag::GPSLatitude, exif::Tag::GPSLatitudeRef);
+    let lon = read_gps_coord(&exif, exif::Tag::GPSLongitude, exif::Tag::GPSLongitudeRef);
+    Some((camera_model, lat, lon))
+}
+
+/// EXIF for an image too large to read fully into memory: the APP1 segment
+/// (JPEG) / TIFF IFD chain (RAW/TIFF) sits at the front of the file, so a
+/// bounded 4 MB head read recovers camera/GPS without the full-file read the
+/// in-memory branch does. Returns `Some((None, None, None))` on a readable
+/// file with no parseable EXIF — same contract as that branch.
+fn exif_from_head(path: &std::path::Path) -> Option<(Option<String>, Option<f64>, Option<f64>)> {
+    const EXIF_HEAD_BYTES: u64 = 4 * 1024 * 1024;
+    let f = open_image_file(path).ok()?;
+    let mut head = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(f, EXIF_HEAD_BYTES), &mut head).ok()?;
+    Some(parse_exif_fields(&head).unwrap_or((None, None, None)))
+}
+
 fn read_gps_coord(exif: &exif::Exif, value_tag: exif::Tag, ref_tag: exif::Tag) -> Option<f64> {
     let value_field = exif.get_field(value_tag, exif::In::PRIMARY)?;
     let ref_field = exif.get_field(ref_tag, exif::In::PRIMARY)?;
@@ -2121,6 +2141,34 @@ mod tests {
     fn dhash_solid_color_is_zero() {
         let rgb = vec![128u8; 64 * 64 * 3];
         assert_eq!(compute_dhash(&rgb, 64, 64), 0);
+    }
+
+    /// C5: over-cap images get EXIF from `exif_from_head` (a bounded head
+    /// read) — there is no later fallback. A minimal JPEG whose APP1 segment
+    /// carries a TIFF IFD with a Model tag must yield the camera model.
+    #[test]
+    fn exif_from_head_extracts_camera_model() {
+        let mut jpeg: Vec<u8> = vec![0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x28];
+        jpeg.extend_from_slice(b"Exif\0\0");
+        jpeg.extend_from_slice(&[
+            0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00, // II*\0, IFD0 @ 8
+            0x01, 0x00, // 1 entry
+            0x10, 0x01, 0x02, 0x00, 0x06, 0x00, 0x00, 0x00, // Model, ASCII, count 6
+            0x1A, 0x00, 0x00, 0x00, // value @ 26
+            0x00, 0x00, 0x00, 0x00, // next IFD: none
+        ]);
+        jpeg.extend_from_slice(b"Pixel\0");
+        jpeg.extend_from_slice(&[0xFF, 0xD9]);
+
+        let p = std::env::temp_dir().join(format!(
+            "fileid-exifhead-{}.jpg",
+            std::process::id()
+        ));
+        std::fs::write(&p, &jpeg).unwrap();
+        let (model, lat, lon) = exif_from_head(&p).expect("readable file must yield Some");
+        assert_eq!(model.as_deref(), Some("Pixel"));
+        assert_eq!((lat, lon), (None, None));
+        let _ = std::fs::remove_file(&p);
     }
 
     #[test]

@@ -363,6 +363,12 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
                 slot.Status = ModelInstallStatus.Downloading;
                 slot.Message = "Queued — starting download…";
                 slot.LastProgressAt = now;
+                // ResetForRetry nulled CurrentModelKind and PrewarmAsync only
+                // restamps it after WaitForReadyAsync, so during engine
+                // cold-start a pre-stamped Downloading row was kind-less and
+                // its Cancel button lost the cancel (C7). Stamp the slot's
+                // primary kind now; PrewarmAsync overwrites with the live kind.
+                slot.CurrentModelKind = PrimaryKindFor(slot);
             }
 
             var tasks = new List<Task>(slotsToInstall.Count);
@@ -423,12 +429,32 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         new[] { "cudnn_runtime_x64", "ort_cuda_x64" }, // Accelerator (GPU pack) slot
     };
 
+    /// <summary>First kind a slot's installAction prewarms. InstallAllAsync's
+    /// pre-stamp uses this so a Downloading row is never kind-less; for a
+    /// multi-kind slot CancelModelAsync expands it back to the full
+    /// SlotKindGroups group, so the first kind cancels the whole slot.</summary>
+    private string? PrimaryKindFor(ModelSlot slot)
+    {
+        if (ReferenceEquals(slot, Clip)) return "mobileclip_s2";
+        if (ReferenceEquals(slot, Arcface)) return "arcface_default";
+        if (ReferenceEquals(slot, RamPlus)) return "ram_plus";
+        if (ReferenceEquals(slot, DeepVlm)) return _deepVlmModelKind;
+        if (ReferenceEquals(slot, Accelerator)) return "cudnn_runtime_x64";
+        return null;
+    }
+
     /// Cancel a single slot's in-flight download(s) (the per-row Cancel button), so
     /// cancelling one row no longer aborts every other concurrent install. For a
     /// multi-kind slot (CLIP, Accelerator) this cancels every kind the slot owns.
+    /// A null kind (slot never got a kind stamped) is a logged no-op — it used to
+    /// fall through to CancelPrewarmAsync(null), the cancel-EVERYTHING path (C7).
     public Task CancelModelAsync(string? modelKind)
     {
-        if (modelKind is null) return EngineClient.Instance.CancelPrewarmAsync(null);
+        if (modelKind is null)
+        {
+            DebugLog.Warn("[INSTALL] CancelModelAsync(null) — slot has no CurrentModelKind; ignoring rather than cancelling every download.");
+            return Task.CompletedTask;
+        }
         var group = SlotKindGroups.FirstOrDefault(g => g.Contains(modelKind));
         if (group is null) return EngineClient.Instance.CancelPrewarmAsync(modelKind);
         return Task.WhenAll(group.Select(k => EngineClient.Instance.CancelPrewarmAsync(k)));

@@ -570,7 +570,7 @@ public sealed partial class RestructureView : UserControl
     private async void OnRunDeepAnalyzeClicked(object sender, RoutedEventArgs e)
         => await DebugLog.SafeRunAsync(nameof(OnRunDeepAnalyzeClicked), async () =>
         {
-            var model = AppSettings.Load().SelectedVlmModelKind;
+            var model = AppViewModel.Instance.Settings.SelectedVlmModelKind;
             DeepAnalyzeHintTitle.Text = "Deep Analyze running...";
             DeepAnalyzeHintBody.Text = "Analyzing your library - proposals will sharpen as it runs.";
             RunDeepAnalyzeButton.IsEnabled = false;

@@ -243,12 +243,12 @@ internal sealed class ThumbnailService : IDisposable
             bool firstRequest = _requestedVideo.Add(key);
             if (firstRequest)
             {
-                DebugLog.Debug($"[THUMB] VIDEO_ENGINE_REQUEST file={req.Path}");
+                DebugLog.Debug($"[THUMB] VIDEO_ENGINE_REQUEST file={PathRedactor.Redact(req.Path)}");
                 _ = EngineClient.Instance.GenerateVideoThumbnailAsync(req.Path, req.ModifiedAt);
             }
             else
             {
-                DebugLog.Debug($"[THUMB] VIDEO_ENGINE_DEDUP file={req.Path}");
+                DebugLog.Debug($"[THUMB] VIDEO_ENGINE_DEDUP file={PathRedactor.Redact(req.Path)}");
             }
         }
 
@@ -284,7 +284,7 @@ internal sealed class ThumbnailService : IDisposable
         }
         if (tcs.TrySetResult(null))
         {
-            DebugLog.Debug($"[THUMB] VIDEO_ENGINE_TIMEOUT key={key}");
+            DebugLog.Debug($"[THUMB] VIDEO_ENGINE_TIMEOUT key={PathRedactor.Redact(key)}");
         }
     }
 
@@ -332,7 +332,7 @@ internal sealed class ThumbnailService : IDisposable
             }
             catch (FormatException ex)
             {
-                DebugLog.Warn($"ThumbnailService video keyframe base64 decode ({evt.Path}): {ex.Message}");
+                DebugLog.Warn($"ThumbnailService video keyframe base64 decode ({PathRedactor.Redact(evt.Path)}): {ex.Message}");
                 CompletePendingVideoNull(key);
                 return;
             }
@@ -360,7 +360,7 @@ internal sealed class ThumbnailService : IDisposable
                 Size = DecodedBytesPerEntry,
                 SlidingExpiration = TimeSpan.FromMinutes(15),
             });
-            DebugLog.Debug($"[THUMB] BITMAP_SET file={evt.Path} src=engine-video");
+            DebugLog.Debug($"[THUMB] BITMAP_SET file={PathRedactor.Redact(evt.Path)} src=engine-video");
 
             TaskCompletionSource<BitmapImage?>? pending;
             lock (_videoLock)
@@ -537,7 +537,7 @@ internal sealed class ThumbnailService : IDisposable
         // risk a native fast-fail in an audio art handler.
         if (AudioExtensions.Contains(ext))
         {
-            DebugLog.Debug($"[THUMB] AUDIO_SHELL_SKIP file={path} ext={ext}");
+            DebugLog.Debug($"[THUMB] AUDIO_SHELL_SKIP file={PathRedactor.Redact(path)} ext={ext}");
             Interlocked.Increment(ref _renderedFailed);
             return null;
         }
@@ -550,7 +550,7 @@ internal sealed class ThumbnailService : IDisposable
         // the follow-up to restore live video thumbnails — NEXT.md.)
         if (VideoExtensions.Contains(ext))
         {
-            DebugLog.Debug($"[THUMB] VIDEO_SHELL_SKIP file={path} ext={ext}");
+            DebugLog.Debug($"[THUMB] VIDEO_SHELL_SKIP file={PathRedactor.Redact(path)} ext={ext}");
             Interlocked.Increment(ref _renderedFailed);
             return null;
         }

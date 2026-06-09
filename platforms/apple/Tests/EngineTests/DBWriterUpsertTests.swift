@@ -138,4 +138,66 @@ struct DBWriterUpsertTests {
             #expect(fresh == id1, "new OCR text indexed by the v14 sync triggers")
         }
     }
+
+    @Test("Failed re-scan records the failure but preserves prior children")
+    func failedRescanPreservesChildren() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDUpsertTest-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let db = try Database(at: tmp.appendingPathComponent("test.sqlite"))
+        let fileURL = tmp.appendingPathComponent("IMG_0002.jpg")
+
+        func newWriter() -> DBWriter {
+            DBWriter(db: db, sink: IPCSink(), coordinator: ScanCoordinator(),
+                     sessionID: UUID().uuidString)
+        }
+
+        // First scan succeeds, with a face.
+        await drain(newWriter(), makeFile(url: fileURL))
+
+        let (id1, faceID): (Int64, Int64) = try await db.pool.read { db in
+            let id = try Int64.fetchOne(db, sql:
+                "SELECT id FROM files WHERE path_text = ?", arguments: [fileURL.path])
+            let fid = try Int64.fetchOne(db, sql:
+                "SELECT id FROM face_prints WHERE file_id = ?", arguments: [id])
+            return (try #require(id), try #require(fid))
+        }
+
+        // User names the person.
+        try await db.pool.write { db in
+            try db.execute(sql: """
+                INSERT INTO persons (name, file_count, created_at) VALUES ('Dad', 1, ?)
+                """, arguments: [Date().timeIntervalSince1970])
+            let personID = db.lastInsertedRowID
+            try db.execute(sql: "UPDATE face_prints SET person_id = ? WHERE id = ?",
+                           arguments: [personID, faceID])
+        }
+
+        // Re-scan of the same path fails transiently (NAS hiccup): the worker
+        // emits a failed record with empty metadata.
+        let failedFile = TaggedFile(
+            url: fileURL, kind: "image", extension: "jpg", sizeBytes: 0,
+            createdAt: nil, modifiedAt: nil,
+            failed: true, errorMessage: "decode failed"
+        )
+        await drain(newWriter(), failedFile)
+
+        try await db.pool.read { db in
+            let row = try #require(try Row.fetchOne(db, sql: """
+                SELECT id, failed, error_message, size_bytes FROM files WHERE path_text = ?
+                """, arguments: [fileURL.path]))
+            #expect((row["id"] as Int64) == id1, "files.id must survive a failed re-scan")
+            #expect((row["failed"] as Int64) == 1, "failure recorded")
+            #expect((row["error_message"] as String?) == "decode failed")
+            #expect((row["size_bytes"] as Int64) == 4,
+                    "prior metadata not clobbered by the failed scan's empty data")
+
+            let faces = try Row.fetchAll(db, sql:
+                "SELECT id, person_id FROM face_prints WHERE file_id = ?", arguments: [id1])
+            #expect(faces.count == 1, "face row survives a failed re-scan")
+            #expect(faces.first?["id"] == faceID, "face row identity preserved")
+            #expect((faces.first?["person_id"] as Int64?) != nil,
+                    "manual person assignment must survive a failed re-scan")
+        }
+    }
 }

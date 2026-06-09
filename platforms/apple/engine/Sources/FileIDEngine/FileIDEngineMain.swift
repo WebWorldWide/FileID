@@ -358,7 +358,8 @@ struct FileIDEngineMain {
              .embedImageQuery,
              .restoreFromTrash,
              .revertMerge,
-             .wipeLibrary:
+             .wipeLibrary,
+             .generateVideoThumbnail:
             await sink.emit(.error(EngineError(
                 kind: "not_implemented_yet",
                 message: "This command is implemented on Windows; mac engine support is planned for V14.10."
@@ -382,10 +383,6 @@ struct FileIDEngineMain {
         coordinator: ScanCoordinator, sink: IPCSink,
         database: Database
     ) async {
-        // `rescan` (force-reprocess vs. incremental-skip) is accepted for
-        // wire parity with the schema; the macOS scan pipeline's incremental
-        // skip isn't wired to it yet (tracked in NEXT.md).
-        _ = rescan
         let url = URL(fileURLWithPath: rootPath)
         // The path arrives already resolved from the app side. Re-establish
         // security-scoped access in case the app handed off scope (no-op /
@@ -477,8 +474,11 @@ struct FileIDEngineMain {
         let taggedChan    = AsyncChannel<TaggedFile>()
         let workerCap     = Hardware.workerCap
         let pool          = VisionWorkerPool(count: workerCap)
+        // `rescan: true` forces a full reprocess even of size+mtime-unchanged
+        // files, mirroring the Windows engine's empty skip set.
         let dbWriter      = DBWriter(db: database, sink: sink,
-                                     coordinator: coordinator, sessionID: session.id)
+                                     coordinator: coordinator, sessionID: session.id,
+                                     forceReprocess: rescan)
 
         // DBWriter task — runs in parallel with tagging. Drains taggedChan
         // until it finishes, then exits.

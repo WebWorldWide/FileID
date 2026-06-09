@@ -36,6 +36,12 @@ public final class CLIPTextEncoder: @unchecked Sendable {
         return session != nil
     }
 
+    /// Model file present on disk even though the ORT session may still
+    /// be compiling — lets the UI tell "install CLIP" from "wait for load".
+    public var isInstalled: Bool {
+        FileManager.default.fileExists(atPath: Self.defaultModelURL.path)
+    }
+
     /// Standard install location — beside the other AI models.
     public static var defaultDirectory: URL {
         AppSupportPath.models.appendingPathComponent("clip_text", isDirectory: true)

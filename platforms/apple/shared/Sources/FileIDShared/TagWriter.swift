@@ -36,9 +36,14 @@ public enum TagWriter {
     }
 
     public static func readTagsThrowing(at url: URL) throws -> [String] {
+        // URL caches resourceValues per instance — a caller holding a
+        // long-lived URL would read back its own stale tag list after a
+        // write (silently breaking read-modify-write flows like undo).
+        // Re-resolving from the path defeats the instance cache.
+        let fresh = URL(fileURLWithPath: url.path)
         let values: URLResourceValues
         do {
-            values = try url.resourceValues(forKeys: [.tagNamesKey])
+            values = try fresh.resourceValues(forKeys: [.tagNamesKey])
         } catch {
             throw Error.readFailed("\(url.lastPathComponent): \(error.localizedDescription)")
         }

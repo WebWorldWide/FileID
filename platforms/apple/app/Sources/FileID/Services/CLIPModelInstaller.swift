@@ -22,6 +22,10 @@ public final class CLIPModelInstaller {
     }
 
     public private(set) var status: Status = .unknown
+    /// Flips once the text encoder's ORT session finishes its
+    /// multi-second build — Library observes it to drop the
+    /// keyword-only hint and re-run the active search.
+    public private(set) var textEncoderReady = false
     private var task: Task<Void, Never>?
 
     private init() {}
@@ -71,6 +75,10 @@ public final class CLIPModelInstaller {
     }
 
     // MARK: - Status
+
+    public func markTextEncoderReady() {
+        textEncoderReady = true
+    }
 
     public func refreshStatus() {
         let files = Self.requiredFiles
@@ -196,7 +204,11 @@ public final class CLIPModelInstaller {
         }
 
         // Eager text-encoder load so search activates without restart.
-        Task.detached(priority: .utility) { _ = CLIPTextEncoder.shared.load() }
+        Task.detached(priority: .utility) {
+            if CLIPTextEncoder.shared.load() {
+                await Self.shared.markTextEncoderReady()
+            }
+        }
         refreshStatus()
     }
 
@@ -412,7 +424,11 @@ public final class CLIPModelInstaller {
             try? FileManager.default.removeItem(at: zipURL)
         }
 
-        Task.detached(priority: .utility) { _ = CLIPTextEncoder.shared.load() }
+        Task.detached(priority: .utility) {
+            if CLIPTextEncoder.shared.load() {
+                await Self.shared.markTextEncoderReady()
+            }
+        }
         refreshStatus()
     }
 

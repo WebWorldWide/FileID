@@ -206,15 +206,7 @@ pub async fn caption(
             cmd.arg("--device").arg(dev);
         }
         cmd.stdout(std::process::Stdio::piped());
-        // Discard stderr rather than pipe-and-not-read it. llama-mtmd-cli writes
-        // a large volume of diagnostics to stderr (model/mmproj load, ggml +
-        // GPU-backend init, per-token timing). If we `piped()` it but only drain
-        // stdout, the child blocks on a full stderr pipe (~64 KB) while we block
-        // on stdout it can no longer produce — a classic undrained-pipe deadlock
-        // that hangs the per-file Deep Analyze caption with no outer timeout.
-        // The completion text comes on stdout; stderr is diagnostics only.
-        // Mirrors vlm_server.rs / probe_discrete_gpu_device, which also null it.
-        cmd.stderr(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::piped());
         cmd.stdin(std::process::Stdio::null());
         // Kill the child if the parent task is dropped mid-caption so we
         // don't orphan llama-mtmd-cli for the OS session.
@@ -228,10 +220,15 @@ pub async fn caption(
         // write once the OS pipe buffer fills while we block reading stdout —
         // a deadlock that hangs Deep Analyze. Read it to EOF on its own task.
         if let Some(stderr) = child.stderr.take() {
+            // llama.cpp echoes the --image arg (a user path) into its
+            // diagnostics; the model/binary paths are app-structural and
+            // pass redaction unchanged.
+            let image_raw = req.image_path.to_string_lossy().into_owned();
+            let image_redacted = crate::platform::redact_path_for_log(&req.image_path);
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(l)) = lines.next_line().await {
-                    tracing::debug!(target: "vlm", "{l}");
+                    tracing::debug!(target: "vlm", "{}", l.replace(&image_raw, &image_redacted));
                 }
             });
         }

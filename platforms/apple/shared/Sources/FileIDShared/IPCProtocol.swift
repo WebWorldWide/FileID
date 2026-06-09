@@ -66,6 +66,12 @@ public struct IPCCommand: Codable, Sendable {
         case markPersonsAsUnknown(personIDs: [Int64])
         case findMergeSuggestions
         case embedImageQuery(fileID: Int64, queryID: String)
+        /// Generate a 192px JPEG thumbnail for a video on demand; the engine
+        /// replies with a `thumbnailGenerated` event. macOS renders video
+        /// thumbs in-process, so the mac engine returns the structured
+        /// not-implemented pointer — the case exists for wire symmetry.
+        /// `modifiedAt` (optional) is echoed on the reply for cache keying.
+        case generateVideoThumbnail(path: String, modifiedAt: Double?)
         case restoreFromTrash(batchID: String)
         case revertMerge(sourcePersonID: Int64, destinationPersonID: Int64, faceIDsToRevert: [Int64])
         /// Record a user "different people" verdict for a suggested pair so

@@ -5,7 +5,8 @@
 //! next scan. A content hash is stable across moves, so a moved file can be
 //! re-bound to its existing row. BLAKE3 is faster than SHA-256 on commodity
 //! CPUs and pure-Rust (no C/C++ build dep). For large files we hash a
-//! composite of head + tail + size rather than read gigabytes per file.
+//! composite of head + interior samples + tail + size rather than read
+//! gigabytes per file.
 #![allow(dead_code)] // wired into the rename/move rebind path within Phase 3.
 
 use std::io::{Read, Seek, SeekFrom};
@@ -22,12 +23,30 @@ const CHUNK: usize = 1024 * 1024;
 /// bytes -> same hash, so a moved/renamed file re-binds to its existing
 /// catalog row instead of being recomputed. Opens long paths safely.
 pub(crate) fn content_hash(path: &Path, size: u64) -> std::io::Result<[u8; 32]> {
-    hash_with_threshold(path, size, FULL_HASH_MAX_BYTES)
+    hash_with_threshold(path, size, FULL_HASH_MAX_BYTES, true)
+}
+
+/// Recipe-v1 composite: blake3(head ‖ tail ‖ size_le), NO interior samples.
+/// Kept for rename-heal compatibility — rows stamped by pre-interior-sample
+/// builds carry this digest for files above `FULL_HASH_MAX_BYTES`, so the
+/// heal lookup must be able to reproduce it or every over-cap file in an
+/// upgraded DB loses its row on its first post-upgrade move. New writes
+/// always use `content_hash`; the heal upsert re-stamps the current recipe.
+/// (At or below the threshold both recipes are the identical full hash.)
+pub(crate) fn legacy_content_hash(path: &Path, size: u64) -> std::io::Result<[u8; 32]> {
+    hash_with_threshold(path, size, FULL_HASH_MAX_BYTES, false)
 }
 
 /// Testable core: `content_hash` with the full-vs-composite threshold
 /// injected so the composite path can be exercised on small fixtures.
-fn hash_with_threshold(path: &Path, size: u64, full_max: u64) -> std::io::Result<[u8; 32]> {
+/// `interior_samples` selects the current recipe (true) or the recipe-v1
+/// head+tail+size composite (false) — see `legacy_content_hash`.
+fn hash_with_threshold(
+    path: &Path,
+    size: u64,
+    full_max: u64,
+    interior_samples: bool,
+) -> std::io::Result<[u8; 32]> {
     let mut f = std::fs::File::open(super::path_safety::to_extended_length(path))?;
     let mut hasher = blake3::Hasher::new();
     if size <= full_max {
@@ -47,17 +66,21 @@ fn hash_with_threshold(path: &Path, size: u64, full_max: u64) -> std::io::Result
         // container formats with identical headers/footers, padded archives)
         // don't collide and trigger a false rename-heal. Deterministic offsets;
         // skipped on files too small for interior reads to clear head/tail.
-        const INTERIOR_SAMPLES: u64 = 4;
-        const INTERIOR_CHUNK: usize = 64 * 1024;
-        for k in 1..=INTERIOR_SAMPLES {
-            let off = size.saturating_mul(k) / (INTERIOR_SAMPLES + 1);
-            if off < span as u64 || off + INTERIOR_CHUNK as u64 > size.saturating_sub(span as u64) {
-                continue;
-            }
-            if f.seek(SeekFrom::Start(off)).is_ok() {
-                let mut mid = vec![0u8; INTERIOR_CHUNK];
-                let n = read_fill(&mut f, &mut mid)?;
-                hasher.update(&mid[..n]);
+        if interior_samples {
+            const INTERIOR_SAMPLES: u64 = 4;
+            const INTERIOR_CHUNK: usize = 64 * 1024;
+            for k in 1..=INTERIOR_SAMPLES {
+                let off = size.saturating_mul(k) / (INTERIOR_SAMPLES + 1);
+                if off < span as u64
+                    || off + INTERIOR_CHUNK as u64 > size.saturating_sub(span as u64)
+                {
+                    continue;
+                }
+                if f.seek(SeekFrom::Start(off)).is_ok() {
+                    let mut mid = vec![0u8; INTERIOR_CHUNK];
+                    let n = read_fill(&mut f, &mut mid)?;
+                    hasher.update(&mid[..n]);
+                }
             }
         }
 
@@ -129,10 +152,10 @@ mod tests {
         let body: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
         let p = tmp_with(&body);
         let size = body.len() as u64;
-        let c1 = hash_with_threshold(&p, size, 64).unwrap();
-        let c2 = hash_with_threshold(&p, size, 64).unwrap();
+        let c1 = hash_with_threshold(&p, size, 64, true).unwrap();
+        let c2 = hash_with_threshold(&p, size, 64, true).unwrap();
         assert_eq!(c1, c2, "composite hash must be deterministic");
-        let full = hash_with_threshold(&p, size, u64::MAX).unwrap();
+        let full = hash_with_threshold(&p, size, u64::MAX, true).unwrap();
         assert_ne!(c1, full, "composite (head+tail+size) differs from full hash");
         let _ = std::fs::remove_file(&p);
     }
@@ -147,10 +170,40 @@ mod tests {
         b[4095] = 2; // tail differs
         let pa = tmp_with(&a);
         let pb = tmp_with(&b);
-        let ha = hash_with_threshold(&pa, 4096, 64).unwrap();
-        let hb = hash_with_threshold(&pb, 4096, 64).unwrap();
+        let ha = hash_with_threshold(&pa, 4096, 64, true).unwrap();
+        let hb = hash_with_threshold(&pb, 4096, 64, true).unwrap();
         assert_ne!(ha, hb);
         let _ = std::fs::remove_file(&pa);
         let _ = std::fs::remove_file(&pb);
+    }
+
+    #[test]
+    fn legacy_fallback_reproduces_pre_interior_sample_recipe() {
+        const MB: usize = 1024 * 1024;
+        // >16 MB so the real public functions take the composite branch and
+        // the interior samples genuinely fire (offsets clear the 1 MB edges).
+        let body: Vec<u8> = (0..17 * MB).map(|i| (i % 251) as u8).collect();
+        let p = tmp_with(&body);
+        let size = body.len() as u64;
+
+        // The digest an origin/main build stamped into the DB:
+        // blake3(head 1MB ‖ tail 1MB ‖ size_le), no interior block.
+        let mut h = blake3::Hasher::new();
+        h.update(&body[..MB]);
+        h.update(&body[body.len() - MB..]);
+        h.update(&size.to_le_bytes());
+        let stamped_by_old_build = *h.finalize().as_bytes();
+
+        assert_eq!(
+            legacy_content_hash(&p, size).unwrap(),
+            stamped_by_old_build,
+            "legacy fallback must reproduce the recipe-v1 digest"
+        );
+        assert_ne!(
+            content_hash(&p, size).unwrap(),
+            stamped_by_old_build,
+            "current recipe must differ (interior samples) or the fallback is moot"
+        );
+        let _ = std::fs::remove_file(&p);
     }
 }

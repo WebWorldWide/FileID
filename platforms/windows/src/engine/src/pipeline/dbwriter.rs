@@ -266,9 +266,26 @@ impl DbWriter {
                 // have neither identity (no heal possible).
                 if f.file_ref.is_some() || f.content_hash.is_some() {
                     let ch_bytes = f.content_hash.as_ref().map(|h| h.as_slice());
+                    // Recipe-v1 fallback (?4): over-cap rows stamped by builds
+                    // before the composite hash gained interior samples hold
+                    // blake3(head ‖ tail ‖ size) — a 2 MB read reproduces it so
+                    // those rows still heal; the upsert below re-stamps the
+                    // current recipe.
+                    let legacy_hash = if f.content_hash.is_some()
+                        && f.size_bytes > crate::util::content_hash::FULL_HASH_MAX_BYTES
+                    {
+                        crate::util::content_hash::legacy_content_hash(&f.path, f.size_bytes).ok()
+                    } else {
+                        None
+                    };
                     let candidates: Vec<(i64, String, bool)> = heal_lookup_stmt
                         .query_map(
-                            params![f.file_ref.map(|r| r as i64), ch_bytes, path_text.as_ref()],
+                            params![
+                                f.file_ref.map(|r| r as i64),
+                                ch_bytes,
+                                path_text.as_ref(),
+                                legacy_hash.as_ref().map(|h| h.as_slice())
+                            ],
                             |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)),
                         )
                         .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
@@ -670,6 +687,11 @@ const INSERT_FILE_RETURNING_ID_SQL: &str = r#"
 // distinguish a true MOVE (file_ref reused only for the same file) from a
 // coexisting byte-identical COPY (two distinct files share a content_hash);
 // only the former may heal unconditionally — see the call site.
+// ?4 is the recipe-v1 digest (head+tail+size, no interior samples; NULL for
+// files at or below the full-hash cap): rows stamped by pre-interior-sample
+// builds hold that digest for >16 MB files, so without it the recipe change
+// would orphan every large file's row on its first post-upgrade move. The
+// upsert after the heal re-stamps the current recipe.
 const HEAL_LOOKUP_SQL: &str = r#"
     SELECT id, path_text,
            (?1 IS NOT NULL AND file_ref IS NOT NULL AND file_ref = ?1) AS by_ref
@@ -677,7 +699,7 @@ const HEAL_LOOKUP_SQL: &str = r#"
     WHERE path_text != ?3
       AND (
           (file_ref IS NOT NULL AND file_ref = ?1)
-          OR (content_hash IS NOT NULL AND content_hash = ?2)
+          OR (content_hash IS NOT NULL AND content_hash IN (?2, ?4))
       )
     ORDER BY by_ref DESC
     LIMIT 32
@@ -1040,10 +1062,22 @@ mod tests {
             .to_ascii_lowercase();
         if f.file_ref.is_some() || f.content_hash.is_some() {
             let ch_bytes = f.content_hash.as_ref().map(|h| h.as_slice());
+            let legacy_hash = if f.content_hash.is_some()
+                && f.size_bytes > crate::util::content_hash::FULL_HASH_MAX_BYTES
+            {
+                crate::util::content_hash::legacy_content_hash(&f.path, f.size_bytes).ok()
+            } else {
+                None
+            };
             let healed: Option<(i64, String, bool)> = conn
                 .query_row(
                     HEAL_LOOKUP_SQL,
-                    params![f.file_ref.map(|r| r as i64), ch_bytes, path_text.as_ref()],
+                    params![
+                        f.file_ref.map(|r| r as i64),
+                        ch_bytes,
+                        path_text.as_ref(),
+                        legacy_hash.as_ref().map(|h| h.as_slice())
+                    ],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)),
                 )
                 .optional()
@@ -1097,7 +1131,7 @@ mod tests {
         let by_ref: bool = conn
             .query_row(
                 HEAL_LOOKUP_SQL,
-                params![Some(0xABCDu64), Some([7u8; 32].as_slice()), r"C:\lib\new\IMG.jpg"],
+                params![Some(0xABCDu64), Some([7u8; 32].as_slice()), r"C:\lib\new\IMG.jpg", None::<&[u8]>],
                 |r| Ok(r.get::<_, i64>(2)? != 0),
             )
             .unwrap();
@@ -1108,11 +1142,38 @@ mod tests {
         let by_ref_none: bool = conn
             .query_row(
                 HEAL_LOOKUP_SQL,
-                params![None::<u64>, Some([7u8; 32].as_slice()), r"C:\lib\new\IMG.jpg"],
+                params![None::<u64>, Some([7u8; 32].as_slice()), r"C:\lib\new\IMG.jpg", None::<&[u8]>],
                 |r| Ok(r.get::<_, i64>(2)? != 0),
             )
             .unwrap();
         assert!(!by_ref_none, "content_hash-only match must clear by_ref");
+    }
+
+    /// C4: an over-cap row stamped by a pre-interior-sample build carries the
+    /// recipe-v1 digest. The lookup must match it via the ?4 fallback even
+    /// though the current-recipe digest (?2) differs, or the row never heals.
+    #[test]
+    fn heal_lookup_matches_legacy_recipe_digest_via_fallback() {
+        let conn = in_memory_db();
+        let mut old = fixture(r"C:\lib\old\HUGE.tif");
+        old.content_hash = Some([0x22; 32]); // recipe-v1 digest stamped by main
+        ingest_with_heal(&conn, &old);
+
+        let matched: Option<(i64, bool)> = conn
+            .query_row(
+                HEAL_LOOKUP_SQL,
+                params![
+                    None::<u64>,
+                    Some([0x33u8; 32].as_slice()), // current-recipe digest: no row has it
+                    r"C:\lib\new\HUGE.tif",
+                    Some([0x22u8; 32].as_slice())
+                ],
+                |r| Ok((r.get(0)?, r.get::<_, i64>(2)? != 0)),
+            )
+            .optional()
+            .unwrap();
+        let (_, by_ref) = matched.expect("legacy digest must match via the ?4 fallback");
+        assert!(!by_ref, "legacy-hash match is a content match, not a ref match");
     }
 
     /// B1 core: two byte-identical files that COEXIST (a copy, not a move)

@@ -28,7 +28,11 @@ struct FileIDApp: App {
                     engine.start()
                     // Search falls back to keyword matching if CLIP
                     // isn't installed yet.
-                    Task.detached { _ = CLIPTextEncoder.shared.load() }
+                    Task.detached {
+                        if CLIPTextEncoder.shared.load() {
+                            await CLIPModelInstaller.shared.markTextEncoderReady()
+                        }
+                    }
                     CLIPModelInstaller.shared.refreshStatus()
                     ArcFaceModelInstaller.shared.refreshStatus()
                     if shouldShowWelcome() { showWelcome = true }

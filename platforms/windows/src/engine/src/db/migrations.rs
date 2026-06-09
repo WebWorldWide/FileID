@@ -313,9 +313,11 @@ CREATE TABLE IF NOT EXISTS usn_state (
 );
 "#;
 
-// v8: rename / move identity. `content_hash` is BLAKE3 (full for ≤16 MB, head+
-// tail+size composite above — see util::content_hash). `file_ref` is the
-// platform's volume-local file id (NTFS MFT reference on Windows via
+// v8: rename / move identity. `content_hash` is BLAKE3 (full for ≤16 MB; a
+// head+interior-samples+tail+size composite above — see util::content_hash.
+// The rename-heal also matches the recipe-v1 head+tail+size digest stamped by
+// pre-interior-sample builds, then re-stamps the current recipe). `file_ref`
+// is the platform's volume-local file id (NTFS MFT reference on Windows via
 // GetFileInformationByHandle; inode on macOS). Both are nullable so a row
 // missing them (e.g. an online-only OneDrive placeholder, or a permission
 // error during the metadata pass) still inserts. The partial indexes keep the

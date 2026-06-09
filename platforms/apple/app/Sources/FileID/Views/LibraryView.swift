@@ -72,8 +72,8 @@ struct LibraryView: View {
             if let seed = similarSeed {
                 similaritySeedBanner(seed)
             }
-            if shouldHintCLIPInstall {
-                clipInstallHint
+            if let hint = clipSearchHint {
+                clipHintBanner(hint)
             }
             if rows.isEmpty {
                 empty
@@ -132,6 +132,11 @@ struct LibraryView: View {
         }
         .onChange(of: kindFilterRaw) { _, _ in reload() }
         .onChange(of: similarSeed?.id) { _, _ in reload() }
+        // The encoder's ORT session takes seconds to build after launch /
+        // install; without this the first search silently stays keyword-only.
+        .onChange(of: CLIPModelInstaller.shared.textEncoderReady) { _, ready in
+            if ready { reload() }
+        }
         // Surface the undo-rename outcome (incl. partial/total failures) — it
         // was written to `undoStatus` but never shown, so failures were silent.
         .alert("Undo Renames", isPresented: Binding(
@@ -166,33 +171,42 @@ struct LibraryView: View {
         .padding(.top, 8)
     }
 
-    /// True when the user has typed a non-trivial query and the CLIP
-    /// text encoder isn't installed — semantic search is degraded to
-    /// keyword search and the user has no way to know why without a
-    /// pointer to Settings.
-    private var shouldHintCLIPInstall: Bool {
+    private enum CLIPSearchHint { case install, preparing }
+
+    /// Non-nil when the user has typed a non-trivial query but semantic
+    /// search is degraded to keyword search: either the CLIP text encoder
+    /// was never installed (point at Settings), or its files exist and
+    /// the ORT session is still compiling after launch / install (the
+    /// grid re-runs the search automatically once it's ready).
+    private var clipSearchHint: CLIPSearchHint? {
         let trimmed = searchText.trimmingCharacters(in: .whitespaces)
-        return trimmed.count >= 3
-            && similarSeed == nil
-            && !CLIPTextEncoder.shared.isReady
+        guard trimmed.count >= 3, similarSeed == nil,
+              !CLIPModelInstaller.shared.textEncoderReady,
+              !CLIPTextEncoder.shared.isReady else { return nil }
+        return CLIPTextEncoder.shared.isInstalled ? .preparing : .install
     }
 
-    /// One-line discoverability pointer when CLIP is missing during a
-    /// search. Tappable, but doesn't switch tabs (avoids extra wiring);
-    /// just points the user at Settings.
+    /// One-line keyword-fallback banner: missing → points the user at
+    /// Settings (doesn't switch tabs; avoids extra wiring), compiling →
+    /// spinner while the encoder finishes loading.
     @ViewBuilder
-    private var clipInstallHint: some View {
+    private func clipHintBanner(_ hint: CLIPSearchHint) -> some View {
         HStack(spacing: 10) {
             Image(systemName: "sparkle.magnifyingglass")
                 .foregroundStyle(Theme.ai)
             VStack(alignment: .leading, spacing: 1) {
                 Text("Showing keyword matches.")
                     .font(.callout.bold())
-                Text("Install CLIP in Settings → AI Models for visual semantic search (\"sunset at the beach\", \"red car\", etc.).")
+                Text(hint == .preparing
+                     ? "Preparing semantic search… results will refresh automatically."
+                     : "Install CLIP in Settings → AI Models for visual semantic search (\"sunset at the beach\", \"red car\", etc.).")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            if hint == .preparing {
+                ProgressView().controlSize(.small).tint(Theme.ai)
+            }
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 8).fill(Theme.ai.opacity(0.08)))
