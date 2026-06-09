@@ -2,7 +2,9 @@
 //
 // Architecture:
 //   producers (DBWriter, ScanCoordinator, dispatch) → emit(payload)
-//     → bounded buffer → single drainer task → stderr
+//     → bounded buffer → single drainer task → IPC wire
+//       (the fd-2 pipe, dup'ed aside by IPCTransport.bootstrap so
+//        library stderr chatter can't splice into the event stream)
 //
 // `FileHandle.write(...)` is synchronous — if the parent stops draining
 // the pipe, every emit() blocks behind it and the engine wedges.
@@ -28,7 +30,14 @@ public actor IPCSink {
     /// Wake the drainer when emit() adds work.
     private var drainerContinuation: CheckedContinuation<Void, Never>?
 
-    public init() {}
+    /// Where events are written. Captured at init: the U4 bootstrap dups
+    /// the wire fd aside before the singleton exists; tests inject a pipe
+    /// to capture the byte stream.
+    private let wire: FileHandle
+
+    public init(wire: FileHandle? = nil) {
+        self.wire = wire ?? IPCTransport.wireHandle
+    }
 
     public func emit(_ payload: IPCEvent.Payload) {
         guard !closed else { return }
@@ -114,7 +123,7 @@ public actor IPCSink {
             let blob = batch.reduce(Data(), +)
             // BLOCKING write — but only THIS task blocks. The actor is free
             // to keep accepting new emit() calls while we wait.
-            do { try FileHandle.standardError.write(contentsOf: blob) } catch { /* parent gone */ }
+            do { try wire.write(contentsOf: blob) } catch { /* parent gone */ }
         }
     }
 

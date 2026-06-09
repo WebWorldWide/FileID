@@ -1,8 +1,10 @@
 // FileIDEngine — child process spawned by the FileID SwiftUI app.
 // Reads IPC commands from stdin (newline-delimited JSON), emits events
-// to stdout in the same format. Owns the SQLite database, scan
-// pipeline, ANE/GPU model loading, and all on-device inference
-// (MobileCLIP, ArcFace, MLX VLMs).
+// over the fd-2 pipe in the same format (dup'ed aside at startup by
+// IPCTransport.bootstrap; raw fd 2 is repointed at engine-stderr.log so
+// MLX/Metal diagnostics can't corrupt the event stream). Owns the
+// SQLite database, scan pipeline, ANE/GPU model loading, and all
+// on-device inference (CLIP, SFace, MLX VLMs).
 //
 // Lifetime: bound to the parent. Pipe close → LineReader EOF → clean
 // exit. A getppid() poll catches force-quits where the pipe lingers.
@@ -15,7 +17,11 @@ import GRDB
 @main
 struct FileIDEngineMain {
     static func main() async {
-        // Ignore SIGPIPE — writes to a closed parent stdout shouldn't crash
+        // U4: must run before ANY library can write to fd 2 (and before
+        // the IPCSink singleton captures its wire handle).
+        IPCTransport.bootstrap()
+
+        // Ignore SIGPIPE — writes to a closed parent pipe shouldn't crash
         // the engine; the LineReader will detect the closed pipe on the next
         // read and we'll exit cleanly through the normal command loop.
         signal(SIGPIPE, SIG_IGN)

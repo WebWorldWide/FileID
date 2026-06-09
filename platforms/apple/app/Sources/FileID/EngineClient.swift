@@ -251,12 +251,20 @@ public final class EngineClient {
                 return out
             }
             for line in lines {
+                // U4: only lines that can be JSON frames earn a decode
+                // attempt; anything else is library chatter from an engine
+                // predating the fd-2 split (or a torn frame) — log a
+                // truncated sample so spew can't bloat app.log.
+                guard line.first == 0x7B else {
+                    Self.debug("ENGINE: \(String(data: line.prefix(512), encoding: .utf8) ?? "<binary>")")
+                    continue
+                }
                 if let event = try? IPCCoder.decoder.decode(IPCEvent.self, from: line) {
                     Task { @MainActor [weak self] in
                         self?.handleEvent(event)
                     }
                 } else {
-                    Self.debug("ENGINE: \(String(data: line, encoding: .utf8) ?? "<binary>")")
+                    Self.debug("ENGINE: undecodable frame: \(String(data: line.prefix(512), encoding: .utf8) ?? "<binary>")")
                 }
             }
         }
