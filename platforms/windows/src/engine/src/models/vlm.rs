@@ -206,6 +206,20 @@ pub async fn caption(
         cmd.kill_on_drop(true);
 
         let mut child = cmd.spawn().with_context(|| format!("spawn {}", runner.binary.display()))?;
+        // Drain stderr concurrently. llama.cpp is extremely verbose on stderr
+        // (backend init, full model/mmproj metadata, sampling params, timings —
+        // tens of KB, emitted during load BEFORE any stdout token). With the
+        // pipe captured but never read, the child blocks on its next stderr
+        // write once the OS pipe buffer fills while we block reading stdout —
+        // a deadlock that hangs Deep Analyze. Read it to EOF on its own task.
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(l)) = lines.next_line().await {
+                    tracing::debug!(target: "vlm", "{l}");
+                }
+            });
+        }
         let stdout = child
             .stdout
             .take()

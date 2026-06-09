@@ -71,9 +71,14 @@ impl ArcFace {
                 rgb_112.len()
             );
         }
-        // Standard ArcFace preprocessing: BGR → CHW float, mean=127.5,
-        // std=127.5 (i.e. (px - 127.5) / 127.5 = px / 127.5 - 1).
-        // The Buffalo_l export expects BGR ordering.
+        // ArcFace preprocessing: RGB → CHW float, mean=127.5, std=127.5
+        // (i.e. (px - 127.5) / 127.5 = px / 127.5 - 1). The Buffalo_l
+        // (w600k_r50) export — the SAME model the macOS reference uses — is
+        // trained with insightface's swapRB=True convention, i.e. it expects
+        // RGB. The previous code wrote B into channel 0 and R into channel 2,
+        // producing channel-swapped embeddings that were both lower quality
+        // and byte-INCOMPATIBLE with the macOS embeddings stored in the shared
+        // DB schema. (Recompute existing arcface_embeddings after this fix.)
         let mut chw = Array4::<f32>::zeros((1, 3, 112, 112));
         for y in 0..112 {
             for x in 0..112 {
@@ -81,9 +86,9 @@ impl ArcFace {
                 let r = rgb_112[i] as f32;
                 let g = rgb_112[i + 1] as f32;
                 let b = rgb_112[i + 2] as f32;
-                chw[[0, 0, y, x]] = b / 127.5 - 1.0;
+                chw[[0, 0, y, x]] = r / 127.5 - 1.0;
                 chw[[0, 1, y, x]] = g / 127.5 - 1.0;
-                chw[[0, 2, y, x]] = r / 127.5 - 1.0;
+                chw[[0, 2, y, x]] = b / 127.5 - 1.0;
             }
         }
 

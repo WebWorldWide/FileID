@@ -21,6 +21,8 @@ use serde_json::Value;
 
 const SOT: u32 = 49406;
 const EOT: u32 = 49407;
+/// CLIP's fixed text context length. Keep in sync with `clip_text::CONTEXT_LEN`.
+const CLIP_CONTEXT_LEN: usize = 77;
 
 pub struct ClipTokenizer {
     vocab: HashMap<String, u32>,
@@ -99,6 +101,13 @@ impl ClipTokenizer {
             }
         }
 
+        // Truncate the content so the trailing EOT always fits inside the
+        // model's 77-token context window. The doc comment promised this but
+        // the code never did it, so for queries >77 tokens the downstream
+        // `.take(CONTEXT_LEN)` dropped the EOT entirely — CLIP relies on the
+        // EOT position for the pooled text embedding, so its absence degraded
+        // long-query search quality.
+        out.truncate(CLIP_CONTEXT_LEN - 1);
         out.push(EOT);
         out
     }

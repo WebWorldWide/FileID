@@ -112,6 +112,13 @@ impl RuntimeProbe {
 /// failure when we register multiple EPs in priority order.
 pub fn priority_chain(vendor: GpuVendor) -> Vec<ExecutionProvider> {
     let user_override = read_user_ep_override();
+    // An explicit CPU override is authoritative: bind CPU ONLY. Previously CPU
+    // was merely pushed first and the vendor's GPU EPs were still appended, so
+    // a GPU EP bound and ran anyway — ignoring a user who forced CPU (e.g. to
+    // work around a flaky GPU driver / TDR).
+    if matches!(user_override, Some(ExecutionProvider::Cpu)) {
+        return vec![ExecutionProvider::Cpu];
+    }
     let mut chain: Vec<ExecutionProvider> = Vec::new();
     if let Some(ep) = user_override {
         chain.push(ep);
