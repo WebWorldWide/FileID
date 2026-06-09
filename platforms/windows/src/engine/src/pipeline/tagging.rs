@@ -675,10 +675,21 @@ fn run_decoder_thread(
 
         if !file.online_only {
             match file.kind {
-                FileKind::Image => {
+                FileKind::Image
+                    if file.size_bytes <= crate::util::content_hash::FULL_HASH_MAX_BYTES =>
+                {
                     if let Ok(mut f) = open_image_file(&file.path) {
-                        let mut bytes = Vec::with_capacity(file.size_bytes as usize);
-                        if std::io::Read::read_to_end(&mut f, &mut bytes).is_ok() {
+                        // Bounded pre-read: capacity is capped at the 16 MB
+                        // full-hash window, and try_reserve_exact turns a rare
+                        // allocation failure into a recoverable per-file skip
+                        // instead of handle_alloc_error -> abort() that would
+                        // kill the whole engine (and the entire scan).
+                        let cap = (file.size_bytes as usize)
+                            .min(crate::util::content_hash::FULL_HASH_MAX_BYTES as usize);
+                        let mut bytes = Vec::new();
+                        if bytes.try_reserve_exact(cap).is_ok()
+                            && std::io::Read::read_to_end(&mut f, &mut bytes).is_ok()
+                        {
                             // Baseline: a successful read always produces Some(_)
                             // so the worker's parse_exif_blocking fallback is
                             // unreachable for images. Non-EXIF formats (PNG, GIF,
@@ -695,22 +706,23 @@ fn run_decoder_thread(
                                 let lon = read_gps_coord(&exif, exif::Tag::GPSLongitude, exif::Tag::GPSLongitudeRef);
                                 exif_data = Some((camera_model, lat, lon));
                             }
-                            // Compute BLAKE3 content hash from memory
-                            let hash = if bytes.len() <= crate::util::content_hash::FULL_HASH_MAX_BYTES as usize {
-                                *blake3::hash(&bytes).as_bytes()
-                            } else {
-                                let span = bytes.len().min(1024 * 1024);
-                                let mut hasher = blake3::Hasher::new();
-                                hasher.update(&bytes[..span]);
-                                let start_tail = bytes.len().saturating_sub(span);
-                                hasher.update(&bytes[start_tail..]);
-                                hasher.update(&(bytes.len() as u64).to_le_bytes());
-                                *hasher.finalize().as_bytes()
-                            };
-                            content_hash = Some(hash);
+                            // ≤16 MB → full BLAKE3.
+                            content_hash = Some(*blake3::hash(&bytes).as_bytes());
                             file_bytes = Some(bytes);
                         }
                     }
+                }
+                FileKind::Image => {
+                    // Over-cap image (multi-hundred-MB RAW/TIFF/PSD, or a
+                    // crafted/sparse file with a huge logical length). Do NOT
+                    // read it into a Vec — with up to 12 decoder threads that
+                    // OOMs, and Vec::with_capacity on a bogus size aborts the
+                    // process. Hash via the bounded head+tail+size composite and
+                    // leave file_bytes = None so decode_image_sync mmaps the
+                    // file (the OS pages it lazily under the MAX_DECODED_PIXELS
+                    // guard). EXIF falls back to the worker's bounded parse.
+                    content_hash =
+                        crate::util::content_hash::content_hash(&file.path, file.size_bytes).ok();
                 }
                 // Doc / PDF / Audio share the image-style single-read pattern
                 // when the file fits in the full-hash window (16 MB). The
@@ -1294,9 +1306,8 @@ async fn process_file_predecoded(
                 // OCR is the biggest CPU per file (~30-50 ms). For camera
                 // photos (EXIF camera_model present) it returns nothing
                 // useful, so skip. Documents/screenshots still run OCR.
-                // Also short-circuit when the GPU is already known dead —
-                // Windows.Media.Ocr fails-soft on driver issues but skipping
-                // avoids any recursive device-init.
+                // Also short-circuit when the GPU is already known dead, to
+                // avoid any recursive device-init after a TDR.
                 if matches!(file.kind, FileKind::Image) && !coord.is_gpu_dead() && should_run_ocr(&file.path, &tagged, file.size_bytes) {
                     let ocr_started = Instant::now();
                     if let Ok(Some(ocr)) = run_ocr_blocking(rgb.clone(), w, h).await {
@@ -1478,7 +1489,10 @@ async fn run_ocr_blocking(rgb: Vec<u8>, w: u32, h: u32) -> anyhow::Result<Option
         match shell::ocr::recognize(&rgb, w, h) {
             Ok(r) => Ok(Some(r)),
             Err(err) => {
-                tracing::debug!(?err, "OCR skipped");
+                // warn!, not debug!: a genuinely non-functional OCR engine
+                // (e.g. COM not initialized, missing language pack) should be
+                // visible rather than silently swallowed for every file.
+                tracing::warn!(?err, "OCR failed");
                 Ok(None)
             }
         }

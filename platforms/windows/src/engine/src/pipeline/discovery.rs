@@ -221,12 +221,32 @@ impl Discovery {
                         children.clear();
                         return;
                     }
+                    // A directory looks like a dev tree only if a build-system
+                    // marker sits directly in it. Used to gate the ambiguous
+                    // build-dir names (target/build/obj/bin/venv) so we don't
+                    // prune a user's ordinary "build" / "bin" folder of files.
+                    let has_build_marker = children.iter().any(|res| {
+                        res.as_ref()
+                            .ok()
+                            .map(|e| {
+                                e.file_type().is_file()
+                                    && is_build_marker(&e.file_name().to_string_lossy())
+                            })
+                            .unwrap_or(false)
+                    });
                     children.retain(|res| {
                         let Ok(entry) = res.as_ref() else { return true; };
                         let file_type = entry.file_type();
                         let name = entry.file_name().to_string_lossy().to_string();
                         if file_type.is_dir() {
-                            !is_noise_directory(&name)
+                            if is_noise_directory(&name) {
+                                return false;
+                            }
+                            // Prune generic build dirs only inside a dev tree.
+                            if is_ambiguous_build_directory(&name) {
+                                return !has_build_marker;
+                            }
+                            true
                         } else if file_type.is_file() {
                             !is_noise_file(&name)
                         } else {
@@ -364,13 +384,36 @@ fn is_noise_directory(name: &str) -> bool {
             | ".cache"
             | ".gradle"
             | ".idea"
-            | "target"     // Rust build artifacts; common at scan roots that include source trees
-            | "build"      // generic build dir; debatable but common
-            | "obj"        // .NET build artifacts
-            | "bin"        // .NET / CMake / autotools build artifacts
-            | ".venv"
-            | "venv"
     )
+}
+
+/// Generic directory names that are build artifacts ONLY inside a dev tree.
+/// They double as ordinary user folder names (a photographer's "build" set,
+/// a "bin" of scans, a French "venv"…), so the caller prunes these only when
+/// a build-system marker sits alongside them — otherwise we'd silently make a
+/// user's files invisible to the whole app.
+fn is_ambiguous_build_directory(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "target" | "build" | "obj" | "bin" | "venv" | ".venv"
+    )
+}
+
+/// True if `name` is a build-system marker (sits next to the build dirs above).
+fn is_build_marker(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower == "cargo.toml"
+        || lower == "cmakelists.txt"
+        || lower == "makefile"
+        || lower == "package.json"
+        || lower == "pyproject.toml"
+        || lower == "setup.py"
+        || lower == "requirements.txt"
+        || lower == "pyvenv.cfg"
+        || lower.ends_with(".sln")
+        || lower.ends_with(".csproj")
+        || lower.ends_with(".vcxproj")
 }
 
 /// Per-file noise filter. Cheap O(1) string match — kept separate from

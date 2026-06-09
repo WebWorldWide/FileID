@@ -207,6 +207,10 @@ impl ScanSession {
             std::sync::Arc::new(set)
         };
 
+        // How many files were skipped as already-current. Lets the ticker tell
+        // "all files already up to date" apart from "genuinely empty folder".
+        let skip_count = skip_paths.len();
+
         // Wire the three pipeline stages with bounded mpsc channels.
         let discovery = Discovery::new_with_skip(root, self.coordinator.clone(), skip_paths);
         let handle = discovery.spawn();
@@ -229,6 +233,7 @@ impl ScanSession {
         // in scope so the tagging callback can also read it for Progress
         // event totals.
         let discovered_count_for_tick = discovered_count.clone();
+        let skip_count_for_tick = skip_count;
         let tick = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -257,7 +262,22 @@ impl ScanSession {
                     // Close out cleanly with a "no supported files found"
                     // error so the user knows what happened.
                     let errs = errors_for_tick.load(std::sync::atomic::Ordering::Relaxed);
-                    if count == 0 {
+                    if count == 0 && skip_count_for_tick > 0 {
+                        // Not empty — every file under the root was already
+                        // up to date and got skipped by the incremental scan.
+                        // Report that, not a misleading "no files found".
+                        let _ = sink_for_tick.try_send(IpcEvent::now(EventPayload::Error(
+                            Wrap::new(crate::ipc::EngineError {
+                                kind: "no_changes".into(),
+                                message: format!(
+                                    "All {} file(s) in {} are already up to date.",
+                                    skip_count_for_tick, root_for_tick
+                                ),
+                                path: Some(root_for_tick.clone()),
+                                model_kind: None,
+                            }),
+                        )));
+                    } else if count == 0 {
                         let _ = sink_for_tick.try_send(IpcEvent::now(EventPayload::Error(
                             Wrap::new(crate::ipc::EngineError {
                                 kind: "empty_folder".into(),

@@ -104,8 +104,22 @@ impl ScanCoordinator {
         if self.is_cancelled() {
             return Err(());
         }
+        // Register the waiter BEFORE reading `paused`. tokio's
+        // notify_waiters() (used by request_resume/cancel/gpu_dead) wakes only
+        // already-registered waiters and stores NO permit, so a resume that
+        // fired between an is_paused()==true read and a plain notified().await
+        // was lost — the worker parked forever, the Tagging→DBWriter channel
+        // never closed, and the whole scan wedged. enable() inserts this future
+        // into the waiter list up front, so any notify in the race window marks
+        // it notified and the await returns immediately. Mirrors main.rs.
+        let notified = self.inner.resume_notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         while self.is_paused() {
-            self.inner.resume_notify.notified().await;
+            notified.as_mut().await;
+            // Re-arm for the next loop iteration.
+            notified.set(self.inner.resume_notify.notified());
+            notified.as_mut().enable();
             if self.is_cancelled() {
                 return Err(());
             }

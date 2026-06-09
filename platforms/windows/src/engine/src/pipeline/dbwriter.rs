@@ -134,6 +134,14 @@ impl DbWriter {
                 }
             }
             if self.coordinator.is_cancelled() {
+                // Flush whatever's buffered before exiting — these files were
+                // already fully processed (tagged/embedded), so dropping them
+                // on cancel just wastes that work and leaves them unscanned.
+                // Matches the graceful Ok(None) close path.
+                if !buffer.is_empty() {
+                    let stats = self.flush(&mut buffer, &mut total, &mut failed, batch_index)?;
+                    on_batch(stats);
+                }
                 break;
             }
         }
@@ -237,22 +245,37 @@ impl DbWriter {
                 // have neither identity (no heal possible).
                 if f.file_ref.is_some() || f.content_hash.is_some() {
                     let ch_bytes = f.content_hash.as_ref().map(|h| h.as_slice());
-                    let healed_id: Option<i64> = heal_lookup_stmt
+                    let healed: Option<(i64, String)> = heal_lookup_stmt
                         .query_row(
                             params![f.file_ref, ch_bytes, path_text.as_ref()],
-                            |r| r.get(0),
+                            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
                         )
                         .optional()
                         .with_context(|| format!("rename-heal lookup for {}", path_text))?;
-                    if let Some(id) = healed_id {
-                        heal_update_stmt
-                            .execute(params![path_text, path_hash, id])
-                            .with_context(|| format!("rename-heal update for {}", path_text))?;
-                        tracing::info!(
-                            id,
-                            new_path = %crate::platform::redact_path_for_log(&f.path),
-                            "[RENAME-HEAL] re-bound existing row to new path"
-                        );
+                    if let Some((id, old_path)) = healed {
+                        // Only heal if the candidate's OLD path is gone — that's
+                        // a move. If the old file still exists this is a COPY of
+                        // identical content, and re-binding would steal the
+                        // original's catalog row and orphan it.
+                        let old_gone = !crate::util::path_safety::to_extended_length(
+                            std::path::Path::new(&old_path),
+                        )
+                        .exists();
+                        if old_gone {
+                            heal_update_stmt
+                                .execute(params![path_text, path_hash, id])
+                                .with_context(|| format!("rename-heal update for {}", path_text))?;
+                            tracing::info!(
+                                id,
+                                new_path = %crate::platform::redact_path_for_log(&f.path),
+                                "[RENAME-HEAL] re-bound existing row to new path"
+                            );
+                        } else {
+                            tracing::debug!(
+                                id,
+                                "[RENAME-HEAL] candidate still exists on disk; treating as copy, not move"
+                            );
+                        }
                     }
                 }
 
@@ -538,7 +561,7 @@ const INSERT_FILE_RETURNING_ID_SQL: &str = r#"
 // (cross-volume) matches, but at a DIFFERENT path. NULL identity columns
 // never match — a row without identity can't be healed.
 const HEAL_LOOKUP_SQL: &str = r#"
-    SELECT id FROM files
+    SELECT id, path_text FROM files
     WHERE path_text != ?3
       AND (
           (file_ref IS NOT NULL AND file_ref = ?1)
