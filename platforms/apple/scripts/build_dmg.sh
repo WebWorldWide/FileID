@@ -63,48 +63,16 @@ fi
 
 if [ "$REBUILD" = "1" ]; then
     echo "🔨 Building release binaries…"
-    DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c release --product FileID
-    DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c release --product FileIDEngine
-
-    echo "📦 Assembling FileID.app bundle…"
-    rm -rf "$APP"
-    mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-    cp .build/release/FileID       "$APP/Contents/MacOS/FileID"
-    cp .build/release/FileIDEngine "$APP/Contents/MacOS/FileIDEngine"
-    chmod +x "$APP/Contents/MacOS/"{FileID,FileIDEngine}
-
-    METALLIB_CACHE="$PROJECT_DIR/.build/cache/mlx.metallib"
-    if [ -f "$METALLIB_CACHE" ]; then
-        cp "$METALLIB_CACHE" "$APP/Contents/MacOS/mlx.metallib"
-        cp "$METALLIB_CACHE" "$APP/Contents/MacOS/default.metallib"
+    if [ -d "$XCODE_DEV_DIR" ]; then
+        DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c release --product FileID
+        DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c release --product FileIDEngine
     else
-        echo "⚠️  $METALLIB_CACHE missing — Deep Analyze will fail at runtime."
-        echo "   Run bash run.sh once to build it, then re-run this script."
+        swift build -c release --product FileID
+        swift build -c release --product FileIDEngine
     fi
 
-    cat > "$APP/Contents/Info.plist" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleIdentifier</key><string>com.fileid.app</string>
-    <key>CFBundleName</key><string>FileID</string>
-    <key>CFBundleDisplayName</key><string>FileID</string>
-    <key>CFBundleExecutable</key><string>FileID</string>
-    <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleIconFile</key><string>FileID</string>
-    <key>CFBundleIconName</key><string>FileID</string>
-    <key>CFBundleShortVersionString</key><string>1.0</string>
-    <key>CFBundleVersion</key><string>1</string>
-    <key>LSMinimumSystemVersion</key><string>15.0</string>
-    <key>NSHighResolutionCapable</key><true/>
-    <key>NSDesktopFolderUsageDescription</key><string>FileID needs to read your folders to tag, dedupe, and reorganize files.</string>
-    <key>NSDocumentsFolderUsageDescription</key><string>FileID needs to read your folders to tag, dedupe, and reorganize files.</string>
-    <key>NSDownloadsFolderUsageDescription</key><string>FileID needs to read your folders to tag, dedupe, and reorganize files.</string>
-</dict>
-</plist>
-PLIST
-    cp "$PROJECT_DIR/Resources/FileID.icns" "$APP/Contents/Resources/FileID.icns"
+    echo "📦 Assembling FileID.app bundle…"
+    bash "$PROJECT_DIR/scripts/assemble_app.sh" "$PROJECT_DIR/$APP"
 
     # Strip DWARF — clang's __FILE__ / debug paths leak the maintainer's home.
     echo "🧹 Stripping debug symbols…"

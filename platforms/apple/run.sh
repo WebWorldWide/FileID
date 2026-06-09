@@ -21,15 +21,25 @@ BUILD_DIR="$PROJECT_DIR/.build/release"
 APP_BUNDLE="$PROJECT_DIR/$APP_NAME.app"
 CONTENTS="$APP_BUNDLE/Contents"
 
+# Xcode is only required to BUILD mlx.metallib (cmake + Metal Toolchain).
+# Once the cache exists, CommandLineTools alone builds + bundles everything.
 XCODE_DEV_DIR="/Applications/Xcode.app/Contents/Developer"
-if [ ! -d "$XCODE_DEV_DIR" ]; then
-    echo "❌ Xcode not found at $XCODE_DEV_DIR"
+METALLIB_CACHE_CHECK="$PROJECT_DIR/.build/cache/mlx.metallib"
+if [ ! -d "$XCODE_DEV_DIR" ] && [ ! -f "$METALLIB_CACHE_CHECK" ]; then
+    echo "❌ Xcode not found at $XCODE_DEV_DIR and no cached mlx.metallib."
+    echo "   Building the Deep Analyze GPU kernels needs Xcode + the Metal Toolchain once;"
+    echo "   after that the cache at $METALLIB_CACHE_CHECK suffices."
     exit 1
 fi
 
 echo "🔨 Building FileID + FileIDEngine (release)..."
-DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c release --product FileID
-DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c release --product FileIDEngine
+if [ -d "$XCODE_DEV_DIR" ]; then
+    DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c release --product FileID
+    DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c release --product FileIDEngine
+else
+    swift build -c release --product FileID
+    swift build -c release --product FileIDEngine
+fi
 
 # MLX requires a precompiled mlx.metallib for GPU kernels. SwiftPM doesn't
 # build it (it's a cmake-driven step inside the mlx-c subproject), so we
@@ -136,60 +146,7 @@ defaults delete com.fileid.app 2>/dev/null || true
 killall cfprefsd 2>/dev/null || true
 
 echo "📦 Assembling $APP_NAME.app bundle..."
-rm -rf "$APP_BUNDLE"
-mkdir -p "$CONTENTS/MacOS"
-mkdir -p "$CONTENTS/Resources"
-
-cp "$BUILD_DIR/FileID"       "$CONTENTS/MacOS/FileID"
-cp "$BUILD_DIR/FileIDEngine" "$CONTENTS/MacOS/FileIDEngine"
-chmod +x "$CONTENTS/MacOS/FileID" "$CONTENTS/MacOS/FileIDEngine"
-
-# MLX needs the metallib colocated with the engine binary. Both names
-# because MLX's load order tries `default.metallib` first then `mlx.metallib`.
-if [ -f "$METALLIB_CACHE" ]; then
-    cp "$METALLIB_CACHE" "$CONTENTS/MacOS/mlx.metallib"
-    cp "$METALLIB_CACHE" "$CONTENTS/MacOS/default.metallib"
-fi
-
-cat > "$CONTENTS/Info.plist" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleIdentifier</key>
-    <string>com.fileid.app</string>
-    <key>CFBundleName</key>
-    <string>FileID</string>
-    <key>CFBundleDisplayName</key>
-    <string>FileID</string>
-    <key>CFBundleExecutable</key>
-    <string>FileID</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleIconFile</key>
-    <string>FileID</string>
-    <key>CFBundleIconName</key>
-    <string>FileID</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
-    <key>CFBundleVersion</key>
-    <string>1</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>15.0</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSDesktopFolderUsageDescription</key>
-    <string>FileID needs to read your folders to tag, dedupe, and reorganize files.</string>
-    <key>NSDocumentsFolderUsageDescription</key>
-    <string>FileID needs to read your folders to tag, dedupe, and reorganize files.</string>
-    <key>NSDownloadsFolderUsageDescription</key>
-    <string>FileID needs to read your folders to tag, dedupe, and reorganize files.</string>
-</dict>
-</plist>
-PLIST
-
-# Icon — uses the same compiled .icns as v1 so they share the brand asset.
-cp "$PROJECT_DIR/Resources/FileID.icns" "$CONTENTS/Resources/FileID.icns"
+bash "$PROJECT_DIR/scripts/assemble_app.sh" "$APP_BUNDLE"
 
 # LaunchServices caches icons aggressively. Touching the bundle invalidates
 # the cache so the new icon shows up immediately.
