@@ -70,7 +70,15 @@ struct BulkTagSheet: View {
         // issues with the view's onComplete closure.
         Task {
             let result = await Task.detached(priority: .userInitiated) {
-                TagWriter.addTagsBulk(tags, to: urls)
+                let detailed = TagWriter.addTagsBulkDetailed(tags, to: urls)
+                // Persist the exact per-file diff so "Undo last tags" can
+                // remove only what FileID added (same journal pattern as
+                // BulkRenameSheet.lastBatchKey).
+                if !detailed.outcomes.isEmpty,
+                   let data = try? JSONEncoder().encode(detailed.outcomes) {
+                    UserDefaults.standard.set(data, forKey: BulkTagSheet.lastBatchKey)
+                }
+                return detailed
             }.value
             inFlight = false
             if result.failed == 0 && result.unchanged == 0 {
@@ -87,5 +95,19 @@ struct BulkTagSheet: View {
                 dismiss()
             }
         }
+    }
+
+    nonisolated static let lastBatchKey = "bulkTag.lastBatch.v1"
+
+    /// Decode the most recent tag batch from UserDefaults. Nil when no
+    /// batch has been recorded yet.
+    nonisolated static func loadLastBatch() -> [TagWriter.TagOutcome]? {
+        guard let data = UserDefaults.standard.data(forKey: lastBatchKey) else { return nil }
+        return try? JSONDecoder().decode([TagWriter.TagOutcome].self, from: data)
+    }
+
+    /// Clear the persisted batch (after successful undo).
+    nonisolated static func clearLastBatch() {
+        UserDefaults.standard.removeObject(forKey: lastBatchKey)
     }
 }

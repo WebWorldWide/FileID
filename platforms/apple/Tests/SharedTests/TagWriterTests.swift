@@ -59,6 +59,67 @@ struct TagWriterBatchTests {
     }
 }
 
+@Suite("TagWriter — detailed outcomes + undo (T4)")
+struct TagWriterDetailedTests {
+    private func scratch(_ hint: String) throws -> URL {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("FileIDDetailed\(hint)-\(UUID().uuidString).txt")
+        try "x".write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
+
+    @Test("outcome records only the genuinely-new tags")
+    func diffIsExact() throws {
+        let a = try scratch("A")
+        defer { try? FileManager.default.removeItem(at: a) }
+        try TagWriter.setTags(["Mom"], at: a)
+
+        let result = TagWriter.addTagsBulkDetailed(["mom", "Beach"], to: [a])
+        #expect(result.outcomes.count == 1)
+        #expect(result.outcomes.first?.addedTags == ["Beach"],
+                "case-duplicate 'mom' must not appear in the diff")
+        #expect(result.unchanged == 0)
+    }
+
+    @Test("undo removes only FileID-added tags, never the user's")
+    func undoIsPrecise() throws {
+        let a = try scratch("Undo")
+        defer { try? FileManager.default.removeItem(at: a) }
+        try TagWriter.setTags(["Important"], at: a)
+
+        let result = TagWriter.addTagsBulkDetailed(["Vacation", "Beach"], to: [a])
+        #expect(Set(TagWriter.readTags(at: a)) == Set(["Important", "Vacation", "Beach"]))
+
+        let undo = TagWriter.undoBulkAdd(result.outcomes)
+        #expect(undo.undone == 1)
+        #expect(undo.failed == 0)
+        #expect(TagWriter.readTags(at: a) == ["Important"],
+                "user's pre-existing tag survives undo")
+    }
+
+    @Test("undo of an unchanged file batch is a no-op")
+    func undoNoopForUnchanged() throws {
+        let a = try scratch("Noop")
+        defer { try? FileManager.default.removeItem(at: a) }
+        try TagWriter.setTags(["Mom"], at: a)
+
+        let result = TagWriter.addTagsBulkDetailed(["Mom"], to: [a])
+        #expect(result.outcomes.isEmpty)
+        #expect(result.unchanged == 1)
+        let undo = TagWriter.undoBulkAdd(result.outcomes)
+        #expect(undo.undone == 0 && undo.failed == 0)
+        #expect(TagWriter.readTags(at: a) == ["Mom"])
+    }
+
+    @Test("outcomes round-trip through JSON (the undo journal format)")
+    func outcomesCodable() throws {
+        let outcomes = [TagWriter.TagOutcome(path: "/tmp/a.jpg", addedTags: ["Beach", "Mom"])]
+        let data = try JSONEncoder().encode(outcomes)
+        let decoded = try JSONDecoder().decode([TagWriter.TagOutcome].self, from: data)
+        #expect(decoded == outcomes)
+    }
+}
+
 @Suite("TagWriter — file roundtrip")
 struct TagWriterRoundtripTests {
 

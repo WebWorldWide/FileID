@@ -7,9 +7,11 @@
 // across volumes that support extended attributes.
 //
 // Writes are reversible — `setTags` overwrites, so the user can clear
-// FileID's tags by passing an empty list. We don't keep our own
-// journal; Finder tags are the source of truth and the user can edit
-// them in Finder if FileID is ever uninstalled.
+// FileID's tags by passing an empty list. Finder tags stay the source
+// of truth (editable in Finder if FileID is ever uninstalled); the only
+// journal is the UI's last-batch undo record built from `TagOutcome`s,
+// which captures the exact per-file diff so undo removes ONLY what
+// FileID added — never the user's own tags.
 import Foundation
 
 public enum TagWriter {
@@ -108,7 +110,38 @@ public enum TagWriter {
     }
 
     public static func addTagsBulk(_ tags: [String], to urls: [URL]) -> BatchResult {
-        var added = 0
+        let detailed = addTagsBulkDetailed(tags, to: urls)
+        return BatchResult(added: detailed.outcomes.count, unchanged: detailed.unchanged,
+                           failed: detailed.failed, firstError: detailed.firstError)
+    }
+
+    /// One modified file in a detailed bulk run: the exact tags newly
+    /// added (after − before, case-insensitive). This is what makes undo
+    /// precise — it removes only what FileID applied, never a tag the
+    /// user already had.
+    public struct TagOutcome: Codable, Sendable, Equatable {
+        public let path: String
+        public let addedTags: [String]
+
+        public init(path: String, addedTags: [String]) {
+            self.path = path
+            self.addedTags = addedTags
+        }
+    }
+
+    public struct DetailedBatchResult: Sendable {
+        /// Only files that were actually modified.
+        public let outcomes: [TagOutcome]
+        public let unchanged: Int
+        public let failed: Int
+        public let firstError: String?
+
+        public var added: Int { outcomes.count }
+        public var succeeded: Int { added + unchanged }
+    }
+
+    public static func addTagsBulkDetailed(_ tags: [String], to urls: [URL]) -> DetailedBatchResult {
+        var outcomes: [TagOutcome] = []
         var unchanged = 0
         var failed = 0
         var firstError: String?
@@ -119,7 +152,9 @@ public enum TagWriter {
                 if after == before {
                     unchanged += 1
                 } else {
-                    added += 1
+                    let beforeLower = Set(before.map { $0.lowercased() })
+                    let newOnes = after.filter { !beforeLower.contains($0.lowercased()) }
+                    outcomes.append(TagOutcome(path: url.path, addedTags: newOnes))
                 }
             } catch {
                 failed += 1
@@ -128,8 +163,31 @@ public enum TagWriter {
                 }
             }
         }
-        return BatchResult(added: added, unchanged: unchanged,
-                           failed: failed, firstError: firstError)
+        return DetailedBatchResult(outcomes: outcomes, unchanged: unchanged,
+                                   failed: failed, firstError: firstError)
+    }
+
+    /// Undo a previous detailed bulk apply: remove ONLY the recorded
+    /// added tags from each file. A file whose recorded tags are already
+    /// gone counts as undone (removeTags is a no-op for absent tags).
+    public static func undoBulkAdd(_ outcomes: [TagOutcome])
+        -> (undone: Int, failed: Int, firstError: String?) {
+        var undone = 0
+        var failed = 0
+        var firstError: String?
+        for outcome in outcomes {
+            do {
+                try removeTags(outcome.addedTags,
+                               at: URL(fileURLWithPath: outcome.path))
+                undone += 1
+            } catch {
+                failed += 1
+                if firstError == nil {
+                    firstError = error.localizedDescription
+                }
+            }
+        }
+        return (undone, failed, firstError)
     }
 
     // MARK: - Merging
