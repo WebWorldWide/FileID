@@ -26,8 +26,10 @@ import Accelerate
 // >25% of nodes are tombstoned).
 //
 // Memory: each node holds one [Float] (the vector) + one [[Int32]] of
-// neighbour IDs per layer. At M=16, dim=128, ~1 KB per node — 50 K nodes ≈
-// 50 MB, well within budget on every supported Mac.
+// neighbour IDs per layer. For ArcFace (dim=512, 2 KB/vector) that is ~2.3 KB
+// per node — 50 K faces ≈ 115 MB, and at the 200 K face cap ≈ 460 MB. Swift
+// arrays are copy-on-write, so transient passes don't multiply that; still,
+// budget for it on 16 GB Macs.
 final class HNSWIndex {
 
     // MARK: - Tuning
@@ -86,7 +88,7 @@ final class HNSWIndex {
 
         let level = randomLevel()
         let newID = Int32(nodes.count)
-        var newNode = Node(
+        let newNode = Node(
             vec: vec,
             levels: Array(repeating: [], count: level + 1),
             deleted: false
@@ -99,6 +101,13 @@ final class HNSWIndex {
             entryLevel = level
             return newID
         }
+
+        // Reserve the storage slot up front (id == nodes.count above) so that
+        // trimNeighbours() can read this node's vector and fairly score the
+        // back-edge to it. Previously the node was appended only after the
+        // connect loop, so whenever a neighbour was at capacity the trim ran
+        // before the node existed and silently dropped its back-edge.
+        nodes.append(newNode)
 
         // Greedy descent from the top entry layer to layer (level + 1).
         var currentNearest = entryPoint
@@ -131,10 +140,9 @@ final class HNSWIndex {
                 candidates: nearest,
                 m: mForLayer
             )
-            // Establish bidirectional edges.
-            newNode.levels[layer] = neighbours.map { $0.0 }
-            // Append the new node now so neighbour-trim sees it; we re-write
-            // the actual storage at the bottom.
+            // Establish bidirectional edges. Write directly into the reserved
+            // storage slot so trimNeighbours below sees this node's edges/vec.
+            nodes[Int(newID)].levels[layer] = neighbours.map { $0.0 }
             for (neighbourID, _) in neighbours {
                 let nIdx = Int(neighbourID)
                 guard nIdx < nodes.count else { continue }
@@ -153,7 +161,6 @@ final class HNSWIndex {
             entryCandidates = nearest
         }
 
-        nodes.append(newNode)
         if level > entryLevel {
             entryPoint = newID
             entryLevel = level

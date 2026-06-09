@@ -515,22 +515,30 @@ public actor DeepAnalyze {
     }
 
     /// Git's blob hash: sha1 of the literal bytes "blob \(size)\0<content>".
+    /// Streamed in 4 MB chunks — VLM weight files are multi-GB, and the old
+    /// `Data(contentsOf:)` + append loaded the whole file (twice) into RAM,
+    /// which OOM-crashed the engine on the first model load and then crash-
+    /// looped on every relaunch trying to re-synthesize the same metadata.
     private static func gitBlobHash(of url: URL) -> String? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        let header = "blob \(data.count)\0"
-        var combined = Data(header.utf8)
-        combined.append(data)
-        return sha1Hex(combined)
-    }
+        let fm = FileManager.default
+        guard let size = (try? fm.attributesOfItem(atPath: url.path))?[.size] as? NSNumber,
+              let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
 
-    /// SHA-1 hex digest using CommonCrypto (avoids the deprecation
-    /// warning from Insecure.SHA1 on more recent SDKs but does the
-    /// same thing — git uses SHA-1 for blob hashes by spec).
-    private static func sha1Hex(_ data: Data) -> String {
-        var digest = [UInt8](repeating: 0, count: 20)
-        data.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
-            _ = CC_SHA1(ptr.baseAddress, CC_LONG(data.count), &digest)
+        var ctx = CC_SHA1_CTX()
+        CC_SHA1_Init(&ctx)
+        let header = Array("blob \(size.int64Value)\u{0}".utf8)
+        header.withUnsafeBytes { _ = CC_SHA1_Update(&ctx, $0.baseAddress, CC_LONG($0.count)) }
+
+        let chunkSize = 4 * 1024 * 1024
+        while true {
+            let chunk: Data
+            do { chunk = try handle.read(upToCount: chunkSize) ?? Data() } catch { return nil }
+            if chunk.isEmpty { break }
+            chunk.withUnsafeBytes { _ = CC_SHA1_Update(&ctx, $0.baseAddress, CC_LONG(chunk.count)) }
         }
+        var digest = [UInt8](repeating: 0, count: 20)
+        CC_SHA1_Final(&digest, &ctx)
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 

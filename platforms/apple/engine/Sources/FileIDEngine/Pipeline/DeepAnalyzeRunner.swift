@@ -227,18 +227,28 @@ public enum DeepAnalyzeRunner {
             if isFailure {
                 failed += 1
             } else {
-                processed += 1
-                _ = try? await persist(database: database,
-                                        fileID: target.id,
-                                        description: result.description,
-                                        proposedName: result.proposedName,
-                                        modelKey: modelKey)
-                await sink.emit(.deepAnalyzeFileDone(DeepAnalyzeFileDone(
-                    fileID: target.id,
-                    description: result.description,
-                    proposedName: result.proposedName,
-                    modelKind: modelKey
-                )))
+                // Success is contingent on the result actually persisting. A
+                // swallowed write used to report the file as done while the
+                // caption/name never reached the DB (the UI then shows nothing
+                // for a file it believes was analyzed).
+                do {
+                    try await persist(database: database,
+                                      fileID: target.id,
+                                      description: result.description,
+                                      proposedName: result.proposedName,
+                                      modelKey: modelKey)
+                    processed += 1
+                    await sink.emit(.deepAnalyzeFileDone(DeepAnalyzeFileDone(
+                        fileID: target.id,
+                        description: result.description,
+                        proposedName: result.proposedName,
+                        modelKind: modelKey
+                    )))
+                } catch {
+                    failed += 1
+                    JSONLog.shared.warn(ev: "deep_analyze_persist_failed",
+                                        error: "\(error)")
+                }
             }
         }
 

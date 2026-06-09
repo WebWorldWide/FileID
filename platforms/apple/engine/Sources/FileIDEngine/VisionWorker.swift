@@ -72,19 +72,14 @@ public final class VisionWorker: @unchecked Sendable {
     //     Drop entirely.
     // Result: Vision pass shrinks from 4 requests to 2, expected ~50 % cut on
     // the ANE-bound stage.
-    private let classifyReq:   VNClassifyImageRequest
-    private let faceRectsReq:  VNDetectFaceRectanglesRequest
-    /// Quality + landmark request — runs *after* faceRectsReq in the same
-    /// handler.perform call. Produces a per-face capture-quality score
-    /// (Apple Vision's blur / lighting / pose composite) and roll / yaw /
-    /// pitch we use for the M2 face-clustering quality filter.
-    private let faceQualityReq: VNDetectFaceCaptureQualityRequest
-
-    public init() {
-        classifyReq    = VNClassifyImageRequest()
-        faceRectsReq   = VNDetectFaceRectanglesRequest()
-        faceQualityReq = VNDetectFaceCaptureQualityRequest()
-    }
+    // VNRequest objects are allocated PER CALL (see runPrimaryPass), not
+    // cached on the worker. Caching them was a data race: the 10s timeout
+    // abandons a still-running `handler.perform` on a background thread, the
+    // worker is recycled to the next file, and the next perform on the SAME
+    // request instances raced the orphaned one — crashing inside Vision or
+    // bleeding one image's faces/labels into another file. Allocation cost is
+    // trivial next to perform (ocrFast already allocates per call).
+    public init() {}
 
     // Result of the bundled primary pass.
     public struct PrimaryPass: Sendable {
@@ -110,22 +105,26 @@ public final class VisionWorker: @unchecked Sendable {
                                facePrints: [])
 
         let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+        // Per-call request objects — never shared across files (see init note).
+        let cReq = VNClassifyImageRequest()
+        let fReq = VNDetectFaceRectanglesRequest()
+        // Quality + landmark request — runs after fReq in the same perform call.
+        let qReq = VNDetectFaceCaptureQualityRequest()
         visionConcurrencyGate.wait()
-        defer { visionConcurrencyGate.signal() }
         // Run Vision with a hard wall-clock timeout so a single bad input
-        // can't permanently park this worker. Quality request runs in the
-        // same perform call and reuses the in-flight detection internally.
-        let cReq = classifyReq
-        let fReq = faceRectsReq
-        let qReq = faceQualityReq
+        // can't permanently park this worker. Signal the concurrency gate from
+        // INSIDE the worker thread (after perform) so a timed-out, orphaned
+        // perform keeps its ANE slot accounted until it actually finishes —
+        // the cap stays honest instead of over-admitting while threads stall.
         let didReturn = runVisionWithTimeout { [handler] in
+            defer { visionConcurrencyGate.signal() }
             do { try handler.perform([cReq, fReq, qReq]) } catch { /* swallow */ }
         }
         if !didReturn {
             return pass   // timed out — return empty, file logged downstream
         }
 
-        if let results = classifyReq.results {
+        if let results = cReq.results {
             // 0.30 confidence floor: VNClassifyImageRequest emits ~1300
             // hierarchical labels; at 0.5 most photos cleared 0-2 tags
             // (the user complaint was "tagging seems pointless"). 0.30
@@ -144,10 +143,10 @@ public final class VisionWorker: @unchecked Sendable {
         // face-rects observations after sorting (the two requests detect
         // independently and may differ in observation order; bbox proximity
         // is the most reliable join key).
-        let qualityByBBox: [(CGRect, Double)] = (faceQualityReq.results ?? []).map { obs in
+        let qualityByBBox: [(CGRect, Double)] = (qReq.results ?? []).map { obs in
             (obs.boundingBox, Double(obs.faceCaptureQuality ?? 0))
         }
-        if let faces = faceRectsReq.results {
+        if let faces = fReq.results {
             pass.faceCount = faces.count
             // Sort by area descending so the largest faces come first.
             let sortedFaces = faces.sorted {
@@ -205,9 +204,11 @@ public final class VisionWorker: @unchecked Sendable {
         req.recognitionLanguages = ["en-US"]
         let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
         // Same gate + timeout as runPrimaryPass — OCR also goes through ANE.
+        // Gate released inside the worker thread so a timed-out perform holds
+        // its slot until it actually finishes.
         visionConcurrencyGate.wait()
-        defer { visionConcurrencyGate.signal() }
         let didReturn = runVisionWithTimeout { [handler] in
+            defer { visionConcurrencyGate.signal() }
             do { try handler.perform([req]) } catch { /* swallow */ }
         }
         guard didReturn, let results = req.results else { return "" }

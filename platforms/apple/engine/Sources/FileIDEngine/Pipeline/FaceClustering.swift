@@ -394,13 +394,19 @@ public enum FaceClustering {
     /// absorbed. Uses ArcFace cosine consistently with the primary
     /// clustering pass — no embedding-space mismatch.
     static func tightPairAutoMerge(database: Database) async -> Int {
-        struct PrintRow: Sendable { let personID: Int64; let blob: Data; let fileCount: Int }
+        struct PrintRow: Sendable { let personID: Int64; let blob: Data; let fileCount: Int; let named: Bool }
         let rows: [PrintRow]
         do {
             rows = try await database.pool.read { db in
+                // `named` = the user gave this cluster an identity (structured
+                // or legacy name) and didn't mark it unknown. Used below to
+                // protect user-named persons from being absorbed+deleted.
                 let r = try GRDB.Row.fetchAll(db, sql: """
                     SELECT fp.person_id AS pid, fp.arcface_embedding AS blob,
-                           p.file_count AS fc
+                           p.file_count AS fc,
+                           (p.is_unknown = 0 AND (COALESCE(p.first_name,'') != ''
+                             OR COALESCE(p.last_name,'') != ''
+                             OR COALESCE(p.name,'') != '')) AS named
                     FROM face_prints fp
                     INNER JOIN persons p ON p.id = fp.person_id
                     WHERE fp.person_id IS NOT NULL
@@ -408,7 +414,8 @@ public enum FaceClustering {
                     """)
                 return r.map { PrintRow(personID: $0["pid"] ?? 0,
                                          blob: $0["blob"] ?? Data(),
-                                         fileCount: $0["fc"] ?? 0) }
+                                         fileCount: $0["fc"] ?? 0,
+                                         named: ($0["named"] ?? 0) != 0) }
             }
         } catch {
             JSONLog.shared.warn(ev: "face_auto_merge_query_failed", error: "\(error)")
@@ -417,16 +424,17 @@ public enum FaceClustering {
         guard !rows.isEmpty else { return 0 }
 
         // Group embeddings by person, build L2-normalized centroid.
-        struct Cluster { let id: Int64; let centroid: [Float]; let fileCount: Int }
-        var byPerson: [Int64: (vecs: [[Float]], fileCount: Int)] = [:]
+        struct Cluster { let id: Int64; let centroid: [Float]; let fileCount: Int; let named: Bool }
+        var byPerson: [Int64: (vecs: [[Float]], fileCount: Int, named: Bool)] = [:]
         var firstDim = 0
         for row in rows {
             let v = ArcFaceService.blobToEmbedding(row.blob)
             guard !v.isEmpty else { continue }
             if firstDim == 0 { firstDim = v.count }
             guard v.count == firstDim else { continue }
-            byPerson[row.personID, default: ([], row.fileCount)].vecs.append(v)
+            byPerson[row.personID, default: ([], row.fileCount, row.named)].vecs.append(v)
             byPerson[row.personID]?.fileCount = row.fileCount
+            byPerson[row.personID]?.named = row.named
         }
         guard firstDim > 0, byPerson.count >= 2 else { return 0 }
         if byPerson.count > autoMergePersonCap {
@@ -449,7 +457,8 @@ public enum FaceClustering {
             let invN = Float(1) / max(.leastNonzeroMagnitude, norm.squareRoot())
             for i in 0..<firstDim { sum[i] *= invN }
             clusters.append(Cluster(id: pid, centroid: sum,
-                                     fileCount: payload.fileCount))
+                                     fileCount: payload.fileCount,
+                                     named: payload.named))
         }
 
         // O(N²) pairwise cosine. Cluster i is "small" if file_count <= 1.
@@ -466,11 +475,21 @@ public enum FaceClustering {
             return r
         }
         // Prefer the larger-fileCount cluster as the merge target so the
-        // dominant person absorbs fragments (not the other way round).
+        // dominant person absorbs fragments — UNLESS exactly one side is
+        // user-named, in which case the named person is always the target so
+        // its name (and row) survive the merge.
         let countByID = Dictionary(uniqueKeysWithValues: clusters.map { ($0.id, $0.fileCount) })
+        let namedByID = Dictionary(uniqueKeysWithValues: clusters.map { ($0.id, $0.named) })
         func union(_ a: Int64, _ b: Int64) {
             let ra = find(a), rb = find(b)
             if ra == rb { return }
+            let namedA = namedByID[ra] ?? false
+            let namedB = namedByID[rb] ?? false
+            if namedA != namedB {
+                // Exactly one named — it absorbs the other.
+                if namedA { parent[rb] = ra } else { parent[ra] = rb }
+                return
+            }
             let ca = countByID[ra] ?? 0
             let cb = countByID[rb] ?? 0
             if ca >= cb { parent[rb] = ra } else { parent[ra] = rb }
@@ -483,6 +502,10 @@ public enum FaceClustering {
             let smallI = ci.fileCount <= 1
             for j in (i + 1)..<clusters.count {
                 let cj = clusters[j]
+                // Never auto-merge two separately user-named persons — that
+                // would silently override an explicit naming decision and
+                // delete one of the names. Leave them for manual merge.
+                if ci.named && cj.named { continue }
                 let smallJ = cj.fileCount <= 1
                 let cos = dotProduct(ci.centroid, cj.centroid)
                 let isTight = cos >= tightAutoMergeCos
