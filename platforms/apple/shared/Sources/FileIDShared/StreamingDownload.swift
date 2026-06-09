@@ -76,6 +76,10 @@ public func streamingDownload(
             task.priority = URLSessionTask.highPriority
             delegate.task = task
             if Task.isCancelled {
+                // Clear completion FIRST so the delegate's didCompleteWithError
+                // (fired by task.cancel()) can't resume this continuation a
+                // second time — a fatal double-resume.
+                delegate.completion = nil
                 task.cancel()
                 cont.resume(throwing: CancellationError())
                 return
@@ -176,7 +180,10 @@ public func parallelStreamingDownload(
         }
     } catch StreamingDownloadError.rangeNotSupported {
         cleanupParts()
-        try await streamingDownload(remote: resolvedURL, dest: dest, onTick: onTick)
+        // Fall back against the CANONICAL remote, not the resolved CDN URL —
+        // a resolved per-redirect URL can be short-lived/expired, whereas the
+        // sibling single-stream fallback (above) correctly re-follows `remote`.
+        try await streamingDownload(remote: remote, dest: dest, onTick: onTick)
         return
     } catch {
         cleanupParts()
@@ -193,7 +200,10 @@ public func parallelStreamingDownload(
         for u in partURLs {
             let reader = try FileHandle(forReadingFrom: u)
             while true {
-                let chunk = autoreleasepool { try? reader.read(upToCount: 4 * 1024 * 1024) } ?? Data()
+                // Propagate read errors instead of swallowing them as EOF —
+                // a genuine I/O error used to silently truncate the assembled
+                // file (and then ship a corrupt model with no error).
+                let chunk = try autoreleasepool { try reader.read(upToCount: 4 * 1024 * 1024) } ?? Data()
                 if chunk.isEmpty { break }
                 try writer.write(contentsOf: chunk)
             }
@@ -206,6 +216,16 @@ public func parallelStreamingDownload(
         try? FileManager.default.removeItem(at: finalTemp)
         cleanupParts()
         throw StreamingDownloadError.underlying(error)
+    }
+    // Verify the assembled file is exactly the advertised size before trusting
+    // it — guards against a short/truncated concat shipping a corrupt model.
+    let assembledSize = ((try? FileManager.default.attributesOfItem(atPath: finalTemp.path))?[.size] as? NSNumber)?.int64Value ?? -1
+    guard assembledSize == total else {
+        try? FileManager.default.removeItem(at: finalTemp)
+        cleanupParts()
+        throw StreamingDownloadError.underlying(NSError(
+            domain: "FileID", code: -2,
+            userInfo: [NSLocalizedDescriptionKey: "Download size mismatch: assembled \(assembledSize) bytes, expected \(total)"]))
     }
     cleanupParts()
 
@@ -276,6 +296,10 @@ private func downloadRange(
             task.priority = URLSessionTask.highPriority
             delegate.task = task
             if Task.isCancelled {
+                // Clear completion FIRST so the delegate's didCompleteWithError
+                // (fired by task.cancel()) can't resume this continuation a
+                // second time — a fatal double-resume.
+                delegate.completion = nil
                 task.cancel()
                 cont.resume(throwing: CancellationError())
                 return
