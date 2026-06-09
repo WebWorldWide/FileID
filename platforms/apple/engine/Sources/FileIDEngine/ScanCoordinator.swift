@@ -127,6 +127,15 @@ public actor ScanCoordinator {
     public func requestCancel() {
         cancelled = true
         Self.setCancelMirror(true)             // visible to sync Discovery + workers
+        // Setting the flag alone is NOT enough: the discovery producer can be
+        // suspended inside `await discoveryChan.send(file)` on an UNBUFFERED
+        // (rendezvous) channel after every worker has already broken out of
+        // its `for await` on cancel — with no consumer, `send` parks forever,
+        // the TaskGroup never returns, and the scan task (plus the whole
+        // JobQueue) wedges. AsyncChannel's send/next are cancellation-aware,
+        // so cancelling the task unblocks the suspended producer and lets the
+        // group finish and emit scanComplete(.cancelled).
+        activeScanTask?.cancel()
     }
 
     /// Track the in-flight scan task so the engine can await it on shutdown

@@ -185,6 +185,11 @@ struct FileIDEngineMain {
             }
         case .shutdown:
             JSONLog.shared.info(ev: "shutdown_requested")
+            // Cancel any active scan so paused/in-flight workers exit
+            // deterministically. Without this, a scan paused at shutdown
+            // leaves its workers spinning in the pause-poll loop forever and
+            // `awaitActiveScan()` (in main) blocks the clean exit indefinitely.
+            await coordinator.requestCancel()
         case .runFaceClustering:
             guard let database else {
                 await sink.emit(.error(EngineError(
@@ -480,8 +485,9 @@ struct FileIDEngineMain {
             }
         }.value
 
-        // Bounded async channels — discovery 1024 (matches batch size),
-        // tagged 256 (DBWriter drains in batches of 100 with headroom).
+        // Unbuffered (rendezvous) async channels: each `send` suspends until a
+        // consumer calls `next`. They are NOT bounded buffers — see the cancel
+        // handling in ScanCoordinator.requestCancel() for why that matters.
         let discoveryChan = AsyncChannel<DiscoveredFile>()
         let taggedChan    = AsyncChannel<TaggedFile>()
         let workerCap     = Hardware.workerCap
@@ -498,9 +504,13 @@ struct FileIDEngineMain {
         // Producer + N workers in one TaskGroup so we know when all workers
         // finish (and can then close taggedChan to signal EOF to writer).
         await withTaskGroup(of: Void.self) { group in
-            // Producer: feed all discovered files into the channel.
+            // Producer: feed all discovered files into the channel. The cancel
+            // check lets the common case (cancel observed before the producer
+            // next suspends) finish promptly; task cancellation (above) handles
+            // the case where the producer is already suspended in `send`.
             group.addTask {
                 for file in files {
+                    if ScanCoordinator.isCancelledSync() { break }
                     await discoveryChan.send(file)
                 }
                 discoveryChan.finish()
