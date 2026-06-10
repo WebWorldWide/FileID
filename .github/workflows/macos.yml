@@ -73,14 +73,12 @@ jobs:
         # alive, then fail fast.
         run: |
           set -uo pipefail
-          TIMEOUT_BIN=$(command -v timeout || command -v gtimeout || echo "")
-          if [ -z "$TIMEOUT_BIN" ]; then
-            echo "::warning::no timeout binary on runner; running unbounded"
-            exec swift test
-          fi
-          if ! "$TIMEOUT_BIN" --signal=TERM --kill-after=20 720 swift test; then
+          # perl's alarm survives exec, and perl is always on the runner
+          # (coreutils timeout/gtimeout is not). SIGALRM kills the test
+          # process tree's leader at 12 min → exit 142.
+          if ! perl -e 'alarm 720; exec @ARGV or die "exec: $!"' swift test; then
             status=$?
-            echo "::error::swift test exited $status (124 = 12-min timeout hit)"
+            echo "::error::swift test exited $status (142 = 12-min SIGALRM timeout)"
             echo "--- surviving processes ---"
             ps ax -o pid,ppid,etime,command | grep -E "FileID|swiftpm" | grep -v grep || true
             exit "$status"

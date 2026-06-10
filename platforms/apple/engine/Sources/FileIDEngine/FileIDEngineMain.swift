@@ -122,11 +122,16 @@ struct FileIDEngineMain {
         // app sends an IPCCommand case the engine doesn't know yet.
         let stdin = FileHandle.standardInput
         let commands = LineReader.readResults(from: stdin, as: IPCCommand.self)
-        for await item in commands {
+        // The label is load-bearing: an unlabeled `break` here exits the
+        // SWITCH, not the loop — the engine then sat in the read loop
+        // until stdin EOF and never honored the shutdown command on its
+        // own (caught by ScanCancellationTests the first time CI actually
+        // executed it).
+        commandLoop: for await item in commands {
             switch item {
             case .success(let cmd):
                 await dispatch(cmd, coordinator: coordinator, sink: sink, database: database)
-                if case .shutdown = cmd.payload { break }
+                if case .shutdown = cmd.payload { break commandLoop }
             case .failure(let err):
                 JSONLog.shared.warn(ev: "command_decode_failed", error: "\(err)")
                 await sink.emit(.error(EngineError(kind: "command_decode_failed",
