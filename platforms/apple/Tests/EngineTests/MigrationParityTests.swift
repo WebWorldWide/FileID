@@ -46,20 +46,26 @@ struct MigrationParityTests {
     func newerDatabaseRefusesToOpen() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("fileid-l7-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let dbURL = dir.appendingPathComponent("fileid.sqlite")
 
-        // FileIDEngine.Database — bare `Database` is ambiguous with
-        // GRDB.Database under @testable import.
-        var db: FileIDEngine.Database? = try FileIDEngine.Database(at: dbURL)
-        try db!.pool.write { conn in
-            try conn.execute(
-                sql: "INSERT INTO grdb_migrations (identifier) VALUES (?)",
-                arguments: ["v99_from_the_future"]
-            )
+        // Build the "newer" DB with a plain DatabaseQueue — opening a
+        // second DatabasePool on the same file inside one process is
+        // exactly what Database's own header warns against.
+        do {
+            let q = try DatabaseQueue(path: dbURL.path)
+            try FileIDEngine.Database.migrator.migrate(q)
+            try q.write { conn in
+                try conn.execute(
+                    sql: "INSERT INTO grdb_migrations (identifier) VALUES (?)",
+                    arguments: ["v99_from_the_future"]
+                )
+            }
+            try q.close()
         }
-        db = nil
 
+        // Bare `Database` is ambiguous with GRDB.Database here.
         #expect(throws: DatabaseOpenError.self) {
             _ = try FileIDEngine.Database(at: dbURL)
         }
