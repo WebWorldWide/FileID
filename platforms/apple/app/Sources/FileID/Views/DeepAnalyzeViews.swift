@@ -259,7 +259,7 @@ struct DeepAnalyzeView: View {
     }
 
     private func refreshPendingRenameCount() {
-        pendingRenameCount = store.filesWithProposedNames(limit: 5000).count
+        pendingRenameCount = store.countFilesWithProposedNames()
     }
 
     private var smartNamesCard: some View {

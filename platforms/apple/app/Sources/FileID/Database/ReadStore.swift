@@ -616,6 +616,27 @@ public final class ReadStore: @unchecked Sendable {
         }) ?? 0
     }
 
+    /// `totalAnalyzableFiles` + `totalCaptioned` in one table pass —
+    /// Restructure's regenerate() needs both, and two separate
+    /// full-table COUNTs doubled the scan on large libraries. Same
+    /// predicates as the individual functions; one shared snapshot.
+    public func filesAnalysisStats() -> (analyzable: Int, captioned: Int) {
+        guard let q = queue else { return (0, 0) }
+        return (try? q.read { db in
+            let row = try Row.fetchOne(db, sql: """
+                SELECT
+                  SUM(CASE WHEN kind IN ('image', 'pdf', 'video', 'doc')
+                      THEN 1 ELSE 0 END) AS analyzable,
+                  SUM(CASE WHEN vlm_proposed_name IS NOT NULL
+                            AND vlm_proposed_name <> ''
+                      THEN 1 ELSE 0 END) AS captioned
+                FROM files WHERE failed = 0
+            """)
+            return ((row?["analyzable"] as Int?) ?? 0,
+                    (row?["captioned"] as Int?) ?? 0)
+        }) ?? (0, 0)
+    }
+
     public func updatePerson(id: Int64, title: String?, firstName: String?,
                              middleName: String?, lastName: String?,
                              suffix: String?, isUnknown: Bool) {
@@ -925,6 +946,25 @@ public final class ReadStore: @unchecked Sendable {
             self.lastError = "Proposed-name query failed: \(error)"
             return []
         }
+    }
+
+    /// Count-only twin of `filesWithProposedNames` — the badge/refresh
+    /// paths only need the number, and SELECT * deserialized up to
+    /// 5000 full rows per refresh. The inner LIMIT keeps the cap
+    /// semantics identical to `filesWithProposedNames(limit:).count`.
+    public func countFilesWithProposedNames(limit: Int = 5000) -> Int {
+        guard let q = queue else { return 0 }
+        return (try? q.read { db in
+            try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM (
+                    SELECT 1 FROM files
+                    WHERE failed = 0
+                      AND vlm_proposed_name IS NOT NULL
+                      AND vlm_proposed_name != ''
+                    LIMIT ?
+                )
+                """, arguments: [limit]) ?? 0
+        }) ?? 0
     }
 
     /// Apply renames to many files. Returns per-file results; the

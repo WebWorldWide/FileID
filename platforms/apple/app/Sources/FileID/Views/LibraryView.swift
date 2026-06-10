@@ -514,7 +514,7 @@ struct LibraryView: View {
     }
 
     private func refreshBulkState() {
-        pendingRenameCount = store.filesWithProposedNames(limit: 5000).count
+        pendingRenameCount = store.countFilesWithProposedNames()
         lastBatchAvailable = (BulkRenameSheet.loadLastBatch()?.isEmpty == false)
         lastTagBatchAvailable = (BulkTagSheet.loadLastBatch()?.isEmpty == false)
     }

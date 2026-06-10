@@ -414,9 +414,9 @@ impl DbWriter {
                         face_stmt
                             .execute(params![
                                 file_id,
-                                arcface_bytes.clone(),
+                                arcface_bytes.as_slice(),
                                 bbox_json,
-                                arcface_bytes,
+                                arcface_bytes.as_slice(),
                                 face.quality as f64,
                             ])
                             .with_context(|| format!("face insert for {}", crate::platform::redact_path_for_log(&f.path)))?;

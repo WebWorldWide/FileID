@@ -26,6 +26,13 @@ public enum Tagging {
         attributes: .concurrent
     )
 
+    // Hot-loop constants — allocated once, not per file.
+    private static let gregorianCalendar = Calendar(identifier: .gregorian)
+    private static let docHints: Set<String> = [
+        "document", "text", "screenshot", "receipt",
+        "presentation", "menu", "sign"
+    ]
+
     /// Process one file. Pure function over the inputs: worker + url + size +
     /// dates → TaggedFile. Caller wraps in `pool.with { ... }` and pushes the
     /// result into the AsyncChannel feeding DBWriter.
@@ -73,7 +80,7 @@ public enum Tagging {
                     let sizeMB = Double(discovered.sizeBytes) / 1_048_576
 
                     let loadStart = CFAbsoluteTimeGetCurrent()
-                    guard let cgImage = loadCGImage(url: url) else {
+                    guard let (cgImage, exif) = loadImageAndEXIF(url: url) else {
                         JSONLog.shared.warn(ev: "image_decode_failed", path: redactPathForLog(url.path))
                         return TaggedFile(
                             url: url, kind: "image", extension: ext,
@@ -93,10 +100,6 @@ public enum Tagging {
                     let visionMs = (CFAbsoluteTimeGetCurrent() - visionStart) * 1000
 
                     // OCR — only if classify suggests there's text to read.
-                    let docHints: Set<String> = [
-                        "document", "text", "screenshot", "receipt",
-                        "presentation", "menu", "sign"
-                    ]
                     var ocr: String? = nil
                     var ocrMs: Double = 0
                     if pass.classifyTags.contains(where: { docHints.contains($0.lowercased()) }) {
@@ -108,7 +111,6 @@ public enum Tagging {
 
                     let phash = computeDHash(cgImage)
                     let aesthetic = lightweightAesthetic(cgImage: cgImage, fileSizeMB: sizeMB)
-                    let exif = readEXIF(url: url)
 
                     // CLIP image embedding — internally bounded by inferenceSem.
                     let clipStart = CFAbsoluteTimeGetCurrent()
@@ -285,7 +287,12 @@ public enum Tagging {
 
     // MARK: - Helpers
 
-    private static func loadCGImage(url: URL) -> CGImage? {
+    // EXIF is read from the SAME CGImageSource as the decode — a separate
+    // CGImageSourceCreateWithURL re-opened and re-parsed every file, which
+    // on NAS volumes cost ms per image across 14-32 workers.
+    private static func loadImageAndEXIF(
+        url: URL
+    ) -> (CGImage, (cameraModel: String?, lat: Double?, lon: Double?))? {
         // Skip files smaller than 256 B — corrupt or zero-byte. Avoids the
         // ImageIO crash mode v1's Session-B-hardening fixed.
         if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
@@ -308,7 +315,10 @@ public enum Tagging {
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: 512
         ]
-        return CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary)
+        guard let img = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else {
+            return nil
+        }
+        return (img, readEXIF(from: src))
     }
 
     /// dHash — perceptual hash for duplicate detection. 9x8 grayscale,
@@ -362,8 +372,7 @@ public enum Tagging {
         var out: [String] = []
         // Year tag from creation date.
         if let d = creationDate {
-            let cal = Calendar(identifier: .gregorian)
-            let y = cal.component(.year, from: d)
+            let y = gregorianCalendar.component(.year, from: d)
             if y > 1990 && y < 2100 { out.append("Year_\(y)") }
         }
         // Camera family — collapse "Apple iPhone 15 Pro Max" → "iPhone",
@@ -387,10 +396,9 @@ public enum Tagging {
         return out
     }
 
-    /// Read EXIF camera model + GPS coords from the image's metadata.
-    private static func readEXIF(url: URL) -> (cameraModel: String?, lat: Double?, lon: Double?) {
-        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
+    /// Read EXIF camera model + GPS coords from an already-open source.
+    private static func readEXIF(from src: CGImageSource) -> (cameraModel: String?, lat: Double?, lon: Double?) {
+        guard let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
         else {
             return (nil, nil, nil)
         }

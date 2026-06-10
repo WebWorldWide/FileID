@@ -818,8 +818,7 @@ struct RestructureView: View {
         inlineGroupsByOutcome = byOutcome
         inlineMatchedCountByOutcome = matchedCount
 
-        let total = store.totalAnalyzableFiles()
-        let captioned = store.totalCaptioned()
+        let (total, captioned) = store.filesAnalysisStats()
         totalAnalyzableFiles = total
         captionedFraction = total > 0 ? Double(captioned) / Double(total) : 0
     }
