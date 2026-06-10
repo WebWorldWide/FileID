@@ -65,7 +65,26 @@ jobs:
         # that need a populated Tests/Corpus/ tree skip themselves when the
         # corpus isn't present (it's downloaded via scripts/build_corpus.sh
         # locally and is too slow/fragile to fetch in CI).
-        run: swift test
+        #
+        # 12-minute hard cap (healthy runs finish in ~3): a leaked child
+        # process holding the test harness's output pipe once turned a
+        # finished suite into a 60-minute silent hang that ate the whole
+        # job timeout. On expiry, surface which processes were still
+        # alive, then fail fast.
+        run: |
+          set -uo pipefail
+          TIMEOUT_BIN=$(command -v timeout || command -v gtimeout || echo "")
+          if [ -z "$TIMEOUT_BIN" ]; then
+            echo "::warning::no timeout binary on runner; running unbounded"
+            exec swift test
+          fi
+          if ! "$TIMEOUT_BIN" --signal=TERM --kill-after=20 720 swift test; then
+            status=$?
+            echo "::error::swift test exited $status (124 = 12-min timeout hit)"
+            echo "--- surviving processes ---"
+            ps ax -o pid,ppid,etime,command | grep -E "FileID|swiftpm" | grep -v grep || true
+            exit "$status"
+          fi
 
       - name: Verify binaries exist
         run: |

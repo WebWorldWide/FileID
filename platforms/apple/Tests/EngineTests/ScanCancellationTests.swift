@@ -71,7 +71,18 @@ struct ScanCancellationTests {
             Task { await collector.feed(data) }
         }
         try proc.run()
-        defer { if proc.isRunning { proc.terminate() } }
+        // A leaked engine child holds the test harness's output pipe open
+        // and turns "suite finished" into an infinite hang (the job-level
+        // symptom: swiftpm-testing + FileIDEngine reaped as orphans at the
+        // 60-min CI timeout). Close stdin (the engine's EOF exit path),
+        // then escalate to SIGKILL — never leave it running.
+        defer {
+            try? stdin.fileHandleForWriting.close()
+            if proc.isRunning {
+                proc.terminate()
+                kill(proc.processIdentifier, SIGKILL)
+            }
+        }
 
         func send(_ json: String) throws {
             try stdin.fileHandleForWriting.write(contentsOf: Data((json + "\n").utf8))
@@ -105,13 +116,19 @@ struct ScanCancellationTests {
                 "cancelled scan must still emit the terminal scanComplete")
 
         // The other C1 symptom was shutdown wedging behind the uncancelled
-        // producer — a clean exit IS the responsiveness probe.
+        // producer — a clean exit IS the responsiveness probe. Poll
+        // isRunning instead of waitUntilExit(): a blocking wait inside a
+        // task group can NEVER be cancelled, so the old "timeout" wrapper
+        // deadlocked the whole suite whenever exit took >15 s (task groups
+        // drain all children before returning). 30 s budget for slow CI
+        // runners — a cancelled 2000-file scan still checkpoints the WAL
+        // on the way out.
         try send(#"{"id":"x","payload":{"shutdown":{}}}"#)
-        let exited = await withTimeout(seconds: 15) {
-            proc.waitUntilExit()
-            return true
-        } ?? false
-        #expect(exited, "engine must exit cleanly on shutdown after a cancelled scan")
+        let exitDeadline = Date().addingTimeInterval(30)
+        while proc.isRunning && Date() < exitDeadline {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        #expect(!proc.isRunning, "engine must exit cleanly on shutdown after a cancelled scan")
 
         // U4: every line on the wire must be a JSON object — no library
         // chatter may reach the IPC stream.
@@ -120,18 +137,4 @@ struct ScanCancellationTests {
         }
     }
 
-    private func withTimeout<T: Sendable>(
-        seconds: TimeInterval, _ body: @escaping @Sendable () -> T
-    ) async -> T? {
-        await withTaskGroup(of: T?.self) { group in
-            group.addTask { body() }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                return nil
-            }
-            let first = await group.next() ?? nil
-            group.cancelAll()
-            return first
-        }
-    }
 }
