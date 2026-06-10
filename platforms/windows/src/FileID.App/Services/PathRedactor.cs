@@ -19,6 +19,7 @@ internal static class PathRedactor
 {
     private static readonly string s_userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
     private static readonly string s_userProfileNormalized = NormalizeForCompare(s_userProfile);
+    private static readonly string s_stateRootNormalized = NormalizeForCompare(AppPaths.Root);
 
     public static string Redact(string? path)
     {
@@ -27,6 +28,16 @@ internal static class PathRedactor
             return "<null>";
         }
         var normalized = NormalizeForCompare(path);
+        // FileID's own state tree (%LOCALAPPDATA%\FileID\…) carries no
+        // user-chosen names — pass it through verbatim so model/db/log
+        // paths stay debuggable. Parity with the Rust engine
+        // (platform.rs root() boundary) and macOS (fileIDStateRoot).
+        if (normalized.StartsWith(s_stateRootNormalized, StringComparison.OrdinalIgnoreCase)
+            && (normalized.Length == s_stateRootNormalized.Length
+                || normalized[s_stateRootNormalized.Length] == '\\'))
+        {
+            return path;
+        }
         // Require an exact-home or separator boundary after the prefix —
         // otherwise `C:\Users\bob` would match `C:\Users\bobby\…` and leak a
         // DIFFERENT user's name as `~by\…`.

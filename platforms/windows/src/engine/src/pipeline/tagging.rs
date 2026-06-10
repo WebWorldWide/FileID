@@ -246,11 +246,40 @@ pub struct DetectedFace {
     pub yaw: f32,
     pub pitch: f32,
     pub quality: f32,
+    /// True when the face should not anchor clustering (macOS parity:
+    /// DBWriter.swift isExcluded). The row + crop still persist so the
+    /// user can attach it to a person later; the clustering query
+    /// filters `excluded = 0`.
+    pub excluded: bool,
     /// Tightly-packed RGB8 of the 112×112 ArcFace crop. Written by the
     /// dbwriter to face_crops/<face_id>.jpg so the People tab cards can
     /// render real faces instead of gray circles. Cleared after persist
     /// to avoid holding ~37 KB per face in memory.
     pub crop_rgb_112: Option<Vec<u8>>,
+}
+
+// Face-quality clustering filter — same constants as macOS
+// (DBWriter.swift qualityFloor / minBBoxAreaFraction / maxYawRadians /
+// maxPitchRadians) so the same library clusters the same faces on both
+// platforms. Pose is radians on both sides. The quality scales differ
+// (Vision faceCaptureQuality vs SCRFD score×geometry) but both floors
+// are "catastrophic-only", and this detector already hard-rejects
+// below its accept threshold — the floor rarely fires here; kept for
+// rule parity.
+const FACE_QUALITY_FLOOR: f32 = 0.02;
+const FACE_MIN_BBOX_AREA_FRACTION: f32 = 0.002;
+const FACE_MAX_YAW_RADIANS: f32 = 50.0 * std::f32::consts::PI / 180.0;
+const FACE_MAX_PITCH_RADIANS: f32 = 30.0 * std::f32::consts::PI / 180.0;
+
+/// True if the face should be excluded from clustering. Mirrors macOS
+/// DBWriter.isExcluded: low capture quality, tiny bbox (noisy
+/// embeddings), or heavy profile/pitch (the same identity at frontal
+/// vs 60° lands far apart in embedding space, polluting clusters).
+pub fn face_is_excluded(quality: f32, yaw: f32, pitch: f32, bbox_area_fraction: f32) -> bool {
+    quality < FACE_QUALITY_FLOOR
+        || bbox_area_fraction < FACE_MIN_BBOX_AREA_FRACTION
+        || yaw.abs() > FACE_MAX_YAW_RADIANS
+        || pitch.abs() > FACE_MAX_PITCH_RADIANS
 }
 
 /// Loaded ML weights shared across tagging workers. Each model is
@@ -1502,6 +1531,12 @@ async fn process_file_predecoded(
                                         match embed_result {
                                             Ok(emb) => {
                                                 let pose = scrfd::estimate_pose(&det.landmarks);
+                                                let img_area = (w as f32) * (h as f32);
+                                                let area_fraction = if img_area > 0.0 {
+                                                    (bbox_xywh[2] * bbox_xywh[3]) / img_area
+                                                } else {
+                                                    0.0
+                                                };
                                                 tagged.faces.push(DetectedFace {
                                                     bbox: bbox_xywh,
                                                     landmarks: det.landmarks,
@@ -1510,6 +1545,9 @@ async fn process_file_predecoded(
                                                     yaw: pose.yaw,
                                                     pitch: pose.pitch,
                                                     quality,
+                                                    excluded: face_is_excluded(
+                                                        quality, pose.yaw, pose.pitch, area_fraction,
+                                                    ),
                                                     crop_rgb_112: Some(crop),
                                                 });
                                             }
@@ -2222,6 +2260,7 @@ mod tests {
             yaw: 0.0,
             pitch: 0.0,
             quality: 0.0,
+            excluded: false,
             crop_rgb_112: None,
         };
         assert!(f.crop_rgb_112.is_none());

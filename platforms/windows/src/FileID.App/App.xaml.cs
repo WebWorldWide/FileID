@@ -227,7 +227,7 @@ public partial class App : Application
     {
         try
         {
-            DebugLog.Info($"[AUTO-SCAN] requested path={folderPath} exitAfter={exitAfterScan}");
+            DebugLog.Info($"[AUTO-SCAN] requested path={PathRedactor.Redact(folderPath)} exitAfter={exitAfterScan}");
             await EngineClient.Instance.WaitForReadyAsync(System.TimeSpan.FromSeconds(60));
             if (EngineClient.Instance.State != ViewModels.EngineClient.LifecycleState.Ready)
             {

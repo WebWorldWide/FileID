@@ -236,6 +236,17 @@ struct FileIDEngineMain {
                 )))
                 return
             }
+            // Duplicate-command parity with the Windows engine: a second
+            // deep-analyze while one is queued/running is rejected, not
+            // silently queued (the app disables its buttons in-flight, so
+            // this only fires for misbehaving callers).
+            if await JobQueue.shared.hasActive(category: .deepAnalyze) {
+                await sink.emit(.error(EngineError(
+                    kind: "deep_analyze_already_running",
+                    message: "A Deep Analyze pass is already running — wait for it to finish or cancel it first."
+                )))
+                return
+            }
             // Immediate "received" signal — the UI's startingCard listens
             // for this so the user sees acknowledgement the moment they
             // click. Without it, there's a multi-second silent gap while
@@ -257,6 +268,13 @@ struct FileIDEngineMain {
                 await sink.emit(.error(EngineError(
                     kind: "deep_invalid",
                     message: "Database unavailable or unknown model kind \(modelKind)."
+                )))
+                return
+            }
+            if await JobQueue.shared.hasActive(category: .deepAnalyze) {
+                await sink.emit(.error(EngineError(
+                    kind: "deep_analyze_already_running",
+                    message: "A Deep Analyze pass is already running — wait for it to finish or cancel it first."
                 )))
                 return
             }
@@ -282,6 +300,13 @@ struct FileIDEngineMain {
                 await sink.emit(.error(EngineError(
                     kind: "deep_invalid",
                     message: "Database unavailable or unknown model kind \(modelKind)."
+                )))
+                return
+            }
+            if await JobQueue.shared.hasActive(category: .deepAnalyze) {
+                await sink.emit(.error(EngineError(
+                    kind: "deep_analyze_already_running",
+                    message: "A Deep Analyze pass is already running — wait for it to finish or cancel it first."
                 )))
                 return
             }

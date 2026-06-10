@@ -1523,16 +1523,19 @@ enum RestructureEngine {
         return parts.joined(separator: "/")
     }
 
-    /// Sanitize a filename: strip `/`, leading dots, NUL, and trim.
-    /// Falls back to a default if everything would be stripped.
+    /// Sanitize a generated filename via the canonical cross-platform
+    /// rules (FilesystemNameSafe: illegal/control chars, trailing
+    /// dots/spaces, Windows reserved basenames, length cap) — the old
+    /// hand-rolled version here only stripped `/` and NUL, so a
+    /// restructure could mint folders Windows can't read when the
+    /// library syncs cross-platform. Leading dots still stripped so a
+    /// generated name never becomes a hidden file.
     static func sanitizeFilename(_ raw: String) -> String {
-        var s = raw
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "\0", with: "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         while s.hasPrefix(".") { s.removeFirst() }
         if s.isEmpty || s == "." || s == ".." { return "untitled" }
-        return s
+        let safe = FilesystemNameSafe.componentSafe(s)
+        return safe == "_" ? "untitled" : safe
     }
 
     /// Resolve a symlink target that may be relative to the link's

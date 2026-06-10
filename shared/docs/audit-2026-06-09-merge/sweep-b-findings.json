@@ -1,0 +1,238 @@
+{
+ "confirmed": [
+  {
+   "lens": "P1-ipc-semantics",
+   "finding": {
+    "title": "Deep Analyze concurrency: Windows rejects duplicate commands with error; macOS queues them silently",
+    "severity": "high",
+    "file": "platforms/apple/engine/Sources/FileIDEngine/FileIDEngineMain.swift; platforms/windows/src/engine/src/main.rs",
+    "line": "macOS: 231-299 (deepAnalyzeFile/Folder/All); Windows: main.rs:706-752, emit_deep_analyze_busy:468-476",
+    "evidence": "macOS handlers (.deepAnalyzeFile, .deepAnalyzeFolder, .deepAnalyzeAll) all call JobQueue.shared.enqueue() without checking if another deep analyze is in flight. Windows handlers for the same commands check `deep_analyze_active.compare_exchange(false, true)` and return `emit_deep_analyze_busy(sink)` error if already active.",
+    "trigger": "User sends deepAnalyzeFile twice in rapid succession (or sends deepAnalyzeFile while deepAnalyzeAll is running): On Windows, the second command gets a 'deep_analyze_already_running' error event (EngineError kind); on macOS, the second command is queued and will run after the first completes.",
+    "impact": "Cross-platform semantic mismatch: the IPC contract should be identical per-platform. Apps using the same command-sending logic will experience different behavior (error vs queue). This breaks the invariant that the same input produces the same output.",
+    "suggestedFix": "macOS should add the same in-flight check as Windows for deepAnalyzeFile/deepAnalyzeFolder/deepAnalyzeAll, using an actor or atomic flag. Emit a 'deep_analyze_already_running' error event (as per EngineError kind) when rejecting duplicate commands, matching Windows behavior.",
+    "whichSideMoves": "macOS moves toward Windows-canonical behavior"
+   },
+   "verdict": {
+    "verdict": "confirmed",
+    "reasoning": "Every load-bearing claim survives independent trace at HEAD (b653d00). \n\nVERIFIED: (1) macOS handlers (.deepAnalyzeFile/.deepAnalyzeFolder/.deepAnalyzeAll at FileIDEngineMain.swift:231-299) call JobQueue.shared.enqueue() unconditionally with zero duplicate-command checks; JobQueue.swift:51-59 shows enqueue() simply appends to a pending array with no deduplication. (2) Windows handlers (main.rs:704-710, 726-732, 748-754) all check deep_analyze_active.compare_exchange(false, true) and call emit_deep_analyze_busy() on failure, emitting EngineError{kind: \"deep_analyze_already_running\"} (main.rs:456-464). (3) The trigger chain is statically deterministic: user sends deepAnalyzeFile twice; Windows rejects the second via the atomic compare_exchange; macOS enqueues it in JobQueue.pending, where it runs after the first completes. (4) Not a duplicate: zero prior audit records mention this specific \"Windows rejects, macOS queues\" parity mismatch; app-audit.json's deep_analyze finding is about app-side IPC message correlation, not engine-side concurrency gates. (5) Not deliberate per DECISIONS.md: no documented decision authorizes this asymmetry.\n\nThe cross-platform IPC contract violation is real: identical input (deepAnalyzeFile sent twice) produces different outputs (error vs queued). Both platforms enforce one-at-a-time execution (JobQueue serialization vs atomic gate), so the mechanical effect is identical (only one runs), but the semantic response differs. For a user clicking \"Analyze\" twice rapidly, both are reasonable UX, but from an IPC-contract perspective the behavior should be uniform.",
+    "severityAdjusted": "medium"
+   }
+  },
+  {
+   "lens": "P1-ipc-semantics",
+   "finding": {
+    "title": "Cancelled scan: Windows does NOT emit scanComplete event; macOS does",
+    "severity": "high",
+    "file": "platforms/apple/engine/Sources/FileIDEngine/FileIDEngineMain.swift; platforms/windows/src/engine/src/scan_session.rs",
+    "line": "macOS: 794-828 (markSessionFinal); Windows: scan_session.rs:495-512",
+    "evidence": "macOS markSessionFinal() (line 815) unconditionally calls `await sink.emit(.scanComplete(...))` regardless of whether the scan was cancelled or completed (line 822). Windows scan_session.rs's finish() method (line 495-512) emits phaseChanged(Cancelled) but has NO scanComplete event in the cancelled branch (line 496-497); scanComplete is only emitted in the success path (line 503-512).",
+    "trigger": "User cancels a scan: phaseChanged(Cancelled) is emitted by both; but macOS also emits scanComplete with totalFiles/processedFiles/failedFiles/totalSeconds, while Windows never emits it.",
+    "impact": "Apps that depend on scanComplete to clear UI state or finalize scan metadata will behave differently. On Windows, cancelled scans leave the UI in 'mid-scan' state unless the app separately listens for phaseChanged(Cancelled). On macOS, the same app gets both events and may double-process the terminal state.",
+    "suggestedFix": "Align Windows and macOS on terminal event semantics. Options: (a) both emit scanComplete for all terminal states (cancelled/completed/failed) -- the more robust choice since it provides a single clear terminal marker; (b) both skip scanComplete for cancelled scans -- less ideal, as cancelled scans still need to report final counts. Option (a) is recommended.",
+    "whichSideMoves": "Windows moves toward macOS behavior (emit scanComplete unconditionally)"
+   },
+   "verdict": {
+    "verdict": "confirmed",
+    "severityAdjusted": "medium",
+    "reasoning": "Verified through code inspection and test evidence:\n\nLOAD-BEARING CLAIMS \u2014 ALL VERIFIED:\n1. macOS markSessionFinal (FileIDEngineMain.swift:822-828): `await sink.emit(.scanComplete(...))` is UNCONDITIONAL at line 822 \u2014 no if-guard based on cancelled state. Line 794 captures `let cancelled = await coordinator.isCancelled` but only uses it for DB status (line 806) and final phase (line 795); emit happens regardless.\n\n2. Windows scan_session.rs finish() (lines 495-512): Explicit branching \u2014 cancelled path (495-497) emits ONLY `phaseChanged(Cancelled)`. Non-cancelled path (498-512) emits scanComplete at lines 503-512. No scanComplete in cancelled branch.\n\n3. Tested/Documented Contract: macOS ScanCancellationTests.swift:104-105 contains explicit regression test asserting `\"cancelled scan must still emit the terminal scanComplete\"` \u2014 this is a load-bearing test that validates the C1 deadlock fix. Windows has no equivalent.\n\n4. Novelty Verified: Comprehensive grep across /shared/docs/audit-2026-06-{01,03,04b,04c,09-merge}/ found no prior record of this specific parity finding. Found other scanComplete mentions (faceClusteringInFlight, DeepAnalyze cancellation labeling) but not this platform divergence.\n\n5. Reproduction Narrative Holds: User cancels a scan mid-operation \u2192 macOS emits phaseChanged(Cancelled) + scanComplete with final counts \u2192 Windows emits ONLY phaseChanged(Cancelled), no scanComplete. External consumers expecting scanComplete to always mark scan end (per tested macOS contract) fail on Windows.\n\nSEVERITY DOWNGRADE JUSTIFIED (from HIGH to MEDIUM):\n- NOT silent data loss: scan completes correctly with accurate final counts, DB is properly updated\n- NOT crash/hang: both sides emit phaseChanged successfully and complete terminal state\n- NOT UI wedge: Windows app (EngineClient.cs) clears LastProgress/LastBatch on phaseChanged(Cancelled), not scanComplete\n- Practical effect: parity contract violation affecting clustering auto-trigger behavior (Windows deliberately defers clustering on cancel per code comment; macOS processes scanComplete)\n- Real risk: contract divergence confuses 3rd-party consumers expecting macOS-documented semantics\n\nVERDICT: Finding is CORRECT and NOVEL. Severity is MEDIUM (parity violation / behavioral inconsistency), not HIGH (would require data loss or crash).</reasoning>\n</invoke>"
+   }
+  },
+  {
+   "lens": "P1-ipc-semantics",
+   "finding": {
+    "title": "discoveryComplete event: macOS emits it; Windows does not",
+    "severity": "medium",
+    "file": "platforms/apple/engine/Sources/FileIDEngine/FileIDEngineMain.swift; platforms/windows/src/engine/src/scan_session.rs",
+    "line": "macOS: 461; Windows: no emitter found (only in ipc/mod.rs:481 definition, ipc/conformance.rs:229 test)",
+    "evidence": "macOS emits `.discoveryComplete(totalFiles: files.count)` at the end of discovery (line 461). Grep across the entire Windows engine codebase finds no emit point for EventPayload::DiscoveryComplete outside test/conformance code.",
+    "trigger": "During a scan, the discovery phase completes: macOS emits a discoveryComplete event; Windows does not.",
+    "impact": "Apps listening for discoveryComplete to update UI (e.g., 'Found 10,000 files, now tagging...') will not receive the event on Windows, leading to missing state transitions or stale progress displays.",
+    "suggestedFix": "Windows should emit EventPayload::DiscoveryComplete(DiscoveryCompletePayload { total_files }) when discovery finishes (in scan_session.rs around line 133-134, after on_phase(SessionPhase::Discovering)).",
+    "whichSideMoves": "Windows moves toward macOS behavior"
+   },
+   "verdict": {
+    "verdict": "confirmed",
+    "reasoning": "The finding is confirmed with high confidence. macOS FileIDEngineMain.swift:461 emits `.discoveryComplete(totalFiles: files.count)` after discovery finishes. Windows scan_session.rs (lines 237-347) has no corresponding emit \u2014 grep of the entire Windows engine finds DiscoveryComplete only in test/conformance code (ipc/conformance.rs:229). The event is defined in the IPC schema (ipc.schema.json) and the Windows app has a handler for it (EngineClient.cs case DiscoveryCompleteEvent), confirming it's part of the expected contract. The finding is novel (absent from all six prior audit records and DECISIONS.md). The reproduction narrative is accurate: discovery completes on both platforms, macOS emits the event, Windows silently omits it. Windows should emit EventPayload::DiscoveryComplete(DiscoveryCompletePayload { total_files: discovered_count.load() }) around scan_session.rs:343 to restore parity.",
+    "severityAdjusted": "medium"
+   }
+  },
+  {
+   "lens": "P3-db-query-parity",
+   "finding": {
+    "title": "Windows DBWriter doesn't populate the `excluded` field for face_prints, breaking clustering quality filters across platforms",
+    "severity": "high",
+    "file": "platforms/windows/src/engine/src/pipeline/dbwriter.rs",
+    "line": "414-421",
+    "evidence": "Windows inserts into face_prints: `INSERT INTO face_prints (file_id, print_data, bbox, arcface_embedding, face_quality) VALUES (?1, ?2, ?3, ?4, ?5)` at lines 414-421. The `excluded` column is never populated, defaulting to 0. macOS inserts: `INSERT INTO face_prints (file_id, print_data, bbox, face_quality, excluded) VALUES (?, ?, ?, ?, ?)` at DBWriter.swift:528-532, computing `excluded = Self.isExcluded(quality: quality, yaw: yaw, pitch: pitch, bboxArea: bboxArea)` (lines 525-526). macOS isExcluded (lines 588-596) excludes nil quality, quality < qualityFloor, bboxArea < minBBoxAreaFraction, abs(yaw) > maxYawRadians, abs(pitch) > maxPitchRadians. Windows clustering query uses `WHERE ... COALESCE(excluded, 0) = 0` but excluded is always 0 since never populated.",
+    "trigger": "Scan library with low-quality or severely rotated faces on both platforms. macOS marks them excluded=1, Windows leaves excluded=0 (default).",
+    "impact": "Face clusters diverge: low-quality faces excluded on macOS are included on Windows, breaking identity consistency across platforms and poisoning clusters with false matches.",
+    "suggestedFix": "Compute excluded flag on Windows (mirror isExcluded logic) and add to INSERT: `INSERT INTO face_prints (file_id, print_data, bbox, arcface_embedding, face_quality, excluded) VALUES (?1, ?2, ?3, ?4, ?5, ?6)` passing the computed excluded flag as the 6th param."
+   },
+   "verdict": {
+    "verdict": "confirmed",
+    "reasoning": "Windows DBWriter.rs (lines 414-421, 739-740) inserts face_prints without the `excluded` column, always defaulting to 0/NULL. macOS DBWriter.swift (lines 525-532) computes `excluded` via isExcluded(quality, yaw, pitch, bboxArea) logic and includes it in INSERT. Windows has zero implementation of the quality filter (no isExcluded function, no constants). Clustering queries reflect this: Windows `COALESCE(excluded, 0) = 0` treats NULL as 0 (includes all), macOS `excluded = 0` filters explicit exclusions. The exclusion criteria (quality<0.02, bboxArea<0.002, |yaw|>50\u00b0, |pitch|>30\u00b0) are fully documented and implemented on macOS only. This is not recorded in any of the 6 prior audit records and not in DECISIONS.md. Reproduction: low-quality/rotated/tiny faces cluster differently on Windows (included) vs macOS (excluded), silently breaking parity. Fix: implement isExcluded logic on Windows, add excluded parameter to INSERT statement.",
+    "severityAdjusted": "high"
+   }
+  },
+  {
+   "lens": "P3-db-query-parity",
+   "finding": {
+    "title": "macOS ReadStore.rankByCosine doesn't filter `failed=0` before computing dot products for semantic search, wasting CPU and risking heap eviction",
+    "severity": "high",
+    "file": "platforms/apple/app/Sources/FileID/Database/ReadStore.swift",
+    "line": "237-270",
+    "evidence": "macOS rankByCosine selects `SELECT file_id, embedding FROM clip_embeddings` (lines 244, 247) with no WHERE filtering. Computes dot products on every embedding including corrupt files, then filters `failed=0` only when materializing final FileRows (line 270). Windows SemanticSearchAsync: `SELECT f.id, ... FROM clip_embeddings e JOIN files f ON f.id = e.file_id WHERE f.failed = 0` (lines 314-323) filters at SQL time before any dot products.",
+    "trigger": "Mark file with CLIP embedding as failed, run semantic search. Windows skips the corrupt embedding, macOS scores it and potentially loses valid results to heap eviction.",
+    "impact": "Inefficiency and correctness loss: semantic search wastes CPU on corrupt embeddings and can under-fill results when corrupt entries occupy bounded heap slots.",
+    "suggestedFix": "Add `AND f.failed = 0` to rankByCosine WHERE clause (lines 244 and 247) before fetching embeddings, matching Windows' early filter."
+   },
+   "verdict": {
+    "verdict": "confirmed",
+    "reasoning": "Independent code trace confirms every material claim:\n\n1. EVIDENCE & LINE NUMBERS EXACT: macOS rankByCosine (ReadStore.swift:237-276) selects embeddings at lines 244/247 with no WHERE failed=0 clause, computes dot products on ALL rows (lines 254-261), then filters failed=0 only when materializing FileRows (line 269). Windows SemanticSearchAsync (ReadStore.cs:314-323, currently at HEAD b653d00) includes WHERE f.failed=0 at line 322 in the JOIN before any dot products (line 333 computes score post-WHERE).\n\n2. REPRODUCTION CHAIN HOLDS: (a) File can be marked failed=1 while retaining prior embedding from earlier successful scan (verified in DBWriter.swift context from prior audits). (b) macOS semanticSearch (line 214) calls rankByCosine (line 216); similarFiles (line 221) calls rankByCosine (line 230) \u2014 rankByCosine is the unified ranking method. (c) Concrete case: user dismisses CLIP install, scans (files written, embeddings nil), later installs CLIP, rescans \u2014 rankByCosine will score embeddings on corrupt files whose embedding blobs persist.\n\n3. PARITY DIFFERENCE VERIFIED: Windows SemanticSearchAsync filters failed=0 at SQL time BEFORE the join and before dot products. macOS rankByCosine fetches all embeddings unconditionally then scores all of them. This is a documented asymmetry.\n\n4. NOVELTY CONFIRMED: Searched AUDIT-2026-06-01.md (found PAR-117, a Windows-only fix), AUDIT-2026-06-03.md, audit-2026-06-04b/*.json, audit-2026-06-04c/*.json, and audit-2026-06-09-merge/R0-findings.json. No prior finding identifies macOS rankByCosine as requiring the failed=0 filter before dot products. The R0 findings mention rankByCosine only in the context of stale-embedding dimension-matching, not the failed-filter issue.\n\n5. CAVEAT (does not refute): Windows internally is asymmetric \u2014 SimilarFilesAsync also lacks failed=0 filtering before dot products (ReadStore.cs:400), so Windows is inconsistent with itself. SemanticSearchAsync was fixed by PAR-117 (add WHERE f.failed=0), but similar-files was never updated. However, the finding's primary claim about macOS-vs-Windows parity remains true at HEAD, and the macOS code is exactly as cited.\n\nVERDICT: confirmed. Load-bearing claims verified. No killing contradictions. Novel (not in prior audits). Severity assessment justified as high due to silent under-filling of search results in real-world scenario (library with failed files retaining embeddings from prior scans).",
+    "severityAdjusted": "high"
+   }
+  },
+  {
+   "lens": "P4-redaction-parity",
+   "finding": {
+    "title": "Unredacted user folder path logged in AUTO-SCAN harness entry point",
+    "severity": "high",
+    "file": "platforms/windows/src/FileID.App/App.xaml.cs",
+    "line": "230",
+    "evidence": "DebugLog.Info($\"[AUTO-SCAN] requested path={folderPath} exitAfter={exitAfterScan}\"); \u2014 folderPath is a user-selected scan target (e.g. C:\\Users\\Adam\\Pictures) logged verbatim without PathRedactor.Redact wrapping.",
+    "trigger": "User runs app with --auto-scan-folder CLI flag (automation/test harness entry point). AutoScanAsync logs the raw folder path on entry, before the engine starts scanning. Every harness run that uses auto-scan creates an app.log entry with the full unredacted user path.",
+    "impact": "Full user file paths (folder names, often containing usernames or sensitive project/client structures) are written to %LOCALAPPDATA%\\FileID\\logs\\app.log. Violates the privacy contract enforced by PathRedactor.cs:7-8 ('PRIVACY: every log call site that includes a user file path MUST wrap the path in PathRedactor.Redact first. Reviewed every PR'). Anyone who receives the app.log for support analysis sees the library structure.",
+    "suggestedFix": "Wrap folderPath in PathRedactor.Redact at line 230: DebugLog.Info($\"[AUTO-SCAN] requested path={PathRedactor.Redact(folderPath)} exitAfter={exitAfterScan}\");. The commented [AUTO-SCAN] marker still serves the harness (grep still works on redacted output like ~/Pictures).",
+    "whichSideMoves": "Windows app (C#)"
+   },
+   "verdict": {
+    "verdict": "confirmed",
+    "reasoning": "The finding is verified at HEAD (b653d00) with complete chain integrity:\n\n1. CODE EVIDENCE (file:line): platforms/windows/src/FileID.App/App.xaml.cs:230\n   `DebugLog.Info($\"[AUTO-SCAN] requested path={folderPath} exitAfter={exitAfterScan}\");`\n   \u2014 folderPath (e.g., C:\\Users\\Adam\\Pictures) is logged unredacted.\n\n2. REPRODUCTION CHAIN (all links verified):\n   - Program.cs parses --auto-scan-folder CLI argument into Program.AutoScanFolder\n   - App.xaml.cs:194-196: if (!string.IsNullOrEmpty(Program.AutoScanFolder)) \u2192 calls AutoScanAsync\n   - App.xaml.cs:226-273: AutoScanAsync method receives folderPath parameter\n   - App.xaml.cs:230: logs folderPath unredacted to DebugLog.Info\n   - DebugLog.cs:27,61-82: Info() writes synchronously to %LOCALAPPDATA%\\FileID\\logs\\app.log\n\n3. PRIVACY CONTRACT VIOLATION (explicit):\n   - DebugLog.cs:7-8: \"PRIVACY: every log call site that includes a user file path MUST wrap the path in PathRedactor.Redact first.\"\n   - PathRedactor.cs:13-14: identical contract: \"every log call site that emits a user file path passes it through here first\"\n   - PathRedactor.Redact() exists at PathRedactor.cs:23-52 and strips home-directory prefix\n\n4. NOVELTY VERIFICATION (no prior record):\n   - Grep all audit files (AUDIT-2026-06-01.md, 06-03.md, audit-2026-06-04b/*.json, 04c/*.json, 06-09-merge/*.json): zero hits for AUTO-SCAN or App.xaml.cs:230\n   - DECISIONS.md: no documented exception for AUTO-SCAN logging or test-harness paths\n\n5. NOT A DOCUMENTED DELIBERATE CHOICE:\n   - No mention in DECISIONS.md of intentional unredacted logging in AUTO-SCAN\n   - The privacy contract is strict and makes no exceptions\n\n6. WINDOWS-ONLY (not parity):\n   - macOS has no equivalent --auto-scan-folder CLI feature\n   - macOS EngineClient/app startup does not have an AutoScanAsync entry point\n   - The finder labeled this \"P4-redaction-parity\" but it is Windows app-specific\n\nThe impact is that every test-harness run with --auto-scan-folder creates an unredacted user path in app.log (e.g., C:\\Users\\<username>\\<folder>\\...). A user sharing the log for support analysis exposes their username and folder/project structure. This violates the explicitly documented privacy contract and is the same class of issue (M18) already found and fixed in ThumbnailService.cs. Severity is high (not critical) because the leak is to a local-only log with no telemetry/network egress and no data-loss risk.",
+    "severityAdjusted": "high"
+   }
+  },
+  {
+   "lens": "P4-redaction-parity",
+   "finding": {
+    "title": "Windows C# PathRedactor lacks state root pass-through: app-structural paths redacted unlike Rust/macOS",
+    "severity": "medium",
+    "file": "platforms/windows/src/FileID.App/Services/PathRedactor.cs",
+    "line": "19-52",
+    "evidence": "PathRedactor.Redact has no logic to detect and pass through AppPaths.Root (resolved to %LOCALAPPDATA%\\FileID) or its subdirectories. Contrast: (1) macOS PathRedaction.swift:19-23 explicitly passes fileIDStateRoot + / prefix verbatim; (2) Rust engine platform.rs:13-39 explicitly passes root() + separator boundary verbatim. Test case: path C:\\Users\\Adam\\AppData\\Local\\FileID\\Models\\clip.onnx: Windows C# returns ~\\AppData\\Local\\FileID\\Models\\clip.onnx (user home replaced with ~), while Rust engine returns the path unchanged, and macOS returns unchanged.",
+    "trigger": "Engine error logs or debug traces include paths under the engine's state tree (Models, logs, database, cache dirs). App calls DebugLog.Info/Warn/Error with a state-tree path. The redactor sees it as a subpath of the user home and redacts it, diverging from the macOS/Rust behavior where app-structural paths are logged verbatim for debugging.",
+    "impact": "Behavioral divergence from the reference (macOS) and the Rust engine: debugging logs for app-internal state operations are harder to parse (redacted structure obscures which component failed), and the divergence makes P4 parity analysis harder. The impact is hygiene/consistency rather than a direct data-loss or privacy leak (the redacted form still obscures the username, so privacy is preserved, just not at parity).",
+    "suggestedFix": "Add state root pass-through to PathRedactor.Redact: (1) Cache AppPaths.Root at static init; (2) Check if the normalized path matches root exactly or starts with root + separator; (3) If yes, return path unchanged; (4) Otherwise fall through to the current UserProfile/macOS logic. Mirrors the Rust engine and macOS precedent.",
+    "whichSideMoves": "Windows app (C#) \u2014 bring it to parity with Rust engine and macOS"
+   },
+   "verdict": {
+    "verdict": "confirmed",
+    "reasoning": "Technical claim verified: Windows C# PathRedactor.Redact() lacks app-structural state root pass-through implemented in macOS and Rust, contrary to PRIVACY.md documented design. Code verified at HEAD: PathRedactor.cs lines 19-52 check user profile only, not AppPaths.Root. Reproduction: C:\\Users\\Adam\\AppData\\Local\\FileID\\Models\\clip.onnx redacts to ~\\AppData\\Local\\FileID\\Models\\clip.onnx on Windows, unchanged on macOS/Rust. Novelty confirmed across six prior audits. Finding is technically accurate.",
+    "severityAdjusted": "medium"
+   }
+  },
+  {
+   "lens": "P5-filename-safety",
+   "finding": {
+    "title": "macOS app Restructure tab uses broken custom sanitizer instead of FilesystemNameSafe.componentSafe \u2014 causes cross-platform folder-name divergence (PAR-69 fix incomplete)",
+    "severity": "high",
+    "file": "/Users/adamnolle/Desktop/Code/FileID/platforms/apple/app/Sources/FileID/Views/RestructureView.swift",
+    "line": "1206, 1217, 1528-1536, 1518-1524",
+    "evidence": "Lines 1206-1208 call `sanitizePathSegment(Self.bucketForFile(...))` to sanitize restructure bucket names like \"People/Alice\"; line 1217 calls `sanitizeFilename(rawBase)` to sanitize filenames. Both are custom functions defined at lines 1528-1536 and 1518-1524. The `sanitizeFilename` function: (1) replaces only \"/\" and \"\\0\"; (2) trims whitespace/newlines indiscriminately; (3) removes leading dots; (4) defaults to \"untitled\" if empty. The `sanitizePathSegment` splits on \"/\" then calls `sanitizeFilename` on each part. This custom logic diverges from the canonical Windows and macOS engine sanitizers: (a) Windows engine uses `safe_filename_component` (path_safety.rs:200-235) which replaces ALL illegal chars (<>:\"|\\ ?*) + controls with \"_\", suffixes Windows reserved names (CON/PRN/...), caps at 200, and trims trailing dots/spaces precisely. (b) macOS engine uses `FilesystemNameSafe.componentSafe` (FilesystemNameSafe.swift:24-52) which does the same. The app's custom functions lack all of these guards. See PAR-69 audit finding (AUDIT-2026-06-01.md) which documented this exact divergence and suggested porting componentSafe \u2014 the Windows side was fixed in commit 550cd194 to call the correct sanitizer, but the macOS app side was not.",
+    "trigger": "(a) Restructure with VLM-proposed name containing Windows reserved basename (\"CON\", \"PRN\", etc.) or illegal char (\":\", \"<\", \">\", \"|\", \"?\", \"*\") or trailing dot/space. (b) Sync/move library between Windows and macOS. (c) Apply restructure on both platforms to the same source \u2014 cross-platform folder names diverge.",
+    "impact": "Cross-platform library divergence: the same source files produce DIFFERENT destination folder structures on macOS vs Windows after restructure. A library synced via iCloud/NAS becomes incompatible \u2014 if a user applies restructure on Windows, the folders are named per Windows rules (reserved-name prefixed, illegal-chars replaced, trailing-dots stripped); if the same user later opens the library on macOS or the library syncs to a macOS backup, the macOS app would regenerate DIFFERENT proposals using its custom sanitizer rules, leading to (1) duplicate/parallel folder trees with incompatible names, or (2) the macOS app silently proposing moves that the Windows app already applied, creating confusion. Also violates the shared restructure contract: the macOS app and Windows engine are supposed to compute identical proposals given the same library (RESTRUCTURE.md \u00a71), but they diverge on folder naming due to sanitizer rules. The test corpus at shared/test-corpus/unicode-names/manifest.json documents the canonical cases (reserved names, trailing dots, control chars) \u2014 the macOS app does NOT correctly handle the manifest-listed cases, but the Windows engine does.",
+    "suggestedFix": "Replace the custom `sanitizePathSegment` and `sanitizeFilename` functions in RestructureView.swift with calls to `FilesystemNameSafe.componentSafe`. At line 1206, change `let bucket = sanitizePathSegment(Self.bucketForFile(...))` to `let bucket = Self.bucketForFile(...).split(separator: \"/\").map { FilesystemNameSafe.componentSafe(String($0)) }.joined(separator: \"/\")` (or extract as a helper). At line 1217, change `let baseName = sanitizeFilename(rawBase)` to `let baseName = FilesystemNameSafe.componentSafe(rawBase)`. Delete the now-unused `sanitizePathSegment` and `sanitizeFilename` functions (1518-1536). Add a regression test case to RestructureView or its tests that asserts reserved names are prefixed with \"_\", illegal chars are replaced, trailing dots/spaces are stripped, and length is capped at 200.",
+    "whichSideMoves": "macOS app moves toward Windows behavior (Windows engine is canonical and has been verified correct per PAR-69 fix in commit 550cd194)."
+   },
+   "verdict": {
+    "verdict": "confirmed",
+    "reasoning": "Every load-bearing claim survives independent verification at HEAD (b653d00). The macOS app RestructureView.swift (lines 1206-1208, 1518-1536) uses custom sanitizePathSegment/sanitizeFilename functions that diverge from the canonical FilesystemNameSafe.componentSafe in critical ways: they omit Windows reserved-name prefixing (CON/PRN/AUX/NUL/COM0-9/LPT0-9), illegal-character replacement (<>:|?*), control-character handling (0x00-0x1F), and length capping (200 scalars). The Windows engine (restructure.rs:187, path_safety.rs:200-235) correctly calls sanitize_path_component \u2192 safe_filename_component for person names and all bucket components, handling reserved names by prefix-substitution. Reproduction is direct: a person named \"CON\" produces \"People/CON\" on macOS (sanitizeFilename leaves it unchanged) but \"People/_CON\" on Windows (safe_filename_component prefixes reserved names). The divergence is real, silent, and unrecovered\u2014syncing a library between platforms creates two incompatible folder hierarchies. Novelty confirmed: PAR-69 in AUDIT-2026-06-01.md targeted the Windows engine (already fixed); N7 in sweep-a-findings.json claimed byte-parity but addressed only VLM slug outputs, not person-name inputs; DECISIONS.md contains no documented decision to use custom sanitizers. Not a duplicate of any prior finding\u2014this is app-side person-name divergence, not VLM-output safety.",
+    "severityAdjusted": "high"
+   }
+  },
+  {
+   "lens": "N4-ipc-robustness",
+   "finding": {
+    "title": "Windows C# app: Unknown future IPC event types silently ignored with no logging or error surfacing",
+    "severity": "medium",
+    "file": "/Users/adamnolle/Desktop/Code/FileID/platforms/windows/src/FileID.App/ViewModels/EngineClient.cs",
+    "line": "1043-1299",
+    "evidence": "Apply method switch statement (lines 1043-1299) handles 18 explicit event types (ReadyEvent through ThumbnailGeneratedEvent) with no `default:` case. Unknown event type falls through silently with no log. Event IS published to subscribers at line 1038, but Apply routing has no handler. macOS EngineClient.swift lines 472-480 explicitly lists Windows events for forward-compatibility: `case .restructurePlan, .restructureApplyResult, ... : break`",
+    "trigger": "Engine ships new event type in future version (e.g., `faceClusteringStarted`). Older Windows app receives it. C# switch finds no matching case, falls through silently. Subscribers see raw event, but main observable state never updates. No log of unknown type.",
+    "impact": "Forward-compatibility gap: app silently ignores new engine signals. If new event is critical (scan status, error condition, model state), app fails to notice. Lower severity than data loss (no silent corruption), but violates defensive-receive principle.",
+    "suggestedFix": "Add `default:` case after the switch that logs: `DebugLog.Warn($\"[IPC IN] unknown event type: {ev.Payload?.GetType().Name ?? \\\"<null>\\\"}\")`. Provides forward-compatibility observability and mirrors macOS's explicit handling of future events.",
+    "whichSideMoves": "Windows moves (add unknown event handler)"
+   },
+   "verdict": {
+    "verdict": "confirmed",
+    "reasoning": "The Windows C# EngineClient.Apply method's switch statement (lines 1043-1299) handles 24 explicit event types with NO default case. Unknown event types (e.g., from a future engine version) will fall through silently without error, exception, or log message. Events are published to subscribers before the switch, so subscribers see the raw event but observable state properties never update and no diagnostic logging occurs. This contradicts macOS's explicit listing of future events with break statements and documentation comments (EngineClient.swift:472-480). Not recorded in any prior audit record, not a documented design decision. The finding's claim about silent fallthrough and parity gap is end-to-end verified. Minor factual error: finding cites \"18 event types\" but HEAD has 24 (5 events were added per DECISIONS.md entry on restructure events).",
+    "severityAdjusted": "medium"
+   }
+  }
+ ],
+ "uncertain": [],
+ "refutedTitles": [
+  "P1-ipc-semantics: macOS deepAnalyzeAll ignores tagsOnly parameter; parameter is accepted but not implemented",
+  "P1-ipc-semantics: wipeLibrary command: macOS returns not_implemented_yet; Windows handles it",
+  "P3-db-query-parity: macOS ReadStore.semanticSearch lacks kind parameter, diverging from Windows UI that supports kind-filtered semantic search",
+  "N4-ipc-robustness: macOS app IPC frame buffer cap (1 MB) silently drops large legitimate events that Windows can send (32 MB cap)",
+  "N4-ipc-robustness: macOS app: Multiple small library diagnostics can accumulate in stderr buffer and be lost if they exceed 1 MB before a newline arrives",
+  "N4-ipc-robustness: Windows engine and app: stdin command size limit (32 MB) has no per-command validation or chunking; extremely large applyRestructure command",
+  "N4-ipc-robustness: macOS and Windows: No frame-level validation that string fields don't contain literal newlines (would corrupt newline-delimited framing)"
+ ],
+ "verifiedClean": [
+  "P1-ipc-semantics: startScan command dispatching and pause/resume/cancel mechanics are semantically identical between platforms",
+  "P1-ipc-semantics: prewarmModel command handling and modelDownloadProgress event emission are synchronized",
+  "P1-ipc-semantics: ScanProgress event fields (processed, total, failed, filesPerSecond, etc.) have matching numeric semantics",
+  "P1-ipc-semantics: BatchSummary event percentile and utilization metrics follow the same calculation path",
+  "P1-ipc-semantics: phaseChanged events for Discovering, Tagging, PostScan phases emit in the same order",
+  "P1-ipc-semantics: Face clustering runFaceClustering command queuing and faceClusteringComplete reply mechanics are consistent",
+  "P1-ipc-semantics: Error event emission for model_load_failed, discovery_failed, db_failed follows the same kinds on both sides",
+  "P2-fileop-semantics: File-operation collision policy (PAR-70): Windows uniquifies with (N) suffix; macOS skips and reports conflicts \u2014 documented and scoped",
+  "P2-fileop-semantics: Path-component sanitizer parity (PAR-69): Windows uses safe_filename_component; macOS uses FilesystemNameSafe.componentSafe with different legal character sets \u2014 documented",
+  "P2-fileop-semantics: Restructure apply DB sync (Sweep-A N1): macOS updatePathTexts uses unconfigured DatabaseQueue (no busyMode timeout); Windows applies per-move with rollback \u2014 documented and scoped for macOS as a high-severity issue",
+  "P2-fileop-semantics: Trash/delete semantics: macOS uses FileManager.trashItem(); Windows uses IFileOperation::DeleteItem with FOF_ALLOWUNDO \u2014 both provide reversibility, semantics documented",
+  "P2-fileop-semantics: Restructure apply no-op detection (ENG-42): Windows checks no-op before uniquify; documented as fixed in both platforms",
+  "P2-fileop-semantics: Symlink handling in restructure: macOS createSymbolicLink throws on existing; Windows CreateSymbolicLinkW returns error \u2014 both fail-safe for collisions",
+  "P2-fileop-semantics: Cross-volume moves: Windows explicitly uses MOVEFILE_COPY_ALLOWED; macOS moveItem handles both transparently \u2014 both support cross-volume semantically",
+  "P2-fileop-semantics: Readonly file handling: No documented special handling on either platform; filesystem APIs naturally fail on permission-denied",
+  "P2-fileop-semantics: Case-only renames: No explicit case-sensitivity handling in either platform; filesystem naturally handles per-OS semantics",
+  "P2-fileop-semantics: Database recording after restructure: Windows updates path_text in a separate statement with recovery sidecar (ENG-5); macOS immediate per-move DB update \u2014 behavioral difference documented",
+  "P3-db-query-parity: Timestamps: both platforms use UNIX epoch (SystemTime on Windows, Date().timeIntervalSince1970 on macOS) for scan_sessions.started_at and files.scanned_at; round-trip correctly.",
+  "P3-db-query-parity: Files INSERT: both insert created_at, modified_at, scanned_at with UNIX epoch; both use ON CONFLICT(path_text) DO UPDATE; COALESCE on content_hash/file_ref works identically.",
+  "P3-db-query-parity: OCR text: both platforms DELETE then INSERT with file_id, text only; no field divergence.",
+  "P3-db-query-parity: CLIP embeddings: both insert file_id, embedding (BLOB float32 LE), model; no differences.",
+  "P3-db-query-parity: Tag source: both now write source='auto' (PAR-78 resolved).",
+  "P3-db-query-parity: VLM model kinds: pinned cross-platform canonical tokens (PAR-88 resolved).",
+  "P4-redaction-parity: Windows Rust engine redact_path_for_log (platform.rs) correctly passes through root() matches + separator boundary, filters to Normal path components, keeps last-two components for user paths; tests verify UNC/drive-root/deep-path/home-file edge cases",
+  "P4-redaction-parity: macOS PathRedaction.swift redactPathForLog correctly passes through fileIDStateRoot + boundary, special-cases home-directory files, keeps last-two components",
+  "P4-redaction-parity: Windows C# DebugLog.cs contract enforced at lines 7-8, all other traced call sites properly wrap paths in PathRedactor.Redact; synchronous-write durability preserved",
+  "P4-redaction-parity: Rust engine recent logging additions (commits 8dca353, 02636c2) NSError interpolations redacted to domain+code only; error contexts use redact_path_for_log; frame samples redacted",
+  "P4-redaction-parity: Engine stderr/diagnostic paths logging.rs, main.rs tracing show no unredacted user file paths; pack dir registration, VRAM probe, CUDA path logging all app-structural non-user-PII",
+  "P5-filename-safety: FilesystemNameSafe.componentSafe (macOS shared): correct implementation covering reserved names, illegal chars, trailing dots/spaces, length cap, control chars \u2014 traces match all Windows equivalent behaviors",
+  "P5-filename-safety: Windows path_safety.rs safe_filename_component: correct implementation verified against macOS componentSafe in cross-platform tests (path_safety.rs:242-256)",
+  "P5-filename-safety: macOS engine Restructure.swift: correctly uses FilesystemNameSafe.componentSafe at lines 180, 208, 213 for person names, extensions, and filenames",
+  "P5-filename-safety: Windows engine restructure.rs: correctly uses safe_filename_component at line 254 for person name sanitization",
+  "N4-ipc-robustness: macOS app: frame-size bounds checking at 1 MB for incomplete frames enforces SOME cap (though parity-broken vs Windows 32 MB)",
+  "N4-ipc-robustness: Windows engine: bounded_read_line() properly caps inbound commands at 32 MB and drains to resync on overflow",
+  "N4-ipc-robustness: macOS IPCTransport: U4 fd-2 dup successfully separates wire from engine stderr before library init (verified no stderr corruption of event stream in recent runs)",
+  "N4-ipc-robustness: Windows app: JSON decode errors on unparseable lines are caught and logged (line 746-750), not silently ignored",
+  "N4-ipc-robustness: Both platforms: RFC 4627 JSON escaping applied by standard libraries (serde_json, System.Text.Json, Foundation); no unescaped control chars in wire",
+  "N4-ipc-robustness: macOS and Windows: IPC command sender does marshal line to UI thread before send (macOS stdinWriteQueue, Windows _writeLock); no cross-thread write races on stdin pipe",
+  "R7-delta-review: N1/N8 SEC-5/SEC-7 port to macOS restructure apply: pathIsContained guard logic, pre+post checks, TOCTOU window closure",
+  "R7-delta-review: N1 updatePathTexts refactor to per-move DB updates: busy-timeout configuration, per-file rollback, failed-fast queue-open gate",
+  "R7-delta-review: N8 redactPathForLog anchoring: passthrough boundary enforcement, NSError domain+code logging",
+  "R7-delta-review: C12 migration fork repair: canonical 16-id list pinned both platforms, v15_fts_sync_triggers byte-identical, v14_files_kind_scanned_index unified",
+  "R7-delta-review: L7 migration downgrade guard: unknown-migration detection, test coverage on both platforms, legitimate DBs unaffected",
+  "R7-delta-review: Perf b653d00 EXIF merge: eliminates second CGImageSourceCreateWithURL re-open, readEXIF signature change complete (single caller)",
+  "R7-delta-review: Perf b653d00 countFilesWithProposedNames: COUNT(*) subquery cap semantics identical to original .count",
+  "R7-delta-review: Perf b653d00 filesAnalysisStats: predicates match originals, one-snapshot improves consistency",
+  "R7-delta-review: T5 applyProposedNamesBulk queue reuse: backward-compatible public wrapper, per-file atomicity preserved, all callers threaded correctly",
+  "R7-delta-review: Perf b653d00 as_slice() borrow: valid temporary reference in params! macro, cloning eliminated correctly",
+  "R7-delta-review: C14 truncate_to_max char-boundary clamping: boundary-floor before truncate prevents panic on multibyte midpoint cuts",
+  "R7-delta-review: C13 VLM offline load: sentinel+payload check safe, early-return skips network for installed models, hasModelPayload semantics correct",
+  "R7-delta-review: C3 PDF render pixel cap: maxPDFRenderPixels scale bounds, scale = min(2.0, maxPixels/longSide) prevents >144MP allocation",
+  "R7-delta-review: Swift Darwin bridging: unlink() call compiles/bridges correctly, semantic equivalence confirmed"
+ ],
+ "comment": "Closing audit sweep B round 1 (2026-06-10): lenses P1-P5 parity, N4 IPC robustness, R7 delta review. 9 confirmed (all fixed in the same-day commit), 7 refuted, 52 verifiedClean. Round 2 (loop-until-dry) re-ran affected lenses over the fix commit."
+}

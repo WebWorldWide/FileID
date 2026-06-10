@@ -238,13 +238,25 @@ public final class ReadStore: @unchecked Sendable {
                               excludeID: Int64? = nil) -> [FileRow] {
         guard let q = queue, !query.isEmpty else { return [] }
         return (try? q.read { db -> [FileRow] in
+            // failed = 0 at SQL time (parity with Windows
+            // SemanticSearchAsync): a failed row scored here would land
+            // in the top-N, then be dropped at materialization below —
+            // displacing a real result, not just wasting dot products.
             let sql: String
             let args: StatementArguments
             if let exclude = excludeID {
-                sql = "SELECT file_id, embedding FROM clip_embeddings WHERE file_id != ?"
+                sql = """
+                    SELECT e.file_id, e.embedding FROM clip_embeddings e
+                    JOIN files f ON f.id = e.file_id
+                    WHERE f.failed = 0 AND e.file_id != ?
+                    """
                 args = [exclude]
             } else {
-                sql = "SELECT file_id, embedding FROM clip_embeddings"
+                sql = """
+                    SELECT e.file_id, e.embedding FROM clip_embeddings e
+                    JOIN files f ON f.id = e.file_id
+                    WHERE f.failed = 0
+                    """
                 args = []
             }
             let rows = try Row.fetchAll(db, sql: sql, arguments: args)

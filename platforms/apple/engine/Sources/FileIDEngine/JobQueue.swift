@@ -73,6 +73,15 @@ public actor JobQueue {
         )
     }
 
+    /// True if a job of `category` is running or queued. Used to reject
+    /// duplicate deep-analyze commands with the same
+    /// deep_analyze_already_running error the Windows engine emits —
+    /// the IPC contract must answer identically on both platforms.
+    public func hasActive(category: JobCategory) -> Bool {
+        if running?.category == category { return true }
+        return pending.contains { $0.category == category }
+    }
+
     // MARK: - Internals
 
     private func startDrainerIfNeeded() {
@@ -86,7 +95,7 @@ public actor JobQueue {
     private func drain() async {
         while true {
             // Pop next job under actor isolation.
-            let next: Job? = await {
+            let next: Job? = {
                 if pending.isEmpty {
                     return nil
                 }

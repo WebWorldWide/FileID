@@ -1148,14 +1148,24 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         // Authoritative final count for the completed-scan summary
                         // (LastProgress.Processed can be throttle-stale by a batch).
                         LastScanProcessedFiles = sce.Result.ProcessedFiles;
-                        Phase = ScanPhase.Completed;
-                        _shownPhaseRank = PhaseRank(ScanPhase.Completed);
                         IsPaused = false;
                         if (_scanStartedAt.HasValue)
                         {
                             LastScanDuration = DateTime.UtcNow - _scanStartedAt.Value;
                             _scanStartedAt = null;
                         }
+                        // The engine now emits scanComplete for cancelled scans
+                        // too (IPC parity with macOS — it carries the final
+                        // counts). Cancelled is the terminal phase the user
+                        // chose: don't overwrite it with Completed, and don't
+                        // auto-advance to clustering (macOS gates its engine-side
+                        // auto-cluster on !isCancelled the same way).
+                        if (Phase == ScanPhase.Cancelled)
+                        {
+                            break;
+                        }
+                        Phase = ScanPhase.Completed;
+                        _shownPhaseRank = PhaseRank(ScanPhase.Completed);
                         // auto-advance to face clustering, matching macOS.
                         // macOS engine itself auto-enqueues face clustering when the
                         // scan finishes (FileIDEngineMain.swift:535+ ::
@@ -1295,6 +1305,14 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                     case ThumbnailGeneratedEvent tg:
                         LastThumbnailGenerated = tg.Generated;
                         DebugLog.Info($"[IPC IN] thumbnailGenerated path={PathRedactor.Redact(tg.Generated.Path)} ({tg.Generated.Bytes.Length} b64 chars)");
+                        break;
+                    default:
+                        // Unknown TAGS never get here (the strict decoder
+                        // throws and the read loop logs the line). This
+                        // catches a DTO added to the schema without a
+                        // routing arm — log it so the gap is visible
+                        // instead of silently dropping state updates.
+                        DebugLog.Warn($"[IPC IN] event type with no Apply routing: {ev.Payload?.GetType().Name ?? "<null>"}");
                         break;
                 }
             }

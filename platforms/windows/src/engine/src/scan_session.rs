@@ -287,6 +287,14 @@ impl ScanSession {
                     },
                 ))));
                 if finished {
+                    // IPC parity with macOS (FileIDEngineMain.swift:486):
+                    // announce the discovery total once the walk ends —
+                    // macOS emits it even for a cancel-truncated walk.
+                    let _ = sink_for_tick.try_send(IpcEvent::now(
+                        EventPayload::DiscoveryComplete(
+                            crate::ipc::DiscoveryCompletePayload { total_files: count },
+                        ),
+                    ));
                     // Empty-folder path: tagging would wait forever on its
                     // input channel if discovery produced zero files.
                     // Close out cleanly with a "no supported files found"
@@ -495,6 +503,22 @@ impl ScanSession {
         } else if self.coordinator.is_cancelled() {
             on_phase(SessionPhase::Cancelled);
             emit_phase(SessionPhase::Cancelled);
+            // IPC parity with macOS (markSessionFinal emits scanComplete
+            // unconditionally, pinned by ScanCancellationTests): cancelled
+            // scans still get the terminal scanComplete carrying the final
+            // counts. Terminal STATE stays the preceding
+            // phaseChanged(cancelled) — consumers must not infer
+            // "completed" from this event.
+            sink.send(IpcEvent::now(EventPayload::ScanComplete(Wrap::new(
+                ScanComplete {
+                    session_id: session_id.clone(),
+                    total_files: total,
+                    processed_files: total,
+                    failed_files: failed,
+                    total_seconds: elapsed,
+                },
+            ))))
+            .await;
         } else {
             on_phase(SessionPhase::PostScan);
             emit_phase(SessionPhase::PostScan);

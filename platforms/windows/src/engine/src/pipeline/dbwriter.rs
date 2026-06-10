@@ -418,6 +418,7 @@ impl DbWriter {
                                 bbox_json,
                                 arcface_bytes.as_slice(),
                                 face.quality as f64,
+                                face.excluded as i64,
                             ])
                             .with_context(|| format!("face insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
 
@@ -736,8 +737,8 @@ const INSERT_CLIP_SQL: &str = r#"
 "#;
 
 const INSERT_FACE_SQL: &str = r#"
-    INSERT INTO face_prints (file_id, print_data, bbox, arcface_embedding, face_quality)
-    VALUES (?1, ?2, ?3, ?4, ?5)
+    INSERT INTO face_prints (file_id, print_data, bbox, arcface_embedding, face_quality, excluded)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6)
 "#;
 
 /// Convert a slice of f32 to little-endian bytes for BLOB storage.
