@@ -36,7 +36,7 @@ use tokio::sync::Notify;
 use ipc::{
     bounded_read::{self, BoundedRead},
     sink::Sink,
-    CommandPayload, EngineError, EventPayload, IpcCommand, IpcEvent, Wrap,
+    CommandPayload, EngineError, EventPayload, IpcCommand, IpcEvent, JobCategory, Wrap,
 };
 
 const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -308,6 +308,20 @@ async fn async_main() -> Result<()> {
     let face_cluster_active: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
     let dispatch_face_cluster_active = face_cluster_active.clone();
+
+    // Sidebar job tracker (macOS JobQueue parity): scan / cluster /
+    // deep-analyze jobs push on accept and finish via RAII guards;
+    // every transition emits a queueState event. Until this wiring the
+    // tracker existed but nothing fed it — the app's SidebarQueueList
+    // (bound to EngineClient.QueueState) stayed permanently empty.
+    let jobs = job_queue::JobQueue::new();
+    {
+        let qs_sink = sink.clone();
+        jobs.on_change(move |state| {
+            let _ = qs_sink.try_send(IpcEvent::now(EventPayload::QueueState(Wrap::new(state))));
+        });
+    }
+    let dispatch_jobs = jobs.clone();
     let dispatch_db_path = db_path.clone();
 
     // Shared HTTP client (HTTP/2 + connection pool) for the 12-way parallel
@@ -372,6 +386,7 @@ async fn async_main() -> Result<()> {
                                 &dispatch_deep_cancel,
                                 &dispatch_deep_active,
                                 &dispatch_face_cluster_active,
+                                &dispatch_jobs,
                                 &dispatch_http_client,
                                 &text,
                             ).await;
@@ -446,6 +461,26 @@ impl Drop for DeepActiveGuard {
     }
 }
 
+/// Removes a tracked sidebar job on drop — survives panics and early
+/// returns (same RAII shape as DeepActiveGuard), so a dying task can't
+/// strand a "running" entry in the app's queue list.
+struct JobTrackGuard {
+    queue: job_queue::JobQueue,
+    id: job_queue::JobId,
+}
+impl JobTrackGuard {
+    fn start(queue: &job_queue::JobQueue, category: JobCategory, title: &str) -> Self {
+        let id = queue.push(category, title, None);
+        queue.promote_next();
+        Self { queue: queue.clone(), id }
+    }
+}
+impl Drop for JobTrackGuard {
+    fn drop(&mut self) {
+        self.queue.finish(&self.id);
+    }
+}
+
 /// Clears the face-clustering single-flight flag on drop — releases on task
 /// success, error, OR panic (same RAII shape as DeepActiveGuard).
 struct FaceClusterActiveGuard(Arc<std::sync::atomic::AtomicBool>);
@@ -485,6 +520,7 @@ async fn handle_line(
     deep_analyze_cancel: &Arc<std::sync::atomic::AtomicBool>,
     deep_analyze_active: &Arc<std::sync::atomic::AtomicBool>,
     face_cluster_active: &Arc<std::sync::atomic::AtomicBool>,
+    jobs: &job_queue::JobQueue,
     http_client: &Arc<reqwest::Client>,
     line: &str,
 ) {
@@ -498,10 +534,20 @@ async fn handle_line(
     let cmd: IpcCommand = match serde_json::from_str(line) {
         Ok(c) => c,
         Err(err) => {
-            // Don't surface decode failures in the UI — any stray byte on the
-            // pipe would otherwise paint a red toast the user can't act on.
-            // The warn log still records it for debugging.
-            tracing::warn!(%err, "ipc decode failed (silenced)");
+            // IPC parity with macOS: emit command_decode_failed so a
+            // slightly-newer app learns its command was dropped. The C#
+            // app classifies the kind as a non-fatal warning, so this
+            // never paints the red toast the old silencing avoided.
+            // serde's error carries position info, not the line content,
+            // so no user path can leak through the message.
+            tracing::warn!(%err, "ipc decode failed");
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "command_decode_failed".into(),
+                message: format!("Command frame could not be decoded: {err}"),
+                path: None,
+                model_kind: None,
+            }))))
+            .await;
             return;
         }
     };
@@ -563,10 +609,12 @@ async fn handle_line(
                 emit_db_unavailable(sink, "startScan").await;
                 return;
             };
+            let track = JobTrackGuard::start(jobs, JobCategory::Scan, "Scan library");
             let sink_c = sink.clone();
             let db_c = db.clone();
             let state_c = scan_state.clone();
             tokio::spawn(async move {
+                let _track = track;
                 commands::scan::handle_start_scan(sink_c, db_c, state_c, payload).await;
             });
         }
@@ -710,11 +758,13 @@ async fn handle_line(
             }
             deep_analyze_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
             let guard = DeepActiveGuard(deep_analyze_active.clone());
+            let track = JobTrackGuard::start(jobs, JobCategory::DeepAnalyze, "Deep Analyze 1 file");
             let sink_c = sink.clone();
             let db_c = db.clone();
             let cancel = deep_analyze_cancel.clone();
             tokio::spawn(async move {
                 let _guard = guard;
+                let _track = track;
                 commands::deep_analyze::handle_deep_analyze_file(sink_c, db_c, payload, cancel).await;
             });
         }
@@ -732,11 +782,13 @@ async fn handle_line(
             }
             deep_analyze_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
             let guard = DeepActiveGuard(deep_analyze_active.clone());
+            let track = JobTrackGuard::start(jobs, JobCategory::DeepAnalyze, "Deep Analyze folder");
             let sink_c = sink.clone();
             let db_c = db.clone();
             let cancel = deep_analyze_cancel.clone();
             tokio::spawn(async move {
                 let _guard = guard;
+                let _track = track;
                 commands::deep_analyze::handle_deep_analyze_folder(sink_c, db_c, payload, cancel).await;
             });
         }
@@ -754,11 +806,13 @@ async fn handle_line(
             }
             deep_analyze_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
             let guard = DeepActiveGuard(deep_analyze_active.clone());
+            let track = JobTrackGuard::start(jobs, JobCategory::DeepAnalyze, "Deep Analyze entire library");
             let sink_c = sink.clone();
             let db_c = db.clone();
             let cancel = deep_analyze_cancel.clone();
             tokio::spawn(async move {
                 let _guard = guard;
+                let _track = track;
                 commands::deep_analyze::handle_deep_analyze_all(sink_c, db_c, payload, cancel).await;
             });
         }
@@ -809,10 +863,12 @@ async fn handle_line(
                 return;
             }
             let guard = FaceClusterActiveGuard(face_cluster_active.clone());
+            let track = JobTrackGuard::start(jobs, JobCategory::FaceCluster, "Cluster faces");
             let sink_c = sink.clone();
             let db_c = db.clone();
             tokio::spawn(async move {
                 let _guard = guard;
+                let _track = track;
                 commands::face_clustering::handle_run_face_clustering(sink_c, db_c).await;
             });
         }

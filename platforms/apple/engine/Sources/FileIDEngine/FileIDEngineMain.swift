@@ -217,6 +217,16 @@ struct FileIDEngineMain {
                 )))
                 return
             }
+            // Duplicate-command parity with the Windows engine
+            // (face_clustering_busy bounce) — same shape as the
+            // deep-analyze gate below.
+            if await JobQueue.shared.hasActive(category: .faceCluster) {
+                await sink.emit(.error(EngineError(
+                    kind: "face_clustering_busy",
+                    message: "Face clustering is already running."
+                )))
+                return
+            }
             await JobQueue.shared.enqueue(.init(
                 category: .faceCluster,
                 title: "Cluster faces",

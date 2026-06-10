@@ -59,6 +59,16 @@ internal static class PathRedactor
             }
             return "~/<home>";
         }
+        // macOS external-volume rows (`/Volumes/<name>/...`): no username,
+        // but the volume + share names identify the user's NAS layout.
+        // Collapse to the last two components — the exact output
+        // redactPathForLog produces on macOS for the same path.
+        if (path.StartsWith("/Volumes/", StringComparison.Ordinal))
+        {
+            var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            var keep = parts.Length >= 2 ? parts[^2..] : parts;
+            return "…/" + string.Join('/', keep);
+        }
         return path;
     }
 

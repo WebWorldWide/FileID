@@ -7,6 +7,21 @@
 
 ---
 
+## 2026-06-10 — IPC event backpressure stays asymmetric by design (Sweep B R2-8)
+
+When the app stops reading the event pipe, the two engines respond differently and we are
+keeping it that way for v1.0. **macOS** (IPCSink) buffers and then COALESCES under pressure —
+progress-class events collapse, terminal events (scanComplete et al.) are pinned (the H3 fix);
+the engine never blocks. **Windows** (ipc::sink) uses a bounded tokio channel whose senders
+block — backpressure propagates to emitters, and emitters that must not stall (discovery
+ticker, queueState) use `try_send` and tolerate drops. Both designs keep the engine from
+unbounded memory growth and both preserve terminal events (Windows: terminal emits go through
+the blocking `send`, so they wait rather than drop). Unifying on either model would mean
+re-engineering the other side's transport for no user-visible gain — the failure mode (an app
+that permanently stops reading) is already fatal to the session on both platforms. Recorded so
+the asymmetry isn't re-flagged as a parity bug; revisit only if a real stall is observed on
+hardware.
+
 ## 2026-06-10 — Sweep A round 2: migration renumber, stable path hash, downgrade guard, perf-sweep drops
 
 **Context**: Audit Sweep A (record: `shared/docs/audit-2026-06-09-merge/sweep-a-findings.json`)

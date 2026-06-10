@@ -285,13 +285,19 @@ public final class EngineClient {
     }
 
     /// Frame samples can carry full user paths in JSON values (e.g. a
-    /// torn deepAnalyzeProgress `currentPath`) — scrub home prefixes
-    /// before they persist in app.log.
+    /// torn deepAnalyzeProgress `currentPath`) — scrub home and volume
+    /// prefixes before they persist in app.log. External-volume paths
+    /// carry no username but the volume + share names identify the
+    /// user's NAS layout, so collapse them the same way.
     nonisolated private static func redactFrameSample(_ line: Data) -> String {
         let sample = String(data: line.prefix(512), encoding: .utf8) ?? "<binary>"
-        return sample.replacingOccurrences(
-            of: #"/Users/[^/"]+"#, with: "~", options: .regularExpression
-        )
+        return sample
+            .replacingOccurrences(
+                of: #"/Users/[^/"]+"#, with: "~", options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: #"/Volumes/[^/"]+"#, with: "~", options: .regularExpression
+            )
     }
 
     /// Debug log at ~/Library/Application Support/FileID/logs/app.log.
@@ -387,6 +393,16 @@ public final class EngineClient {
             if e.kind == "deep_analyze_unavailable" {
                 deepAnalyzeAvailable = false
                 deepAnalyzeUnavailableReason = e.message
+                return
+            }
+            // PAR-111 mirror: a busy bounce means a pass IS running — the
+            // opposite of a failure. Falling through would match the
+            // hasPrefix("face_cluster")/hasPrefix("deep") arms below and
+            // wrongly clear the in-flight flags / abort auto-pilot while
+            // the running pass is still going. Log-only; the running pass
+            // emits its own terminal event.
+            if e.kind == "face_clustering_busy" || e.kind == "deep_analyze_already_running" {
+                Self.debug("engine bounce (benign): \(e.kind)")
                 return
             }
             lastError = e

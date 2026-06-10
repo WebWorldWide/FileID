@@ -89,6 +89,31 @@ impl JobQueue {
         Self::emit_locked(&inner);
     }
 
+    /// Terminal bookkeeping for a job wherever it sits: a running job
+    /// is completed and the next pending one promoted; a still-pending
+    /// job is dropped. RAII guards call this on Drop so a panicking
+    /// task can't wedge the sidebar queue. (Cross-category jobs can
+    /// genuinely overlap on this engine; the single-running model is a
+    /// sidebar approximation matching macOS's serialized JobQueue, and
+    /// it always converges as jobs finish.)
+    pub fn finish(&self, id: &str) {
+        let mut inner = self.inner.lock();
+        if inner.running.as_ref().is_some_and(|r| r.id == id) {
+            inner.running = None;
+            if !inner.pending.is_empty() {
+                let next = inner.pending.remove(0);
+                inner.running = Some(next);
+            }
+            Self::emit_locked(&inner);
+            return;
+        }
+        let before = inner.pending.len();
+        inner.pending.retain(|j| j.id != id);
+        if inner.pending.len() != before {
+            Self::emit_locked(&inner);
+        }
+    }
+
     /// Cancel a specific pending job. Returns true if it was found.
     pub fn cancel_pending(&self, id: &str) -> bool {
         let mut inner = self.inner.lock();

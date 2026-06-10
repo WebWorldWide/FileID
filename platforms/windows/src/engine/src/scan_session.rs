@@ -509,10 +509,12 @@ impl ScanSession {
             // counts. Terminal STATE stays the preceding
             // phaseChanged(cancelled) — consumers must not infer
             // "completed" from this event.
+            // totalFiles = discovered (can exceed processed when the
+            // cancel landed mid-tagging) — macOS emits the same split.
             sink.send(IpcEvent::now(EventPayload::ScanComplete(Wrap::new(
                 ScanComplete {
                     session_id: session_id.clone(),
-                    total_files: total,
+                    total_files: discovered_count.load(std::sync::atomic::Ordering::Relaxed),
                     processed_files: total,
                     failed_files: failed,
                     total_seconds: elapsed,

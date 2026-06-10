@@ -163,6 +163,9 @@ internal sealed partial class EngineClient
         // guard — a manual Re-cluster while clustering is already running is a
         // benign "already busy" notice, not a scary red error.
         "face_clustering_busy" => true,
+        // IPC parity: the engine now reports undecodable command frames
+        // (macOS has always emitted this kind). Diagnostic, not actionable.
+        "command_decode_failed" => true,
         _ => false,
     };
 
