@@ -251,26 +251,47 @@ public enum Restructure {
 
     public static func apply(
         proposals: [RestructureProposal],
-        database: Database
+        database: Database,
+        libraryRoot: URL
     ) async -> ApplyResult {
         let fm = FileManager.default
         var moved = 0
         var skipped = 0
         var failed = 0
         var conflicts: [String] = []
+        let resolvedRoot = libraryRoot.resolvingSymlinksInPath().path
 
         for p in proposals {
             let oldURL = URL(fileURLWithPath: p.oldPath)
             let newURL = URL(fileURLWithPath: p.newPath)
             if oldURL == newURL { skipped += 1; continue }
-            // Ensure dir exists.
+            // SEC-7 port: the destination's resolved parent must stay inside
+            // the resolved library root — a symlinked bucket component must
+            // not let a move escape the tree the user authorized.
+            guard pathIsContained(newURL.deletingLastPathComponent(),
+                                  inResolvedRoot: resolvedRoot) else {
+                failed += 1
+                JSONLog.shared.warn(ev: "restructure_move_escapes_root",
+                                    path: redactPathForLog(p.newPath))
+                continue
+            }
             do {
                 try fm.createDirectory(at: newURL.deletingLastPathComponent(),
                                        withIntermediateDirectories: true)
             } catch {
                 failed += 1; continue
             }
-            // Skip if destination collides with existing file.
+            // SEC-5 port: re-verify after createDirectory (an attacker can
+            // plant a symlink between check and use; cheap defense in depth).
+            guard pathIsContained(newURL.deletingLastPathComponent(),
+                                  inResolvedRoot: resolvedRoot) else {
+                failed += 1
+                JSONLog.shared.warn(ev: "restructure_move_escapes_root",
+                                    path: redactPathForLog(p.newPath))
+                continue
+            }
+            // Advisory collision report — the enforcement is moveItem itself,
+            // which never overwrites (throws NSFileWriteFileExistsError).
             if fm.fileExists(atPath: newURL.path) {
                 conflicts.append(p.newPath)
                 skipped += 1
@@ -279,7 +300,6 @@ public enum Restructure {
             do {
                 try fm.moveItem(at: oldURL, to: newURL)
                 moved += 1
-                // Update path_text in DB.
                 try await database.pool.write { db in
                     try db.execute(
                         sql: "UPDATE files SET path_text = ? WHERE id = ?",
@@ -288,8 +308,11 @@ public enum Restructure {
                 }
             } catch {
                 failed += 1
+                // NSError text embeds both full paths — log domain+code only.
+                let ns = error as NSError
                 JSONLog.shared.warn(ev: "restructure_move_failed",
-                                    path: redactPathForLog(oldURL.path), error: "\(error)")
+                                    path: redactPathForLog(oldURL.path),
+                                    error: "\(ns.domain) \(ns.code)")
             }
         }
         JSONLog.shared.info(ev: "restructure_applied",
@@ -298,6 +321,7 @@ public enum Restructure {
                                     "failed": AnyCodable(failed)])
         return ApplyResult(moved: moved, skipped: skipped, failed: failed, conflicts: conflicts)
     }
+
 
     private static func monthName(_ m: Int) -> String {
         let names = ["", "01-Jan","02-Feb","03-Mar","04-Apr","05-May","06-Jun",

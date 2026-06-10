@@ -825,6 +825,10 @@ struct RestructureView: View {
     }
 
     private func applySelected(mode: RestructureEngine.ApplyMode) {
+        guard let root = libraryRoot else {
+            status = "Pick a library folder before applying."
+            return
+        }
         // Belt-and-suspenders: never move a proposal whose outcome is skipped,
         // regardless of selection state.
         let toMove = proposals.filter {
@@ -832,7 +836,8 @@ struct RestructureView: View {
         }
         Task {
             let result = await RestructureEngine.apply(proposals: toMove,
-                                                       store: store, mode: mode)
+                                                       store: store, mode: mode,
+                                                       libraryRoot: root)
             let modeLabel = mode == .symlink ? "linked" : "moved"
             status = "\(result.moved) \(modeLabel) · skipped \(result.skipped) · failed \(result.failed)"
                 + (result.conflicts.isEmpty ? "" : " · \(result.conflicts.count) conflicts")
@@ -1362,36 +1367,70 @@ enum RestructureEngine {
     }
 
     /// Symlink mode (default) leaves originals in place; realMove `mv`s
-    /// each file and rewrites its path_text row.
+    /// each file and rewrites its path_text row immediately after the
+    /// move (rolling the file back on DB failure), so a crash or WAL
+    /// contention strands at most one file instead of the whole batch.
     static func apply(proposals: [RestructureView.Proposal],
-                       store: ReadStore, mode: ApplyMode) async -> ApplyResult {
+                       store: ReadStore, mode: ApplyMode,
+                       libraryRoot: URL) async -> ApplyResult {
         let fm = FileManager.default
         var moved = 0
         var skipped = 0
         var failed = 0
         var conflicts: [String] = []
-        var pathUpdates: [(Int64, String)] = []
+        let resolvedRoot = libraryRoot.resolvingSymlinksInPath().path
+
+        // Fail fast: if the DB isn't writable (engine mid-batch holding
+        // the lock past the busy timeout, wiped DB, …), move NOTHING —
+        // moved-but-unrecorded files are the failure mode this prevents.
+        var updateQueue: DatabaseQueue?
+        if mode == .realMove {
+            guard let q = try? store.openPathUpdateQueue() else {
+                return ApplyResult(moved: 0, skipped: 0, failed: proposals.count,
+                                   conflicts: [], mode: mode)
+            }
+            updateQueue = q
+        }
+
         for p in proposals {
             let oldURL = URL(fileURLWithPath: p.oldPath)
             let newURL = URL(fileURLWithPath: p.newPath)
             if oldURL == newURL { skipped += 1; continue }
+            let parent = newURL.deletingLastPathComponent()
+            // SEC-7: destination's resolved parent must stay inside the
+            // resolved root — a symlinked bucket component must not let
+            // a move (or link) land outside the authorized tree.
+            guard pathIsContained(parent, inResolvedRoot: resolvedRoot) else {
+                failed += 1; continue
+            }
             do {
-                try fm.createDirectory(at: newURL.deletingLastPathComponent(),
-                                        withIntermediateDirectories: true)
+                try fm.createDirectory(at: parent, withIntermediateDirectories: true)
             } catch {
                 failed += 1; continue
             }
-            // Skip the fileExists pre-check: it opens a TOCTOU window
-            // where an attacker can create the path between the check
-            // and the create. createSymbolicLink / moveItem already
-            // throw on existing destination — that's the atomic test.
+            // SEC-5: re-verify after createDirectory (check-to-use window).
+            guard pathIsContained(parent, inResolvedRoot: resolvedRoot) else {
+                failed += 1; continue
+            }
+            // No fileExists pre-check: it opens a TOCTOU window.
+            // createSymbolicLink / moveItem already throw on existing
+            // destination — that's the atomic test.
             do {
                 switch mode {
                 case .symlink:
                     try fm.createSymbolicLink(at: newURL, withDestinationURL: oldURL)
                 case .realMove:
                     try fm.moveItem(at: oldURL, to: newURL)
-                    pathUpdates.append((p.fileID, newURL.path))
+                    do {
+                        try store.updatePathText(fileID: p.fileID,
+                                                 newPath: newURL.path,
+                                                 on: updateQueue!)
+                    } catch {
+                        // Disk and DB must not diverge — put the file back.
+                        try? fm.moveItem(at: newURL, to: oldURL)
+                        failed += 1
+                        continue
+                    }
                 }
                 moved += 1
             } catch CocoaError.fileWriteFileExists {
@@ -1409,22 +1448,24 @@ enum RestructureEngine {
                 }
             }
         }
-        if !pathUpdates.isEmpty {
-            await store.updatePathTexts(pathUpdates)
-        }
+        if moved > 0 { store.notifyChanged() }
         return ApplyResult(moved: moved, skipped: skipped, failed: failed,
                            conflicts: conflicts, mode: mode)
     }
 
     /// For each proposal whose newPath is a symlink → original, replace
-    /// it with a real move and update the DB.
+    /// it with a real move and update the DB row immediately (rolling
+    /// back on DB failure).
     static func convertSymlinksToMoves(proposals: [RestructureView.Proposal],
                                         store: ReadStore) async -> ApplyResult {
         let fm = FileManager.default
         var moved = 0
         var skipped = 0
         var failed = 0
-        var pathUpdates: [(Int64, String)] = []
+        guard let updateQueue = try? store.openPathUpdateQueue() else {
+            return ApplyResult(moved: 0, skipped: 0, failed: proposals.count,
+                               conflicts: [], mode: .realMove)
+        }
         for p in proposals {
             let oldURL = URL(fileURLWithPath: p.oldPath)
             let newURL = URL(fileURLWithPath: p.newPath)
@@ -1443,18 +1484,31 @@ enum RestructureEngine {
             guard let resolvedDest = destPath, resolvedDest == p.oldPath else {
                 skipped += 1; continue
             }
+            // unlink(2), not removeItem: it deletes only a link/file and
+            // fails on a directory, so a check-to-use swap can never turn
+            // this into a recursive delete of real user data.
+            guard unlink(newURL.path) == 0 else {
+                skipped += 1; continue
+            }
             do {
-                try fm.removeItem(at: newURL)
                 try fm.moveItem(at: oldURL, to: newURL)
-                moved += 1
-                pathUpdates.append((p.fileID, newURL.path))
             } catch {
+                // Restore the link so the tree stays browsable.
+                try? fm.createSymbolicLink(at: newURL, withDestinationURL: oldURL)
+                failed += 1; continue
+            }
+            do {
+                try store.updatePathText(fileID: p.fileID,
+                                         newPath: newURL.path,
+                                         on: updateQueue)
+                moved += 1
+            } catch {
+                try? fm.moveItem(at: newURL, to: oldURL)
+                try? fm.createSymbolicLink(at: newURL, withDestinationURL: oldURL)
                 failed += 1
             }
         }
-        if !pathUpdates.isEmpty {
-            await store.updatePathTexts(pathUpdates)
-        }
+        if moved > 0 { store.notifyChanged() }
         return ApplyResult(moved: moved, skipped: skipped, failed: failed,
                            conflicts: [], mode: .realMove)
     }

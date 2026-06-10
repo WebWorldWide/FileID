@@ -883,22 +883,21 @@ public final class ReadStore: @unchecked Sendable {
         }) ?? (0, 0)
     }
 
-    /// Bulk path_text update for Restructure post-move.
-    public func updatePathTexts(_ pairs: [(Int64, String)]) async {
-        guard !pairs.isEmpty else { return }
-        do {
-            let q = try DatabaseQueue(path: dbURL.path)
-            try await q.write { db in
-                for (id, path) in pairs {
-                    try db.execute(
-                        sql: "UPDATE files SET path_text = ? WHERE id = ?",
-                        arguments: [path, id]
-                    )
-                }
-            }
-            self.notifyChanged()
-        } catch {
-            self.lastError = "Path update failed: \(error)"
+    /// One busy-tolerant write connection for a whole restructure batch.
+    /// Callers update each row right after its move so a crash or DB
+    /// failure strands at most one file (which the caller rolls back) —
+    /// the old batch-end variant had no busy timeout and swallowed the
+    /// error after every file had already moved on disk.
+    public func openPathUpdateQueue() throws -> DatabaseQueue {
+        try renameWriteQueue()
+    }
+
+    public func updatePathText(fileID: Int64, newPath: String, on queue: DatabaseQueue) throws {
+        try queue.write { db in
+            try db.execute(
+                sql: "UPDATE files SET path_text = ? WHERE id = ?",
+                arguments: [newPath, fileID]
+            )
         }
     }
 

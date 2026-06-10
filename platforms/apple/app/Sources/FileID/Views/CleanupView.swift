@@ -291,7 +291,10 @@ struct CleanupView: View {
                         try FileManager.default.trashItem(at: item.url, resultingItemURL: nil)
                         return TrashResult(id: item.id, size: item.size, success: true)
                     } catch {
-                        NSLog("FileID v2 cleanup: could not trash %@: %@", redactPathForLog(item.url.path), "\(error)")
+                        // NSError descriptions embed the full path — log
+                        // domain+code only, beside the redacted copy.
+                        let ns = error as NSError
+                        NSLog("FileID v2 cleanup: could not trash %@: %@ (%ld)", redactPathForLog(item.url.path), ns.domain, ns.code)
                         return TrashResult(id: item.id, size: item.size, success: false)
                     }
                 }
