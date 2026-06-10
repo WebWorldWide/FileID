@@ -192,6 +192,8 @@ public enum Tagging {
 
     // MARK: - PDF pipeline
 
+    private static let maxPDFRenderPixels: CGFloat = 50_000_000
+
     /// First-page OCR (fast tier), 3-page cap, skip files > 20 MB.
     /// Mirrors v1's Batch 10 heuristics — anything bigger is usually a
     /// scanned manual where filename + Large_Document tag is enough.
@@ -233,7 +235,20 @@ public enum Tagging {
                     for pageNum in 1...pageCount {
                         guard let page = pdf.page(at: pageNum) else { continue }
                         let bounds = page.getBoxRect(.mediaBox)
-                        let scale: CGFloat = 2.0
+                        guard bounds.width > 0, bounds.height > 0 else { continue }
+                        // The 20 MB gate above is byte-size only — a tiny
+                        // vector PDF with a plotter/poster-size mediaBox
+                        // (CAD, GIS) would render a multi-GB bitmap at a
+                        // fixed 2x (data:nil commits w*h*4 bytes), times up
+                        // to workerCap concurrent files. Clamp the scale so
+                        // each page stays under the same 50 MP ceiling the
+                        // Windows engine enforces (MAX_DECODED_PIXELS,
+                        // tagging.rs).
+                        var scale: CGFloat = 2.0
+                        let scaledPixels = bounds.width * bounds.height * scale * scale
+                        if scaledPixels > maxPDFRenderPixels {
+                            scale *= sqrt(maxPDFRenderPixels / scaledPixels)
+                        }
                         let w = Int(bounds.width  * scale)
                         let h = Int(bounds.height * scale)
                         guard w > 0, h > 0 else { continue }

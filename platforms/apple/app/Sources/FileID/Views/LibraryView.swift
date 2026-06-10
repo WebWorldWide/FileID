@@ -1171,11 +1171,7 @@ private struct FilePreviewSheet: View {
                                                         oldPath: oldPath,
                                                         newPath: newURL.path
                                                     )
-                                                    if let data = try? JSONEncoder().encode([outcome]) {
-                                                        UserDefaults.standard.set(
-                                                            data, forKey: BulkRenameSheet.lastBatchKey
-                                                        )
-                                                    }
+                                                    BulkRenameSheet.saveLastBatch([outcome])
                                                 }
                                                 dismiss()
                                             }

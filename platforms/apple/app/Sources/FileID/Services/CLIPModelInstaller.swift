@@ -138,6 +138,7 @@ public final class CLIPModelInstaller {
     /// Files stage into a sibling dir and atomic-promote on full
     /// success — a partial install never poisons the production tree.
     private func runHubFetch() async {
+        Self.sweepOrphanedStagingRoots()
         let approxBytes: Int64 = 250 * 1024 * 1024
         if let free = freeDiskBytes(), free < approxBytes * 2 {
             status = .installFailed("Not enough free space (need ~\(approxBytes * 2 / 1_048_576) MB).")
@@ -214,6 +215,20 @@ public final class CLIPModelInstaller {
             }
         }
         refreshStatus()
+    }
+
+    /// `.clip-staging-<UUID>` roots from a process killed mid-install
+    /// (the cleanup `defer` above dies with the process) strand ~250 MB
+    /// each and eat into the free-space preflight. Wholesale removal is
+    /// safe: only this installer creates them, one install task runs at
+    /// a time (`guard task == nil`), and none can be in flight here.
+    private static func sweepOrphanedStagingRoots() {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(
+            at: modelsRoot, includingPropertiesForKeys: nil) else { return }
+        for entry in entries where entry.lastPathComponent.hasPrefix(".clip-staging-") {
+            try? fm.removeItem(at: entry)
+        }
     }
 
     /// Body lives outside the TaskGroup closure so the Swift 6 region

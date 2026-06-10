@@ -281,7 +281,7 @@ pub(crate) async fn handle_rename_files(
             // content_hash/file_ref).
             let dest_hash = crate::util::path_safety::stable_path_hash(&dest_text);
             match tx.execute(
-                "UPDATE files SET path_text = ?1, path_hash = ?2 WHERE id = ?3",
+                "UPDATE files SET path_text = ?1, path_hash = ?2, path_search = ?1 WHERE id = ?3",
                 rusqlite::params![dest_text, dest_hash, entry.file_id],
             ) {
                 Ok(_) => {

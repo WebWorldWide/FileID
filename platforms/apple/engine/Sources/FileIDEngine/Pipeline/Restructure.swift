@@ -302,8 +302,10 @@ public enum Restructure {
                 moved += 1
                 try await database.pool.write { db in
                     try db.execute(
-                        sql: "UPDATE files SET path_text = ? WHERE id = ?",
-                        arguments: [newURL.path, p.fileID]
+                        sql: "UPDATE files SET path_text = ?, path_search = ? WHERE id = ?",
+                        arguments: [newURL.path,
+                                    newURL.path.precomposedStringWithCanonicalMapping,
+                                    p.fileID]
                     )
                 }
             } catch {

@@ -2,9 +2,10 @@
 // 200ms batches into the single SQLite writer connection.
 //
 // Single-writer is by design: WAL permits concurrent readers but only
-// one writer. Every insert + the resume cursor update + the FTS5 OCR
-// row land in the same transaction so a crash mid-batch leaves no
-// partial state.
+// one writer. Every insert + the resume cursor update land in the same
+// transaction so a crash mid-batch leaves no partial state. The
+// ocr_fts/doc_fts external-content indexes are maintained by the v15
+// sync triggers — never written here directly.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -215,31 +216,23 @@ impl DbWriter {
             let mut tag_insert = tx
                 .prepare_cached("INSERT OR REPLACE INTO tags (file_id, tag, source, score) VALUES (?1, ?2, 'auto', ?3)")
                 .context("preparing tag insert")?;
+            // ocr_fts/doc_fts are owned by the v15 sync triggers, so only the
+            // content tables are touched here. Explicit DELETE + INSERT rather
+            // than INSERT OR REPLACE: REPLACE's implicit delete fires the
+            // AFTER DELETE trigger only when recursive triggers are enabled,
+            // which would strand the old text's FTS postings.
             let mut ocr_text_stmt = tx
-                .prepare_cached("INSERT OR REPLACE INTO ocr_text (file_id, text) VALUES (?1, ?2)")
+                .prepare_cached("INSERT INTO ocr_text (file_id, text) VALUES (?1, ?2)")
                 .context("preparing ocr_text insert")?;
-            let mut ocr_fts_delete = tx
-                .prepare_cached("DELETE FROM ocr_fts WHERE rowid = ?1")
-                .context("preparing ocr_fts delete")?;
             let mut ocr_text_delete = tx
                 .prepare_cached("DELETE FROM ocr_text WHERE file_id = ?1")
                 .context("preparing ocr_text delete")?;
-            let mut ocr_fts_stmt = tx
-                .prepare_cached("INSERT INTO ocr_fts (rowid, text) VALUES (?1, ?2)")
-                .context("preparing ocr_fts insert")?;
-            // Phase 4: document text + FTS5 (same shape as ocr_text/ocr_fts).
             let mut doc_text_stmt = tx
-                .prepare_cached("INSERT OR REPLACE INTO doc_text (file_id, text) VALUES (?1, ?2)")
+                .prepare_cached("INSERT INTO doc_text (file_id, text) VALUES (?1, ?2)")
                 .context("preparing doc_text insert")?;
-            let mut doc_fts_delete = tx
-                .prepare_cached("DELETE FROM doc_fts WHERE rowid = ?1")
-                .context("preparing doc_fts delete")?;
             let mut doc_text_delete = tx
                 .prepare_cached("DELETE FROM doc_text WHERE file_id = ?1")
                 .context("preparing doc_text delete")?;
-            let mut doc_fts_stmt = tx
-                .prepare_cached("INSERT INTO doc_fts (rowid, text) VALUES (?1, ?2)")
-                .context("preparing doc_fts insert")?;
             for f in buffer.iter() {
                 let insert_started = Instant::now();
                 let path_text = f.path.to_string_lossy();
@@ -357,6 +350,7 @@ impl DbWriter {
                             f.error_message,
                             f.content_hash.as_ref().map(|h| h.as_slice()),
                             f.file_ref.map(|r| r as i64),
+                            path_text,
                         ],
                         |row| row.get(0),
                     )
@@ -442,14 +436,11 @@ impl DbWriter {
 
                 // Delete-then-conditional-insert, but ONLY when the OCR stage
                 // actually ran this session — never on the ambiguous default-
-                // skip path. This clears stale ocr_text/ocr_fts when a
-                // re-process now yields empty text (phantom FTS hits, #11) while
-                // leaving valid prior text untouched on the common skipped
-                // sessions.
+                // skip path. This clears stale ocr_text (and, via the v15
+                // triggers, ocr_fts) when a re-process now yields empty text
+                // (phantom FTS hits, #11) while leaving valid prior text
+                // untouched on the common skipped sessions.
                 if f.ocr_stage_ran {
-                    ocr_fts_delete
-                        .execute(params![file_id])
-                        .with_context(|| format!("ocr_fts delete for {}", crate::platform::redact_path_for_log(&f.path)))?;
                     ocr_text_delete
                         .execute(params![file_id])
                         .with_context(|| format!("ocr_text delete for {}", crate::platform::redact_path_for_log(&f.path)))?;
@@ -458,19 +449,13 @@ impl DbWriter {
                             ocr_text_stmt
                                 .execute(params![file_id, text])
                                 .with_context(|| format!("ocr_text insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
-                            ocr_fts_stmt
-                                .execute(params![file_id, text])
-                                .with_context(|| format!("ocr_fts insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
                         }
                     }
                 }
 
-                // Phase 4: document text + FTS5 — same stage-ran-gated
-                // delete-then-conditional-insert as ocr_text/ocr_fts above (#11).
+                // Phase 4: document text — same stage-ran-gated
+                // delete-then-conditional-insert as ocr_text above (#11).
                 if f.doc_stage_ran {
-                    doc_fts_delete
-                        .execute(params![file_id])
-                        .with_context(|| format!("doc_fts delete for {}", crate::platform::redact_path_for_log(&f.path)))?;
                     doc_text_delete
                         .execute(params![file_id])
                         .with_context(|| format!("doc_text delete for {}", crate::platform::redact_path_for_log(&f.path)))?;
@@ -479,9 +464,6 @@ impl DbWriter {
                             doc_text_stmt
                                 .execute(params![file_id, text])
                                 .with_context(|| format!("doc_text insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
-                            doc_fts_stmt
-                                .execute(params![file_id, text])
-                                .with_context(|| format!("doc_fts insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
                         }
                     }
                 }
@@ -608,6 +590,9 @@ fn percentile(values: &mut [f64], p: f64) -> f64 {
 /// Bare INSERT (no RETURNING) — retained for test fixtures that don't
 /// need the id. The hot-path writer uses `INSERT_FILE_RETURNING_ID_SQL`
 /// below, which is identical plus a `RETURNING id` suffix.
+/// `path_search` (?20) binds the same value as `path_text` — Windows paths
+/// are NFC in practice and Rust has no NFC normalizer in the locked
+/// dependency set (see the v16 migration note).
 #[allow(dead_code)]  // used by test fixtures only; bin path uses the RETURNING variant.
 const INSERT_FILE_SQL: &str = r#"
     INSERT INTO files (
@@ -618,11 +603,12 @@ const INSERT_FILE_SQL: &str = r#"
         has_faces, has_text,
         camera_model, location_lat, location_lon,
         failed, error_message,
-        content_hash, file_ref
+        content_hash, file_ref, path_search
     )
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
     ON CONFLICT(path_text) DO UPDATE SET
         path_hash    = excluded.path_hash,
+        path_search  = excluded.path_search,
         size_bytes   = excluded.size_bytes,
         modified_at  = excluded.modified_at,
         scanned_at   = excluded.scanned_at,
@@ -654,11 +640,12 @@ const INSERT_FILE_RETURNING_ID_SQL: &str = r#"
         has_faces, has_text,
         camera_model, location_lat, location_lon,
         failed, error_message,
-        content_hash, file_ref
+        content_hash, file_ref, path_search
     )
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
     ON CONFLICT(path_text) DO UPDATE SET
         path_hash    = excluded.path_hash,
+        path_search  = excluded.path_search,
         size_bytes   = excluded.size_bytes,
         modified_at  = excluded.modified_at,
         scanned_at   = excluded.scanned_at,
@@ -711,7 +698,7 @@ const HEAL_LOOKUP_SQL: &str = r#"
 // FK-cascades its tags/embeddings/faces, then the healed row wins.
 const HEAL_UPDATE_SQL: &str = r#"
     UPDATE files
-       SET path_text = ?1, path_hash = ?2
+       SET path_text = ?1, path_hash = ?2, path_search = ?1
      WHERE id = ?3
 "#;
 
@@ -837,6 +824,7 @@ mod tests {
                 f.error_message,
                 f.content_hash.as_ref().map(|h| h.as_slice()),
                 f.file_ref.map(|r| r as i64),
+                path_text,
             ],
         )?;
         Ok(())
@@ -926,14 +914,14 @@ mod tests {
             INSERT_FILE_RETURNING_ID_SQL,
             params![row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7,
                     row.8, row.9, row.10, row.11, row.12, row.13, row.14, row.15, row.16,
-                    row.17, row.18],
+                    row.17, row.18, row.0],
             |r| r.get(0),
         ).expect("first insert returns id");
         let id2: i64 = conn.query_row(
             INSERT_FILE_RETURNING_ID_SQL,
             params![row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7,
                     row.8, row.9, row.10, row.11, row.12, row.13, row.14, row.15, row.16,
-                    row.17, row.18],
+                    row.17, row.18, row.0],
             |r| r.get(0),
         ).expect("ON CONFLICT branch must also return id");
         assert_eq!(id1, id2, "RETURNING must yield stable id across insert + update");
@@ -1111,6 +1099,7 @@ mod tests {
                 f.error_message,
                 f.content_hash.as_ref().map(|h| h.as_slice()),
                 f.file_ref.map(|r| r as i64),
+                path_text,
             ],
             |r| r.get(0),
         )
@@ -1340,5 +1329,102 @@ mod tests {
             .unwrap();
         assert_eq!(n, 1, "rename must not create a duplicate row");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// C12: the v15 sync triggers own ocr_fts/doc_fts; the writer only
+    /// touches the content tables (explicit DELETE + INSERT — the flush
+    /// pattern). FTS must follow through insert → re-process (delete+insert)
+    /// → direct update → delete with no stale postings and no corruption.
+    /// Before the fix the writer's manual FTS statements double-fired against
+    /// a macOS-installed trigger set → SQLITE_CORRUPT on every re-process.
+    #[test]
+    fn fts_follows_content_tables_via_triggers() {
+        let conn = in_memory_db();
+        conn.execute(
+            "INSERT INTO files (path_text, path_hash, size_bytes, scanned_at, kind, extension) \
+             VALUES ('C:\\t\\a.png', 1, 1, 1.0, 'image', 'png')",
+            [],
+        )
+        .unwrap();
+        let id: i64 = conn
+            .query_row("SELECT id FROM files WHERE path_text = 'C:\\t\\a.png'", [], |r| r.get(0))
+            .unwrap();
+
+        let hits = |term: &str, fts: &str| -> i64 {
+            conn.query_row(
+                &format!("SELECT COUNT(*) FROM {fts} WHERE {fts} MATCH ?1"),
+                params![term],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let integrity_ok = |fts: &str| {
+            conn.execute(
+                &format!("INSERT INTO {fts}({fts}, rank) VALUES('integrity-check', 1)"),
+                [],
+            )
+            .map(|_| ())
+        };
+
+        for (content, fts) in [("ocr_text", "ocr_fts"), ("doc_text", "doc_fts")] {
+            conn.execute(
+                &format!("INSERT INTO {content} (file_id, text) VALUES (?1, 'alpha bravo')"),
+                params![id],
+            )
+            .unwrap();
+            assert_eq!(hits("alpha", fts), 1, "{fts}: insert must be indexed by the ai trigger");
+
+            conn.execute(&format!("DELETE FROM {content} WHERE file_id = ?1"), params![id])
+                .unwrap();
+            conn.execute(
+                &format!("INSERT INTO {content} (file_id, text) VALUES (?1, 'charlie delta')"),
+                params![id],
+            )
+            .unwrap();
+            assert_eq!(hits("alpha", fts), 0, "{fts}: re-process must drop stale postings");
+            assert_eq!(hits("charlie", fts), 1, "{fts}: re-process must index fresh text");
+
+            conn.execute(
+                &format!("UPDATE {content} SET text = 'echo foxtrot' WHERE file_id = ?1"),
+                params![id],
+            )
+            .unwrap();
+            assert_eq!(hits("charlie", fts), 0, "{fts}: au trigger must drop old postings");
+            assert_eq!(hits("echo", fts), 1, "{fts}: au trigger must index new text");
+
+            conn.execute(&format!("DELETE FROM {content} WHERE file_id = ?1"), params![id])
+                .unwrap();
+            assert_eq!(hits("echo", fts), 0, "{fts}: ad trigger must clear postings");
+
+            integrity_ok(fts).unwrap_or_else(|e| panic!("{fts} integrity-check failed: {e}"));
+        }
+    }
+
+    /// C15: every writer path stamps `path_search` (= `path_text` on
+    /// Windows — see the v16 migration note) so the app's normalization-
+    /// insensitive LIKE never misses engine-written rows.
+    #[test]
+    fn writers_populate_path_search() {
+        let conn = in_memory_db();
+        let f = fixture(r"C:\lib\café.jpg");
+        insert_one(&conn, &f).unwrap();
+        let stored: String = conn
+            .query_row(
+                "SELECT path_search FROM files WHERE path_text = ?1",
+                params![r"C:\lib\café.jpg"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, r"C:\lib\café.jpg");
+
+        let id: i64 = conn
+            .query_row("SELECT id FROM files WHERE path_text = ?1", params![r"C:\lib\café.jpg"], |r| r.get(0))
+            .unwrap();
+        conn.execute(HEAL_UPDATE_SQL, params![r"C:\lib\renamed.jpg", 42i64, id])
+            .unwrap();
+        let healed: String = conn
+            .query_row("SELECT path_search FROM files WHERE id = ?1", params![id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(healed, r"C:\lib\renamed.jpg", "heal must re-stamp path_search");
     }
 }

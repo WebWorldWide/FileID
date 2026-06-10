@@ -8,7 +8,8 @@
 //!   v4_face_verifications, v5_person_naming_structured,
 //!   v6_arcface_embeddings, v7_identity_anchors, v8_content_identity,
 //!   v9_usn_state, v10_doc_text, v11_text_embeddings, v12_face_model_reset,
-//!   v13_face_verification_anchors, v14_files_kind_scanned_index
+//!   v13_face_verification_anchors, v14_files_kind_scanned_index,
+//!   v15_fts_sync_triggers, v16_path_search
 //!
 //! Migrations are append-only. NEVER edit a registered migration once
 //! committed; add a new vN+1 migration instead.
@@ -40,6 +41,8 @@ fn registry() -> Vec<(&'static str, &'static str)> {
         ("v12_face_model_reset",        V12_FACE_MODEL_RESET),
         ("v13_face_verification_anchors", V13_FACE_VERIFICATION_ANCHORS),
         ("v14_files_kind_scanned_index", V14_FILES_KIND_SCANNED_INDEX),
+        ("v15_fts_sync_triggers",        V15_FTS_SYNC_TRIGGERS),
+        ("v16_path_search",              V16_PATH_SEARCH),
     ]
 }
 
@@ -82,6 +85,55 @@ ALTER TABLE face_verifications ADD COLUMN face_b INTEGER;
 /// identifier with equivalent SQL for cross-platform DB parity.
 const V14_FILES_KIND_SCANNED_INDEX: &str = "
 CREATE INDEX IF NOT EXISTS idx_files_kind_scanned ON files(kind, scanned_at);
+";
+
+/// v15: keep the external-content FTS5 indexes in sync via triggers. Byte-
+/// faithful mirror of the macOS "v15_fts_sync_triggers" migration
+/// (Database.swift) — triggers are schema objects stored IN the DB file, so
+/// a macOS-touched library brings them along and the Windows writer must
+/// follow the same contract: the dbwriter no longer writes ocr_fts/doc_fts
+/// directly (the AFTER INSERT/DELETE/UPDATE triggers own the index), and
+/// content-table writes are explicit DELETE + INSERT (REPLACE's implicit
+/// delete fires AFTER DELETE triggers only when recursive_triggers is on,
+/// which would strand the old text's postings). The rebuilds also repair any
+/// stale/dangling postings left by the manual-maintenance era.
+const V15_FTS_SYNC_TRIGGERS: &str = "
+INSERT INTO ocr_fts(ocr_fts) VALUES('rebuild');
+INSERT INTO doc_fts(doc_fts) VALUES('rebuild');
+CREATE TRIGGER IF NOT EXISTS ocr_text_ai AFTER INSERT ON ocr_text BEGIN
+    INSERT INTO ocr_fts(rowid, text) VALUES (new.file_id, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS ocr_text_ad AFTER DELETE ON ocr_text BEGIN
+    INSERT INTO ocr_fts(ocr_fts, rowid, text) VALUES ('delete', old.file_id, old.text);
+END;
+CREATE TRIGGER IF NOT EXISTS ocr_text_au AFTER UPDATE ON ocr_text BEGIN
+    INSERT INTO ocr_fts(ocr_fts, rowid, text) VALUES ('delete', old.file_id, old.text);
+    INSERT INTO ocr_fts(rowid, text) VALUES (new.file_id, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS doc_text_ai AFTER INSERT ON doc_text BEGIN
+    INSERT INTO doc_fts(rowid, text) VALUES (new.file_id, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS doc_text_ad AFTER DELETE ON doc_text BEGIN
+    INSERT INTO doc_fts(doc_fts, rowid, text) VALUES ('delete', old.file_id, old.text);
+END;
+CREATE TRIGGER IF NOT EXISTS doc_text_au AFTER UPDATE ON doc_text BEGIN
+    INSERT INTO doc_fts(doc_fts, rowid, text) VALUES ('delete', old.file_id, old.text);
+    INSERT INTO doc_fts(rowid, text) VALUES (new.file_id, new.text);
+END;
+";
+
+/// v16: normalization-insensitive filename search (C15). SQLite LIKE compares
+/// bytes, so an NFC query can never match an NFD-stored name (Mac/NAS/Dropbox-
+/// synced files). `path_search` holds the NFC form of `path_text`; the app
+/// NFC-normalizes the query and LIKEs against it. Asymmetry by design: Rust
+/// has no NFC normalizer in the locked dependency set, and Windows paths are
+/// NFC in practice (NTFS preserves what apps write; Win32 input is composed),
+/// so this engine populates `path_search = path_text` verbatim while macOS
+/// applies real NFC at its writers. NOTE: macOS must register an identical
+/// `v16_path_search` identifier for cross-platform DB parity.
+const V16_PATH_SEARCH: &str = "
+ALTER TABLE files ADD COLUMN path_search TEXT;
+UPDATE files SET path_search = path_text;
 ";
 
 /// Apply every registered migration that hasn't been applied yet, in
@@ -349,11 +401,10 @@ mod tests {
         }
         apply(&conn).expect("migrations apply");
 
-        // grdb_migrations has 14 rows.
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 14, "expected 14 applied migrations");
+        assert_eq!(n, 16, "expected 16 applied migrations");
 
         // v13 added face_a + face_b to face_verifications (stable anchor keys).
         let verify_cols: i64 = conn
@@ -378,17 +429,14 @@ mod tests {
             .unwrap();
         assert!(persons_cols >= 11, "persons expected >= 11 columns, got {persons_cols}");
 
-        // FTS5 virtual table is reachable (insert + query).
+        // FTS5 virtual table is reachable (insert + query); the v15 AFTER
+        // INSERT trigger indexes the ocr_text row — no manual ocr_fts write.
         conn.execute_batch(r#"
             INSERT INTO files (path_text, path_hash, size_bytes, scanned_at, kind, extension)
               VALUES ('/test/a.png', 1, 100, 1.0, 'image', 'png');
             INSERT INTO ocr_text (file_id, text)
               VALUES ((SELECT id FROM files WHERE path_text = '/test/a.png'),
                       'the quick brown fox');
-            INSERT INTO ocr_fts (rowid, text) VALUES (
-                (SELECT id FROM files WHERE path_text = '/test/a.png'),
-                'the quick brown fox'
-            );
         "#).unwrap();
 
         let file_id: i64 = conn
@@ -414,7 +462,88 @@ mod tests {
         apply(&conn).unwrap();
         apply(&conn).unwrap(); // second run is a no-op
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 14);
+        assert_eq!(n, 16);
+    }
+
+    /// C12 regression: the migration chains forked at v14 (macOS registered
+    /// "v14_fts_sync_triggers" while this engine registered
+    /// "v14_files_kind_scanned_index"), which made a macOS-touched library
+    /// fail every Windows scan with SQLITE_CORRUPT. Both platforms pin the
+    /// same canonical identifier list — the macOS mirror lives in
+    /// platforms/apple/Tests/EngineTests/MigrationParityTests.swift. Update
+    /// BOTH or the chains fork again.
+    #[test]
+    fn migration_identifiers_match_canonical_list() {
+        const CANONICAL: [&str; 16] = [
+            "v1_core_tables",
+            "v2_clip_embeddings",
+            "v3_deep_analyze",
+            "v4_face_verifications",
+            "v5_person_naming_structured",
+            "v6_arcface_embeddings",
+            "v7_identity_anchors",
+            "v8_content_identity",
+            "v9_usn_state",
+            "v10_doc_text",
+            "v11_text_embeddings",
+            "v12_face_model_reset",
+            "v13_face_verification_anchors",
+            "v14_files_kind_scanned_index",
+            "v15_fts_sync_triggers",
+            "v16_path_search",
+        ];
+        let ids: Vec<&str> = registry().iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, CANONICAL, "migration identifiers must match the canonical cross-platform list");
+    }
+
+    /// V15 installed the six FTS sync triggers (same DDL macOS applies).
+    /// Verify they exist and that the FTS index survives a macOS-shaped
+    /// content-table churn without corruption.
+    #[test]
+    fn v15_installs_fts_sync_triggers() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply(&conn).unwrap();
+
+        let triggers: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN \
+                 ('ocr_text_ai','ocr_text_ad','ocr_text_au', \
+                  'doc_text_ai','doc_text_ad','doc_text_au')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(triggers, 6, "all six v15 sync triggers must exist");
+    }
+
+    /// V16 added the nullable `path_search` shadow column for normalization-
+    /// insensitive filename search, backfilled from `path_text`.
+    #[test]
+    fn v16_adds_and_backfills_path_search() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Run v1–v15, insert a pre-v16 row, then let v16 backfill it.
+        for (id, sql) in registry() {
+            if id == "v16_path_search" {
+                break;
+            }
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO files (path_text, path_hash, size_bytes, scanned_at, kind, extension) \
+             VALUES ('C:\\test\\legacy.png', 1, 100, 1.0, 'image', 'png')",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(V16_PATH_SEARCH).unwrap();
+
+        let backfilled: String = conn
+            .query_row(
+                "SELECT path_search FROM files WHERE path_text = 'C:\\test\\legacy.png'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(backfilled, "C:\\test\\legacy.png", "v16 must backfill path_search from path_text");
     }
 
     /// V10 added the `doc_text` + `doc_fts` (FTS5) pair, mirroring `ocr_text`
@@ -430,10 +559,6 @@ mod tests {
             INSERT INTO files (path_text, path_hash, size_bytes, scanned_at, kind, extension)
               VALUES ('/test/doc.docx', 1, 100, 1.0, 'doc', 'docx');
             INSERT INTO doc_text (file_id, text) VALUES (
-                (SELECT id FROM files WHERE path_text = '/test/doc.docx'),
-                'quarterly revenue report and projections'
-            );
-            INSERT INTO doc_fts (rowid, text) VALUES (
                 (SELECT id FROM files WHERE path_text = '/test/doc.docx'),
                 'quarterly revenue report and projections'
             );

@@ -7,6 +7,8 @@
 //   3. Issues N range GETs against the resolved CDN URL, each
 //      enforced to return 206 (else falls back to single-stream).
 //   4. Streams part files into the destination, fsyncs, atomic-renames.
+// Staging entries orphaned by process death are swept on the next
+// download into the same directory (see sweepStaleStagingEntries).
 //
 // Nonisolated by design — runs off the main thread. SwiftUI callers
 // hop to MainActor inside their own onTick if they need it.
@@ -118,6 +120,43 @@ public func streamingDownload(
     }
 }
 
+/// Removes `.fileid-staging` entries left behind by a dead process.
+/// Nothing in-process can reclaim them: the engine hard-exits via
+/// `_exit(0)` on stdin EOF and the app dies with the user's quit, both
+/// skipping `cleanupParts()`, so every interrupted multi-GB install
+/// would strand its parts in a Finder-hidden dir forever. Entry names
+/// are pid-prefixed (`<pid>-<uuid>-part-<n>`) so ownership is provable:
+/// entries of the current process are never touched (a concurrent
+/// download in this process may own them), a dead pid's entries are
+/// reclaimed immediately, and a live foreign pid is trusted only up to
+/// `maxAge` (pid reuse). Un-prefixed names can't belong to any live
+/// download and are removed.
+public func sweepStaleStagingEntries(
+    in stagingDir: URL,
+    currentPID: Int32 = ProcessInfo.processInfo.processIdentifier,
+    maxAge: TimeInterval = 48 * 60 * 60,
+    isProcessAlive: (Int32) -> Bool = { kill($0, 0) == 0 || errno == EPERM }
+) {
+    let fm = FileManager.default
+    guard let entries = try? fm.contentsOfDirectory(
+        at: stagingDir,
+        includingPropertiesForKeys: [.contentModificationDateKey]
+    ) else { return }
+    let cutoff = Date().addingTimeInterval(-maxAge)
+    for entry in entries {
+        let pid = entry.lastPathComponent
+            .split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+            .first.flatMap { Int32($0) }
+        if let pid {
+            if pid == currentPID { continue }
+            let mtime = (try? entry.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate ?? .distantPast
+            if isProcessAlive(pid), mtime > cutoff { continue }
+        }
+        try? fm.removeItem(at: entry)
+    }
+}
+
 /// Multi-part range download. HEADs to confirm `Content-Length` +
 /// `Accept-Ranges: bytes`, captures the redirected CDN URL, splits
 /// into `parts` chunks downloaded concurrently, streams them into
@@ -177,7 +216,8 @@ public func parallelStreamingDownload(
     }
 
     let tracker = MultiPartProgressTracker(partCount: chunkCount, totalBytes: total)
-    let runID = UUID().uuidString
+    // pid prefix lets the next run's sweep prove the owner is dead.
+    let runID = "\(ProcessInfo.processInfo.processIdentifier)-\(UUID().uuidString)"
     // Stage parts in the destination's parent dir so the final concat
     // file ends up on the same volume as `dest` — the final move is
     // then an intra-volume rename instead of a multi-GB cross-volume
@@ -185,12 +225,16 @@ public func parallelStreamingDownload(
     let stagingDir = dest.deletingLastPathComponent()
         .appendingPathComponent(".fileid-staging", isDirectory: true)
     try? FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+    sweepStaleStagingEntries(in: stagingDir)
     let partURLs: [URL] = (0..<chunkCount).map { i in
         stagingDir.appendingPathComponent("\(runID)-part-\(i)")
     }
 
     func cleanupParts() {
         for u in partURLs { try? FileManager.default.removeItem(at: u) }
+        // posix rmdir only succeeds on an empty dir — never recursively
+        // deletes a concurrent sibling run's parts.
+        _ = rmdir(stagingDir.path)
     }
 
     do {
@@ -276,8 +320,10 @@ public func parallelStreamingDownload(
         try moveAtomically(from: finalTemp, to: dest, fsync: false)
     } catch {
         try? FileManager.default.removeItem(at: finalTemp)
+        _ = rmdir(stagingDir.path)
         throw StreamingDownloadError.underlying(error)
     }
+    _ = rmdir(stagingDir.path)
 
     onTick(DownloadTick(written: total, total: total,
                          bytesPerSecond: tracker.combinedBytesPerSec(),
@@ -323,6 +369,11 @@ private func downloadRange(
                 switch result {
                 case .success(let tempURL):
                     do {
+                        // A concurrent sibling download sharing this staging
+                        // dir may have just rmdir'd it empty — recreate.
+                        try FileManager.default.createDirectory(
+                            at: partURL.deletingLastPathComponent(),
+                            withIntermediateDirectories: true)
                         try? FileManager.default.removeItem(at: partURL)
                         try FileManager.default.moveItem(at: tempURL, to: partURL)
                         tracker.markComplete(part: partIndex)

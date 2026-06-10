@@ -100,6 +100,14 @@ public actor DBWriter {
     private var batchIndex = 0
     private var processedTotal = 0
     private var failedTotal = 0
+    private var consecutiveCommitFailures = 0
+    private var abortedForWriteFailure = false
+
+    /// Consecutive failed batch commits before the writer cancels the scan.
+    /// A persistent failure (disk full, DB unlinked) otherwise lets the full
+    /// ANE/CLIP pipeline burn hours producing batches that all drop — one
+    /// error event each — while the session still ends "completed".
+    private let maxConsecutiveCommitFailures = 3
 
     /// Tunables — both sides act as a ceiling. Whichever fires first ends
     /// the buffer window and triggers a commit. Bumped from 50ms → 200ms in
@@ -192,6 +200,7 @@ public actor DBWriter {
             }
             self.processedTotal += insertedOK
             self.failedTotal    += insertedFailed
+            self.consecutiveCommitFailures = 0
             await self.coordinator.bumpProcessed(by: insertedOK)
             await self.coordinator.bumpFailed(by: insertedFailed)
         } catch {
@@ -218,10 +227,23 @@ public actor DBWriter {
             default:
                 userMessage = "Batch \(self.batchIndex) write failed: \(error)"
             }
-            await sink.emit(.error(EngineError(
-                kind: "db_write_failed",
-                message: userMessage
-            )))
+            self.consecutiveCommitFailures += 1
+            if self.abortedForWriteFailure {
+                // Already cancelled — suppress further UI events for batches
+                // that were still in flight when the abort fired.
+            } else if self.consecutiveCommitFailures >= self.maxConsecutiveCommitFailures {
+                self.abortedForWriteFailure = true
+                await self.coordinator.requestCancel()
+                await sink.emit(.error(EngineError(
+                    kind: "db_write_failed",
+                    message: userMessage + " Scan stopped — nothing was being saved."
+                )))
+            } else {
+                await sink.emit(.error(EngineError(
+                    kind: "db_write_failed",
+                    message: userMessage
+                )))
+            }
         }
 
         let insertDur = Date().timeIntervalSince(insertStart)
@@ -320,7 +342,10 @@ public actor DBWriter {
     /// Static + nonisolated so the GRDB write closure can call it without
     /// crossing the actor's executor (Swift 6 strict concurrency).
     private static func insertOne(file: TaggedFile, forceReprocess: Bool, db: GRDB.Database) throws {
-        let pathHash = Int(bitPattern: UInt(truncatingIfNeeded: file.url.path.hashValue))
+        // NOT String.hashValue — that's per-process seeded, so every engine
+        // launch would mint a different value, breaking the stable
+        // cross-platform path_hash contract (path_safety.rs stable_path_hash).
+        let pathHash = StablePathHash.hash(file.url.path)
 
         // Look up any existing row for this path. We need its id (to preserve
         // it) and its size/mtime/failed state (to decide whether the file
@@ -374,13 +399,14 @@ public actor DBWriter {
         //   they bind NULL and COALESCE preserves any previously-stored value.
         try db.execute(sql: """
             INSERT INTO files
-              (path_text, path_hash, size_bytes, created_at, modified_at,
-               scanned_at, kind, extension, phash, aesthetic, has_faces,
-               has_text, camera_model, location_lat, location_lon,
+              (path_text, path_hash, path_search, size_bytes, created_at,
+               modified_at, scanned_at, kind, extension, phash, aesthetic,
+               has_faces, has_text, camera_model, location_lat, location_lon,
                failed, error_message, content_hash, file_ref)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(path_text) DO UPDATE SET
                 path_hash     = excluded.path_hash,
+                path_search   = excluded.path_search,
                 size_bytes    = excluded.size_bytes,
                 modified_at   = excluded.modified_at,
                 scanned_at    = excluded.scanned_at,
@@ -399,6 +425,7 @@ public actor DBWriter {
             """, arguments: [
                 file.url.path,
                 pathHash,
+                file.url.path.precomposedStringWithCanonicalMapping,
                 Int(file.sizeBytes),
                 file.createdAt?.timeIntervalSince1970,
                 newModified,

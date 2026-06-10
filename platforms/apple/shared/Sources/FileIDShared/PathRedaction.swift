@@ -22,6 +22,12 @@ public func redactPathForLog(_ path: String) -> String {
         if path.hasPrefix(fileIDStateRoot + "/") { return path }
     }
     let parts = (path as NSString).pathComponents
+    // A file directly under a home directory (/Users/<name>/<file>)
+    // would keep the username as the parent component of the
+    // two-component tail — emit the filename alone instead.
+    if parts.count == 4, parts[0] == "/", parts[1] == "Users" {
+        return "…/\(parts[3])"
+    }
     let tail = parts.suffix(2).joined(separator: "/")
     return tail.isEmpty ? "…" : "…/\(tail)"
 }

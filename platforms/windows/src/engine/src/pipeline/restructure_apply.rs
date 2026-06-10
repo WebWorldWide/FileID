@@ -322,7 +322,7 @@ fn update_path_in_db(conn: &Arc<Mutex<Connection>>, file_id: i64, new_path: &Pat
     let path_hash = crate::util::path_safety::stable_path_hash(&path_text);
     // prepare_cached: a plan can issue thousands of moves, so cache the parse on
     // the long-lived writer connection (codebase idiom — see bulk.rs/dbwriter.rs).
-    conn.prepare_cached("UPDATE files SET path_text = ?1, path_hash = ?2 WHERE id = ?3")?
+    conn.prepare_cached("UPDATE files SET path_text = ?1, path_hash = ?2, path_search = ?1 WHERE id = ?3")?
         .execute(params![path_text, path_hash, file_id])
         .context("DB UPDATE files.path_text")?;
     Ok(())

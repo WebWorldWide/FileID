@@ -176,8 +176,10 @@ public actor DeepAnalyze {
                                 extra: ["kind": AnyCodable(kind.rawValue)])
             JSONLog.shared.flush()
         } catch {
+            // NSError text embeds the full weights path — log domain+code only.
+            let ns = error as NSError
             JSONLog.shared.error(ev: "deep_loadcontainer_threw",
-                                 error: "\(error)")
+                                 error: "\(ns.domain) \(ns.code)")
             JSONLog.shared.flush()
             loadState = .failed("\(error.localizedDescription)")
             throw error
@@ -531,8 +533,12 @@ public actor DeepAnalyze {
                 try body.write(to: metaURL, atomically: true, encoding: .utf8)
                 synthesized.append(file.lastPathComponent)
             } catch {
+                // NSError text embeds the full sidecar path — log
+                // domain+code only, beside the redacted copy.
+                let ns = error as NSError
                 JSONLog.shared.warn(ev: "metadata_synth_failed",
-                                    path: redactPathForLog(metaURL.path), error: "\(error)")
+                                    path: redactPathForLog(metaURL.path),
+                                    error: "\(ns.domain) \(ns.code)")
             }
         }
         if !synthesized.isEmpty {

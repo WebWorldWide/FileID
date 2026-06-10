@@ -193,6 +193,24 @@ pub fn chain_has_pin_failure(err: &anyhow::Error) -> bool {
     })
 }
 
+fn io_error_is_disk_full(e: &std::io::Error) -> bool {
+    // 39 = ERROR_HANDLE_DISK_FULL, 112 = ERROR_DISK_FULL. The raw codes are
+    // Windows-only — they mean unrelated errnos on Unix.
+    #[cfg(windows)]
+    let raw_disk_full = matches!(e.raw_os_error(), Some(39 | 112));
+    #[cfg(not(windows))]
+    let raw_disk_full = false;
+    e.kind() == std::io::ErrorKind::StorageFull || raw_disk_full
+}
+
+/// Disk-full detection for install failures: anyhow's Display drops the io
+/// source ("writing range chunk"), so without this walk an ENOSPC surfaces
+/// as a connection problem with retry advice that can never work.
+pub fn chain_has_disk_full(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|e| e.downcast_ref::<std::io::Error>().is_some_and(io_error_is_disk_full))
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct DownloadProgress {
@@ -978,8 +996,9 @@ async fn download_range_with_retry(
 #[cfg(test)]
 mod tests {
     use super::{
-        chain_has_pin_failure, check_size_plausible, message_indicates_pin_failure,
-        source_chain_indicates_pin_failure, RetryBudget, PINNED_ROOT_CERTS,
+        chain_has_disk_full, chain_has_pin_failure, check_size_plausible,
+        message_indicates_pin_failure, source_chain_indicates_pin_failure, RetryBudget,
+        PINNED_ROOT_CERTS,
     };
     use std::time::Duration;
 
@@ -1036,6 +1055,27 @@ mod tests {
         assert!(source_chain_indicates_pin_failure(&wrapped));
         let plain = OpaqueWrap(std::io::Error::other("connection reset by peer"));
         assert!(!source_chain_indicates_pin_failure(&plain));
+    }
+
+    #[test]
+    fn chain_disk_full_detected_through_anyhow_context_layers() {
+        let err = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::StorageFull,
+            "There is not enough space on the disk. (os error 112)",
+        ))
+        .context("writing range chunk")
+        .context("downloading model.onnx");
+        assert!(chain_has_disk_full(&err));
+
+        let conn = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "connection reset by peer",
+        ))
+        .context("writing range chunk");
+        assert!(!chain_has_disk_full(&conn));
+
+        let plain = anyhow::anyhow!("HTTP 503 Service Unavailable").context("issuing GET");
+        assert!(!chain_has_disk_full(&plain));
     }
 
     #[test]

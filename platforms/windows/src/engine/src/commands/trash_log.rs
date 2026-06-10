@@ -62,8 +62,17 @@ pub(crate) fn append(entry: &TrashLogEntry) -> anyhow::Result<()> {
 
 /// Keep only the last `MAX_ENTRIES` non-empty lines, atomically (temp + rename).
 fn trim_to_cap(path: &std::path::Path) -> anyhow::Result<()> {
-    let raw = std::fs::read_to_string(path)?;
-    let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+    // Read bytes, not read_to_string: one torn line cut mid-codepoint (power
+    // loss before append's fsync) would otherwise fail the WHOLE read forever
+    // and silently disable the cap. Undecodable lines are dropped per-line,
+    // like the HMAC-reject path.
+    let raw = std::fs::read(path)?;
+    let lines: Vec<&str> = raw
+        .split(|b| *b == b'\n')
+        .filter_map(|l| std::str::from_utf8(l).ok())
+        .map(|l| l.trim_end_matches('\r'))
+        .filter(|l| !l.trim().is_empty())
+        .collect();
     if lines.len() <= MAX_ENTRIES {
         return Ok(());
     }
@@ -91,8 +100,20 @@ pub(crate) fn read_batch(batch_id: &str) -> anyhow::Result<Option<TrashLogEntry>
         return Ok(None);
     }
     let key = hmac::log_hmac_key()?;
-    let raw = std::fs::read_to_string(&path)?;
-    for line in raw.lines() {
+    // Read bytes, not read_to_string: a torn line ending inside a multi-byte
+    // character (power loss mid-append) would otherwise return InvalidData
+    // for the whole file and wedge restore for EVERY batch, old and new.
+    let raw = std::fs::read(&path)?;
+    Ok(find_batch_in(&raw, &key, batch_id))
+}
+
+fn find_batch_in(raw: &[u8], key: &[u8], batch_id: &str) -> Option<TrashLogEntry> {
+    for line in raw.split(|b| *b == b'\n') {
+        let Ok(line) = std::str::from_utf8(line) else {
+            tracing::warn!("trash_log line is not valid UTF-8 (torn append?) -- skipping");
+            continue;
+        };
+        let line = line.trim_end_matches('\r');
         if line.trim().is_empty() {
             continue;
         }
@@ -103,18 +124,18 @@ pub(crate) fn read_batch(batch_id: &str) -> anyhow::Result<Option<TrashLogEntry>
             continue;
         };
         let (payload, expected) = (&line[..tab], &line[tab + 1..]);
-        let actual = hmac::hmac_sha256_hex(&key, payload.as_bytes());
+        let actual = hmac::hmac_sha256_hex(key, payload.as_bytes());
         if !hmac::constant_time_eq_str(&actual, expected) {
             tracing::warn!("trash_log entry HMAC mismatch -- rejecting forged entry");
             continue;
         }
         if let Ok(entry) = serde_json::from_str::<TrashLogEntry>(payload) {
             if entry.batch_id == batch_id {
-                return Ok(Some(entry));
+                return Some(entry);
             }
         }
     }
-    Ok(None)
+    None
 }
 
 #[cfg(test)]

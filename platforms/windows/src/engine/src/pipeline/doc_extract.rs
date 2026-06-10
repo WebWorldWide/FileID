@@ -51,10 +51,13 @@ pub(crate) fn extract(path: &Path, bytes: Option<&[u8]>) -> Result<Option<String
 
 fn truncate_to_max(mut t: String) -> String {
     if t.len() > MAX_TEXT_BYTES {
-        t.truncate(MAX_TEXT_BYTES);
-        while !t.is_char_boundary(t.len()) {
-            t.pop();
+        // String::truncate panics off a char boundary, so clamp the cut point
+        // down to one BEFORE truncating (floor_char_boundary isn't stable yet).
+        let mut n = MAX_TEXT_BYTES;
+        while !t.is_char_boundary(n) {
+            n -= 1;
         }
+        t.truncate(n);
     }
     t
 }
@@ -371,5 +374,17 @@ mod tests {
         assert!(truncated.len() <= MAX_TEXT_BYTES);
         // Roundtrip valid UTF-8 (every char must still be 'é').
         assert!(truncated.chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn truncate_handles_cut_inside_multibyte_char() {
+        // 3-byte chars: MAX_TEXT_BYTES (262144) % 3 == 1, so the byte cut
+        // always lands mid-char — the case that used to panic in
+        // String::truncate before the boundary clamp.
+        let s = "夏".repeat(100_000);
+        let truncated = truncate_to_max(s);
+        assert!(truncated.len() <= MAX_TEXT_BYTES);
+        assert!(truncated.len() > MAX_TEXT_BYTES - 4);
+        assert!(truncated.chars().all(|c| c == '夏'));
     }
 }

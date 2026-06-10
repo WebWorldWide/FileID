@@ -134,10 +134,19 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
                 var dur = completed.HasValue && completed.Value > started
                     ? FormatDuration(completed.Value - started)
                     : (status == "running" ? "running…" : "—");
+                // The engine stamps failed (DbWriter error / GPU TDR) and
+                // cancelled rows too — surface those instead of letting them
+                // read like clean completions.
+                var statusNote = status switch
+                {
+                    "failed" => "  ·  failed",
+                    "cancelled" => "  ·  cancelled",
+                    _ => string.Empty,
+                };
                 var rootShort = string.IsNullOrEmpty(root)
                     ? "(unknown root)"
                     : System.IO.Path.GetFileName(root.TrimEnd('\\', '/'));
-                items.Add($"• {when}  ·  {total:N0} files  ·  {dur}  ·  {rootShort}");
+                items.Add($"• {when}  ·  {total:N0} files  ·  {dur}{statusNote}  ·  {rootShort}");
             }
             RecentScansList.ItemsSource = items;
         }

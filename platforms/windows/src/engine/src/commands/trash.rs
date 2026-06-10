@@ -86,9 +86,9 @@ pub(crate) async fn handle_restore_from_trash(
                 let kind = crate::pipeline::discovery::FileKind::from_extension(&extension);
                 let _ = tx.execute(
                     "INSERT OR IGNORE INTO files \
-                     (path_text, path_hash, size_bytes, scanned_at, kind, extension, \
+                     (path_text, path_hash, path_search, size_bytes, scanned_at, kind, extension, \
                       has_faces, has_text, failed) \
-                     VALUES (?1, ?2, 0, ?3, ?4, ?5, 0, 0, 0)",
+                     VALUES (?1, ?2, ?1, 0, ?3, ?4, ?5, 0, 0, 0)",
                     rusqlite::params![
                         item.original_path,
                         crate::util::path_safety::stable_path_hash(&item.original_path),

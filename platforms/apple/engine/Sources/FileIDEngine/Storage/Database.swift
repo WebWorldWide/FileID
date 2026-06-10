@@ -349,7 +349,19 @@ public final class Database: @unchecked Sendable {
             try db.execute(sql: "ALTER TABLE face_verifications ADD COLUMN face_b INTEGER")
         }
 
-        // v14 — keep the external-content FTS5 indexes in sync via triggers.
+        // v14: composite (kind, scanned_at) index. Byte-equivalent mirror of
+        // the Windows "v14_files_kind_scanned_index" migration so the chains
+        // stay identical and a library round-trips across platforms — the
+        // kind-filtered Library grid runs `WHERE kind = ? ORDER BY scanned_at`,
+        // which the single-column kind index satisfies for the filter but not
+        // the order (TEMP B-TREE sort each refresh).
+        m.registerMigration("v14_files_kind_scanned_index") { db in
+            try db.execute(sql:
+                "CREATE INDEX IF NOT EXISTS idx_files_kind_scanned ON files(kind, scanned_at)"
+            )
+        }
+
+        // v15 — keep the external-content FTS5 indexes in sync via triggers.
         //
         // ocr_fts/doc_fts are external-content FTS5 (content='ocr_text' etc.).
         // They were only ever fed on INSERT; deletes (Cleanup prune, orphan
@@ -359,7 +371,12 @@ public final class Database: @unchecked Sendable {
         // install the canonical sync triggers so every insert/delete/update on
         // the content table maintains the index. The DBWriter no longer writes
         // ocr_fts directly (the AFTER INSERT trigger does it).
-        m.registerMigration("v14_fts_sync_triggers") { db in
+        //
+        // Renamed from the briefly-registered "v14_fts_sync_triggers": that
+        // identifier never shipped and collided with the Windows v14 slot
+        // (the (kind, scanned_at) index above), forking the cross-platform
+        // migration chain. Renaming pre-ship is safe — run.sh wipes dev DBs.
+        m.registerMigration("v15_fts_sync_triggers") { db in
             try db.execute(sql: "INSERT INTO ocr_fts(ocr_fts) VALUES('rebuild')")
             try db.execute(sql: "INSERT INTO doc_fts(doc_fts) VALUES('rebuild')")
 
@@ -380,6 +397,29 @@ public final class Database: @unchecked Sendable {
                         INSERT INTO \(fts)(rowid, text) VALUES (new.file_id, new.text);
                     END
                     """)
+            }
+        }
+
+        // v16: normalization-insensitive filename search. SQLite LIKE compares
+        // bytes, so an NFC query ("café" = 63 61 66 C3 A9) never matches an
+        // NFD-stored path ("café" = 63 61 66 65 CC 81) — and macOS GUI-created
+        // accented filenames are commonly NFD on disk while search-field input
+        // is NFC. path_search holds the NFC form of path_text; every writer
+        // populates it and ReadStore LIKEs against it with an NFC query. The
+        // bulk SQL copy covers ASCII rows (NFC is the identity there); the
+        // Swift pass re-normalizes only rows with non-ASCII characters.
+        m.registerMigration("v16_path_search") { db in
+            try db.execute(sql: "ALTER TABLE files ADD COLUMN path_search TEXT")
+            try db.execute(sql: "UPDATE files SET path_search = path_text")
+            let rows = try Row.fetchAll(db, sql:
+                "SELECT id, path_text FROM files WHERE path_text GLOB '*[^ -~]*'"
+            )
+            for row in rows {
+                let path: String = row["path_text"]
+                try db.execute(
+                    sql: "UPDATE files SET path_search = ? WHERE id = ?",
+                    arguments: [path.precomposedStringWithCanonicalMapping, row["id"] as Int64]
+                )
             }
         }
 

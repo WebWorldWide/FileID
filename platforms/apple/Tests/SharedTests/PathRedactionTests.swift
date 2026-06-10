@@ -41,6 +41,25 @@ struct PathRedactionTests {
         #expect(!r.contains("adam"))
     }
 
+    @Test("file directly under a home directory drops the username")
+    func fileDirectlyUnderHome() {
+        let r = redactPathForLog("/Users/adam/notes.txt")
+        #expect(r == "…/notes.txt")
+        #expect(!r.contains("adam"))
+    }
+
+    @Test("file directly under ANOTHER user's home drops that username too")
+    func fileUnderOtherUsersHome() {
+        let r = redactPathForLog("/Users/bob/taxes-2025.pdf")
+        #expect(r == "…/taxes-2025.pdf")
+        #expect(!r.contains("bob"))
+    }
+
+    @Test("one level below home keeps the (non-username) parent")
+    func oneLevelBelowHomeKeepsParent() {
+        #expect(redactPathForLog("/Users/adam/Pictures/IMG.jpg") == "…/Pictures/IMG.jpg")
+    }
+
     @Test("empty input collapses to ellipsis")
     func emptyInput() {
         #expect(redactPathForLog("") == "…")

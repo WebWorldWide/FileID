@@ -24,6 +24,11 @@ public final class ArcFaceModelInstaller {
     ]
 
     private var tasks: [FaceEmbedderKind: Task<Void, Never>] = [:]
+    /// Kinds with a download actually in flight. Progress ticks arrive
+    /// as queued MainActor tasks and can be scheduled AFTER the catch
+    /// arm wrote a terminal status — gate them on liveness so a stale
+    /// tick can't resurrect a phantom "Downloading…" row.
+    private var active: Set<FaceEmbedderKind> = []
 
     private init() {}
 
@@ -50,7 +55,10 @@ public final class ArcFaceModelInstaller {
                 let sz = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
                 status[kind] = .installed(sizeBytes: sz)
             } else {
-                if case .downloading = status[kind] { continue }
+                // Preserve .downloading only while an install task is
+                // alive; otherwise overwrite from disk state like the
+                // CLIP installer, so a phantom row self-heals here.
+                if case .downloading = status[kind], tasks[kind] != nil { continue }
                 status[kind] = .missing(reason: "Not installed.")
             }
         }
@@ -79,6 +87,11 @@ public final class ArcFaceModelInstaller {
         let modelsRoot = FaceEmbedderKind.modelsDirectory
         try? FileManager.default.createDirectory(at: modelsRoot, withIntermediateDirectories: true)
 
+        // Reclaim parts orphaned by a kill mid-download BEFORE the
+        // free-space preflight, so stale staging can't fail it.
+        sweepStaleStagingEntries(
+            in: modelsRoot.appendingPathComponent(".fileid-staging", isDirectory: true))
+
         if let free = freeDiskBytes(at: modelsRoot),
            free < kind.approxBytes * 2 {
             status[kind] = .installFailed("Not enough free space.")
@@ -92,6 +105,8 @@ public final class ArcFaceModelInstaller {
         }
         status[kind] = .downloading(fraction: 0, message: "Connecting…",
                                     bytesPerSecond: 0, etaSeconds: 0)
+        active.insert(kind)
+        defer { active.remove(kind) }
 
         do {
             // Multi-part — single-stream gets ~1 MB/s from HF/Cloudflare.
@@ -99,7 +114,7 @@ public final class ArcFaceModelInstaller {
                                                  approxBytes: kind.approxBytes,
                                                  expectedSHA256: ModelManifest.sha256(forURL: remote)) { tick in
                 Task { @MainActor [weak self] in
-                    guard let self else { return }
+                    guard let self, self.active.contains(kind) else { return }
                     let frac = tick.total > 0
                         ? min(1.0, Double(tick.written) / Double(tick.total))
                         : 0

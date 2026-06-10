@@ -93,10 +93,11 @@ pub fn cancel_prewarm(model_kind: Option<&str>) {
     }
 }
 
-/// A TLS pin failure is an interception signal, not a flaky connection —
-/// "check your connection and Retry" copy would send the user in circles, so
-/// it gets its own kind + copy that says what's actually happening.
-fn download_failure_kind_and_hint(pin_failure: bool) -> (&'static str, &'static str) {
+/// A TLS pin failure is an interception signal and a full disk is a storage
+/// problem — neither is a flaky connection, and "check your connection and
+/// Retry" copy would send the user in circles, so each gets its own kind +
+/// copy that says what's actually happening.
+fn download_failure_kind_and_hint(pin_failure: bool, disk_full: bool) -> (&'static str, &'static str) {
     if pin_failure {
         (
             "download_tls_pin_failed",
@@ -109,6 +110,17 @@ fn download_failure_kind_and_hint(pin_failure: bool) -> (&'static str, &'static 
              different network, or, if you trust this one, set \
              FILEID_DISABLE_TLS_PINNING=1 to trust the system certificate \
              store instead.",
+        )
+    } else if disk_full {
+        (
+            "model_download_disk_full",
+            "The disk is full — this is not a connection problem, and \
+             retrying without freeing space will fail the same way. \
+             Installing a model needs roughly TWICE its download size free \
+             while the partial .part files (kept next to the model under \
+             %LOCALAPPDATA%\\FileID\\Models) are combined into the final \
+             file. Free up space, then click Retry — already-downloaded \
+             parts are reused.",
         )
     } else {
         (
@@ -384,9 +396,11 @@ pub(crate) async fn handle_prewarm_model(
         for (label, _dest, err) in &errs {
             tracing::warn!(?err, file = %label, "model download failed");
         }
+        // {err:#} prints the whole context chain — plain {err} shows only the
+        // outermost layer ("writing range chunk"), hiding the OS cause.
         let detail = errs
             .iter()
-            .map(|(label, _dest, err)| format!("{label}: {err}"))
+            .map(|(label, _dest, err)| format!("{label}: {err:#}"))
             .collect::<Vec<_>>()
             .join("\n");
         let (first_label, first_dest, _) = &errs[0];
@@ -398,7 +412,10 @@ pub(crate) async fn handle_prewarm_model(
         let pin_failure = errs
             .iter()
             .any(|(_, _, err)| crate::downloader::chain_has_pin_failure(err));
-        let (kind, hint) = download_failure_kind_and_hint(pin_failure);
+        let disk_full = errs
+            .iter()
+            .any(|(_, _, err)| crate::downloader::chain_has_disk_full(err));
+        let (kind, hint) = download_failure_kind_and_hint(pin_failure, disk_full);
         sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
             kind: kind.into(),
             message: format!("{summary}:\n{detail}\n\n{hint}"),
@@ -455,11 +472,13 @@ pub(crate) async fn handle_prewarm_model(
                 return;
             }
             tracing::warn!(?err, file = %label, "model download failed");
-            let (kind, hint) =
-                download_failure_kind_and_hint(crate::downloader::chain_has_pin_failure(&err));
+            let (kind, hint) = download_failure_kind_and_hint(
+                crate::downloader::chain_has_pin_failure(&err),
+                crate::downloader::chain_has_disk_full(&err),
+            );
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                 kind: kind.into(),
-                message: format!("Couldn't download {label}: {err}\n\n{hint}"),
+                message: format!("Couldn't download {label}: {err:#}\n\n{hint}"),
                 path: Some(file.dest.display().to_string()),
                 model_kind: Some(model_kind.clone()),
             }))))

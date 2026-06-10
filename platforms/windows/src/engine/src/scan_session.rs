@@ -360,7 +360,7 @@ impl ScanSession {
         // the sidebar progress bar pegs at 100 % during tagging.
         let discovered_count_for_batch = discovered_count.clone();
 
-        let (total, failed) = writer
+        let writer_outcome = writer
             .run(tagged_rx, move |stats: BatchStats| {
                 emit_batch_summary(&sink_for_batch, &stats);
                 let discovered = discovered_count_for_batch.load(std::sync::atomic::Ordering::Relaxed);
@@ -372,12 +372,34 @@ impl ScanSession {
                     discovered,
                 );
             })
-            .await?;
+            .await;
 
         // Tick exits on its own once discovery's `done` flips true; this
         // abort is belt-and-suspenders for the rare case where DBWriter
         // returns before tick observes the done flag (cancel mid-walk).
+        // Must run BEFORE the error propagation below, or a failed writer
+        // leaves the tick emitting Discovering progress after the caller's
+        // PhaseChanged(Failed).
         tick.abort();
+
+        let (total, failed) = match writer_outcome {
+            Ok(t) => t,
+            Err(err) => {
+                // Stamp the row 'failed' so Settings → Recent scans doesn't
+                // show it as 'running' forever. Best-effort: the writer
+                // failure may be the DB itself (SQLITE_FULL / unreachable).
+                let conn = self.db_conn.lock();
+                let completed_unix = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(0.0);
+                let _ = conn.execute(
+                    "UPDATE scan_sessions SET completed_at = ?1, status = 'failed' WHERE id = ?2",
+                    rusqlite::params![completed_unix, session_id],
+                );
+                return Err(err);
+            }
+        };
 
         // Post-drain fallback for the empty/rescan/partial notice: if discovery
         // finished but the tick was aborted before it could emit (drained inside
@@ -432,10 +454,18 @@ impl ScanSession {
 
         let elapsed = started.elapsed().as_secs_f64();
 
-        // Stamp the scan_sessions row with completed_at + status.
+        // Stamp the scan_sessions row with completed_at + status. gpu-dead
+        // wins over cancelled: a TDR-aborted scan emits PhaseChanged(Failed)
+        // below and must not be recorded as completed/cancelled.
         {
             let conn = self.db_conn.lock();
-            let final_status = if self.coordinator.is_cancelled() { "cancelled" } else { "completed" };
+            let final_status = if self.coordinator.is_gpu_dead() {
+                "failed"
+            } else if self.coordinator.is_cancelled() {
+                "cancelled"
+            } else {
+                "completed"
+            };
             let completed_unix = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs_f64())

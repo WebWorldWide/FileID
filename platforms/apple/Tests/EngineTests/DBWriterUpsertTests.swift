@@ -1,6 +1,6 @@
 // H2 regression: re-scan must preserve files.id and face_prints.person_id
 // for unchanged files (id-preserving UPSERT, never delete+reinsert), and the
-// v14 FTS sync triggers must keep ocr_fts postings consistent across change
+// v15 FTS sync triggers must keep ocr_fts postings consistent across change
 // and delete — the old INSERT OR REPLACE wiped manual person assignments and
 // stranded stale FTS postings on every re-scan.
 import Testing
@@ -132,10 +132,34 @@ struct DBWriterUpsertTests {
 
             let stale = try Int64.fetchOne(db, sql:
                 "SELECT rowid FROM ocr_fts WHERE ocr_fts MATCH 'alpha'")
-            #expect(stale == nil, "old OCR postings removed by the v14 sync triggers")
+            #expect(stale == nil, "old OCR postings removed by the v15 sync triggers")
             let fresh = try Int64.fetchOne(db, sql:
                 "SELECT rowid FROM ocr_fts WHERE ocr_fts MATCH 'charlie'")
-            #expect(fresh == id1, "new OCR text indexed by the v14 sync triggers")
+            #expect(fresh == id1, "new OCR text indexed by the v15 sync triggers")
+        }
+    }
+
+    @Test("insertOne stores the NFC form in path_search (C15)")
+    func pathSearchStoresNFC() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDUpsertTest-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let db = try Database(at: tmp.appendingPathComponent("test.sqlite"))
+
+        let nfdName = "cafe\u{0301}.jpg"
+        let fileURL = tmp.appendingPathComponent(nfdName)
+        let writer = DBWriter(db: db, sink: IPCSink(), coordinator: ScanCoordinator(),
+                              sessionID: UUID().uuidString)
+        await drain(writer, makeFile(url: fileURL, withFace: false))
+
+        try await db.pool.read { db in
+            let stored = try String.fetchOne(db, sql:
+                "SELECT path_search FROM files WHERE path_text = ?",
+                arguments: [fileURL.path])
+            let nfc = fileURL.path.precomposedStringWithCanonicalMapping
+            #expect(stored == nfc, "path_search must hold the NFC form")
+            #expect(stored?.contains("caf\u{00E9}") == true,
+                    "NFD input must precompose to U+00E9 in path_search")
         }
     }
 

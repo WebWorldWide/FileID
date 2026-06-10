@@ -20,6 +20,7 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.Sqlite;
@@ -184,7 +185,11 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             var seen = new HashSet<long>();
             using var cmd = _connection.CreateCommand();
 
+            // NFC-normalize first (macOS parity): SQLite LIKE compares bytes,
+            // and path_search stores the NFC form (v16) so an NFC query
+            // matches Mac/NAS-synced NFD names too.
             var escapedSearch = trimmedSearch
+                .Normalize(NormalizationForm.FormC)
                 .Replace("\\", "\\\\")
                 .Replace("%", "\\%")
                 .Replace("_", "\\_");
@@ -202,7 +207,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             WHERE f.failed = 0{kindClause}
               AND (
                    {(hasMatch ? "f.id IN (SELECT rowid FROM ocr_fts WHERE ocr_fts MATCH $match) OR f.id IN (SELECT rowid FROM doc_fts WHERE doc_fts MATCH $match)" : "0")}
-                   OR f.path_text LIKE $like ESCAPE '\'
+                   OR f.path_search LIKE $like ESCAPE '\'
                    OR f.vlm_proposed_name LIKE $like ESCAPE '\'
                    OR f.vlm_description LIKE $like ESCAPE '\'
                    OR f.id IN (SELECT file_id FROM tags WHERE tag LIKE $like ESCAPE '\')

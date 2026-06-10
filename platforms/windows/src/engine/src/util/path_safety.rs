@@ -356,6 +356,39 @@ mod tests {
         }
     }
 
+    /// Cross-platform pin: the macOS engine re-implements this function in
+    /// Swift (FileIDShared/StablePathHash.swift, mirrored vectors in
+    /// StablePathHashTests) so `files.path_hash` is identical in both
+    /// engines' DBs. If DefaultHasher's algorithm ever changes, this fails
+    /// before the platforms silently drift apart.
+    #[test]
+    fn stable_path_hash_pinned_vectors() {
+        assert_eq!(stable_path_hash(""), 3_476_900_567_878_811_119);
+        assert_eq!(stable_path_hash("a"), 8_186_225_505_942_432_243);
+        assert_eq!(
+            stable_path_hash("/Users/adam/Photos/IMG_0001.JPG"),
+            -6_847_549_264_798_039_763
+        );
+        assert_eq!(
+            stable_path_hash("C:\\Users\\Adam\\Pictures\\Photo.JPG"),
+            -5_418_614_373_936_508_534
+        );
+        assert_eq!(
+            stable_path_hash("/Users/ådam/Désktop/Café.jpg"),
+            6_025_210_603_525_090_388
+        );
+        assert_eq!(
+            stable_path_hash("/Users/adam/Photos/家族写真.jpg"),
+            -1_257_796_233_084_950_905
+        );
+        assert_eq!(
+            stable_path_hash(
+                "/Users/adam/Library/Mobile Documents/com~apple~CloudDocs/Tax 2024 (final).pdf"
+            ),
+            1_387_562_067_336_403_736
+        );
+    }
+
     // SEC-7: the trash-restore containment check uses `Path::starts_with`
     // on canonicalized PathBufs. UNC paths must containment-match
     // correctly — a restore target of \\srv\share\user\file.jpg must

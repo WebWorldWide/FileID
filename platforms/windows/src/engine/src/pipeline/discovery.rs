@@ -283,6 +283,21 @@ impl Discovery {
                 // holds normal-form DB paths). FS access reconverts via
                 // `to_extended_length` at the open site.
                 let path = crate::util::path_safety::strip_extended_length(&entry.path());
+                // A name that doesn't round-trip through Unicode (an unpaired
+                // UTF-16 surrogate on NTFS) would be catalogued under a
+                // U+FFFD-mangled path_text that no later action (open,
+                // thumbnail, rename, trash) can resolve back to the real
+                // file — and two such names can collapse into one DB row.
+                // Skip it loudly instead of cataloguing an inert entry.
+                if is_non_unicode_path(&path) {
+                    tracing::warn!(
+                        path = %crate::platform::redact_path_for_log(&path),
+                        "[DISCOVERY] file name is not valid Unicode (unpaired \
+                         surrogate?) — skipping; rename the file to include it"
+                    );
+                    error_count_inner.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
                 // Skip files the orchestrator pre-loaded as already-current.
                 // Hash lookup is O(1); a 1M-file set costs ~80 MB RAM but
                 // lets a repeat scan complete in seconds instead of hours.
@@ -375,6 +390,13 @@ impl Discovery {
 
         DiscoveryHandle { rx, count, done, error_count }
     }
+}
+
+/// True when `to_string_lossy` would mangle this path: the lossy text is the
+/// only identity the DB/app layers ever see, so such a file can never be
+/// targeted again after cataloguing.
+fn is_non_unicode_path(path: &std::path::Path) -> bool {
+    path.to_str().is_none()
 }
 
 /// Directory names whose entire subtree should be skipped. Decided once
@@ -487,6 +509,32 @@ mod tests {
     fn noise_directory_case_insensitive() {
         assert!(is_noise_directory("NODE_MODULES"));
         assert!(is_noise_directory("Node_Modules"));
+    }
+
+    /// Non-Unicode names (unpaired UTF-16 surrogates on NTFS; raw bytes on
+    /// POSIX) must be detected so discovery can skip-log them instead of
+    /// cataloguing a U+FFFD-mangled path no later action can resolve.
+    #[test]
+    fn non_unicode_path_detected() {
+        assert!(!is_non_unicode_path(std::path::Path::new(
+            r"C:\Users\René\Bilder\Café.jpg"
+        )));
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            let units: Vec<u16> = "C:\\pics\\img"
+                .encode_utf16()
+                .chain([0xD800, 0x002E, 0x006A, 0x0070, 0x0067]) // unpaired high surrogate + ".jpg"
+                .collect();
+            let os = std::ffi::OsString::from_wide(&units);
+            assert!(is_non_unicode_path(std::path::Path::new(&os)));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let os = std::ffi::OsString::from_vec(b"/pics/img\xFF.jpg".to_vec());
+            assert!(is_non_unicode_path(std::path::Path::new(&os)));
+        }
     }
 
     #[test]

@@ -689,36 +689,37 @@ impl Tagger {
         // don't oversaturate the GPU side or starve the WinUI 3 app.
         let topo = crate::platform::cpu_topology();
         let decoder_count = ((topo.p_cores + topo.e_cores) as usize).clamp(2, 12);
-        // Channel cap: bound decoded-RGB read-ahead by a MEMORY budget, not a
-        // flat frame count. A 12 MP frame is ~36 MB, so the old (worker*2) count
-        // pinned ~0.5-1 GB of pure read-ahead slack the GPU never needs — decode
-        // (CPU, the [2,12] decoder pool) vastly outruns the GPU-bound RAM++
-        // tagger (~6-8 files/s), so the channel sits full all scan and a
-        // shallower queue cannot starve the GPU. Size to ~256 MB of typical
-        // frames while still guaranteeing every worker can hold one frame ready
-        // (floor = worker_count). Per-frame pixels are already capped at
-        // MAX_DECODED_PIXELS, so this also tightens the pathological-frame ceiling.
+        // Low tier: each decoder blocked on a full byte budget still owns one
+        // decoded frame (up to ~150 MB at MAX_DECODED_PIXELS), so an unclamped
+        // [2,12] pool of blocked decoders could dwarf the budget itself on the
+        // 4 GB target. Cap the pool, not just the channel.
+        let decoder_count = match crate::platform::memory_tier() {
+            crate::platform::MemoryTier::Low => decoder_count.min(4),
+            _ => decoder_count,
+        };
+        // Channel cap: a SLOT bound only (floor = one frame ready per worker).
+        // The real memory bound is the byte-weighted budget below — a slot
+        // count alone priced every frame at TYPICAL_FRAME_MB while
+        // MAX_DECODED_PIXELS admits ~150 MB frames, a ~6x per-slot
+        // underestimate that let 45 MP libraries pin gigabytes of read-ahead.
         const PREDECODE_BUDGET_MB: usize = 256;
         const TYPICAL_FRAME_MB: usize = 24; // ~8 MP RGB8
         let budget_cap = PREDECODE_BUDGET_MB / TYPICAL_FRAME_MB;
-        // The worker_count floor guarantees every worker can hold one frame
-        // ready, but on a low-RAM box a high worker_count would override the
-        // ~256 MB budget. Under MemoryTier::Low respect the budget instead so the
-        // read-ahead can't outgrow it (a shallower queue can't starve the GPU
-        // stage — decode vastly outruns inference). Non-Low tiers keep the floor.
         let predecoded_cap = match crate::platform::memory_tier() {
             crate::platform::MemoryTier::Low => budget_cap.max(1),
             _ => budget_cap.max(self.worker_count),
         };
         let (predecoded_tx, predecoded_rx) =
             async_channel::bounded::<PreDecoded>(predecoded_cap);
+        let byte_budget = PredecodeBudget::new(PREDECODE_BUDGET_MB * 1024 * 1024);
         for decoder_idx in 0..decoder_count {
             let rx = raw_rx.clone();
             let tx = predecoded_tx.clone();
             let coord = self.coordinator.clone();
+            let budget = byte_budget.clone();
             let spawn_result = std::thread::Builder::new()
                 .name(format!("fileid-decode-{decoder_idx}"))
-                .spawn(move || run_decoder_thread(rx, tx, coord));
+                .spawn(move || run_decoder_thread(rx, tx, coord, budget));
             if let Err(e) = spawn_result {
                 // Don't panic mid-scan if the OS refuses a new thread (handle or
                 // memory pressure on a very large library). Log and continue with
@@ -875,6 +876,71 @@ pub struct PreDecoded {
     pub audio_tags: Vec<(String, Option<f32>)>,
     pub content_hash: Option<[u8; 32]>,
     pub exif: Option<(Option<String>, Option<f64>, Option<f64>)>,
+    /// Reservation of this frame's decoded bytes in the predecode budget;
+    /// released when the worker drops the frame.
+    budget: Option<PredecodeBudgetGuard>,
+}
+
+/// Byte-weighted read-ahead budget for decoded frames. The channel's slot
+/// cap alone assumed TYPICAL_FRAME_MB per slot, but MAX_DECODED_PIXELS
+/// admits ~150 MB frames — decoders must reserve each frame's ACTUAL byte
+/// size before sending so high-MP libraries can't pin ~6x the design budget.
+struct PredecodeBudget {
+    capacity: usize,
+    used: Mutex<usize>,
+    freed: parking_lot::Condvar,
+}
+
+impl PredecodeBudget {
+    fn new(capacity: usize) -> Arc<Self> {
+        Arc::new(Self {
+            capacity,
+            used: Mutex::new(0),
+            freed: parking_lot::Condvar::new(),
+        })
+    }
+
+    /// Blocks the calling decoder thread until `bytes` fit. A frame larger
+    /// than the whole budget clamps to capacity so it can still be admitted
+    /// (alone) instead of deadlocking. Returns `None` when the scan is
+    /// cancelled while waiting.
+    fn acquire(
+        self: &Arc<Self>,
+        bytes: usize,
+        coord: &ScanCoordinator,
+    ) -> Option<PredecodeBudgetGuard> {
+        let bytes = bytes.min(self.capacity);
+        let mut used = self.used.lock();
+        while *used + bytes > self.capacity {
+            if coord.is_cancelled() {
+                return None;
+            }
+            self.freed
+                .wait_for(&mut used, std::time::Duration::from_millis(100));
+        }
+        *used += bytes;
+        Some(PredecodeBudgetGuard {
+            budget: self.clone(),
+            bytes,
+        })
+    }
+
+    fn release(&self, bytes: usize) {
+        let mut used = self.used.lock();
+        *used = used.saturating_sub(bytes);
+        self.freed.notify_all();
+    }
+}
+
+struct PredecodeBudgetGuard {
+    budget: Arc<PredecodeBudget>,
+    bytes: usize,
+}
+
+impl Drop for PredecodeBudgetGuard {
+    fn drop(&mut self) {
+        self.budget.release(self.bytes);
+    }
 }
 
 /// Decoder-pool worker. Sync OS thread (not a tokio task) so the
@@ -886,6 +952,7 @@ fn run_decoder_thread(
     rx: async_channel::Receiver<DiscoveredFile>,
     tx: async_channel::Sender<PreDecoded>,
     coord: ScanCoordinator,
+    budget: Arc<PredecodeBudget>,
 ) {
     loop {
         if coord.is_cancelled() {
@@ -1014,7 +1081,27 @@ fn run_decoder_thread(
                 _ => Vec::new(),
             }
         };
-        let item = PreDecoded { file, decoded, doc_text, audio_tags, content_hash, exif: exif_data };
+        let frame_bytes = match &decoded {
+            Some(Ok((rgb, _, _))) => rgb.len(),
+            _ => 0,
+        };
+        let budget_guard = if frame_bytes > 0 {
+            match budget.acquire(frame_bytes, &coord) {
+                Some(g) => Some(g),
+                None => return,
+            }
+        } else {
+            None
+        };
+        let item = PreDecoded {
+            file,
+            decoded,
+            doc_text,
+            audio_tags,
+            content_hash,
+            exif: exif_data,
+            budget: budget_guard,
+        };
         if tx.send_blocking(item).is_err() {
             return;
         }
@@ -1181,7 +1268,10 @@ async fn process_file_predecoded(
     worker_idx: usize,
     coord: &ScanCoordinator,
 ) -> TaggedFile {
-    let PreDecoded { file, decoded, doc_text, audio_tags, content_hash, exif } = predecoded;
+    // `_budget` keeps the byte-budget reservation alive while this worker
+    // holds the frame; it releases when the function returns.
+    let PreDecoded { file, decoded, doc_text, audio_tags, content_hash, exif, budget: _budget } =
+        predecoded;
     let file = &file;
     let started = Instant::now();
     let scanned_unix = std::time::SystemTime::now()
@@ -2141,6 +2231,50 @@ mod tests {
     fn dhash_solid_color_is_zero() {
         let rgb = vec![128u8; 64 * 64 * 3];
         assert_eq!(compute_dhash(&rgb, 64, 64), 0);
+    }
+
+    /// C6: the predecode bound is byte-weighted by each frame's ACTUAL
+    /// decoded size — a third frame that would overflow the budget must wait
+    /// until an earlier reservation is dropped.
+    #[test]
+    fn predecode_budget_weighs_frames_by_actual_bytes() {
+        let coord = ScanCoordinator::new();
+        let budget = PredecodeBudget::new(100);
+        let g1 = budget.acquire(60, &coord).expect("first frame fits");
+        let _g2 = budget.acquire(40, &coord).expect("second frame fits");
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            drop(g1);
+        });
+        let started = std::time::Instant::now();
+        let _g3 = budget
+            .acquire(30, &coord)
+            .expect("third frame admitted once g1 releases");
+        assert!(
+            started.elapsed() >= Duration::from_millis(100),
+            "third acquire must have blocked on the full budget"
+        );
+        releaser.join().unwrap();
+    }
+
+    #[test]
+    fn predecode_budget_clamps_oversize_frame_to_capacity() {
+        let coord = ScanCoordinator::new();
+        let budget = PredecodeBudget::new(100);
+        let g = budget
+            .acquire(10_000, &coord)
+            .expect("a frame larger than the budget must still be admitted alone");
+        drop(g);
+        assert!(budget.acquire(100, &coord).is_some());
+    }
+
+    #[test]
+    fn predecode_budget_acquire_unblocks_on_cancel() {
+        let coord = ScanCoordinator::new();
+        let budget = PredecodeBudget::new(100);
+        let _held = budget.acquire(100, &coord).unwrap();
+        coord.request_cancel();
+        assert!(budget.acquire(50, &coord).is_none());
     }
 
     /// C5: over-cap images get EXIF from `exif_from_head` (a bounded head

@@ -39,7 +39,10 @@ public final class ThumbnailService {
         let image = await task.value
         inflight.removeValue(forKey: key as String)
         if let image {
-            cache.setObject(image, forKey: key, cost: Int(size * size * 4))
+            // Cost in PIXELS, not points — a Retina request yields a
+            // scale× representation, and point-based costs undercount
+            // 4× so the totalCostLimit never engages.
+            cache.setObject(image, forKey: key, cost: Int(size * scale * size * scale * 4))
         }
         return image
     }

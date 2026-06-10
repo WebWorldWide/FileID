@@ -143,23 +143,33 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             // its files + sentinel are already on disk.
             installAction: async () =>
             {
+                ClearCancelMarks("mobileclip_s2", "clip_text");
                 await PrewarmAsync("mobileclip_s2").ConfigureAwait(false);
                 await PrewarmAsync("clip_text").ConfigureAwait(false);
             });
         Arcface = new ModelSlot(
             displayLabel: "Face models (YuNet + SFace)",
             approxBytes: 39UL * 1024 * 1024,
-            installAction: () => PrewarmAsync("arcface_default"));
+            installAction: () =>
+            {
+                ClearCancelMarks("arcface_default");
+                return PrewarmAsync("arcface_default");
+            });
         RamPlus = new ModelSlot(
             displayLabel: "RAM++ image tagger",
             // ~882 MB fp16 ONNX (bakes the frozen tag-description embeddings in).
             approxBytes: 925_600_000UL,
-            installAction: () => PrewarmAsync("ram_plus"));
+            installAction: () =>
+            {
+                ClearCancelMarks("ram_plus");
+                return PrewarmAsync("ram_plus");
+            });
         DeepVlm = new ModelSlot(
             displayLabel: "Qwen2.5-VL 7B",
             approxBytes: 6_100_000_000UL,
             installAction: async () =>
             {
+                ClearCancelMarks(_deepVlmModelKind);
                 // Persist the hardware-recommended Deep Analyze model so the
                 // Deep Analyze tab + manual auto-chain use what the user just
                 // downloaded.
@@ -186,6 +196,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             // EP once the provider lands.
             installAction: async () =>
             {
+                ClearCancelMarks("cudnn_runtime_x64", "ort_cuda_x64");
                 await PrewarmAsync("cudnn_runtime_x64").ConfigureAwait(false);
                 await PrewarmAsync("ort_cuda_x64").ConfigureAwait(false);
             });
@@ -418,6 +429,20 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     }
 
     public Task CancelAllAsync() => EngineClient.Instance.CancelPrewarmAsync();
+
+    /// <summary>The explicit Install/Retry click is the ONLY place a kind's
+    /// cancel mark is erased. EngineClient.PrewarmModelAsync used to clear it
+    /// at dispatch — but during engine cold start the dispatch is parked in
+    /// WaitForReadyAsync, so a Cancel clicked in that window was erased by the
+    /// very prewarm it should have cancelled (C9, the surviving branch (a) of
+    /// the C7 finding).</summary>
+    private static void ClearCancelMarks(params string[] kinds)
+    {
+        foreach (var k in kinds)
+        {
+            EngineClient.Instance.ClearPrewarmCancelMark(k);
+        }
+    }
 
     // Kinds installed by the SAME UI slot. A multi-kind slot's per-row Cancel must
     // cancel ALL its sub-downloads: slot.CurrentModelKind is only the latest of two
@@ -658,6 +683,18 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             return;
         }
 
+        // A per-row Cancel during the wait above only sets the app-side mark —
+        // its CancelPrewarm IPC faults because the engine isn't Ready, so the
+        // engine never hears about it. Honor the mark here instead of
+        // dispatching a download the user already cancelled (C9). The next
+        // explicit Install/Retry click clears the mark (ClearCancelMarks).
+        if (EngineClient.Instance.IsPrewarmCancelled(modelKind))
+        {
+            DebugLog.Info($"[INSTALL] {modelKind} was cancelled while waiting for engine Ready; skipping dispatch.");
+            slot.ResetForRetry();
+            return;
+        }
+
         // only reset state if this slot wasn't already
         // pre-stamped to Downloading by InstallAllAsync. Re-running
         // ResetForRetry after the pre-stamp would blank Fraction/Message
@@ -675,7 +712,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
 
         try
         {
-            await EngineClient.Instance.PrewarmModelAsync(modelKind).ConfigureAwait(false);
+            await EngineClient.Instance.PrewarmModelAsync(modelKind, clearCancelMark: false).ConfigureAwait(false);
             DebugLog.Info($"[INSTALL] {modelKind} prewarmModel IPC sent; awaiting progress events.");
         }
         catch (Exception ex)
@@ -899,6 +936,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         var kind = error.Kind ?? string.Empty;
         var isInstallError =
             kind == "model_download_failed"
+            || kind == "model_download_disk_full"
             || kind == "download_tls_pin_failed"
             || kind == "zip_extract_failed"
             || kind == "pack_not_available"
@@ -909,6 +947,12 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             // forever behind a raw red toast.
             || kind == "unknown_model"
             || kind == "models_dir_unavailable"
+            // sentinel_dir_create_failed / sentinel_write_failed /
+            // sentinel_rename_failed: the bytes all landed but the engine
+            // couldn't register the install marker, and it emits NO terminal
+            // progress event after these — without routing them the row spins
+            // at ~100% "Downloading" forever with no Retry (C10).
+            || kind.StartsWith("sentinel_", StringComparison.OrdinalIgnoreCase)
             || kind.StartsWith("prewarm_", StringComparison.OrdinalIgnoreCase);
         if (!isInstallError) return;
 
@@ -947,6 +991,17 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         if (string.Equals(error.ModelKind, "ort_openvino_x64", StringComparison.OrdinalIgnoreCase))
         {
             DebugLog.Info($"[INSTALL] OpenVINO pack unavailable ({kind}); staying on DirectML. {error.Message}");
+            // "Leave the slot alone" assumed it still read pseudo-Installed,
+            // but the engine's unconditional Queued event already flipped it
+            // to Downloading — and the auto-install bypasses PrewarmAsync, so
+            // no watchdog ever rescues it. Restore the Intel DirectML state
+            // instead of leaving the row downloading forever (C11). Only
+            // CudaAutoInstaller's Intel path prewarms this kind, so the
+            // hard-coded vendor is safe.
+            if (Accelerator.Status == ModelInstallStatus.Downloading)
+            {
+                UpdateAcceleratorForVendor("intel");
+            }
             return;
         }
         DebugLog.Info($"[INSTALL] engine error → {slot.DisplayLabel}.Fail(): {error.Message}");

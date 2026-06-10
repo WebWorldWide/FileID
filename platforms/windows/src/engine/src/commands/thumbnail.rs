@@ -5,6 +5,7 @@
 //! a redacted warning.
 
 use std::io::Cursor;
+use std::sync::OnceLock;
 
 use base64::Engine as _;
 
@@ -12,6 +13,19 @@ use crate::ipc::{sink::Sink, EventPayload, GenerateVideoThumbnailPayload, IpcEve
 
 /// Long side (in px) of the generated thumbnail. Matches the app's cache spec.
 const THUMB_LONG_SIDE: u32 = 192;
+
+/// Cap on concurrent Media Foundation extracts. Each one holds a full-res
+/// decoded frame (up to ~192 MB at MAX_VIDEO_PIXELS) plus a D3D video-decode
+/// context for 1-10 s, and a cache-cold scroll through a video folder fires
+/// hundreds of these commands in seconds — unbounded, they piled up on
+/// tokio's 512-thread blocking pool and OOMed the Low-memory target. Mirrors
+/// the scan pipeline's GPU semaphores (vision=4 / clip=2).
+const MAX_CONCURRENT_EXTRACTS: usize = 2;
+
+fn extract_semaphore() -> &'static tokio::sync::Semaphore {
+    static SEM: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+    SEM.get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_EXTRACTS))
+}
 
 pub(crate) async fn handle_generate_video_thumbnail(sink: Sink, payload: GenerateVideoThumbnailPayload) {
     let GenerateVideoThumbnailPayload { path, modified_at } = payload;
@@ -36,6 +50,7 @@ pub(crate) async fn handle_generate_video_thumbnail(sink: Sink, payload: Generat
 /// Decode a video keyframe → resize to 192px long-side JPEG → base64. Runs the
 /// blocking keyframe extract on a `spawn_blocking` thread; never panics.
 async fn build_thumbnail_b64(path: &str) -> anyhow::Result<String> {
+    let _permit = extract_semaphore().acquire().await?;
     let p = std::path::PathBuf::from(path);
     let frame = tokio::task::spawn_blocking(move || crate::shell::video::keyframe_25pct(&p)).await??;
 

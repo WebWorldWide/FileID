@@ -94,6 +94,7 @@ public final class ReadStore: @unchecked Sendable {
                 }
                 return total
             }
+            SpotlightIndexer.deindex(ids: ids)
             self.notifyChanged()
             return deleted
         } catch {
@@ -159,7 +160,11 @@ public final class ReadStore: @unchecked Sendable {
                     // "100" + arbitrary chars + "_discount". The
                     // ESCAPE '\' clause is appended to every LIKE so
                     // SQLite knows about the escape character we used.
+                    // NFC-normalize first: SQLite LIKE compares bytes, and
+                    // path_search stores the NFC form (v16) so an NFC query
+                    // matches names regardless of on-disk normalization.
                     let escapedSearch = trimmedSearch
+                        .precomposedStringWithCanonicalMapping
                         .replacingOccurrences(of: "\\", with: "\\\\")
                         .replacingOccurrences(of: "%", with: "\\%")
                         .replacingOccurrences(of: "_", with: "\\_")
@@ -172,7 +177,7 @@ public final class ReadStore: @unchecked Sendable {
                     sql += """
                          AND (
                               id IN (SELECT rowid FROM ocr_fts WHERE ocr_fts MATCH ?)
-                              OR path_text LIKE ? ESCAPE '\\'
+                              OR path_search LIKE ? ESCAPE '\\'
                               OR vlm_proposed_name LIKE ? ESCAPE '\\'
                               OR vlm_description LIKE ? ESCAPE '\\'
                               OR id IN (SELECT file_id FROM tags WHERE tag LIKE ? ESCAPE '\\')
@@ -895,8 +900,8 @@ public final class ReadStore: @unchecked Sendable {
     public func updatePathText(fileID: Int64, newPath: String, on queue: DatabaseQueue) throws {
         try queue.write { db in
             try db.execute(
-                sql: "UPDATE files SET path_text = ? WHERE id = ?",
-                arguments: [newPath, fileID]
+                sql: "UPDATE files SET path_text = ?, path_search = ? WHERE id = ?",
+                arguments: [newPath, newPath.precomposedStringWithCanonicalMapping, fileID]
             )
         }
     }
@@ -929,6 +934,20 @@ public final class ReadStore: @unchecked Sendable {
         public let fileID: Int64
         public let oldPath: String
         public let newPath: String
+        /// Identity at rename time (nil in journals from older builds).
+        /// Undo skips the entry on mismatch — a same-named replacement
+        /// file at newPath must not be silently renamed.
+        public let fileSize: Int64?
+        public let modifiedAt: Date?
+
+        init(fileID: Int64, oldPath: String, newPath: String) {
+            self.fileID = fileID
+            self.oldPath = oldPath
+            self.newPath = newPath
+            let attrs = try? FileManager.default.attributesOfItem(atPath: newPath)
+            self.fileSize = attrs?[.size] as? Int64
+            self.modifiedAt = attrs?[.modificationDate] as? Date
+        }
     }
 
     public struct BulkRenameResult: Sendable {
@@ -973,8 +992,9 @@ public final class ReadStore: @unchecked Sendable {
 
     /// Reverse a previously-applied rename batch. Walks each entry
     /// backwards: `mv newPath oldPath`. Skips entries whose newPath no
-    /// longer exists (user already moved them again somewhere) — these
-    /// are reported as `skipped`.
+    /// longer exists (user already moved them again somewhere) or no
+    /// longer matches the recorded size/mtime — these are reported as
+    /// `skipped`.
     public func undoRenames(_ outcomes: [RenameOutcome]) -> (undone: Int, skipped: Int, failed: Int) {
         var undone = 0
         var skipped = 0
@@ -985,6 +1005,19 @@ public final class ReadStore: @unchecked Sendable {
             let oldURL = URL(fileURLWithPath: r.oldPath)
             guard fm.fileExists(atPath: newURL.path) else {
                 skipped += 1; continue
+            }
+            if let size = r.fileSize, let date = r.modifiedAt {
+                let attrs = try? fm.attributesOfItem(atPath: newURL.path)
+                guard let curSize = attrs?[.size] as? Int64,
+                      let curDate = attrs?[.modificationDate] as? Date,
+                      curSize == size,
+                      abs(curDate.timeIntervalSince(date)) < 1
+                else {
+                    // A different file occupies newPath now — renaming
+                    // it would clobber an unrelated file's name and
+                    // repoint the DB row at the wrong bytes.
+                    skipped += 1; continue
+                }
             }
             if fm.fileExists(atPath: oldURL.path) {
                 // The old path is now occupied — bail rather than clobber.
@@ -1002,8 +1035,10 @@ public final class ReadStore: @unchecked Sendable {
                     let q = try DatabaseQueue(path: dbURL.path, configuration: config)
                     try q.write { db in
                         try db.execute(
-                            sql: "UPDATE files SET path_text = ? WHERE id = ?",
-                            arguments: [oldURL.path, r.fileID]
+                            sql: "UPDATE files SET path_text = ?, path_search = ? WHERE id = ?",
+                            arguments: [oldURL.path,
+                                        oldURL.path.precomposedStringWithCanonicalMapping,
+                                        r.fileID]
                         )
                     }
                     undone += 1
@@ -1063,8 +1098,14 @@ public final class ReadStore: @unchecked Sendable {
         do {
             try queue.write { db in
                 try db.execute(
-                    sql: "UPDATE files SET path_text = ?, vlm_proposed_name = NULL WHERE id = ?",
-                    arguments: [target.path, file.id]
+                    sql: """
+                        UPDATE files
+                        SET path_text = ?, path_search = ?, vlm_proposed_name = NULL
+                        WHERE id = ?
+                        """,
+                    arguments: [target.path,
+                                target.path.precomposedStringWithCanonicalMapping,
+                                file.id]
                 )
             }
             self.notifyChanged()

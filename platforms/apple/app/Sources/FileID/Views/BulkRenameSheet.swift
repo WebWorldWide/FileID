@@ -4,6 +4,11 @@
 import SwiftUI
 import FileIDShared
 
+private struct PersistedRenameBatch: Codable {
+    let savedAt: Date
+    let entries: [ReadStore.RenameOutcome]
+}
+
 struct BulkRenameSheet: View {
     let store: ReadStore
     @Environment(\.dismiss) private var dismiss
@@ -155,9 +160,7 @@ struct BulkRenameSheet: View {
         Task.detached(priority: .userInitiated) {
             let result = storeRef.applyProposedNamesBulk(toRename)
             // Persist the batch to UserDefaults so the user can undo.
-            if let data = try? JSONEncoder().encode(result.renamed) {
-                UserDefaults.standard.set(data, forKey: BulkRenameSheet.lastBatchKey)
-            }
+            BulkRenameSheet.saveLastBatch(result.renamed)
             await MainActor.run {
                 inFlight = false
                 files = storeRef.filesWithProposedNames()
@@ -172,19 +175,38 @@ struct BulkRenameSheet: View {
         }
     }
 
-    nonisolated static let lastBatchKey = "bulkRename.lastBatch.v1"
+    nonisolated static let lastBatchKey = "bulkRename.lastBatch.v2"
+    /// Pre-expiry format (bare [RenameOutcome], no timestamp or file
+    /// identity) — never read anymore, only cleaned up.
+    nonisolated private static let legacyBatchKey = "bulkRename.lastBatch.v1"
+    /// Journals older than this stop surfacing "Undo last rename" — a
+    /// weeks-old batch is far more likely to hit a same-named
+    /// replacement file than to be an intentional undo.
+    nonisolated static let lastBatchMaxAge: TimeInterval = 7 * 24 * 60 * 60
+
+    nonisolated static func saveLastBatch(_ entries: [ReadStore.RenameOutcome]) {
+        let batch = PersistedRenameBatch(savedAt: Date(), entries: entries)
+        guard let data = try? JSONEncoder().encode(batch) else { return }
+        UserDefaults.standard.set(data, forKey: lastBatchKey)
+        UserDefaults.standard.removeObject(forKey: legacyBatchKey)
+    }
 
     /// Decode the most recent rename batch from UserDefaults. Returns
-    /// nil if no batch has been recorded yet. Nonisolated so background
-    /// tasks can persist the batch right after applying it.
+    /// nil if no batch has been recorded yet or the recorded batch is
+    /// older than `lastBatchMaxAge`. Nonisolated so background tasks
+    /// can persist the batch right after applying it.
     nonisolated static func loadLastBatch() -> [ReadStore.RenameOutcome]? {
-        guard let data = UserDefaults.standard.data(forKey: lastBatchKey) else { return nil }
-        return try? JSONDecoder().decode([ReadStore.RenameOutcome].self, from: data)
+        guard let data = UserDefaults.standard.data(forKey: lastBatchKey),
+              let batch = try? JSONDecoder().decode(PersistedRenameBatch.self, from: data),
+              Date().timeIntervalSince(batch.savedAt) < lastBatchMaxAge
+        else { return nil }
+        return batch.entries
     }
 
     /// Clear the persisted batch (after successful undo).
     nonisolated static func clearLastBatch() {
         UserDefaults.standard.removeObject(forKey: lastBatchKey)
+        UserDefaults.standard.removeObject(forKey: legacyBatchKey)
     }
 
     // MARK: - Person tag history (P10)

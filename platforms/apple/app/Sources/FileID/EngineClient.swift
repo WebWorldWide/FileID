@@ -193,7 +193,7 @@ public final class EngineClient {
     }
 
     private func spawn(binary: URL) {
-        Self.debug("spawn: starting engine at \(binary.path)")
+        Self.debug("spawn: starting engine at \(redactPathForLog(binary.path))")
         let proc = Process()
         proc.executableURL = binary
         // swift-transformers' NetworkMonitor reports offline until its
@@ -256,7 +256,7 @@ public final class EngineClient {
                 // predating the fd-2 split (or a torn frame) — log a
                 // truncated sample so spew can't bloat app.log.
                 guard line.first == 0x7B else {
-                    Self.debug("ENGINE: \(String(data: line.prefix(512), encoding: .utf8) ?? "<binary>")")
+                    Self.debug("ENGINE: \(Self.redactFrameSample(line))")
                     continue
                 }
                 if let event = try? IPCCoder.decoder.decode(IPCEvent.self, from: line) {
@@ -264,7 +264,7 @@ public final class EngineClient {
                         self?.handleEvent(event)
                     }
                 } else {
-                    Self.debug("ENGINE: undecodable frame: \(String(data: line.prefix(512), encoding: .utf8) ?? "<binary>")")
+                    Self.debug("ENGINE: undecodable frame: \(Self.redactFrameSample(line))")
                 }
             }
         }
@@ -272,13 +272,26 @@ public final class EngineClient {
         do {
             try proc.run()
         } catch {
-            Self.debug("spawn: proc.run() FAILED: \(error)")
+            // NSError descriptions embed the binary path — persist
+            // domain+code only.
+            let ns = error as NSError
+            Self.debug("spawn: proc.run() FAILED: \(ns.domain) (\(ns.code))")
             state = .crashed(reason: "Failed to launch engine: \(error)")
             return
         }
         Self.debug("spawn: engine pid=\(proc.processIdentifier), readabilityHandler armed")
         self.process = proc
         self.stdinPipe = inPipe
+    }
+
+    /// Frame samples can carry full user paths in JSON values (e.g. a
+    /// torn deepAnalyzeProgress `currentPath`) — scrub home prefixes
+    /// before they persist in app.log.
+    nonisolated private static func redactFrameSample(_ line: Data) -> String {
+        let sample = String(data: line.prefix(512), encoding: .utf8) ?? "<binary>"
+        return sample.replacingOccurrences(
+            of: #"/Users/[^/"]+"#, with: "~", options: .regularExpression
+        )
     }
 
     /// Debug log at ~/Library/Application Support/FileID/logs/app.log.
@@ -478,6 +491,17 @@ public final class EngineClient {
         process = nil
         stdinPipe = nil
 
+        // A dead engine can never emit the terminal events that clear
+        // these — without the reset, one mid-job crash wedges Deep
+        // Analyze / People across the respawn (the respawned engine
+        // starts jobless, so nothing else un-sticks them).
+        deepAnalyzeInFlight = false
+        deepAnalyzeStarting = nil
+        deepAnalyzeProgress = nil
+        faceClusteringInFlight = false
+        isPaused = false
+        queueState = QueueState(running: nil, pending: [], totalEtaSeconds: nil)
+
         // Expected exit (shutdown called or work just completed): silent
         // re-spawn, no error pill, no respawn budget burned. Covers
         // MLX's known SIGSEGV-in-static-destructor on clean exit.
@@ -533,15 +557,19 @@ public final class EngineClient {
 
     // MARK: - Commands
 
-    public func send(_ payload: IPCCommand.Payload) {
-        guard let pipe = stdinPipe else { return }
+    /// Returns false when the command never left the app (engine down
+    /// during the respawn window, or encode failure) so callers can
+    /// avoid arming state that only an engine event would clear.
+    @discardableResult
+    public func send(_ payload: IPCCommand.Payload) -> Bool {
+        guard let pipe = stdinPipe else { return false }
         let cmd = IPCCommand(payload: payload)
         let data: Data
         do {
             data = try IPCCoder.encodeLine(cmd)
         } catch {
             FileHandle.standardError.write(Data("EngineClient send encode failed: \(error)\n".utf8))
-            return
+            return false
         }
 
         // Off the main thread with a 10 s deadline. FileHandle.write
@@ -567,6 +595,7 @@ public final class EngineClient {
             }
             done.withLock { $0 = true }
         }
+        return true
     }
 
     /// Wipe progress + last batch + error (e.g. when the user picks a new folder).
@@ -652,8 +681,24 @@ public final class EngineClient {
         // would have to be re-acquired. We rely on the same
         // bookmark-resolve path as `startScan`.
         pendingWipeAndRescanRoot = rootURL
-        expectedExit = true
-        send(.shutdown)
+        // Engine already down (respawn backoff or exhausted budget):
+        // the shutdown would be silently dropped and no exit would
+        // ever run the wipe — but no WAL lock is held either, so wipe
+        // directly and respawn.
+        guard stdinPipe != nil else {
+            Self.deleteLibraryFiles()
+            clearProgress()
+            state = .starting
+            pendingRespawn?.cancel()
+            pendingRespawn = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                self?.start()
+            }
+            return
+        }
+        if send(.shutdown) {
+            expectedExit = true
+        }
     }
 
     /// Deletes the SQLite library + WAL/SHM siblings + scan log.
@@ -673,36 +718,42 @@ public final class EngineClient {
             let url = root.appendingPathComponent(name)
             try? fm.removeItem(at: url)
         }
+        // The Spotlight items mirror the rows just wiped — without
+        // this, captions/tags/paths of wiped files stay queryable in
+        // ⌘Space long after the library is gone.
+        SpotlightIndexer.wipe()
     }
 
+    // In-flight flags arm only when send() succeeded — a click during
+    // the respawn backoff (stdinPipe nil) used to set the flag, drop
+    // the command, and wedge the UI with no job running.
     public func runFaceClustering() {
-        guard !faceClusteringInFlight else { return }
+        guard !faceClusteringInFlight, send(.runFaceClustering) else { return }
         faceClusteringInFlight = true
-        send(.runFaceClustering)
     }
 
     public func deepAnalyzeFile(fileID: Int64, modelKind: String) {
+        guard send(.deepAnalyzeFile(fileID: fileID, modelKind: modelKind)) else { return }
         deepAnalyzeInFlight = true
         deepAnalyzeProgress = nil
         deepAnalyzeComplete = nil
         deepAnalyzeStarting = nil
-        send(.deepAnalyzeFile(fileID: fileID, modelKind: modelKind))
     }
 
     public func deepAnalyzeFolder(prefix: String, modelKind: String) {
+        guard send(.deepAnalyzeFolder(pathPrefix: prefix, modelKind: modelKind)) else { return }
         deepAnalyzeInFlight = true
         deepAnalyzeProgress = nil
         deepAnalyzeComplete = nil
         deepAnalyzeStarting = nil
-        send(.deepAnalyzeFolder(pathPrefix: prefix, modelKind: modelKind))
     }
 
     public func deepAnalyzeAll(modelKind: String, skipExisting: Bool) {
+        guard send(.deepAnalyzeAll(modelKind: modelKind, skipExisting: skipExisting, tagsOnly: false)) else { return }
         deepAnalyzeInFlight = true
         deepAnalyzeProgress = nil
         deepAnalyzeComplete = nil
         deepAnalyzeStarting = nil
-        send(.deepAnalyzeAll(modelKind: modelKind, skipExisting: skipExisting, tagsOnly: false))
     }
 
     public func deepAnalyzeCancel() {

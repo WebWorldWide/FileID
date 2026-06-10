@@ -39,11 +39,22 @@ public enum SpotlightIndexer {
         }
     }
 
-    /// Wipe every FileID-owned item from Spotlight. Exposed for a
-    /// future "Delete my data" flow on the Privacy card.
+    /// Wipe every FileID-owned item from Spotlight. Called by the
+    /// wipe-library flow (EngineClient.deleteLibraryFiles) so wiped
+    /// files' captions/tags/paths leave ⌘Space with the library.
     public static func wipe() {
         CSSearchableIndex.default().deleteSearchableItems(
             withDomainIdentifiers: [domainIdentifier]
+        )
+    }
+
+    /// Drop the Spotlight items for deleted rows — `indexAll` only
+    /// upserts, so without this a trashed file's caption/path stays
+    /// queryable in ⌘Space indefinitely.
+    public static func deindex(ids: [Int64]) {
+        guard !ids.isEmpty else { return }
+        CSSearchableIndex.default().deleteSearchableItems(
+            withIdentifiers: ids.map { "fileid-\($0)" }
         )
     }
 

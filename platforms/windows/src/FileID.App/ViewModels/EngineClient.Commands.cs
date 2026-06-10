@@ -499,17 +499,34 @@ internal sealed partial class EngineClient
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _prewarmCancelledKinds = new();
     private int _prewarmCancelAllRequested;
 
-    private bool IsPrewarmCancelled(string modelKind) =>
+    internal bool IsPrewarmCancelled(string modelKind) =>
         Interlocked.CompareExchange(ref _prewarmCancelAllRequested, 0, 0) == 1
         || _prewarmCancelledKinds.ContainsKey(modelKind);
 
-    public Task PrewarmModelAsync(string modelKind)
+    /// <summary>Erase a kind's cancel mark. Call only from explicit user
+    /// Install/Retry entry points (the ModelInstallerService installActions):
+    /// the mark must survive a prewarm dispatch that was REQUESTED before the
+    /// cancel — during engine cold start the dispatch parks in
+    /// WaitForReadyAsync for up to 75 s while the CancelPrewarm IPC faults, so
+    /// the mark is the only record the cancel ever happened (C9).</summary>
+    internal void ClearPrewarmCancelMark(string modelKind) =>
+        _prewarmCancelledKinds.TryRemove(modelKind, out _);
+
+    public Task PrewarmModelAsync(string modelKind, bool clearCancelMark = true)
     {
         DebugLog.Info($"[INSTALL] EngineClient.PrewarmModelAsync('{modelKind}') called. State={State}, _stdin={(_stdin is null ? "NULL" : "alive")}");
-        // A fresh prewarm means the user wants downloads: clear this kind's cancel
-        // mark and any pending cancel-all so its (and others') stall guards re-arm.
-        Interlocked.Exchange(ref _prewarmCancelAllRequested, 0);
-        _prewarmCancelledKinds.TryRemove(modelKind, out _);
+        // Direct callers (Settings performance pack, Deep Analyze installer,
+        // auto-installers) are fresh intent: clear this kind's cancel mark and
+        // any pending cancel-all so its (and others') stall guards re-arm.
+        // ModelInstallerService.PrewarmAsync passes false: its installAction
+        // cleared the mark at click time, and clearing again at dispatch would
+        // erase a Cancel that arrived while the dispatch was parked waiting
+        // for engine Ready — the lost-cancel half of C7 (C9).
+        if (clearCancelMark)
+        {
+            Interlocked.Exchange(ref _prewarmCancelAllRequested, 0);
+            _prewarmCancelledKinds.TryRemove(modelKind, out _);
+        }
         var send = SendCommandAsync(new PrewarmModelCommand(modelKind));
         // Detached stall guard — keeps PrewarmModelAsync fire-and-forget (callers
         // like ModelInstallerService schedule their own UI-slot watchdog after

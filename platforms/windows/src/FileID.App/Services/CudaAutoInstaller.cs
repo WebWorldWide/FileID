@@ -112,8 +112,9 @@ internal static class CudaAutoInstaller
     /// so commercial-clean to redistribute. Gated by
     /// <c>DisableAutoInstallOpenVino</c>; own sentinel. Safe to auto-enable:
     /// ep_guard reverts to DirectML if the OpenVINO bind crashes, and if the
-    /// pack artifact isn't hosted yet the download 404s gracefully and Intel
-    /// stays on DirectML.</summary>
+    /// download fails (offline, proxy TLS interception) ModelInstallerService
+    /// swallows the error and restores the Accelerator row to its DirectML
+    /// pseudo-Installed state.</summary>
     private static void TryInstallOpenVinoPack()
     {
         try

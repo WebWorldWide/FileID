@@ -14,7 +14,8 @@
 // Resumable: we skip files that already exist at the expected size —
 // but only once a `.fileid-verified-<revision>` sentinel attests a
 // fully verified fetch; without it, on-disk files are re-hashed
-// against the LFS oid before being trusted.
+// against the LFS oid before being trusted. A valid sentinel skips
+// the tree listing entirely, so installed models load fully offline.
 // Integrity: the tree listing + file URLs are pinned to the immutable
 // HF revision from ModelManifest, and each LFS file's sha256 (its LFS
 // oid) is enforced by the downloader before the atomic promote. Small
@@ -54,14 +55,9 @@ public actor VLMDownloader {
         progress: @escaping @Sendable (Double, Int64, Int64) -> Void
     ) async throws {
         let revision = ModelManifest.vlmPin(forRepo: repo)?.revision ?? "main"
-        let files = try await listRepoFiles(repo: repo, revision: revision)
-        let downloadable = files.filter { Self.shouldDownload($0) }
-        guard !downloadable.isEmpty else { throw VLMDownloaderError.noFilesListed }
-
         let modelDir = documentsHF
             .appending(component: "models")
             .appending(component: repo)
-        try FileManager.default.createDirectory(at: modelDir, withIntermediateDirectories: true)
 
         // Size-based skip is only trusted once a prior fetch of THIS
         // revision fully verified — otherwise pre-hardening installs
@@ -70,6 +66,24 @@ public actor VLMDownloader {
         // (streamed re-hash, no download) before it's skipped.
         let verifiedSentinel = modelDir.appendingPathComponent(".fileid-verified-\(revision)")
         let sentinelValid = FileManager.default.fileExists(atPath: verifiedSentinel.path)
+
+        // Sentinel-first: a verified fetch of this pinned revision already
+        // attested every file on disk, so the install must load fully
+        // offline — no HF tree round-trip. That round-trip both wedged
+        // installed models behind network reachability (offline Macs could
+        // never run Deep Analyze) and emitted non-download egress on every
+        // first load, against PRIVACY.md. The payload check guards a stale
+        // sentinel over a hand-emptied model dir.
+        if sentinelValid, hasModelPayload(modelDir) {
+            progress(1.0, 0, 0)
+            return
+        }
+
+        let files = try await listRepoFiles(repo: repo, revision: revision)
+        let downloadable = files.filter { Self.shouldDownload($0) }
+        guard !downloadable.isEmpty else { throw VLMDownloaderError.noFilesListed }
+
+        try FileManager.default.createDirectory(at: modelDir, withIntermediateDirectories: true)
 
         let unverified = downloadable.filter { $0.sha256 == nil }.map(\.path)
         if !unverified.isEmpty {
@@ -230,6 +244,14 @@ public actor VLMDownloader {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
               let n = attrs[.size] as? Int64 else { return nil }
         return n
+    }
+
+    /// Anything beyond our own dot-sentinels (.fileid-*, .cache) counts —
+    /// configs, tokenizer JSON, safetensors all qualify.
+    private nonisolated func hasModelPayload(_ modelDir: URL) -> Bool {
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: modelDir.path)
+        else { return false }
+        return entries.contains { !$0.hasPrefix(".") }
     }
 
     private static func shouldDownload(_ f: VLMRepoFile) -> Bool {
