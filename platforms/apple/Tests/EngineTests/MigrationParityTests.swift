@@ -7,6 +7,7 @@
 // (migration_identifiers_match_canonical_list). Update BOTH or the chains
 // fork again.
 import Testing
+import Foundation
 import GRDB
 @testable import FileIDEngine
 
@@ -48,7 +49,9 @@ struct MigrationParityTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let dbURL = dir.appendingPathComponent("fileid.sqlite")
 
-        var db: Database? = try Database(at: dbURL)
+        // FileIDEngine.Database — bare `Database` is ambiguous with
+        // GRDB.Database under @testable import.
+        var db: FileIDEngine.Database? = try FileIDEngine.Database(at: dbURL)
         try db!.pool.write { conn in
             try conn.execute(
                 sql: "INSERT INTO grdb_migrations (identifier) VALUES (?)",
@@ -58,7 +61,7 @@ struct MigrationParityTests {
         db = nil
 
         #expect(throws: DatabaseOpenError.self) {
-            _ = try Database(at: dbURL)
+            _ = try FileIDEngine.Database(at: dbURL)
         }
     }
 }
