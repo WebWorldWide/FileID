@@ -45,9 +45,18 @@ findings** across every record. What landed on top of the entry below:
   busy-bounce exemption on macOS); round 3 → **completely dry** (0 candidates, 22 verifiedClean).
   Record: `audit-2026-06-09-merge/sweep-b-findings.json`.
 
+**CI epilogue:** the macOS workflow's first real execution of the C1 process suite (yesterday's
+"green" run had silently never started it) caught one final engine bug — the shutdown IPC
+command never exited the engine (`break` inside the command loop's switch broke the SWITCH;
+stdin EOF was the only real exit, which the app's pipe-close masked). Fixed with a labeled
+break (verified: 0.13 s exit on the shutdown frame with stdin held open), the C1 test harness
+made un-hangable (a blocking waitUntilExit inside a task group had turned a slow exit into a
+60-min CI hang), and macos.yml now caps `swift test` at 12 minutes with a survivor-process dump.
+
 Local gates at HEAD: `swift build` clean 0 · `cargo clippy --all-targets -D warnings` 0 ·
-`cargo test` 292 green · release dry-run DMG green. **CI + hardware UAT are the remaining
-gates** — see NEXT.md for the checklist. "Zero known bugs" = every recorded finding
+`cargo test` 292 green · release dry-run DMG green · **CI green all three workflows** (macOS
+92/92 incl. the C1 suite; Windows engine x64+arm64; Windows app). **Hardware UAT is the
+remaining gate** — see NEXT.md for the checklist. "Zero known bugs" = every recorded finding
 closed/accepted + gates green + UAT clean; the C#/.NET side and all runtime behavior verify in
 CI/on-hardware only.
 
