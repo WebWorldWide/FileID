@@ -141,6 +141,28 @@ UPDATE files SET path_search = path_text;
 pub fn apply(conn: &Connection) -> Result<()> {
     conn.execute_batch(MIGRATION_TABLE_DDL).context("creating grdb_migrations")?;
 
+    // L7: a DB stamped by a NEWER engine carries identifiers this
+    // registry doesn't know; writing to it could silently break the
+    // newer schema's invariants. Refuse to open instead. macOS mirror:
+    // Database.swift DatabaseOpenError.newerThanEngine.
+    let known: Vec<&str> = registry().iter().map(|(id, _)| *id).collect();
+    let applied: Vec<String> = conn
+        .prepare("SELECT identifier FROM grdb_migrations")?
+        .query_map([], |row| row.get(0))?
+        .collect::<std::result::Result<_, _>>()
+        .context("listing applied migrations")?;
+    let unknown: Vec<String> = applied
+        .into_iter()
+        .filter(|id| !known.contains(&id.as_str()))
+        .collect();
+    if !unknown.is_empty() {
+        anyhow::bail!(
+            "db_newer_than_engine: database was migrated by a newer FileID \
+             version (unknown migrations: {}) — refusing to open for writing",
+            unknown.join(", ")
+        );
+    }
+
     for (id, sql) in registry() {
         let already: bool = conn
             .query_row(
@@ -463,6 +485,23 @@ mod tests {
         apply(&conn).unwrap(); // second run is a no-op
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 16);
+    }
+
+    /// L7 regression: a DB stamped by a newer engine must refuse to open
+    /// rather than silently write into a schema this build doesn't know.
+    /// macOS mirror: MigrationParityTests.newerDatabaseRefusesToOpen.
+    #[test]
+    fn newer_db_with_unknown_migration_is_refused() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO grdb_migrations (identifier) VALUES ('v99_from_the_future')",
+            [],
+        )
+        .unwrap();
+        let err = apply(&conn).unwrap_err();
+        assert!(err.to_string().contains("db_newer_than_engine"));
+        assert!(err.to_string().contains("v99_from_the_future"));
     }
 
     /// C12 regression: the migration chains forked at v14 (macOS registered

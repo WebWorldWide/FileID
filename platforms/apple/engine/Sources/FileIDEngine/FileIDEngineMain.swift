@@ -54,6 +54,14 @@ struct FileIDEngineMain {
         let database: Database?
         do {
             database = try Database(at: Database.defaultURL)
+        } catch let error as DatabaseOpenError {
+            // Migration identifiers, not user paths — safe to log raw.
+            await sink.emit(.error(EngineError(
+                kind: "db_newer_than_engine",
+                message: "\(error). Update FileID, or wipe the library to rescan."
+            )))
+            JSONLog.shared.error(ev: "db_newer_than_engine", error: "\(error)")
+            database = nil
         } catch {
             await sink.emit(.error(EngineError(
                 kind: "db_open_failed",

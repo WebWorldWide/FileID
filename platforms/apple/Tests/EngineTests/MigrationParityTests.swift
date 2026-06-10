@@ -36,4 +36,29 @@ struct MigrationParityTests {
     func identifiersMatchCanonicalList() {
         #expect(Database.migrator.migrations == Self.canonicalIdentifiers)
     }
+
+    // L7: a DB stamped by a newer engine (identifiers beyond this
+    // registry) must refuse to open rather than silently write into a
+    // schema it doesn't understand. Windows mirror:
+    // migrations.rs newer_db_with_unknown_migration_is_refused.
+    @Test("DB migrated beyond this engine's registry refuses to open")
+    func newerDatabaseRefusesToOpen() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("fileid-l7-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let dbURL = dir.appendingPathComponent("fileid.sqlite")
+
+        var db: Database? = try Database(at: dbURL)
+        try db!.pool.write { conn in
+            try conn.execute(
+                sql: "INSERT INTO grdb_migrations (identifier) VALUES (?)",
+                arguments: ["v99_from_the_future"]
+            )
+        }
+        db = nil
+
+        #expect(throws: DatabaseOpenError.self) {
+            _ = try Database(at: dbURL)
+        }
+    }
 }

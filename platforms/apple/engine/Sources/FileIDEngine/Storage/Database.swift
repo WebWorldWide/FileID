@@ -10,6 +10,22 @@
 import Foundation
 import GRDB
 
+/// A DB touched by a NEWER engine carries migration identifiers this
+/// build doesn't know; writing to it could silently break the newer
+/// schema's invariants, so the engine refuses to open it (L7). Mirrors
+/// the Windows engine's db_newer_than_engine guard in migrations.rs.
+public enum DatabaseOpenError: Error, CustomStringConvertible {
+    case newerThanEngine(unknownMigrations: [String])
+    public var description: String {
+        switch self {
+        case .newerThanEngine(let ids):
+            return "database was migrated by a newer FileID version "
+                + "(unknown migrations: \(ids.joined(separator: ", "))) — "
+                + "refusing to open for writing"
+        }
+    }
+}
+
 /// Single owner of the database. Constructed once in main; passed to the DB
 /// Writer task as the only writer. The SwiftUI app reads via its own
 /// read-only DatabaseQueue (M4) — never via this writer.
@@ -34,7 +50,14 @@ public final class Database: @unchecked Sendable {
             try db.execute(sql: "PRAGMA wal_autocheckpoint = 10000") // ~40 MB
         }
         self.pool = try DatabasePool(path: url.path, configuration: config)
-        try Self.migrator.migrate(pool)
+        let migrator = Self.migrator
+        let unknown = try pool.read { db in
+            try migrator.appliedIdentifiers(db).subtracting(migrator.migrations)
+        }
+        guard unknown.isEmpty else {
+            throw DatabaseOpenError.newerThanEngine(unknownMigrations: unknown.sorted())
+        }
+        try migrator.migrate(pool)
     }
 
     /// Default location: ~/Library/Application Support/FileID/fileid.sqlite.
