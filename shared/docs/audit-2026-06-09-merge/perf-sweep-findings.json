@@ -1,0 +1,412 @@
+{
+ "comment": "Cross-platform performance sweep (2026-06-10), 6 finder lenses x adversarial verifier per candidate. 6 confirmed (landed as b653d00), 2 uncertain (dropped, see DECISIONS.md 2026-06-10), 27 refuted. The diffAudit section verified the uncommitted Sweep A round-2 tree against sweep-a-findings.json before commit 8dca353.",
+ "perf": {
+  "confirmed": [
+   {
+    "lens": "mac-engine-pipeline",
+    "candidate": {
+     "title": "Redundant CGImageSource open for EXIF metadata (double file I/O per image)",
+     "file": "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Tagging.swift",
+     "line": "295, 392",
+     "evidence": "loadCGImage() opens the image file and creates a CGImageSource at line 295. Immediately after (called from processImage at line 111), readEXIF() opens the SAME file AGAIN at line 392 to read EXIF metadata. Both calls to CGImageSourceCreateWithURL trigger file I/O and metadata parsing. The file is opened twice per image file.",
+     "whyHot": "Per-image hot path during scan. Image processing is the dominant per-file bottleneck (load is P95 252ms per earlier comments). Every image file hits this twice\u2014on network volumes this adds measurable latency. With >=140 files/s target, even 1-2ms per image file compounds significantly.",
+     "change": "Refactor readEXIF(url:) to read EXIF metadata from the already-open CGImageSource in loadCGImage(). Extract metadata while the source is live, then close it once. Return (cgImage, exifData) or add EXIF extraction inside loadCGImage() to return both together. Move the EXIF read into the existing autoreleasepool block where loadCGImage is called.",
+     "expectedGain": "~2\u20135 ms per image file on NAS/network volumes (eliminates one entire file open + header parse per image). On local SSD ~0.5\u20131 ms. With typical libraries of 10k+ images, this is ~5\u201350 second cumulative savings per full library scan. No risk of regressing non-image files.",
+     "risk": "VERY LOW. readEXIF is pure data extraction; moving the call site and bundling it with the existing CGImageSource does not change the data. The autoreleasepool already encloses the CGImage lifetime, so EXIF data lifetime is compatible. Only code-path integration change, no semantic or contract changes. Tests (if any) on image EXIF extraction still pass because the output is identical.",
+     "verification": "Measure image decode time (loadMs) before/after on a real library scan (the batch profiler logs loadP50/P95). Decode time should drop by ~1\u20133ms P50 on images (the existing timings are already instrumented at line 88 in Tagging.swift). Verify that EXIF metadata (cameraModel, lat, lon) matches expectations in a few test images before/after. No DB corruption risk (metadata is read-only, not written)."
+    },
+    "verdict": {
+     "verdict": "confirmed",
+     "reasoning": "The optimization is real and safe. Candidate correctly identifies a redundant CGImageSourceCreateWithURL call in the hot image-processing path. Current code (lines 295 and 392 in Tagging.swift) opens the file twice: once in loadCGImage() to create a thumbnail, again in readEXIF() to extract metadata. Both operations are read-only on the same file and occur within the same autoreleasepool block. Windows engine (DECISIONS.md line 1597) already fixed an identical double-open problem (peeking image dimensions, then decoding) by reading into memory once and using the buffer twice; acknowledged ~100 \u00b5s cost per file \u00d7 50k files = ~5 second scan savings. macOS can apply the same pattern: merge both operations onto a single CGImageSource before release. EXIF metadata will be byte-identical, no contract changes, no IPC implications.",
+     "adjustedGain": "2\u20135 ms per image on NAS/network volumes (one file open + metadata parse eliminated per image). On local SSD ~0.5\u20131 ms. With 10k+ image libraries: ~5\u201350 second cumulative savings per full scan. Scales with worker count (14 concurrent workers \u00d7 2\u20135 ms per image = measurable throughput improvement, especially on SMB NAS where CGImageSource reads serialize at the network layer).",
+     "riskList": [
+      "No thread-safety risk (both operations same queue, same autoreleasepool)",
+      "EXIF data identical regardless of call order",
+      "No IPC or database contract changes",
+      "No data semantic changes",
+      "Read-only operations only",
+      "Autoreleasepool lifetime unchanged"
+     ],
+     "safeImplementationNotes": "Merge loadCGImage() and readEXIF() into single function that creates CGImageSource once, extracts both thumbnail image and EXIF metadata before source release, returns (cgImage, (cameraModel, lat, lon)). Update call site at lines 76\u2013111 to use single call. Verify EXIF output on test images is byte-identical. Measure loadMs before/after: expect 1\u20133 ms P50 reduction per image on real library scan.</safeImplementationNotes>\n"
+    }
+   },
+   {
+    "lens": "mac-engine-pipeline",
+    "candidate": {
+     "title": "Per-file Calendar object allocation in extraTags",
+     "file": "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Tagging.swift",
+     "line": "365",
+     "evidence": "Line 365: let cal = Calendar(identifier: .gregorian) is created inside extraTags(), which is called from processImage() at line 124 for every image file that has a creationDate. Calendar(identifier:) allocates a new calendar object on every invocation, even though the Gregorian calendar is immutable and the same across all files.",
+     "whyHot": "Called once per image file (in the per-file processImage closure). With 10k\u2013100k image files per library, this allocates ~10k\u2013100k Calendar objects that are immediately thrown away. Calendar allocation includes timezone + locale lookup; reusing a static instance is free. The allocation happens inside the autoreleasepool in visionQueue, so the churn is visible to memory pressure on concurrent workers.",
+     "change": "Create a static let Calendar at the module/class level: `private static let gregorianCalendar = Calendar(identifier: .gregorian)`. Replace line 365 with using the static directly. No functional change; the calendar is immutable and has no state per file.",
+     "expectedGain": "Eliminates ~10k\u2013100k Calendar allocations per full library scan (zero functional gain, but reduces memory churn and GC pressure during the tagging phase). Order of ~1\u20135 MB of allocation volume avoided per 100k-file scan. Not on the critical path (year extraction is fast), but reduces memory fragmentation and background GC pauses.",
+     "risk": "NEGLIGIBLE. Calendar is a value type but immutable; static-sharing is safe. No synchronization needed (Calendar is thread-safe for reads, and we never write to it). Functionally identical before/after.",
+     "verification": "Monitor resident memory (Hardware.residentMB() logged in batches) before/after on a large library scan\u2014memory should be slightly lower during the tagging phase (less churn). Functional verification: a few test files with EXIF dates should still extract the correct year tag before/after. Check that the year-tag logic remains identical."
+    },
+    "verdict": {
+     "verdict": "confirmed",
+     "reasoning": "The optimization is real, safe, and worthwhile. Calendar(identifier: .gregorian) allocates a new object per image file with creationDate (~10k-100k times per large scan). The allocation includes locale/timezone metadata lookup. Replacing with a static let eliminates 1-5 MB of allocation churn per 100k-file scan, reducing memory fragmentation and GC pressure during concurrent tagging. Calendar is immutable (thread-safe for reads), so static-sharing is functionally identical and pattern-consistent with existing codebase (maxPDFRenderPixels at line 195). No transaction/ordering/cancellation/thread-safety/IPC/privacy risks. Not contradicted by any audit fixes or documented decisions.",
+     "adjustedGain": "1-5 MB allocation volume per 100k-file scan; reduces per-worker memory churn and GC pauses during tagging phase (not on per-file critical path, but measurable under memory pressure on concurrent workers).",
+     "riskList": [
+      "Negligible \u2014 Calendar is immutable value type, read-only usage, already thread-safe"
+     ],
+     "safeImplementationNotes": "Add `private static let gregorianCalendar = Calendar(identifier: .gregorian)` after the visionQueue static definition (after line 27) in the Tagging enum. Replace line 365 `let cal = Calendar(identifier: .gregorian)` with `let cal = gregorianCalendar`. No other changes: the year extraction logic at lines 366-367 remains identical, DB schema/IPC unaffected, no functional change. Verify with a test file containing EXIF creation date \u2014 year tag must extract correctly before/after. Memory profile during a 100k-file scan should show slightly reduced resident memory in the tagging phase (less churn, lower GC pause count)."
+    }
+   },
+   {
+    "lens": "mac-engine-pipeline",
+    "candidate": {
+     "title": "Missing cache of docHints set in image tagging (minor per-file allocation)",
+     "file": "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Tagging.swift",
+     "line": "96-99",
+     "evidence": "Lines 96\u201399: let docHints: Set<String> = [...] is created inside processImage() on every image file, even though it's a constant set used only for OCR eligibility checking. The set is immutable and never changes across files.",
+     "whyHot": "Created once per image file (inside processImage at line 96, before Vision pass). With 10k+ image files, this allocates ~10k constant sets that are thrown away. Set<String> allocation includes hash table init + 7 string literals being hashed. Used only at line 102 for the one contains(where:) check. Low cost individually but compounds across many files.",
+     "change": "Move docHints to a static let at module level: `private static let docHints: Set<String> = [\"document\", \"text\", \"screenshot\", \"receipt\", \"presentation\", \"menu\", \"sign\"]`. Replace line 96 with a reference to the static constant. No behavioral change.",
+     "expectedGain": "Eliminates ~10k\u2013100k Set allocations per library scan. Memory savings ~100 KB\u20131 MB per 100k-file library (minimal). Churn reduction, no critical-path gain. Order of <0.1 ms per-file.",
+     "risk": "NEGLIGIBLE. Set is immutable and shared safely. Thread-safe (Set<String> reads are atomic). Functionally identical.",
+     "verification": "Memory profile (docHints allocation volume decreases). Functional test: images with document/text/screenshot tags should still trigger OCR before/after. Verify the OCR output matches for test files."
+    },
+    "verdict": {
+     "verdict": "confirmed",
+     "reasoning": "The optimization is safe, minimal, and real. While the performance gain is negligible (below measurement noise floor), the code change is:\n\n1. **Safe**: Set<String> is immutable; reads are thread-safe across 4-32 concurrent workers\n2. **Minimal**: Single line move from local to static let, following the established pattern (visionQueue, maxPDFRenderPixels)\n3. **Aligned with current work**: The uncommitted audit diff (Sweep A R2) shows maxPDFRenderPixels being added as static let in the same file, establishing this exact pattern\n4. **Real allocation reduction**: Eliminates ~10k unnecessary Set<String> allocations per typical scan (~640 KB total)\n5. **Zero functional risk**: Identical OCR eligibility logic before/after\n\nThe gain is honestly claimed as negligible (below the project's own 25% measurement variance), but the change is cleanliness-focused during an audit phase, not a misrepresented performance optimization. No correctness, durability, concurrency, or privacy concerns exist.",
+     "adjustedGain": "Real but negligible: ~10k-100k Set allocations eliminated per scan (640 KB-1.3 MB memory saved). Per-file cost reduction ~0.01-0.05% (immeasurable within 25% variance). Benefit is cleanliness and consistency with current audit patterns, not measurable throughput gain.",
+     "riskList": [
+      "Zero correctness risk: immutable set, identical semantics",
+      "Zero thread-safety risk: Set<String> reads are thread-safe, pattern matches visionQueue",
+      "Zero initialization risk: static let is lazily initialized once, no ordering dependency",
+      "Zero test risk: same OCR eligibility logic",
+      "No contradiction to project philosophy: audit phase, not premature optimization without profiling"
+     ],
+     "safeImplementationNotes": "Add immediately after line 27 (after visionQueue definition):\n\n```swift\nprivate static let docHints: Set<String> = [\n    \"document\", \"text\", \"screenshot\", \"receipt\",\n    \"presentation\", \"menu\", \"sign\"\n]\n```\n\nThen replace lines 96-99 (local docHints definition) with a reference to the static. At line 102, the reference remains unchanged: `docHints.contains($0.lowercased())` automatically uses the static version.\n\n**Verification test**: Run corpus on images tagged with document/text/screenshot/receipt/presentation/menu/sign and verify OCR output byte-matches before/after. No behavioral change required. Test: `ocrText` field should be non-nil for eligible images in both versions, with identical extracted text."
+    }
+   },
+   {
+    "lens": "mac-app-db-ui",
+    "candidate": {
+     "title": "Replace filesWithProposedNames().count with a dedicated COUNT query",
+     "file": "platforms/apple/app/Sources/FileID/Views/LibraryView.swift",
+     "line": "517",
+     "evidence": "refreshBulkState() calls `store.filesWithProposedNames(limit: 5000).count`, which fetches the entire FileRow array (5000 rows \u00d7 ~500 bytes = ~2.5 MB) just to get a count. The function exists only to return a count.",
+     "whyHot": "refreshBulkState() is called on every batch during scan (line 107-111), every keystroke debounce exit (line 131), and every Deep Analyze progress event (line 111). During a 1000-file Deep Analyze run, this allocates ~2.5 GB in aggregate, stressing the garbage collector.",
+     "change": "Add a new public func countFilesWithProposedNames() -> Int that runs SELECT COUNT(*) instead of SELECT *. Call that from refreshBulkState() instead of filesWithProposedNames(limit: 5000).count.",
+     "expectedGain": "Eliminates ~2.5 MB per call, ~2.5 GB per 1000-file Deep Analyze. Reduces garbage pressure significantly. Estimated wall-clock improvement: ~50-200ms per refresh depending on GC pressure.",
+     "risk": "Negligible. New function is straightforward; old function remains for other uses. No behavior change.",
+     "verification": "Measure Memory.footprint() before/after during a 100-file Deep Analyze run via Instruments. Verify bulk rename button counts match the old method (visual regression test)."
+    },
+    "verdict": {
+     "verdict": "confirmed",
+     "reasoning": "The optimization is sound and safe. While the candidate's frequency claims are significantly overstated (Deep Analyze calls once, not 1000 times; scan-time allocation is 30-60 MB, not 2.5 GB), the core optimization is valid: two call sites fetch 5000 FileRows (~2.5 MB each) only to call .count, when a SELECT COUNT(*) is materially cheaper. No correctness, thread-safety, durability, or decision-tree conflicts exist. The pattern mirrors existing store code that already uses COUNT queries for counters.",
+     "adjustedGain": "~30-60 MB memory allocation reduction per long-duration scan operation (multiple batches over seconds), not the claimed 2.5 GB per Deep Analyze run. Per-call savings: ~2-2.5 MB per eliminated SELECT * + row deserialization + LIMIT + ORDER BY. Realistic wall-clock improvement: negligible to single-digit milliseconds per refresh (the savings are in allocation/GC pressure, not query latency, which is already fast).",
+     "riskList": [
+      "None identified. COUNT(*) with same WHERE clause is guaranteed to match filesWithProposedNames().count. No transaction boundaries crossed, no durability implications, no thread-safety gaps, no behavior changes."
+     ],
+     "safeImplementationNotes": "Add public func countFilesWithProposedNames() -> Int to ReadStore.swift (after filesWithProposedNames at line 911). Implementation: query SELECT COUNT(*) FROM files WHERE failed=0 AND vlm_proposed_name IS NOT NULL AND vlm_proposed_name != '' using the same error-handling pattern as other store functions. Replace ONLY the two .count call sites: LibraryView.swift line 517 (in refreshBulkState) and DeepAnalyzeViews.swift line 262 (in refreshPendingRenameCount). Keep filesWithProposedNames() unchanged \u2014 BulkRenameSheet.swift lines 40 and 166 still need the actual data. Verification: after changes, confirm pendingRenameCount displayed in Library/DeepAnalyze tabs matches the count of rows in the BulkRenameSheet (visual regression test). No schema changes, no migrations, no IPC changes needed. The optimization is read-only and additive."
+    }
+   },
+   {
+    "lens": "mac-app-db-ui",
+    "candidate": {
+     "title": "Batch totalCaptioned and totalAnalyzableFiles queries in RestructureView.regenerate()",
+     "file": "platforms/apple/app/Sources/FileID/Views/RestructureView.swift",
+     "line": "821-824",
+     "evidence": "regenerate() calls store.totalAnalyzableFiles() and store.totalCaptioned() as separate queries. Both queries scan the files table with different WHERE clauses, but could be computed in a single pass using aggregate functions.",
+     "whyHot": "regenerate() is called (1) on tab appear, (2) after Deep Analyze completes, (3) after restructure apply completes. On a 50K-file library, two separate full-table scans become one.",
+     "change": "Add a new query func filesAnalysisStats() -> (analyzable: Int, captioned: Int) that runs both counts in one SQL statement using aggregate functions or FILTER. Replace the two separate calls in regenerate() with one call to this new method.",
+     "expectedGain": "~2 scans \u2192 1 scan. Estimated wall-clock: ~50-200ms per regenerate() call depending on file count.",
+     "risk": "Very low. Combines two existing read-only queries. Result is identical. No behavior change.",
+     "verification": "Run existing tests; verify totalAnalyzableFiles and totalCaptioned results match the combined query. Measure query execution time via sqlite3 CLI on a large test DB before/after."
+    },
+    "verdict": {
+     "verdict": "confirmed",
+     "reasoning": "The optimization is real, safe, and ready to implement. Two separate full-table scans (with different WHERE clauses) are batched into one using SUM(CASE) aggregations. The gain is material: 50-200ms per regenerate() call on a 50K file library. Correctness risk is negligible\u2014the batched query is mathematically equivalent, read-only, and actually transactionally safer (both counts from same snapshot). The codebase has precedent (duplicateGroups batching pattern) and no contradicting decisions. The hot path is confirmed: regenerate() fires on tab appear, Deep Analyze completion, restructure apply, and convert-to-real-moves operations.",
+     "adjustedGain": "~50-200ms per regenerate() call on mid-tier 50K+ file libraries (two full-table scans \u2192 one batched scan). On smaller libraries (&lt;5K files) the overhead is negligible but the code is cleaner.",
+     "riskList": [
+      "Negligible: Both queries are read-only, no state mutation",
+      "Negligible: Query plan differences (batched might use index differently, but results are identical)",
+      "Negligible: NULL/empty string handling\u2014CASE WHEN expressions properly filter both",
+      "Already mitigated: Transactional safety actually improves (both counts from same snapshot vs. two separate transactions)"
+     ],
+     "safeImplementationNotes": "**Method signature**: Add `func filesAnalysisStats() -> (analyzable: Int, captioned: Int)` to ReadStore (platforms/apple/app/Sources/FileID/Database/ReadStore.swift, after line 617). **SQL**: `SELECT SUM(CASE WHEN kind IN ('image','pdf','video','doc') THEN 1 ELSE 0 END) AS analyzable, SUM(CASE WHEN vlm_proposed_name IS NOT NULL AND vlm_proposed_name <> '' THEN 1 ELSE 0 END) AS captioned FROM files WHERE failed = 0`. **Error handling**: Use try? q.read with default (0, 0) to match original behavior. **Call site**: Replace lines 821-824 in RestructureView.regenerate() with `let (total, captioned) = store.filesAnalysisStats()`. **Test**: Add Swift Testing case verifying `filesAnalysisStats()` returns identical results to running the original two queries separately on the same DB snapshot. **Verification**: Run existing RestructureView UI tests (exercising deepAnalyzeHintBanner) to confirm counts still display correctly."
+    }
+   },
+   {
+    "lens": "win-engine-pipeline",
+    "candidate": {
+     "title": "Arcface embedding bytes: pass by reference instead of cloning Vec in dbwriter",
+     "file": "/Users/adamnolle/Desktop/Code/FileID/platforms/windows/src/engine/src/pipeline/dbwriter.rs",
+     "line": "417-419",
+     "evidence": "let arcface_bytes = floats_to_le_bytes(&face.embedding); ... params![... arcface_bytes.clone() ...] (line 417) and then arcface_bytes (line 419). Vec<u8> (~128 bytes per face) is cloned unnecessarily because both usages are within the same scope.",
+     "whyHot": "Runs per-face in DBWriter.flush() batch loop (faces common in photo libraries: avg 0.5-2 faces/file = 50-500 faces per 100-250 file batch). Clone is avoidable because embedding is already isolated (computed fresh per file); no sharing or lifetime conflict.",
+     "change": "Change rusqlite params binding to accept references: params![file_id, &arcface_bytes, bbox_json, &arcface_bytes, ...] at lines 417 and 419. rusqlite's params! macro accepts &[u8] for BLOB bindings via AsRef trait. No functional change to parameter passing.",
+     "expectedGain": "Eliminates ~128 bytes \u00d7 face count per batch. Typical face-heavy batch: 50-100 faces = 6.4-12.8 KB allocation freed. On continuous scan: ~3-6 KB/s freed (tiny impact on wall time, <1 \u00b5s per face). Primary win is reducing memory allocator overhead and following Rust best practices (no-copy-if-not-needed).",
+     "risk": "Very low. rusqlite params! accepts &[u8] and &Vec<u8> identically via AsRef<[u8]>. BLOB persistence unchanged (database stores same bytes). No format/encoding impact. Verify rusqlite version supports this (all recent versions do: AsRef trait is standard).",
+     "verification": "Compile and run dbwriter tests (existing test suite exercises this binding path). Spot-check database: SELECT hex(arcface_embedding) from face_prints, verify bytes are unchanged before/after patch. Integration test: scan folder with faces, verify face clustering still works (test against macOS reference if available)."
+    },
+    "verdict": {
+     "verdict": "confirmed",
+     "reasoning": "The optimization is technically sound, safe, and material. The candidate correctly identified an unnecessary clone of arcface_bytes that can be eliminated by using references in both rusqlite params! bindings. \n\nCONFIRMED FACTS:\n1. The arcface_bytes (SFace 128-d embedding = 512 bytes) is bound TWICE in the same params! call (lines 417 and 419).\n2. The codebase already demonstrates this pattern works: path_text is bound twice in INSERT_FILE_RETURNING_ID_SQL (lines 334 and 353), proving rusqlite 0.31 accepts the same value/reference multiple times.\n3. The current clone at line 417 is avoidable since both bindings occur in the same scope.\n4. No audit fixes in the working tree address this pattern.\n5. No DECISIONS.md entry contradicts this optimization.\n\nVERIFIED SAFETY:\n- Rusqlite 0.31 supports references via AsRef<[u8]>\n- Using &Vec<u8> is safe (deref coerces to &[u8])\n- No database format/encoding impact (same bytes persisted)\n- No IPC/transaction boundary concerns\n\nMATERIAL GAINS (larger than candidate claimed):\n- Per embedding: 512 bytes (candidate said ~128 bytes, confusing the 128-d dimension with byte size)\n- Typical batch (50-100 faces): 25.6-51.2 KB freed per batch (candidate claimed 6.4-12.8 KB \u2014 off by 4x)\n- Wall-time impact: minimal (<1 \u00b5s per face as claimed is realistic)\n- Primary win: eliminating allocator overhead + memcpy\n\nCORRECTNESS PRESERVED:\n- Database stores identical bytes before/after (same 512-byte little-endian blob in both print_data and arcface_embedding columns)\n- No file-move, durability, transaction, or cancellation risks\n- Clustering/verification downstream unaffected",
+     "adjustedGain": "Actual gains are larger than estimated: approximately 512 bytes per face (128-d \u00d7 4 bytes). For typical face-heavy batches (50\u2013100 faces), this frees 25.6\u201351.2 KB per batch, not the claimed 6.4\u201312.8 KB. The candidate conflated the embedding dimension (128-d) with byte size (128 bytes), when the actual size is 512 bytes per embedding. The wall-time impact remains minimal and is correctly estimated as <1 \u00b5s per face. Allocator overhead reduction is the primary benefit; raw throughput gain is negligible.",
+     "riskList": [
+      "Very low risk overall. Verification must confirm rusqlite params! macro accepts &Vec<u8> both times (should work, established pattern with path_text proves it, but test binding is recommended). Database schema unchanged, BLOB byte content unchanged.",
+      "Edge case: ensure the span of arcface_bytes remains in scope for both params! binding operations (it does \u2014 both occur inside the for face loop).",
+      "Convention alignment: codebase uses .as_slice() for explicit byte conversion (see content_hash.as_ref().map(h| h.as_slice())), so either bare &arcface_bytes or arcface_bytes.as_slice() both work; the latter is more consistent with established patterns in dbwriter.rs lines 351, 825, etc."
+     ],
+     "safeImplementationNotes": "EXACT CHANGE BOUNDARIES: Replace only lines 417\u2013419 in face_stmt.execute(params![...]) call. Change arcface_bytes.clone() at line 417 to either &arcface_bytes or arcface_bytes.as_slice() (both work; .as_slice() is more consistent with codebase style). Keep arcface_bytes at line 419 unchanged (it will still move into the second param binding after the reference is consumed).\n\nWHAT MUST NOT CHANGE: The INSERT_FACE_SQL schema (line 739), the number of params (5), the order, or the column mapping. Database must store byte-for-byte identical content to both print_data and arcface_embedding. The floats_to_le_bytes() function behavior unchanged. No migrations needed.\n\nVERIFICATION CHECKLIST: (1) Compile and run cargo test -p fileid-engine --lib pipeline::dbwriter to exercise the binding path. (2) Spot-check database post-scan: SELECT hex(arcface_embedding) FROM face_prints LIMIT 1; \u2014 must match SELECT hex(print_data) FROM face_prints WHERE id = (SELECT id FROM face_prints LIMIT 1);. (3) Integration test: scan a folder with faces (minimum 20 files with \u22651 face each), verify face clustering still works and person count unchanged from baseline. (4) Observe no regression in suggested-merge accuracy or cluster stability.\n\nIMPLEMENTATION CHOICE: Recommend arcface_bytes.as_slice() for both bindings (lines 417 and 419) to match the codebase's explicit pattern used for content_hash and other byte blobs, improving readability. However, bare &arcface_bytes also works; either is safe. If choosing .as_slice(): params![file_id, arcface_bytes.as_slice(), bbox_json, arcface_bytes.as_slice(), face.quality as f64]."
+    }
+   }
+  ],
+  "uncertain": [
+   {
+    "lens": "mac-app-db-ui",
+    "candidate": {
+     "title": "Replace person face_count scalar subquery with JOIN + GROUP BY",
+     "file": "platforms/apple/app/Sources/FileID/Database/ReadStore.swift",
+     "line": "531",
+     "evidence": "The persons() query contains a scalar subquery: `(SELECT COUNT(*) FROM face_prints WHERE person_id = p.id) AS face_count` which executes once per person row. For a 500-person cluster, this generates 500 extra database queries.",
+     "whyHot": "The People tab loads persons() on every view appearance, and face_count is used by multiple views for sorting/display. On libraries with hundreds of named people, the scalar subquery multiplies the query cost by P (person count).",
+     "change": "Replace the scalar subquery with a LEFT JOIN + GROUP BY: move the COUNT to an outer join that groups face_prints by person_id once, then left join to persons. Use COALESCE(face_print_counts.cnt, 0) for the result.",
+     "expectedGain": "Reduces persons() from P+1 queries to 2 queries (one for persons, one for the group count). On a 500-person library, saves ~500 round-trips to the database. Estimated wall-clock improvement: ~200-500ms depending on DB contention.",
+     "risk": "Very low. The join cardinality is identical (same face_count result); only the execution strategy changes. Existing tests for persons() validation still apply. No schema changes.",
+     "verification": "Run existing PersonRow mapping tests; verify displayed face_count matches before/after in a test library with known face distributions (e.g., 5 people with 10, 20, 50, 100, 200 faces respectively). Check that People tab sorts correctly by fileCount and displays face icons."
+    },
+    "verdict": {
+     "verdict": "uncertain",
+     "reasoning": "The proposed optimization (replace scalar subquery with LEFT JOIN + GROUP BY) is LOGICALLY SOUND and low-risk for correctness. However, the PERFORMANCE GAIN is unproven. Critical evidence gaps: (1) No benchmark data showing persons() is a measurable bottleneck \u2014 the 200-500ms claim lacks timing measurements on a real 500-person library; (2) No SQLite query plan analysis to verify that the scalar subquery actually executes P times rather than being optimized/cached; (3) Zero test coverage for persons() or PersonRow.faceCount \u2014 the verification plan assumes tests exist but they don't, making it impossible to verify the change doesn't break behavior; (4) Recent audits (Sweep A) and DECISIONS.md don't flag this query as problematic; (5) The indexed face_prints.person_id lookup might make the scalar subquery fast enough that the JOIN + GROUP BY doesn't yield measurable wall-clock gains. Without a before/after benchmark on realistic data, the \"200-500ms\" claim is speculative.",
+     "adjustedGain": "0\u201350ms (speculative; unproven). The reduction from P+1 to 2 database operations is real in theory, but actual wall-clock improvement depends on: (a) current query time on test libraries (unknown), (b) whether SQLite optimizer already makes the scalar subquery efficient, (c) whether 500 lightweight COUNT operations with an index are material compared to the JOIN overhead.",
+     "riskList": [
+      "No test coverage exists for persons() or PersonRow.faceCount \u2014 change cannot be verified for regression",
+      "No benchmark data: 200-500ms gain claimed without timing measurements",
+      "No SQLite EXPLAIN QUERY PLAN analysis: scalar subquery execution strategy unknown",
+      "Edge case (person with 0 faces) is logically correct but untested",
+      "The indexed face_prints.person_id lookup might already make scalar subquery efficient, reducing benefit",
+      "Audit findings (Sweep A round 2, DECISIONS.md) do not flag this query as problematic, suggesting it may not be a bottleneck"
+     ],
+     "safeImplementationNotes": "IF implemented after proving the gain with benchmarks: (1) Minimal change: replace the scalar subquery with `LEFT JOIN (SELECT person_id, COUNT(*) AS cnt FROM face_prints GROUP BY person_id) face_counts ON face_counts.person_id = p.id` and use `COALESCE(face_counts.cnt, 0) AS face_count`. (2) Must NOT change: SELECT column order, ORDER BY clause, WHERE condition, or join cardinality (persons should still return N rows, not fewer). (3) Test requirements BEFORE commit: Add a unit test running the query on an in-memory DB with a known face distribution (e.g., 5 people with 10, 20, 50, 100, 200 faces respectively) and verify face_count matches expected. (4) Benchmark requirement: Time persons() before/after on a test library with \u2265500 people; prove measurable wall-clock improvement. (5) Windows parity: Verify the Windows engine has an equivalent query and apply the same optimization there (currently no equivalent bulk persons query found in Windows code)."
+    }
+   },
+   {
+    "lens": "win-app",
+    "candidate": {
+     "title": "IpcCoder.EncodeLine allocates MemoryStream per command, no pooling",
+     "file": "/Users/adamnolle/Desktop/Code/FileID/platforms/windows/src/FileID.IpcSchema/IpcCoder.cs",
+     "line": "80-93",
+     "evidence": "EncodeLine creates fresh MemoryStream (line 82) and Utf8JsonWriter per command. Restructure apply on 200k-move library = 30 MB MemoryStream allocation. Scan might send 10+ commands; each allocates transient buffers.",
+     "whyHot": "Per command sent: SendCommandAsync calls EncodeLine. Large frames like applyRestructure (30 MB) allocate huge MemoryStream, write JSON, convert to byte[], dispose\u2014all transient.",
+     "change": "Reuse ArrayBufferWriter<byte> (pooled): 'var buffer = new ArrayBufferWriter<byte>(estimatedSize); using var writer = new Utf8JsonWriter(buffer, ...); JsonSerializer.Serialize(writer, value, Options); return buffer.WrittenMemory.ToArray();'",
+     "expectedGain": "~2-5 MB reduced GC pressure per restructure apply. For 200k-move plan: avoid 30 MB MemoryStream alloc. 10-command scan: save ~100 KB allocations total.",
+     "risk": "LOW. ArrayBufferWriter is standard. Convert to byte[] before reusing (writer state is not reusable). Pooling the writer itself is unsafe.",
+     "verification": "Measure GC allocations during Restructure apply of 200k-move plan. Assert Gen0 collections dropped. Verify encoded JSON is byte-identical."
+    },
+    "verdict": {
+     "verdict": "uncertain",
+     "reasoning": "The candidate correctly identifies that EncodeLine allocates MemoryStream per command with no pooling, and ArrayBufferWriter would be a safe, standard replacement. However, the claimed performance gain is not demonstrated to be material. The core issue: the candidate conflates different workloads (\"scan might send 10+ commands\") to inflate the frequency and gain. In reality, ApplyRestructure (the 30 MB case) is a rare user action, not part of scan overhead. Most scan commands are tiny (status ~100 bytes, pause ~50 bytes). The comprehensive IPC+perf audit (2026-06-04b) analyzed this exact domain extensively and did not flag MemoryStream pooling as a worthwhile optimization, suggesting it wasn't identified as a real hotspot. No before/after profiling data is provided to substantiate the \"2-5 MB reduced GC pressure per restructure apply\" claim. The gain is likely negligible: one 30 MB Gen 0 collection once per session pales against the actual bottlenecks (ML inference, file I/O). The optimization is technically sound (LOW correctness risk) but lacks evidence that it solves a real problem on the critical path. The internal inconsistency (\"2-5 MB per ApplyRestructure\" vs \"100 KB per 10-command scan\") raises doubt about the analysis rigor.",
+     "adjustedGain": "Likely negligible. If any: ~5-10 MB of peak GC allocation pressure per ApplyRestructure operation (which occurs once per session), and ~50 KB average across a typical scan workload. Gen 0 collections of these sizes are not observable slowdowns vs. the ML inference and file I/O bottlenecks identified in DECISIONS.md. Real-world benefit would require: (1) frame size distribution from actual usage logs, (2) GC allocation profiling before/after, and (3) evidence this is on the critical path. None provided.",
+     "riskList": [
+      "Minimal correctness risk if WrittenMemory.ToArray() is verified byte-identical to stream.ToArray()",
+      "No measurable allocation profiling provided; optimization may not move the needle on actual user experience",
+      "Optimizing a non-critical path adds maintenance burden for unclear ROI",
+      "Future maintainers must not corrupt the WrittenMemory.ToArray() invariant that round-trip tests depend on"
+     ],
+     "safeImplementationNotes": "IF pursued despite undemonstrated gain: (1) Use ArrayBufferWriter<byte> only, convert via WrittenMemory.ToArray() before returning (do NOT pool Utf8JsonWriter or reuse its state). (2) Preserve newline addition (buffer.WriteByte((byte)'\\n') after ToArray()). (3) Measure actual impact via frame-size logging (EngineClient.Commands.cs:32) and on-hardware GC profiling before committing; unblock only if it solves a real bottleneck. (4) Existing round-trip tests (IpcCommandTests, IpcCoderDecodeTests) MUST pass unchanged; byte-format changes break IPC contract. (5) Preserve JsonSerializerOptions reuse (lines 26-29) as the higher-ROI optimization already applied; do NOT remove it in pursuit of this lower-confidence change."
+    }
+   }
+  ],
+  "refutedCount": 27
+ },
+ "diffAudit": {
+  "coverage": [
+   {
+    "finding": "C1: Restructure realMove/convert DB sync batch-end, busy-timeout-less",
+    "status": "absent",
+    "note": "C1 was fixed in commit 1e5cab3 before this audit record was written. Not part of round 2 scope."
+   },
+   {
+    "finding": "C2: macOS restructure apply SEC-5/SEC-7 symlink containment",
+    "status": "absent",
+    "note": "C2 was fixed in commit 1e5cab3 before this audit record was written. Not part of round 2 scope."
+   },
+   {
+    "finding": "C3: macOS restructure apply no SEC-5/SEC-7 containment (no root parameter)",
+    "status": "absent",
+    "note": "NO FIX FOUND in diff. RestructureView.swift has no changes. The apply(proposals:store:mode:) function at line 1366 still lacks libraryRoot parameter and symlink checks. This finding remains open."
+   },
+   {
+    "finding": "C4: macOS scan-path PDF render no pixel cap (2x scale, multi-GB for CAD/plotter)",
+    "status": "complete",
+    "note": "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Tagging.swift:195-250 adds maxPDFRenderPixels constant (50M), calculates scaledPixels, and clamps scale via sqrt to stay under budget. Matches Windows MAX_DECODED_PIXELS."
+   },
+   {
+    "finding": "C5: macOS parallelStreamingDownload orphans .fileid-staging part files on process death",
+    "status": "complete",
+    "note": "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift:120-159 adds sweepStaleStagingEntries() with pid-based ownership check, maxAge guard, and dead-process detection. lines 216-327 implement pid-prefixing (ProcessInfo.processIdentifier), rmdir cleanup, concurrent-safe directory recreation. CLIPModelInstaller.swift:217-232 and ArcFaceModelInstaller.swift both add staging sweeps."
+   },
+   {
+    "finding": "C6: Windows generateVideoThumbnail unbounded concurrency (100+ concurrent extracts, 192MB frames)",
+    "status": "complete",
+    "note": "platforms/windows/src/engine/src/commands/thumbnail.rs:16-53 adds extract_semaphore() static with MAX_CONCURRENT_EXTRACTS=2, guards build_thumbnail_b64 with _permit = extract_semaphore().acquire().await?. Mirrors scan pipeline's GPU semaphores."
+   },
+   {
+    "finding": "C7: Windows Low-tier predecode 'memory budget' counts frames at 24MB assumed vs 150MB actual max",
+    "status": "complete",
+    "note": "platforms/windows/src/engine/src/pipeline/tagging.rs:690-943 adds PredecodeBudget struct with byte-weight accounting (not slot count). Low-tier decoder pool clamped to 4 (line 693-695). Decoder threads acquire bytes before send_blocking. Lines 2233-2277 add comprehensive test coverage (budget clamp, oversize frame, cancel unblock)."
+   },
+   {
+    "finding": "C8: macOS engine crash/exit never clears in-flight UI flags (Deep Analyze, People wedge)",
+    "status": "complete",
+    "note": "platforms/apple/app/Sources/FileID/EngineClient.swift:494-504 reset deepAnalyzeInFlight, faceClusteringInFlight, isPaused, queueState on process death. Line 722 calls SpotlightIndexer.wipe() in deleteLibraryFiles to clear metadata of wiped files."
+   },
+   {
+    "finding": "C9: macOS 'Wipe library + rescan' clicked while engine down silently skips wipe",
+    "status": "complete",
+    "note": "platforms/apple/app/Sources/FileID/EngineClient.swift:682-698 check stdinPipe != nil; if nil, call deleteLibraryFiles() directly, reset UI, and respawn. Wipe no longer depends on engine shutdown handshake."
+   },
+   {
+    "finding": "C10: Windows prewarm cancel during engine cold start silently lost (app-side mark erased by dispatch)",
+    "status": "complete",
+    "note": "platforms/windows/src/FileID.App/Services/ModelInstallerService.cs:196-249 add ClearCancelMarks() explicit call at Install/Retry entry points only. Line 687-697 honor cancel mark before dispatch (instead of erasing it). EngineClient.Commands.cs:512-530 add clearCancelMark parameter (false in ModelInstallerService.PrewarmAsync call :715) to prevent dispatch-time erasure during cold-start wait."
+   },
+   {
+    "finding": "C11: Windows sentinel-write failure exits strand install slot at ~99.9% 'Downloading'",
+    "status": "complete",
+    "note": "platforms/windows/src/FileID.App/Services/ModelInstallerService.cs:930-951 route sentinel_* error kinds via HandleEngineError (was previously swallowed). OpenVINO unavailable case (line 997-1004) now resets Accelerator state from Downloading back to Intel DirectML state instead of leaving it stuck."
+   },
+   {
+    "finding": "C12: Migration chain forked at v14 (macOS v14_fts_sync_triggers vs Windows v14_files_kind_scanned_index)",
+    "status": "complete",
+    "note": "platforms/apple/engine/Sources/FileIDEngine/Storage/Database.swift registers v14_files_kind_scanned_index, renames prior v14 FTS to v15_fts_sync_triggers, adds v16_path_search. platforms/windows/src/engine/src/db/migrations.rs adds v15/v16 with identical DDL. platforms/apple/Tests/EngineTests/MigrationParityTests.swift:16-37 pins canonical 16-identifier list; Windows mirror test migration_identifiers_match_canonical_list verifies both sides."
+   },
+   {
+    "finding": "C13: Deep Analyze model load requires live huggingface.co round-trip even when installed",
+    "status": "complete",
+    "note": "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift:67-80 add sentinel-first check: if verifiedSentinel exists and hasModelPayload() is true, return immediately without HF tree listing. Offline Macs can now run Deep Analyze with verified installs."
+   },
+   {
+    "finding": "C14: Windows truncate_to_max calls String::truncate at fixed byte offset BEFORE char-boundary fixup (panics on >256KiB non-ASCII)",
+    "status": "complete",
+    "note": "platforms/windows/src/engine/src/pipeline/doc_extract.rs:52-64 clamp boundary n BEFORE truncate (floor_char_boundary pattern). Test added lines 378-389 with 3-byte chars (MAX_TEXT_BYTES % 3 == 1) to trigger mid-char cut case."
+   },
+   {
+    "finding": "C15: Filename search Unicode-normalization-sensitive (NFC query never matches NFD path_text)",
+    "status": "complete",
+    "note": "Cross-platform NFC normalization fix: ReadStore.swift lines 163-165 NFC-normalize search query with precomposedStringWithCanonicalMapping, search path_search column (line 180). Database.swift v16_path_search migration adds column and backfills with NFC form. migrations.rs v16 identical. DBWriter.swift uses StablePathHash.hash() for path_hash (not String.hashValue), populates path_search at lines 428, 440. StablePathHash.swift new file implements SipHash-1-3 port with ASCII-lowercasing (case-insensitive but not Unicode case). Test vectors pinned in StablePathHashTests.swift and path_safety.rs."
+   },
+   {
+    "finding": "C16: macOS path_hash is per-process-randomized String.hashValue (violates stable cross-platform contract)",
+    "status": "complete",
+    "note": "platforms/apple/shared/Sources/FileIDShared/StablePathHash.swift new file implements stable SipHash-1-3 matching Windows engine. DBWriter.swift line 325 calls StablePathHash.hash(file.url.path) instead of String.hashValue. Test vectors pinned at both platforms (StablePathHashTests.swift lines 13-26, path_safety.rs lines 359-388)."
+   },
+   {
+    "finding": "L1: Restructure.apply dead code (engine implementation exists but unused)",
+    "status": "partial",
+    "note": "Finding is about documenting and scoping dead code. Engine Restructure.swift:262-292 already contains SEC-5/SEC-7 checks. This is seeded as a scope note for future macOS app-side implementation, not a bug to fix now."
+   },
+   {
+    "finding": "L2: macOS DBWriter keeps running after persistent SQLITE_FULL",
+    "status": "complete",
+    "note": "platforms/apple/engine/Sources/FileIDEngine/Storage/DBWriter.swift:194-242 add consecutiveCommitFailures counter, maxConsecutiveCommitFailures=3. On 3rd failure, abort scan (coordinator.requestCancel) and emit terminal error. File drops earlier errors while abortedForWriteFailure is set."
+   },
+   {
+    "finding": "L3: macOS ThumbnailService NSCache cost omits Retina backing scale (256MB limit never engages)",
+    "status": "absent",
+    "note": "NO FIX FOUND in diff. ThumbnailService.swift has no visible changes related to NSCache totalCostLimit or countLimit tuning."
+   },
+   {
+    "finding": "L4: Windows model install full disk reported as connection problem",
+    "status": "complete",
+    "note": "platforms/windows/src/engine/src/downloader.rs:196-213 add chain_has_disk_full() detection walking anyhow error chain for io::ErrorKind::StorageFull or Windows error codes 39/112. prewarm.rs lines 97-123 check disk_full flag and emit model_download_disk_full error kind with 2x space + .part-file explanation instead of generic connection hint."
+   },
+   {
+    "finding": "L5: Windows DbWriter failure doesn't stamp scan_sessions before abort",
+    "status": "complete",
+    "note": "platforms/windows/src/engine/src/scan_session.rs:375-383 on writer error, lock db and UPDATE scan_sessions SET completed_at, status='failed' BEFORE returning error. Prevents 'running' status forever."
+   },
+   {
+    "finding": "L6: macOS ArcFace installer stale progress tick overwrites terminal status",
+    "status": "complete",
+    "note": "platforms/apple/app/Sources/FileID/Services/ArcFaceModelInstaller.swift:31-34 add active Set to track in-flight kinds. Lines 85-87 gate refreshStatus() preserve-downloading only while tasks[kind] != nil. Lines 106-107 set active.insert(kind), defer remove. Lines 116-117 gate progress tick on active.contains(kind) so stale ticks are dropped."
+   },
+   {
+    "finding": "L7: No newer-DB/downgrade guard (both engines silently open DB migrated beyond registry)",
+    "status": "absent",
+    "note": "NO FIX FOUND in diff. No version/migration-registry guard logic added to either engine."
+   },
+   {
+    "finding": "L8: trash_log.json torn UTF-8 line wedges restore (read_to_string aborts whole file)",
+    "status": "complete",
+    "note": "platforms/windows/src/engine/src/commands/trash_log.rs:65-157 switch from read_to_string to read() and split by line. Each line validated with from_utf8(); undecodable lines log warning and skip (lines 111-116). find_batch_in() extracted as separate function for reuse."
+   },
+   {
+    "finding": "L9: macOS undo rename journal no expiry or file-identity check",
+    "status": "complete",
+    "note": "platforms/apple/app/Sources/FileID/Database/ReadStore.swift:936-949 add fileSize and modifiedAt to RenameOutcome struct and capture at rename time. undoRenames() at lines 1008-1020 verify newURL file identity (size and mtime match within 1s) before undoing; skip if changed. Prevents silent clobber of an unrelated file now at newPath."
+   },
+   {
+    "finding": "L10: Windows non-UTF-16-roundtrippable filenames mangled to U+FFFD",
+    "status": "complete",
+    "note": "platforms/windows/src/engine/src/pipeline/discovery.rs:286-301 add is_non_unicode_path() check (Path::to_str().is_none()). Skip-log such files with redacted path (line 298-300). Lines 392-401 define is_non_unicode_path(). Lines 505-528 add tests for Windows unpaired surrogates and POSIX raw bytes."
+   },
+   {
+    "finding": "L11: macOS path_hash unstable (duplicate of C16)",
+    "status": "complete",
+    "note": "Covered by C16 fix (StablePathHash.swift implementation)."
+   },
+   {
+    "finding": "L12: metadata_synth_failed and deep_loadcontainer_threw log raw error with unredacted paths",
+    "status": "partial",
+    "note": "Partially addressed: EngineClient.swift lines 256, 264, 271-278 redact frame samples. However, the actual logging statements in the engine code (metadata_synth_failed, deep_loadcontainer_threw) themselves were not directly examined in diff \u2014 the redaction fix is on the app side IPC frame logging. Engine-side logging may still emit raw paths."
+   },
+   {
+    "finding": "L13: EngineClient app.log persists raw IPC frame dumps and binary path",
+    "status": "complete",
+    "note": "platforms/apple/app/Sources/FileID/EngineClient.swift lines 193, 256, 264, 271-278 add redactPathForLog/redactFrameSample calls. Line 272-278 redactFrameSample() scrubs /Users/[^/]+ to ~ before persisting. Line 275 extract NSError domain+code instead of full description."
+   },
+   {
+    "finding": "L14: redactPathForLog keeps immediate parent component (username visible for files directly under home)",
+    "status": "complete",
+    "note": "platforms/apple/shared/Sources/FileIDShared/PathRedaction.swift:25-31 special case /Users/<name>/<file> (4-component path) and emit only filename. Test added PathRedactionTests.swift lines 44-59."
+   },
+   {
+    "finding": "L15: engine-stderr.log captures raw third-party library stderr bypassing redaction",
+    "status": "partial",
+    "note": "NOT FIXED but DOCUMENTED. shared/docs/PRIVACY.md updated to acknowledge this as a residual: engine-stderr.log (macOS) is local-only and outside redaction reach. Documented as acceptable tradeoff."
+   },
+   {
+    "finding": "L16: PRIVACY.md misdescribes redaction implementations",
+    "status": "complete",
+    "note": "shared/docs/PRIVACY.md:34 updated to accurately describe redaction behavior (last 1-2 components only, username dropped for direct-home files, FileID state tree passed through verbatim, L15 residual noted). Also: SpotlightIndexer.deindex(ids:) added (line 51-57) to drop deleted rows from Spotlight index so captions/tags of wiped files don't persist in search."
+   }
+  ],
+  "strayEdits": [
+   "BulkRenameSheet.swift \u2014 part of L9 (undo rename file identity fix) \u2014 integrated use of new RenameOutcome fields",
+   "LibraryView.swift \u2014 minor Spotlight integration change related to L16 deindex call setup",
+   "ThumbnailService.swift (macOS) \u2014 change appears cosmetic/minor; reviewed briefly in earlier file status check"
+  ],
+  "concerns": [
+   "C3 (macOS restructure apply SEC-5/SEC-7 root containment and symlink checks) is ABSENT from the diff. The finding describes a critical containment violation where files can escape the user's chosen library root via symlinks. RestructureView.swift:1366-1417 apply() function still lacks libraryRoot parameter and all symlink/containment defenses. This remains an open high-severity issue.",
+   "L3 (macOS ThumbnailService NSCache Retina scale) is ABSENT from the diff. The 256 MB totalCostLimit was pinned to assume per-bitmap cost but Retina retinas double that; the fix requires NSCache configuration adjustment or countLimit tuning.",
+   "L7 (No version-guard on either engine for opening DBs migrated beyond the engine's migration registry) is ABSENT. Both engines silently accept and write to DBs with newer schemas, risking silent data corruption if contracts have changed.",
+   "L12 (metadata_synth_failed and deep_loadcontainer_threw raw logging) is only partially addressed \u2014 the app-side IPC frame redaction is in place, but the engine-side logging statements themselves were not explicitly examined in the diff. Engine may still emit unredacted paths in those specific error logs.",
+   "The C1 fix (restructure realMove DB sync with busy-timeout) was already in 1e5cab3, but this round only adds path_search/NFC updates to updatePathText calls. The actual busy-timeout and per-move DB rollback pattern do not appear in the current diff \u2014 verify that C1 truly was complete in the prior commit.",
+   "Several new test files (StablePathHashTests.swift, StagingSweepTests.swift, MigrationParityTests.swift) are untracked \u2014 ensure these are staged and committed alongside the fixes they pin."
+  ],
+  "lowsCovered": [
+   "L2: macOS DBWriter SQLITE_FULL abort after 3 consecutive failures",
+   "L4: Windows disk-full error detection and messaging",
+   "L5: Windows scan_sessions failure status stamping",
+   "L6: macOS ArcFace installer phantom 'Downloading' row prevention",
+   "L8: trash_log.json torn UTF-8 line handling",
+   "L9: macOS undo rename file-identity check",
+   "L10: Windows non-Unicode filename detection and skip",
+   "L11: macOS path_hash via C16 StablePathHash",
+   "L13: EngineClient app.log redaction (frames and error messages)",
+   "L14: redactPathForLog username omission for direct-home files",
+   "L16: PRIVACY.md documentation accuracy update + Spotlight deindex"
+  ],
+  "lowsNotCovered": [
+   "L1: Restructure.apply dead code scoping (informational; legitimately unaddressed as it's a future implementation vehicle, not a bug)",
+   "L3: macOS ThumbnailService NSCache Retina scale tuning",
+   "L7: Version guard on DB open (no migration-registry enforcement)",
+   "L12: Engine-side logging of metadata_synth_failed/deep_loadcontainer_threw (partially addressed on app side only; engine sources not verified)"
+  ]
+ }
+}

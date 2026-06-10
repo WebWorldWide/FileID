@@ -7,6 +7,47 @@
 
 ---
 
+## 2026-06-10 — Sweep A round 2: migration renumber, stable path hash, downgrade guard, perf-sweep drops
+
+**Context**: Audit Sweep A (record: `shared/docs/audit-2026-06-09-merge/sweep-a-findings.json`)
+confirmed 16 findings + 16 lows; round 2 landed as `8dca353`/`02636c2`, the verified perf sweep
+as `b653d00`. The non-obvious calls:
+
+**C12 — the v14 migration fork was repaired by RENAMING a never-shipped identifier.** macOS had
+registered `v14_fts_sync_triggers` while Windows registered `v14_files_kind_scanned_index` for a
+different DDL — a hard fork: a library touched by one platform failed the other's scan. Because
+the macOS `v14_fts_sync_triggers` identifier existed only on this branch (never in any tagged
+build or `main`), renaming it to `v15_fts_sync_triggers` does NOT violate the append-only rule —
+append-only protects *shipped* chains. macOS adopted Windows' `v14_files_kind_scanned_index`
+byte-for-byte; both added `v16_path_search`. The canonical 16-identifier list is now pinned by
+tests on BOTH platforms (`MigrationParityTests.swift`, `migrations.rs`) so a future fork breaks CI
+instead of user libraries. A dev-machine DB stamped with the old v14 name will fail the L7 guard
+below — acceptable: wipe + rescan is the documented dev recovery, and no user DB can carry it.
+
+**L11 — `path_hash` is now StablePathHash (SipHash-1-3, ASCII-lowercased input) on macOS.**
+Swift's `String.hashValue` is per-process randomized, so the column was useless across runs and
+violated the cross-platform contract with Windows' `stable_path_hash`. The Swift port matches the
+Rust implementation bit-for-bit; shared test vectors are pinned on both sides
+(`StablePathHashTests.swift` / `path_safety.rs`). ASCII-only case folding is deliberate — it
+matches Rust's behavior; full Unicode folding would diverge between ICU versions.
+
+**L7 — both engines refuse to open a DB migrated beyond their registry** (distinct
+`db_newer_than_engine` error) instead of silently writing into a newer schema. Alternatives:
+silent open (status quo — risks corrupting newer invariants) or read-only fallback (complex,
+misleading UI). Refuse-with-guidance is what the migration table is for.
+
+**Perf sweep — two adversarially-unproven candidates dropped, on record so they aren't
+re-proposed**: (1) rewriting the persons `face_count` scalar subquery into a JOIN+GROUP BY —
+no benchmark showed the scalar subquery is hot, and the rewrite risks row-cardinality bugs for
+zero gain; (2) pooling `IpcCoder.EncodeLine` buffers — allocation volume is noise next to ML
+inference, and pooling adds an invariant future edits can corrupt. Re-open either only with a
+measured bottleneck. The six landed wins are in `b653d00`.
+
+**L1 (scope note) — engine-side `Restructure.apply` on macOS is dead code by design**: the live
+restructure apply is app-side (`RestructureEngine.apply` in RestructureView.swift, which now has
+the SEC-5/SEC-7 containment port). The engine path stays as the future vehicle for moving apply
+into the engine for full Windows parity; do not delete it as "unused."
+
 ## 2026-06-09 — Full bug-audit sweep: WinVerifyTrust revocation goes cache-only; IPC ID-casing drift deferred
 
 **Context**: A read-only multi-agent static audit across macOS (Swift), the Windows Rust engine,
