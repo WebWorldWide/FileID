@@ -1,6 +1,64 @@
 # NEXT — resume here
 
-## 2026-06-09 (newest) — Verify the bug-audit sweep on hardware (branch `fix/bug-audit-sweep`) (RESUME HERE)
+## 2026-06-10 (newest) — Campaign closed; CI + hardware UAT are the only remaining gates (RESUME HERE)
+
+Branch `fix/bug-audit-sweep` holds the full production-readiness campaign (see STATE.md
+2026-06-10). All local gates are green; the branch is pushed and **CI must be green on all
+three workflows** (macos / windows-engine / windows-app — macos.yml runs the swift-testing
+suites this dev env can't compile) before merge to `main`.
+
+**Hardware UAT — macOS (owner's Mac):**
+- Scan a large folder; pause → resume → cancel (no hang; cancelled scan still emits
+  `scanComplete` and the UI returns to idle).
+- Re-scan a clustered folder — People names + manual assignments survive (H2 UPSERT on a
+  real DB).
+- Restructure: pick root → plan → convert to real moves on a root containing a SYMLINKED
+  folder (e.g. `root/Photos → /Volumes/External/Photos`): files must NOT escape the root
+  (skip+conflict), DB paths update per-move, generated folder names are Windows-safe.
+- Deep Analyze: full run **offline** with a previously-installed VLM (sentinel-gated load —
+  no network round-trip); double-click Analyze mid-run → benign bounce, no wedge; engine
+  force-kill mid-run → UI flags reset on respawn.
+- Search: `"`/`*`/`:` metacharacters return rows; an NFD-named file (e.g. `Café.jpg` typed
+  composed) is found by NFC query (v16_path_search).
+- Bulk tag + bulk rename + both undo paths; Spotlight `tag:` search; wipe library →
+  Spotlight results for wiped files are gone (C16).
+- Quit the app mid-VLM-download, relaunch, re-install: stale `.fileid-staging` parts swept
+  (C4); kill engine mid-scan twice → respawn works, third crash within window surfaces the
+  crashed banner.
+- `bash scripts/iterate.sh` green (wire purity U4 + C1 cancel regression).
+- Release: install Developer ID cert + `xcrun notarytool store-credentials fileid-notary`,
+  then `bash scripts/release.sh v1.0.0` (full sign + notarize + staple) and Gatekeeper-test
+  the DMG on a quarantined download.
+
+**Hardware UAT — Windows (RTX 2060 / G:\TrueNAS):**
+- `build\iterate.ps1` full corpus pass + scan_assertions.
+- Cancel a scan mid-tagging: phase shows Cancelled (not Completed), no auto-clustering fires,
+  `scanComplete` arrives with totalFiles=discovered > processedFiles.
+- Sidebar queue list NOW POPULATES (queueState was never emitted before this branch): start a
+  scan, queue a Deep Analyze — both appear; entries clear on completion/cancel/crash.
+- Cache-cold video-heavy folder scroll: extracts serialized (2 permits), no engine OOM, tiles
+  fill in (C5).
+- 45 MP photo library scan on the Low-tier (4 GB) profile: engine commit stays bounded
+  (byte-weighted predecode budget, C6).
+- A >256 KiB non-ASCII document (e.g. large Cyrillic .txt) scans without an engine panic (C14).
+- Per-row model Cancel during engine cold start sticks (C9); sentinel-write failure surfaces
+  an error not a stuck 99.9% slot (C10); OpenVINO-unavailable resets the Accelerator slot (C11).
+- People tab: cluster counts exclude tiny/profile faces (excluded flag now populated — expect
+  somewhat CLEANER clusters than before on re-cluster; re-run clustering twice → identical
+  results).
+- Cross-platform DB round-trip: scan a small library on macOS, open the same DB on Windows
+  (and reverse) — both engines accept it (v1–v16 parity); a DB from a NEWER build is refused
+  with `db_newer_than_engine`.
+- TLS pin failure UX via mitmproxy (`download_tls_pin_failed` surfaces; escape hatch works);
+  corrupt a model file on disk → reinstall flow recovers (checksum mismatch).
+
+**After UAT:** merge to `main`, confirm CI green there, then the only remaining v1.0 items are
+the non-campaign ones in SHIP.md (Restructure P2–P4, Windows EV signing/MSI, per-vendor matrix,
+face-clustering structural fix, rename-heal duplicate fix, throughput re-baseline).
+
+---
+
+## 2026-06-09 (superseded by the entry above) — Verify the bug-audit sweep on hardware (branch `fix/bug-audit-sweep`)
 
 72/73 confirmed + 3/4 uncertain audit findings are fixed on the branch, now merged with main's
 2026-05-26→06-04 line (commercial-clean YuNet+SFace / OpenCLIP / RAM++ stack, butler restructure,

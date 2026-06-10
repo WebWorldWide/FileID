@@ -8,6 +8,49 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-10 — Production-readiness campaign closed: zero open findings, perf sweep, hardening live, T4/T5/T7 shipped (branch `fix/bug-audit-sweep`)
+
+The full campaign that started with the 2026-06-09 sweep is **closed with zero open confirmed
+findings** across every record. What landed on top of the entry below:
+
+- **Merge reconciliation** — origin/main's 123-commit line (commercial-clean stack, its own
+  audits) merged into the branch's 19-commit fix line; R0 merge-interaction review found + fixed
+  7 semantic conflicts git couldn't see (`R0-findings.json`).
+- **Deferred findings closed** — L1 (schema-conformance suites lock Rust + C# mirrors to
+  `ipc.schema.json`; zero drift) and U4 (macOS IPC wire dup'ed off fd 2; MLX/Metal diagnostics
+  go to `engine-stderr.log`, wire stays pure JSON — pinned by iterate.sh).
+- **Security hardening live** — SHA256 manifest (`shared/models/manifest.json`, registry-locked
+  both platforms, VLMs revision-pinned with sentinel), TLS CA-allowlist pinning (11 roots +
+  rotation runbook in SECURITY.md), tokenizer DoS bounds. SECURITY.md rewritten to match.
+- **macOS features** — T4 Finder-tag undo journal + tile tag dots, T5 bulk-rename perf hoist,
+  T7 sign/notarize/DMG pipeline (`scripts/release.sh`; `--skip-notarize` dry run produces a
+  92 MB hardened-runtime DMG that passes `codesign --verify` + DR check; real signing is
+  owner-gated on the Developer ID cert).
+- **Audit Sweep A** (R1–R6 fix-regression + N1–N3/N5–N8 depth lenses): 16 confirmed + 16 lows,
+  all adversarially verified, all fixed — incl. the **v14 migration fork** (C12: chains
+  re-unified, canonical 16-id list pinned by tests on both platforms), the C14 char-boundary
+  truncate panic, NFC-insensitive search (v16_path_search), StablePathHash (SipHash-1-3, shared
+  vectors), staging-orphan sweeps, byte-weighted predecode budget, video-thumb semaphore, and
+  the L7 newer-DB downgrade guard (`db_newer_than_engine`, both engines).
+- **Perf sweep** — 35 candidates from 6 lenses, 27 adversarially refuted, 6 landed (`b653d00`):
+  EXIF read off the already-open CGImageSource (2–5 ms/image × 14–32 workers on NAS), COUNT(*)
+  badge queries, single-pass restructure stats, arcface clone removal. 2 unproven candidates
+  dropped on record (DECISIONS.md).
+- **Closing Sweep B** (P1–P5 parity, N4 robustness, R7 delta, loop-until-dry): round 1 → 9
+  confirmed fixed (deep-analyze/cluster duplicate-command parity, scanComplete-on-cancel,
+  discoveryComplete, face_prints.excluded population, rankByCosine failed-filter, redaction
+  parity ×2, sanitizer delegation, Apply default arm); round 2 → 7 fixed (cancelled-scan counts,
+  **Windows queueState finally wired** — the SidebarQueueList was bound to an event the engine
+  never emitted, command_decode_failed parity, /Volumes redaction both sides, PAR-111-mirror
+  busy-bounce exemption on macOS); round 3 → **completely dry** (0 candidates, 22 verifiedClean).
+  Record: `audit-2026-06-09-merge/sweep-b-findings.json`.
+
+Local gates at HEAD: `swift build` clean 0 · `cargo clippy --all-targets -D warnings` 0 ·
+`cargo test` 292 green · release dry-run DMG green. **CI + hardware UAT are the remaining
+gates** — see NEXT.md for the checklist. "Zero known bugs" = every recorded finding
+closed/accepted + gates green + UAT clean; the C#/.NET side and all runtime behavior verify in
+CI/on-hardware only.
+
 ## 2026-06-09 — Full cross-platform bug-audit sweep (branch `fix/bug-audit-sweep`)
 
 Ran a read-only multi-agent static audit across macOS (Swift), the Windows Rust engine, and the

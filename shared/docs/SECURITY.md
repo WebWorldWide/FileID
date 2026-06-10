@@ -20,7 +20,7 @@ FileID is two local binaries — the engine (Rust on Windows, Swift on macOS) an
   - `Trusted` → proceed. When a thumbprint is pinned, the app SHA256-hashes the binary after the verdict and re-hashes immediately before `Process.Start`; a mismatch aborts the spawn (TOCTOU mitigation against a binary swapped between verify and launch).
   - On macOS the equivalent guard lives in `EngineClient.start()`: the engine path must resolve inside the app bundle's `Contents/MacOS/`, and the engine's signing Team ID (`kSecCodeInfoTeamIdentifier`) must match the app's (or both unsigned/ad-hoc for dev).
 - **Single-writer database.** The engine holds the only writer connection; all writes serialize through it. Reads fan out via fresh read-only connections. No cross-process write race on the DB.
-- **Parameterized SQL.** Every `rusqlite` call in the engine uses bound parameters (`params![...]`, `query_row(sql, [args], …)`) — values are never string-interpolated into SQL. The migration runner (`db/migrations.rs`) binds the migration identifier as `?1`. Migrations v1–v12 are append-only and byte-faithful with the macOS GRDB schema (same `grdb_migrations` table + identifier strings) so a DB written by either platform opens on the other. On macOS, GRDB's typed API enforces the same discipline.
+- **Parameterized SQL.** Every `rusqlite` call in the engine uses bound parameters (`params![...]`, `query_row(sql, [args], …)`) — values are never string-interpolated into SQL. The migration runner (`db/migrations.rs`) binds the migration identifier as `?1`. Migrations v1–v16 are append-only and byte-faithful with the macOS GRDB schema (same `grdb_migrations` table + identifier strings, chain pinned by tests on both platforms) so a DB written by either platform opens on the other; a DB migrated beyond the local registry is refused with `db_newer_than_engine` instead of silently written. On macOS, GRDB's typed API enforces the same discipline.
 - **Restructure path containment.** Restructure proposals are built by joining sanitized components onto the user-picked library root (`pipeline/restructure.rs::classify`); `sanitize_path_component` strips the Windows-reserved set `< > : " / \ | ? *` (which also defuses `..`-style traversal via separators), and only the original file's own `file_name()` is reused as the leaf. VLM-proposed names from Deep Analyze pass through `sanitize_proposed_name` (`pipeline/deep_analyze.rs`), which strips quotes/punctuation, lowercases, hyphen-joins, caps length at a word boundary, and falls back to `untitled` on empty input.
 - **Download transport hardening.** The engine's downloader (`downloader.rs`) is the only network code in the engine. It uses HTTPS only, a generic non-fingerprinting User-Agent, a bounded retry/back-off (1 s / 4 s / 16 s, `Retry-After` honored, capped at 60 s), a global in-flight request cap, and writes to `.part` files renamed atomically into place only on success.
 - **Path redaction in logs.** Logs are local-only (`%LOCALAPPDATA%\FileID\logs\` / `~/Library/Application Support/FileID/logs/`). User file paths are redacted before they reach a log call site: `redact_path_for_log` (Rust, `platform.rs`), `PathRedactor.Redact` (C#), and `redactPathForLog(_:)` (Swift) all strip the user's home/username, keeping only enough tail to stay useful. App-structural FileID paths pass through unredacted.
@@ -32,20 +32,49 @@ FileID is two local binaries — the engine (Rust on Windows, Swift on macOS) an
 - **Telemetry / analytics.** No analytics SDK, crash reporter, update ping, or beacon ships in either binary. Enforced, not just asserted — see the CI gates below and `PRIVACY.md`.
 - **Engine respawn race (macOS).** `EngineClient` keeps a single process reference and uses bounded backoff; no multi-instance race.
 
-### SHA256 download verification — wired but currently inert
+### SHA256 download verification — live on both platforms (2026-06-10)
 
-The downloader fully supports per-file SHA256 verification: when a `DownloadRequest` carries an `expected_sha256`, the stream is hashed (or the file re-hashed from disk after a resume), and a mismatch deletes the `.part` file and aborts with a clear error. The prewarm call sites pass each model file's `sha256` straight through.
+`shared/models/manifest.json` is the single source of truth: 29 static artifacts with pinned
+SHA256 + the MLX VLM repos pinned by immutable HuggingFace revision (per-file LFS `oid`
+verification). The Windows registry (`models/registry.rs`) is locked to the manifest by a cargo
+test (`manifest_consistency.rs`, bidirectional); macOS parses the same manifest as a SwiftPM
+resource (`ModelManifest.swift`) and `StreamingDownload` hashes incrementally, deleting the
+artifact and failing with a distinct checksum error *before* the atomic move. Small embedders
+(CLIP/ArcFace) re-verify on load at preWarm; multi-GB VLMs are install-time-verified with a
+`.fileid-verified-<revision>` sentinel (re-hashing 5–7 GB on every load is unacceptable — the
+residual risk and rationale are in `DECISIONS.md`).
 
-**However, every entry in the model registry (`models/registry.rs`) currently sets `sha256: None`** — including the llama.cpp runtime zips pulled from GitHub releases. So in the shipped build the integrity check is plumbed end-to-end but does nothing, because the manifest supplies no digests. Until the registry is populated with the pinned hashes from `MODELS.md`, a network MITM or a CDN compromise could substitute a download undetected. Populating these digests is the highest-value open hardening item (below) and is the accurate state to cite — do not describe model downloads as "SHA256-pinned" in user-facing copy until the registry carries the hashes.
+### TLS pinning — live on both platforms (2026-06-10)
+
+CA-allowlist pinning (root SPKI set + backups, NOT leaf pins) for the model-download hosts.
+Pins live in `shared/security/tls-pins.json` + `pinned-roots/*.pem` (11 roots covering
+huggingface.co, its CDNs, and GitHub releases); `shared/scripts/check_tls_pins.sh` asserts the
+two representations match in CI. macOS: `TLSPinning.swift` challenge handler (system trust
+first, then chain∩pin-set). Windows: `reqwest` built with `.tls_built_in_root_certs(false)` +
+only the embedded roots; the fail-closed fallback client has no roots at all. Escape hatch
+`FILEID_DISABLE_TLS_PINNING=1` logs loudly and changes no egress. SHA256 above remains the
+primary integrity control; pinning is defense-in-depth.
+
+**Rotation runbook:** if a download host rotates to a CA outside the pin set, downloads fail
+with the distinct pin error (`download_tls_pin_failed` / `pinningFailed`). Recovery: re-capture
+the live chains (`openssl s_client -showcerts` against each host in `tls-pins.json`, including
+the `cdn-lfs*` and `objects.githubusercontent.com` redirect targets), add the new root PEM to
+`shared/security/pinned-roots/`, regenerate the SPKI entry in `tls-pins.json`, run
+`check_tls_pins.sh`, ship a point release. Users mid-outage can set the escape hatch.
+
+### Tokenizer input bounds — live on both platforms (2026-06-10)
+
+Both CLIP tokenizers (Swift `CLIPTokenizer` in FileIDShared, Rust `clip_tokenizer.rs`) cap
+input at 1 024 chars pre-regex (lossless under the 77-token context), bound piece counts and
+vocab/merge sizes at construction, and truncate char-boundary-safely. The BGE wordpiece
+tokenizer (attacker-controlled doc/OCR text) stops at `max_len` words with input pre-slicing.
+Pathological-input tests (1 MB single word, combining-char floods, 4-byte emoji runs) run on
+both platforms.
 
 ## Open hardening — gates the v1.0 release (NOT yet shipped)
 
-These items must land before the v1.0 tag. They are not required for day-to-day development builds.
-
-- **Populate the model-download SHA256 manifest.** Fill `models/registry.rs` `sha256` fields (and the macOS equivalent) from the canonical `MODELS.md` hashes so the already-wired download verifier actually fires. Covers the HuggingFace model weights and the GitHub-hosted llama.cpp runtime zips. This is the single change that turns the dormant integrity check on.
-- **Per-model verification on load.** Even once downloads are verified, a model file on disk can be replaced afterward by a local adversary with write access to the Models directory. Record the SHA256 at download time and re-verify on every load (Windows engine + macOS, including the MLX VLMs).
-- **Certificate pinning for downloads.** No TLS cert pinning today; an active MITM with a trusted CA could swap a download. Pin `huggingface.co` (and the GitHub release host) in the downloader. Best landed together with the SHA256 manifest above — the two together close the MITM gap.
-- **EV signing + thumbprint pin in release builds.** The engine-integrity guard is only as strong as a real Authenticode/EV signature and a pinned `FILEID_EV_THUMBPRINT`; today's builds run unsigned-with-warning. Ship signed, with the thumbprint pinned, so the strict path (refuse unsigned + tamper-mismatched binaries) is live. Tracked with WiX MSI packaging in `SHIP.md`.
+- **EV signing + thumbprint pin in release builds (Windows).** The engine-integrity guard is only as strong as a real Authenticode/EV signature and a pinned `FILEID_EV_THUMBPRINT`; today's builds run unsigned-with-warning. Ship signed, with the thumbprint pinned, so the strict path (refuse unsigned + tamper-mismatched binaries) is live. Tracked with WiX MSI packaging in `SHIP.md`.
+- **macOS Developer ID signing + notarization (user-gated).** The full pipeline exists and dry-runs green (`platforms/apple/scripts/release.sh --skip-notarize` produces a hardened-runtime, ad-hoc-signed DMG). The real signing pass needs the Developer ID certificate + `notarytool store-credentials fileid-notary` on the owner's machine — steps documented in the script header.
 
 ## CI enforcement
 

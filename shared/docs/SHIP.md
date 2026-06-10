@@ -121,7 +121,12 @@ present, 128-d/512-byte SFace prints, person clusters formed).
 
 ## Remaining to v1.0
 
-Priorities in [`NEXT.md`](NEXT.md). The major open items:
+Priorities in [`NEXT.md`](NEXT.md). **Done as of 2026-06-10** (branch `fix/bug-audit-sweep`,
+pending CI + hardware UAT): the full bug-audit campaign (zero open confirmed findings across
+all records — see STATE.md), security hardening (SHA256 manifest + TLS pinning + tokenizer
+bounds — SECURITY.md), macOS Finder-tag undo + bulk-rename polish, and the **macOS
+sign/notarize/DMG pipeline** (`platforms/apple/scripts/release.sh`; real signing owner-gated
+on the Developer ID cert). The major open items:
 
 - **Restructure P2–P4** — VLM naming, confidence tiers + journal, Win2D Sankey.
 - **macOS lockstep (WS-MAC)** — mirror the commercial-clean swap into the Swift
