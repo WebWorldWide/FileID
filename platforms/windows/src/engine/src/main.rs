@@ -509,25 +509,31 @@ async fn watch_parent_pinned(ppid: u32, shutdown: Arc<Notify>) {
     };
 
     // SAFETY: ppid is a u32 PID; OpenProcess returns a handle or an error.
-    let handle: HANDLE = match unsafe {
+    // Reduce the OpenProcess Result/HANDLE (both !Send) to a Send-safe usize
+    // BEFORE any await — this async fn is `tokio::spawn`ed, so a !Send value
+    // living across the fallback `.await` below would make the whole future
+    // !Send and fail to compile on Windows.
+    let pinned_addr: Option<usize> = match unsafe {
         OpenProcess(
             PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
             false,
             ppid,
         )
     } {
-        Ok(h) if !h.is_invalid() => h,
-        _ => {
-            // Couldn't get a pinning handle (e.g. PROCESS_QUERY_LIMITED_INFORMATION
-            // denied). Fall back to the platform's SYNCHRONIZE-only watcher rather
-            // than disabling the watchdog outright — no worse than the pre-fix path.
-            tracing::warn!(
-                "could not open pinning handle (pid={ppid}); falling back to unpinned watch"
-            );
-            platform::watch_parent(ppid, shutdown).await;
-            return;
-        }
+        Ok(h) if !h.is_invalid() => Some(h.0 as usize),
+        _ => None,
     };
+    let Some(handle_addr) = pinned_addr else {
+        // Couldn't get a pinning handle (e.g. PROCESS_QUERY_LIMITED_INFORMATION
+        // denied). Fall back to the platform's SYNCHRONIZE-only watcher rather
+        // than disabling the watchdog outright — no worse than the pre-fix path.
+        tracing::warn!(
+            "could not open pinning handle (pid={ppid}); falling back to unpinned watch"
+        );
+        platform::watch_parent(ppid, shutdown).await;
+        return;
+    };
+    let handle = HANDLE(handle_addr as *mut core::ffi::c_void);
 
     // Pin identity: capture the opened process' creation time, then re-sample
     // who our parent actually is. If the PID we opened is no longer our parent
@@ -546,11 +552,10 @@ async fn watch_parent_pinned(ppid: u32, shutdown: Arc<Notify>) {
     }
 
     // HANDLE wraps *mut c_void which the windows crate doesn't mark Send.
-    // Smuggle it across the closure boundary as a usize — integers are always
-    // Send. SAFETY: a Win32 HANDLE is opaque; CloseHandle and
-    // WaitForSingleObject can be called from any thread once the handle
-    // exists. This task is the sole owner of the value across the move.
-    let handle_addr = handle.0 as usize;
+    // We carry it across the closure boundary as the `handle_addr` usize
+    // captured above — integers are always Send. SAFETY: a Win32 HANDLE is
+    // opaque; CloseHandle and WaitForSingleObject can be called from any thread
+    // once the handle exists. This task is the sole owner of the value.
     let wait = tokio::task::spawn_blocking(move || {
         let h = HANDLE(handle_addr as *mut core::ffi::c_void);
         // SAFETY: h is the pinned parent handle smuggled across threads.
