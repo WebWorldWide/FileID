@@ -36,6 +36,7 @@ use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::ipc::{RestructureApplyResult, RestructureMove};
@@ -52,11 +53,32 @@ pub struct RestructureApply {
     db_conn: Arc<Mutex<Connection>>,
     library_root: PathBuf,
     use_symlinks: bool,
+    // F-C6-013: cooperative cancel polled between moves. Defaults to a fresh,
+    // never-set flag; the dispatcher injects a shared flag via `with_cancel` so
+    // a user "stop" aborts a 100k-move apply between moves (each completed move
+    // is already durable, so stopping mid-batch preserves per-move atomicity).
+    cancel: Arc<AtomicBool>,
 }
 
 impl RestructureApply {
     pub fn new(db_conn: Arc<Mutex<Connection>>, library_root: PathBuf, use_symlinks: bool) -> Self {
-        Self { db_conn, library_root, use_symlinks }
+        Self {
+            db_conn,
+            library_root,
+            use_symlinks,
+            cancel: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Inject a shared cancellation flag (the dispatcher sets it on a user
+    /// stop); `apply` polls it at the top of each move. (F-C6-013)
+    // Allowed-dead in the non-test bin: the apply-side poll + the unit test
+    // exercise it now; the dispatcher (CancelScan path in main.rs) wiring that
+    // calls this is a follow-up outside this file's ownership.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn with_cancel(mut self, cancel: Arc<AtomicBool>) -> Self {
+        self.cancel = cancel;
+        self
     }
 
     /// Apply every proposed move. Stops on first hard error; returns the
@@ -73,7 +95,22 @@ impl RestructureApply {
         // touches disk.
         let mut claimed: HashSet<PathBuf> = HashSet::new();
 
-        for m in moves {
+        // F-C6-013: the apply loop was a silent, unstoppable serial walk — at
+        // 100k+ moves the user got no feedback and no stop.
+        let total = moves.len();
+        for (idx, m) in moves.iter().enumerate() {
+            // Poll the cancel flag at the TOP of every iteration. Every move
+            // already completed is durable (per-move FS op + DB update), so
+            // stopping BETWEEN moves is safe and preserves per-move atomicity.
+            if self.cancel.load(Ordering::Relaxed) {
+                tracing::info!(applied, failed, processed = idx, total, "[RESTRUCTURE] apply cancelled by user");
+                break;
+            }
+            let processed = idx + 1;
+            if should_emit_apply_progress(processed, total, APPLY_PROGRESS_INTERVAL) {
+                tracing::info!(applied, failed, processed, total, "[RESTRUCTURE] apply progress");
+            }
+
             // B4/S6/S7: bind the move to the planned file identity. The
             // payload `source` is not authoritative on its own — re-read the
             // live DB row for `file_id` and require it still names this
@@ -213,6 +250,19 @@ impl RestructureApply {
 
         Ok(RestructureApplyResult { applied, failed, privilege_error: None })
     }
+}
+
+const APPLY_PROGRESS_INTERVAL: usize = 500;
+
+/// Apply-progress throttle: emit on the first move, on the last, and once per
+/// `interval` processed moves, so a 100k-move apply logs ~total/interval lines
+/// instead of none (silent) or one-per-move (flood). Pure → the cadence is
+/// unit-assertable. (F-C6-013)
+fn should_emit_apply_progress(processed: usize, total: usize, interval: usize) -> bool {
+    if interval == 0 || processed == 0 {
+        return false;
+    }
+    processed == 1 || processed == total || processed % interval == 0
 }
 
 #[derive(Debug)]
@@ -497,6 +547,53 @@ fn has_reparse_point_in_chain(_parent: &Path, _root: &Path) -> bool { false }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_emit_apply_progress_cadence() {
+        // Never on the zeroth processed item or with a zero interval.
+        assert!(!should_emit_apply_progress(0, 1000, 500));
+        assert!(!should_emit_apply_progress(500, 1000, 0));
+        // First move (immediate feedback), every `interval`, and the last move.
+        assert!(should_emit_apply_progress(1, 1000, 500));
+        assert!(should_emit_apply_progress(500, 1000, 500));
+        assert!(should_emit_apply_progress(1000, 1000, 500));
+        // Silent on the in-between indices (so 100k moves → ~200 lines, not 100k).
+        assert!(!should_emit_apply_progress(2, 1000, 500));
+        assert!(!should_emit_apply_progress(499, 1000, 500));
+        assert!(!should_emit_apply_progress(501, 1000, 500));
+    }
+
+    /// F-C6-013: a pre-cancelled apply must break before touching the filesystem
+    /// — no move, and a cancel is NOT counted as a failure. Cross-platform: the
+    /// cancel poll sits at the top of the loop, ahead of the (Windows-only)
+    /// move_file, so the loop exits without reaching it.
+    #[test]
+    fn apply_honors_cancel_before_moving_any_file() {
+        let root = std::env::temp_dir().join(format!("fileid-apply-cancel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let src = root.join("a.jpg");
+        std::fs::write(&src, b"data").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        insert_file_row(&conn, 1, &src.to_string_lossy());
+        let db = Arc::new(Mutex::new(conn));
+
+        // Already cancelled before apply runs.
+        let cancel = Arc::new(AtomicBool::new(true));
+        let apply = RestructureApply::new(db, root.clone(), false).with_cancel(cancel);
+        let dest = root.join("Sorted").join("a.jpg").to_string_lossy().into_owned();
+        let res = apply
+            .apply(&[move_fixture(1, &src.to_string_lossy(), &dest)])
+            .unwrap();
+
+        assert_eq!(res.applied, 0, "cancelled before any move applies");
+        assert_eq!(res.failed, 0, "a cancel is not a failure");
+        assert!(src.exists(), "source untouched by a cancelled apply");
+        assert!(!root.join("Sorted").join("a.jpg").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn ensure_inside_root_accepts_canonical_descendant() {

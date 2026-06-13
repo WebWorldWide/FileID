@@ -676,14 +676,19 @@ mod tests {
             let done = handle.done.clone();
             // Wait for the walk to finish (done flag flips after the last
             // count.fetch_add + tx.send). Then assert count == 100 even if
-            // we haven't drained the receiver yet — proving the counter
-            // reflects walk progress independent of receiver drain.
-            for _ in 0..100 {
+            // we haven't drained the receiver yet (the 32k channel buffers all
+            // 100, so the walk completes regardless of drain) — proving the
+            // counter reflects walk progress independent of receiver drain.
+            // Budget is generous (15s) because the rayon walk shares the thread
+            // pool with the rest of the suite under `cargo test`; a tight 2s
+            // poll flaked when scheduler starvation delayed `done` past 2s.
+            for _ in 0..750 {
                 if done.load(Ordering::Acquire) {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
+            assert!(done.load(Ordering::Acquire), "discovery walk did not finish within budget");
             assert_eq!(count.load(Ordering::Relaxed), 100);
             let mut drained = 0;
             while rx.try_recv().is_ok() {

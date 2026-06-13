@@ -449,7 +449,8 @@ public enum Restructure {
     public static func apply(
         proposals: [RestructureProposal],
         database: Database,
-        libraryRoot: URL
+        libraryRoot: URL,
+        isCancelled: @Sendable () -> Bool = { Task.isCancelled }
     ) async -> ApplyResult {
         let fm = FileManager.default
         var moved = 0
@@ -461,8 +462,34 @@ public enum Restructure {
         // distinct sources mapping to the same basename don't collide before
         // either touches disk.
         var claimed = Set<String>()
+        // F-C6-013: the apply loop was a silent, unstoppable serial walk — at
+        // 100k+ moves the user got no feedback and no stop. Poll the cancel
+        // signal at the TOP of every iteration (each completed move is already
+        // durable, so stopping BETWEEN moves preserves per-move atomicity) and
+        // emit throttled progress to the engine log so the run isn't feedbackless.
+        let total = proposals.count
+        var processed = 0
 
         for p in proposals {
+            if isCancelled() {
+                JSONLog.shared.info(ev: "restructure_apply_cancelled",
+                                    extra: ["processed": AnyCodable(processed),
+                                            "total": AnyCodable(total),
+                                            "moved": AnyCodable(moved),
+                                            "skipped": AnyCodable(skipped),
+                                            "failed": AnyCodable(failed)])
+                break
+            }
+            processed += 1
+            if Self.shouldEmitApplyProgress(processed: processed, total: total,
+                                            interval: Self.applyProgressInterval) {
+                JSONLog.shared.info(ev: "restructure_apply_progress",
+                                    extra: ["processed": AnyCodable(processed),
+                                            "total": AnyCodable(total),
+                                            "moved": AnyCodable(moved),
+                                            "skipped": AnyCodable(skipped),
+                                            "failed": AnyCodable(failed)])
+            }
             let oldURL = URL(fileURLWithPath: p.oldPath)
             let plannedURL = URL(fileURLWithPath: p.newPath)
 
@@ -564,6 +591,16 @@ public enum Restructure {
                                     "skipped": AnyCodable(skipped),
                                     "failed": AnyCodable(failed)])
         return ApplyResult(moved: moved, skipped: skipped, failed: failed, conflicts: conflicts)
+    }
+
+    /// Apply-progress throttle: log on the first move, on the last, and once per
+    /// `interval` processed moves, so a 100k-move apply emits ~total/interval log
+    /// lines instead of none (silent) or one-per-move (flood). Pure → the cadence
+    /// is unit-assertable. (F-C6-013)
+    static let applyProgressInterval = 500
+    static func shouldEmitApplyProgress(processed: Int, total: Int, interval: Int) -> Bool {
+        guard interval > 0, processed > 0 else { return false }
+        return processed == 1 || processed == total || processed % interval == 0
     }
 
     /// B3: resolve a destination that collides with neither an on-disk entry nor
