@@ -192,8 +192,16 @@ public actor VLMDownloader {
 
     // MARK: - HF tree listing
 
+    /// HF tree-listing URL. `recursive=true` is required (F-C3-043): without
+    /// it the listing is top-level only, so a repo with any subfolder fetches
+    /// an INCOMPLETE set yet still writes the `.fileid-verified` sentinel — the
+    /// install then wedges as "verified" forever and Deep Analyze fails offline.
+    static func treeListURL(repo: String, revision: String) -> URL? {
+        URL(string: "https://huggingface.co/api/models/\(repo)/tree/\(revision)?recursive=true")
+    }
+
     private func listRepoFiles(repo: String, revision: String) async throws -> [VLMRepoFile] {
-        guard let url = URL(string: "https://huggingface.co/api/models/\(repo)/tree/\(revision)") else {
+        guard let url = Self.treeListURL(repo: repo, revision: revision) else {
             throw VLMDownloaderError.treeListFailed(status: 0)
         }
         var req = URLRequest(url: url)

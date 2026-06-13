@@ -34,6 +34,16 @@ public actor DeepAnalyze {
     /// JobQueue dispatches the work.
     private var prewarmCancelPending: Bool = false
 
+    /// Single-flight handle for an in-progress model load (F-C3-023). A
+    /// prewarm and a Deep Analyze run that race share THIS one task instead
+    /// of each downloading + loading their own container (double model RAM,
+    /// mis-attributed vlm_model). It's also the cancellation handle for an
+    /// in-flight download (F-C3-024): requestCancel()/cancelPrewarm() cancel
+    /// it so a multi-GB fetch aborts promptly. Unstructured by design (shared
+    /// across callers), so cancellation is wired explicitly, not inherited.
+    private var loadTask: Task<Void, Error>?
+    private var loadTaskKind: AIModelKind?
+
     private let generateParams = MLXLMCommon.GenerateParameters(
         maxTokens: 320,
         temperature: 0.3,
@@ -44,11 +54,21 @@ public actor DeepAnalyze {
 
     // MARK: - Cancellation
 
-    public func requestCancel() { cancelRequested = true }
+    public func requestCancel() {
+        cancelRequested = true
+        // F-C3-024: abort an in-flight cold load/download too — otherwise the
+        // single-lane JobQueue stays wedged for the whole multi-GB fetch after
+        // the user cancels. parallelStreamingDownload honors task cancellation.
+        loadTask?.cancel()
+    }
     public func clearCancel()   { cancelRequested = false }
     public func isCancelled() -> Bool { cancelRequested }
 
     public func cancelPrewarm() {
+        // The shared single-flight load runs in an unstructured task, so
+        // cancelling only the prewarm's outer task won't reach it — cancel
+        // the load explicitly.
+        loadTask?.cancel()
         if let task = prewarmTask {
             task.cancel()
         } else {
@@ -100,10 +120,61 @@ public actor DeepAnalyze {
         kind: AIModelKind,
         progress: (@Sendable (Double, String, Int64, Int64) -> Void)? = nil
     ) async throws {
+        try Task.checkCancellation()
         if container != nil, loadedKind == kind {
             loadState = .ready(kind)
             return
         }
+        // F-C3-023 single-flight: if a load is already running, JOIN it rather
+        // than starting a second download + container load.
+        if let existing = loadTask {
+            if loadTaskKind == kind {
+                try await awaitLoad(existing)
+                if container != nil, loadedKind == kind { loadState = .ready(kind) }
+                return
+            }
+            // A different kind is mid-load — let it finish before we swap.
+            _ = try? await awaitLoad(existing)
+        }
+        // Re-check after the await above (actor reentrancy: another caller may
+        // have loaded our kind while we were suspended).
+        if container != nil, loadedKind == kind {
+            loadState = .ready(kind)
+            return
+        }
+        if let existing = loadTask, loadTaskKind == kind {
+            try await awaitLoad(existing)
+            if container != nil, loadedKind == kind { loadState = .ready(kind) }
+            return
+        }
+
+        let task = Task<Void, Error> { [progress] in
+            try await self.performLoad(kind: kind, progress: progress)
+        }
+        loadTask = task
+        loadTaskKind = kind
+        defer {
+            // Only the loader that owns this task clears it.
+            if loadTaskKind == kind { loadTask = nil; loadTaskKind = nil }
+        }
+        try await awaitLoad(task)
+    }
+
+    /// Await a shared (unstructured) load task while propagating THIS caller's
+    /// cancellation into it — so a cancel that arrives before the load starts,
+    /// or a prewarm cancel, still aborts the in-flight download.
+    private func awaitLoad(_ task: Task<Void, Error>) async throws {
+        try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    private func performLoad(
+        kind: AIModelKind,
+        progress: (@Sendable (Double, String, Int64, Int64) -> Void)?
+    ) async throws {
         if container != nil {
             container = nil
             loadedKind = nil
@@ -238,17 +309,15 @@ public actor DeepAnalyze {
         guard let container else {
             return FaceComparison(sameClass: false, confidence: 0)
         }
-        let ciA: CIImage? = autoreleasepool {
-            guard let cg = Self.loadCGImage(url: cropA, maxPixelSize: 256) else { return nil }
-            return CIImage(cgImage: cg)
-        }
-        let ciB: CIImage? = autoreleasepool {
-            guard let cg = Self.loadCGImage(url: cropB, maxPixelSize: 256) else { return nil }
-            return CIImage(cgImage: cg)
-        }
-        guard let ciA, let ciB else {
+        // F-C3-026: decode OFF the actor so a crop on an unreachable volume
+        // can't pin the executor and stall every queued IPC command.
+        let boxA = await Self.decodeImageOffActor(url: cropA, maxPixelSize: 256)
+        let boxB = await Self.decodeImageOffActor(url: cropB, maxPixelSize: 256)
+        guard let cgA = boxA.get(), let cgB = boxB.get() else {
             return FaceComparison(sameClass: false, confidence: 0)
         }
+        let ciA = CIImage(cgImage: cgA)
+        let ciB = CIImage(cgImage: cgB)
 
         let systemPrompt = """
         You are a face-matching assistant. You will see two cropped face photos. Answer in EXACTLY this format on two lines:
@@ -310,11 +379,16 @@ public actor DeepAnalyze {
     /// models that drop the structured `VERDICT:` / `CONFIDENCE:`
     /// prefixes — without a confidence default, loosely-formatted SAME
     /// verdicts would never clear the auto-merge threshold.
-    private static func parseFaceComparison(_ raw: String) -> FaceComparison {
+    static func parseFaceComparison(_ raw: String) -> FaceComparison {
         let upper = raw.uppercased()
         let saidDifferent = upper.contains("DIFFERENT")
-        let saidSame = upper.contains("VERDICT: SAME")
-            || (!saidDifferent && upper.contains("SAME"))
+        // F-C3-022: a negated "same" ("not the same person", "isn't the
+        // same") is a DIFFERENT verdict. Without this it parsed as SAME at
+        // the defaulted 0.80 confidence — above the 0.75 auto-merge
+        // threshold — and force-merged two distinct people.
+        let negatedSame = Self.containsNegatedSame(upper)
+        let saidSame = !negatedSame
+            && (upper.contains("VERDICT: SAME") || (!saidDifferent && upper.contains("SAME")))
         let same = saidSame && !saidDifferent
 
         var conf: Float = 0
@@ -332,11 +406,31 @@ public actor DeepAnalyze {
         }
         // Default to 0.80 when the verdict is clear but no confidence
         // number was returned. Clears the 0.75 auto-merge threshold;
-        // explicit numbers from compliant models still take precedence.
+        // explicit numbers from compliant models still take precedence. A
+        // negated/DIFFERENT verdict never auto-merges regardless (sameClass is
+        // false), so this default only matters for an affirmative SAME.
         if !explicitlyParsed && (same || saidDifferent) {
             conf = 0.80
         }
         return FaceComparison(sameClass: same, confidence: conf)
+    }
+
+    /// True when `upper` (already uppercased) expresses a *negated* "same"
+    /// — "not the same", "are not the same", "isn't the same person",
+    /// "cannot be the same". Such a reply means DIFFERENT; treating it as
+    /// SAME forces a wrong face merge.
+    static func containsNegatedSame(_ upper: String) -> Bool {
+        // "NOT/CANNOT [≤2 words] SAME", and contractions ending in N'T
+        // (isn't/aren't/don't/doesn't/can't) shortly before SAME. Straight +
+        // curly apostrophes.
+        let patterns = [
+            #"\b(?:NOT|CANNOT)\b(?:\s+\S+){0,2}\s+SAME\b"#,
+            #"N['’]T\b(?:\s+\S+){0,2}\s+SAME\b"#
+        ]
+        for p in patterns where upper.range(of: p, options: .regularExpression) != nil {
+            return true
+        }
+        return false
     }
 
     /// Run the VLM on a single image URL. Returns description + a
@@ -354,13 +448,16 @@ public actor DeepAnalyze {
         }
         // Decode image at 768 px max — good detail for the 448-input VLM
         // without blowing memory on RAW or huge JPEGs.
-        let ciImage: CIImage? = autoreleasepool {
-            guard let cg = Self.loadCGImage(url: imageURL, maxPixelSize: 768) else { return nil }
-            return CIImage(cgImage: cg)
-        }
-        guard let ciImage else {
+        // F-C3-026: decode OFF the actor. A synchronous decode here pins the
+        // DeepAnalyze actor's executor, so a file on an unreachable volume
+        // would block deepAnalyzeCancel (and every queued IPC command) behind
+        // it. The detached task does the (possibly hanging) read; the actor
+        // suspends at `await`, staying responsive to cancel.
+        let box = await Self.decodeImageOffActor(url: imageURL, maxPixelSize: 768)
+        guard let cg = box.get() else {
             return AnalysisResult(description: "Could not decode image.", proposedName: nil)
         }
+        let ciImage = CIImage(cgImage: cg)
 
         // Build the prompt. Face names (if face clustering has run) are
         // injected as context so the VLM can reference people by their
@@ -583,6 +680,27 @@ public actor DeepAnalyze {
     /// everything else uses ImageIO thumbnails. Single entry point so
     /// Deep Analyze can caption images, PDFs, and videos through the
     /// same code path.
+    /// Windows-parity decode cap (deep_analyze.rs MAX_DECODED_PIXELS): refuse
+    /// sources whose pixel count exceeds 50 MP so an adversarial/huge image
+    /// can't OOM the decode. Zero/unknown dimensions pass (let ImageIO decide).
+    nonisolated static let maxDecodedPixels = 50_000_000
+    nonisolated static func pixelsExceedDecodeCap(width: Int, height: Int) -> Bool {
+        guard width > 0, height > 0 else { return false }
+        return Int64(width) * Int64(height) > Int64(maxDecodedPixels)
+    }
+
+    /// Decode `url` on a detached task so a hung/slow read can't block the
+    /// DeepAnalyze actor (F-C3-026). Returns the CGImage in a Sendable box —
+    /// CGImage isn't Sendable, but the box's lock makes the hand-off safe and
+    /// the CIImage is built on the actor afterward.
+    private nonisolated static func decodeImageOffActor(url: URL, maxPixelSize: Int) async -> ImageBox {
+        await Task.detached(priority: .userInitiated) {
+            let box = ImageBox()
+            autoreleasepool { box.set(loadCGImage(url: url, maxPixelSize: maxPixelSize)) }
+            return box
+        }.value
+    }
+
     nonisolated static func loadCGImage(url: URL, maxPixelSize: Int) -> CGImage? {
         let ext = url.pathExtension.lowercased()
         if ext == "pdf" {
@@ -593,6 +711,19 @@ public actor DeepAnalyze {
         }
         // Try ImageIO first — fast for images via thumbnail decode.
         if let src = CGImageSourceCreateWithURL(url as CFURL, nil) {
+            // F-C3-044: refuse a decompression bomb — a small file that decodes
+            // to a huge raster. Peek the source pixel dimensions and bail above
+            // the 50 MP cap (Windows parity: MAX_DECODED_PIXELS in deep_analyze.rs).
+            if let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] {
+                let w = (props[kCGImagePropertyPixelWidth] as? Int) ?? 0
+                let h = (props[kCGImagePropertyPixelHeight] as? Int) ?? 0
+                if pixelsExceedDecodeCap(width: w, height: h) {
+                    JSONLog.shared.warn(ev: "deep_decode_too_large",
+                                        path: redactPathForLog(url.path),
+                                        error: "\(w)x\(h)")
+                    return nil
+                }
+            }
             let opts: [CFString: Any] = [
                 kCGImageSourceShouldCacheImmediately: true,
                 kCGImageSourceCreateThumbnailFromImageIfAbsent: true,

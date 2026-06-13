@@ -39,12 +39,16 @@ public enum DeepAnalyzeRunner {
                 return []
             case .folder(let prefix):
                 let p = prefix.hasSuffix("/") ? prefix : prefix + "/"
+                // F-C3-027: escape LIKE metacharacters in the folder prefix so a
+                // folder named with `_` (any char) or `%` (any run) can't
+                // over-match a sibling subtree and pull unrelated files into the
+                // VLM pass. ESCAPE '\' pairs with escapeLike's backslashing.
                 let r = try GRDB.Row.fetchAll(db, sql: """
                     SELECT id, path_text FROM files
                     WHERE kind IN ('image', 'pdf', 'video', 'doc') AND failed = 0
-                      AND (path_text = ? OR path_text LIKE ?)
+                      AND (path_text = ? OR path_text LIKE ? ESCAPE '\\')
                     ORDER BY scanned_at ASC
-                    """, arguments: [prefix, p + "%"])
+                    """, arguments: [prefix, Self.escapeLike(p) + "%"])
                 return r.map { Target(id: $0["id"] ?? 0, path: $0["path_text"] ?? "") }
             case .wholeLibrary(let skipExisting):
                 let sql: String
@@ -72,6 +76,15 @@ public enum DeepAnalyzeRunner {
         return rows.map { ($0.id, $0.path) }
     }
 
+    /// Backslash-escape SQL LIKE metacharacters so a literal folder prefix
+    /// can't be widened by `_`/`%` in the path. Pairs with `ESCAPE '\'`.
+    static func escapeLike(_ s: String) -> String {
+        var out = s.replacingOccurrences(of: "\\", with: "\\\\")
+        out = out.replacingOccurrences(of: "%", with: "\\%")
+        out = out.replacingOccurrences(of: "_", with: "\\_")
+        return out
+    }
+
     /// Run the batch. Streams progress via `sink`. Holds a SleepGuard
     /// for the duration so the system stays awake (lid-closed friendly).
     public static func run(
@@ -90,6 +103,32 @@ public enum DeepAnalyzeRunner {
         SleepGuard.shared.begin(reason: "Deep Analyze (\(modelKind.displayName))")
         defer { SleepGuard.shared.end() }
 
+        // Single funnel for every terminal exit: emit exactly one
+        // deepAnalyzeComplete and reset the cancel flag. Routing all exits here
+        // guarantees no run() path strands the UI (F-C3-028) and that a cancel
+        // consumed by THIS run is cleared for the next job — replacing the old
+        // run-start clearCancel() that erased a cancel issued while queued
+        // (F-C3-025).
+        func finish(processed: Int, failed: Int, cancelled: Bool) async {
+            await DeepAnalyze.shared.clearCancel()
+            await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
+                processed: processed, failed: failed,
+                totalSeconds: Date().timeIntervalSince(started),
+                modelKind: modelKey, cancelled: cancelled
+            )))
+        }
+
+        // F-C3-025: honor a cancel issued while this job sat in the JobQueue.
+        // (The old code clearCancel()'d here, erasing that cancel and running
+        // the whole pass anyway.) Checked before the RAM probe + cold load so a
+        // job the user already cancelled does no work at all.
+        if await DeepAnalyze.shared.isCancelled() {
+            JSONLog.shared.info(ev: "deep_analyze_cancelled_while_queued",
+                                extra: ["model": AnyCodable(modelKey)])
+            await finish(processed: 0, failed: 0, cancelled: true)
+            return
+        }
+
         // Defensive RAM check — the UI hides too-big models, but a stale
         // IPC command (e.g. user picked a big model on a different Mac
         // and it persisted in UserDefaults) could still arrive. Loading
@@ -103,16 +142,9 @@ public enum DeepAnalyzeRunner {
                                          "needGB": AnyCodable(modelKind.ramBudgetGB),
                                          "haveGB": AnyCodable(ramGB)])
             await sink.emit(.error(EngineError(kind: "deep_model_too_big", message: msg)))
-            await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
-                processed: 0, failed: 0,
-                totalSeconds: Date().timeIntervalSince(started),
-                modelKind: modelKey, cancelled: false
-            )))
+            await finish(processed: 0, failed: 0, cancelled: false)
             return
         }
-
-        // Reset cancellation state from any previous run.
-        await DeepAnalyze.shared.clearCancel()
 
         // 1. Load the model (download if needed, with progress events).
         // Tell the UI we're entering the multi-second cold-load window
@@ -135,6 +167,16 @@ public enum DeepAnalyzeRunner {
                 }
             }
         } catch {
+            // F-C3-024: a cancel during the cold load/download cancels the load
+            // task; surface that as a user cancel, not an alarming load failure.
+            // (await is hoisted out of the `||` — its RHS is a non-async autoclosure.)
+            let cancelledDuringLoad = await DeepAnalyze.shared.isCancelled()
+            if error is CancellationError || cancelledDuringLoad {
+                JSONLog.shared.info(ev: "deep_analyze_cancelled_during_load",
+                                    extra: ["model": AnyCodable(modelKey)])
+                await finish(processed: 0, failed: 0, cancelled: true)
+                return
+            }
             if case StreamingDownloadError.checksumMismatch = error {
                 await sink.emit(.error(EngineError(
                     kind: "model_integrity_failed",
@@ -147,11 +189,7 @@ public enum DeepAnalyzeRunner {
                     message: "Could not load \(modelKind.displayName): \(error.localizedDescription)"
                 )))
             }
-            await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
-                processed: 0, failed: 0,
-                totalSeconds: Date().timeIntervalSince(started),
-                modelKind: modelKey, cancelled: false
-            )))
+            await finish(processed: 0, failed: 0, cancelled: false)
             return
         }
 
@@ -170,15 +208,14 @@ public enum DeepAnalyzeRunner {
                 kind: "deep_targets_failed",
                 message: "Could not resolve targets: \(error.localizedDescription)"
             )))
+            // F-C3-028: this exit previously returned with no terminal event,
+            // stranding the UI. Emit the terminal complete like every other exit.
+            await finish(processed: 0, failed: 0, cancelled: false)
             return
         }
         let total = targets.count
         guard total > 0 else {
-            await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
-                processed: 0, failed: 0,
-                totalSeconds: Date().timeIntervalSince(started),
-                modelKind: modelKey, cancelled: false
-            )))
+            await finish(processed: 0, failed: 0, cancelled: false)
             return
         }
 
@@ -266,24 +303,24 @@ public enum DeepAnalyzeRunner {
                                     "failed": AnyCodable(failed),
                                     "cancelled": AnyCodable(cancelled),
                                     "seconds": AnyCodable(dur)])
-        await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
-            processed: processed, failed: failed,
-            totalSeconds: dur, modelKind: modelKey, cancelled: cancelled
-        )))
+        await finish(processed: processed, failed: failed, cancelled: cancelled)
     }
 
-    private static func persist(
+    static func persist(
         database: Database,
         fileID: Int64,
-        description: String,
+        description: String?,
         proposedName: String?,
         modelKey: String
     ) async throws {
         try await database.pool.write { db in
+            // F-C3-044: COALESCE so a NULL result (model returned no caption or
+            // no proposed name on this pass) preserves a prior good value rather
+            // than clobbering it with NULL (Windows parity, deep_analyze.rs).
             try db.execute(sql: """
                 UPDATE files
-                SET vlm_description = ?,
-                    vlm_proposed_name = ?,
+                SET vlm_description = COALESCE(?, vlm_description),
+                    vlm_proposed_name = COALESCE(?, vlm_proposed_name),
                     vlm_model = ?,
                     vlm_analyzed_at = ?
                 WHERE id = ?
