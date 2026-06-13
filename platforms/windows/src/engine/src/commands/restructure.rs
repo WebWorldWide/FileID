@@ -33,6 +33,54 @@ const PLAN_FILES_SQL: &str = "SELECT
  FROM files f
  WHERE f.failed = 0";
 
+/// Max CLIP embeddings to hold resident for one restructure plan, by memory
+/// tier. Each ViT-B/32 image embedding is ~2 KiB, so the Low cap bounds the
+/// transient to ~100 MiB; Balanced/High are effectively uncapped (preserving
+/// the prior full-table behavior on boxes with headroom). Files past the cap
+/// fall through to the rule cascade. (audit F-C6-016)
+fn embedding_load_cap(tier: crate::platform::MemoryTier) -> usize {
+    match tier {
+        crate::platform::MemoryTier::Low => 50_000,
+        crate::platform::MemoryTier::Balanced | crate::platform::MemoryTier::High => usize::MAX,
+    }
+}
+
+/// Stream the image CLIP embeddings into a map, stopping at `cap` so the heavy
+/// blob transient never exceeds the memory-tier budget. The query streams
+/// row-by-row, so breaking early holds at most `cap` decoded vectors resident.
+/// (audit F-C6-016)
+fn load_capped_embeddings(
+    conn: &rusqlite::Connection,
+    cap: usize,
+) -> rusqlite::Result<std::collections::HashMap<i64, Vec<f32>>> {
+    let mut embeddings = std::collections::HashMap::new();
+    if cap == 0 {
+        return Ok(embeddings);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT ce.file_id, ce.embedding FROM clip_embeddings ce
+         JOIN files f ON f.id = ce.file_id
+         WHERE f.failed = 0 AND f.kind = 'image'",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+    })?;
+    for r in rows {
+        if embeddings.len() >= cap {
+            break;
+        }
+        let (id, blob) = r?;
+        if !blob.is_empty() && blob.len() % 4 == 0 {
+            let v = blob
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            embeddings.insert(id, v);
+        }
+    }
+    Ok(embeddings)
+}
+
 /// Walk the `files` table for the picked library root, classify each file,
 /// and emit a `restructurePlan` event with the proposed moves + per-category
 /// counts. The app's Restructure tab consumes this to render the Sankey +
@@ -120,31 +168,22 @@ pub(crate) async fn handle_plan_restructure(
     // Butler P1: semantic + learn-your-style classification for image files that
     // have a CLIP embedding; everything else (and density-clustering noise)
     // falls back to the rule cascade. See pipeline/restructure_semantic.rs.
+    //
+    // The CLIP embeddings are the heavy transient here (each ~2 KiB), so cap how
+    // many we load by memory tier: on a low-RAM box an unbounded full-table load
+    // could materialize hundreds of MiB at once. Above Low we keep the prior
+    // behavior (effectively uncapped). Files past the cap simply fall through to
+    // the rule cascade — the same graceful degradation as a file with no
+    // embedding. Tags are then loaded only for the ids we kept, so neither map
+    // grows unbounded under pressure. (audit F-C6-016)
+    let embedding_cap = embedding_load_cap(crate::platform::memory_tier());
     let signals = tokio::task::spawn_blocking(
         move || -> rusqlite::Result<(
             std::collections::HashMap<i64, Vec<f32>>,
             std::collections::HashMap<i64, Vec<String>>,
         )> {
             let conn = db_for_semantic.lock();
-            let mut embeddings = std::collections::HashMap::new();
-            let mut stmt = conn.prepare(
-                "SELECT ce.file_id, ce.embedding FROM clip_embeddings ce
-                 JOIN files f ON f.id = ce.file_id
-                 WHERE f.failed = 0 AND f.kind = 'image'",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })?;
-            for r in rows {
-                let (id, blob) = r?;
-                if !blob.is_empty() && blob.len() % 4 == 0 {
-                    let v = blob
-                        .chunks_exact(4)
-                        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                        .collect();
-                    embeddings.insert(id, v);
-                }
-            }
+            let embeddings = load_capped_embeddings(&conn, embedding_cap)?;
             let mut tags: std::collections::HashMap<i64, Vec<String>> =
                 std::collections::HashMap::new();
             // DISTINCT so a tag carried under multiple sources for the same
@@ -156,7 +195,12 @@ pub(crate) async fn handle_plan_restructure(
                 tstmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?;
             for r in trows {
                 let (id, tag) = r?;
-                tags.entry(id).or_default().push(tag);
+                // Only retain tags for files we actually loaded an embedding for;
+                // the semantic path consults tags solely for those, so bounding
+                // here keeps the tags map bounded under the same tier cap.
+                if embeddings.contains_key(&id) {
+                    tags.entry(id).or_default().push(tag);
+                }
             }
             Ok((embeddings, tags))
         },
@@ -184,10 +228,21 @@ pub(crate) async fn handle_plan_restructure(
         })
         .collect();
 
+    // Source folders the semantic butler actively claimed (every file relocated
+    // into a content group). These classify Anchor on destination-category
+    // homogeneity but are real relocations, not in-place anchors — exempt them
+    // from the anchor strip so their highest-confidence moves survive. (F-C1-004)
+    let mut semantic_source_folders: std::collections::HashSet<PathBuf> =
+        std::collections::HashSet::new();
     let proposed = if semantic_files.len() >= 2 {
         let protos = restructure_semantic::folder_prototypes(&semantic_files, 4);
         let moves = restructure_semantic::semantic_classify(&semantic_files, &protos, library_root_path);
         let moved: std::collections::HashSet<i64> = moves.iter().map(|m| m.file_id).collect();
+        for m in &moves {
+            if let Some(parent) = m.source.parent() {
+                semantic_source_folders.insert(parent.to_path_buf());
+            }
+        }
         let rule_files: Vec<FileForClassify> =
             files.iter().filter(|f| !moved.contains(&f.file_id)).cloned().collect();
         let mut out = moves;
@@ -207,7 +262,18 @@ pub(crate) async fn handle_plan_restructure(
     let mut tier_by_folder: std::collections::HashMap<PathBuf, &'static str> =
         std::collections::HashMap::with_capacity(folder_class.len());
     for f in &folder_class {
-        let tier_label = match f.classification {
+        // An exempted Anchor folder is the butler actively relocating its files
+        // into a content group — it is NOT kept in place, so it must not inflate
+        // the "Keep" tile or label its moves Anchor. Count + tier it as Mixed so
+        // the tile and the surviving moves agree. (F-C1-004)
+        let classification = if matches!(f.classification, FolderClassification::Anchor)
+            && semantic_source_folders.contains(&f.source_folder)
+        {
+            &FolderClassification::Mixed
+        } else {
+            &f.classification
+        };
+        let tier_label = match classification {
             FolderClassification::Anchor => {
                 anchor += 1;
                 "Anchor"
@@ -230,8 +296,14 @@ pub(crate) async fn handle_plan_restructure(
     // just above) tells the user they're left untouched. Drop their moves so the
     // plan the app applies can never silently relocate a file the UI promised
     // would stay put — without this, default-selected Anchor rows were applied.
-    // (audit A1/A3)
-    let proposed = restructure::strip_anchor_folder_moves(proposed, &folder_class);
+    // Folders the semantic butler actively claimed are exempt: their homogeneity
+    // is a real relocation, not an in-place anchor, so stripping would eat the
+    // best proposals. (audit A1/A3, F-C1-004)
+    let proposed = restructure::strip_anchor_folder_moves_except(
+        proposed,
+        &folder_class,
+        &semantic_source_folders,
+    );
     let category_summary = restructure::category_counts(&proposed);
 
     let plan = RestructurePlan {
@@ -371,5 +443,51 @@ mod tests {
         names.sort_unstable();
         assert_eq!(names, ["Alice", "Bob"]);
         assert_eq!(rows[1].1, None);
+    }
+
+    /// The embedding load must be tier-gated: Low caps the resident map, while
+    /// Balanced/High preserve the prior full-table behavior. (audit F-C6-016)
+    #[test]
+    fn embedding_load_cap_is_bounded_on_low_only() {
+        use crate::platform::MemoryTier;
+        let low = embedding_load_cap(MemoryTier::Low);
+        assert!(low < usize::MAX, "Low tier must cap the embedding load: {low}");
+        assert_eq!(embedding_load_cap(MemoryTier::Balanced), usize::MAX);
+        assert_eq!(embedding_load_cap(MemoryTier::High), usize::MAX);
+    }
+
+    /// The load streams and stops at the cap, so a large corpus never
+    /// materializes a full-table HashMap under memory pressure. Before the fix
+    /// the load was unconditional (one HashMap holding every row); this asserts
+    /// the cap actually bounds the resident map. (audit F-C6-016)
+    #[test]
+    fn capped_embedding_load_bounds_the_resident_map() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE files(id INTEGER PRIMARY KEY, kind TEXT, failed INTEGER DEFAULT 0);
+             CREATE TABLE clip_embeddings(file_id INTEGER PRIMARY KEY, embedding BLOB);",
+        )
+        .unwrap();
+        // 100 image rows, each a valid 4-float embedding blob.
+        let blob: Vec<u8> = (0..4)
+            .flat_map(|i| (i as f32).to_le_bytes())
+            .collect();
+        for id in 1..=100i64 {
+            conn.execute("INSERT INTO files(id,kind,failed) VALUES (?1,'image',0)", [id])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO clip_embeddings(file_id,embedding) VALUES (?1,?2)",
+                rusqlite::params![id, blob],
+            )
+            .unwrap();
+        }
+
+        // A small cap bounds the resident map even though 100 rows qualify.
+        let capped = load_capped_embeddings(&conn, 10).unwrap();
+        assert_eq!(capped.len(), 10, "cap must bound the resident map");
+
+        // An effectively-uncapped load (Balanced/High) returns the full table.
+        let full = load_capped_embeddings(&conn, usize::MAX).unwrap();
+        assert_eq!(full.len(), 100, "uncapped load returns every qualifying row");
     }
 }
