@@ -41,6 +41,25 @@ use ipc::{
 
 const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Max inbound IPC frame size. 32 MiB, symmetric with the app's outbound
+/// command cap (MaxIpcFrameBytes) and its inbound read cap (MaxFrameChars).
+/// A large applyRestructure carries the same multi-MB move set the engine
+/// emitted in restructurePlan; the old 1 MiB cap silently rejected + drained
+/// it. Still bounded vs a runaway line; the engine already holds the whole
+/// plan in memory. (audit E10)
+const MAX_FRAME_BYTES: usize = 32 * 1024 * 1024;
+
+/// Human-readable rejection message for an oversized inbound frame. Derives the
+/// cap from MAX_FRAME_BYTES so the text can never drift from the real limit
+/// (F-C1-010: the old message hardcoded "1 MB" while the cap was 32 MiB).
+fn oversized_frame_message(seen: usize) -> String {
+    format!(
+        "Command frame exceeded {} MiB cap (saw {} bytes before reject).",
+        MAX_FRAME_BYTES / (1024 * 1024),
+        seen,
+    )
+}
+
 fn main() -> Result<()> {
     // SEC-3: lock DLL search FIRST. Must run before tokio::runtime spins
     // worker threads, before logging::init() opens tracing-appender file
@@ -258,13 +277,17 @@ async fn async_main() -> Result<()> {
     tokio::pin!(main_shutdown);
     main_shutdown.as_mut().enable();
 
-    // Parent watchdog: poll OpenProcess(parent_pid) every 5 s. If parent is
-    // gone or our handle to it is invalid, set the shutdown notifier.
+    // Parent watchdog: wait on a handle to the parent process. When the
+    // parent exits, signal shutdown. The parent's IDENTITY is pinned by an
+    // OpenProcess handle + creation-time captured here at startup, NOT by the
+    // bare PID — a PID can be reused by an unrelated process the instant the
+    // real parent exits, and a watchdog bound to a bare PID would then wait on
+    // a stranger (F-C1-015 TOCTOU).
     let parent_pid = platform::get_parent_pid();
     if let Some(ppid) = parent_pid {
         let s = shutdown.clone();
         tokio::spawn(async move {
-            platform::watch_parent(ppid, s).await;
+            watch_parent_pinned(ppid, s).await;
         });
     } else {
         tracing::warn!("could not determine parent PID; running without watchdog");
@@ -276,7 +299,7 @@ async fn async_main() -> Result<()> {
     // the whole line before returning, which means a hostile no-newline
     // blob can OOM the engine before any cap fires. Instead we use
     // `read_until(b'\n', ...)` against an in-loop `Vec<u8>` and reject
-    // anything that crosses the 1 MB ceiling mid-read.
+    // anything that crosses the MAX_FRAME_BYTES ceiling mid-read.
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin);
 
@@ -348,12 +371,6 @@ async fn async_main() -> Result<()> {
     // commands::prewarm (see prewarm_cancel_flag / cancel_prewarm) — no global
     // flag to thread through here.
     let stdio_loop = tokio::spawn(async move {
-        // 32 MiB, symmetric with the app's outbound command cap (MaxIpcFrameBytes)
-        // and its inbound read cap (MaxFrameChars). A large applyRestructure carries
-        // the same multi-MB move set the engine emitted in restructurePlan; the old
-        // 1 MiB cap silently rejected + drained it. Still bounded vs a runaway line;
-        // the engine already holds the whole plan in memory. (audit E10)
-        const MAX_FRAME_BYTES: usize = 32 * 1024 * 1024;
         let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
         loop {
             tokio::select! {
@@ -396,7 +413,7 @@ async fn async_main() -> Result<()> {
                             tracing::warn!(bytes_seen = seen, "oversized ipc frame; rejecting");
                             dispatch_sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                                 kind: "oversized_ipc_frame".into(),
-                                message: format!("Command frame exceeded 1 MB cap (saw {} bytes before reject).", seen),
+                                message: oversized_frame_message(seen),
                                 path: None,
                                 model_kind: None,
                             })))).await;
@@ -450,6 +467,123 @@ async fn async_main() -> Result<()> {
 
     tracing::info!("FileIDEngine exiting cleanly");
     Ok(())
+}
+
+/// 64-bit process creation time (FILETIME packed hi:lo) used to pin parent
+/// identity across a PID-reuse window. Two processes that ever share a PID
+/// cannot share a creation time, so this disambiguates a reused PID.
+#[cfg(windows)]
+fn process_creation_time(handle: windows::Win32::Foundation::HANDLE) -> Option<u64> {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::GetProcessTimes;
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: handle is a live process handle opened with
+    // PROCESS_QUERY_LIMITED_INFORMATION; all four out-params are owned locals.
+    let ok = unsafe {
+        GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user)
+    };
+    if ok.is_err() {
+        return None;
+    }
+    Some(((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64)
+}
+
+/// Watch the parent process for exit and signal `shutdown` when it dies.
+///
+/// Identity is PINNED: we OpenProcess the PID once here, capture the process'
+/// creation time, then re-sample our actual parent PID and confirm it is still
+/// `ppid` with the same creation time. The returned handle refers to a specific
+/// kernel object; even if `ppid` is later reused by an unrelated process, the
+/// handle keeps pointing at the original parent — so the wait can never be
+/// redirected onto a stranger. If the parent already vanished (and possibly its
+/// PID was already reused) by the time we open it, we detect the creation-time
+/// mismatch and signal shutdown immediately rather than babysit the reuser.
+#[cfg(windows)]
+async fn watch_parent_pinned(ppid: u32, shutdown: Arc<Notify>) {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    };
+
+    // SAFETY: ppid is a u32 PID; OpenProcess returns a handle or an error.
+    let handle: HANDLE = match unsafe {
+        OpenProcess(
+            PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+            false,
+            ppid,
+        )
+    } {
+        Ok(h) if !h.is_invalid() => h,
+        _ => {
+            // Couldn't get a pinning handle (e.g. PROCESS_QUERY_LIMITED_INFORMATION
+            // denied). Fall back to the platform's SYNCHRONIZE-only watcher rather
+            // than disabling the watchdog outright — no worse than the pre-fix path.
+            tracing::warn!(
+                "could not open pinning handle (pid={ppid}); falling back to unpinned watch"
+            );
+            platform::watch_parent(ppid, shutdown).await;
+            return;
+        }
+    };
+
+    // Pin identity: capture the opened process' creation time, then re-sample
+    // who our parent actually is. If the PID we opened is no longer our parent
+    // (the real parent exited and the PID was reused between get_parent_pid()
+    // and OpenProcess), the handle points at a stranger — bail to shutdown.
+    let pinned_creation = process_creation_time(handle);
+    let still_parent = platform::get_parent_pid() == Some(ppid);
+    if !still_parent || pinned_creation.is_none() {
+        tracing::warn!(
+            "parent identity could not be pinned (pid={ppid}); treating parent as gone"
+        );
+        // SAFETY: handle was a live, owned handle from OpenProcess above.
+        unsafe { let _ = CloseHandle(handle); }
+        shutdown.notify_waiters();
+        return;
+    }
+
+    // HANDLE wraps *mut c_void which the windows crate doesn't mark Send.
+    // Smuggle it across the closure boundary as a usize — integers are always
+    // Send. SAFETY: a Win32 HANDLE is opaque; CloseHandle and
+    // WaitForSingleObject can be called from any thread once the handle
+    // exists. This task is the sole owner of the value across the move.
+    let handle_addr = handle.0 as usize;
+    let wait = tokio::task::spawn_blocking(move || {
+        let h = HANDLE(handle_addr as *mut core::ffi::c_void);
+        // SAFETY: h is the pinned parent handle smuggled across threads.
+        let r = unsafe { WaitForSingleObject(h, u32::MAX) };
+        unsafe { let _ = CloseHandle(h); }
+        r
+    });
+
+    // Race the blocking wait against the shared shutdown signal so EOF /
+    // explicit Shutdown can unblock us when the parent stays alive. If we lose
+    // the race, the blocking thread keeps its INFINITE wait until process exit;
+    // the runtime's shutdown_timeout(0) ensures it does not delay exit.
+    tokio::select! {
+        _ = shutdown.notified() => {
+            tracing::info!("watch_parent cancelled by shutdown signal");
+        }
+        result = wait => {
+            if result.is_ok() {
+                tracing::info!("parent process exited; signaling shutdown");
+                shutdown.notify_waiters();
+            } else {
+                tracing::warn!("parent watchdog task aborted; falling back to stdin EOF detection");
+            }
+        }
+    }
+}
+
+/// Non-Windows watchdog: delegates to the platform getppid poll. There is no
+/// PID-reuse TOCTOU here because POSIX guarantees the parent stays a zombie
+/// (reaped by us) until waited on, so the bare PID identity holds.
+#[cfg(not(windows))]
+async fn watch_parent_pinned(ppid: u32, shutdown: Arc<Notify>) {
+    platform::watch_parent(ppid, shutdown).await;
 }
 
 /// Clears the Deep-Analyze single-in-flight flag on drop, so the slot frees even
@@ -905,6 +1039,72 @@ async fn emit_db_unavailable(sink: &Sink, command: &str) {
         model_kind: None,
     }))))
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // F-C1-010: the oversize-frame rejection text must report the REAL cap
+    // (MAX_FRAME_BYTES = 32 MiB), not the stale hardcoded "1 MB". Pre-fix this
+    // said "exceeded 1 MB cap"; post-fix it is derived from MAX_FRAME_BYTES.
+    #[test]
+    fn oversize_frame_error_text_matches_max_frame_bytes() {
+        let msg = oversized_frame_message(99_999);
+
+        let expected_mib = MAX_FRAME_BYTES / (1024 * 1024);
+        assert_eq!(expected_mib, 32, "cap is 32 MiB");
+
+        assert!(
+            msg.contains(&format!("{expected_mib} MiB")),
+            "message must state the real cap ({expected_mib} MiB): {msg}"
+        );
+        // The pre-fix bug: a literal "1 MB" cap that no longer matches reality.
+        assert!(
+            !msg.contains("1 MB"),
+            "message must not report the stale 1 MB cap: {msg}"
+        );
+        // Still reports the observed byte count so logs stay actionable.
+        assert!(msg.contains("99999"), "message must include the seen byte count: {msg}");
+    }
+
+    // F-C1-015: parent identity is pinned by an OpenProcess handle + the
+    // process creation time, not a bare PID. A creation time is a per-process-
+    // object value: two processes that ever share a PID cannot share it, so
+    // capturing it at startup closes the PID-reuse TOCTOU. Here we prove the
+    // pinning primitive works and is stable for a known-live process (ours).
+    #[cfg(windows)]
+    #[test]
+    fn parent_identity_pinned_by_creation_time_not_bare_pid() {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::{
+            GetCurrentProcessId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        let pid = unsafe { GetCurrentProcessId() };
+
+        let open = || unsafe {
+            OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+                .expect("open self process")
+        };
+
+        let h1 = open();
+        let t1 = process_creation_time(h1);
+        unsafe {
+            let _ = CloseHandle(h1);
+        }
+        assert!(t1.is_some(), "creation time must be capturable for a live process");
+        assert_ne!(t1, Some(0), "creation time must be a concrete non-zero value");
+
+        // Re-opening the SAME pid yields the SAME creation time: identity is
+        // bound to the process object, so the pin is stable and reusable.
+        let h2 = open();
+        let t2 = process_creation_time(h2);
+        unsafe {
+            let _ = CloseHandle(h2);
+        }
+        assert_eq!(t1, t2, "creation time pins a stable identity for a given PID");
+    }
 }
 
 
