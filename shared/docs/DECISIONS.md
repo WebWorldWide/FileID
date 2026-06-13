@@ -2978,3 +2978,24 @@ Branch `fix/audit-2026-06-10`; full inventory in `shared/docs/audit-2026-06-10/`
   builds adversarial redirect URLs via string interpolation, so the unchanged scan is exercised
   against hostile inputs and proven equivalent to the Windows behavior. Test-side change, zero
   production-code risk.
+## 2026-06-13 (later) — macOS adaptive hardware scaling: tier values chosen to leave M1 Pro byte-identical
+
+- **The Vision/ANE gate and DB batch now scale with the machine, but the M1 Pro tier is left exactly
+  at the prior constants — by construction, not by coincidence.** `VisionWorker.visionConcurrencyGate`
+  moved from a hardcoded `14` to `Hardware.workerCap`; the M1 Pro's `workerCap` *is* 14 (`8P+2E` →
+  `8+2+max(1,4)`), so the gate is unchanged on the verified box and only widens on higher-core Macs
+  (M-Ultra → 32). The hardcoded 14 had silently throttled a bigger ANE to 14-wide. `DBWriter`'s
+  `maxBatchFiles` is tier-scaled (low 64 / balanced 100 / high 500); the `balanced` band is set to
+  **100 — the exact pre-existing value** — so the 16 GB M1 Pro (balanced) commits identically to
+  before, and only `≥48 GB` boxes get the 500-file chunks. This was deliberate: a re-measure after an
+  earlier draft that bumped balanced→250 showed a run within run-to-run noise but *not* faster (the
+  M1 Pro is CPU-bound, not commit-bound), so per the "never claim a throughput number; ~25% variance"
+  rule we did not adopt a change we couldn't show helped on the only tier we can measure. The scale-up
+  is pure headroom for hardware we can't test here, documented as a hardware-UAT tuning recipe in
+  NEXT.md rather than asserted as a win.
+- **Memory tier is static at startup, mirroring the worker-cap model, NOT the dynamic F-3 monitor.**
+  `Hardware.MemoryTier` is computed once from `physicalMemory` (low `<12` / balanced `12–48` / high
+  `≥48` GB), matching how `workerCap` is fixed at launch. True runtime memory-pressure adaptation
+  (`MemoryPressureMonitor` with fast-down/slow-up hysteresis driving worker admission + PDF pixel
+  ceiling + batch target) remains the separate F-3 item — these tiers do not pre-empt it, they just
+  size the startup budgets so a powerful box isn't pinned to M1-Pro defaults.

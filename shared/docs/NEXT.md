@@ -1,5 +1,56 @@
 # NEXT — resume here
 
+## 2026-06-13 (later) — macOS adaptive hardware scaling landed; per-chip tuning is a hardware-UAT knob (branch `perf/adaptive-scaling-2026-06-13`)
+
+The macOS engine now scales its Vision/ANE concurrency and DB batch size with the
+machine instead of using M1-Pro-shaped constants (commit `f80d768`). All three
+changes reduce to the prior constants on the 16 GB M1 Pro baseline (gate 14,
+batch 100), so this is a **no-op on the verified tier** and pure headroom on
+higher-core / higher-RAM Macs — but the headroom itself is unmeasured on this dev
+box (M1 Pro is already CPU-maxed at ~88% avg during a scan; the scale-up only
+manifests on bigger silicon). The tuning below needs an M-Pro-Max / M-Ultra /
+Mac-Pro to validate.
+
+**What landed:**
+- `VisionWorker.visionConcurrencyGate` = `Hardware.workerCap` (was hardcoded 14).
+- `Hardware.MemoryTier` — low `<12 GB` / balanced `12–48 GB` / high `≥48 GB`.
+- `DBWriter.maxBatchFiles` — low 64 / balanced 100 / high 500.
+
+**Per-chip tuning recipe (run on the target Mac, read-only corpus):**
+1. **Baseline the box.** Drive a full-corpus scan via `platforms/apple/scripts/iterate.sh`
+   (or a FIFO+stderr driver) and capture from the `scanComplete` event:
+   `processedFiles / totalSeconds` = throughput; sample `ps -o %cpu,rss` of the
+   engine PID at ~0.5 s cadence for avg/peak CPU% (logical-core-count × 100 = full)
+   and peak RSS. M1 Pro reference: ~62 files/s, avg CPU ~875% of 1000% (CPU-bound),
+   peak RSS ~855 MB on the 9,745-file Bernadine/CD set.
+2. **Vision/ANE gate.** If avg CPU is **not** near its ceiling and throughput is
+   below the M1-Pro files/s-per-P-core ratio, the Vision stage is under-fed. The
+   gate now opens to `workerCap` (M-Ultra → 32); if the ANE still starves, the
+   limiter is the **ANE inference semaphore** `MobileCLIPService.inferenceSem`
+   (currently `4`) — raise to 6–8 on chips with a 2× ANE (M-Max/Ultra) and
+   re-measure; back off if throughput drops or RSS spikes.
+3. **Worker cap.** `Hardware.computeWorkerCap` = `P + E + max(1, P/2)` capped at 32.
+   On a Mac Pro (many P-cores) the 32 cap can bind — but raising it is
+   **storage-bound, not CPU-bound**: iteration-8 data showed workers 14→18 spiked
+   NAS read latency 2 ms→1510 ms. Only raise the cap when the corpus is on a fast
+   **local** SSD; on a NAS/network share keep it. Re-baseline read latency after
+   any bump.
+4. **DB batch / memory tier.** On `≥48 GB` boxes the writer batches 500 files;
+   confirm peak RSS stays well under physical RAM (the decoupled committer holds
+   one batch of `TaggedFile`s — embeddings included — in memory). If RSS is
+   comfortable, the high tier can go higher (mirror Windows' upper bound); if a
+   low-RAM box (`<12 GB`) shows GC/swap pressure, drop low-tier below 64.
+   *Acceptance for the whole recipe:* on a bigger-than-M1-Pro Mac, throughput
+   exceeds the M1 Pro's files/s-per-P-core ratio with no OOM, no NAS read-latency
+   regression, and avg CPU near its ceiling during the tagging phase.
+
+Note: the truly dynamic piece (runtime memory-pressure adaptation, F-3) is still
+spec-only — these are **static at startup** tiers (matching the worker-cap model).
+F-3 (`MemoryPressureMonitor` driving worker admission + PDF pixel ceiling + batch
+target with fast-down/slow-up hysteresis) remains the follow-on.
+
+---
+
 ## 2026-06-13 (newest) — audit-2026-06-10 campaign: macOS apply UAT + deferred items are the only remaining gates (RESUME HERE)
 
 The `fix/audit-2026-06-10` campaign is closed on the branch (see STATE.md 2026-06-13): 131 findings

@@ -8,6 +8,25 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-13 (later) — macOS adaptive hardware scaling (branch `perf/adaptive-scaling-2026-06-13`, commit `f80d768`)
+
+The macOS engine was using M1-Pro-shaped constants for the two stages that should
+scale with the machine. Now they're hardware-derived, with the M1 Pro tier left
+byte-identical so the verified baseline is untouched:
+- `VisionWorker.visionConcurrencyGate`: hardcoded `14` → `Hardware.workerCap`
+  (M1 Pro 14; M-Ultra 32) so the Vision/ANE stage scales with cores instead of
+  silently feeding a bigger ANE only 14-wide.
+- `Hardware.MemoryTier` (low `<12`/balanced `12–48`/high `≥48` GB) mirroring the
+  Windows `memory_tier`, driving `DBWriter.maxBatchFiles` (64/100/500). M1 16 GB →
+  balanced → 100 (the proven value, unchanged).
+
+On the dev M1 Pro all three reduce to the prior constants — the box is already
+CPU-maxed (~875% of 1000% avg during a scan), so the headroom only manifests on
+bigger silicon and is **unmeasured here**. Per-chip tuning recipe (gate, ANE
+semaphore, worker-cap storage-bound caveat, batch/RSS) is in NEXT.md
+(`2026-06-13 (later)`). `swift build` debug + release clean. Runtime memory-pressure
+adaptation (F-3) is still spec-only; these tiers are static at startup.
+
 ## 2026-06-13 — "audit-2026-06-10" perfection campaign: 131 findings + 2 criticals fixed, 22 self-introduced regressions caught, clean on-hardware macOS scan (branch `fix/audit-2026-06-10`)
 
 The deepest adversarial pass yet — run cross-platform off `main`, closed on this branch.
