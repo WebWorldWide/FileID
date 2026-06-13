@@ -156,14 +156,21 @@ pub(crate) async fn handle_start_scan(
     // Arm the override-aware EP that will actually attempt the first native
     // GPU bind (honors gpuExecutionProviderOverride), not the auto-detected
     // active_provider() which ignores the override — see runtime::armed_provider.
+    //
+    // The guard disarms on drop too, so a GRACEFUL shutdown that aborts this
+    // task mid-load (before the `.await` returns) still clears the breadcrumb —
+    // otherwise the next launch would false-poison this healthy EP. A real
+    // native crash skips the drop (process gone) and keeps the breadcrumb.
     let armed_ep = models::runtime::armed_provider();
-    models::ep_guard::arm(armed_ep.as_str());
+    let ep_guard = models::ep_guard::ArmGuard::arm(armed_ep.as_str());
     let load_result = tokio::time::timeout(
         Duration::from_secs(120),
         tokio::task::spawn_blocking(move || ModelStack::load_default(models_worker_count)),
     )
     .await;
-    models::ep_guard::disarm(armed_ep.as_str());
+    // We survived the bind (success, Rust error, or timeout) — disarm now; the
+    // guard's drop covers the graceful-shutdown-mid-load cancellation instead.
+    drop(ep_guard);
     let models = match load_result {
         Ok(Ok(m)) => Arc::new(m),
         Ok(Err(err)) => {

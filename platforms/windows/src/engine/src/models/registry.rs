@@ -533,13 +533,47 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
     }
 }
 
+/// Stable, short token identifying the EXACT pinned artifacts of `model` —
+/// derived from every file's URL + sha256. Folding the URL in too means an
+/// unpinned (`None`-sha) entry whose `resolve/<rev>/...` URL bumps still
+/// invalidates. Deterministic FNV-1a (no deps), so the same pin always yields
+/// the same token across launches and machines.
+fn revision_token(model: &Model) -> String {
+    fn feed(h: u64, bytes: &[u8]) -> u64 {
+        let mut h = h;
+        for &b in bytes {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h
+    }
+    let mut h: u64 = 0xcbf29ce484222325;
+    for f in &model.files {
+        h = feed(h, f.url.as_bytes());
+        h = feed(h, b"\0");
+        h = feed(h, f.sha256.as_deref().unwrap_or("").as_bytes());
+        h = feed(h, b"\0");
+    }
+    format!("{h:016x}")
+}
+
 /// Sentinel file the engine drops after every file in `model.files`
 /// has landed. Welcome sheet + tagging stack poll it to know whether
 /// the model is installed without re-validating SHA256s on every
 /// launch.
+///
+/// The filename is keyed by [`revision_token`] (not just `model.id`) so a pin
+/// bump — a changed revision/sha256 for any file — yields a DIFFERENT sentinel
+/// name. The old `{id}-<oldtoken>.installed` no longer matches, so the install
+/// gate falls through to a re-fetch instead of trusting the stale artifact on
+/// disk. This mirrors the macOS revision-keyed sentinel that self-heals across
+/// a pin change (audit C1-024; the b4404→b9254 episode).
 pub fn sentinel_path(model: &Model) -> Option<PathBuf> {
     let root = paths::models_dir().ok()?;
-    Some(root.join(".sentinels").join(format!("{}.installed", model.id)))
+    Some(
+        root.join(".sentinels")
+            .join(format!("{}-{}.installed", model.id, revision_token(model))),
+    )
 }
 
 #[cfg(test)]
@@ -597,8 +631,44 @@ mod tests {
             if let Some(p) = sentinel_path(&m) {
                 let s = p.to_string_lossy();
                 assert!(s.contains(".sentinels"), "sentinel not under .sentinels: {s}");
-                assert!(s.ends_with("ram_plus.installed"), "unexpected sentinel: {s}");
+                let name = p.file_name().unwrap().to_string_lossy();
+                // Revision-keyed: `ram_plus-<token>.installed` (audit C1-024).
+                assert!(name.starts_with("ram_plus-"), "sentinel not id-prefixed: {s}");
+                assert!(name.ends_with(".installed"), "unexpected sentinel: {s}");
             }
+        }
+    }
+
+    /// A pin bump (revision/sha256 change on any file) must move the sentinel
+    /// filename so the stale `.installed` no longer matches and the install gate
+    /// re-fetches. Before the revision-key fix the name was a bare
+    /// `{id}.installed` that survived the b4404→b9254 hash bump. (audit C1-024)
+    #[test]
+    fn pin_bump_invalidates_sentinel() {
+        let LookupResult::Found(model) = lookup_full("ram_plus") else {
+            return;
+        };
+        let before = sentinel_path(&model).expect("sentinel path");
+
+        // Simulate a pin bump: same id/files, one sha256 changed.
+        let mut bumped = model.clone();
+        assert!(!bumped.files.is_empty(), "ram_plus must have at least one file");
+        bumped.files[0].sha256 =
+            Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".into());
+        let after = sentinel_path(&bumped).expect("sentinel path");
+
+        assert_ne!(
+            before, after,
+            "sentinel filename must change when a pinned hash changes"
+        );
+    }
+
+    /// The token is a pure function of the pins — identical models yield an
+    /// identical sentinel across launches (no spurious re-fetch).
+    #[test]
+    fn sentinel_is_stable_for_unchanged_pins() {
+        if let LookupResult::Found(m) = lookup_full("mobileclip_s2") {
+            assert_eq!(sentinel_path(&m), sentinel_path(&m.clone()));
         }
     }
 }
