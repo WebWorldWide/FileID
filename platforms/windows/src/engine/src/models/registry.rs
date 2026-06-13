@@ -10,7 +10,7 @@
 // Adding a model: append a match arm in `lookup_full` and a sentinel
 // path in `sentinel_path`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::paths;
 
@@ -568,12 +568,31 @@ fn revision_token(model: &Model) -> String {
 /// gate falls through to a re-fetch instead of trusting the stale artifact on
 /// disk. This mirrors the macOS revision-keyed sentinel that self-heals across
 /// a pin change (audit C1-024; the b4404→b9254 episode).
+///
+/// Pre-revision-key Windows builds dropped a bare `{id}.installed` with no token.
+/// [`migrate_legacy_sentinel`] renames that legacy marker to the current keyed
+/// name on first read so an already-present (multi-GB) install isn't reported as
+/// not-installed and re-downloaded merely because the naming scheme changed
+/// (R-04). A genuine pin bump still self-heals: a stale `{id}-<oldtoken>.installed`
+/// is not the legacy name and is left for the re-fetch path.
 pub fn sentinel_path(model: &Model) -> Option<PathBuf> {
-    let root = paths::models_dir().ok()?;
-    Some(
-        root.join(".sentinels")
-            .join(format!("{}-{}.installed", model.id, revision_token(model))),
-    )
+    let dir = paths::models_dir().ok()?.join(".sentinels");
+    let keyed = dir.join(format!("{}-{}.installed", model.id, revision_token(model)));
+    migrate_legacy_sentinel(&dir, &model.id, &keyed);
+    Some(keyed)
+}
+
+/// Heal a pre-revision-key install in place by renaming a legacy bare
+/// `{id}.installed` to the current `keyed` sentinel. No-op when the keyed
+/// sentinel already exists or no legacy marker is present. See [`sentinel_path`].
+fn migrate_legacy_sentinel(dir: &Path, model_id: &str, keyed: &Path) {
+    if keyed.exists() {
+        return;
+    }
+    let legacy = dir.join(format!("{model_id}.installed"));
+    if legacy.exists() {
+        let _ = std::fs::rename(&legacy, keyed);
+    }
 }
 
 #[cfg(test)]
@@ -670,5 +689,60 @@ mod tests {
         if let LookupResult::Found(m) = lookup_full("mobileclip_s2") {
             assert_eq!(sentinel_path(&m), sentinel_path(&m.clone()));
         }
+    }
+
+    /// R-04: a pre-revision-key install has a bare `{id}.installed`. On first
+    /// read it must be migrated (renamed) to the current keyed name so the
+    /// install gate sees it as installed — not re-download a multi-GB model that
+    /// is already present and valid.
+    #[test]
+    fn legacy_sentinel_is_migrated_to_keyed_name() {
+        let dir = std::env::temp_dir().join(format!(
+            "fileid-sentinel-migrate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy = dir.join("ram_plus.installed");
+        std::fs::write(&legacy, b"ram_plus").unwrap();
+        let keyed = dir.join("ram_plus-deadbeef00000000.installed");
+
+        migrate_legacy_sentinel(&dir, "ram_plus", &keyed);
+
+        assert!(keyed.exists(), "keyed sentinel not created from legacy marker");
+        assert!(!legacy.exists(), "legacy marker not consumed by migration");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Migration must NOT clobber an existing keyed sentinel, and is a no-op when
+    /// no legacy marker is present (a genuine pin bump's stale keyed name is left
+    /// for the re-fetch path).
+    #[test]
+    fn migration_noop_without_legacy_marker() {
+        let dir = std::env::temp_dir().join(format!(
+            "fileid-sentinel-noop-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let keyed = dir.join("ram_plus-cafebabe00000000.installed");
+
+        // No legacy, no keyed → stays absent (re-fetch path).
+        migrate_legacy_sentinel(&dir, "ram_plus", &keyed);
+        assert!(!keyed.exists(), "migration must not fabricate a sentinel");
+
+        // Existing keyed + a legacy marker → keyed preserved, legacy untouched.
+        std::fs::write(&keyed, b"ram_plus").unwrap();
+        let legacy = dir.join("ram_plus.installed");
+        std::fs::write(&legacy, b"ram_plus").unwrap();
+        migrate_legacy_sentinel(&dir, "ram_plus", &keyed);
+        assert!(keyed.exists() && legacy.exists(), "existing keyed sentinel must not trigger a rename");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

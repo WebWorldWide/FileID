@@ -536,18 +536,37 @@ async fn watch_parent_pinned(ppid: u32, shutdown: Arc<Notify>) {
     let handle = HANDLE(handle_addr as *mut core::ffi::c_void);
 
     // Pin identity: capture the opened process' creation time, then re-sample
-    // who our parent actually is. If the PID we opened is no longer our parent
-    // (the real parent exited and the PID was reused between get_parent_pid()
-    // and OpenProcess), the handle points at a stranger — bail to shutdown.
+    // who our parent actually is. Three cases, kept distinct so a TRANSIENT
+    // re-sample miss can't shut a live parent down (R-03):
+    //   * Some(other != ppid): concrete proof the real parent exited and its PID
+    //     was reused between get_parent_pid() and OpenProcess — the handle points
+    //     at a stranger. Bail to shutdown.
+    //   * None, or the creation-time probe failed: INCONCLUSIVE. get_parent_pid()
+    //     uses CreateToolhelp32Snapshot, which can transiently fail (e.g.
+    //     ERROR_BAD_LENGTH under process churn) and return None while the parent
+    //     is alive. Do NOT signal shutdown — fall back to the unpinned
+    //     SYNCHRONIZE watcher, exactly as the OpenProcess-failure branch above.
+    //   * Some(ppid): still our parent — continue with the pinned wait.
     let pinned_creation = process_creation_time(handle);
-    let still_parent = platform::get_parent_pid() == Some(ppid);
-    if !still_parent || pinned_creation.is_none() {
+    let resampled = platform::get_parent_pid();
+    if let Some(current) = resampled {
+        if current != ppid {
+            tracing::warn!(
+                "parent PID changed (was {ppid}, now {current}); treating original parent as gone"
+            );
+            // SAFETY: handle was a live, owned handle from OpenProcess above.
+            unsafe { let _ = CloseHandle(handle); }
+            shutdown.notify_waiters();
+            return;
+        }
+    }
+    if resampled.is_none() || pinned_creation.is_none() {
         tracing::warn!(
-            "parent identity could not be pinned (pid={ppid}); treating parent as gone"
+            "parent identity re-sample inconclusive (pid={ppid}); falling back to unpinned watch"
         );
         // SAFETY: handle was a live, owned handle from OpenProcess above.
         unsafe { let _ = CloseHandle(handle); }
-        shutdown.notify_waiters();
+        platform::watch_parent(ppid, shutdown).await;
         return;
     }
 

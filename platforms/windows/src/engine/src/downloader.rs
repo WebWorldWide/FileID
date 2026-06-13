@@ -861,11 +861,13 @@ fn part_file_path(dest: &Path, index: usize) -> PathBuf {
 
 /// Sum the resumable bytes already on disk across all planned part files, so
 /// `download_parallel` can seed its progress counter on a resume instead of
-/// reporting from 0 (a backward-jumping bar on Retry). Each part contributes at
-/// most its planned range length: an oversized stale part will be discarded
-/// before re-use, so counting only the in-range prefix matches the bytes that
-/// actually survive into the resumed download. `ranges` is `(index, start, end)`
-/// with an inclusive `end`.
+/// reporting from 0 (a backward-jumping bar on Retry). A part contributes only
+/// the bytes that actually survive into the resumed download: an oversized part
+/// (> its planned range) is discarded WHOLE by `download_range_with_retry`
+/// (its in-range prefix does NOT survive), so it must seed 0 — otherwise its
+/// range_len would be counted once here and again as re-download deltas, pushing
+/// bytes_done past bytes_total. `ranges` is `(index, start, end)` with an
+/// inclusive `end`.
 async fn resume_seed_bytes(dest: &Path, ranges: &[(usize, u64, u64)]) -> u64 {
     let mut seed: u64 = 0;
     for &(i, start, end) in ranges {
@@ -874,7 +876,7 @@ async fn resume_seed_bytes(dest: &Path, ranges: &[(usize, u64, u64)]) -> u64 {
             .await
             .map(|m| m.len())
             .unwrap_or(0);
-        seed += on_disk.min(range_len);
+        seed += if on_disk > range_len { 0 } else { on_disk };
     }
     seed
 }
@@ -1278,13 +1280,15 @@ mod tests {
             "seed must reflect on-disk bytes (100 + 50), not 0"
         );
 
-        // An OVERSIZED stale part (200 B in a 100 B range) contributes only its
-        // in-range prefix — download_range_with_retry discards the overflow.
+        // An OVERSIZED stale part (200 B in a 100 B range) contributes 0:
+        // download_range_with_retry discards the WHOLE part (not just the
+        // overflow), so seeding any of it would double-count against the re-
+        // download deltas and let bytes_done exceed bytes_total (R-05).
         std::fs::write(super::part_file_path(&dest, 2), vec![0u8; 200]).unwrap();
         assert_eq!(
             resume_seed_bytes(&dest, &ranges).await,
-            250,
-            "oversized stale part is clamped to its planned range length"
+            150,
+            "oversized stale part seeds 0 (discarded whole), not its range length"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

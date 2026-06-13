@@ -73,16 +73,18 @@ pub fn redact_path_for_log(path: impl AsRef<Path>) -> String {
     });
     if let Some(anchor) = home_anchor {
         let user_idx = anchor + 1;
-        // username is among the kept last-two components iff there is at most one
-        // component after it (i.e. it is the second-to-last or last part).
-        if user_idx < parts.len() && parts.len() - user_idx <= 2 {
+        // Treat parts[user_idx] as the username only when (a) at least one
+        // component follows it — so it is a real user dir, not the file itself —
+        // and (b) it would otherwise leak inside the kept last-two-component tail.
+        // The "component follows" guard stops a directory literally named
+        // users/home sitting directly above a file (e.g. a backup tree like
+        // `E:\…\Users\file.txt`) from masking the FILENAME and collapsing the
+        // whole path to "…".
+        if user_idx + 1 < parts.len() && parts.len() - user_idx <= 2 {
             let after = &parts[user_idx + 1..];
             // Keep only the last two post-username components for context parity.
             let kept: Vec<&str> =
                 after.iter().rev().take(2).copied().collect::<Vec<_>>().into_iter().rev().collect();
-            if kept.is_empty() {
-                return "…".to_string();
-            }
             return format!("…/{}", kept.join("/"));
         }
     }
@@ -223,6 +225,17 @@ mod redaction_tests {
         let r = redact_path_for_log(r"C:\Users\Adam\Pictures\Vacation\IMG.jpg");
         assert_eq!(r, "…/Vacation/IMG.jpg");
         assert!(!r.contains("Adam"), "username leaked: {r}");
+    }
+
+    /// R-06: a directory literally named `Users`/`home` sitting DIRECTLY above a
+    /// file (a backup tree, a NAS share) is not a home root and the next part is
+    /// the FILENAME, not a username. Home-anchored masking must fall through to
+    /// the generic tail and preserve the filename instead of collapsing to "…".
+    #[test]
+    #[cfg(windows)]
+    fn home_masking_preserves_filename_for_backup_tree() {
+        let r = redact_path_for_log(r"E:\Backups\Users\file.txt");
+        assert_eq!(r, "…/Users/file.txt");
     }
 }
 

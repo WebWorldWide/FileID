@@ -567,25 +567,17 @@ impl ScanSession {
             ))))
             .await;
             on_phase(SessionPhase::Failed);
-            // C1-002: terminal Failed phase via the guaranteed path — a drop
-            // here would render the TDR-aborted scan as Completed and auto-fire
-            // face clustering on a half-scanned library.
+            // C1-002: terminal Failed phase via the guaranteed (backpressuring)
+            // path — a drop here would render the TDR-aborted scan as Completed
+            // and auto-fire face clustering on a half-scanned library.
+            //
+            // R-01: Failed emits NO terminal ScanComplete. The app's
+            // ScanCompleteEvent handler only suppresses the Phase overwrite for
+            // Cancelled, so a ScanComplete on this branch would immediately
+            // clobber phaseChanged(Failed) back to Completed (relabeling a failed
+            // scan as Completed). The guaranteed phaseChanged(Failed) is the SOLE
+            // terminal frame for a failed scan.
             emit_phase_guaranteed(&sink, SessionPhase::Failed).await;
-            // C1-002 backstop: Failed had no terminal ScanComplete. Without it,
-            // a consumer that missed the (now-guaranteed) PhaseChanged still has
-            // no terminal frame to settle the scan. Emit one carrying the final
-            // counts; the preceding phaseChanged(failed) is the authoritative
-            // STATE — consumers must not infer "completed" from this event.
-            sink.send(IpcEvent::now(EventPayload::ScanComplete(Wrap::new(
-                ScanComplete {
-                    session_id: session_id.clone(),
-                    total_files: discovered_count.load(std::sync::atomic::Ordering::Relaxed),
-                    processed_files: total,
-                    failed_files: failed,
-                    total_seconds: elapsed,
-                },
-            ))))
-            .await;
         } else if self.coordinator.is_cancelled() {
             on_phase(SessionPhase::Cancelled);
             // C1-002: terminal Cancelled phase via the guaranteed path — a drop

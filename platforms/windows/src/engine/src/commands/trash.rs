@@ -216,6 +216,29 @@ pub(crate) async fn handle_restore_from_trash(
     emit_bulk_result(&sink, "restoreFromTrash", result).await;
 }
 
+/// PowerShell batch-restore script. The wanted set uses an ordinal-IGNORE-CASE
+/// comparer so the bin's reconstructed `Join-Path $loc $i.Name` matches the
+/// DB-stored `original_path` even when their casing diverges (drive-letter /
+/// Shell path normalization). The default parameterless HashSet[string] ctor is
+/// ordinal case-SENSITIVE, which regressed the case-insensitive `-eq` match the
+/// per-item helper used and silently failed recoverable restores. (R-02)
+#[cfg(any(windows, test))]
+const RESTORE_BATCH_SCRIPT: &str = "\
+$shell = New-Object -ComObject Shell.Application; \
+$bin = $shell.NameSpace(0x0a); \
+$wanted = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase); \
+foreach ($w in ($env:FILEID_RB_PATHS -split [char]0)) { if ($w.Length -gt 0) { [void]$wanted.Add($w) } }; \
+foreach ($i in $bin.Items()) { \
+    $loc = $i.ExtendedProperty('System.Recycle.DeletedFrom'); \
+    if ($null -eq $loc) { continue } \
+    $full = (Join-Path $loc $i.Name); \
+    if ($wanted.Contains($full)) { \
+        $i.InvokeVerb('Undelete'); \
+        [void]$wanted.Remove($full); \
+    } \
+    if ($wanted.Count -eq 0) { break } \
+}";
+
 /// C1-007: restore a WHOLE batch of paths with ONE Recycle Bin enumeration.
 /// The old per-item helper spawned a fresh PowerShell (each re-walking the
 /// entire bin) for every path; a large undo batch ran them serially and blew
@@ -238,21 +261,7 @@ fn restore_batch_from_recycle_bin(wanted_paths: &[&str]) {
     // given target path and then remove it from the wanted set — deterministic
     // when multiple bin entries share one original path (C1-003).
     let joined = wanted_paths.join("\0");
-    let script = "\
-$shell = New-Object -ComObject Shell.Application; \
-$bin = $shell.NameSpace(0x0a); \
-$wanted = New-Object System.Collections.Generic.HashSet[string]; \
-foreach ($w in ($env:FILEID_RB_PATHS -split [char]0)) { if ($w.Length -gt 0) { [void]$wanted.Add($w) } }; \
-foreach ($i in $bin.Items()) { \
-    $loc = $i.ExtendedProperty('System.Recycle.DeletedFrom'); \
-    if ($null -eq $loc) { continue } \
-    $full = (Join-Path $loc $i.Name); \
-    if ($wanted.Contains($full)) { \
-        $i.InvokeVerb('Undelete'); \
-        [void]$wanted.Remove($full); \
-    } \
-    if ($wanted.Count -eq 0) { break } \
-}";
+    let script = RESTORE_BATCH_SCRIPT;
     // SEC: pin -ExecutionPolicy Bypass so the script runs even when group
     // policy locks the user-default policy. Script is internal (not user-
     // supplied); the path list crosses via an env var so there's no string-
@@ -384,5 +393,23 @@ mod tests {
         let b = restore_disposition(allowed, occupied);
         assert_eq!(a, b);
         assert_eq!(a, RestoreDisposition::Conflict);
+    }
+
+    // R-02: the batch-restore wanted set must match paths case-INSENSITIVELY,
+    // restoring the case-insensitive `-eq` semantics the per-item helper had.
+    // A parameterless HashSet[string] is ordinal case-SENSITIVE, which fails to
+    // match (and so fails to restore) a recoverable file whenever the bin's
+    // reconstructed path casing diverges from the stored original_path.
+    #[test]
+    fn restore_batch_script_matches_paths_case_insensitively() {
+        assert!(
+            RESTORE_BATCH_SCRIPT.contains("[System.StringComparer]::OrdinalIgnoreCase"),
+            "batch-restore HashSet must use an ordinal-ignore-case comparer"
+        );
+        // Guard against a silent revert to the parameterless (case-sensitive) ctor.
+        assert!(
+            !RESTORE_BATCH_SCRIPT.contains("System.Collections.Generic.HashSet[string];"),
+            "must not use the parameterless (ordinal case-sensitive) HashSet ctor"
+        );
     }
 }
