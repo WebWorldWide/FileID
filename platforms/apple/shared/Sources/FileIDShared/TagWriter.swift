@@ -9,9 +9,11 @@
 // Writes are reversible — `setTags` overwrites, so the user can clear
 // FileID's tags by passing an empty list. Finder tags stay the source
 // of truth (editable in Finder if FileID is ever uninstalled); the only
-// journal is the UI's last-batch undo record built from `TagOutcome`s,
-// which captures the exact per-file diff so undo removes ONLY what
-// FileID added — never the user's own tags.
+// journal is the last-batch undo record built from `TagOutcome`s, which
+// captures the exact per-file diff so undo removes ONLY what FileID added
+// — never the user's own tags. The journal is rewritten on every bulk
+// batch (an all-unchanged batch CLEARS it) and undo is gated by an age +
+// file-identity guard, mirroring the rename journal. (F-C3-034)
 import Foundation
 
 public enum TagWriter {
@@ -115,7 +117,10 @@ public enum TagWriter {
     }
 
     public static func addTagsBulk(_ tags: [String], to urls: [URL]) -> BatchResult {
-        let detailed = addTagsBulkDetailed(tags, to: urls)
+        // `journal: nil` — Cleanup auto-tag and People tagging keep their prior
+        // behavior of NOT feeding the Library "Undo last tags" journal, which
+        // is reserved for the explicit bulk-tag sheet. (F-C3-034)
+        let detailed = addTagsBulkDetailed(tags, to: urls, journal: nil)
         return BatchResult(added: detailed.outcomes.count, unchanged: detailed.unchanged,
                            failed: detailed.failed, firstError: detailed.firstError)
     }
@@ -127,10 +132,33 @@ public enum TagWriter {
     public struct TagOutcome: Codable, Sendable, Equatable {
         public let path: String
         public let addedTags: [String]
+        /// Identity captured at apply time (nil in journals from older builds
+        /// and from the pure `init(path:addedTags:)`). Undo skips an entry on
+        /// mismatch so a same-named replacement file's tags are never
+        /// stripped. (F-C3-034)
+        public let fileSize: Int64?
+        public let modifiedAt: Date?
+        /// When the batch was applied — undo ignores entries older than
+        /// `undoJournalMaxAge`, mirroring the rename journal's 7-day expiry.
+        public let appliedAt: Date?
 
         public init(path: String, addedTags: [String]) {
             self.path = path
             self.addedTags = addedTags
+            self.fileSize = nil
+            self.modifiedAt = nil
+            self.appliedAt = nil
+        }
+
+        /// Capture the file's identity + an apply timestamp so undo can verify
+        /// the same file is still there before stripping tags. (F-C3-034)
+        init(capturing path: String, addedTags: [String], at appliedAt: Date = Date()) {
+            self.path = path
+            self.addedTags = addedTags
+            let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+            self.fileSize = attrs?[.size] as? Int64
+            self.modifiedAt = attrs?[.modificationDate] as? Date
+            self.appliedAt = appliedAt
         }
     }
 
@@ -145,11 +173,13 @@ public enum TagWriter {
         public var succeeded: Int { added + unchanged }
     }
 
-    public static func addTagsBulkDetailed(_ tags: [String], to urls: [URL]) -> DetailedBatchResult {
+    public static func addTagsBulkDetailed(_ tags: [String], to urls: [URL],
+                                           journal: UserDefaults? = .standard) -> DetailedBatchResult {
         var outcomes: [TagOutcome] = []
         var unchanged = 0
         var failed = 0
         var firstError: String?
+        let appliedAt = Date()
         for url in urls {
             do {
                 let before = readTags(at: url)
@@ -159,7 +189,7 @@ public enum TagWriter {
                 } else {
                     let beforeLower = Set(before.map { $0.lowercased() })
                     let newOnes = after.filter { !beforeLower.contains($0.lowercased()) }
-                    outcomes.append(TagOutcome(path: url.path, addedTags: newOnes))
+                    outcomes.append(TagOutcome(capturing: url.path, addedTags: newOnes, at: appliedAt))
                 }
             } catch {
                 failed += 1
@@ -168,19 +198,78 @@ public enum TagWriter {
                 }
             }
         }
+        // Rewrite the undo journal on EVERY batch — including an all-unchanged
+        // one (outcomes empty → journal cleared). Without this, an all-unchanged
+        // batch left the PREVIOUS batch's journal in place and "Undo last tags"
+        // stripped tags from a different, earlier set of files. (F-C3-034)
+        if let journal {
+            recordUndoJournal(outcomes, in: journal)
+        }
         return DetailedBatchResult(outcomes: outcomes, unchanged: unchanged,
                                    failed: failed, firstError: firstError)
+    }
+
+    // MARK: - Undo journal
+    //
+    // The undo journal persists the most recent bulk-tag batch so the Library
+    // "Undo last tags" button can remove only what FileID just added. It lives
+    // in TagWriter (not the app) so it is rewritten/cleared in lock-step with
+    // the batch that produced it, mirroring the rename journal's age + file-
+    // identity guards (BulkRenameSheet). (F-C3-034)
+
+    /// UserDefaults key for the bulk-tag undo journal. MUST stay equal to the
+    /// app's `BulkTagSheet.lastBatchKey` — both record/read this one journal,
+    /// so an all-unchanged batch here clears the app's "Undo last tags" button.
+    public static let undoJournalKey = "bulkTag.lastBatch.v1"
+
+    /// Undo ignores journal entries older than this — a weeks-old batch is far
+    /// likelier to hit a same-named replacement file than to be an intentional
+    /// undo (mirrors `BulkRenameSheet.lastBatchMaxAge`).
+    public static let undoJournalMaxAge: TimeInterval = 7 * 24 * 60 * 60
+
+    /// Overwrite the undo journal with this batch's outcomes; an empty batch
+    /// CLEARS it so a stale earlier batch can never be undone by mistake.
+    static func recordUndoJournal(_ outcomes: [TagOutcome], in defaults: UserDefaults = .standard) {
+        if outcomes.isEmpty {
+            defaults.removeObject(forKey: undoJournalKey)
+        } else if let data = try? JSONEncoder().encode(outcomes) {
+            defaults.set(data, forKey: undoJournalKey)
+        }
     }
 
     /// Undo a previous detailed bulk apply: remove ONLY the recorded
     /// added tags from each file. A file whose recorded tags are already
     /// gone counts as undone (removeTags is a no-op for absent tags).
     public static func undoBulkAdd(_ outcomes: [TagOutcome])
-        -> (undone: Int, failed: Int, firstError: String?) {
+        -> (undone: Int, skipped: Int, failed: Int, firstError: String?) {
         var undone = 0
+        var skipped = 0
         var failed = 0
         var firstError: String?
+        let fm = FileManager.default
+        let now = Date()
         for outcome in outcomes {
+            // Age guard: a stale journal is far likelier to hit a same-named
+            // replacement file than to be an intentional undo. (F-C3-034)
+            if let applied = outcome.appliedAt,
+               now.timeIntervalSince(applied) > undoJournalMaxAge {
+                skipped += 1
+                continue
+            }
+            // Identity guard: if the file at this path no longer matches the
+            // size/mtime captured at apply time, a DIFFERENT file occupies it —
+            // stripping tags would mangle an unrelated file. Skip it. (F-C3-034)
+            if let size = outcome.fileSize, let mtime = outcome.modifiedAt {
+                let attrs = try? fm.attributesOfItem(atPath: outcome.path)
+                guard let curSize = attrs?[.size] as? Int64,
+                      let curMtime = attrs?[.modificationDate] as? Date,
+                      curSize == size,
+                      abs(curMtime.timeIntervalSince(mtime)) < 1
+                else {
+                    skipped += 1
+                    continue
+                }
+            }
             do {
                 try removeTags(outcome.addedTags,
                                at: URL(fileURLWithPath: outcome.path))
@@ -192,7 +281,7 @@ public enum TagWriter {
                 }
             }
         }
-        return (undone, failed, firstError)
+        return (undone, skipped, failed, firstError)
     }
 
     // MARK: - Merging
