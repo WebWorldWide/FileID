@@ -45,6 +45,7 @@ public sealed partial class RestructureView : UserControl
 
     private bool _unloaded;
     private bool _suppressRecompute;
+    private bool _applying;
     private bool _deepAnalyzeHintDismissed;
     private RestructureOutcome? _hovered;
     private EngineError? _lastHandledError;
@@ -201,6 +202,10 @@ public sealed partial class RestructureView : UserControl
     {
         var plan = EngineClient.Instance.LastRestructurePlan;
         if (plan is null) return;
+
+        // A fresh plan supersedes any in-flight apply — release the single-flight
+        // guard so the new plan's buttons enable correctly (F-C5-003).
+        _applying = false;
 
         _allFileRows.Clear();
         _filesByOutcome.Clear();
@@ -364,8 +369,11 @@ public sealed partial class RestructureView : UserControl
         }
 
         bool hasWork = selected > 0;
-        ApplySymlinkButton.IsEnabled = hasWork;
-        ApplyMovesButton.IsEnabled = hasWork;
+        // Single-flight: while an apply is in flight the buttons stay disabled
+        // even if a checkbox toggle re-runs this, so a stale plan can't be
+        // re-applied (F-C5-003).
+        ApplySymlinkButton.IsEnabled = hasWork && !_applying;
+        ApplyMovesButton.IsEnabled = hasWork && !_applying;
         ApplyBarSelectedCount.Text = selected.ToString("N0");
         ApplySymlinkButtonText.Text = hasWork ? $"Apply as shortcuts ({selected:N0})" : "Apply as shortcuts";
         ApplyStatusText.Text = hasWork
@@ -615,6 +623,10 @@ public sealed partial class RestructureView : UserControl
 
     private async Task ApplyAsync(bool useSymlinks)
     {
+        // Single-flight: re-clicking after an apply re-runs against a now-stale
+        // plan (B4 reports every file failed -> a false "some changes couldn't be
+        // applied" alarm). Guard + disable until the result (and re-plan) land.
+        if (_applying) return;
         var plan = EngineClient.Instance.LastRestructurePlan;
         if (plan is null || plan.Moves.Count == 0) return;
         var sel = new List<RestructureMove>();
@@ -623,6 +635,9 @@ public sealed partial class RestructureView : UserControl
             if (_allFileRows.TryGetValue(m.FileId, out var row) && row.IsSelected) sel.Add(m);
         }
         if (sel.Count == 0) return;
+        _applying = true;
+        ApplySymlinkButton.IsEnabled = false;
+        ApplyMovesButton.IsEnabled = false;
         ApplyStatusText.Text = useSymlinks
             ? $"Creating {sel.Count:N0} symlinks..."
             : $"Moving {sel.Count:N0} files...";
@@ -636,6 +651,8 @@ public sealed partial class RestructureView : UserControl
             // the status freezes on "Moving N files..." (the apply-result event
             // never arrives). Surface it instead of a silent hang.
             DebugLog.Warn("ApplyRestructure send failed: " + ex.Message);
+            _applying = false;
+            RecomputeSelection();
             ApplyStatusText.Text = "Couldn't apply - the engine isn't responding. Try restarting the app.";
             await ShowAlertAsync("Couldn't apply changes",
                 "FileID couldn't tell the engine to apply your reorganization (it isn't responding). " +
@@ -647,6 +664,39 @@ public sealed partial class RestructureView : UserControl
     {
         var r = EngineClient.Instance.LastRestructureApplyResult;
         if (r is null) return;
+
+        // Anything actually moved -> the current plan is stale (real moves
+        // updated the DB; applied rows must leave the view). Re-plan, exactly as
+        // macOS applySelected() does via regenerate(), and KEEP the single-flight
+        // guard engaged across the re-plan so the stale plan can't be re-applied
+        // in the gap before the fresh one lands (the F-C5-003 false-alarm window);
+        // SyncPlan releases the guard when the new plan arrives. When nothing
+        // moved, release it now so the user can retry.
+        if (r.Applied > 0)
+        {
+            var folder = AppViewModel.Instance.FolderPath;
+            if (!string.IsNullOrEmpty(folder))
+            {
+                try { _ = EngineClient.Instance.PlanRestructureAsync(folder!); }
+                catch (Exception ex)
+                {
+                    DebugLog.Warn("Restructure post-apply re-plan failed: " + ex.Message);
+                    _applying = false;
+                    RecomputeSelection();
+                }
+            }
+            else
+            {
+                _applying = false;
+                RecomputeSelection();
+            }
+        }
+        else
+        {
+            _applying = false;
+            RecomputeSelection();
+        }
+
         if (!string.IsNullOrEmpty(r.PrivilegeError))
         {
             ApplyStatusText.Text = r.PrivilegeError;
@@ -683,6 +733,11 @@ public sealed partial class RestructureView : UserControl
         if (err is null || ReferenceEquals(err, _lastHandledError)) return;
         if (err.Kind != "plan_restructure_failed" && err.Kind != "apply_restructure") return;
         _lastHandledError = err;
+
+        // The apply itself, or the post-apply re-plan, failed - release the
+        // single-flight guard so the buttons aren't stuck disabled (F-C5-003).
+        _applying = false;
+        RecomputeSelection();
 
         if (err.Kind == "plan_restructure_failed")
         {

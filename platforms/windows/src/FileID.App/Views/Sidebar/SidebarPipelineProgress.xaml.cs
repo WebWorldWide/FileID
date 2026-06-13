@@ -5,6 +5,7 @@
 // live in the same column as the dot they belong to.
 
 using System.ComponentModel;
+using System.Threading.Tasks;
 using FileID.IpcSchema;
 using FileID.Services;
 using FileID.ViewModels;
@@ -65,6 +66,53 @@ public sealed partial class SidebarPipelineProgress : UserControl
         Loaded += (_, _) => SyncStage();
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         Unloaded += (_, _) => EngineClient.Instance.PropertyChanged -= OnEngineChanged;
+
+        // Seed from the persisted (DB-derived) scan state so the strip reflects
+        // a prior session's work instead of blanking to grey on every launch of
+        // an existing library. Live engine signals always win (see SyncStage).
+        SeedFromPersistedState();
+    }
+
+    // DB-derived launch floor. -1 = no persisted state (fresh library or DB not
+    // yet created); otherwise the post-scan stage to fall back to when no live
+    // engine signal has arrived. Mirrors macOS PipelineProgress, which reads
+    // cheap DB counters so the strip stays accurate across launches.
+    private int _dbDerivedIndex = -1;
+
+    private void SeedFromPersistedState()
+    {
+        var ui = DispatcherQueue;
+        _ = DebugLog.SafeRunAsync(nameof(SeedFromPersistedState), async () =>
+        {
+            int derived = await Task.Run(async () =>
+            {
+                try
+                {
+                    await using var store = new ReadStore(AppPaths.DbPath);
+                    await store.OpenAsync().ConfigureAwait(false);
+                    if (!store.IsOpen) return -1; // first launch: engine hasn't created the DB
+                    var counts = await store.KindCountsAsync(default).ConfigureAwait(false);
+                    int total = 0;
+                    foreach (var n in counts.Values) total += n;
+                    // A non-empty library was scanned in a prior session. Hold the
+                    // strip at People (post-scan) — the same floor SyncStage applies
+                    // right after ScanComplete — rather than blanking to grey.
+                    return total > 0 ? 2 : -1;
+                }
+                catch
+                {
+                    return -1; // locked/unreadable DB: leave the strip on live state
+                }
+            }).ConfigureAwait(false);
+
+            if (derived < 0) return;
+            ui.TryEnqueue(() =>
+            {
+                if (derived <= _dbDerivedIndex) return;
+                _dbDerivedIndex = derived;
+                SyncStage();
+            });
+        });
     }
 
     private void BuildStages()
@@ -220,6 +268,10 @@ public sealed partial class SidebarPipelineProgress : UserControl
             // stay -1 — blanking the whole strip to grey for a beat on EVERY scan
             // completion. Hold at People (2) instead of going dark.
             else if (phase == ScanPhase.Completed) activeIndex = 2;
+            // No live engine signal at all (fresh launch of an existing library):
+            // fall back to the persisted DB-derived stage so the strip reflects a
+            // prior session's scan instead of blanking to grey.
+            else if (_dbDerivedIndex >= 0) activeIndex = _dbDerivedIndex;
         }
 
         // The rendered strip is a pure function of activeIndex, but LastProgress

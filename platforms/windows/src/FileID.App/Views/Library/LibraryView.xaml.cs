@@ -341,6 +341,15 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             OnPropertyChanged(nameof(StatusText));
             OnPropertyChanged(nameof(FooterVisibility));
         }
+        // A background refresh (mid-scan batch / scan-complete / undo) can prune
+        // selected tiles; the VM drops them from its selection set and raises
+        // SelectedCount, but the selection toolbar otherwise only re-reads the
+        // count on direct user input — so it would keep showing the stale,
+        // pre-prune number. Re-sync the bar here too. (F-C5-012)
+        if (e.PropertyName is nameof(LibraryViewModel.SelectedCount))
+        {
+            DispatcherQueue.TryEnqueue(UpdateSelectionBar);
+        }
     }
 
     private void OnItemsCollectionChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
@@ -997,14 +1006,19 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Primary,
         };
+        bool committed = false;
         dialog.PrimaryButtonClick += async (d, args) =>
         {
             var deferral = args.GetDeferral();
             var ok = await sheet.CommitAsync();
-            if (!ok) args.Cancel = true;
+            if (!ok) args.Cancel = true; else committed = true;
             deferral.Complete();
         };
         try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
+        // The grid still shows the pre-commit tag chips until we re-query the
+        // engine's now-updated rows; the identity-stable merge folds the new
+        // tags onto the surviving tiles via MergeMutableFrom. (F-C5-004)
+        if (committed) RequestLibraryRefresh(force: true);
     }
 
     private async void OnRenameSelectedClicked(object sender, RoutedEventArgs e)
@@ -1031,14 +1045,25 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Primary,
         };
+        bool committed = false;
         dialog.PrimaryButtonClick += async (d, args) =>
         {
             var deferral = args.GetDeferral();
             var ok = await sheet.CommitAsync();
-            if (!ok) args.Cancel = true;
+            if (!ok) args.Cancel = true; else committed = true;
             deferral.Complete();
         };
         try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
+        if (committed)
+        {
+            // FileTile.Path/FileName are identity-stable (init-only) and the
+            // refresh merge keeps the OLD instance for a surviving id — so it
+            // would keep the OLD name. Evict the renamed tiles first so the
+            // re-query rebuilds them as fresh tiles carrying the new on-disk
+            // name (a failed per-file rename just re-lands unchanged). (F-C5-004)
+            foreach (var t in selected) ViewModel.Items.Remove(t);
+            RequestLibraryRefresh(force: true);
+        }
     }
 
     private async void OnTrashSelectedClicked(object sender, RoutedEventArgs e)

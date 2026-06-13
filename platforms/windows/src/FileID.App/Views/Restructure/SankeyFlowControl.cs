@@ -190,47 +190,63 @@ public sealed class SankeyFlowControl : Control
         const int MaxNodes = 12;
         const string OtherKey = "Other";
 
-        var distinctSources = moves.Select(SourceOf).Distinct(StringComparer.OrdinalIgnoreCase).Count();
-        var topSources = moves.GroupBy(SourceOf).OrderByDescending(g => g.Count())
-            .Take(MaxNodes - 1).Select(g => g.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        string SourceBucket(RestructureMove m)
+        // SourceOf does a Substring + String.Split per move; it used to run ~4x
+        // per move across the distinct-count, top-N, group and flow-matrix passes
+        // below, all on the UI thread on every plan arrival. Parse each move's
+        // source ONCE here and tally the raw source/category counts in the same
+        // pass; every pass after this reads the precomputed arrays (F-C5-010).
+        int n = moves.Count;
+        var srcOf = new string[n];
+        var srcRawCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var catRawCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < n; i++)
         {
-            var s = SourceOf(m);
-            return distinctSources > MaxNodes && !topSources.Contains(s) ? OtherKey : s;
+            var s = SourceOf(moves[i]);
+            srcOf[i] = s;
+            srcRawCounts.TryGetValue(s, out var sc);
+            srcRawCounts[s] = sc + 1;
+            var cat = moves[i].Category;
+            catRawCounts.TryGetValue(cat, out var cc);
+            catRawCounts[cat] = cc + 1;
         }
 
-        var distinctCats = moves.Select(m => m.Category).Distinct(StringComparer.OrdinalIgnoreCase).Count();
-        var topCats = moves.GroupBy(m => m.Category).OrderByDescending(g => g.Count())
-            .Take(MaxNodes - 1).Select(g => g.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        string CategoryBucket(RestructureMove m)
-        {
-            var c = m.Category;
-            return distinctCats > MaxNodes && !topCats.Contains(c) ? OtherKey : c;
-        }
+        var topSources = srcRawCounts.OrderByDescending(kv => kv.Value)
+            .Take(MaxNodes - 1).Select(kv => kv.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        bool foldSources = srcRawCounts.Count > MaxNodes;
+        var topCats = catRawCounts.OrderByDescending(kv => kv.Value)
+            .Take(MaxNodes - 1).Select(kv => kv.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        bool foldCats = catRawCounts.Count > MaxNodes;
 
-        var rawSourceGroups = moves.GroupBy(SourceBucket)
-                                   .OrderByDescending(g => g.Count())
-                                   .ToList();
-        var rawCategoryGroups = moves.GroupBy(CategoryBucket)
-                                     .OrderByDescending(g => g.Count())
-                                     .ToList();
+        // Second pass: per-move bucket keys (top-N fold → "Other") + the
+        // (source, category) flow matrix, all from the precomputed arrays — no
+        // re-parse. The barycentric sort + ribbon-draw loop then read FlowOf in
+        // O(1), so nothing below re-walks moves or re-splits a path.
+        var srcBucketOf = new string[n];
+        var catBucketOf = new string[n];
+        var flow = new Dictionary<(string Src, string Cat), int>();
+        for (int i = 0; i < n; i++)
+        {
+            var sb = foldSources && !topSources.Contains(srcOf[i]) ? OtherKey : srcOf[i];
+            var cb = foldCats && !topCats.Contains(moves[i].Category) ? OtherKey : moves[i].Category;
+            srcBucketOf[i] = sb;
+            catBucketOf[i] = cb;
+            flow.TryGetValue((sb, cb), out var fn);
+            flow[(sb, cb)] = fn + 1;
+        }
+        int FlowOf(string src, string cat) => flow.TryGetValue((src, cat), out var f) ? f : 0;
+
+        // Group by the precomputed bucket keys (over move indices — no re-parse,
+        // no per-move materialization); only each group's Key + Count is read
+        // downstream.
+        var rawSourceGroups = Enumerable.Range(0, n).GroupBy(i => srcBucketOf[i])
+                                        .OrderByDescending(g => g.Count())
+                                        .ToList();
+        var rawCategoryGroups = Enumerable.Range(0, n).GroupBy(i => catBucketOf[i])
+                                          .OrderByDescending(g => g.Count())
+                                          .ToList();
 
         var sourceList = rawSourceGroups.Select(g => g.Key).ToList();
         var categoryList = rawCategoryGroups.Select(g => g.Key).ToList();
-
-        // Precompute the (source, category) flow matrix in a single pass over
-        // moves. The barycentric sort below + the ribbon-draw loop used to call
-        // moves.Count(predicate) for every (source, category) cell — O(2 * S * C
-        // * Moves) per Render, re-firing on every SizeChanged during a resize
-        // drag. One pass + dictionary lookups makes each cell O(1).
-        var flow = new Dictionary<(string Src, string Cat), int>();
-        foreach (var m in moves)
-        {
-            var key = (SourceBucket(m), CategoryBucket(m));
-            flow.TryGetValue(key, out var n);
-            flow[key] = n + 1;
-        }
-        int FlowOf(string src, string cat) => flow.TryGetValue((src, cat), out var n) ? n : 0;
 
         // 2 iterations of barycentric sorting to minimize ribbon crossings
         for (int iter = 0; iter < 2; iter++)

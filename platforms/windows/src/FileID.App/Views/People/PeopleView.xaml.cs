@@ -29,6 +29,14 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     // SidebarEngineStatus's ctor-cached brushes.
     private readonly SolidColorBrush _goldBrush = new(Microsoft.UI.Colors.Gold);
 
+    // Source of truth for multi-select, keyed by stable ClusterId (not object
+    // identity). A background re-cluster's MergeByClusterId REPLACES the
+    // instance of any cluster whose anchor/count/name changed, handing back a
+    // fresh PersonCluster with IsSelected=false — which silently dropped the
+    // user's selection on the next mid-selection refresh. Tracking ids here lets
+    // OnClustersCollectionChanged re-project selection onto the new instances.
+    private readonly System.Collections.Generic.HashSet<int> _selectedClusterIds = new();
+
     private bool _unloaded;
     public PeopleView()
     {
@@ -179,6 +187,8 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         // never goes stale after a re-cluster while the user is mid-selection.
         if (!ViewModel.IsSelectMode) return;
 
+        // Detach handlers from any instances leaving the collection so a removed
+        // (or replaced) cluster's subscription can't leak past its lifetime.
         if (e.OldItems != null)
         {
             foreach (var removed in e.OldItems)
@@ -186,25 +196,17 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
                 if (removed is PersonCluster oc) oc.PropertyChanged -= OnClusterIsSelectedChanged;
             }
         }
-        if (e.NewItems != null)
-        {
-            foreach (var added in e.NewItems)
-            {
-                if (added is PersonCluster nc)
-                {
-                    nc.PropertyChanged -= OnClusterIsSelectedChanged;
-                    nc.PropertyChanged += OnClusterIsSelectedChanged;
-                }
-            }
-        }
-        if (e.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Reset)
-        {
-            foreach (var c in ViewModel.Clusters)
-            {
-                c.PropertyChanged -= OnClusterIsSelectedChanged;
-                c.PropertyChanged += OnClusterIsSelectedChanged;
-            }
-        }
+
+        // Re-wire + re-project selection across the CURRENT instances. The merge
+        // reuses unchanged clusters (keeping their IsSelected), but replaces the
+        // instance of any cluster whose anchor/count/name changed; the
+        // replacement arrives with IsSelected=false. Restore selection by stable
+        // ClusterId so a mid-selection re-cluster never silently drops the user's
+        // multi-select. Detach-then-attach makes the restore non-re-entrant and
+        // guards against double-subscription. Covers Add / Replace / Reset alike.
+        foreach (var c in ViewModel.Clusters) c.PropertyChanged -= OnClusterIsSelectedChanged;
+        ReprojectSelection(ViewModel.Clusters, _selectedClusterIds);
+        foreach (var c in ViewModel.Clusters) c.PropertyChanged += OnClusterIsSelectedChanged;
 
         // Newly-added cards may not be realized yet on this synchronous event;
         // defer the visual-tree checkbox sweep so it sees them.
@@ -518,6 +520,8 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         ViewModel.IsSelectMode = !ViewModel.IsSelectMode;
         SelectButtonText.Text = ViewModel.IsSelectMode ? "Done" : "Select";
         BulkActionBar.Visibility = ViewModel.IsSelectMode ? Visibility.Visible : Visibility.Collapsed;
+        // Toggling either direction resets selection — keep the id set in step.
+        _selectedClusterIds.Clear();
         // Show/hide every per-card checkbox via tag-walk. ItemsRepeater
         // doesn't ItemContainerStyle, so we walk realized children. The
         // initial state of newly-realized cards is Collapsed (XAML default);
@@ -543,9 +547,29 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
 
     private void OnClusterIsSelectedChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == nameof(PersonCluster.IsSelected))
+        if (e.PropertyName != nameof(PersonCluster.IsSelected)) return;
+        // Keep the id-keyed selection set in sync as the user toggles cards, so a
+        // later instance-replacing refresh can re-project selection by id.
+        if (sender is PersonCluster pc)
         {
-            UpdateSelectionCountText();
+            if (pc.IsSelected) _selectedClusterIds.Add(pc.ClusterId);
+            else _selectedClusterIds.Remove(pc.ClusterId);
+        }
+        UpdateSelectionCountText();
+    }
+
+    // Re-project id-keyed selection onto the supplied cluster instances. Pulled
+    // out as a static so the survives-an-instance-replacing-refresh behavior is
+    // unit-testable without the UI runtime. Idempotent: clusters not in the set
+    // are deselected, matching the set as the single source of truth.
+    internal static void ReprojectSelection(
+        System.Collections.Generic.IEnumerable<PersonCluster> clusters,
+        System.Collections.Generic.ISet<int> selectedIds)
+    {
+        foreach (var c in clusters)
+        {
+            bool want = selectedIds.Contains(c.ClusterId);
+            if (c.IsSelected != want) c.IsSelected = want;
         }
     }
 
@@ -647,6 +671,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         }
         // Exit select mode + refresh.
         ViewModel.IsSelectMode = false;
+        _selectedClusterIds.Clear();
         BulkActionBar.Visibility = Visibility.Collapsed;
         SelectButtonText.Text = "Select";
         UpdateCheckboxVisibility();
@@ -689,6 +714,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             return;
         }
         ViewModel.IsSelectMode = false;
+        _selectedClusterIds.Clear();
         BulkActionBar.Visibility = Visibility.Collapsed;
         SelectButtonText.Text = "Select";
         UpdateCheckboxVisibility();
