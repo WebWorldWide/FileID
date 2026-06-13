@@ -73,19 +73,28 @@ pub fn redact_path_for_log(path: impl AsRef<Path>) -> String {
     });
     if let Some(anchor) = home_anchor {
         let user_idx = anchor + 1;
-        // Treat parts[user_idx] as the username only when (a) at least one
-        // component follows it — so it is a real user dir, not the file itself —
-        // and (b) it would otherwise leak inside the kept last-two-component tail.
-        // The "component follows" guard stops a directory literally named
-        // users/home sitting directly above a file (e.g. a backup tree like
-        // `E:\…\Users\file.txt`) from masking the FILENAME and collapsing the
-        // whole path to "…".
-        if user_idx + 1 < parts.len() && parts.len() - user_idx <= 2 {
-            let after = &parts[user_idx + 1..];
-            // Keep only the last two post-username components for context parity.
-            let kept: Vec<&str> =
-                after.iter().rev().take(2).copied().collect::<Vec<_>>().into_iter().rev().collect();
-            return format!("…/{}", kept.join("/"));
+        if user_idx < parts.len() {
+            // (a) The path ends AT the home dir itself (`C:\Users\<user>`,
+            // `/home/<user>`) — the username is the terminal component. Only a
+            // GENUINE home root (the keyword is the first component, anchor == 0)
+            // qualifies; fully mask it (baseline F-C2-004 behavior). A nested
+            // backup tree whose terminal IS a real file (anchor > 0, e.g.
+            // `E:\Backups\Users\file.txt`) is NOT a home dir and falls through
+            // so its filename survives. (audit R-06)
+            if user_idx == parts.len() - 1 && anchor == 0 {
+                return "…".to_string();
+            }
+            // (b) The username sits inside the kept last-two-component tail with
+            // at least one component after it (a real user dir above a file).
+            // Drop up to+including the username so only post-username context
+            // survives. The "component follows" guard stops a dir literally named
+            // users/home directly above a file from masking the FILENAME.
+            if user_idx + 1 < parts.len() && parts.len() - user_idx <= 2 {
+                let after = &parts[user_idx + 1..];
+                let kept: Vec<&str> =
+                    after.iter().rev().take(2).copied().collect::<Vec<_>>().into_iter().rev().collect();
+                return format!("…/{}", kept.join("/"));
+            }
         }
     }
     let tail = parts
@@ -214,6 +223,16 @@ mod redaction_tests {
         let r2 = redact_path_for_log("/Users/adam/notes.txt");
         assert!(!r2.contains("adam"), "username leaked: {r2}");
         assert!(r2.ends_with("notes.txt"), "filename lost: {r2}");
+    }
+
+    /// R-06 regression: a path that ENDS at the home dir itself (the scan root
+    /// is the home directory — no file under it) must fully mask the username,
+    /// not fall through to the generic tail and leak it. Genuine home root only
+    /// (keyword is the first component); a nested backup tree is handled below.
+    #[test]
+    fn redacts_terminal_home_dir_masking_username() {
+        assert_eq!(redact_path_for_log("/Users/adam"), "…");
+        assert_eq!(redact_path_for_log("/home/adam"), "…");
     }
 
     /// F-C2-004 must NOT over-redact deep paths: `…/Users/<user>/Pictures/IMG`

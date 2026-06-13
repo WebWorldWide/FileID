@@ -342,13 +342,23 @@ public actor Discovery {
             }
             return s + String(next)
         }()
+        // R-14: the CLIP-backfill exclusion keeps embeddingless images IN the
+        // pipeline so a post-install rescan backfills them — but only matters
+        // when CLIP is actually installed. With no CLIP model on disk, no image
+        // can ever get an embedding, so the exclusion would keep EVERY image out
+        // of the skip set and re-run the full ANE/Vision pass on every scan
+        // forever. Gate it on the model file existing.
+        let clipInstalled = FileManager.default.fileExists(
+            atPath: MobileCLIPService.defaultImageModelURL.path)
+        let clipExclusion = clipInstalled
+            ? "AND \(DBWriter.skipSetClipBackfillExclusionSQL)" : ""
         do {
             return try await database.pool.read { db -> [String: SkipEntry] in
                 var map: [String: SkipEntry] = [:]
                 let rows = try Row.fetchAll(db, sql: """
                     SELECT path_text, size_bytes, modified_at FROM files
                     WHERE failed = 0 AND path_text >= ? AND path_text < ?
-                      AND \(DBWriter.skipSetClipBackfillExclusionSQL)
+                      \(clipExclusion)
                     """, arguments: [prefix, prefixUpper])
                 map.reserveCapacity(rows.count)
                 for row in rows {
