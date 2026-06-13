@@ -21,14 +21,17 @@ struct DeepAnalyzePureLogicTests {
     // affirmative SAME at the defaulted 0.80 (> 0.75 auto-merge threshold).
     @Test("parseFaceComparison: negated 'same' is DIFFERENT, never auto-merges")
     func negatedVerdictNeverMerges() {
+        // R-12: only LOOSE free-text negations parse as DIFFERENT here. A reply
+        // with an explicit "VERDICT: SAME" line is authoritative and is covered
+        // in `affirmativeVerdictPreserved` — the negated-same override must not
+        // reach the explicit-verdict branch.
         let negatives = [
             "These are not the same person.",
             "not the same",
             "They are not the same.",
             "No — isn't the same person.",
             "These two aren't the same.",
-            "They cannot be the same individual.",
-            "VERDICT: SAME but on reflection they are not the same person"
+            "They cannot be the same individual."
         ]
         for raw in negatives {
             let r = DeepAnalyze.parseFaceComparison(raw)
@@ -53,6 +56,42 @@ struct DeepAnalyzePureLogicTests {
 
         let diff = DeepAnalyze.parseFaceComparison("VERDICT: DIFFERENT\nCONFIDENCE: 0.9")
         #expect(diff.sameClass == false)
+
+        // R-12: an explicit "VERDICT: SAME" line is authoritative — incidental
+        // negation about lighting/angle must NOT be picked up by the
+        // negated-same heuristic and flip the verdict to DIFFERENT.
+        let incidental = DeepAnalyze.parseFaceComparison(
+            "VERDICT: SAME\nCONFIDENCE: 0.92\nThese are not in the same lighting but clearly the same person.")
+        #expect(incidental.sameClass == true,
+                "explicit VERDICT: SAME must survive incidental negated phrasing")
+        #expect(abs(incidental.confidence - 0.92) < 0.001)
+
+        // An explicit DIFFERENT still wins even alongside a SAME line.
+        let conflict = DeepAnalyze.parseFaceComparison("VERDICT: SAME\nVERDICT: DIFFERENT")
+        #expect(conflict.sameClass == false)
+    }
+
+    // R-11 — the shared single-flight load must be cancelled only when its LAST
+    // joined waiter bails, so cancelling a prewarm can't abort a run joined to
+    // the same download (and vice-versa). The load lifecycle needs a live MLX
+    // load (verified on-device), but the waiter ref-count that gates the
+    // cancel decision is pure and unit-assertable.
+    @Test("ModelLoadGate: shared load cancels only when the final waiter bails")
+    func loadGateRefCountsWaiters() {
+        // Two waiters (e.g. a prewarm + a run joined to the same download).
+        let two = ModelLoadGate()
+        two.enter(); two.enter()
+        #expect(two.bail() == false, "first of two waiters bailing must NOT cancel the shared load")
+        #expect(two.bail() == true,  "the last waiter bailing cancels the shared load")
+
+        // A sole waiter cancels the shared load immediately.
+        let one = ModelLoadGate()
+        one.enter()
+        #expect(one.bail() == true)
+
+        // A bail with no registered waiter never cancels.
+        let none = ModelLoadGate()
+        #expect(none.bail() == false)
     }
 
     // F-C3-044 — refuse a decompression bomb above 50 MP (Windows parity).

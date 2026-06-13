@@ -12,7 +12,7 @@
 // `progress` events overwrite the latest one in place and other
 // non-critical events drop the OLDEST non-critical entry. Critical
 // events — every terminal completion (`scanComplete`,
-// `deepAnalyzeComplete`, `faceClusteringComplete`,
+// `deepAnalyzeComplete`, `faceClusteringComplete`, `restructurePlan`,
 // `restructureApplyResult`, `error`) plus `ready` / `discoveryComplete`
 // / `phaseChanged` — are pinned and never evicted.
 import Foundation
@@ -57,8 +57,9 @@ public actor IPCSink {
         // slowly. Coalesce a progress flood in place; otherwise evict the
         // OLDEST progress-class (non-critical) entry to make room. A pinned
         // critical event — every terminal completion (scanComplete,
-        // deepAnalyzeComplete, faceClusteringComplete, restructureApplyResult,
-        // error) plus ready / discoveryComplete / phaseChanged — is NEVER
+        // deepAnalyzeComplete, faceClusteringComplete, restructurePlan,
+        // restructureApplyResult, error) plus ready / discoveryComplete /
+        // phaseChanged — is NEVER
         // evicted: dropping a buffered terminal strands that tab's UI forever
         // (F-C3-029/030). The old code's `removeFirst()` ignored criticality
         // and could drop exactly such an entry sitting at the front.
@@ -194,8 +195,12 @@ public actor IPCSink {
     static func isCritical(_ p: IPCEvent.Payload) -> Bool {
         switch p {
         // Terminal completions — every one strands a tab's UI if lost.
+        // restructurePlan is the success-path terminal reply for planRestructure
+        // (its error twin, plan_restructure_failed, is .error and already pinned);
+        // omitting it let a successful plan be evicted while a failed one always
+        // landed — the asymmetry the re-audit flagged (R-15).
         case .scanComplete, .deepAnalyzeComplete, .faceClusteringComplete,
-             .restructureApplyResult, .error,
+             .restructurePlan, .restructureApplyResult, .error,
         // Non-terminal but still must never be coalesced away.
              .ready, .discoveryComplete, .phaseChanged:
             return true
@@ -214,6 +219,7 @@ public actor IPCSink {
         Data("\"scanComplete\"".utf8),
         Data("\"deepAnalyzeComplete\"".utf8),
         Data("\"faceClusteringComplete\"".utf8),
+        Data("\"restructurePlan\"".utf8),
         Data("\"restructureApplyResult\"".utf8),
         Data("\"discoveryComplete\"".utf8),
         Data("\"phaseChanged\"".utf8),

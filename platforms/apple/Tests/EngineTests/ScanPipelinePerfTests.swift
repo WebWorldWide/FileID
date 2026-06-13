@@ -17,31 +17,46 @@ struct ScanPipelinePerfTests {
 
     // MARK: - F-C6-001: pure skip predicate
 
-    @Test("isAlreadyCurrent: unchanged file (same size, scanned after mtime) skips")
+    @Test("isAlreadyCurrent: unchanged file (same size, mtime == stored modified_at) skips")
     func skipPredicateUnchanged() {
         #expect(Discovery.isAlreadyCurrent(
-            dbScannedAt: 2_000, dbSize: 100, currentModified: 1_000, currentSize: 100))
-        // Exactly-equal scanned_at == modified is still "captured".
-        #expect(Discovery.isAlreadyCurrent(
-            dbScannedAt: 1_000, dbSize: 100, currentModified: 1_000, currentSize: 100))
+            dbModified: 1_000, dbSize: 100, currentModified: 1_000, currentSize: 100))
     }
 
-    @Test("isAlreadyCurrent: a newer on-disk mtime than scanned_at never skips")
+    @Test("isAlreadyCurrent: a changed on-disk mtime never skips")
     func skipPredicateModified() {
+        // Mirrors DBWriter's `unchanged` contract: only an EXACT mtime match
+        // counts as captured, so a newer mtime reprocesses.
         #expect(!Discovery.isAlreadyCurrent(
-            dbScannedAt: 1_000, dbSize: 100, currentModified: 1_500, currentSize: 100))
+            dbModified: 1_000, dbSize: 100, currentModified: 1_500, currentSize: 100))
+    }
+
+    @Test("isAlreadyCurrent: a backdated same-size edit (mtime != stored) reprocesses")
+    func skipPredicateBackdatedMtime() {
+        // R-09: an archive extract / rsync -a / Time Machine restore can move a
+        // file's mtime to a value still <= the prior scan time but != the stored
+        // modified_at. The old `scanned_at >= mtime` test skipped it forever
+        // (stale tags/OCR); DBWriter would have reprocessed (M1 != M2), so the
+        // skip predicate must agree and NOT skip.
+        #expect(!Discovery.isAlreadyCurrent(
+            dbModified: 1_500, dbSize: 100, currentModified: 1_000, currentSize: 100))
     }
 
     @Test("isAlreadyCurrent: a size change never skips")
     func skipPredicateSize() {
         #expect(!Discovery.isAlreadyCurrent(
-            dbScannedAt: 2_000, dbSize: 100, currentModified: 1_000, currentSize: 101))
+            dbModified: 1_000, dbSize: 100, currentModified: 1_000, currentSize: 101))
     }
 
-    @Test("isAlreadyCurrent: a missing on-disk mtime can't prove unchanged → never skips")
+    @Test("isAlreadyCurrent: a one-sided nil mtime can't prove equality → never skips")
     func skipPredicateNilMtime() {
         #expect(!Discovery.isAlreadyCurrent(
-            dbScannedAt: 2_000, dbSize: 100, currentModified: nil, currentSize: 100))
+            dbModified: 1_000, dbSize: 100, currentModified: nil, currentSize: 100))
+        #expect(!Discovery.isAlreadyCurrent(
+            dbModified: nil, dbSize: 100, currentModified: 1_000, currentSize: 100))
+        // Both-nil mtimes match DBWriter's (nil, nil) == unchanged branch.
+        #expect(Discovery.isAlreadyCurrent(
+            dbModified: nil, dbSize: 100, currentModified: nil, currentSize: 100))
     }
 
     // MARK: - F-C6-001: end-to-end discovery skip set
@@ -66,37 +81,52 @@ struct ScanPipelinePerfTests {
         let db = try Database(at: tmp.appendingPathComponent("test.sqlite"))
         let discovery = Discovery()
 
-        // Discover once with no DB to learn the exact enumerator paths + sizes.
+        // Discover once with no DB to learn the exact enumerator paths + sizes
+        // + on-disk mtimes (the skip predicate now matches stored modified_at to
+        // the current mtime, mirroring DBWriter).
         let baseline = await discovery.walk(root: root)
         #expect(baseline.count == 4)
         var pathByName: [String: String] = [:]
         var sizeByName: [String: Int64] = [:]
+        var modByName: [String: Double?] = [:]
         for f in baseline {
             pathByName[f.url.lastPathComponent] = f.url.path
             sizeByName[f.url.lastPathComponent] = f.sizeBytes
+            modByName[f.url.lastPathComponent] = f.modificationDate?.timeIntervalSince1970
         }
 
-        // scanned_at far in the future guarantees scanned_at >= on-disk mtime.
+        // scanned_at far in the future: proves the R-08 touch fired (it bumps
+        // scanned_at DOWN to the current scan time for the skipped row).
         let future = Date().timeIntervalSince1970 + 1_000_000
-        func insert(name: String, size: Int64, failed: Int) throws {
+        func insert(name: String, size: Int64, modified: Double?, failed: Int) throws {
             try db.pool.write { d in
                 try d.execute(sql: """
-                    INSERT INTO files (path_text, path_hash, size_bytes, scanned_at,
-                                       kind, extension, failed)
-                    VALUES (?, 0, ?, ?, 'image', 'jpg', ?)
-                    """, arguments: [pathByName[name]!, size, future, failed])
+                    INSERT INTO files (path_text, path_hash, size_bytes, modified_at,
+                                       scanned_at, kind, extension, failed)
+                    VALUES (?, 0, ?, ?, ?, 'image', 'jpg', ?)
+                    """, arguments: [pathByName[name]!, size, modified, future, failed])
             }
         }
-        // a: current → MUST be skipped. b: wrong size → reprocess.
-        // c: prior failure (failed=1, excluded from the set) → reprocess.
-        // d: no row at all → reprocess.
-        try insert(name: "a.jpg", size: sizeByName["a.jpg"]!,     failed: 0)
-        try insert(name: "b.jpg", size: sizeByName["b.jpg"]! + 1, failed: 0)
-        try insert(name: "c.jpg", size: sizeByName["c.jpg"]!,     failed: 1)
+        // a: current (size + mtime match) → MUST be skipped. b: wrong size →
+        // reprocess. c: prior failure (failed=1, excluded from the set) →
+        // reprocess. d: no row at all → reprocess.
+        try insert(name: "a.jpg", size: sizeByName["a.jpg"]!,     modified: modByName["a.jpg"]!, failed: 0)
+        try insert(name: "b.jpg", size: sizeByName["b.jpg"]! + 1, modified: modByName["b.jpg"]!, failed: 0)
+        try insert(name: "c.jpg", size: sizeByName["c.jpg"]!,     modified: modByName["c.jpg"]!, failed: 1)
 
         let incremental = await discovery.walk(root: root, database: db, forceReprocess: false)
         let got = Set(incremental.map { $0.url.lastPathComponent })
         #expect(got == ["b.jpg", "c.jpg", "d.jpg"], "only the genuinely-current file is skipped")
+
+        // R-08: the skipped row's scanned_at must be bumped to the current scan
+        // time (touched down from `future`), so the post-scan orphan sweep —
+        // which treats `scanned_at < scanStart` as deleted — counts it present.
+        let touchedA = try await db.pool.read { d in
+            try Double.fetchOne(d, sql: "SELECT scanned_at FROM files WHERE path_text = ?",
+                                arguments: [pathByName["a.jpg"]!])
+        }
+        #expect((touchedA ?? .greatestFiniteMagnitude) < future,
+                "skipped file's scanned_at was bumped to the scan time, not left stale")
 
         // forceReprocess empties the skip set: every file flows through again.
         let forced = await discovery.walk(root: root, database: db, forceReprocess: true)

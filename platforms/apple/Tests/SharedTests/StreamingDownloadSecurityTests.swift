@@ -88,6 +88,16 @@ struct SizePlausibilityTests {
             try checkSizePlausible(actual: actual, approxBytes: approxBytes)
         }
     }
+
+    // R-17: the size gate is a *no-hash* fallback. After a passing SHA256 the
+    // bytes are provably correct, so the loose estimate must NOT run — an
+    // over-estimated approxBytes would otherwise delete a hash-verified file.
+    @Test("size gate runs only when no hash is pinned")
+    func gateDisabledOncePinnedHashPresent() {
+        #expect(shouldEnforceSizeGate(expectedSHA256: nil))
+        #expect(!shouldEnforceSizeGate(expectedSHA256: "abc123"))
+        #expect(!shouldEnforceSizeGate(expectedSHA256: ""))
+    }
 }
 
 @Suite("preflightDiskSpace — free-space guard before a multi-GB fetch")
@@ -122,6 +132,32 @@ struct DiskPreflightTests {
         let err = StreamingDownloadError.insufficientDiskSpace(
             needed: 8_000_000_000, available: 1_000_000_000)
         #expect(err.errorDescription?.isEmpty == false)
+    }
+
+    // R-18: the single-stream path only lands ~1× on the destination volume,
+    // so its peakMultiplier:1 must accept a fetch the 2× parallel guard rejects
+    // (free space between 1× and 2× of the file).
+    @Test("single-stream 1x multiplier accepts a fetch the 2x parallel guard rejects")
+    func singleStreamMultiplierIsLessConservative() throws {
+        let dest = tempDest()
+        defer { try? FileManager.default.removeItem(at: dest.deletingLastPathComponent()) }
+        guard let free = volumeFreeBytes(forItemAt: dest), free > 16 else { return }
+        // Needs > free at 2× (1.2×free) but ≤ free at 1× (0.6×free).
+        let approx = Int64(Double(free) * 0.6)
+        #expect(throws: StreamingDownloadError.self) {
+            try preflightDiskSpace(dest: dest, approxBytes: approx, peakMultiplier: 2)
+        }
+        try preflightDiskSpace(dest: dest, approxBytes: approx, peakMultiplier: 1)
+    }
+
+    @Test("multiplier defaults to the 2x parallel-staging guard")
+    func defaultMultiplierIsParallel() {
+        let dest = tempDest()
+        defer { try? FileManager.default.removeItem(at: dest.deletingLastPathComponent()) }
+        // 1 EiB at the default 2× exceeds any real volume → reject.
+        #expect(throws: StreamingDownloadError.self) {
+            try preflightDiskSpace(dest: dest, approxBytes: Int64(1) << 60)
+        }
     }
 }
 

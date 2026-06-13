@@ -38,11 +38,16 @@ public actor DeepAnalyze {
     /// prewarm and a Deep Analyze run that race share THIS one task instead
     /// of each downloading + loading their own container (double model RAM,
     /// mis-attributed vlm_model). It's also the cancellation handle for an
-    /// in-flight download (F-C3-024): requestCancel()/cancelPrewarm() cancel
-    /// it so a multi-GB fetch aborts promptly. Unstructured by design (shared
-    /// across callers), so cancellation is wired explicitly, not inherited.
+    /// in-flight download (F-C3-024): a cancel aborts the multi-GB fetch
+    /// promptly. Unstructured by design (shared across callers), so
+    /// cancellation is wired explicitly, not inherited.
     private var loadTask: Task<Void, Error>?
     private var loadTaskKind: AIModelKind?
+    /// Waiter ref-count for the shared single-flight load (R-11). The shared
+    /// loadTask is cancelled only when its LAST joined waiter bails, so a
+    /// prewarm cancel can't abort a concurrent Deep Analyze run that joined the
+    /// same download (and vice-versa). Created with each loadTask, cleared with it.
+    private var currentLoadGate: ModelLoadGate?
 
     private let generateParams = MLXLMCommon.GenerateParameters(
         maxTokens: 320,
@@ -55,20 +60,27 @@ public actor DeepAnalyze {
     // MARK: - Cancellation
 
     public func requestCancel() {
+        let wasCancelled = cancelRequested
         cancelRequested = true
-        // F-C3-024: abort an in-flight cold load/download too — otherwise the
-        // single-lane JobQueue stays wedged for the whole multi-GB fetch after
-        // the user cancels. parallelStreamingDownload honors task cancellation.
-        loadTask?.cancel()
+        // F-C3-024 + R-11: abort an in-flight cold load/download so the
+        // single-lane JobQueue doesn't stay wedged for the whole multi-GB fetch
+        // after the user cancels — but only when THIS run is the last waiter on
+        // the shared single-flight load, so a concurrent prewarm of the same
+        // model that joined the same download isn't collaterally aborted.
+        // parallelStreamingDownload honors task cancellation. The wasCancelled
+        // guard makes a repeated cancel a no-op so it can't bail twice.
+        guard !wasCancelled, let gate = currentLoadGate, let task = loadTask else { return }
+        if gate.bail() { task.cancel() }
     }
     public func clearCancel()   { cancelRequested = false }
     public func isCancelled() -> Bool { cancelRequested }
 
     public func cancelPrewarm() {
-        // The shared single-flight load runs in an unstructured task, so
-        // cancelling only the prewarm's outer task won't reach it — cancel
-        // the load explicitly.
-        loadTask?.cancel()
+        // R-11: cancel only the prewarm's outer task — its awaitLoad bails from
+        // the shared single-flight load and, via the waiter ref-count, cancels
+        // the shared load only when no other caller (a concurrent run) is still
+        // joined to it. Cancelling loadTask directly here would abort a joined
+        // run's load too.
         if let task = prewarmTask {
             task.cancel()
         } else {
@@ -153,9 +165,10 @@ public actor DeepAnalyze {
         }
         loadTask = task
         loadTaskKind = kind
+        currentLoadGate = ModelLoadGate()
         defer {
             // Only the loader that owns this task clears it.
-            if loadTaskKind == kind { loadTask = nil; loadTaskKind = nil }
+            if loadTaskKind == kind { loadTask = nil; loadTaskKind = nil; currentLoadGate = nil }
         }
         try await awaitLoad(task)
     }
@@ -163,11 +176,22 @@ public actor DeepAnalyze {
     /// Await a shared (unstructured) load task while propagating THIS caller's
     /// cancellation into it — so a cancel that arrives before the load starts,
     /// or a prewarm cancel, still aborts the in-flight download.
+    ///
+    /// R-11: each caller is one waiter on the shared load. If THIS caller's
+    /// enclosing task is cancelled (e.g. cancelPrewarm cancelled the prewarm
+    /// task), it bails from the load — but the shared task is cancelled only
+    /// when the LAST waiter bails, so a concurrent run/prewarm joined to the
+    /// same download isn't collaterally aborted.
     private func awaitLoad(_ task: Task<Void, Error>) async throws {
+        let gate = currentLoadGate
+        gate?.enter()
+        defer { gate?.leave() }
         try await withTaskCancellationHandler {
             try await task.value
         } onCancel: {
-            task.cancel()
+            // Only the final outstanding waiter actually cancels the shared
+            // load; a nil gate falls back to the original blunt cancel.
+            if gate?.bail() ?? true { task.cancel() }
         }
     }
 
@@ -386,9 +410,14 @@ public actor DeepAnalyze {
         // same") is a DIFFERENT verdict. Without this it parsed as SAME at
         // the defaulted 0.80 confidence — above the 0.75 auto-merge
         // threshold — and force-merged two distinct people.
+        // R-12: the negated-same override applies ONLY to the loose free-text
+        // branch — an explicit "VERDICT: SAME" line is authoritative, so
+        // incidental phrasing like "not in the same lighting" can't flip a
+        // compliant affirmative verdict to DIFFERENT (an explicit DIFFERENT
+        // still wins below via saidDifferent).
         let negatedSame = Self.containsNegatedSame(upper)
-        let saidSame = !negatedSame
-            && (upper.contains("VERDICT: SAME") || (!saidDifferent && upper.contains("SAME")))
+        let saidSame = upper.contains("VERDICT: SAME")
+            || (!negatedSame && !saidDifferent && upper.contains("SAME"))
         let same = saidSame && !saidDifferent
 
         var conf: Float = 0
@@ -844,6 +873,28 @@ public actor DeepAnalyze {
         ctx.scaleBy(x: scale, y: scale)
         ctx.drawPDFPage(page)
         return ctx.makeImage()
+    }
+}
+
+// MARK: - Shared-load waiter ref-count (R-11)
+
+/// Ref-counts the callers joined to the shared single-flight model load so the
+/// load is cancelled only when its LAST waiter bails — a prewarm cancel must not
+/// abort a Deep Analyze run that joined the same download, nor the reverse.
+/// `enter` on joining the load, `leave` on finish, `bail` when a caller's await
+/// is cancelled; `bail` returns true only for the final outstanding waiter, the
+/// one allowed to actually cancel the shared task. Lock-guarded so the
+/// non-isolated `withTaskCancellationHandler` onCancel can touch it safely.
+final class ModelLoadGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var waiters = 0
+    private var bailed = 0
+    func enter() { lock.lock(); waiters += 1; lock.unlock() }
+    func leave() { lock.lock(); if waiters > 0 { waiters -= 1 }; lock.unlock() }
+    func bail() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        bailed += 1
+        return waiters > 0 && bailed >= waiters
     }
 }
 

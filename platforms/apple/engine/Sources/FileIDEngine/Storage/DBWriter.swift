@@ -566,6 +566,12 @@ public actor DBWriter {
         // a file that didn't change. One exception: a CLIP model installed
         // AFTER the original scan means this scan produced an embedding the
         // DB doesn't have — backfill it without rebuilding the other children.
+        // For this branch to be REACHABLE on a normal incremental rescan, the
+        // discovery skip set must NOT drop an embeddable image that still lacks
+        // a clip_embeddings row — it keeps such files in the pipeline by AND-ing
+        // `skipSetClipBackfillExclusionSQL` (below) into its WHERE. Without that
+        // coordination F-C6-001's size+mtime skip filters these files out
+        // upstream and this backfill path is dead code (re-audit R-14).
         if unchanged {
             if let blob = file.clipEmbeddingBlob {
                 let hasEmbedding = try Bool.fetchOne(
@@ -671,6 +677,22 @@ public actor DBWriter {
             try insertClipEmbedding(fileID: fileID, blob: blob, db: db)
         }
     }
+
+    /// SQL boolean fragment (no leading `AND`, references the unaliased `files`
+    /// table) the discovery incremental skip-set query must AND into its WHERE so
+    /// an embeddable image that still LACKS a clip_embeddings row is NEVER added
+    /// to the skip set. Keeping such files in the pipeline is what makes
+    /// `insertOne`'s unchanged-file CLIP-backfill branch reachable after a CLIP
+    /// model is installed post-scan — co-located with that branch so the two stay
+    /// in sync. Keyed on `kind = 'image'` + NOT EXISTS, so ONLY images are forced,
+    /// and only until they have an embedding (a backfilled image becomes skippable
+    /// again on the next scan). Re-audit R-14; analogous in spirit to the Windows
+    /// skip-set's content_hash carve-out (C1-013, scan_session.rs), which likewise
+    /// keeps a file whose derived data is still missing IN the pipeline.
+    static let skipSetClipBackfillExclusionSQL = """
+        NOT (files.kind = 'image' AND NOT EXISTS (
+            SELECT 1 FROM clip_embeddings WHERE clip_embeddings.file_id = files.id))
+        """
 
     private static func insertClipEmbedding(fileID: Int64, blob: Data, db: GRDB.Database) throws {
         // `blob` is the worker's already-finalized Data; bind it straight to the

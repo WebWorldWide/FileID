@@ -104,6 +104,7 @@ public actor Discovery {
         collected.reserveCapacity(8_192)
         await enumerate(
             root: root, skipHidden: skipHidden, maxSizeMB: maxSizeMB, skip: skip,
+            database: database,
             cancelCheck: cancelCheck, progress: progress
         ) { file in
             collected.append(file)
@@ -133,13 +134,14 @@ public actor Discovery {
             root: root, database: database, forceReprocess: forceReprocess)
         await enumerate(
             root: root, skipHidden: skipHidden, maxSizeMB: maxSizeMB, skip: skip,
+            database: database,
             cancelCheck: cancelCheck, progress: progress, emit: onFile)
     }
 
     // MARK: - Enumeration core
 
     private struct SkipEntry: Sendable {
-        let scannedAt: Double
+        let modifiedAt: Double?
         let size: Int64
     }
 
@@ -151,6 +153,7 @@ public actor Discovery {
         skipHidden: Bool,
         maxSizeMB: Int,
         skip: [String: SkipEntry]?,
+        database: Database?,
         cancelCheck: @Sendable () -> Bool,
         progress: @Sendable (Int) -> Void,
         emit: (DiscoveredFile) async -> Void
@@ -171,6 +174,12 @@ public actor Discovery {
         let maxBytes = Int64(maxSizeMB) * 1024 * 1024
         var kept = 0
         var sinceLastProgress = 0
+        // re-audit R-08: paths skipped this scan whose `scanned_at` must still be
+        // bumped to "now" so the post-scan orphan sweep doesn't mistake a present-
+        // but-skipped file for a deletion. Captured once at the walk's start
+        // (always > the upstream scanStart), flushed in bounded batches.
+        var skippedTouch: [String] = []
+        let touchTime = Date().timeIntervalSince1970
 
         // FileManager.DirectoryEnumerator's `for ... in` is unavailable in
         // async contexts (Sendable issues). nextObject() is the sync escape.
@@ -189,17 +198,26 @@ public actor Discovery {
                                     extra: ["sizeMB": AnyCodable(size / 1_048_576)])
                 continue
             }
-            // F-C6-001 incremental skip: a DB row that succeeded before, still
-            // has the same size, and whose `scanned_at` is at/after the file's
-            // current on-disk mtime means we already captured this content —
+            // F-C6-001 incremental skip: a DB row that succeeded before and still
+            // has the same size AND the same mtime as on disk (the DBWriter
+            // "unchanged" contract, R-09) means we already captured this content —
             // skip the whole ANE/Vision/CLIP/OCR + NAS-read pass. The set holds
-            // only `failed = 0` rows, so prior failures always reprocess, and a
-            // lookup miss fails safe (the file is processed).
+            // only `failed = 0` rows (prior failures always reprocess) and excludes
+            // embeddable images still lacking a CLIP row (R-14); a lookup miss
+            // fails safe (the file is processed).
             if let skip, let entry = skip[url.path],
                Self.isAlreadyCurrent(
-                   dbScannedAt: entry.scannedAt, dbSize: entry.size,
+                   dbModifiedAt: entry.modifiedAt, dbSize: entry.size,
                    currentModified: values?.contentModificationDate?.timeIntervalSince1970,
                    currentSize: size) {
+                // re-audit R-08: the file is PRESENT (just unchanged) — record it
+                // so its row's `scanned_at` is refreshed; otherwise the orphan
+                // sweep (scanned_at < scanStart) would treat it as deleted.
+                skippedTouch.append(url.path)
+                if skippedTouch.count >= 2_000 {
+                    await Self.touchScannedAt(skippedTouch, to: touchTime, database: database)
+                    skippedTouch.removeAll(keepingCapacity: true)
+                }
                 continue
             }
             await emit(DiscoveredFile(
@@ -217,6 +235,41 @@ public actor Discovery {
                 sinceLastProgress = 0
             }
         }
+        if !skippedTouch.isEmpty {
+            await Self.touchScannedAt(skippedTouch, to: touchTime, database: database)
+        }
+    }
+
+    /// re-audit R-08: bump `scanned_at` for files SKIPPED this scan. A skip never
+    /// reaches the DBWriter UPSERT that normally refreshes `scanned_at`, so without
+    /// this the post-scan orphan sweep — which prunes rows whose `scanned_at`
+    /// predates the scan — would saturate its candidate cap with present-but-skipped
+    /// files and fail to delete genuinely-gone ones. A cheap UPDATE-only touch keeps
+    /// the skip set and the orphan sweep agreeing on "seen this scan". Bound the
+    /// IN-list to stay under SQLite's bound-variable limit. Fail-safe: a touch error
+    /// only risks an over-eager sweep candidate next run, never data loss, so it is
+    /// logged and swallowed.
+    private static func touchScannedAt(
+        _ paths: [String], to scannedAt: Double, database: Database?
+    ) async {
+        guard let database, !paths.isEmpty else { return }
+        do {
+            try await database.pool.write { db in
+                for chunk in stride(from: 0, to: paths.count, by: 500).map({
+                    Array(paths[$0..<min($0 + 500, paths.count)])
+                }) {
+                    let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
+                    var args: [DatabaseValueConvertible] = [scannedAt]
+                    args.append(contentsOf: chunk)
+                    try db.execute(
+                        sql: "UPDATE files SET scanned_at = ? WHERE path_text IN (\(placeholders))",
+                        arguments: StatementArguments(args))
+                }
+            }
+        } catch {
+            JSONLog.shared.warn(ev: "discovery_skip_touch_failed",
+                                path: redactPathForLog(paths.first ?? ""), error: "\(error)")
+        }
     }
 
     /// Volume-local file identity = APFS/HFS inode (st_ino), the macOS analog of
@@ -226,6 +279,14 @@ public actor Discovery {
     /// Windows CreateFileW path; nil on any error (heal simply won't fire).
     /// Computed only for KEPT files (post incremental-skip), so the extra syscall
     /// is paid once per file already bound for the ANE/Vision/CLIP/OCR pass.
+    ///
+    /// CAUTION (re-audit R-10): unlike the Windows NTFS file_ref, st_ino carries NO
+    /// sequence/generation number — APFS/HFS reuse an inode freely after a file is
+    /// deleted. So the DBWriter rename/move heal MUST NOT trust file_ref equality
+    /// alone; it must corroborate with a signal that survives a move but differs
+    /// across distinct files (size_bytes, and content_hash when available),
+    /// otherwise a reused inode can re-bind a deleted file's row onto an unrelated
+    /// new file. (Corroboration lives in DBWriter.healMovedRow.)
     static func inode(of url: URL) -> UInt64? {
         var st = stat()
         let ok = url.withUnsafeFileSystemRepresentation { rep -> Bool in
@@ -235,18 +296,26 @@ public actor Discovery {
         return ok ? UInt64(st.st_ino) : nil
     }
 
-    /// Pure incremental-skip predicate (testable in isolation). A file is
-    /// "already current" when its size is unchanged AND the DB scanned it at or
-    /// after the file's current modification time. A `nil` current mtime can't
-    /// prove the file is unchanged, so it is never skipped. `forceReprocess` and
-    /// the prior-failure exclusion are handled where the skip set is built.
+    /// Pure incremental-skip predicate (testable in isolation). Mirrors DBWriter's
+    /// `unchanged` contract (DBWriter.insertOne) EXACTLY: a file is "already
+    /// current" only when its size is unchanged AND its current on-disk mtime
+    /// EQUALS the stored `modified_at` (within float tolerance). The prior form
+    /// (`scanned_at >= mtime`) was LOOSER than DBWriter — it skipped same-size
+    /// edits whose mtime moved to a value still <= the last scan time (archive
+    /// extract / `rsync -a` / git checkout / Time Machine restore), so the new
+    /// content was never re-tagged (re-audit R-09). A nil-vs-present mtime is a
+    /// change; both-nil matches DBWriter's both-nil "unchanged". `forceReprocess`
+    /// and the prior-failure exclusion are handled where the skip set is built.
     static func isAlreadyCurrent(
-        dbScannedAt: Double, dbSize: Int64,
+        dbModifiedAt: Double?, dbSize: Int64,
         currentModified: Double?, currentSize: Int64
     ) -> Bool {
         guard dbSize == currentSize else { return false }
-        guard let modified = currentModified else { return false }
-        return dbScannedAt >= modified
+        switch (dbModifiedAt, currentModified) {
+        case let (a?, b?): return abs(a - b) < 0.000_001
+        case (nil, nil):   return true
+        default:           return false
+        }
     }
 
     /// Build the read-only incremental skip set for `root`. Returns nil (skip
@@ -255,7 +324,11 @@ public actor Discovery {
     /// path_text < prefixUpper` is sargable on the UNIQUE index on `path_text`
     /// (a `LIKE prefix||'%'` is not) and scopes the load to THIS root's subtree,
     /// mirroring the Windows skip-set query (scan_session.rs) and the macOS
-    /// orphan-sweep range. Only `failed = 0` rows are loaded.
+    /// orphan-sweep range. Only `failed = 0` rows are loaded, and an embeddable
+    /// image still lacking a `clip_embeddings` row is excluded (R-14) via the
+    /// shared `DBWriter.skipSetClipBackfillExclusionSQL` so the post-CLIP-install
+    /// backfill branch in DBWriter.insertOne stays reachable on an incremental
+    /// rescan instead of being filtered out here.
     private static func buildSkipSet(
         root: URL, database: Database?, forceReprocess: Bool
     ) async -> [String: SkipEntry]? {
@@ -273,15 +346,16 @@ public actor Discovery {
             return try await database.pool.read { db -> [String: SkipEntry] in
                 var map: [String: SkipEntry] = [:]
                 let rows = try Row.fetchAll(db, sql: """
-                    SELECT path_text, size_bytes, scanned_at FROM files
+                    SELECT path_text, size_bytes, modified_at FROM files
                     WHERE failed = 0 AND path_text >= ? AND path_text < ?
+                      AND \(DBWriter.skipSetClipBackfillExclusionSQL)
                     """, arguments: [prefix, prefixUpper])
                 map.reserveCapacity(rows.count)
                 for row in rows {
                     let path: String = row["path_text"]
                     let size: Int64 = row["size_bytes"] ?? -1
-                    let scannedAt: Double = row["scanned_at"] ?? 0
-                    map[path] = SkipEntry(scannedAt: scannedAt, size: size)
+                    let modifiedAt: Double? = row["modified_at"]
+                    map[path] = SkipEntry(modifiedAt: modifiedAt, size: size)
                 }
                 return map
             }

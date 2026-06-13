@@ -30,6 +30,12 @@ struct LibraryView: View {
     /// once at the end to refresh them. Kept in sync with `store.version`
     /// whenever no scan is active.
     @State private var frozenTileVersion: Int = 0
+    /// Edit-only epoch, bumped by in-app tag / undo writes. Unlike
+    /// `frozenTileVersion` it is NOT frozen during a scan, so a Finder-tag
+    /// edit, bulk-tag, or undo performed while the engine is scanning still
+    /// refreshes the affected tiles' dots instead of going stale until the
+    /// scan ends. Combined with the counter epoch in `tileRefreshToken`.
+    @State private var editEpoch: Int = 0
     /// When set, the grid shows photos most-similar to this seed
     /// (CLIP image-embedding cosine).
     @State private var similarSeed: FileRow? = nil
@@ -67,12 +73,13 @@ struct LibraryView: View {
         return p.phase == .discovering || p.phase == .tagging || p.phase == .postScan
     }
 
-    /// The epoch each tile's `.task` keys on. While a scan runs it's frozen
-    /// (see `frozenTileVersion`) so the per-second counter refresh doesn't
-    /// re-task every visible tile; otherwise it tracks `store.version` so
-    /// tag edits / undo refresh the Finder-tag dots in place.
-    private var tileRefreshToken: Int {
-        scanActive ? frozenTileVersion : store.version
+    /// The composite id each tile's `.task` keys on. The counter epoch is
+    /// frozen during a scan (see `frozenTileVersion`) so the per-second batch
+    /// bump doesn't re-task every visible tile; the edit epoch is never frozen
+    /// so an in-app tag / undo write still refreshes the dots mid-scan. Either
+    /// component changing re-tasks the affected tiles.
+    private var tileRefreshToken: String {
+        "\(scanActive ? frozenTileVersion : store.version)·\(editEpoch)"
     }
 
     var body: some View {
@@ -539,6 +546,7 @@ struct LibraryView: View {
                 onComplete: {
                     selectMode = false
                     checkedFileIDs.removeAll()
+                    editEpoch += 1   // refresh tile dots even mid-scan
                 }
             )
         }
@@ -562,6 +570,7 @@ struct LibraryView: View {
                 undoStatus = "Reverted \(result.undone) rename\(result.undone == 1 ? "" : "s")"
                     + (result.skipped > 0 ? " · skipped \(result.skipped)" : "")
                     + (result.failed > 0 ? " · failed \(result.failed)" : "")
+                editEpoch += 1   // refresh tiles (renamed files) even mid-scan
                 refreshBulkState()
                 reload()
             }
@@ -574,12 +583,14 @@ struct LibraryView: View {
         Task.detached(priority: .userInitiated) {
             let result = TagWriter.undoBulkAdd(batch)
             await MainActor.run {
-                if result.failed == 0 {
+                if result.failed == 0 && result.skipped == 0 {
                     BulkTagSheet.clearLastBatch()
                 }
                 undoStatus = "Removed tags from \(result.undone) file\(result.undone == 1 ? "" : "s")"
+                    + (result.skipped > 0 ? " · skipped \(result.skipped)" : "")
                     + (result.failed > 0 ? " · failed \(result.failed)" : "")
                     + (result.firstError.map { " — \($0)" } ?? "")
+                editEpoch += 1   // refresh tile dots even mid-scan
                 refreshBulkState()
                 storeRef.notifyChanged()
                 reload()
@@ -675,7 +686,8 @@ struct LibraryView: View {
         }
         .sheet(item: $selected) { file in
             FilePreviewSheet(file: file, store: store, engine: engine,
-                              siblings: previewSiblings, onSelect: { selected = $0 })
+                              siblings: previewSiblings, onSelect: { selected = $0 },
+                              onEdit: { editEpoch += 1 })
         }
     }
 
@@ -751,10 +763,11 @@ struct FileTile: View {
     /// Top vision tags injected from the parent's batch query —
     /// avoids N+1 SQL across visible tiles.
     var topTags: [String] = []
-    /// Scan-frozen mirror of `store.version` from the parent. Keys the
-    /// tile's `.task` so a tag edit / undo refreshes it, while a live
-    /// scan's per-second counter bump does not re-task every visible tile.
-    var refreshToken: Int = 0
+    /// Composite refresh id from the parent (scan-frozen counter epoch +
+    /// never-frozen edit epoch). Keys the tile's `.task` so a tag edit / undo
+    /// refreshes it — including mid-scan — while a live scan's per-second
+    /// counter bump alone does not re-task every visible tile.
+    var refreshToken: String = ""
 
     @State private var thumb: NSImage?
     @State private var hovering = false
@@ -888,11 +901,11 @@ struct FileTile: View {
                 }
             }
         }
-        // Keyed on refreshToken (a scan-frozen mirror of store.version) so
-        // tag edits / bulk undo refresh the Finder-tag dots in place, but the
-        // per-second counter refresh during a live scan doesn't re-task every
-        // visible tile — re-reading thumbnails + Finder xattrs for files that
-        // didn't change. Thumbnail re-fetches are NSCache hits.
+        // Keyed on refreshToken (counter epoch + never-frozen edit epoch) so
+        // tag edits / bulk undo refresh the Finder-tag dots in place — even
+        // mid-scan — but the per-second counter refresh during a live scan
+        // doesn't re-task every visible tile, re-reading thumbnails + Finder
+        // xattrs for files that didn't change. Thumbnail re-fetches are NSCache hits.
         .task(id: "\(row.id)·\(refreshToken)") {
             thumb = await ThumbnailService.shared.thumbnail(for: row.url, size: 264)
             // Off-main like FinderTagsEditor — xattr reads can stall on
@@ -1036,6 +1049,9 @@ private struct FilePreviewSheet: View {
     let engine: EngineClient
     let siblings: [FileRow]              // for prev/next arrow nav
     let onSelect: (FileRow) -> Void
+    /// Bump the parent's edit epoch so a Finder-tag edit / smart-name apply
+    /// made in this sheet refreshes the underlying grid tile even mid-scan.
+    var onEdit: () -> Void = {}
     @Environment(\.dismiss) var dismiss
     @State private var preview: NSImage?
 
@@ -1228,6 +1244,7 @@ private struct FilePreviewSheet: View {
                                                         newPath: newURL.path
                                                     )
                                                     BulkRenameSheet.saveLastBatch([outcome])
+                                                    onEdit()
                                                 }
                                                 dismiss()
                                             }
@@ -1251,7 +1268,7 @@ private struct FilePreviewSheet: View {
                                 }
                             }
                         }
-                        FinderTagsEditor(file: file, store: store)
+                        FinderTagsEditor(file: file, store: store, onEdit: onEdit)
                     }
                     .padding(16)
                 }
@@ -1299,6 +1316,9 @@ private struct FilePreviewSheet: View {
 private struct FinderTagsEditor: View {
     let file: FileRow
     let store: ReadStore
+    /// Notify the parent grid that this file's tags changed so its tile
+    /// re-reads the Finder-tag dots — needed for refresh during a live scan.
+    var onEdit: () -> Void = {}
     @State private var tags: [String] = []
     @State private var draft: String = ""
     @State private var error: String?
@@ -1367,6 +1387,7 @@ private struct FinderTagsEditor: View {
             draft = ""
             error = nil
             store.notifyChanged()  // refresh Library tile tag-count
+            onEdit()
         } catch {
             self.error = error.localizedDescription
         }
@@ -1377,6 +1398,7 @@ private struct FinderTagsEditor: View {
             tags = try TagWriter.removeTags([tag], at: file.url)
             error = nil
             store.notifyChanged()
+            onEdit()
         } catch {
             self.error = error.localizedDescription
         }

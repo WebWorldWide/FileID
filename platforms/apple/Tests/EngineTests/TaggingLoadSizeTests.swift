@@ -66,4 +66,23 @@ struct TaggingLoadSizeTests {
         let result = Tagging.loadImageAndEXIF(url: url, sizeBytes: 1_000_000)
         #expect(result != nil)
     }
+
+    // R-13: a 0/absent discovered size means UNKNOWN, not tiny — Discovery's
+    // .fileSizeKey can come back empty on some SMB/NFS volumes, leaving a valid
+    // image at sizeBytes 0. The loader must re-stat and decode it rather than
+    // short-circuit to decode-failed via the <256 B guard.
+    @Test("a 0 discovered size re-stats and still decodes (not decode-failed)")
+    func zeroSizeFallsBackToStatAndDecodes() throws {
+        let url = try makeTempPNG()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        // The on-disk file is well over 256 B; only the *passed* size is unknown.
+        let onDisk = try #require(
+            (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int)
+        #expect(onDisk >= 256)
+
+        let result = Tagging.loadImageAndEXIF(url: url, sizeBytes: 0)
+        #expect(result != nil,
+                "a 0 discovered size must re-stat and decode, not skip a valid image as corrupt")
+    }
 }

@@ -341,7 +341,18 @@ public enum Tagging {
         // ImageIO crash mode v1's Session-B-hardening fixed. Reuse the size
         // Discovery (Stage A) already stat'd instead of a second
         // attributesOfItem — one fewer SMB/NFS round-trip per image on NAS.
-        if sizeBytes < 256 { return nil }
+        //
+        // R-13: a 0/absent discovered size means UNKNOWN, not tiny — Discovery's
+        // .fileSizeKey can come back empty on some SMB/NFS volumes (which this
+        // project targets), leaving sizeBytes 0 on a perfectly valid image. Only
+        // re-stat in that case so we don't mark a decodable file decode-failed;
+        // the common (size > 0) path keeps the no-redundant-stat win.
+        var effectiveSize = sizeBytes
+        if effectiveSize <= 0,
+           let n = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber {
+            effectiveSize = n.int64Value
+        }
+        if effectiveSize > 0 && effectiveSize < 256 { return nil }
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
         // Iteration 5 perf finding: load (NAS I/O + decode) was P95 252ms — by
         // far the dominant per-file cost. Two changes:

@@ -3,6 +3,7 @@
 // returned in the right (sorted) order with the right kinds.
 import Testing
 import Foundation
+import GRDB
 @testable import FileIDEngine
 
 @Suite("Discovery")
@@ -75,5 +76,112 @@ struct DiscoveryTests {
 
         #expect(result.count == 1)
         #expect(result.first?.url.lastPathComponent == "small.jpg")
+    }
+
+    // re-audit R-08: a file the incremental skip set DROPS is still present on
+    // disk, so discovery must refresh its `scanned_at`; otherwise the post-scan
+    // orphan sweep (which prunes rows with `scanned_at < scanStart`) would treat
+    // every skipped-but-present file as a deletion candidate and stop pruning the
+    // genuinely-deleted ones once its cap is saturated.
+    @Test("A skipped unchanged file still gets its scanned_at bumped (R-08)")
+    func skippedFileScannedAtIsBumped() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDSkipTouch-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let db = try Database(at: tmp.appendingPathComponent("test.sqlite"))
+
+        // A non-image doc: skippable without a CLIP embedding (the R-14 carve-out
+        // forces only embeddingless IMAGES to stay in the pipeline).
+        let doc = tmp.appendingPathComponent("report.pdf")
+        let bytes = Data("hello".utf8)                              // 5 bytes
+        try bytes.write(to: doc)
+        let fixedMtime = Date(timeIntervalSince1970: 1_700_000_000) // whole second
+        try FileManager.default.setAttributes(
+            [.modificationDate: fixedMtime], ofItemAtPath: doc.path)
+
+        // Seed a prior-scan row: same size + mtime, but a deliberately OLD
+        // scanned_at (as an earlier scan, before the current scanStart, would have).
+        let oldScannedAt = 1_000.0
+        try await db.pool.write { conn in
+            try conn.execute(sql: """
+                INSERT INTO files
+                  (path_text, path_hash, path_search, size_bytes, modified_at,
+                   scanned_at, kind, extension)
+                VALUES (?, ?, ?, ?, ?, ?, 'doc', 'pdf')
+                """, arguments: [
+                    doc.path, 0, doc.path.precomposedStringWithCanonicalMapping,
+                    Int(bytes.count), fixedMtime.timeIntervalSince1970, oldScannedAt
+                ])
+        }
+
+        let discovery = Discovery()
+        let result = await discovery.walk(root: tmp, database: db, forceReprocess: false)
+
+        // Unchanged → SKIPPED (never re-emitted to the pipeline)…
+        #expect(!result.contains { $0.url.lastPathComponent == "report.pdf" })
+
+        // …but its scanned_at must be refreshed to ~now so the orphan sweep
+        // (scanned_at < scanStart) won't treat the present file as deleted.
+        let after: Double = try await db.pool.read { conn in
+            try Double.fetchOne(conn, sql:
+                "SELECT scanned_at FROM files WHERE path_text = ?",
+                arguments: [doc.path]) ?? -1
+        }
+        #expect(after > oldScannedAt)
+        #expect(after > fixedMtime.timeIntervalSince1970)
+    }
+}
+
+// re-audit R-09: the incremental-skip predicate must match DBWriter's `unchanged`
+// contract — skip ONLY when size matches AND the current mtime EQUALS the stored
+// modified_at. The prior `scanned_at >= mtime` form was looser and skipped
+// same-size, backdated-mtime edits forever.
+@Suite("Discovery incremental-skip predicate (R-09)")
+struct DiscoverySkipPredicateTests {
+
+    @Test("size mismatch never skips")
+    func sizeMismatch() {
+        #expect(!Discovery.isAlreadyCurrent(
+            dbModifiedAt: 100, dbSize: 10, currentModified: 100, currentSize: 11))
+    }
+
+    @Test("equal size + equal mtime skips")
+    func equalMtimeSkips() {
+        #expect(Discovery.isAlreadyCurrent(
+            dbModifiedAt: 1_700_000_000, dbSize: 10,
+            currentModified: 1_700_000_000, currentSize: 10))
+    }
+
+    @Test("backdated same-size edit (mtime != stored) is NOT skipped")
+    func backdatedEditNotSkipped() {
+        // Stored mtime M1, file backdated to M2 (M2 < last scan time but M1 != M2).
+        // The old `scanned_at >= mtime` predicate skipped this; the contract-
+        // matching predicate must reprocess it so new content is re-tagged.
+        #expect(!Discovery.isAlreadyCurrent(
+            dbModifiedAt: 1_700_000_000, dbSize: 10,
+            currentModified: 1_600_000_000, currentSize: 10))
+    }
+
+    @Test("both-nil mtime matches DBWriter's both-nil unchanged")
+    func bothNilSkips() {
+        #expect(Discovery.isAlreadyCurrent(
+            dbModifiedAt: nil, dbSize: 10, currentModified: nil, currentSize: 10))
+    }
+
+    @Test("nil-vs-present mtime is a change")
+    func nilVsPresentNotSkipped() {
+        #expect(!Discovery.isAlreadyCurrent(
+            dbModifiedAt: nil, dbSize: 10, currentModified: 100, currentSize: 10))
+        #expect(!Discovery.isAlreadyCurrent(
+            dbModifiedAt: 100, dbSize: 10, currentModified: nil, currentSize: 10))
+    }
+
+    @Test("sub-microsecond mtime drift still skips")
+    func tinyDriftSkips() {
+        #expect(Discovery.isAlreadyCurrent(
+            dbModifiedAt: 1_700_000_000.0, dbSize: 10,
+            currentModified: 1_700_000_000.0 + 1e-7, currentSize: 10))
     }
 }

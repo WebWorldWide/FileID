@@ -15,7 +15,14 @@ public final class EngineClient {
 
     public private(set) var state: ConnectionState = .starting
     public private(set) var lastProgress: ScanProgress?
-    public private(set) var lastError: EngineError?
+    public private(set) var lastError: EngineError? {
+        didSet { lastErrorSignal &+= 1 }
+    }
+    /// Bumps on every `lastError` write, including a repeat of an identical
+    /// message. EngineError isn't Equatable, so views key error-recovery
+    /// `.onChange` on this monotonic counter rather than `lastError?.message`
+    /// — two consecutive identical failures must still re-fire the handler.
+    public private(set) var lastErrorSignal: Int = 0
     public private(set) var lastBatch: BatchSummary?
     public private(set) var lastFaceClustering: FaceClusteringResult?
     public private(set) var faceClusteringInFlight: Bool = false
@@ -155,7 +162,7 @@ public final class EngineClient {
     /// Stop half of a restart: cancel any pending respawn and
     /// synchronously terminate + reap the running engine, so a restart
     /// never overlaps two live engines against the single-writer SQLite
-    /// DB. `waitUntilExit()` releases the WAL lock before the next spawn;
+    /// DB. The bounded reap releases the WAL lock before the next spawn;
     /// the old process's pipe handlers are left armed (so it keeps
     /// draining and can't deadlock on a full pipe during shutdown) — its
     /// late EOF is harmless because `handleEngineExit(for:)` rejects any
@@ -165,10 +172,30 @@ public final class EngineClient {
         pendingRespawn = nil
         if let proc = process, proc.isRunning {
             proc.terminate()
-            proc.waitUntilExit()
+            // Bounded reap, not an unbounded waitUntilExit() on the
+            // @MainActor: SIGTERM drops the WAL lock in well under a second
+            // (the engine installs no handler), but a wedged/uninterruptible
+            // engine must never hang the UI. Poll, then escalate to SIGKILL.
+            if !Self.waitForExit(proc, timeout: 3.0) {
+                kill(proc.processIdentifier, SIGKILL)
+                _ = Self.waitForExit(proc, timeout: 2.0)
+            }
         }
         process = nil
         stdinPipe = nil
+    }
+
+    /// Bounded wait for a child to exit; true if it exited within `timeout`.
+    /// Polls `isRunning` (flipped by Foundation's background reaper, so it
+    /// updates even while this runs on the main actor) instead of the
+    /// timeout-free `waitUntilExit()`, which can hang indefinitely.
+    private static func waitForExit(_ proc: Process, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while proc.isRunning {
+            if Date() >= deadline { return false }
+            usleep(20_000)
+        }
+        return true
     }
 
     /// Returns a non-nil failure reason when the engine binary

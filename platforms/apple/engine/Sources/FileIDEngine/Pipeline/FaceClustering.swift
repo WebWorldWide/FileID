@@ -43,12 +43,31 @@ public enum FaceClustering {
     /// (audit F-C3-033)
     public static let maxFacesPerRun: Int = 200_000
 
+    /// Effective mid-pass cancel for a clustering run. The SCAN cancel mirror is
+    /// sticky — set on `.cancelScan` / `.shutdown` and cleared only by the next
+    /// scan's `startSession()` — so a standalone (`.runFaceClustering`) or auto
+    /// cluster enqueued after a cancelled scan must NOT abort merely because that
+    /// prior scan was cancelled (it would hit cancel on its first poll and return
+    /// before the persist txn — a silent "0 persons" no-op). We honor the mirror
+    /// only when it flips true AFTER this run began (`baseline == false`) — a
+    /// genuine shutdown/cancel mid-pass — preserving the F-C3-042 cooperative
+    /// cancel. (audit R-07)
+    static func clusterShouldCancel(baseline: Bool, current: Bool) -> Bool {
+        current && !baseline
+    }
+
     /// Run a clustering pass. Returns a summary the engine emits over IPC.
     public static func runClustering(
         database: Database,
         sink: IPCSink
     ) async -> FaceClusteringResult {
         let started = Date()
+
+        // Snapshot the sticky SCAN cancel mirror at entry so this clustering job
+        // has its own cancellation scope: a previously-cancelled scan can't
+        // suppress a later manual/auto cluster, while a cancel/shutdown arriving
+        // DURING the run still aborts it at a safe boundary. (audit R-07)
+        let cancelBaseline = ScanCoordinator.isCancelledSync()
 
         // ArcFace is a hard requirement — no Vision-print fallback. Vision
         // feature prints aren't face-identity-trained; clustering on them
@@ -203,11 +222,17 @@ public enum FaceClustering {
                 }
             },
             params: icParams,
-            // Poll the engine's existing sync cancel mirror (set on .shutdown via
-            // ScanCoordinator.requestCancel) so a mid-flight pass aborts at a safe
-            // boundary instead of being killed by _exit(0) behind its persist
-            // transaction. The cancelled result is discarded — nothing persisted.
-            shouldCancel: { ScanCoordinator.isCancelledSync() }
+            // Poll the engine's sync cancel mirror (set via ScanCoordinator
+            // .requestCancel on .cancelScan/.shutdown) so a mid-flight pass aborts
+            // at a safe boundary instead of being killed by _exit(0) behind its
+            // persist transaction. `clusterShouldCancel` ignores a mirror that was
+            // already true at entry (a sticky prior scan-cancel) so this job runs;
+            // it fires only on a transition during the run. Cancelled = nothing
+            // persisted. (F-C3-042, R-07)
+            shouldCancel: {
+                Self.clusterShouldCancel(baseline: cancelBaseline,
+                                         current: ScanCoordinator.isCancelledSync())
+            }
         )
 
         // A cancellation mid-pass discards the (partial) clustering result: we

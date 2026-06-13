@@ -55,7 +55,9 @@ public func streamingDownload(
     expectedSHA256: String? = nil,
     onTick: @escaping @Sendable (DownloadTick) -> Void
 ) async throws {
-    try preflightDiskSpace(dest: dest, approxBytes: approxBytes)
+    // Single-stream transits the system temp dir then atomic-moves onto the
+    // destination volume — peak destination use is ~1×, not the parallel 2×.
+    try preflightDiskSpace(dest: dest, approxBytes: approxBytes, peakMultiplier: 1)
     let delegate = StreamingDownloadDelegate()
     let session = URLSession(configuration: streamingConfig(),
                               delegate: delegate, delegateQueue: nil)
@@ -90,11 +92,16 @@ public func streamingDownload(
                     }
                     do {
                         // Size sanity (no-hash gate): reject a truncated stream
-                        // or error page standing in for the artifact.
-                        let actualSize = ((try? FileManager.default
-                            .attributesOfItem(atPath: tempURL.path))?[.size] as? NSNumber)?
-                            .int64Value ?? -1
-                        try checkSizePlausible(actual: actualSize, approxBytes: approxBytes)
+                        // or error page standing in for the artifact. Skipped
+                        // once a SHA256 verified above — an exact hash makes
+                        // this loose estimate a false-reject-only risk that
+                        // could delete a provably-correct file.
+                        if shouldEnforceSizeGate(expectedSHA256: expectedSHA256) {
+                            let actualSize = ((try? FileManager.default
+                                .attributesOfItem(atPath: tempURL.path))?[.size] as? NSNumber)?
+                                .int64Value ?? -1
+                            try checkSizePlausible(actual: actualSize, approxBytes: approxBytes)
+                        }
                     } catch {
                         try? FileManager.default.removeItem(at: tempURL)
                         cont.resume(throwing: error)
@@ -188,7 +195,9 @@ public func parallelStreamingDownload(
     expectedSHA256: String? = nil,
     onTick: @escaping @Sendable (DownloadTick) -> Void
 ) async throws {
-    try preflightDiskSpace(dest: dest, approxBytes: approxBytes)
+    // Parallel staging keeps every part plus the concat'd final on the
+    // destination volume → peak transient use is ~2× the file.
+    try preflightDiskSpace(dest: dest, approxBytes: approxBytes, peakMultiplier: 2)
     let probeCapture = RedirectCapture()
     let probeSession = URLSession(configuration: streamingConfig(approxBytes: approxBytes),
                                   delegate: probeCapture, delegateQueue: nil)
@@ -340,13 +349,16 @@ public func parallelStreamingDownload(
     // Size sanity (no-hash gate, mirrors the single-stream path): the
     // exact-Content-Length check above can still pass for an error page that
     // sets a matching small Content-Length, so reject anything implausibly
-    // far below the registry estimate.
-    do {
-        try checkSizePlausible(actual: assembledSize, approxBytes: approxBytes)
-    } catch {
-        try? FileManager.default.removeItem(at: finalTemp)
-        cleanupParts()
-        throw error
+    // far below the registry estimate. Skipped once a SHA256 verified above —
+    // an exact hash makes this loose estimate a false-reject-only risk.
+    if shouldEnforceSizeGate(expectedSHA256: expectedSHA256) {
+        do {
+            try checkSizePlausible(actual: assembledSize, approxBytes: approxBytes)
+        } catch {
+            try? FileManager.default.removeItem(at: finalTemp)
+            cleanupParts()
+            throw error
+        }
     }
     cleanupParts()
 
@@ -454,17 +466,28 @@ func volumeFreeBytes(forItemAt url: URL) -> Int64? {
 
 /// Free-disk preflight before a multi-GB fetch — mirrors the small CLIP /
 /// SFace installers so the VLM path (3.3–13.5 GB) no longer fails mid-fetch
-/// with an opaque write error. The parallel path stages every part then
-/// concatenates into a final temp on the same volume, so peak transient use
-/// is ~2× the file; the installers gate on the same 2× heuristic. Skipped
-/// when `approxBytes <= 0` (size unknown) or when free space can't be read.
-func preflightDiskSpace(dest: URL, approxBytes: Int64) throws {
+/// with an opaque write error. Peak transient use depends on the path, so the
+/// caller passes the multiplier: the parallel path stages every part then
+/// concatenates into a final temp on the destination volume (~2×), while the
+/// single-stream path transits the system temp dir and lands ~1× on the
+/// destination volume — a fixed 2× there false-rejects fetches that fit when
+/// free space is between 1× and 2×. Skipped when `approxBytes <= 0` (size
+/// unknown) or when free space can't be read.
+func preflightDiskSpace(dest: URL, approxBytes: Int64, peakMultiplier: Int64 = 2) throws {
     guard approxBytes > 0 else { return }
-    let needed = approxBytes * 2
+    let needed = approxBytes * max(1, peakMultiplier)
     guard let free = volumeFreeBytes(forItemAt: dest) else { return }
     if free < needed {
         throw StreamingDownloadError.insufficientDiskSpace(needed: needed, available: free)
     }
+}
+
+/// The post-download size gate is a *no-hash* fallback: when a SHA256 was
+/// pinned and matched, the bytes are provably correct, so the loose size
+/// estimate must be skipped — running it after a passing hash can only
+/// false-reject (and delete) a verified file when `approxBytes` over-estimates.
+func shouldEnforceSizeGate(expectedSHA256: String?) -> Bool {
+    expectedSHA256 == nil
 }
 
 /// Loose post-download size sanity — port of the Windows downloader's

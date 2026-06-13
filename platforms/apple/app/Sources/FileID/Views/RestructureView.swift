@@ -287,11 +287,23 @@ struct RestructureView: View {
         }
         // A plan computation that failed engine-side ends the "Computing…"
         // spinner (it would otherwise spin forever waiting for a plan event).
-        .onChange(of: engine.lastError?.message) { _, _ in
-            guard loading, let kind = engine.lastError?.kind,
-                  kind == "plan_restructure_failed" || kind == "db_unavailable" else { return }
-            loading = false
-            status = "Couldn't compute a plan. Please try again."
+        // Keyed on `lastErrorSignal` (bumps on every error write) not the
+        // message, so a retry that fails with the identical message still
+        // clears the spinner. An oversized plan frame dropped by the app's
+        // inbound IPC cap (`ipc_frame_too_large`) is a terminal plan failure
+        // here too — otherwise the tab wedges on a very large library's plan.
+        .onChange(of: engine.lastErrorSignal) { _, _ in
+            guard loading, let kind = engine.lastError?.kind else { return }
+            switch kind {
+            case "plan_restructure_failed", "db_unavailable":
+                loading = false
+                status = "Couldn't compute a plan. Please try again."
+            case "ipc_frame_too_large":
+                loading = false
+                status = "This library's plan is too large to display. Try restructuring a smaller folder."
+            default:
+                break
+            }
         }
         // Group the drill-down's proposals once per scope, not on every
         // checkbox tap inside the sheet.
