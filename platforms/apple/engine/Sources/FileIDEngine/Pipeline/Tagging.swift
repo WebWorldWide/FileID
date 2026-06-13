@@ -48,15 +48,16 @@ public enum Tagging {
         let ext = url.pathExtension.lowercased()
         let started = CFAbsoluteTimeGetCurrent()
 
+        var tagged: TaggedFile
         switch discovered.kind {
         case .image:
-            return await processImage(discovered: discovered, worker: worker, started: started)
+            tagged = await processImage(discovered: discovered, worker: worker, started: started)
         case .video:
-            return await processVideo(discovered: discovered, worker: worker, started: started)
+            tagged = await processVideo(discovered: discovered, worker: worker, started: started)
         case .pdf:
-            return await processPDF(discovered: discovered, worker: worker, started: started)
+            tagged = await processPDF(discovered: discovered, worker: worker, started: started)
         case .doc, .audio, .other:
-            return TaggedFile(
+            tagged = TaggedFile(
                 url: url, kind: kind, extension: ext, sizeBytes: discovered.sizeBytes,
                 createdAt: discovered.creationDate, modifiedAt: discovered.modificationDate,
                 visionTags: [discovered.kind.rawValue.capitalized],
@@ -64,6 +65,11 @@ public enum Tagging {
                 tagsEvaluated: true
             )
         }
+        // Single choke point: stamp the volume-local identity (st_ino) computed
+        // at discovery onto every TaggedFile so DBWriter's rename/move heal can
+        // re-bind a moved file's row instead of orphaning its tags/faces/OCR.
+        tagged.fileRef = discovered.fileRef
+        return tagged
     }
 
     // MARK: - Image pipeline

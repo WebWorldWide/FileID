@@ -23,6 +23,14 @@ public struct TaggedFile: Sendable {
     public let createdAt: Date?
     public let modifiedAt: Date?
 
+    /// Volume-local file identity (APFS/HFS inode, st_ino), propagated from
+    /// `DiscoveredFile.fileRef`. Powers DBWriter's rename/move heal: a moved file
+    /// with a matching `fileRef` whose old path is gone re-binds the existing row
+    /// (id + tags/faces/OCR/embeddings) instead of orphaning it. nil when stat
+    /// failed at discovery (no heal possible). The macOS analog of the Windows
+    /// NTFS MFT file_ref (dbwriter.rs).
+    public var fileRef: UInt64?
+
     // Tagging output — empty arrays for files we couldn't process.
     public var visionTags: [String]          // raw Vision classifier labels
     public var phash: UInt64?                // dHash (0 = none / failed)
@@ -65,6 +73,7 @@ public struct TaggedFile: Sendable {
     public init(
         url: URL, kind: String, extension ext: String, sizeBytes: Int64,
         createdAt: Date?, modifiedAt: Date?,
+        fileRef: UInt64? = nil,
         visionTags: [String] = [], phash: UInt64? = nil,
         aestheticScore: Double? = nil, hasFaces: Bool = false,
         facePrints: [Data] = [], faceBBoxes: [String] = [],
@@ -85,6 +94,7 @@ public struct TaggedFile: Sendable {
         self.sizeBytes = sizeBytes
         self.createdAt = createdAt
         self.modifiedAt = modifiedAt
+        self.fileRef = fileRef
         self.visionTags = visionTags
         self.phash = phash
         self.aestheticScore = aestheticScore
@@ -423,11 +433,36 @@ public actor DBWriter {
         // life of the (pool-reused) writer connection, so the hot per-file path
         // re-binds instead of re-parsing — the macOS analogue of the Windows
         // prepared/cached-statement path (dbwriter.rs). (F-C6-010)
-        let existing = try Row.fetchOne(
+        var existing = try Row.fetchOne(
             db.cachedStatement(sql: """
                 SELECT id, size_bytes, modified_at, failed FROM files WHERE path_text = ?
                 """),
             arguments: [file.url.path])
+
+        // Rename/move heal — port of dbwriter.rs (heal_candidate_moved). Run ONLY
+        // when no row yet sits at THIS path (a genuinely new path = a move's
+        // destination). If another row carries the same volume-local `file_ref`
+        // at a DIFFERENT path whose OLD location is now GONE from disk, re-bind
+        // that row to this path — preserving its id and every FK-linked tag /
+        // face (incl. manual person_id) / OCR / embedding — instead of orphaning
+        // it and inserting a brand-new row that loses all of it. The old-path-gone
+        // gate is the exact-duplicate guard: two COEXISTING hardlinks share an
+        // inode but both paths still exist, so neither heals — they stay two rows.
+        // After a heal the row lives at this path, so re-fetch `existing`: the
+        // upsert below then takes its DO UPDATE branch and `fileID` resolves to
+        // the preserved id. A pure move keeps size+mtime, so `unchanged` is true
+        // and the carried-over children are left intact (no re-detect).
+        if existing == nil, let ref = file.fileRef,
+           try Self.healMovedRow(
+               fileRef: ref, newPath: file.url.path, newPathHash: pathHash,
+               newPathSearch: file.url.path.precomposedStringWithCanonicalMapping,
+               db: db) != nil {
+            existing = try Row.fetchOne(
+                db.cachedStatement(sql: """
+                    SELECT id, size_bytes, modified_at, failed FROM files WHERE path_text = ?
+                    """),
+                arguments: [file.url.path])
+        }
 
         // A failure on a file that scanned before (transient decode error, NAS
         // hiccup) must not clobber the prior metadata or its child rows — incl.
@@ -467,8 +502,11 @@ public actor DBWriter {
         //   created_at + aesthetic are inserted but intentionally NOT in the
         //   DO UPDATE set (matches Windows): a rescan must not clobber the
         //   originally-recorded creation time, and aesthetic is scored elsewhere.
-        //   content_hash/file_ref aren't computed by the macOS scan path yet, so
-        //   they bind NULL and COALESCE preserves any previously-stored value.
+        //   file_ref binds the volume-local inode (st_ino) computed at discovery,
+        //   stored bit-for-bit as the Windows `r as i64` (Int64(bitPattern:)) for
+        //   cross-platform byte-parity; content_hash stays NULL (no BLAKE3 on the
+        //   macOS scan path — a separate deferred decision). COALESCE preserves a
+        //   previously-stored identity when the incoming value is NULL.
         try db.cachedStatement(sql: """
             INSERT INTO files
               (path_text, path_hash, path_search, size_bytes, created_at,
@@ -514,7 +552,7 @@ public actor DBWriter {
                 file.failed ? 1 : 0,
                 file.errorMessage,
                 nil,
-                nil
+                file.fileRef.map { Int64(bitPattern: $0) }
             ])
         // last_insert_rowid() is NOT updated on the UPDATE branch of an upsert,
         // so resolve the id from the existing row when there was one. This
@@ -643,6 +681,69 @@ public actor DBWriter {
             INSERT OR REPLACE INTO clip_embeddings (file_id, embedding, model)
             VALUES (?, ?, ?)
             """).execute(arguments: [fileID, blob, "mobileclip_s2"])
+    }
+
+    // MARK: - Rename/move heal
+
+    /// Lookup + gate + re-bind for a moved file. Returns the healed row id, or
+    /// nil if nothing healed. Port of the Windows HEAL_LOOKUP_SQL +
+    /// heal_candidate_moved + HEAL_UPDATE_SQL (dbwriter.rs). file_ref-only on
+    /// macOS — content_hash isn't computed by the scan path, and file_ref alone
+    /// covers same-volume rename/move, the dominant case.
+    private static func healMovedRow(
+        fileRef: UInt64, newPath: String, newPathHash: Int64,
+        newPathSearch: String, db: GRDB.Database
+    ) throws -> Int64? {
+        // Stored bit-for-bit as Windows binds it (`r as i64`) so the lookup keys
+        // match across a cross-platform DB round-trip.
+        let refInt = Int64(bitPattern: fileRef)
+        // Candidate rows: same volume-local identity, DIFFERENT path. NULL
+        // file_ref never matches (a row without identity can't be healed). More
+        // than one match only on hardlinks; the gate below keeps coexisting links
+        // distinct and re-binds only the genuinely-gone original.
+        let candidates = try Row.fetchAll(
+            db.cachedStatement(sql: """
+                SELECT id, path_text FROM files
+                WHERE path_text != ? AND file_ref IS NOT NULL AND file_ref = ?
+                """),
+            arguments: [newPath, refInt])
+        for row in candidates {
+            let oldPath: String = row["path_text"]
+            // Heal ONLY a genuine move: the candidate's old path must be GONE.
+            // A still-present old path means a coexisting copy/hardlink — skip, so
+            // both stay distinct rows (the exact-duplicate guard). Mirrors the
+            // Windows heal_candidate_moved old-path-gone gate exactly.
+            if pathExistsOnDisk(oldPath) { continue }
+            let id: Int64 = row["id"]
+            do {
+                try db.cachedStatement(sql: """
+                    UPDATE files SET path_text = ?, path_hash = ?, path_search = ?
+                    WHERE id = ?
+                    """).execute(arguments: [newPath, newPathHash, newPathSearch, id])
+                JSONLog.shared.info(ev: "rename_heal", path: redactPathForLog(newPath))
+                return id
+            } catch let e as DatabaseError
+                where e.resultCode.primaryResultCode == .SQLITE_CONSTRAINT {
+                // A content-identical row already occupies newPath (a copy scanned
+                // there independently). Skip the heal rather than colliding on the
+                // UNIQUE(path_text) constraint; the upsert below updates that
+                // occupant and the moved-away orphan is left for orphan-pruning.
+                // Mirrors the Windows ConstraintViolation skip (dbwriter.rs).
+                return nil
+            }
+        }
+        return nil
+    }
+
+    /// Old-path-gone probe for the rename-heal gate. `lstat` (not `stat`) so a
+    /// dangling symlink still counts as PRESENT and is never treated as a move,
+    /// mirroring the Windows `symlink_metadata` gate.
+    private static func pathExistsOnDisk(_ path: String) -> Bool {
+        var st = stat()
+        return URL(fileURLWithPath: path).withUnsafeFileSystemRepresentation { rep in
+            guard let rep else { return false }
+            return lstat(rep, &st) == 0
+        }
     }
 
     // MARK: - Face quality filter

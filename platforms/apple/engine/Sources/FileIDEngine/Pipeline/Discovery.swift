@@ -30,6 +30,10 @@ public struct DiscoveredFile: Sendable {
     public let creationDate: Date?
     public let modificationDate: Date?
     public let kind: Kind
+    /// Volume-local file identity = APFS/HFS inode (st_ino), the macOS analog of
+    /// the Windows NTFS MFT file_ref. Propagated to TaggedFile so DBWriter's
+    /// rename/move heal can re-bind a moved file's row instead of orphaning it.
+    public let fileRef: UInt64?
 
     public enum Kind: String, Sendable {
         case image, video, pdf, doc, audio, other
@@ -203,7 +207,8 @@ public actor Discovery {
                 sizeBytes: size,
                 creationDate: values?.creationDate,
                 modificationDate: values?.contentModificationDate,
-                kind: FileTypes.kind(forExtension: ext)
+                kind: FileTypes.kind(forExtension: ext),
+                fileRef: Self.inode(of: url)
             ))
             kept += 1
             sinceLastProgress += 1
@@ -212,6 +217,22 @@ public actor Discovery {
                 sinceLastProgress = 0
             }
         }
+    }
+
+    /// Volume-local file identity = APFS/HFS inode (st_ino), the macOS analog of
+    /// the Windows NTFS MFT file_ref (platform.rs `file_ref`). Stored as INTEGER
+    /// for cross-platform DB byte-parity. `stat` (follows symlinks) so a
+    /// symlinked regular file resolves to its target's identity, matching the
+    /// Windows CreateFileW path; nil on any error (heal simply won't fire).
+    /// Computed only for KEPT files (post incremental-skip), so the extra syscall
+    /// is paid once per file already bound for the ANE/Vision/CLIP/OCR pass.
+    static func inode(of url: URL) -> UInt64? {
+        var st = stat()
+        let ok = url.withUnsafeFileSystemRepresentation { rep -> Bool in
+            guard let rep else { return false }
+            return stat(rep, &st) == 0
+        }
+        return ok ? UInt64(st.st_ino) : nil
     }
 
     /// Pure incremental-skip predicate (testable in isolation). A file is
