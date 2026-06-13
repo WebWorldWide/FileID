@@ -192,9 +192,17 @@ public enum FolderClassifier {
         for p in knownPersons {
             let pn = p.displayName.lowercased()
             guard !pn.isEmpty else { continue }
-            // Exact match OR folder-contains-name OR name-contains-folder.
-            // Helps with "Marie Curie's Laboratory" vs. "Marie Curie".
-            if lower == pn || lower.contains(pn) || pn.contains(lower) {
+            // Exact match, or the folder name BEGINS with the full person name
+            // at a word boundary ("Marie Curie's Laboratory"). Bare substring
+            // containment in either direction misclassified unrelated folders
+            // (e.g. a folder "Marie" matching person "Marie Curie", or any
+            // folder containing a short name as a substring). (F-C4-021)
+            if lower == pn
+                || lower.hasPrefix(pn + " ")
+                || lower.hasPrefix(pn + "'")
+                || lower.hasPrefix(pn + "\u{2019}")
+                || lower.hasPrefix(pn + "-")
+                || lower.hasPrefix(pn + "_") {
                 return .namedPerson(personID: p.id, displayName: p.displayName)
             }
         }

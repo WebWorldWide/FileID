@@ -512,7 +512,10 @@ public final class EngineClient {
                 }
             }
         case .modelDownloadProgress(let p):
-            modelDownloadProgress = p
+            // Clear the bar once the download completes so the model picker
+            // doesn't show a stale "Downloading 100%" forever; otherwise track
+            // progress. (F-C4-015) It also clears on engine exit (handleEngineExit).
+            modelDownloadProgress = p.fraction >= 1.0 ? nil : p
         case .queueState(let q):
             queueState = q
         // ── Windows-originated reply events. The mac app's equivalent flows
