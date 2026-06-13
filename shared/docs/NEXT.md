@@ -1,6 +1,71 @@
 # NEXT — resume here
 
-## 2026-06-10 (newest) — Campaign closed; CI + hardware UAT are the only remaining gates (RESUME HERE)
+## 2026-06-13 (newest) — audit-2026-06-10 campaign: macOS apply UAT + deferred items are the only remaining gates (RESUME HERE)
+
+The `fix/audit-2026-06-10` campaign is closed on the branch (see STATE.md 2026-06-13): 131 findings
++ 2 criticals fixed, 22 self-introduced regressions caught, all local gates green, all three CI
+workflows green, and a clean **read-only** on-hardware macOS scan of the 62,746-file `Adlon/TrueNAS`
+corpus. What remains are the write-path and threshold items that need the owner's Mac or labeled data.
+
+**Mac-UAT (owner's Mac, on an isolated/throwaway library — these touch the move path):**
+- **Restructure apply/move on-Mac** — the one write-path NOT exercised on hardware. After a plan,
+  convert to real moves on an isolated copy library and verify: engine-side moves get filesystem
+  permission; the in-batch `claimed` set ∪ on-disk lstat collision check fires; **D-7 auto-rename**
+  produces `name (2).ext`; the **B4 stale-plan guard** fails a move whose live `path_text` no longer
+  matches; the DB row's **`path_hash`** is refreshed (not just `path_text`/`path_search`).
+  *Recipe:* `platforms/apple/scripts/iterate.sh` + `test_assertions.py` against a copy library —
+  never the real corpus. *Acceptance:* N planned moves apply, colliding names get ` (2)`, no file
+  escapes the root, DB paths + `path_hash` updated per move, zero overwrites.
+- **Restructure apply-bar relabel + Tidy/Keep tier split.** The two-step symlink-preview→copy apply
+  bar is stale now that the engine performs direct real moves — relabel it to one real-move step.
+  And the engine plan must populate per-move `tier` + `folderClassifications` so the UI shows
+  Tidy/Keep correctly; today every move renders as "Reorganize". *Acceptance:* Tidy and Keep tiles
+  show accurate non-zero counts; the apply bar describes a single real-move action.
+- **F-C6-005 `walkStreaming` activation.** Implemented but dormant. After the apply UAT, wire
+  `FileIDEngineMain` to `walkStreaming` and re-run the full-corpus scan. *Acceptance:* parity with
+  the current discovery path on file count + tags, no RSS regression vs the 1,187 MB baseline.
+- **`ReadStore.refreshCounters` NSLock-in-async.** Compiles today but holds an `NSLock` across an
+  `await` in the counters loop; replace with a Swift-6-concurrency-safe lock. *Acceptance:* builds
+  clean under Swift 6 mode with no actor-isolation warnings.
+- **Deep Analyze (MLX) + face/CLIP model features** could not be exercised on the dev box (no Xcode
+  Metal toolchain; models not installed). Graceful model-absence handling WAS verified; the populated
+  path needs a Mac with the models installed. *Acceptance:* a full Deep Analyze run completes offline
+  against an installed VLM (no network round-trip); face crops + CLIP semantic search return rows.
+- **R-11 (DeepAnalyze ModelLoadGate JobQueue wedge).** When a same-model prewarm is *joined* to a
+  run's single-flight model load and the run is cancelled, the run's JobQueue lane stays wedged until
+  the joined download finishes (self-resolving, not a permanent hang). The ref-count gate correctly
+  protects the prewarm's download; the missing piece is freeing THIS waiter's lane immediately. A
+  correct fix needs a per-waiter `CheckedContinuation` wakeup (`await task.value` is not interruptible,
+  so it can't be done safely blind) — verify on a Mac with the real concurrency. *Acceptance:*
+  cancelling a run that shares a load with a prewarm frees the run's lane within ~1s while the prewarm
+  download continues.
+- **R-07 (face clustering un-cancellable after a cancelled scan).** A manual `runFaceClustering`
+  issued after a `.cancelScan` (sticky mirror) ignores a *fresh* `.shutdown` during the run (LOW; the
+  only harm is the pass may run to its persist before `_exit`). The scan-cancel mirror can't
+  distinguish a stale scan-cancel from a fresh shutdown — give clustering a dedicated shutdown/
+  generation signal distinct from the scan mirror. *Acceptance:* a shutdown during a baseline-cancelled
+  cluster aborts at a safe boundary before the persist txn.
+
+**Hardware-UAT (thresholds / GPU / runtime — need labeled data or specific hardware):**
+- **F-4 face-clustering pass-1 structural change (mutual-kNN / density-gated).** SPECED ONLY — the
+  current single-linkage pass-1 is retained. The structural fix needs a hand-labeled `G:\TrueNAS`
+  subset to find the precision/recall optimum (a blunt threshold bump over-splits genuine
+  identities). *Recipe:* hand-label a corpus subset, sweep `pass1_cosine` + the mutual-kNN/density
+  bands, pick the F1 optimum. *Acceptance:* on the labeled subset, no cross-identity merges and fewer
+  spurious singletons than single-linkage at equal recall.
+- **F-C5-005 engine half — `hardwareReprobed` accuracy.** The reprobe should report the
+  actually-bound EP, not a fresh independent probe (runtime/hardware). *Acceptance:* on the RTX 2060,
+  `hardwareReprobed` reflects the EP the engine actually bound (DirectML/CUDA/CPU), verified against
+  `engine.jsonl`.
+- **Per-vendor Windows GPU UAT** (carried from before): RTX 2060 throughput re-baseline; DirectML +
+  CUDA paths. *Recipe:* `platforms/windows/build/iterate.ps1` full corpus + `scan_assertions.py`.
+
+**After UAT:** merge `fix/audit-2026-06-10` to `main`, confirm CI green there. (The
+`fix/bug-audit-sweep` UAT checklist below remains valid for that branch's separate items.)
+
+---
+
+## 2026-06-10 — Campaign closed; CI + hardware UAT are the only remaining gates
 
 Branch `fix/bug-audit-sweep` holds the full production-readiness campaign (see STATE.md
 2026-06-10). All local gates are green; the branch is pushed and **CI must be green on all

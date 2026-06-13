@@ -8,6 +8,71 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-13 — "audit-2026-06-10" perfection campaign: 131 findings + 2 criticals fixed, 22 self-introduced regressions caught, clean on-hardware macOS scan (branch `fix/audit-2026-06-10`)
+
+The deepest adversarial pass yet — run cross-platform off `main`, closed on this branch.
+
+**Method.** Three adversarial audit workflows (WF-1 unit-correctness, WF-2 cross-platform parity,
+WF-3 perf/memory-adaptive) → triage → **7 fix waves** → a **delta re-audit loop (2 rounds)** over
+the campaign's own diff. **252 raw findings → 131 fixable + 15 rejected** (each rejection a
+deliberate guard or a cited prior ruling). Full record in `shared/docs/audit-2026-06-10/`
+(`findings.json`, `TRIAGE.md`, `reaudit-confirmed.json`).
+
+**What landed, by wave:**
+- **Wave R — 30 Rust-local engine fixes** (the FIX-LOCAL set, clippy/test-verifiable here):
+  EP-guard breadcrumb clear + revision-keyed install sentinel, terminal phase/IPC events never
+  droppable + outbound frame cap, trash restore-conflict + batch enumeration + recovery sidecar,
+  anchor-strip exempting the semantic butler's moves, Deep Analyze CPU-EP honor / target scope /
+  skip semantics, SleepGuard same-thread release, redaction home-username mask, COM apartment
+  scoping, pptx member cap, ranged-resume progress, watchdog PID-reuse, parallelized discovery
+  syscalls.
+- **C2 — IPC contract parity, schema-first.** Every change landed in `ipc.schema.json` first, then
+  mirrored across all four DTO targets (Rust → C# → Swift): optional `deepAnalyzeAll` fields,
+  `cancelPrewarm.modelKind`, canonical error-kind vocabulary, Windows DA eta/path,
+  `discoveryComplete` backstop, v16 `path_search` NFC symmetry.
+- **C3 — 44 macOS-engine fixes**, including a **CRITICAL gate-trio**: an ungated `DELETE` meant a
+  Vision/OCR/face **timeout silently wiped a file's tags / `person_id` / OCR** (now every
+  destructive re-write is gated on the stage having actually run). Also the **face-clustering
+  data-loss + determinism cluster** (port of the Windows S0 snapshot-under-lock, fixed-seed HNSW,
+  `is_unknown`/verdict guards, union-find de-chaining) and the **butler restructure ENGINE port**
+  (path_hash, B4 stale-plan guard, uniquify, sanitize, tiering, Windows-canonical naming).
+- **C4 — 21 macOS-app fixes**, including a **CRITICAL dual-writer**: "Restart Engine" spawned a new
+  engine without reaping the old one → two writers on one DB (now terminate-and-reap before spawn).
+  Plus restructure single-flight apply, off-main merge/search, read-conn UAF guard, Deep Analyze
+  staleness, model-download progress reset.
+- **C5 — 12 Windows C# fixes**: read-conn drain dispose, single-flight apply, bulk-tag confirm+undo,
+  selection/rename identity, Sankey single-parse, log-lock, CUDA toggle.
+- **C6 — perf**: macOS discovery-time incremental skip-set (activated), decoupled DB commit, cached
+  statements, streamed (bounded-memory) semantic search, Vision autoreleasepool, cancellable +
+  progress-emitting restructure apply (both platforms).
+- **Feature wave** — **F-2** macOS rename-heal (moved/renamed files keep tags/faces/OCR via APFS
+  inode `file_ref`, old-path-gone-gated) and **F-C3-021-app** (route the macOS Restructure tab
+  through the engine butler, retire the app-side classifier).
+
+**The delta re-audit earned its keep.** Round 1 found + fixed **22 self-introduced regressions**
+(`reaudit-confirmed.json`, R-01..R-22), incl. 2 HIGH: face clustering became a **silent no-op after
+any scan-cancel** (a sticky scan-scoped cancel mirror gated the standalone cluster job), and the new
+discovery **skip-set defeated the orphan sweep** (skipped files retained a stale `scanned_at`,
+saturating the 5000-row prune-candidate cap → real orphans never pruned). Round 2 of the re-audit
+loop is in progress.
+
+**Local gates at HEAD:** `cargo clippy --all-targets -D warnings` clean · `cargo test` **336
+passing** (was 292 baseline; **+44 regression tests**) · `swift build` debug + release clean (no
+Xcode locally → `swift test` is CI-only). **CI green on all three workflows** (`macos.yml`,
+`windows-engine.yml`, `windows-app.yml`) on the branch through the C6 batch.
+
+**On-hardware macOS verification** (owner's external drive `Adlon`, `/Volumes/Adlon/TrueNAS`,
+**62,746 files, READ-ONLY** — no permanent changes to corpus data):
+- Full scan **clean**: 59,633 processed / 54 failed (**0.09 %**, all genuine "Could not decode image"
+  on corrupt backup images), **~120 files/s** (Vision-only — no GPU models on this box), **peak RSS
+  1,187 MB** (< 1.5 GB target), no crashes. Produced 307,666 tags + 26,678 files-with-faces.
+- Incremental skip-set verified: rescan of a 311-file folder processed **0 files in 9.5 ms**.
+- Restructure butler plan produced **13,131 moves** (photo/video/audio + GPS Places +
+  `Documents/<year>`, Windows-canonical naming) with no crash.
+- Mid-scan cancel terminated promptly with final status written, **no hang**.
+- **Apply/move write-paths were NOT run on hardware** (would move corpus files) — covered by macOS
+  unit tests + the proven Windows port. The on-Mac apply UAT is the remaining macOS gate (NEXT.md).
+
 ## 2026-06-10 — Production-readiness campaign closed: zero open findings, perf sweep, hardening live, T4/T5/T7 shipped (branch `fix/bug-audit-sweep`)
 
 The full campaign that started with the 2026-06-09 sweep is **closed with zero open confirmed

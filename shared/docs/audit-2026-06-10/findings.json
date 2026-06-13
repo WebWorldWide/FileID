@@ -1,0 +1,2731 @@
+[
+  {
+    "id": "F-C1-001",
+    "title": "Graceful shutdown during model-load leaves .ep_attempt breadcrumb on disk \u2014 false-poisons a healthy CUDA/OpenVINO EP next launch",
+    "severity": "high",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/ep_guard.rs",
+      "platforms/windows/src/engine/src/model_stack.rs"
+    ],
+    "wave": "C1",
+    "disposition": "FIX-LOCAL",
+    "claim": "The ep_guard crash breadcrumb is written on model-load bind but never cleared on a GRACEFUL shutdown that occurs mid-load, so the next launch disables a healthy guarded EP. This is the real bug, distinct from the deliberate over-disable SET guard.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:W13",
+      "WF1b:W12",
+      "WF3:ep-cuda-readiness"
+    ],
+    "ruling": null,
+    "test_to_add": "ep_guard: arm during model-load then graceful-shutdown clears the breadcrumb (no stale crumb on next start)"
+  },
+  {
+    "id": "F-C1-002",
+    "title": "Terminal PhaseChanged(Cancelled/Failed) emitted via droppable try_send \u2014 a drop renders a cancelled scan as Completed and auto-fires face clustering",
+    "severity": "high",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/scan_session.rs",
+      "platforms/windows/src/engine/src/ipc/sink.rs"
+    ],
+    "wave": "C1",
+    "disposition": "FIX-LOCAL",
+    "claim": "Terminal PhaseChanged(Cancelled) and PhaseChanged(Failed on TDR) go through try_send and can be dropped under sink backpressure; Failed has no ScanComplete backstop. A drop makes the app treat a cancelled/failed scan as Completed. Violates the engine's own documented terminal-events-must-not-drop rule.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:W11",
+      "WF3:backpressure-e2e"
+    ],
+    "ruling": null,
+    "test_to_add": "sink: terminal PhaseChanged uses blocking send (or a guaranteed-delivery path); never dropped under a full channel"
+  },
+  {
+    "id": "F-C1-003",
+    "title": "restoreFromTrash reports success when the original path is already occupied \u2014 trashed bytes silently never restored",
+    "severity": "high",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/commands/trash.rs"
+    ],
+    "wave": "C1",
+    "disposition": "FIX-LOCAL",
+    "claim": "restoreFromTrash returns success even when the destination path is occupied, so the user believes the file was restored but the bytes remain in the Recycle Bin. Also restores an arbitrary bin item when multiple entries share the same original path.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:W22"
+    ],
+    "ruling": null,
+    "test_to_add": "restore: occupied-destination path returns a conflict error, not success; multi-entry same-path picks deterministically or errors"
+  },
+  {
+    "id": "F-C1-004",
+    "title": "Anchor-strip silently drops the semantic butler's highest-confidence moves when a source folder's files all route to one destination group",
+    "severity": "high",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/commands/restructure.rs",
+      "platforms/windows/src/engine/src/pipeline/restructure.rs"
+    ],
+    "wave": "C1",
+    "disposition": "FIX-LOCAL",
+    "claim": "The anchor-folder Keep-move drop runs after semantic classification, so when all of a source folder's files route to a single destination group the highest-confidence semantic moves are stripped as 'anchor' and never proposed.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:W5"
+    ],
+    "ruling": null,
+    "test_to_add": "restructure: a homogeneous source folder whose files route to a new semantic group still yields proposals (anchor-strip does not eat semantic moves)"
+  },
+  {
+    "id": "F-C1-005",
+    "title": "Deep Analyze batch silently excludes PDFs despite a shipped default-on PDF render path (kind IN ('image','video'))",
+    "severity": "high",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/pipeline/deep_analyze.rs",
+      "platforms/windows/src/engine/src/commands/deep_analyze.rs"
+    ],
+    "wave": "C1",
+    "disposition": "FIX-LOCAL",
+    "claim": "deepAnalyzeAll target query filters kind IN ('image','video'), excluding PDFs even though a default-on PDF render path ships. macOS includes pdf+doc. Parity resolves toward including renderable PDFs.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:W3",
+      "WF2:P4-deep-analyze"
+    ],
+    "ruling": "Data/correctness resolves to the more-correct side; this also feeds the C2 deepAnalyzeAll scope alignment.",
+    "test_to_add": "deep_analyze: target selection includes pdf rows when the PDF render path is enabled"
+  },
+  {
+    "id": "F-C1-006",
+    "title": "Deep Analyze ignores gpuExecutionProviderOverride=cpu \u2014 the documented GPU-TDR recovery path still forces full GPU offload (-ngl 99)",
+    "severity": "high",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/pipeline/deep_analyze.rs"
+    ],
+    "wave": "C1",
+    "disposition": "FIX-LOCAL",
+    "claim": "The llama.cpp Deep Analyze path hardcodes -ngl 99 and ignores gpuExecutionProviderOverride='cpu', so the documented GPU-TDR recovery (evacuate the GPU) re-engages the GPU the user explicitly disabled.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:W4",
+      "WF3:ep-cuda-readiness"
+    ],
+    "ruling": null,
+    "test_to_add": "deep_analyze: with gpuExecutionProviderOverride=cpu, llama spawn omits GPU offload (-ngl 0 / cpu path)"
+  },
+  {
+    "id": "F-C1-007",
+    "title": "restoreFromTrash shells out a fresh PowerShell (full Recycle Bin enumeration) per item serially \u2014 large undo batches blow the 30s app waiter",
+    "severity": "medium",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/commands/trash.rs"
+    ],
+    "wave": "C1",
+    "disposition": "FIX-LOCAL",
+    "claim": "Each restore spawns a fresh PowerShell that enumerates the entire Recycle Bin, run serially; a large undo batch exceeds the app's 30s waiter and surfaces a misleading 'didn't confirm' message.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:W22"
+    ],
+    "ruling": null,
+    "test_to_add": "restore batch: single enumeration / batched restore (no per-item full-bin PowerShell spawn)"
+  },
+  {
+    "id": "F-C1-008",
+    "title": "SleepGuard acquire/Drop run on different Tokio worker threads \u2014 thread-scoped SetThreadExecutionState never cleared, machine never sleeps after a scan",
+    "severity": "medium",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/sleep_guard.rs"
+    ],
+    "wave": "C1",
+    "disposition": "FIX-LOCAL",
+    "claim": "SleepGuard uses thread-scoped SetThreadExecutionState but acquire and Drop execute on different Tokio worker threads, so ES_CONTINUOUS is set on one thread and cleared on another \u2014 the sleep assertion is never actually released.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:W19"
+    ],
+    "ruling": null,
+    "test_to_add": "sleep_guard: acquire+drop on a known thread (dedicated thread or process-wide ES_CONTINUOUS toggle) so the assertion clears"
+  },
+  {
+    "id": "F-C1-009",
+    "title": "Engine outbound IPC sink has no frame-size cap \u2014 a large restructurePlan exceeds the app's 32 MiB inbound cap and is silently dropped, hanging the Restructure UI",
+    "severity": "medium",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/ipc/sink.rs"
+    ],
+    "wave": "C1",
+    "disposition": "FIX-LOCAL",
+    "claim": "The Rust outbound sink applies no per-frame size cap; a plan above the app's 32 MiB inbound cap is dropped app-side with no error, hanging the Restructure tab. Pairs with the macOS-side and the monolithic-plan-frame issue.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:W18",
+      "WF3:scale-extremes"
+    ],
+    "ruling": null,
+    "test_to_add": "sink: oversize outbound frame yields a structured ipc_frame_too_large event instead of a silent app-side drop"
+  },
+  {
+    "id": "F-C1-011",
+    "title": "Video keyframe extraction permanently MTA-initializes shared tokio blocking-pool threads \u2014 contaminates later STA-expecting shell ops (trash/tags/thumbnail)",
+    "severity": "medium",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/pipeline/video.rs"
+    ],
+    "wave": "C1",
+    "disposition": "FIX-LOCAL",
+    "claim": "Keyframe extraction calls CoInitializeEx(MTA) on a shared tokio blocking-pool thread and never uninitializes; a later shell op (trash/tags/thumbnail) scheduled on that recycled thread expects STA and misbehaves.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:W21a"
+    ],
+    "ruling": null,
+    "test_to_add": "video: COM apartment is scoped/uninitialized per task (or runs on a dedicated thread) so recycled pool threads aren't left MTA"
+  },
+  {
+    "id": "F-C1-012",
+    "title": "Bulk rename on-disk moves are not atomic with the single end-of-batch DB commit and have no recovery sidecar \u2014 a commit failure desyncs the whole batch",
+    "severity": "medium",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/commands/bulk.rs"
+    ],
+    "wave": "C1",
+    "disposition": "FIX-LOCAL",
+    "claim": "Bulk rename performs all on-disk moves then a single end-of-batch DB commit, with no per-move recovery sidecar (unlike restructure B5). A commit failure leaves disk renamed but DB stale across the entire batch.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:W20"
+    ],
+    "ruling": null,
+    "test_to_add": "bulk rename: commit-failure path leaves a recovery sidecar reconciling disk vs DB (mirror restructure B5)"
+  },
+  {
+    "id": "F-C1-013",
+    "title": "OneDrive online-only files dehydrated at scan time are stranded in the incremental skip-set after hydration \u2014 never embedded/OCR'd/face-scanned without a forced rescan",
+    "severity": "medium",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/scan_session.rs"
+    ],
+    "wave": "C1",
+    "disposition": "FIX-LOCAL",
+    "claim": "A dehydrated (online-only) file scanned while a placeholder is recorded failed=0; after the user hydrates it, the skip-set predicate (failed=0 AND scanned_at>=modified_at) keeps skipping it, so it never gets ML processing.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:W10"
+    ],
+    "ruling": null,
+    "test_to_add": "skip-set: a file whose reparse/placeholder state changed (dehydrated->hydrated) is not skipped on rescan"
+  },
+  {
+    "id": "F-C1-017",
+    "title": "Parallel resume reports progress from 0, ignoring bytes already on disk \u2014 progress bar jumps backward on Retry; no 416 recovery",
+    "severity": "medium",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/download.rs"
+    ],
+    "wave": "C1",
+    "disposition": "FIX-LOCAL",
+    "claim": "The parallel ranged downloader reports progress from 0 on resume, ignoring already-downloaded bytes (progress jumps backward). The ranged path also has no 416 Range-Not-Satisfiable recovery where download_simple auto-recovers.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:W16a"
+    ],
+    "ruling": null,
+    "test_to_add": "download: ranged resume seeds progress from on-disk bytes; 416 falls back to a clean re-fetch"
+  },
+  {
+    "id": "F-C1-019",
+    "title": "Year_ tag derived from modification time (UTC, >=1990) \u2014 diverges from macOS creation-time/local/>1990",
+    "severity": "medium",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/pipeline/tagging.rs"
+    ],
+    "wave": "C1",
+    "disposition": "FIX-LOCAL",
+    "claim": "Windows derives the Year_ enriched tag from modification time in UTC with a >=1990 lower bound; macOS uses creation date in local time with >1990. Three-way divergence (timestamp source, timezone, boundary). Converge per the more-correct side (creation date, local).",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:W1b",
+      "WF2:P3-tagging"
+    ],
+    "ruling": "Cosmetic-tag parity: pick one canonical rule; correctness (creation date when available) wins over modified-at.",
+    "test_to_add": "tagging: Year_ tag uses creation date + agreed timezone/boundary, pinned by a shared vector"
+  },
+  {
+    "id": "F-C1-020",
+    "title": "skip_existing on the full (non-tags-only) Deep Analyze pass is not model-aware \u2014 switching VLM model + re-running skips every prior file",
+    "severity": "medium",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/pipeline/deep_analyze.rs"
+    ],
+    "wave": "C1",
+    "disposition": "FIX-LOCAL",
+    "claim": "The full Deep Analyze pass's skip_existing predicate is 'already analyzed' regardless of model; the schema intends 'for this model'. Switching the VLM and re-running skips every file the old model captioned.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:W3",
+      "WF2:P4-deep-analyze"
+    ],
+    "ruling": null,
+    "test_to_add": "deep_analyze: skip predicate keys on (file, vlm_model) so a model switch re-analyzes"
+  },
+  {
+    "id": "F-C1-021",
+    "title": "Batch Deep Analyze permanently abandons the persistent llama server on the FIRST per-file error of any kind, not just on server death",
+    "severity": "medium",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/pipeline/deep_analyze.rs"
+    ],
+    "wave": "C1",
+    "disposition": "FIX-LOCAL",
+    "claim": "A single per-file error (e.g. an unreadable image) makes the batch tear down the fast persistent server and fall back to slow per-file subprocess spawning for the rest of the run, even though the server is healthy.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:W4"
+    ],
+    "ruling": null,
+    "test_to_add": "deep_analyze: a per-file error does not abandon a healthy persistent server (only server-death does)"
+  },
+  {
+    "id": "F-C1-024",
+    "title": "Windows install sentinel is id-keyed and never invalidates on a pin bump \u2014 stale artifact persists across a hash change (b4404->b9254 episode)",
+    "severity": "medium",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/model_install.rs"
+    ],
+    "wave": "C1",
+    "disposition": "FIX-LOCAL",
+    "claim": "The Windows install sentinel is keyed by model id and never invalidates when the pinned revision/hash changes; macOS keys the sentinel by revision and self-heals. A pin bump leaves the old artifact installed.",
+    "port_source": null,
+    "source_ids": [
+      "WF2:P9-model-supply"
+    ],
+    "ruling": null,
+    "test_to_add": "model_install: a pin/revision bump invalidates the sentinel and forces re-fetch"
+  },
+  {
+    "id": "F-C1-025",
+    "title": "Bulk rename: a video/over-cap-doc content hash re-opens a file the decoder already read, as blocking IO on a tokio worker (inside the writer path)",
+    "severity": "medium",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/pipeline/dbwriter.rs",
+      "platforms/windows/src/engine/src/pipeline/tagging.rs"
+    ],
+    "wave": "C1",
+    "disposition": "FIX-LOCAL",
+    "claim": "Video (and over-cap doc) content hashing runs as blocking file IO on tokio worker threads and re-opens a file the decoder already read; and the legacy_content_hash ~2MB re-read for >16MB files runs inside the single-writer transaction under the connection mutex. Move blocking IO off the writer-locked path.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:W2a",
+      "WF3:io-patterns",
+      "WF3:scale-extremes"
+    ],
+    "ruling": null,
+    "test_to_add": "dbwriter: no blocking filesystem read occurs while holding the writer transaction lock"
+  },
+  {
+    "id": "F-C1-010",
+    "title": "Oversized inbound IPC frame error reports wrong cap ('1 MB') while the actual cap is 32 MiB",
+    "severity": "low",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/main.rs"
+    ],
+    "wave": "C1",
+    "disposition": "FIX-LOCAL",
+    "claim": "The oversized-frame rejection message states a 1 MB cap; the real MAX_FRAME_BYTES is 32 MiB. Cosmetic but misleading in logs.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:W18"
+    ],
+    "ruling": null,
+    "test_to_add": "main: oversize-frame error text matches MAX_FRAME_BYTES"
+  },
+  {
+    "id": "F-C1-014",
+    "title": "pptx slide-glob extraction has no member-count cap \u2014 a crafted .pptx can burn unbounded CPU on a decoder thread",
+    "severity": "low",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/pipeline/office.rs"
+    ],
+    "wave": "C1",
+    "disposition": "FIX-LOCAL",
+    "claim": "The pptx slide-glob extraction iterates archive members with no count cap; a crafted file with millions of slide entries burns unbounded CPU. A simple member-count bound mitigates.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:W21b"
+    ],
+    "ruling": null,
+    "test_to_add": "office: pptx member iteration is capped; a zip-bomb-shaped pptx is rejected/bounded"
+  },
+  {
+    "id": "F-C1-015",
+    "title": "Parent-watchdog PID-reuse TOCTOU between get_parent_pid() snapshot and OpenProcess \u2014 can watch an unrelated reused-PID process",
+    "severity": "low",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/watchdog.rs"
+    ],
+    "wave": "C1",
+    "disposition": "FIX-LOCAL",
+    "claim": "Between sampling the parent PID and OpenProcess, the parent can exit and the PID be reused, so the watchdog monitors an unrelated process. Capture a process handle/start-time at startup to bind identity.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:W12"
+    ],
+    "ruling": null,
+    "test_to_add": "watchdog: parent identity is pinned by handle/creation-time, not bare PID"
+  },
+  {
+    "id": "F-C1-016",
+    "title": "RAM++ batch coordinator thread-spawn panics (.expect) where every sibling spawn site degrades gracefully",
+    "severity": "low",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/pipeline/tagging.rs"
+    ],
+    "wave": "C1",
+    "disposition": "FIX-LOCAL",
+    "claim": "The RAM++ batch coordinator thread spawn uses .expect(), panicking the engine on spawn failure, while every sibling spawn site handles the error and degrades. Replace with graceful degradation.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:W1a"
+    ],
+    "ruling": null,
+    "test_to_add": "tagging: coordinator-spawn failure degrades (no panic) like sibling sites"
+  },
+  {
+    "id": "F-C1-018",
+    "title": "Bulk trash: a trash_log append failure after commit leaves trashed files with no undo-journal entry \u2014 UndoStack restore is a silent no-op",
+    "severity": "low",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/commands/bulk.rs",
+      "platforms/windows/src/engine/src/trash_log.rs"
+    ],
+    "wave": "C1",
+    "disposition": "FIX-LOCAL",
+    "claim": "If the trash_log append fails after the DB commit, the trashed file has no undo-journal entry, so the app's UndoStack restore silently does nothing. Order the journal write before the irreversible step or surface the failure.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:W20"
+    ],
+    "ruling": null,
+    "test_to_add": "bulk trash: journal-append failure surfaces an error (no silently-unrecoverable trash)"
+  },
+  {
+    "id": "F-C1-022",
+    "title": "Deep Analyze targets ignore files.failed \u2014 re-attempts GPU-death-marked rows the macOS reference excludes",
+    "severity": "low",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/pipeline/deep_analyze.rs"
+    ],
+    "wave": "C1",
+    "disposition": "FIX-LOCAL",
+    "claim": "The Windows deepAnalyzeAll target query does not filter files.failed, re-attempting rows marked failed by a prior GPU death; macOS excludes failed rows.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:W3",
+      "WF2:P4-deep-analyze"
+    ],
+    "ruling": null,
+    "test_to_add": "deep_analyze: target selection excludes failed=1 rows (parity with macOS)"
+  },
+  {
+    "id": "F-C1-023",
+    "title": "Name-based auto-merge guard built from the phase-1 snapshot, not re-read under the phase-3 lock \u2014 a rename in the lock-free window can unblock a wrong cluster auto-merge",
+    "severity": "low",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/commands/face_clustering.rs",
+      "platforms/windows/src/engine/src/pipeline/face_clustering.rs"
+    ],
+    "wave": "C1",
+    "disposition": "FIX-LOCAL",
+    "claim": "The named-named auto-merge guard is built from the phase-1 snapshot rather than re-read under the phase-3 persist lock like the S0 identity snapshot, so a rename committed during the lock-free phase-2 window can unblock a wrong-cluster auto-merge.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:W8a"
+    ],
+    "ruling": null,
+    "test_to_add": "face_clustering: name-guard is re-derived from the under-lock phase-3 snapshot"
+  },
+  {
+    "id": "F-C2-005",
+    "title": "v16 path_search NFC asymmetry: Windows stores verbatim bytes while its own app assumes NFC \u2014 NFD filenames unsearchable on Windows only",
+    "severity": "high",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/db/migrations.rs",
+      "platforms/windows/src/engine/src/pipeline/dbwriter.rs"
+    ],
+    "wave": "C2",
+    "disposition": "FIX-LOCAL",
+    "claim": "macOS normalizes path_search to NFC (precomposed) on write; the Windows engine stores verbatim bytes, so an NFD filename is unsearchable on Windows even though the app's query side assumes NFC. The v16_path_search NFC contract must be applied on the Windows write side too.",
+    "port_source": null,
+    "source_ids": [
+      "WF2:P5-db-schema"
+    ],
+    "ruling": "NFC v16_path_search is the canonical contract (guard registry) \u2014 Windows must conform to it, not the reverse.",
+    "test_to_add": "dbwriter: path_search is NFC-normalized on the Windows write path; an NFD filename is found by an NFC query"
+  },
+  {
+    "id": "F-C2-001",
+    "title": "Swift IPC mirror drops deepAnalyzeAll.proposeRenames and hard-requires tagsOnly",
+    "severity": "medium",
+    "platform": "cross",
+    "files": [
+      "shared/ipc-schema/ipc.schema.json",
+      "platforms/apple/shared/Sources/FileIDShared/IPCProtocol.swift",
+      "platforms/windows/src/engine/src/ipc/mod.rs",
+      "platforms/windows/src/FileID.IpcSchema/CommandPayload.cs"
+    ],
+    "wave": "C2",
+    "disposition": "FIX-CI",
+    "claim": "Schema+Rust+C# make tagsOnly optional (default false) and include proposeRenames (default true); Swift omits proposeRenames entirely and makes tagsOnly a hard-required parameter, so a schema-conformant payload that omits tagsOnly fails to decode on macOS.",
+    "port_source": null,
+    "source_ids": [
+      "WF2:P6-ipc",
+      "WF2:P4-deep-analyze",
+      "WF1:M3"
+    ],
+    "ruling": null,
+    "test_to_add": "IPC conformance: deepAnalyzeAll decodes with tagsOnly omitted and carries proposeRenames on all three mirrors"
+  },
+  {
+    "id": "F-C2-002",
+    "title": "Swift cancelPrewarm cannot carry modelKind \u2014 targeted prewarm cancel degrades to cancel-all on macOS",
+    "severity": "medium",
+    "platform": "cross",
+    "files": [
+      "shared/ipc-schema/ipc.schema.json",
+      "platforms/apple/shared/Sources/FileIDShared/IPCProtocol.swift"
+    ],
+    "wave": "C2",
+    "disposition": "FIX-CI",
+    "claim": "Schema+Rust+C# carry an optional modelKind on cancelPrewarm (null = cancel-all); Swift's case has no payload, so a targeted per-model cancel silently becomes cancel-all on macOS.",
+    "port_source": null,
+    "source_ids": [
+      "WF2:P6-ipc"
+    ],
+    "ruling": null,
+    "test_to_add": "IPC conformance: cancelPrewarm(modelKind:) round-trips on Swift"
+  },
+  {
+    "id": "F-C2-003",
+    "title": "Error-kind vocabulary drift in shared flows: face_cluster_failed (macOS) vs face_clustering_failed (Windows), plus unknown-model/scan-notice kinds",
+    "severity": "medium",
+    "platform": "cross",
+    "files": [
+      "shared/ipc-schema/ipc.schema.json",
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/FaceClustering.swift",
+      "platforms/windows/src/engine/src/commands/face_clustering.rs",
+      "platforms/windows/src/engine/src/commands/prewarm.rs"
+    ],
+    "wave": "C2",
+    "disposition": "FIX-CI",
+    "claim": "macOS emits error kind 'face_cluster_failed' while Windows emits 'face_clustering_failed'; unknown-model and scan-notice kinds also drift. The app single-flight gates and toasts key on exact strings, so a mismatch breaks gate release / error routing across a round-tripped library.",
+    "port_source": null,
+    "source_ids": [
+      "WF2:P6-ipc"
+    ],
+    "ruling": "Pin one canonical error-kind vocabulary in the schema; both engines emit the schema strings.",
+    "test_to_add": "IPC conformance: face-clustering failure kind is the single schema-pinned string on both engines"
+  },
+  {
+    "id": "F-C2-004",
+    "title": "Windows engine path redaction leaks the username for files directly under a home directory",
+    "severity": "medium",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/platform.rs"
+    ],
+    "wave": "C2",
+    "disposition": "FIX-LOCAL",
+    "claim": "Redaction keeps the last two path components, so a file directly under C:\\Users\\<name> redacts to '\u2026/<name>/file', leaking the username. Redact home-anchored paths so the user component is masked.",
+    "port_source": null,
+    "source_ids": [
+      "WF2:P6-ipc"
+    ],
+    "ruling": null,
+    "test_to_add": "redaction: a file directly under a home dir does not expose the username in the redacted string"
+  },
+  {
+    "id": "F-C2-008",
+    "title": "deepAnalyzeProgress.etaSeconds never populated by the Windows engine; caption frames omit currentPath",
+    "severity": "medium",
+    "platform": "cross",
+    "files": [
+      "shared/ipc-schema/ipc.schema.json",
+      "platforms/windows/src/engine/src/pipeline/deep_analyze.rs"
+    ],
+    "wave": "C2",
+    "disposition": "FIX-CI",
+    "claim": "deepAnalyzeProgress.etaSeconds is schema-present but never populated by the Windows engine, and caption frames omit currentPath, so the Windows Deep Analyze UI cannot show ETA or the current file. macOS populates them.",
+    "port_source": null,
+    "source_ids": [
+      "WF2:P4-deep-analyze"
+    ],
+    "ruling": null,
+    "test_to_add": "deep_analyze: progress frames carry etaSeconds and currentPath (parity with macOS schema usage)"
+  },
+  {
+    "id": "F-C2-006",
+    "title": "discoveryComplete emission may diverge on cancel-during-discovery / sub-250ms scans",
+    "severity": "low",
+    "platform": "cross",
+    "files": [
+      "platforms/windows/src/engine/src/scan_session.rs",
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/ScanCoordinator.swift"
+    ],
+    "wave": "C2",
+    "disposition": "FIX-CI",
+    "claim": "WF-2 claimed Windows skips discoveryComplete on cancel-during-discovery and sub-250ms scans while macOS emits it unconditionally; targeted re-verification found the current Windows code emits unconditionally after the walk. Downgraded to a parity test to pin the invariant on both sides.",
+    "port_source": null,
+    "source_ids": [
+      "WF2:P6-ipc"
+    ],
+    "ruling": null,
+    "test_to_add": "IPC: discoveryComplete is emitted exactly once on every scan terminal path (cancel, empty, <250ms) on both engines"
+  },
+  {
+    "id": "F-C2-007",
+    "title": "IPC identifier-field casing drift (schema fileID/personIDs vs Rust/C# ...Id) \u2014 contract-conformance gap",
+    "severity": "low",
+    "platform": "cross",
+    "files": [
+      "shared/ipc-schema/ipc.schema.json",
+      "platforms/windows/src/engine/src/ipc/mod.rs",
+      "platforms/windows/src/FileID.IpcSchema/CommandPayload.cs"
+    ],
+    "wave": "C2",
+    "disposition": "HARDWARE",
+    "claim": "The schema and macOS Swift use capitalized identifier suffixes (fileID, personIDs); Rust and C# use ...Id. Each platform pair is internally consistent so both work today, but it is a schema-conformance gap. A one-sided rename breaks Windows IPC; only a real Windows app<->engine run validates the coordinated fix.",
+    "port_source": null,
+    "source_ids": [
+      "WF2:P6-ipc"
+    ],
+    "ruling": "Deferred per DECISIONS.md 2026-06-09 Decision 2 \u2014 coordinated Rust+C# wire-key rename validated only on Windows hardware.",
+    "test_to_add": "(NEXT.md) Windows app<->engine round-trip after the coordinated ...Id->...ID rename"
+  },
+  {
+    "id": "F-C3-001",
+    "title": "C1 gate trio: macOS DBWriter ungated DELETE wipes tags + face_prints(person_id) + ocr_text on a Vision/OCR/face timeout or zero-result rescan",
+    "severity": "critical",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Storage/DBWriter.swift",
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Tagging.swift",
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VisionWorker.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "macOS DBWriter unconditionally runs DELETE FROM tags (source='auto'), DELETE FROM face_prints, and DELETE FROM ocr_text before re-inserting, with no tags_evaluated/faces_evaluated/ocr_stage_ran gate. A swallowed Vision/ANE/OCR timeout (or a zero-face pass) on a rescan wipes previously-persisted auto-tags, OCR text + FTS postings, and \u2014 critically \u2014 manual person_id assignments. Windows gates all three.",
+    "port_source": "platforms/windows/src/engine/src/pipeline/dbwriter.rs (tags_evaluated / faces_evaluated / ocr_stage_ran gates) + tagging.rs (flag set on success only)",
+    "source_ids": [
+      "WF1b:M1",
+      "WF2:P3-tagging"
+    ],
+    "ruling": null,
+    "test_to_add": "DBWriter: a persist with the stage-ran flag false leaves existing tags/face_prints(person_id)/ocr_text intact (port the three Windows gates)"
+  },
+  {
+    "id": "F-C3-002",
+    "title": "People edits committed during a clustering pass are silently destroyed by the stale Phase-0 snapshot persist (Windows S0 fix never mirrored to macOS)",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/FaceClustering.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "macOS FaceClustering snapshots prior anchors in phase 0 and re-applies that snapshot in phase 4 without re-reading under the persist lock, so a rename/merge/mark-unknown committed during the pass is wiped. Port the Windows S0 fix: re-read the identity snapshot inside the persist transaction after re-acquiring the writer lock.",
+    "port_source": "platforms/windows/src/engine/src/pipeline/face_clustering.rs (phase-3 under-lock re-read of persons)",
+    "source_ids": [
+      "WF1:M5a",
+      "WF1:M5b",
+      "WF1:M6"
+    ],
+    "ruling": null,
+    "test_to_add": "FaceClustering: a person edit committed mid-pass survives the persist (snapshot re-read under lock)"
+  },
+  {
+    "id": "F-C3-003",
+    "title": "macOS tightPairAutoMerge treats is_unknown persons as mergeable \u2014 destroys the user's 'don't identify' verdict",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/FaceClustering.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "tightPairAutoMerge only blocks two-named merges; it treats is_unknown persons as ordinary unnamed clusters and merges them on centroid cosine, destroying the user's explicit 'don't identify these' verdict that the rest of the pipeline preserves.",
+    "port_source": null,
+    "source_ids": [
+      "WF1:M5b",
+      "WF2:P7-faces-identity"
+    ],
+    "ruling": null,
+    "test_to_add": "FaceClustering: an is_unknown person is never auto-merged"
+  },
+  {
+    "id": "F-C3-004",
+    "title": "macOS automerge ignores face_verifications 'different people' verdicts \u2014 a Windows-authored library gets user-refused merges force-applied",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/FaceClustering.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "macOS tightPairAutoMerge does not consult face_verifications 'different' verdicts; a library authored on Windows (where verdicts are honored) round-tripped to macOS has its user-refused merges force-applied. markPersonsDifferent verdicts must block macOS automerge.",
+    "port_source": "platforms/windows/src/engine/src/pipeline/face_clustering.rs (blocked-pair set from face_verifications)",
+    "source_ids": [
+      "WF1:M5b",
+      "WF2:P7-faces-identity"
+    ],
+    "ruling": null,
+    "test_to_add": "FaceClustering: a 'different' verdict pair is never auto-merged on macOS"
+  },
+  {
+    "id": "F-C3-005",
+    "title": "Union-find transitive chaining in tightPairAutoMerge defeats the named-named guard and Pass-2 margin rule \u2014 bridge singletons merge distinct identities and can delete a user-assigned name",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/FaceClustering.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "The union-find in tightPairAutoMerge chains transitively: a bridge singleton between two named clusters can merge distinct identities and delete a user-assigned name, defeating both the named-named guard and Pass-2's margin rule.",
+    "port_source": null,
+    "source_ids": [
+      "WF1:M5b"
+    ],
+    "ruling": null,
+    "test_to_add": "FaceClustering: a bridge singleton cannot transitively merge two distinct named persons"
+  },
+  {
+    "id": "F-C3-006",
+    "title": "macOS HNSW level-draw uses entropy RNG \u2014 face clustering nondeterministic across runs (Windows E0 fixed-seed fix never mirrored)",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/HNSWIndex.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "HNSWIndex draws levels with Float.random (system entropy), so face clustering is nondeterministic across engine launches. Windows pins seed 0xF11E_1D00. Port the fixed seed.",
+    "port_source": "platforms/windows/src/engine/src/pipeline/hnsw_index.rs (Builder::default().seed(0xF11E_1D00))",
+    "source_ids": [
+      "WF1:M5b",
+      "WF1:M6",
+      "WF1b:M14",
+      "WF2:P7-faces-identity"
+    ],
+    "ruling": null,
+    "test_to_add": "HNSWIndex: two builds from identical input produce identical graphs (fixed seed)"
+  },
+  {
+    "id": "F-C3-009",
+    "title": "macOS restructure move leaves files.path_hash stale (Windows ENG-91 fix not ported)",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Restructure.swift",
+      "platforms/apple/app/Sources/FileID/.../RestructureView.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "The macOS restructure apply UPDATE refreshes path_text and path_search but NOT path_hash (a notNull, indexed StablePathHash column), leaving every moved file with a stale hash and breaking cross-run/cross-platform path identity. Part of the F-1 butler port.",
+    "port_source": "platforms/windows/src/engine/src/commands/restructure_apply.rs (UPDATE refreshes path_hash too)",
+    "source_ids": [
+      "WF1:M4",
+      "WF2:P2-restructure-apply"
+    ],
+    "ruling": null,
+    "test_to_add": "Restructure.apply: post-move row has path_hash == StablePathHash(newPath)"
+  },
+  {
+    "id": "F-C3-010",
+    "title": "macOS restructure apply has no B4 stale-plan identity guard \u2014 proposal's oldPath is moved without re-reading the live files row",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Restructure.swift",
+      "platforms/apple/app/Sources/FileID/.../RestructureView.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "macOS apply moves the proposal's oldPath without re-reading the live files.path_text for that fileID, so a plan generated before a concurrent edit moves the wrong/stale source. Port the Windows B4 guard (require live path == oldPath, else fail). Part of F-1.",
+    "port_source": "platforms/windows/src/engine/src/commands/restructure_apply.rs (B4 stale-plan identity guard)",
+    "source_ids": [
+      "WF1:M4",
+      "WF2:P2-restructure-apply"
+    ],
+    "ruling": null,
+    "test_to_add": "Restructure.apply: a move whose live path != proposal.oldPath is counted failed, not executed"
+  },
+  {
+    "id": "F-C3-011",
+    "title": "F-1: macOS restructure collision policy skips+reports vs Windows uniquify \u2014 converge on auto-rename 'name (2).ext' on both",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Restructure.swift",
+      "platforms/apple/app/Sources/FileID/.../RestructureView.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "On a destination collision Windows uniquifies (stem (n).ext, n=2..9999, occupancy = on-disk lstat \u222a in-batch claimed set) while macOS does an advisory fileExists pre-check then skips + reports a conflict with no in-batch claimed set. Port uniquify + the claimed set + the ENG-42 no-op-skip-before-uniquify parity. Part of F-1.",
+    "port_source": "platforms/windows/src/engine/src/commands/restructure_apply.rs (unique_destination + claimed set + no-op skip)",
+    "source_ids": [
+      "WF1:M4",
+      "WF2:P2-restructure-apply"
+    ],
+    "ruling": "D-7: auto-rename 'name (2).ext' on both platforms (Windows is spec).",
+    "test_to_add": "Restructure.apply: two proposals to the same dest both apply via uniquified names; no skipped-conflict"
+  },
+  {
+    "id": "F-C3-013",
+    "title": "macOS semantic new-group folder names are not sanitized (Windows #2 fix not ported)",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/RestructureSemantic.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "RestructureSemantic joins the raw c-TF-IDF group name to libraryRoot with no FilesystemNameSafe.componentSafe sanitize / 200-scalar cap, so separator or illegal-char tags mis-route or create unintended nested folders. Internally inconsistent (the person route in the same file IS sanitized). Live once the butler is wired into the engine.",
+    "port_source": "platforms/windows/src/engine/src/pipeline/restructure_semantic.rs (safe_filename_component)",
+    "source_ids": [
+      "WF1:M4",
+      "WF2:P1-restructure-plan"
+    ],
+    "ruling": null,
+    "test_to_add": "RestructureSemantic: a group name containing '/' or NUL is sanitized to a single safe component"
+  },
+  {
+    "id": "F-C3-018",
+    "title": "Month folder names diverge: macOS '01-Jan'..'12-Dec' vs Windows 'January'..'December' \u2014 macOS converges",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Restructure.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "macOS monthName() returns '01-Jan'..'12-Dec'; Windows month_name() returns full month names. Windows is canonical for this cosmetic parity; macOS converges to full month names.",
+    "port_source": "platforms/windows/src/engine/src/pipeline/restructure.rs (month_name full names)",
+    "source_ids": [
+      "WF2:P1-restructure-plan"
+    ],
+    "ruling": "Windows canonical for month-folder naming; macOS converges.",
+    "test_to_add": "Restructure: monthName(6) == 'June'"
+  },
+  {
+    "id": "F-C3-021",
+    "title": "macOS engine Restructure butler is dead code: planRestructure/applyRestructure return not_implemented_yet and proposeAll has zero callers \u2014 wire it and route the app through it",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/FileIDEngineMain.swift",
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Restructure.swift",
+      "platforms/apple/app/Sources/FileID/.../RestructureView.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "The macOS engine's planRestructure/applyRestructure IPC handlers return not_implemented_yet and proposeAll has no callers; the live restructure runs app-side via RestructureEngine. Per the user ruling, port the Windows butler into the macOS ENGINE, wire the dead IPC, add the F-1 guards, route the app through the engine, and retire the app-side classifier. This is the umbrella that makes F-C3-009..020 reachable in production.",
+    "port_source": "platforms/windows/src/engine/src/commands/restructure.rs + restructure_apply.rs + pipeline/restructure*.rs (full butler)",
+    "source_ids": [
+      "WF1:M4",
+      "WF2:P1-restructure-plan",
+      "WF2:P2-restructure-apply"
+    ],
+    "ruling": "User ruling 2: port the Windows butler into the macOS engine, wire proposeAll+applyRestructure IPC, route the app through the engine, retire the app-side classifier. Overrides the DECISIONS.md 'dead code by design' note.",
+    "test_to_add": "IPC: planRestructure/applyRestructure return a real plan/result (round-trip), app consumes engine plan"
+  },
+  {
+    "id": "F-C3-023",
+    "title": "ensureLoaded has no single-flight/reentrancy guard \u2014 overlapping prewarm + Deep Analyze double-load containers, mis-attribute a batch's vlm_model, double model RAM",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Models/.../ModelLoader.swift",
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyzeRunner.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "ensureLoaded has no single-flight guard, so a prewarm racing a Deep Analyze run double-loads the model containers, mis-attributes an entire batch's vlm_model, and doubles model RAM.",
+    "port_source": null,
+    "source_ids": [
+      "WF1:M2"
+    ],
+    "ruling": null,
+    "test_to_add": "ensureLoaded: concurrent callers share one load (single-flight); vlm_model attribution is stable"
+  },
+  {
+    "id": "F-C3-024",
+    "title": "deepAnalyzeCancel cannot abort an in-run model download \u2014 single-lane JobQueue wedged for the full multi-GB fetch the user cancelled",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyzeRunner.swift",
+      "platforms/apple/engine/Sources/FileIDEngine/Models/.../Downloader.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "deepAnalyzeCancel cannot interrupt an in-progress model download, so the single-lane JobQueue stays wedged for the entire multi-GB fetch after the user explicitly cancels.",
+    "port_source": null,
+    "source_ids": [
+      "WF1:M2"
+    ],
+    "ruling": null,
+    "test_to_add": "deepAnalyzeCancel: cancels an in-flight model download (cooperative cancel on the download task)"
+  },
+  {
+    "id": "F-C3-028",
+    "title": "deep_targets_failed exit path emits no terminal deepAnalyzeComplete \u2014 the only run() exit without one (UI stranded)",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyzeRunner.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "The deep_targets_failed exit path returns without emitting a terminal deepAnalyzeComplete (cancelled/failed), the only run() exit that omits one, so the Deep Analyze UI is stranded. Windows' terminal derivation also diverges across error paths.",
+    "port_source": null,
+    "source_ids": [
+      "WF1:M3",
+      "WF2:P4-deep-analyze"
+    ],
+    "ruling": null,
+    "test_to_add": "DeepAnalyze: every run() exit (including targets-failed) emits exactly one terminal complete event"
+  },
+  {
+    "id": "F-C3-029",
+    "title": "deepAnalyzeComplete terminal event is NOT pinned \u2014 full-buffer coalescing can evict it, stranding the Deep Analyze UI forever",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/IPC/IPCSink.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "The IPCSink critical/pinned set used by the H3 coalescing fix omits deepAnalyzeComplete (and other non-scan terminal events), so under full-buffer pressure removeFirst() can evict the terminal event and the Deep Analyze UI never completes.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:M10",
+      "WF3:backpressure-e2e"
+    ],
+    "ruling": null,
+    "test_to_add": "IPCSink: every terminal completion event (scan, deepAnalyze, faceCluster, restructure) is pinned and never evicted"
+  },
+  {
+    "id": "F-C3-030",
+    "title": "macOS IPCSink full-buffer eviction removeFirst() ignores criticality and the critical set omits non-scan completions",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/IPC/IPCSink.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "On a full buffer IPCSink calls removeFirst() without regard to event criticality, and the 'critical' set covers only scan completion. Generalize the pinned set to all terminal events (this subsumes F-C3-029's mechanism).",
+    "port_source": null,
+    "source_ids": [
+      "WF3:backpressure-e2e",
+      "WF1b:M10"
+    ],
+    "ruling": null,
+    "test_to_add": "IPCSink: eviction under pressure drops only progress-class events, never any pinned terminal event"
+  },
+  {
+    "id": "F-C3-034",
+    "title": "Tag-undo journal goes stale on an all-unchanged batch, then 'Undo last tags' strips tags from a different earlier batch; no age/identity guard",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/.../TagUndo.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "The tag-undo journal is not rewritten on an all-unchanged batch, so 'Undo last tags' applies the previous batch's journal and strips tags from a different, earlier set of files. It also has no age-expiry or file-identity guard unlike the rename journal it claims to mirror.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:M12"
+    ],
+    "ruling": null,
+    "test_to_add": "TagUndo: an all-unchanged batch updates/clears the journal; undo only affects the most recent batch by identity"
+  },
+  {
+    "id": "F-C3-037",
+    "title": "VLM download path (3.3-13.5 GB models) has no free-disk-space preflight, unlike the small-artifact installers",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Models/.../Downloader.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "The VLM model download path performs no free-disk-space preflight before pulling 3.3-13.5 GB, unlike the small-artifact installers, so a full disk fails mid-fetch with no friendly guard.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:M13a"
+    ],
+    "ruling": null,
+    "test_to_add": "Downloader: VLM download checks free space >= model size before starting; surfaces a clear error"
+  },
+  {
+    "id": "F-C3-038",
+    "title": "macOS download redirects followed across scheme downgrade (https->http) and cross-host loses CA pinning \u2014 no https-only/host-allowlist (Windows E11 parity)",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Models/.../Downloader.swift",
+      "platforms/apple/engine/Sources/FileIDEngine/Net/.../URLSessionDelegate.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "The macOS download stack follows redirects across an https->http downgrade and to non-allowlisted hosts (where CA pinning silently stops applying off the appliesToHosts list), with no https-only guard, host allowlist, or hop cap. Windows enforces https-only + host-allowlist + 10-hop cap + pinning everywhere. Also VLM non-LFS files are fetched with no SHA256 and the installer pin lookup is Optional with no gate.",
+    "port_source": "platforms/windows/src/engine/src/download.rs (https-only + host allowlist + hop cap + mandatory pins)",
+    "source_ids": [
+      "WF1b:M13b",
+      "WF2:P9-model-supply"
+    ],
+    "ruling": null,
+    "test_to_add": "Downloader: an https->http or off-allowlist redirect is rejected; every artifact requires a SHA256 pin"
+  },
+  {
+    "id": "F-C3-007",
+    "title": "macOS clustering iterates unordered Dictionaries / dropped sorted-root iteration \u2014 output nondeterministic across launches",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/FaceClustering.swift",
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/IdentityClustering.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "macOS iterates cluster groups via unordered Dictionary.values; the Swift port dropped the sorted-root iteration the Windows engine documents as its determinism invariant, so cluster-ID assignment varies run to run.",
+    "port_source": "platforms/windows/src/engine/src/pipeline/identity_clustering.rs (sort_by_key(root) before iteration)",
+    "source_ids": [
+      "WF1:M6",
+      "WF2:P7-faces-identity"
+    ],
+    "ruling": null,
+    "test_to_add": "clustering: cluster-ID assignment is stable across runs (sorted-root iteration)"
+  },
+  {
+    "id": "F-C3-012",
+    "title": "apply(): successful moveItem followed by failed DB UPDATE leaves disk/DB divergent, double-counts moved+failed, no recovery record",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Restructure.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "When moveItem succeeds but the DB UPDATE fails, the file is on disk at the new path but the row still points at the old path; the move is counted both moved and failed, with no recovery sidecar. Diverges from the Windows accounting. Part of F-1.",
+    "port_source": "platforms/windows/src/engine/src/commands/restructure_apply.rs (DB-update-failure accounting + B5 sidecar)",
+    "source_ids": [
+      "WF1:M4",
+      "WF2:P2-restructure-apply"
+    ],
+    "ruling": null,
+    "test_to_add": "Restructure.apply: UPDATE-after-move failure is recorded once (recovery sidecar) and not double-counted"
+  },
+  {
+    "id": "F-C3-014",
+    "title": "macOS semantic classify lacks used_group_names dedup + bounded numeric suffix (Windows #9 fix not ported) \u2014 distinct clusters with identical top tags silently merge into one folder",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/RestructureSemantic.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "Two distinct clusters with the same top tags both name a folder identically and silently merge; Windows dedups in the sanitized namespace with a bounded numeric suffix (reserving suffix room to avoid the truncation infinite-loop). Live once the butler is engine-wired.",
+    "port_source": "platforms/windows/src/engine/src/pipeline/restructure_semantic.rs (sanitized-namespace dedup + reserved suffix)",
+    "source_ids": [
+      "WF1:M4",
+      "WF2:P1-restructure-plan"
+    ],
+    "ruling": null,
+    "test_to_add": "RestructureSemantic: two clusters with identical top tags produce distinct dedup-suffixed folders"
+  },
+  {
+    "id": "F-C3-015",
+    "title": "macOS nearestTwoFolders / existing-folder routing not constrained to prototypes inside libraryRoot (Windows E12 guard not ported)",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/RestructureSemantic.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "macOS routes a cluster to any prototype at sim>=0.55 with no in-root containment check; Windows additionally requires proto.path.starts_with(library_root) (E12). Live once the butler is engine-wired.",
+    "port_source": "platforms/windows/src/engine/src/pipeline/restructure_semantic.rs (in-root containment guard)",
+    "source_ids": [
+      "WF1:M4",
+      "WF2:P1-restructure-plan"
+    ],
+    "ruling": null,
+    "test_to_add": "RestructureSemantic: a prototype outside libraryRoot is not a routing target"
+  },
+  {
+    "id": "F-C3-016",
+    "title": "proposeAll has no Anchor/Mixed/Junk tiering or anchor-move strip (Windows A1/A3 guard absent from the engine plan)",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Restructure.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "The engine-side proposeAll lacks the Anchor/Mixed/Junk source-folder tiering and the anchor-move strip the Windows cascade applies, so anchor-folder files are not held out of the plan. Part of the butler port.",
+    "port_source": "platforms/windows/src/engine/src/commands/restructure.rs (anchor-folder Keep-move drop) + pipeline/restructure.rs tiering",
+    "source_ids": [
+      "WF1:M4"
+    ],
+    "ruling": null,
+    "test_to_add": "proposeAll: anchor-folder files emit no move proposals"
+  },
+  {
+    "id": "F-C3-017",
+    "title": "Rule cascade routes videos/audio/other-kind into Photos/<Year>/<Month> \u2014 diverges from Windows Videos/<Year> and Audio/ buckets",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Restructure.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "The macOS rule cascade routes any dated non-document file (including video/audio) into Photos/<Year>/<Month>; Windows routes video->Videos/<Year> and audio->Audio. Converge on the Windows buckets (Windows is canonical for this cosmetic/UX parity).",
+    "port_source": "platforms/windows/src/engine/src/pipeline/restructure.rs (Videos/Audio buckets)",
+    "source_ids": [
+      "WF1:M4",
+      "WF2:P1-restructure-plan"
+    ],
+    "ruling": "Windows canonical for cosmetic/UX parity (Videos/Audio buckets); macOS converges.",
+    "test_to_add": "Restructure: a dated video routes to Videos/<Year>, dated audio to Audio/"
+  },
+  {
+    "id": "F-C3-019",
+    "title": "Wire category label vocabulary differs: macOS 'Documents'/'Photos'/'Misc' vs Windows 'document'/'photo'/'misc'",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Restructure.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "The category label on the wire differs in casing/wording between platforms. Windows lowercase wire categories are canonical; macOS converges.",
+    "port_source": null,
+    "source_ids": [
+      "WF2:P1-restructure-plan"
+    ],
+    "ruling": "Windows lowercase wire categories canonical; macOS converges.",
+    "test_to_add": "Restructure: wire category strings match the Windows lowercase vocabulary"
+  },
+  {
+    "id": "F-C3-020",
+    "title": "Missing-timestamp year handling diverges: macOS omits the year folder, Windows coerces to 1970",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Restructure.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "With a missing timestamp macOS omits the year folder (and skips the year when the bucket string contains digits) while Windows coerces to 1970. Converge on a single rule as part of the butler port.",
+    "port_source": null,
+    "source_ids": [
+      "WF2:P1-restructure-plan"
+    ],
+    "ruling": null,
+    "test_to_add": "Restructure: a file with no timestamp routes to one agreed canonical year bucket on both platforms"
+  },
+  {
+    "id": "F-C3-022",
+    "title": "parseFaceComparison inverts natural-language negatives: 'not the same person' parses as SAME at defaulted 0.80, above the 0.75 auto-merge threshold",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyzeRunner.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "parseFaceComparison treats 'not the same person' as SAME with a defaulted 0.80 confidence (above the 0.75 auto-merge threshold), so a VLM negative verdict forces a wrong merge.",
+    "port_source": null,
+    "source_ids": [
+      "WF1:M2"
+    ],
+    "ruling": null,
+    "test_to_add": "parseFaceComparison: a negated verdict ('not the same') yields different/low-confidence, never an auto-merge"
+  },
+  {
+    "id": "F-C3-025",
+    "title": "clearCancel() at job start erases a cancel issued while the Deep Analyze job was queued \u2014 the cancelled run proceeds anyway",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyzeRunner.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "A cancel pressed while the Deep Analyze job is still queued is erased by clearCancel() at run start, so the whole-library VLM pass runs anyway.",
+    "port_source": null,
+    "source_ids": [
+      "WF1:M3",
+      "WF1:M2"
+    ],
+    "ruling": null,
+    "test_to_add": "DeepAnalyze: a cancel issued while queued aborts the job before processing begins"
+  },
+  {
+    "id": "F-C3-026",
+    "title": "Synchronous image decode on the DeepAnalyze actor executor stalls deepAnalyzeCancel (and every IPC command) while probing a file on an unreachable volume",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyzeRunner.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "Synchronous image decode runs on the DeepAnalyze actor executor, so a file on an unreachable volume blocks the inline command loop and deepAnalyzeCancel (and every command behind it) stalls.",
+    "port_source": null,
+    "source_ids": [
+      "WF1:M2"
+    ],
+    "ruling": null,
+    "test_to_add": "DeepAnalyze: decode runs off the actor/command executor (cancel stays responsive during a hung read)"
+  },
+  {
+    "id": "F-C3-027",
+    "title": "Folder-scoped Deep Analyze uses unescaped LIKE \u2014 folders containing '_' or '%' over-match sibling paths outside the chosen folder",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyzeRunner.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "resolveTargets' .folder scope binds 'path_text LIKE prefix||/%' with no ESCAPE clause, so a folder path containing '_' or '%' matches files outside the requested subtree, which are then run through the VLM.",
+    "port_source": null,
+    "source_ids": [
+      "WF1:M3"
+    ],
+    "ruling": null,
+    "test_to_add": "resolveTargets: folder scope uses an escaped LIKE (or path-prefix range), no over-match on '_'/'%'"
+  },
+  {
+    "id": "F-C3-031",
+    "title": "Cancelled/aborted scans can never write final status: GRDB 7 task cancellation makes markSessionFinal's pool.write always throw \u2014 scan_sessions stuck 'running', mislabeled 'crashed' next startup",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/ScanCoordinator.swift",
+      "platforms/apple/engine/Sources/FileIDEngine/Storage/Database.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "markSessionFinal's pool.write runs inside the cancelled task; GRDB 7 makes a write on a cancelled task throw, so the terminal status UPDATE is swallowed and scan_sessions stays 'running', producing a false crash-recovery on next launch. Use an uncancelled write for the terminal status.",
+    "port_source": null,
+    "source_ids": [
+      "WF1:M7a",
+      "WF1b:M8"
+    ],
+    "ruling": null,
+    "test_to_add": "markSessionFinal: writes terminal status even when the scan task is cancelled (detached/uncancellable write)"
+  },
+  {
+    "id": "F-C3-032",
+    "title": "startScan rejected for db-unavailable emits an error but no scan-terminal event \u2014 app auto-pilot sticks on 'Scanning\u2026' indefinitely",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/FileIDEngineMain.swift",
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/ScanCoordinator.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "When startScan is rejected for db-unavailable the engine emits an error kind but no scan-terminal event, so the app's auto-pilot remains in 'Scanning\u2026' forever.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:M8"
+    ],
+    "ruling": null,
+    "test_to_add": "startScan: a db-unavailable rejection emits a terminal scan event so the app can exit the scanning state"
+  },
+  {
+    "id": "F-C3-033",
+    "title": "Pending-extraction window starves: permanently-failing rows occupy ORDER BY id ASC LIMIT 5000 forever, blocking newer faces from embedding; maxFacesPerRun overflow never picked up",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/FaceClustering.swift",
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VisionWorker.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "The pending-face extraction query is ORDER BY id ASC LIMIT 5000; permanently-failing rows sit at the front forever, blocking newer faces from being embedded. Separately the Phase-2 maxFacesPerRun query re-selects the same first 200k ids every run, contradicting the documented re-run recovery.",
+    "port_source": null,
+    "source_ids": [
+      "WF1:M5b"
+    ],
+    "ruling": null,
+    "test_to_add": "FaceClustering: a permanently-failing face row is skipped/marked so newer rows make progress; overflow advances across runs"
+  },
+  {
+    "id": "F-C3-035",
+    "title": "namedPerson Mixed gate measures the WRONG person's homogeneity \u2014 flags most of a folder as outliers when a different person dominates",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Restructure.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "The namedPerson Mixed-tier gate computes homogeneity against the wrong person, so when a different person dominates the folder most files are wrongly flagged as outliers.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:M12"
+    ],
+    "ruling": null,
+    "test_to_add": "Restructure: Mixed-tier homogeneity is measured against the dominant person in the folder"
+  },
+  {
+    "id": "F-C3-036",
+    "title": "Vision-timeout image is persisted failed=false then permanently skipped on incremental rescans (never re-tagged)",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Tagging.swift",
+      "platforms/apple/engine/Sources/FileIDEngine/Storage/DBWriter.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "An image whose Vision pass timed out is persisted with failed=false and scanned_at updated, so the incremental skip logic never re-tags it. Mark the stage incomplete (ties to the C1 gate) so a rescan retries.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:M1"
+    ],
+    "ruling": null,
+    "test_to_add": "DBWriter: a stage-timeout file is not marked complete, so incremental rescan retries it"
+  },
+  {
+    "id": "F-C3-044",
+    "title": "50MP decode cap absent from the macOS deep-analyze path; vlm_proposed_name/vlm_description NULL-clobber (vs Windows COALESCE)",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyzeRunner.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "The macOS deep-analyze path has no 50MP decode cap (Windows caps it), and persist() direct-overwrites vlm_proposed_name/vlm_description so a NULL result clobbers a prior good value where Windows COALESCEs to preserve it.",
+    "port_source": "platforms/windows/src/engine/src/pipeline/deep_analyze.rs (50MP cap + COALESCE write)",
+    "source_ids": [
+      "WF2:P4-deep-analyze"
+    ],
+    "ruling": null,
+    "test_to_add": "DeepAnalyzeRunner: oversize image is downscaled to <=50MP; a NULL caption preserves the prior value (COALESCE)"
+  },
+  {
+    "id": "F-C3-045",
+    "title": "Hardware.workerCap Intel fallback counts SMT logical threads as P-cores and lacks Windows' logical-core clamp \u2014 1.5x oversubscription on every Intel Mac",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Hardware.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "The Intel fallback in Hardware.workerCap counts SMT logical threads as physical P-cores and omits Windows' logical-core clamp, oversubscribing the worker pool ~1.5x on every Intel Mac.",
+    "port_source": "platforms/windows/src/engine/src/platform.rs (logical-core clamp)",
+    "source_ids": [
+      "WF3:mac-memory-adaptation"
+    ],
+    "ruling": null,
+    "test_to_add": "Hardware: workerCap on a known Intel topology matches the physical-core-derived target (no SMT double-count)"
+  },
+  {
+    "id": "F-C3-008",
+    "title": "Pass-2 recomputes the full cluster centroid on every outlier assignment \u2014 quadratic work the Windows mirror replaced with O(dim) running sums",
+    "severity": "low",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/IdentityClustering.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "Pass-2 recomputes the full centroid per outlier assignment (O(S) per add -> O(S^2)); Windows folds the outlier into a running sum (O(dim) per add). Port the running-sum form.",
+    "port_source": "platforms/windows/src/engine/src/pipeline/identity_clustering.rs (core_sums running-sum add)",
+    "source_ids": [
+      "WF1:M6",
+      "WF2:P7-faces-identity"
+    ],
+    "ruling": null,
+    "test_to_add": "IdentityClustering: Pass-2 outlier assignment uses O(dim) running sums (parity test vs full-recompute output)"
+  },
+  {
+    "id": "F-C3-039",
+    "title": "macOS writer omits PRAGMA cache_spill=0 \u2014 dirty pages can spill to a temp file mid-transaction under memory pressure",
+    "severity": "low",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Storage/Database.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "macOS prepareDatabase sets six PRAGMAs but not cache_spill=0 (Windows sets it), so dirty pages can spill to a temp file mid-transaction under memory pressure. Cheap parity addition.",
+    "port_source": "platforms/windows/src/engine/src/db/mod.rs (PRAGMA cache_spill = 0)",
+    "source_ids": [
+      "WF1b:M7b",
+      "WF2:P5-db-schema"
+    ],
+    "ruling": null,
+    "test_to_add": "Database: prepareDatabase issues PRAGMA cache_spill = 0"
+  },
+  {
+    "id": "F-C3-040",
+    "title": "IPCSink is never drained/closed before Darwin._exit(0) \u2014 a buffered terminal event can be lost on graceful shutdown",
+    "severity": "low",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/FileIDEngineMain.swift",
+      "platforms/apple/engine/Sources/FileIDEngine/IPC/IPCSink.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "On graceful shutdown the engine calls _exit(0) without draining/closing the IPCSink, so a buffered terminal event can be lost.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:M10"
+    ],
+    "ruling": null,
+    "test_to_add": "shutdown: IPCSink is flushed/drained before _exit"
+  },
+  {
+    "id": "F-C3-041",
+    "title": "PHASE 4 re-creates persons whose representative_face_id references faces cascade-deleted mid-pass by app-side Cleanup \u2014 re-introduces the dangle reconcilePersons repairs",
+    "severity": "low",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/FaceClustering.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "If app-side Cleanup cascade-deletes faces mid-pass, phase 4 re-creates persons whose representative_face_id points at a now-deleted face, re-introducing the dangling reference reconcilePersons exists to repair.",
+    "port_source": null,
+    "source_ids": [
+      "WF1:M5a"
+    ],
+    "ruling": null,
+    "test_to_add": "FaceClustering: a representative_face_id deleted mid-pass is reconciled before persist (no dangling ref)"
+  },
+  {
+    "id": "F-C3-042",
+    "title": "No cancellation path for face clustering: shutdown _exit(0)s a mid-flight cluster job, discarding the pass and delaying exit behind its persist transaction",
+    "severity": "low",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/FaceClustering.swift",
+      "platforms/apple/engine/Sources/FileIDEngine/FileIDEngineMain.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "There is no cancellation path for an in-flight face-clustering job; shutdown _exit(0)s mid-pass, discarding the work and delaying exit behind the persist transaction.",
+    "port_source": null,
+    "source_ids": [
+      "WF1:M5a"
+    ],
+    "ruling": null,
+    "test_to_add": "FaceClustering: a shutdown signal cooperatively cancels the pass at a safe boundary"
+  },
+  {
+    "id": "F-C3-043",
+    "title": "Latent: HF tree listing is non-recursive yet .fileid-verified sentinel is written as if all repo files were fetched \u2014 a pinned repo with any subfolder installs incomplete and wedges offline",
+    "severity": "low",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Models/.../HFDownloader.swift"
+    ],
+    "wave": "C3",
+    "disposition": "FIX-CI",
+    "claim": "The HF tree listing is non-recursive, but the .fileid-verified sentinel is written as if all repo files were fetched; a pinned repo with any subfolder installs incomplete and then permanently treats itself as installed (wedged offline).",
+    "port_source": null,
+    "source_ids": [
+      "WF1:M3"
+    ],
+    "ruling": null,
+    "test_to_add": "HFDownloader: sentinel is written only after a recursive listing confirms all files present"
+  },
+  {
+    "id": "F-C4-001",
+    "title": "'Restart Engine' spawns a second engine without terminating the first \u2014 dual SQLite writers + orphaned errPipe handler corrupts lifecycle",
+    "severity": "critical",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/app/Sources/FileID/EngineClient.swift"
+    ],
+    "wave": "C4",
+    "disposition": "FIX-CI",
+    "claim": "Restart Engine spawns a new engine process without terminating the existing one, leaving two SQLite writers against the same DB and an orphaned errPipe handler bound to the old process \u2014 corrupting the new engine's lifecycle. Mirror the Windows sender!=_process identity guard / clean teardown.",
+    "port_source": "platforms/windows app EngineClient RestartAsync (sender != _process guard + Cleanup before StartAsync)",
+    "source_ids": [
+      "WF1b:MA1"
+    ],
+    "ruling": null,
+    "test_to_add": "EngineClient: Restart terminates+reaps the old process before spawning; never two live engines"
+  },
+  {
+    "id": "F-C4-002",
+    "title": "ReadStore.Dispose() / store teardown can free the live SqliteConnection out from under an in-flight thread-pool read (use-after-free crash)",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/app/Sources/FileID/ReadStore.swift"
+    ],
+    "wave": "C4",
+    "disposition": "FIX-CI",
+    "claim": "ReadStore teardown can close/free the underlying read connection while a background thread-pool read is still using it, a use-after-dispose / native crash. (Mirror of the Windows ReadStore.Dispose race.) Guard with a ref-count/quiescence before close.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:WA6"
+    ],
+    "ruling": null,
+    "test_to_add": "ReadStore: dispose waits for in-flight reads to quiesce before closing the connection"
+  },
+  {
+    "id": "F-C4-003",
+    "title": "Double-click on 'Convert to real moves' can permanently destroy a user file (no single-flight / button-disable on the irreversible apply path)",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/app/Sources/FileID/.../RestructureView.swift"
+    ],
+    "wave": "C4",
+    "disposition": "FIX-CI",
+    "claim": "The irreversible 'Convert to real moves' apply has no single-flight guard or button-disable, so a double-click runs apply twice and can destroy a user file / produce a false 'some changes couldn't be applied' alarm on the second pass.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:MA2a"
+    ],
+    "ruling": null,
+    "test_to_add": "RestructureView: the apply button is single-flight (disabled while applying); a double-tap runs once"
+  },
+  {
+    "id": "F-C4-004",
+    "title": "Person merge/move/mark-unknown and Cleanup deleteFiles app-side writes have no busy timeout \u2014 collide with the engine writer under WAL, report false success or silently drop the edit",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/app/Sources/FileID/Database/People.swift",
+      "platforms/apple/app/Sources/FileID/Database/Cleanup.swift",
+      "platforms/apple/app/Sources/FileID/Database/.../WriteStore.swift"
+    ],
+    "wave": "C4",
+    "disposition": "FIX-CI",
+    "claim": "App-side write connections for People edits (updatePerson, movePersonFaces, mergePersons, mergePersonsBatch, mark-unknown) and Cleanup deleteFiles open without a busy timeout, so under engine-writer WAL contention they hit SQLITE_BUSY and either report false success or silently no-op \u2014 and trashed files become ghost DB rows. Set a busy timeout on every app write connection.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:MA4",
+      "WF1b:MA6",
+      "WF1b:MA5a",
+      "WF1b:MA7b",
+      "WF1:M7a"
+    ],
+    "ruling": null,
+    "test_to_add": "WriteStore: every app write connection sets a busy timeout; a contended write retries instead of failing silently"
+  },
+  {
+    "id": "F-C4-006",
+    "title": "Semantic/similarity search runs the full clip_embeddings cosine scan synchronously on the MainActor \u2014 multi-second UI hang on a 50k library",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/app/Sources/FileID/.../SearchStore.swift",
+      "platforms/apple/app/Sources/FileID/ReadStore.swift"
+    ],
+    "wave": "C4",
+    "disposition": "FIX-CI",
+    "claim": "Semantic/similarity search materializes and cosine-scans the full clip_embeddings table synchronously on the MainActor, hanging the UI for seconds on a 50k library. Move off the main thread (and stream/top-K).",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:MA5b"
+    ],
+    "ruling": null,
+    "test_to_add": "SearchStore: semantic search executes off the MainActor"
+  },
+  {
+    "id": "F-C4-008",
+    "title": "Bulk-tag 'Replace existing' permanently wipes user tags with no undo and no confirmation",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/app/Sources/FileID/.../BulkTagView.swift"
+    ],
+    "wave": "C4",
+    "disposition": "FIX-CI",
+    "claim": "The bulk-tag 'Replace existing' action wipes a file's user tags with no undo journal entry and no confirmation dialog. Add a confirmation + journal.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:WA7b"
+    ],
+    "ruling": null,
+    "test_to_add": "BulkTagView: Replace-existing requires confirmation and writes an undo journal"
+  },
+  {
+    "id": "F-C4-009",
+    "title": "TreeDiffView re-groups all proposals and eagerly materializes every row into AnyView per render \u2014 defeats LazyVStack virtualization, storms on hover",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/app/Sources/FileID/.../TreeDiffView.swift",
+      "platforms/apple/app/Sources/FileID/.../RestructureView.swift"
+    ],
+    "wave": "C4",
+    "disposition": "FIX-CI",
+    "claim": "TreeDiffView re-groups all proposals and eagerly wraps every row in AnyView on each render, defeating LazyVStack virtualization; continuous Sankey hover invalidates the whole RestructureView body (re-passing the 10k array, O(N) onChange equality per mouse-move); the drill-down sheet re-filters+re-groups on every checkbox tap.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:MA2b"
+    ],
+    "ruling": null,
+    "test_to_add": "TreeDiffView: rows are lazily built; hover does not re-pass the full proposal array"
+  },
+  {
+    "id": "F-C4-005",
+    "title": "Bulk-tag undo / total-failure bulk rename clobber a valid prior undo journal with an empty batch; raw-path undo with no identity guard strips an unrelated same-named file's tag",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/app/Sources/FileID/.../BulkOps.swift",
+      "platforms/apple/app/Sources/FileID/.../UndoJournal.swift"
+    ],
+    "wave": "C4",
+    "disposition": "FIX-CI",
+    "claim": "A total-failure bulk rename / bulk-tag persists an empty batch over a still-valid prior undo journal, silently destroying 'Undo last rename/tags'. And bulk-tag undo removes tags by raw path with no file-identity guard, so it can strip a tag from an unrelated same-named file.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:MA5a",
+      "WF1b:MA8"
+    ],
+    "ruling": null,
+    "test_to_add": "BulkOps: a zero-success batch leaves the prior undo journal intact; undo matches by file identity"
+  },
+  {
+    "id": "F-C4-007",
+    "title": "Keyword reload() runs the multi-table search query on the MainActor on every throttled batch event during a live scan",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/app/Sources/FileID/.../SearchStore.swift"
+    ],
+    "wave": "C4",
+    "disposition": "FIX-CI",
+    "claim": "The keyword reload() runs the multi-table search query on the MainActor on every throttled batch event during a live scan, stuttering the UI.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:MA5b"
+    ],
+    "ruling": null,
+    "test_to_add": "SearchStore: keyword reload query runs off the MainActor"
+  },
+  {
+    "id": "F-C4-012",
+    "title": "Per-file deselections wiped (everything re-selected) on every regenerate, including a Deep Analyze finishing mid-review",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/app/Sources/FileID/.../RestructureView.swift"
+    ],
+    "wave": "C4",
+    "disposition": "FIX-CI",
+    "claim": "Regenerating the plan re-selects everything, discarding the user's per-file deselections; a Deep Analyze completing mid-review triggers a regenerate and silently re-checks files the user unchecked.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:MA2a"
+    ],
+    "ruling": null,
+    "test_to_add": "RestructureView: per-file deselections survive a regenerate"
+  },
+  {
+    "id": "F-C4-013",
+    "title": "Drag-to-merge runs the full merge transaction synchronously on the main thread \u2014 freezes the UI on large libraries; ghost cluster after moving all photos",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/app/Sources/FileID/.../PeopleView.swift"
+    ],
+    "wave": "C4",
+    "disposition": "FIX-CI",
+    "claim": "Drag-to-merge runs the full merge transaction synchronously on the main thread, freezing the UI on large libraries; and moving all of a person's photos leaves a ghost cluster whose card shows the wrong (target) person's face.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:MA6"
+    ],
+    "ruling": null,
+    "test_to_add": "PeopleView: merge runs off the main thread; an emptied person is removed (no ghost card)"
+  },
+  {
+    "id": "F-C4-014",
+    "title": "DeepAnalyze run-start staleness: deepAnalyzeLast not cleared (stale caption beside 'Starting\u2026'); Cancel button non-functional during model download",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/app/Sources/FileID/.../DeepAnalyzeView.swift"
+    ],
+    "wave": "C4",
+    "disposition": "FIX-CI",
+    "claim": "At Deep Analyze run-start deepAnalyzeLast is not cleared, so a stale 'Most recent caption' shows beside the 'Starting\u2026' card; and the Cancel button in the Starting card is non-functional during the multi-GB model download phase (ties to F-C3-024).",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:MA3"
+    ],
+    "ruling": null,
+    "test_to_add": "DeepAnalyzeView: run-start clears the last caption; Cancel is live during download"
+  },
+  {
+    "id": "F-C4-016",
+    "title": "Engine crash mid-run strands DeepAnalyze in a frozen 'running' UI until the user tab-switches; persisted _activeModel not re-validated against the RAM gate",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/app/Sources/FileID/.../DeepAnalyzeView.swift",
+      "platforms/apple/app/Sources/FileID/EngineClient.swift"
+    ],
+    "wave": "C4",
+    "disposition": "FIX-CI",
+    "claim": "An engine crash/fatal error mid-run leaves Deep Analyze in a frozen 'running' UI (StreamCard up, Cancel inert) until a tab switch; and the persisted _activeModel is never re-validated against the RAM gate, so Analyze can launch a VLM the cards forbid.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:WA4"
+    ],
+    "ruling": null,
+    "test_to_add": "DeepAnalyzeView: an engine crash resets the running UI; _activeModel is re-validated against the RAM gate before launch"
+  },
+  {
+    "id": "F-C4-018",
+    "title": "Whole-library 'Select all non-keepers' persists by file id across reloads \u2014 a mid-scan keeper re-rank leaves the now-keeper selected and trashed on next Delete",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/app/Sources/FileID/.../CleanupView.swift"
+    ],
+    "wave": "C4",
+    "disposition": "FIX-CI",
+    "claim": "The Cleanup 'Select all non-keepers' selection persists by file id across reloads; if the engine re-ranks a group's keeper mid-scan, the now-displayed keeper stays selected and is trashed on the next Delete.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:MA7b"
+    ],
+    "ruling": null,
+    "test_to_add": "CleanupView: a re-ranked keeper is deselected on reload (selection is keeper-aware, not raw-id)"
+  },
+  {
+    "id": "F-C4-010",
+    "title": "Auto-pilot no-faces watchdog auto-runs deepAnalyzeAll on the whole library \u2014 contradicts the 'Deep Analyze waits for a named person' chaining rule",
+    "severity": "low",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/app/Sources/FileID/.../AutoPilot.swift"
+    ],
+    "wave": "C4",
+    "disposition": "FIX-CI",
+    "claim": "The auto-pilot no-faces watchdog auto-runs deepAnalyzeAll on the entire library, contradicting the documented rule that Deep Analyze waits for a named person before chaining.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:MA1"
+    ],
+    "ruling": null,
+    "test_to_add": "AutoPilot: no-faces watchdog does not auto-launch whole-library Deep Analyze"
+  },
+  {
+    "id": "F-C4-011",
+    "title": "shutdown() latches expectedExit=true even when .shutdown was never sent \u2014 masks the next genuine crash",
+    "severity": "low",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/app/Sources/FileID/EngineClient.swift"
+    ],
+    "wave": "C4",
+    "disposition": "FIX-CI",
+    "claim": "EngineClient.shutdown() sets expectedExit=true unconditionally, even when no .shutdown command was actually sent, so the next genuine engine crash is masked as an expected exit.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:MA1"
+    ],
+    "ruling": null,
+    "test_to_add": "EngineClient: expectedExit is set only when a shutdown command was actually dispatched"
+  },
+  {
+    "id": "F-C4-015",
+    "title": "modelDownloadProgress never reset to nil \u2014 Settings model picker shows a stale 'Downloading 100%' bar forever after any download",
+    "severity": "low",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/app/Sources/FileID/.../SettingsView.swift"
+    ],
+    "wave": "C4",
+    "disposition": "FIX-CI",
+    "claim": "modelDownloadProgress is never reset to nil after a download completes, so the Settings model picker shows a stale 'Downloading 100%' bar indefinitely.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:MA3"
+    ],
+    "ruling": null,
+    "test_to_add": "SettingsView: download progress resets to nil on completion/cancel"
+  },
+  {
+    "id": "F-C4-017",
+    "title": "CLIP Uninstall leaves the text encoder loaded \u2014 semantic search keeps running against the deleted model; 'Install all' permanently disabled after one click",
+    "severity": "low",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/app/Sources/FileID/.../SettingsView.swift",
+      "platforms/apple/app/Sources/FileID/.../WelcomeSheet.swift"
+    ],
+    "wave": "C4",
+    "disposition": "FIX-CI",
+    "claim": "Uninstalling CLIP leaves the text encoder loaded in memory, so semantic search keeps running against the deleted model with no fallback hint until restart; and the WelcomeSheet 'Install all' button is permanently disabled for the session once clicked, even if a model is cancelled or fails.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:MA7a"
+    ],
+    "ruling": null,
+    "test_to_add": "Settings/Welcome: CLIP uninstall unloads the encoder + shows a fallback hint; Install-all re-enables on cancel/fail"
+  },
+  {
+    "id": "F-C4-019",
+    "title": "Anchor ('staying put') source folder in the Tree-diff opens an empty 'Nothing to show' drill-down (display-name vs full-path key mismatch)",
+    "severity": "low",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/app/Sources/FileID/.../TreeDiffView.swift"
+    ],
+    "wave": "C4",
+    "disposition": "FIX-CI",
+    "claim": "Tapping an anchor source folder in the Tree-diff view opens an empty drill-down because the lookup keys on display name while rows are keyed by full path.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:MA8"
+    ],
+    "ruling": null,
+    "test_to_add": "TreeDiffView: anchor-folder drill-down keys on full path and shows its files"
+  },
+  {
+    "id": "F-C4-020",
+    "title": "hasActiveScan dead code / unordered discovery-progress Tasks can overwrite the final count with a stale lower value",
+    "severity": "low",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/app/Sources/FileID/.../ScanDispatcher.swift"
+    ],
+    "wave": "C4",
+    "disposition": "FIX-CI",
+    "claim": "hasActiveScan is unreachable dead code whose docstring claims a re-entrancy guard the dispatcher never applies; and the discovery progress callback fires unordered detached Tasks carrying monotonic counts, so a stale lower 'discovered' value can overwrite the final count.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:M9"
+    ],
+    "ruling": null,
+    "test_to_add": "ScanDispatcher: discovered count is monotonic (a stale lower update never overwrites a higher one)"
+  },
+  {
+    "id": "F-C4-021",
+    "title": "Person name-match uses bare substring containment \u2014 misclassifies common folders as person folders",
+    "severity": "low",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/app/Sources/FileID/.../Restructure*.swift"
+    ],
+    "wave": "C4",
+    "disposition": "FIX-CI",
+    "claim": "Person-folder detection uses bare substring containment of a person name in the folder name, misclassifying common folders (e.g. a name that is a common word) as person folders.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:M12"
+    ],
+    "ruling": null,
+    "test_to_add": "Restructure: person-folder match uses a token/word boundary, not bare substring"
+  },
+  {
+    "id": "F-C5-001",
+    "title": "ReadStore.Dispose() can free the live SqliteConnection out from under an in-flight thread-pool read (use-after-dispose / native crash)",
+    "severity": "high",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/FileID.App/.../ReadStore.cs"
+    ],
+    "wave": "C5",
+    "disposition": "FIX-CI",
+    "claim": "ReadStore.Dispose() can close the SqliteConnection while a background thread-pool read is still executing against it, a use-after-dispose native crash. Quiesce in-flight reads before disposing.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:WA6"
+    ],
+    "ruling": null,
+    "test_to_add": "ReadStore: Dispose waits for in-flight reads (ref-count/quiescence) before closing"
+  },
+  {
+    "id": "F-C5-002",
+    "title": "DrillDownSheet eagerly builds one UIElement + fires one shell thumbnail per move, uncapped \u2014 'See all' on a large group freezes the UI and floods the shell",
+    "severity": "high",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/FileID.App/.../DrillDownSheet.xaml.cs"
+    ],
+    "wave": "C5",
+    "disposition": "FIX-CI",
+    "claim": "DrillDownSheet eagerly materializes one UIElement and fires one shell thumbnail request per move with no cap, so 'See all' on a large outcome group freezes the UI thread and floods the shell. Virtualize + cap.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:WA3b"
+    ],
+    "ruling": null,
+    "test_to_add": "DrillDownSheet: rows virtualize and thumbnail requests are bounded/lazy"
+  },
+  {
+    "id": "F-C5-003",
+    "title": "No double-apply prevention on Apply \u2014 re-clicking after a successful real-move apply produces a false 'Some changes couldn't be applied' alarm; stale plan re-rendered as pending",
+    "severity": "high",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/FileID.App/.../RestructureViewModel.cs"
+    ],
+    "wave": "C5",
+    "disposition": "FIX-CI",
+    "claim": "Apply has no double-apply guard: re-clicking after a successful real-move apply re-runs against a stale plan (B4 catches it but reports every file failed), producing a false 'some changes couldn't be applied' alarm; a symlink-mode re-apply reports every file failed (symlink mode never updates the DB so B4 can't detect staleness); and the stale plan stays rendered as pending with no post-apply re-plan (diverges from macOS regenerate()).",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:WA3a"
+    ],
+    "ruling": null,
+    "test_to_add": "RestructureViewModel: Apply is single-flight and re-plans after a successful apply (no stale-pending render)"
+  },
+  {
+    "id": "F-C5-004",
+    "title": "Bulk-tag 'Replace existing' permanently wipes user tags with no undo and no confirmation; grid shows stale filenames/tags after bulk rename/tag",
+    "severity": "high",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/FileID.App/.../BulkTagViewModel.cs",
+      "platforms/windows/src/FileID.App/.../LibraryView.xaml.cs"
+    ],
+    "wave": "C5",
+    "disposition": "FIX-CI",
+    "claim": "Bulk-tag Replace-existing wipes user tags with no undo and no confirmation; and the grid shows stale filenames/tags after a bulk rename or bulk-tag apply (no post-commit refresh).",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:WA7b"
+    ],
+    "ruling": null,
+    "test_to_add": "BulkTag: Replace-existing confirms + journals; grid refreshes after a bulk commit"
+  },
+  {
+    "id": "F-C5-005",
+    "title": "hardwareReprobed.execution_provider reports a fresh probe, not the engine's actually-bound EP \u2014 Settings claims 'CUDA active, no restart needed' while scans run DirectML",
+    "severity": "medium",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/FileID.App/.../SettingsViewModel.cs",
+      "platforms/windows/src/engine/src/commands/hardware.rs"
+    ],
+    "wave": "C5",
+    "disposition": "FIX-CI",
+    "claim": "hardwareReprobed.execution_provider reports a fresh hardware probe rather than the EP the running engine actually bound, so Settings shows 'CUDA active, no restart needed' while scans still run DirectML. Report the bound EP.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:W22",
+      "WF3:win-tier-transitions"
+    ],
+    "ruling": null,
+    "test_to_add": "hardware: reprobe reports the engine's currently-bound EP, not a hypothetical fresh probe"
+  },
+  {
+    "id": "F-C5-006",
+    "title": "PersonDetailSheet rename can write the name onto a different person (or no-op) after a background re-cluster \u2014 stale _personId, no generation guard",
+    "severity": "medium",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/FileID.App/.../PersonDetailSheet.xaml.cs"
+    ],
+    "wave": "C5",
+    "disposition": "FIX-CI",
+    "claim": "PersonDetailSheet holds a stale _personId with no generation guard, so a rename after a background re-cluster can write the name onto a different person or silently no-op.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:WA8a"
+    ],
+    "ruling": null,
+    "test_to_add": "PersonDetailSheet: rename validates the person generation/identity before writing"
+  },
+  {
+    "id": "F-C5-007",
+    "title": "DebugLog truncation check + truncating rewrite run OUTSIDE s_writeLock \u2014 concurrent log writes silently dropped once app.log exceeds 10 MB",
+    "severity": "medium",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/FileID.App/.../DebugLog.cs"
+    ],
+    "wave": "C5",
+    "disposition": "FIX-CI",
+    "claim": "The DebugLog 10 MB truncation check and the truncating rewrite run outside s_writeLock, racing the locked append; once app.log exceeds 10 MB, concurrent writes are silently dropped and the forensic tail is lost. Move the truncate under the lock (synchronous DebugLog stays synchronous per the guard).",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:WA10"
+    ],
+    "ruling": null,
+    "test_to_add": "DebugLog: truncation runs under s_writeLock; concurrent writes during a truncate are not lost"
+  },
+  {
+    "id": "F-C5-008",
+    "title": "'Auto-install CUDA acceleration' toggle is a dead control \u2014 DisableAutoInstallCuda is read nowhere",
+    "severity": "medium",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/FileID.App/.../SettingsViewModel.cs"
+    ],
+    "wave": "C5",
+    "disposition": "FIX-CI",
+    "claim": "The 'Auto-install CUDA acceleration' Settings toggle persists DisableAutoInstallCuda, but the flag is never read by the install chain, so the control does nothing. Wire it (or remove it).",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:WA11"
+    ],
+    "ruling": null,
+    "test_to_add": "Settings: DisableAutoInstallCuda actually gates the CUDA auto-install path"
+  },
+  {
+    "id": "F-C5-009",
+    "title": "Pipeline progress strip blanks to grey on every app launch of an existing library (no DB-derived stage; macOS reference parity break)",
+    "severity": "medium",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/FileID.App/.../PipelineProgressView.xaml.cs"
+    ],
+    "wave": "C5",
+    "disposition": "FIX-CI",
+    "claim": "The pipeline progress strip has no DB-derived stage, so on every launch of an existing library it blanks to grey instead of reflecting the persisted scan state (macOS reference shows the derived stage).",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:WA9b"
+    ],
+    "ruling": null,
+    "test_to_add": "PipelineProgress: strip reflects the DB-derived stage on launch of an existing library"
+  },
+  {
+    "id": "F-C5-010",
+    "title": "Sankey Render() makes ~4 full O(Moves) passes with a String.Split+Substring per move on the UI thread on every plan arrival",
+    "severity": "medium",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/FileID.App/.../SankeyView.xaml.cs"
+    ],
+    "wave": "C5",
+    "disposition": "FIX-CI",
+    "claim": "Sankey Render() makes ~4 full O(Moves) passes with a String.Split + Substring allocation per move on the UI thread every time a plan arrives, stalling the UI on large plans.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:WA3b"
+    ],
+    "ruling": null,
+    "test_to_add": "SankeyView: Render does a single pass without per-move string allocation (precompute keys)"
+  },
+  {
+    "id": "F-C5-011",
+    "title": "Multi-select selection silently dropped when a refresh replaces a selected cluster's instance; Cleanup header text claims perceptual-hash grouping",
+    "severity": "medium",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/FileID.App/.../PeopleView.xaml.cs",
+      "platforms/windows/src/FileID.App/.../CleanupView.xaml"
+    ],
+    "wave": "C5",
+    "disposition": "FIX-CI",
+    "claim": "A background refresh that replaces a selected cluster's object instance silently drops the multi-select; and the Cleanup header text claims perceptual-hash grouping, contradicting the exact-content-hash delete-safety design.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:WA8b"
+    ],
+    "ruling": null,
+    "test_to_add": "People: selection survives an instance-replacing refresh; Cleanup header text matches the content-hash design"
+  },
+  {
+    "id": "F-C5-012",
+    "title": "Selection toolbar goes stale when a background refresh prunes selected tiles (VM emits SelectedCount; View never re-reads it)",
+    "severity": "low",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/FileID.App/.../LibraryView.xaml.cs"
+    ],
+    "wave": "C5",
+    "disposition": "FIX-CI",
+    "claim": "When a background refresh prunes selected tiles the VM updates SelectedCount but the View never re-reads it, so the selection toolbar shows a stale count.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:WA7a"
+    ],
+    "ruling": null,
+    "test_to_add": "LibraryView: toolbar re-reads SelectedCount after a refresh prunes selection"
+  },
+  {
+    "id": "F-C6-001",
+    "title": "macOS has no discovery-time incremental skip set \u2014 every rescan re-runs the full ANE/Vision/CLIP pipeline + NAS IO on unchanged files",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Discovery.swift",
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/ScanCoordinator.swift",
+      "platforms/apple/engine/Sources/FileIDEngine/Storage/DBWriter.swift"
+    ],
+    "wave": "C6",
+    "disposition": "FIX-CI",
+    "claim": "macOS decides unchanged-ness only at the DBWriter, after the full per-file ANE/Vision/CLIP/OCR pipeline and NAS reads have already run; Windows skips unchanged files (failed=0 AND scanned_at>=modified_at) before tagging. Add a discovery-time skip set so a repeat scan pays near-zero on unchanged files.",
+    "port_source": "platforms/windows/src/engine/src/scan_session.rs (pre-tagging skip predicate)",
+    "source_ids": [
+      "WF3:backpressure-e2e",
+      "WF3:io-patterns"
+    ],
+    "ruling": null,
+    "test_to_add": "Discovery: an unchanged file (scanned_at>=modified_at, failed=0) is skipped before tagging on rescan"
+  },
+  {
+    "id": "F-C6-002",
+    "title": "macOS semantic search materializes every CLIP embedding via fetchAll \u2014 ~1 GB transient per query at 500k files",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/app/Sources/FileID/ReadStore.swift",
+      "platforms/apple/app/Sources/FileID/.../SearchStore.swift"
+    ],
+    "wave": "C6",
+    "disposition": "FIX-CI",
+    "claim": "Semantic search fetchAll's the entire clip_embeddings table into memory per query (~1 GB transient at 500k files). Stream the scan and keep a bounded top-K heap. (Pairs with the F-C4-006 main-thread correctness fix.)",
+    "port_source": null,
+    "source_ids": [
+      "WF3:scale-extremes"
+    ],
+    "ruling": null,
+    "test_to_add": "ReadStore: semantic search streams embeddings with a bounded top-K (no full-table materialization)"
+  },
+  {
+    "id": "F-C6-003",
+    "title": "macOS ReadStore.refreshCounters runs an O(N log N) duplicate-group window query synchronously on the main thread up to once per second during a scan",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/app/Sources/FileID/ReadStore.swift"
+    ],
+    "wave": "C6",
+    "disposition": "FIX-CI",
+    "claim": "refreshCounters runs an O(N log N) duplicate-group window query synchronously on the main thread, up to once per second during a scan, pegging the UI on large libraries. Offload + throttle.",
+    "port_source": null,
+    "source_ids": [
+      "WF3:scale-extremes"
+    ],
+    "ruling": null,
+    "test_to_add": "ReadStore: refreshCounters runs off the main thread and is throttled during a scan"
+  },
+  {
+    "id": "F-C6-004",
+    "title": "macOS DBWriter commits inline on the rendezvous channel \u2014 every DB transaction stalls all tagging workers; WAL 10000-page autocheckpoint does one ~40 MB sync copy mid-commit",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Storage/DBWriter.swift"
+    ],
+    "wave": "C6",
+    "disposition": "FIX-CI",
+    "claim": "DBWriter commits inline on the rendezvous channel, so every transaction stalls all tagging workers for its full duration; and the 10000-page wal_autocheckpoint defers all checkpoint work into one ~40 MB synchronous copy inside a commit (idling every worker) with no mid-scan checkpoint cadence like Windows. Decouple commit from the worker rendezvous + add a checkpoint cadence.",
+    "port_source": null,
+    "source_ids": [
+      "WF3:backpressure-e2e",
+      "WF3:io-patterns"
+    ],
+    "ruling": null,
+    "test_to_add": "DBWriter: a commit does not block tagging-worker progress; checkpoint cadence is bounded mid-scan"
+  },
+  {
+    "id": "F-C6-005",
+    "title": "macOS Discovery materializes and sorts the full corpus before any tagging starts \u2014 O(N) memory held for the whole scan + dead-air phase at 500k",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Discovery.swift"
+    ],
+    "wave": "C6",
+    "disposition": "FIX-CI",
+    "claim": "Discovery materializes and sorts the entire corpus before tagging begins, holding O(N) memory for the whole scan and producing a dead-air phase at 500k files. Stream discovery into tagging.",
+    "port_source": null,
+    "source_ids": [
+      "WF3:scale-extremes"
+    ],
+    "ruling": null,
+    "test_to_add": "Discovery: tagging starts before the full corpus is materialized (streamed, not batch-sorted upfront)"
+  },
+  {
+    "id": "F-C6-006",
+    "title": "macOS CLIP preprocessing allocates ~1.4MB and redundantly memsets/copies ~800KB per image, partly inside the ANE semaphore",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Models/.../MobileCLIPService.swift",
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Tagging.swift"
+    ],
+    "wave": "C6",
+    "disposition": "HARDWARE",
+    "claim": "CLIP preprocessing allocates ~1.4MB and redundantly zero-fills/copies ~800KB per image (rgba zero-fill + planes zero-fill + NSMutableData copy), partly inside the ANE semaphore. An output-identical rewrite reduces allocation, but it touches the ML hot path and its win is only measurable on hardware (CLAUDE.md: tune ML against real data).",
+    "port_source": null,
+    "source_ids": [
+      "WF3:hot-loops-macos"
+    ],
+    "ruling": null,
+    "test_to_add": "(NEXT.md) on-hardware A/B: CLIP preprocess allocation reduction is byte-identical and faster"
+  },
+  {
+    "id": "F-C6-007",
+    "title": "runVisionWithTimeout executes Vision on a global queue with NO autoreleasepool \u2014 intermediates accumulate on never-draining root-queue threads",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VisionWorker.swift"
+    ],
+    "wave": "C6",
+    "disposition": "FIX-CI",
+    "claim": "runVisionWithTimeout runs the Vision perform on a global queue with no surrounding autoreleasepool; the per-file Tagging pools don't cover it, so Vision intermediates accumulate on never-draining root-queue threads. Wrap the perform in an autoreleasepool.",
+    "port_source": null,
+    "source_ids": [
+      "WF3:hot-loops-macos"
+    ],
+    "ruling": null,
+    "test_to_add": "VisionWorker: the Vision perform runs inside an autoreleasepool"
+  },
+  {
+    "id": "F-C6-008",
+    "title": "loadImageAndEXIF re-stats every image via attributesOfItem when DiscoveredFile.sizeBytes already holds the answer \u2014 an extra NAS round-trip per file",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Tagging.swift"
+    ],
+    "wave": "C6",
+    "disposition": "FIX-CI",
+    "claim": "loadImageAndEXIF calls FileManager.attributesOfItem per image when DiscoveredFile.sizeBytes already carries the size, costing an extra full-attribute stat (a SMB round trip on NAS) per file. Reuse the discovered size.",
+    "port_source": null,
+    "source_ids": [
+      "WF3:hot-loops-macos",
+      "WF3:io-patterns"
+    ],
+    "ruling": null,
+    "test_to_add": "Tagging: loadImageAndEXIF does not re-stat when the size is already known"
+  },
+  {
+    "id": "F-C6-009",
+    "title": "PDF pages render into RGBA at up to 200MB/page for OCR that needs no color, under a single whole-document autoreleasepool",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Tagging.swift",
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VisionWorker.swift"
+    ],
+    "wave": "C6",
+    "disposition": "HARDWARE",
+    "claim": "PDF pages render into full RGBA at up to 200MB/page for OCR that needs no color, all under one whole-document autoreleasepool, so peak memory scales with page count. A grayscale render + per-page pool reduces peak, but the render-quality impact on OCR is a hardware/quality call.",
+    "port_source": null,
+    "source_ids": [
+      "WF3:hot-loops-macos"
+    ],
+    "ruling": null,
+    "test_to_add": "(NEXT.md) on-hardware: grayscale PDF render + per-page pool keeps OCR accuracy and cuts peak memory"
+  },
+  {
+    "id": "F-C6-012",
+    "title": "macOS Restructure compute pages the full files table with LIMIT/OFFSET over an unindexed ORDER BY \u2014 O(N^2/page) full re-sort per regenerate",
+    "severity": "medium",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/app/Sources/FileID/.../RestructureEngine.swift"
+    ],
+    "wave": "C6",
+    "disposition": "FIX-CI",
+    "claim": "RestructureEngine.compute pages the full files table with LIMIT/OFFSET over an ORDER BY, re-sorting+re-materializing the whole table per page (O(N^2/page)) on every regenerate(). Retired once the engine butler owns planning (F-C3-021); until then, keyset-paginate. (Note: idx_files_scanned exists per Database.swift:106-107, so a scanned_at order is index-backed \u2014 the cost is the OFFSET paging, not a missing index.)",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:MA2b",
+      "WF3:scale-extremes"
+    ],
+    "ruling": null,
+    "test_to_add": "RestructureEngine: paging uses keyset pagination (no OFFSET re-sort); or planning moves to the engine (F-C3-021)"
+  },
+  {
+    "id": "F-C6-013",
+    "title": "Restructure apply is an uncancellable, progress-less serial loop with a per-move DB transaction \u2014 at 100k+ moves the user gets no feedback and no stop",
+    "severity": "medium",
+    "platform": "cross",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Restructure.swift",
+      "platforms/windows/src/engine/src/commands/restructure_apply.rs"
+    ],
+    "wave": "C6",
+    "disposition": "FIX-CI",
+    "claim": "On both platforms restructure apply is an uncancellable, progress-less serial loop with a per-move DB transaction, so at 100k+ moves the user gets zero feedback and no way to stop. Batch the transactions + emit progress + honor cancel.",
+    "port_source": null,
+    "source_ids": [
+      "WF3:backpressure-e2e"
+    ],
+    "ruling": null,
+    "test_to_add": "restructure apply: emits progress, honors cancel, batches DB writes"
+  },
+  {
+    "id": "F-C6-016",
+    "title": "Windows planRestructure loads the entire clip_embeddings table into a HashMap with no memory-tier gating",
+    "severity": "medium",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/commands/restructure.rs"
+    ],
+    "wave": "C6",
+    "disposition": "FIX-LOCAL",
+    "claim": "planRestructure loads the whole clip_embeddings table into a HashMap with no memory-tier gating, an unbounded transient on a large library. Stream or tier-gate it.",
+    "port_source": null,
+    "source_ids": [
+      "WF3:scale-extremes"
+    ],
+    "ruling": null,
+    "test_to_add": "restructure: embedding load is bounded/tier-gated (no full-table HashMap on a large corpus)"
+  },
+  {
+    "id": "F-C6-017",
+    "title": "Windows discovery serializes per-file metadata + file_ref syscalls on the single consumer thread \u2014 the 'parallel walk' only parallelizes read_dir",
+    "severity": "medium",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/scan_session.rs"
+    ],
+    "wave": "C6",
+    "disposition": "FIX-LOCAL",
+    "claim": "Windows discovery parallelizes read_dir but then serializes per-file metadata + file_ref opens on the single consumer thread, capping discovery throughput once the ML stage is no longer the bottleneck. Parallelize the per-file stat/open.",
+    "port_source": null,
+    "source_ids": [
+      "WF3:scale-extremes",
+      "WF1b:W10"
+    ],
+    "ruling": null,
+    "test_to_add": "discovery: per-file metadata/file_ref opens run parallel to the walk (throughput not consumer-bound)"
+  },
+  {
+    "id": "F-C6-018",
+    "title": "Windows predecode byte budget acquired AFTER decode \u2014 up to decoder_count \u00d7 150 MB of decoded frames live outside the 256 MB budget when it saturates",
+    "severity": "medium",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/pipeline/tagging.rs"
+    ],
+    "wave": "C6",
+    "disposition": "HARDWARE",
+    "claim": "The predecode byte budget is acquired after the decode, so when the 256 MB budget saturates up to decoder_count \u00d7 150 MB of already-decoded frames live outside it \u2014 the budget doesn't actually bound peak memory. Acquiring before decode requires a size estimate and changes GPU/decoder timing, so verify on hardware.",
+    "port_source": null,
+    "source_ids": [
+      "WF3:semaphore-rationale"
+    ],
+    "ruling": null,
+    "test_to_add": "(NEXT.md) on-hardware: predecode budget acquired before decode bounds peak decoded-frame memory without throughput loss"
+  },
+  {
+    "id": "F-C6-010",
+    "title": "macOS embedding output copy chain is 3 copies + a scalar loop per 512-d vector; insertOne re-prepares every statement and pays a per-file SELECT",
+    "severity": "low",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Tagging.swift",
+      "platforms/apple/engine/Sources/FileIDEngine/Storage/DBWriter.swift"
+    ],
+    "wave": "C6",
+    "disposition": "FIX-CI",
+    "claim": "The embedding output goes tensorData -> element-loop copy -> normalize map -> blob Data (3 copies + a scalar loop per 512-d vector); and insertOne re-prepares every statement per call (GRDB execute is uncached) and pays a per-file SELECT the Windows engine eliminated with RETURNING. Reduce copies + cache statements.",
+    "port_source": null,
+    "source_ids": [
+      "WF3:hot-loops-macos",
+      "WF3:io-patterns"
+    ],
+    "ruling": null,
+    "test_to_add": "DBWriter: insertOne uses cached prepared statements (no per-call re-prepare); embedding copy chain reduced"
+  },
+  {
+    "id": "F-C6-011",
+    "title": "macOS app inbound IPC frame cap is 1 MiB \u2014 raise to 32 MiB with a visible oversize error (the exact Windows bug shape)",
+    "severity": "low",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/app/Sources/FileID/EngineClient.swift"
+    ],
+    "wave": "C6",
+    "disposition": "FIX-CI",
+    "claim": "The macOS app caps inbound engine event frames at 1 MiB and drops oversize frames with a debug-only log; Windows already hit this (restructurePlan above ~3.5k moves) and raised to 32 MiB with a visible ipc_frame_too_large error. Raise the macOS cap + surface the error (latent until the engine butler emits plans).",
+    "port_source": "platforms/windows app EngineClient.cs (32 MiB cap + OversizeDropped surface)",
+    "source_ids": [
+      "WF3:scale-extremes"
+    ],
+    "ruling": null,
+    "test_to_add": "EngineClient: inbound cap is 32 MiB; an oversize frame surfaces a user-visible error, not a silent drop"
+  },
+  {
+    "id": "F-C6-014",
+    "title": "Per-second store.notifyChanged() during a live scan re-fires every visible tile's .task \u2014 re-reads Finder xattrs for unchanged files",
+    "severity": "low",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/app/Sources/FileID/.../LibraryView.swift",
+      "platforms/apple/app/Sources/FileID/ReadStore.swift"
+    ],
+    "wave": "C6",
+    "disposition": "FIX-CI",
+    "claim": "A per-second store.notifyChanged() during a live scan bumps a version key that re-fires every visible tile's .task, re-reading Finder xattrs for files that did not change. Scope invalidation to changed rows.",
+    "port_source": null,
+    "source_ids": [
+      "WF1b:MA5b"
+    ],
+    "ruling": null,
+    "test_to_add": "ReadStore: notifyChanged invalidates only changed rows (a tile for an unchanged file does not re-read xattrs)"
+  },
+  {
+    "id": "F-C6-015",
+    "title": "Windows IPC sink flushes stdout per event \u2014 2 syscalls per frame during the bursts the 16384 cap was sized for",
+    "severity": "low",
+    "platform": "windows",
+    "files": [
+      "platforms/windows/src/engine/src/ipc/sink.rs"
+    ],
+    "wave": "C6",
+    "disposition": "FIX-LOCAL",
+    "claim": "The Windows IPC sink flushes stdout after every event (2 syscalls per frame) during exactly the bursty periods the 16384 channel cap was sized for. Coalesce flushes.",
+    "port_source": null,
+    "source_ids": [
+      "WF3:backpressure-e2e"
+    ],
+    "ruling": null,
+    "test_to_add": "sink: stdout flush is coalesced across a burst (no per-frame flush)"
+  },
+  {
+    "id": "F-C7-001",
+    "title": "F-2: macOS rename-heal \u2014 renamed/moved files lose tags/faces on rescan (no file_ref/content_hash heal on macOS); Windows heal already fixed, BUGS.md stale",
+    "severity": "high",
+    "platform": "macos",
+    "files": [
+      "platforms/apple/engine/Sources/FileIDEngine/Storage/DBWriter.swift",
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Discovery.swift",
+      "shared/docs/BUGS.md"
+    ],
+    "wave": "C7",
+    "disposition": "FIX-CI",
+    "claim": "macOS has no rename-heal: content_hash/file_ref are not computed by the scan path, so a renamed/moved file is treated as new on rescan and loses its tags/faces. Implement file_ref = APFS inode (st_ino, no new dependency) with the same old-path-gone gate (lstat) as Windows; BLAKE3 content_hash deferred (would be a new Swift package -> DECISIONS question). Update BUGS.md: Windows half is fixed.",
+    "port_source": "platforms/windows/src/engine/src/pipeline/dbwriter.rs heal_candidate_moved (old-path-gone gate on file_ref + content_hash)",
+    "source_ids": [
+      "CAMPAIGN-NOTES:F-2"
+    ],
+    "ruling": null,
+    "test_to_add": "DBWriter: a moved-on-same-volume file (same st_ino, old path gone) heals its row, preserving tags/faces"
+  },
+  {
+    "id": "F-C7-002",
+    "title": "F-4: face-clustering pass-1 mutual-kNN structure \u2014 single-linkage over-chains; adopt mutual-kNN (thresholds stay provisional, recipe -> NEXT.md)",
+    "severity": "medium",
+    "platform": "cross",
+    "files": [
+      "platforms/windows/src/engine/src/pipeline/identity_clustering.rs",
+      "platforms/apple/engine/Sources/FileIDEngine/Pipeline/FaceClustering.swift"
+    ],
+    "wave": "C7",
+    "disposition": "HARDWARE",
+    "claim": "Pass-1 single-linkage clustering chains distinct identities through bridge faces. The structural fix is a mutual-kNN graph (an edge only when both faces are in each other's top-k), implemented in identity_clustering.rs (Windows source of truth) + the FaceClustering.swift mirror. The structure lands in code, but the k and cosine thresholds are calibration values that must be tuned against real face data on hardware.",
+    "port_source": null,
+    "source_ids": [
+      "CAMPAIGN-NOTES:F-4"
+    ],
+    "ruling": null,
+    "test_to_add": "identity_clustering: a mutual-kNN edge predicate (both directions) gates pass-1 union; threshold calibration -> NEXT.md"
+  },
+  {
+    "id": "R-005",
+    "title": "macOS RestructureEngine.compute does ~100 full-table sorts of 500k rows (no scanned_at index)",
+    "severity": "high",
+    "platform": "-",
+    "files": [],
+    "wave": "REJECT",
+    "disposition": "REJECT",
+    "claim": "WF-3 scale-extremes claimed regenerate() forces ~100 full sorts of 500k rows because there is no standalone scanned_at index.",
+    "port_source": null,
+    "source_ids": [
+      "WF3:scale-extremes",
+      "WF1b:MA2b"
+    ],
+    "ruling": null,
+    "test_to_add": null,
+    "citation": "Refuted (WF-3 adjudication x2): the load-bearing premise is false \u2014 idx_files_scanned ON files(scanned_at) IS created at Database.swift:106-107 via GRDB's db.create(index:) builder (the candidate's raw-SQL grep missed it). SQLite walks the index in reverse for ORDER BY scanned_at DESC. The residual OFFSET-paging cost (immaterial at scale, and retired by the engine-butler port) is captured separately as F-C6-012."
+  },
+  {
+    "id": "R-002",
+    "title": "C7: CLIP-installed-later backfill exists on macOS but not Windows",
+    "severity": "medium",
+    "platform": "-",
+    "files": [],
+    "wave": "REJECT",
+    "disposition": "REJECT",
+    "claim": "WF-2 P3 C7 claimed a Windows scan that completed without embeddings then gains them on macOS but not Windows.",
+    "port_source": null,
+    "source_ids": [
+      "WF2:P3-tagging"
+    ],
+    "ruling": null,
+    "test_to_add": null,
+    "citation": "Refuted (WF-2 adjudication): the precondition is unreachable on Windows \u2014 scan pre-flight (scan.rs:59-105) hard-requires the mobileclip_s2 sentinel and aborts with models_not_installed if CLIP is missing; the post-load guard aborts if installed CLIP fails to load. A completed Windows scan never produced failed=0 rows without embeddings, so the divergence cannot manifest."
+  },
+  {
+    "id": "R-008",
+    "title": "macOS auto-downloads an uninstalled VLM mid-run; Windows refuses with vlm_model_missing",
+    "severity": "medium",
+    "platform": "-",
+    "files": [],
+    "wave": "REJECT",
+    "disposition": "REJECT",
+    "claim": "WF-2 P4 flagged that macOS auto-downloads multi-GB VLM weights inside a Deep Analyze run while Windows refuses.",
+    "port_source": null,
+    "source_ids": [
+      "WF2:P4-deep-analyze"
+    ],
+    "ruling": null,
+    "test_to_add": null,
+    "citation": "WS-MAC model-stack identity divergence / model-supply behavior is a known-open, explicitly RULED divergence (DECISIONS.md 2026-05-13/05-17 not_implemented_yet + macOS-lockstep-lag rulings; WF-2 adjudication cites it as 'documented, explicitly ruled expected divergence'). The SECURITY half of the macOS download path (redirects/pinning/SHA256) is NOT rejected \u2014 it is F-C3-038. The mid-run auto-download UX choice itself is the ruled divergence."
+  },
+  {
+    "id": "R-010",
+    "title": "tagsOnly/proposeRenames are wire-accepted but semantically inert on macOS (mode plumbing)",
+    "severity": "medium",
+    "platform": "-",
+    "files": [],
+    "wave": "REJECT",
+    "disposition": "REJECT",
+    "claim": "WF-2 P4 flagged that macOS accepts tagsOnly/proposeRenames on the wire but does nothing with them.",
+    "port_source": null,
+    "source_ids": [
+      "WF2:P4-deep-analyze",
+      "WF2:P6-ipc"
+    ],
+    "ruling": null,
+    "test_to_add": null,
+    "citation": "The SEMANTIC inertness of the Deep Analyze MODE plumbing is the explicitly ruled macOS-lockstep lag (DECISIONS.md 2026-05-13/05-17; WF-2 adjudication: 'documented, explicitly ruled expected divergence'). NOTE: the DECODE bug (Swift hard-requires tagsOnly, omits proposeRenames) is a real contract gap and is NOT rejected \u2014 it is F-C2-001. Only the 'mode does nothing yet' behavior is the ruled item."
+  },
+  {
+    "id": "R-012",
+    "title": "Windows persists source='vlm' tag rows from Deep Analyze; macOS persists none",
+    "severity": "medium",
+    "platform": "-",
+    "files": [],
+    "wave": "REJECT",
+    "disposition": "REJECT",
+    "claim": "WF-2 P3 C8 flagged that Windows writes source='vlm' tag rows where macOS writes none.",
+    "port_source": null,
+    "source_ids": [
+      "WF2:P3-tagging"
+    ],
+    "ruling": null,
+    "test_to_add": null,
+    "citation": "Refuted (WF-2 adjudication): this is the same ruled macOS Deep-Analyze mode-plumbing lag (no tag write-out on macOS yet). The load-bearing impact assertion is owned by the ruled D-2 VLM-runtime divergence; not a new fixable finding. (If macOS later wires VLM tag write-out, it rides the butler/Deep-Analyze parity work, not this finding.)"
+  },
+  {
+    "id": "R-014",
+    "title": "IPC event backpressure model differs between platforms (macOS coalesce vs Windows blocking channel)",
+    "severity": "medium",
+    "platform": "-",
+    "files": [],
+    "wave": "REJECT",
+    "disposition": "REJECT",
+    "claim": "WF-3 / WF-2 noted the two engines handle event backpressure differently.",
+    "port_source": null,
+    "source_ids": [
+      "WF3:backpressure-e2e"
+    ],
+    "ruling": null,
+    "test_to_add": null,
+    "citation": "DECISIONS.md:10-23 (2026-06-10) \u2014 the asymmetry is by design for v1.0 and both designs preserve terminal events; recorded explicitly 'so the asymmetry isn't re-flagged as a parity bug.' NOTE: the specific droppable-terminal-event bugs (try_send on terminal PhaseChanged; IPCSink not pinning non-scan terminals) are REAL and NOT rejected \u2014 they are F-C1-002 and F-C3-029/030."
+  },
+  {
+    "id": "R-001",
+    "title": "Windows hard-codes cancelled:true on non-cancel Deep-Analyze error arms",
+    "severity": "low",
+    "platform": "-",
+    "files": [],
+    "wave": "REJECT",
+    "disposition": "REJECT",
+    "claim": "WF-2 P4 flagged Windows reporting cancelled:true on llama_cpp_missing / query-failure arms as a parity bug.",
+    "port_source": null,
+    "source_ids": [
+      "WF2:P4-deep-analyze"
+    ],
+    "ruling": null,
+    "test_to_add": null,
+    "citation": "DECISIONS.md:117 (2026-06-04) \u2014 deliberately LEFT the llama_cpp_missing arm at cancelled:true; it pairs with a specific actionable toast and suppresses a redundant generic warning. 'Not an oversight.' The folder/all query-failure arms are the same #6 convention."
+  },
+  {
+    "id": "R-003",
+    "title": "Both engines stamp OpenCLIP ViT-B/32 embeddings with the legacy 'mobileclip_s2' identifier",
+    "severity": "low",
+    "platform": "-",
+    "files": [],
+    "wave": "REJECT",
+    "disposition": "REJECT",
+    "claim": "WF-2 P3 C9 flagged the mobileclip_s2 model identifier on OpenCLIP ViT-B/32 embeddings as a hazard.",
+    "port_source": null,
+    "source_ids": [
+      "WF2:P3-tagging"
+    ],
+    "ruling": null,
+    "test_to_add": null,
+    "citation": "Refuted (WF-2 adjudication): a deliberate, identical choice on BOTH engines (DBWriter.swift:543-548 / dbwriter.rs:360-364); no migration wipes clip_embeddings; the residual concern is already owned by a verified prior finding. WS-MAC model-identity divergence is explicitly REJECT-listed in the guard registry (model identity only)."
+  },
+  {
+    "id": "R-004",
+    "title": "macOS DBWriter batch ceilings (100/200ms) are not memory-adaptive / tier-polled like Windows",
+    "severity": "low",
+    "platform": "-",
+    "files": [],
+    "wave": "REJECT",
+    "disposition": "REJECT",
+    "claim": "WF-3 raised adopting Windows' tier-polled 64/250/500 DBWriter batch sizing on macOS as a perf win across several checks.",
+    "port_source": null,
+    "source_ids": [
+      "WF3:scale-extremes",
+      "WF3:hot-loops-macos",
+      "WF3:semaphore-rationale",
+      "WF3:win-tier-transitions"
+    ],
+    "ruling": null,
+    "test_to_add": null,
+    "citation": "DBWriter 100-file/200ms batch bound is in the deliberate-guard registry. Refuted on materiality (WF-3 adjudications x4): the 200ms time ceiling binds first (~7 files/60ms measured, DBWriter.swift:112-116), so the 100-count cap only fires above ~500 files/s \u2014 ~3.5x the >=140 files/s target. The High-tier amortization win is arithmetically zero. Batch size as a *commit-overhead* knob (not memory) is folded into F-C6-004; the memory-tier batch knob itself is part of the F-3 design (see HARDWARE)."
+  },
+  {
+    "id": "R-006",
+    "title": "macOS engine Restructure.apply / proposeAll is dead code (should be deleted as unused)",
+    "severity": "low",
+    "platform": "-",
+    "files": [],
+    "wave": "REJECT",
+    "disposition": "REJECT",
+    "claim": "WF-2 P2 flagged the engine-side Restructure.apply as dead code (live apply is app-side).",
+    "port_source": null,
+    "source_ids": [
+      "WF2:P2-restructure-apply",
+      "WF2:P1-restructure-plan"
+    ],
+    "ruling": null,
+    "test_to_add": null,
+    "citation": "DECISIONS.md:61-64 (L1, 2026-06-10) \u2014 engine-side Restructure.apply is 'dead code by design'; it is the future vehicle for moving apply into the engine for full Windows parity; 'do not delete it as unused.' Per user ruling 2, it is being WIRED (F-C3-021), not deleted \u2014 so the 'delete dead code' framing is rejected, the port is the C3 work."
+  },
+  {
+    "id": "R-007",
+    "title": "Stale 'ipc_unknown_command' kind in the Rust EngineError doc \u2014 neither engine emits it",
+    "severity": "low",
+    "platform": "-",
+    "files": [],
+    "wave": "REJECT",
+    "disposition": "REJECT",
+    "claim": "WF-2 P6 flagged that ipc_unknown_command appears in a doc comment but the engines emit command_decode_failed.",
+    "port_source": null,
+    "source_ids": [
+      "WF2:P6-ipc"
+    ],
+    "ruling": null,
+    "test_to_add": null,
+    "citation": "Exact-match failure-kind strings are in the deliberate-guard registry; the emitted kind (command_decode_failed) is correct and identical on both engines. This is a stale doc-comment only with zero runtime effect; not carried as a fixable behavioral finding (a doc tidy may ride along with C2 but is not a triaged finding)."
+  },
+  {
+    "id": "R-009",
+    "title": "DeepAnalyzeStarting 'queued' phase is macOS-only; Windows never emits it",
+    "severity": "low",
+    "platform": "-",
+    "files": [],
+    "wave": "REJECT",
+    "disposition": "REJECT",
+    "claim": "WF-2 P4 flagged the missing 'queued' phase on Windows as a parity gap.",
+    "port_source": null,
+    "source_ids": [
+      "WF2:P4-deep-analyze"
+    ],
+    "ruling": null,
+    "test_to_add": null,
+    "citation": "Refuted (WF-2 adjudication): no consumer makes it observable \u2014 the Windows app acknowledges the click locally/optimistically before any engine event (DeepAnalyzeView.xaml.cs:731-739), so the missing queued phase has zero user-visible impact. Wire-shape symmetry is already locked by round-trip tests."
+  },
+  {
+    "id": "R-011",
+    "title": "Windows tag dedup/cap (case-insensitive first-wins + 16-cap) vs macOS exact/last-wins/unbounded",
+    "severity": "low",
+    "platform": "-",
+    "files": [],
+    "wave": "REJECT",
+    "disposition": "REJECT",
+    "claim": "WF-2 P3 C2 flagged divergent tag dedup/cap semantics.",
+    "port_source": null,
+    "source_ids": [
+      "WF2:P3-tagging"
+    ],
+    "ruling": null,
+    "test_to_add": null,
+    "citation": "Refuted (WF-2 adjudication): impact is unreachable \u2014 every macOS visionTag producer emits at most ~10 inherently-unique identifiers (prefix(8) VNClassify + Year_ + one camera family), with no possible case-variant or exact duplicate, so the Windows dedup/cap has nothing to collapse. No user-visible divergence."
+  },
+  {
+    "id": "R-013",
+    "title": "Cross-platform IPC schema asymmetric: macOS engine returns not_implemented_yet for restructure/plan",
+    "severity": "low",
+    "platform": "-",
+    "files": [],
+    "wave": "REJECT",
+    "disposition": "REJECT",
+    "claim": "WF-2 flagged the macOS engine returning not_implemented_yet for planRestructure/applyRestructure as a parity bug.",
+    "port_source": null,
+    "source_ids": [
+      "WF2:P1-restructure-plan",
+      "WF2:P2-restructure-apply"
+    ],
+    "ruling": null,
+    "test_to_add": null,
+    "citation": "DECISIONS.md 2026-05-13 (option 2 on record) + 2026-05-17 (restructurePlan event family is a future macOS task, not a Windows blocker) \u2014 the wire is deliberately symmetric with macOS stubs, round-trip tests lock the shape. Per user ruling 2 the stubs are being WIRED (F-C3-021); the 'asymmetry is a bug' framing is rejected, the port is the C3 work."
+  },
+  {
+    "id": "R-015",
+    "title": "macOS Face HNSW build holds three full copies of all face embeddings",
+    "severity": "low",
+    "platform": "-",
+    "files": [],
+    "wave": "REJECT",
+    "disposition": "REJECT",
+    "claim": "WF-3 scale-extremes flagged 3 coexisting copies of face embeddings during HNSW build.",
+    "port_source": null,
+    "source_ids": [
+      "WF3:scale-extremes"
+    ],
+    "ruling": null,
+    "test_to_add": null,
+    "citation": "Refuted on materiality (WF-3 adjudication): the candidate self-classifies as bounded low-severity waste with no OOM cliff (SFace 128-d, ~51 MB/copy at 100k). Arithmetic confirmed but immaterial at realistic scale; the actionable landHere core is refuted. Not carried."
+  }
+]

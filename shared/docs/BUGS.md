@@ -19,18 +19,8 @@ _None open._
 
 ## 🟠 High
 
-- [ ] **Rename-heal collapses coexisting exact-duplicate files** (cross-platform;
-  Windows `pipeline/dbwriter.rs`, macOS `Database`/dbwriter). The rename/move heal
-  (v8 identity) re-binds an existing row to a new path whenever the file's
-  `file_ref` *or* `content_hash` matches — without checking the old path still
-  exists on disk. For a real move that is correct, but when two byte-identical
-  files coexist (`IMG_1558.HEIC` + `IMG_1558(1).HEIC`), the second steals the
-  first's row, so only one appears in the library and the Cleanup tab can't
-  surface the exact-dup group. Not data loss — both files stay on disk.
-  **Fix:** only heal when the prior path no longer exists (stat it) or the USN
-  journal recorded a rename; otherwise insert a distinct row and let phash dedup
-  handle it. Mirror in macOS for byte-faithful parity. *Acceptance:* scanning N
-  byte-identical pairs yields 2N rows and Cleanup shows the dup group.
+_None open._ (The cross-platform rename-heal exact-duplicate bug was closed
+2026-06-13 — see **Recently closed** below.)
 
 ## 🟡 Medium
 
@@ -44,7 +34,10 @@ _None open._
   UI), not silent identity merges. The structural fix is mutual-kNN / density-
   gated edges (a higher threshold would start over-splitting genuine identities);
   the bands themselves want a hand-labeled `G:\TrueNAS` subset to find the
-  precision/recall optimum. Marked PROVISIONAL in the code.
+  precision/recall optimum. Marked PROVISIONAL in the code. The structural fix is
+  now **specced as F-4** (audit-2026-06-10 campaign) and tracked in
+  [`NEXT.md`](NEXT.md) under hardware-UAT, with a calibration recipe; single-linkage
+  pass-1 is retained until the labeled subset exists.
 
 ## 🟢 Low
 
@@ -71,6 +64,21 @@ current call paths; fix when a feature starts exercising them.
   single-waiter invariant means there's no correctness issue and per-task memory
   is negligible. **Fix if noticed:** cancel the prior backstop task in the next
   park.
+
+---
+
+## Recently closed
+
+- [x] **Rename-heal collapses coexisting exact-duplicate files** — **FIXED 2026-06-13**
+  (cross-platform). The rename/move heal now re-binds an existing row to a new path
+  *only when the prior path no longer exists on disk*, so two byte-identical files that
+  coexist (`IMG_1558.HEIC` + `IMG_1558(1).HEIC`) yield two distinct rows and Cleanup
+  surfaces the exact-dup group. Windows: `heal_candidate_moved` gates every heal
+  (`file_ref` AND `content_hash`) on `symlink_metadata` old-path-gone. macOS: the new
+  **F-2** rename-heal computes `file_ref` from the APFS inode (`st_ino`) with the same
+  old-path-gone (`lstat`) gate — moved files keep tags/faces/OCR, coexisting duplicates
+  do not steal each other's row. (BLAKE3 `content_hash` on macOS deferred — see
+  [`DECISIONS.md`](DECISIONS.md) 2026-06-13.) Detail in `git log` + DECISIONS.md.
 
 ---
 

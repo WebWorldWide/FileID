@@ -2937,3 +2937,44 @@ Branch `win-prod-hardening-2026-06-03`; full inventory + deferred list in `AUDIT
   `(kind,scanned_at)` index + `created_at` are cross-platform migrations. All file:line-precise in
   `AUDIT-2026-06-03.md`.
   file:line-precise, per-side plan in `LOCKSTEP-2026-06-02.md` for a Mac session + CI verification.
+
+## 2026-06-13 — audit-2026-06-10 campaign: restructure parity rulings + implement-now/defer calls
+
+Branch `fix/audit-2026-06-10`; full inventory in `shared/docs/audit-2026-06-10/` (`findings.json`,
+`TRIAGE.md`, `reaudit-confirmed.json`). The owner rulings and non-obvious calls:
+
+- **Restructure cosmetics: macOS adopts Windows-canonical, not the reverse.** For cosmetic
+  restructure parity the Windows scheme is the spec — full month names, lowercase wire categories,
+  and dedicated `Videos`/`Audio` buckets. macOS was brought to match. Windows already shipped this
+  layout, so aligning macOS avoids churning both apps' generated folder names twice.
+- **The butler restructure logic lives in the macOS ENGINE, and the app routes through it.** Rather
+  than mirror the Windows classifier a second time in Swift app code, the Windows butler was ported
+  into the macOS engine; the Restructure tab now calls `planRestructure` and the app-side classifier
+  is retired (F-C3-021-app). One source of truth for the plan, on the side that owns the DB and the
+  moves. Trade-off recorded as deferred Mac-UAT: the app's two-step symlink-preview apply bar + the
+  per-move Tidy/Keep tier split still need wiring (NEXT.md).
+- **D-7 collision policy is auto-rename `name (2).ext` on BOTH platforms.** A planned destination
+  that is occupied (in-batch claimed set ∪ on-disk lstat) gets a `stem (n).ext` suffix (n=2..); the
+  move never overwrites and never silently drops. Windows behavior was the spec; macOS apply was
+  brought to match, and the old "conflicts" list disappears (auto-renamed instead).
+- **F-2 rename-heal on macOS uses `file_ref` (APFS inode) ONLY — BLAKE3 content_hash deferred.**
+  macOS had no rename-heal at all (content_hash/file_ref were never computed on the scan path), so a
+  moved/renamed file lost its tags/faces/OCR on rescan (a new row). The heal now keys on the APFS
+  inode (`st_ino`, no new dependency) with the same old-path-gone gate the Windows path uses,
+  covering the rename/move-on-same-volume case. A BLAKE3 `content_hash` (which would also catch
+  copy-then-delete across volumes) was DEFERRED because Swift BLAKE3 means a new package — not worth
+  a dependency for the residual case. Documented limitation: bare `st_ino` lacks the NTFS
+  sequence-number reuse protection, so the heal stays conservative (old-path-gone-gated; no
+  cross-file rebind without it).
+- **F-4 face-clustering structural change is SPECED, not landed — pending a labeled corpus.** Pass-1
+  is still single-linkage (connected-components on a kNN graph), which can chain identities through
+  bridge faces on very large libraries; it fails *safe* toward over-split. The structural fix
+  (mutual-kNN / density-gated edges) needs a hand-labeled subset to find the precision/recall optimum
+  — a blunt threshold bump over-splits genuine identities — so it is tracked as a hardware/labeled-
+  data item in NEXT.md, not guessed here.
+- **The macOS source-URL privacy scan was NOT modified — the TEST was made adversarial instead.**
+  Parity work flagged that the macOS scan didn't obviously match the Windows src-only scan. Rather
+  than touch the (correct, shipping) privacy scan and risk a regression, the security CI test now
+  builds adversarial redirect URLs via string interpolation, so the unchanged scan is exercised
+  against hostile inputs and proven equivalent to the Windows behavior. Test-side change, zero
+  production-code risk.
