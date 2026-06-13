@@ -18,6 +18,18 @@ struct LibraryView: View {
     /// Debounce against per-keystroke reloads while CLIP semantic
     /// search is active (~50ms per query).
     @State private var searchDebounce: Task<Void, Never>?
+    /// In-flight off-main reload. Cancelled before each new reload so a
+    /// slow query can't land its rows after a newer one (latest-wins).
+    @State private var reloadTask: Task<Void, Never>?
+    /// Tile-refresh epoch. `store.version` bumps on every change including
+    /// the per-second counter refresh during a live scan; keying each
+    /// visible tile's xattr/thumbnail `.task` on it re-reads Finder tags
+    /// for unchanged files every tick. Freeze the epoch during a scan —
+    /// Finder xattrs can't change while the engine only writes DB rows —
+    /// so tiles don't re-task; the terminal reload bumps `store.version`
+    /// once at the end to refresh them. Kept in sync with `store.version`
+    /// whenever no scan is active.
+    @State private var frozenTileVersion: Int = 0
     /// When set, the grid shows photos most-similar to this seed
     /// (CLIP image-embedding cosine).
     @State private var similarSeed: FileRow? = nil
@@ -49,6 +61,19 @@ struct LibraryView: View {
     private let columns = [
         GridItem(.adaptive(minimum: 160, maximum: 220), spacing: 12)
     ]
+
+    private var scanActive: Bool {
+        guard let p = engine.lastProgress else { return false }
+        return p.phase == .discovering || p.phase == .tagging || p.phase == .postScan
+    }
+
+    /// The epoch each tile's `.task` keys on. While a scan runs it's frozen
+    /// (see `frozenTileVersion`) so the per-second counter refresh doesn't
+    /// re-task every visible tile; otherwise it tracks `store.version` so
+    /// tag edits / undo refresh the Finder-tag dots in place.
+    private var tileRefreshToken: Int {
+        scanActive ? frozenTileVersion : store.version
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -133,6 +158,12 @@ struct LibraryView: View {
         }
         .onChange(of: kindFilterRaw) { _, _ in reload() }
         .onChange(of: similarSeed?.id) { _, _ in reload() }
+        // Keep the tile-refresh epoch tracking store.version while idle so a
+        // tag edit / undo refreshes the dots, but leave it frozen during a
+        // scan (the per-second counter bump must not re-task every tile).
+        .onChange(of: store.version) { _, v in
+            if !scanActive { frozenTileVersion = v }
+        }
         // The encoder's ORT session takes seconds to build after launch /
         // install; without this the first search silently stays keyword-only.
         .onChange(of: CLIPModelInstaller.shared.textEncoderReady) { _, ready in
@@ -596,7 +627,8 @@ struct LibraryView: View {
                     FileTile(row: row, store: store,
                              selectMode: selectMode,
                              isChecked: checkedFileIDs.contains(row.id),
-                             topTags: tagsByFile[row.id] ?? [])
+                             topTags: tagsByFile[row.id] ?? [],
+                             refreshToken: tileRefreshToken)
                         .onTapGesture {
                             if selectMode {
                                 if checkedFileIDs.contains(row.id) {
@@ -667,28 +699,45 @@ struct LibraryView: View {
     // MARK: - Data
 
     private func reload() {
-        defer {
-            // Batch chip tags for every visible tile in one SQL
-            // query — was N+1 across the grid before.
-            tagsByFile = store.topVisionTagsBulk(
-                forFileIDs: rows.map { $0.id }, limit: 2
-            )
+        // Off the MainActor: similarity + semantic search cosine-scan the full
+        // clip_embeddings table (O(N·512)) and the keyword query hits multiple
+        // tables plus a face join — multi-second on a 50k library, and the live
+        // scan re-fires this on every throttled batch. Run them on a background
+        // task via ReadStore's *Async twins and assign only the results on main.
+        // Latest-wins: cancel any in-flight reload so a slow query can never
+        // overwrite a newer one's results.
+        let seed = similarSeed
+        let query = searchText
+        let kind = kindFilter
+        let encoderReady = CLIPTextEncoder.shared.isReady
+        reloadTask?.cancel()
+        reloadTask = Task { @MainActor in
+            let newRows: [FileRow]
+            if let seed {
+                newRows = await store.similarFilesAsync(toFileID: seed.id, limit: 60)
+            } else {
+                // CLIP text→image semantic search when the encoder is installed
+                // and the query is non-trivial; otherwise keyword search.
+                let trimmed = query.trimmingCharacters(in: .whitespaces)
+                if trimmed.count >= 3, encoderReady,
+                   let semantic = await store.semanticSearchAsync(query: trimmed, limit: 60),
+                   !semantic.isEmpty {
+                    newRows = semantic
+                } else {
+                    newRows = await store.filesAsync(search: query, kindFilter: kind)
+                }
+            }
+            guard !Task.isCancelled else { return }
+            // Batch chip tags for every visible tile in one SQL query — was
+            // N+1 across the grid before. Off-main too (same read-store scan).
+            let ids = newRows.map { $0.id }
+            let tags = await Task.detached(priority: .userInitiated) { [store] in
+                store.topVisionTagsBulk(forFileIDs: ids, limit: 2)
+            }.value
+            guard !Task.isCancelled else { return }
+            rows = newRows
+            tagsByFile = tags
         }
-        if let seed = similarSeed {
-            rows = store.similarFiles(toFileID: seed.id, limit: 60)
-            return
-        }
-        // CLIP text→image semantic search when the encoder is
-        // installed and the query is non-trivial; otherwise fall
-        // through to keyword search.
-        let trimmed = searchText.trimmingCharacters(in: .whitespaces)
-        if trimmed.count >= 3, CLIPTextEncoder.shared.isReady,
-           let semantic = store.semanticSearch(query: trimmed, limit: 60),
-           !semantic.isEmpty {
-            rows = semantic
-            return
-        }
-        rows = store.files(search: searchText, kindFilter: kindFilter)
     }
 }
 
@@ -702,6 +751,10 @@ struct FileTile: View {
     /// Top vision tags injected from the parent's batch query —
     /// avoids N+1 SQL across visible tiles.
     var topTags: [String] = []
+    /// Scan-frozen mirror of `store.version` from the parent. Keys the
+    /// tile's `.task` so a tag edit / undo refreshes it, while a live
+    /// scan's per-second counter bump does not re-task every visible tile.
+    var refreshToken: Int = 0
 
     @State private var thumb: NSImage?
     @State private var hovering = false
@@ -835,9 +888,12 @@ struct FileTile: View {
                 }
             }
         }
-        // Keyed on store.version so tag edits / bulk undo refresh the
-        // Finder-tag dots in place (thumbnail re-fetches are NSCache hits).
-        .task(id: "\(row.id)·\(store.version)") {
+        // Keyed on refreshToken (a scan-frozen mirror of store.version) so
+        // tag edits / bulk undo refresh the Finder-tag dots in place, but the
+        // per-second counter refresh during a live scan doesn't re-task every
+        // visible tile — re-reading thumbnails + Finder xattrs for files that
+        // didn't change. Thumbnail re-fetches are NSCache hits.
+        .task(id: "\(row.id)·\(refreshToken)") {
             thumb = await ThumbnailService.shared.thumbnail(for: row.url, size: 264)
             // Off-main like FinderTagsEditor — xattr reads can stall on
             // slow / network volumes.

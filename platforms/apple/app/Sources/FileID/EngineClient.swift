@@ -264,10 +264,15 @@ public final class EngineClient {
             }
         }
         let stderrBuffer = MutexBox(Data())
-        // S5: mirror the engine's 1 MiB MAX_FRAME_BYTES guard so a wedged or
-        // compromised engine that never emits a newline can't grow this buffer
-        // without bound and OOM the app.
-        let maxFrameBytes = 1024 * 1024
+        // 32 MiB inbound frame cap — matches the Windows app's inbound cap.
+        // The engine emits whole event lines with no per-frame size limit
+        // (IPCSink.emit), and a butler restructurePlan (~3.5k+ moves) blows
+        // past the old 1 MiB guard, which silently dropped the frame and left
+        // the UI wedged with no plan and no error. Still bounded so a wedged
+        // engine that never emits a newline can't grow this buffer without
+        // limit and OOM the app — but an oversize frame now surfaces a visible
+        // error instead of vanishing.
+        let maxFrameBytes = 32 * 1024 * 1024
         errPipe.fileHandleForReading.readabilityHandler = { [weak self, weak proc] handle in
             let data = handle.availableData
             if data.isEmpty {
@@ -278,6 +283,7 @@ public final class EngineClient {
                 return
             }
             // Append + drain whole lines under the lock.
+            var oversizeBytes: Int? = nil
             let lines: [Data] = stderrBuffer.withLock { buf in
                 buf.append(data)
                 var out: [Data] = []
@@ -286,14 +292,24 @@ public final class EngineClient {
                     buf.removeSubrange(buf.startIndex...nl)
                     if !line.isEmpty { out.append(line) }
                 }
-                // S5: a partial frame past the cap (no newline yet) means the
-                // engine is emitting garbage — drop it and resync to the next
-                // newline rather than buffering unbounded.
+                // A partial frame past the cap (no newline yet) means the engine
+                // is emitting garbage or a frame larger than the shared limit —
+                // drop it and resync to the next newline rather than buffering
+                // unbounded. Reported below instead of dropped silently.
                 if buf.count > maxFrameBytes {
-                    Self.debug("ENGINE: oversize IPC frame (\(buf.count) bytes, no newline) — discarding")
+                    oversizeBytes = buf.count
                     buf.removeAll(keepingCapacity: false)
                 }
                 return out
+            }
+            if let dropped = oversizeBytes {
+                Self.debug("ENGINE: oversize IPC frame (\(dropped) bytes, no newline) — discarding")
+                Task { @MainActor in
+                    self?.lastError = EngineError(
+                        kind: "ipc_frame_too_large",
+                        message: "The engine sent an oversized message (\(dropped / (1024 * 1024)) MB) over the \(maxFrameBytes / (1024 * 1024)) MB limit, so it was dropped. Some results may be incomplete — try again."
+                    )
+                }
             }
             for line in lines {
                 // U4: only lines that can be JSON frames earn a decode

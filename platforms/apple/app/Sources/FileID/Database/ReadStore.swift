@@ -20,6 +20,12 @@ public final class ReadStore: @unchecked Sendable {
         get { connLock.lock(); defer { connLock.unlock() }; return _queue }
         set { connLock.lock(); defer { connLock.unlock() }; _queue = newValue }
     }
+    // Coalesce + throttle state for the off-main counters refresh. The
+    // duplicate-group window query is O(N log N) and must not run on the
+    // main thread on every scan tick — see `refreshCounters`.
+    @ObservationIgnored private let countersLock = NSLock()
+    @ObservationIgnored private var countersDirty = false
+    @ObservationIgnored private var countersRunning = false
     private let dbURL: URL
     public private(set) var version: Int = 0
     public private(set) var totalFiles: Int = 0
@@ -124,12 +130,70 @@ public final class ReadStore: @unchecked Sendable {
         }
     }
 
+    private struct CounterSnapshot {
+        let totalFiles: Int
+        let totalImages: Int
+        let totalDuplicateGroups: Int
+        let totalReclaimableMB: Double
+    }
+
+    private enum CounterResult {
+        case ok(CounterSnapshot)
+        case failure(String)
+        case noDatabase
+    }
+
+    /// Schedule a counters refresh off the main thread. The duplicate-group
+    /// window query is O(N log N) over the whole `files` table; run inline it
+    /// pegged the UI because a live scan calls `notifyChanged` up to once a
+    /// second from `@MainActor` views. A single background worker coalesces
+    /// bursts (one in-flight run, re-run once if more requests arrived while
+    /// it ran) and throttles successive heavy queries, so the main thread
+    /// never pays for scan ticks and the table is scanned at most ~once a
+    /// second during a burst. Property writes still land on the main actor.
     private func refreshCounters() {
-        guard let q = queue else { return }
+        countersLock.lock()
+        countersDirty = true
+        if countersRunning {
+            countersLock.unlock()
+            return
+        }
+        countersRunning = true
+        countersLock.unlock()
+
+        Task.detached(priority: .utility) { [weak self] in
+            while let self {
+                self.countersLock.lock()
+                if !self.countersDirty {
+                    self.countersRunning = false
+                    self.countersLock.unlock()
+                    return
+                }
+                self.countersDirty = false
+                self.countersLock.unlock()
+
+                switch self.computeCounters() {
+                case .ok(let snapshot):
+                    await MainActor.run { self.applyCounters(snapshot) }
+                case .failure(let message):
+                    await MainActor.run { self.lastError = message }
+                case .noDatabase:
+                    break
+                }
+                // Throttle: cap the heavy window query to ~once per interval
+                // so a steady scan can't spin the background worker; the
+                // trailing dirty flag still guarantees a final, accurate run.
+                try? await Task.sleep(nanoseconds: 750_000_000)
+            }
+        }
+    }
+
+    private func computeCounters() -> CounterResult {
+        guard let q = queue else { return .noDatabase }
         do {
-            try q.read { db in
-                self.totalFiles  = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files") ?? 0
-                self.totalImages = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'image' AND failed = 0") ?? 0
+            return try q.read { db -> CounterResult in
+                let totalFiles  = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files") ?? 0
+                let totalImages = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'image' AND failed = 0") ?? 0
 
                 // Duplicate groups by phash (groups of size > 1). Mirror the
                 // Cleanup list exactly: filter failed = 0, and compute
@@ -155,13 +219,26 @@ public final class ReadStore: @unchecked Sendable {
                         (SELECT COUNT(DISTINCT phash) FROM ranked WHERE n > 1) AS groups,
                         COALESCE((SELECT SUM(size_bytes) FROM ranked WHERE n > 1 AND rk > 1), 0) AS reclaimable
                     """)
-                self.totalDuplicateGroups = dupRow?["groups"] ?? 0
+                let groups: Int = dupRow?["groups"] ?? 0
                 let reclaimableBytes: Int64 = dupRow?["reclaimable"] ?? 0
-                self.totalReclaimableMB = Double(reclaimableBytes) / 1_048_576
+                return .ok(CounterSnapshot(
+                    totalFiles: totalFiles,
+                    totalImages: totalImages,
+                    totalDuplicateGroups: groups,
+                    totalReclaimableMB: Double(reclaimableBytes) / 1_048_576
+                ))
             }
         } catch {
-            self.lastError = "Counters refresh failed: \(error)"
+            return .failure("Counters refresh failed: \(error)")
         }
+    }
+
+    @MainActor
+    private func applyCounters(_ snapshot: CounterSnapshot) {
+        self.totalFiles = snapshot.totalFiles
+        self.totalImages = snapshot.totalImages
+        self.totalDuplicateGroups = snapshot.totalDuplicateGroups
+        self.totalReclaimableMB = snapshot.totalReclaimableMB
     }
 
     // MARK: - Library queries
@@ -288,7 +365,7 @@ public final class ReadStore: @unchecked Sendable {
     /// (seed = a CLIP text embedding).
     public func rankByCosine(against query: [Float], limit: Int = 60,
                               excludeID: Int64? = nil) -> [FileRow] {
-        guard let q = queue, !query.isEmpty else { return [] }
+        guard let q = queue, !query.isEmpty, limit > 0 else { return [] }
         return (try? q.read { db -> [FileRow] in
             // failed = 0 at SQL time (parity with Windows
             // SemanticSearchAsync): a failed row scored here would land
@@ -311,21 +388,27 @@ public final class ReadStore: @unchecked Sendable {
                     """
                 args = []
             }
-            let rows = try Row.fetchAll(db, sql: sql, arguments: args)
-            struct Scored { let id: Int64; let score: Float }
-            var scored: [Scored] = []
-            scored.reserveCapacity(rows.count)
-            for r in rows {
+            // Stream rows through a cursor and keep only a bounded top-K
+            // min-heap. fetchAll would hold every 512-float embedding blob
+            // resident at once (~1 GB at 500k files); the cursor frees each
+            // blob right after it's scored. Ranking is (score desc, row-order
+            // asc) — identical to the previous stable sort-then-prefix(limit),
+            // so the result set and tie order are unchanged while retained
+            // state drops from O(N) to O(limit).
+            var heap = TopKByCosine(capacity: limit)
+            let cursor = try Row.fetchCursor(db, sql: sql, arguments: args)
+            var order = 0
+            while let r = try cursor.next() {
                 guard let fid: Int64 = r["file_id"],
                       let blob: Data = r["embedding"] else { continue }
                 let v = blobToFloats(blob)
                 guard v.count == query.count else { continue }
                 var s: Float = 0
                 for i in 0..<v.count { s += query[i] * v[i] }
-                scored.append(Scored(id: fid, score: s))
+                heap.offer(id: fid, score: s, order: order)
+                order += 1
             }
-            scored.sort { $0.score > $1.score }
-            let topIDs = scored.prefix(limit).map { $0.id }
+            let topIDs = heap.sortedDescending().map { $0.id }
             guard !topIDs.isEmpty else { return [] }
             let placeholders = topIDs.map { _ in "?" }.joined(separator: ",")
             let fileArgs: [DatabaseValueConvertible] = topIDs.map { Int($0) }
@@ -1221,5 +1304,73 @@ public final class ReadStore: @unchecked Sendable {
             try? FileManager.default.moveItem(at: target, to: oldURL)
             return nil
         }
+    }
+}
+
+/// Bounded top-K selector for cosine ranking. Retains at most `capacity`
+/// scored ids in a min-heap keyed by rank (score desc, row-order asc): the
+/// root is the lowest-ranked kept item, so an incoming item only displaces
+/// it when it ranks strictly higher. This caps retained state at O(K)
+/// regardless of table size while reproducing exactly the output of a stable
+/// sort-by-score-descending truncated to K — row order breaks score ties, the
+/// same tie-break a stable sort gives. `order` is unique, so the rank is a
+/// strict total order and selection is deterministic.
+private struct TopKByCosine {
+    struct Item { let id: Int64; let score: Float; let order: Int }
+    private var items: [Item] = []
+    private let capacity: Int
+
+    init(capacity: Int) {
+        self.capacity = max(0, capacity)
+        items.reserveCapacity(self.capacity)
+    }
+
+    private func ranksAbove(_ a: Item, _ b: Item) -> Bool {
+        a.score != b.score ? a.score > b.score : a.order < b.order
+    }
+
+    mutating func offer(id: Int64, score: Float, order: Int) {
+        guard capacity > 0 else { return }
+        let item = Item(id: id, score: score, order: order)
+        if items.count < capacity {
+            items.append(item)
+            siftUp(from: items.count - 1)
+        } else if ranksAbove(item, items[0]) {
+            // New item outranks the worst kept — replace the root.
+            items[0] = item
+            siftDown(from: 0)
+        }
+    }
+
+    // Min-heap on rank: a parent never ranks above its children, so the
+    // worst-ranked kept item sits at the root for O(1) comparison in `offer`.
+    private mutating func siftUp(from start: Int) {
+        var i = start
+        while i > 0 {
+            let parent = (i - 1) / 2
+            guard ranksAbove(items[parent], items[i]) else { break }
+            items.swapAt(i, parent)
+            i = parent
+        }
+    }
+
+    private mutating func siftDown(from start: Int) {
+        var i = start
+        let n = items.count
+        while true {
+            let l = 2 * i + 1, r = 2 * i + 2
+            var worst = i
+            if l < n, ranksAbove(items[worst], items[l]) { worst = l }
+            if r < n, ranksAbove(items[worst], items[r]) { worst = r }
+            if worst == i { break }
+            items.swapAt(i, worst)
+            i = worst
+        }
+    }
+
+    /// The kept items, highest rank first — matching `prefix(limit)` of the
+    /// prior stable descending sort.
+    func sortedDescending() -> [Item] {
+        items.sorted { ranksAbove($0, $1) }
     }
 }
