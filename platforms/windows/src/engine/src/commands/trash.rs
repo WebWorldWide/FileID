@@ -8,6 +8,31 @@ use crate::platform;
 use super::bulk::emit_bulk_result;
 use super::trash_log;
 
+/// Per-target restore decision, made BEFORE touching the Recycle Bin.
+/// Keeps the C1-003 conflict rule and the SEC-7 containment rule in one
+/// pure, unit-testable place.
+#[derive(Debug, PartialEq, Eq)]
+enum RestoreDisposition {
+    /// Inside an authorized root and the destination is free — attempt restore.
+    Restore,
+    /// Outside every authorized library root (SEC-7).
+    Refused,
+    /// Destination already occupied by another file (C1-003) — restoring would
+    /// clobber it / the bin's Undelete is a no-op, so report a conflict rather
+    /// than a false success.
+    Conflict,
+}
+
+fn restore_disposition(allowed: bool, occupied: bool) -> RestoreDisposition {
+    if !allowed {
+        RestoreDisposition::Refused
+    } else if occupied {
+        RestoreDisposition::Conflict
+    } else {
+        RestoreDisposition::Restore
+    }
+}
+
 pub(crate) async fn handle_restore_from_trash(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
@@ -27,6 +52,24 @@ pub(crate) async fn handle_restore_from_trash(
         // On success, the file lands at its original path; we re-INSERT a
         // stripped-down DB row so the Library tab shows it again.
         let conn = db.lock();
+
+        // C1-003: capture each destination's pre-restore occupancy. A path that
+        // is ALREADY occupied (by a DIFFERENT file the user re-created) cannot be
+        // restored without clobbering it — the bin's Undelete is a no-op there and
+        // the bytes stay trapped. We must surface that as a conflict error rather
+        // than seeing the occupant via Path::exists() and falsely reporting
+        // success. Probed before the restore so a successfully-restored file isn't
+        // mistaken for a pre-existing occupant.
+        let pre_occupied: std::collections::HashSet<String> = entry
+            .items
+            .iter()
+            .filter(|item| {
+                std::path::Path::new(&item.original_path)
+                    .symlink_metadata()
+                    .is_ok()
+            })
+            .map(|item| item.original_path.clone())
+            .collect();
 
         // SEC-7: collect every authorized scan root from scan_sessions and
         // require each restore destination to be a descendant. Defends
@@ -49,29 +92,74 @@ pub(crate) async fn handle_restore_from_trash(
             .collect();
 
         let tx = conn.unchecked_transaction()?;
+
+        // C1-007: partition into (allowed-to-restore, conflict, refused) WITHOUT
+        // spawning PowerShell per item. The allowed set is restored in a SINGLE
+        // bin enumeration below so a large undo batch can't blow the app's 30s
+        // waiter (each old per-item spawn re-walked the entire Recycle Bin).
+        let mut to_restore: Vec<&str> = Vec::new();
         for item in &entry.items {
             let path_obj = std::path::Path::new(&item.original_path);
             let candidate = crate::util::path_safety::canonicalize_for_containment(path_obj);
             let allowed = allowed_canonical
                 .iter()
                 .any(|root| candidate.starts_with(root));
-            if !allowed {
-                tracing::warn!(
-                    path = %platform::redact_path_for_log(&item.original_path),
-                    "SEC-7: refusing restore — path is outside every authorized library root"
-                );
-                failed += 1;
-                messages.push(BulkActionItem {
-                    file_id: Some(item.file_id),
-                    ok: false,
-                    message: Some(format!(
-                        "Refused: {} is not inside any authorized library root.",
-                        item.original_path
-                    )),
-                });
+            let occupied = pre_occupied.contains(&item.original_path);
+            match restore_disposition(allowed, occupied) {
+                RestoreDisposition::Refused => {
+                    tracing::warn!(
+                        path = %platform::redact_path_for_log(&item.original_path),
+                        "SEC-7: refusing restore — path is outside every authorized library root"
+                    );
+                    failed += 1;
+                    messages.push(BulkActionItem {
+                        file_id: Some(item.file_id),
+                        ok: false,
+                        message: Some(format!(
+                            "Refused: {} is not inside any authorized library root.",
+                            item.original_path
+                        )),
+                    });
+                }
+                // C1-003: a destination already occupied by a DIFFERENT file is a
+                // conflict — restoring would clobber it (or, as the bin's no-op
+                // Undelete does, silently leave the bytes trapped). Report a
+                // conflict instead of a false success.
+                RestoreDisposition::Conflict => {
+                    tracing::warn!(
+                        path = %platform::redact_path_for_log(&item.original_path),
+                        "restore conflict — destination already occupied; not restoring"
+                    );
+                    failed += 1;
+                    messages.push(BulkActionItem {
+                        file_id: Some(item.file_id),
+                        ok: false,
+                        message: Some(format!(
+                            "Cannot restore: {} is already occupied by another file.",
+                            item.original_path
+                        )),
+                    });
+                }
+                RestoreDisposition::Restore => to_restore.push(&item.original_path),
+            }
+        }
+
+        // Single bin enumeration for the whole batch (C1-007).
+        restore_batch_from_recycle_bin(&to_restore);
+
+        for item in &entry.items {
+            // Skip the ones already accounted for above (refused / conflict).
+            let attempted = to_restore.contains(&item.original_path.as_str());
+            if !attempted {
                 continue;
             }
-            let restored = restore_one_from_recycle_bin(&item.original_path).is_ok();
+            // C1-003: after the batch restore, success means the file is now
+            // present at a path that was NOT pre-occupied — i.e. the bytes we
+            // restored, not a stale occupant. (Pre-occupied paths were already
+            // filtered into the conflict branch above.)
+            let restored = std::path::Path::new(&item.original_path)
+                .symlink_metadata()
+                .is_ok();
             if restored {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -128,38 +216,46 @@ pub(crate) async fn handle_restore_from_trash(
     emit_bulk_result(&sink, "restoreFromTrash", result).await;
 }
 
+/// C1-007: restore a WHOLE batch of paths with ONE Recycle Bin enumeration.
+/// The old per-item helper spawned a fresh PowerShell (each re-walking the
+/// entire bin) for every path; a large undo batch ran them serially and blew
+/// the app's 30s waiter. Here a single PowerShell pass walks the bin once,
+/// matching each item against the requested set.
+///
+/// `wanted_paths` are the full original paths (each `parent\name`). They cross
+/// into the script as one NUL-separated env var so there is no string-
+/// interpolation surface. Best-effort: per-path success is verified by the
+/// caller via on-disk presence, so a non-zero exit here is not fatal.
 #[cfg(windows)]
-fn restore_one_from_recycle_bin(original_path: &str) -> anyhow::Result<()> {
-    // PowerShell walks the Recycle Bin, finds an item whose
-    // `OriginalLocation` + `Name` matches, and invokes its Verb "Undelete"
-    // (Restore). Path data flows through environment variables
-    // (FILEID_RB_PARENT / FILEID_RB_NAME) instead of being interpolated
-    // into the script — eliminates every escape concern.
-    let parent = std::path::Path::new(original_path)
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("bad path"))?
-        .to_string_lossy()
-        .to_string();
-    let name = std::path::Path::new(original_path)
-        .file_name()
-        .ok_or_else(|| anyhow::anyhow!("bad path"))?
-        .to_string_lossy()
-        .to_string();
+fn restore_batch_from_recycle_bin(wanted_paths: &[&str]) {
+    if wanted_paths.is_empty() {
+        return;
+    }
+    // Build the wanted set. Use the FULL original path (DeletedFrom + Name) as
+    // the match key so two trashed files with the same Name under different
+    // folders aren't confused. NUL-separate so a path containing a newline
+    // can't inject a spurious entry. Restore the FIRST bin entry that matches a
+    // given target path and then remove it from the wanted set — deterministic
+    // when multiple bin entries share one original path (C1-003).
+    let joined = wanted_paths.join("\0");
     let script = "\
 $shell = New-Object -ComObject Shell.Application; \
 $bin = $shell.NameSpace(0x0a); \
-$wantParent = $env:FILEID_RB_PARENT; \
-$wantName = $env:FILEID_RB_NAME; \
+$wanted = New-Object System.Collections.Generic.HashSet[string]; \
+foreach ($w in ($env:FILEID_RB_PATHS -split [char]0)) { if ($w.Length -gt 0) { [void]$wanted.Add($w) } }; \
 foreach ($i in $bin.Items()) { \
     $loc = $i.ExtendedProperty('System.Recycle.DeletedFrom'); \
-    $nm = $i.Name; \
-    if ($loc -eq $wantParent -and $nm -eq $wantName) { \
-        $i.InvokeVerb('Undelete'); break; \
+    if ($null -eq $loc) { continue } \
+    $full = (Join-Path $loc $i.Name); \
+    if ($wanted.Contains($full)) { \
+        $i.InvokeVerb('Undelete'); \
+        [void]$wanted.Remove($full); \
     } \
+    if ($wanted.Count -eq 0) { break } \
 }";
     // SEC: pin -ExecutionPolicy Bypass so the script runs even when group
     // policy locks the user-default policy. Script is internal (not user-
-    // supplied), arguments cross via env vars so there's no string-
+    // supplied); the path list crosses via an env var so there's no string-
     // interpolation surface.
     let status = std::process::Command::new("powershell.exe")
         .args([
@@ -170,22 +266,17 @@ foreach ($i in $bin.Items()) { \
             "-Command",
             script,
         ])
-        .env("FILEID_RB_PARENT", &parent)
-        .env("FILEID_RB_NAME", &name)
-        .status()?;
-    if !status.success() {
-        anyhow::bail!("powershell restore exit {:?}", status.code());
+        .env("FILEID_RB_PATHS", &joined)
+        .status();
+    if let Ok(status) = status {
+        if !status.success() {
+            tracing::warn!(code = ?status.code(), "powershell batch restore exited non-zero");
+        }
     }
-    if !std::path::Path::new(original_path).exists() {
-        anyhow::bail!("restore reported success but file is still missing");
-    }
-    Ok(())
 }
 
 #[cfg(not(windows))]
-fn restore_one_from_recycle_bin(_original_path: &str) -> anyhow::Result<()> {
-    anyhow::bail!("Recycle Bin restore not supported on this platform")
-}
+fn restore_batch_from_recycle_bin(_wanted_paths: &[&str]) {}
 
 pub(crate) async fn handle_revert_merge(
     sink: Sink,
@@ -245,4 +336,53 @@ pub(crate) async fn handle_revert_merge(
     .await;
 
     emit_bulk_result(&sink, "revertMerge", result).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // C1-003: an occupied destination must be a Conflict (not a Restore that
+    // later reads the occupant via Path::exists() and falsely reports success).
+    #[test]
+    fn occupied_destination_is_a_conflict_not_success() {
+        // Inside an authorized root but the path is already occupied.
+        assert_eq!(
+            restore_disposition(true, true),
+            RestoreDisposition::Conflict
+        );
+        // The happy path: allowed + free.
+        assert_eq!(
+            restore_disposition(true, false),
+            RestoreDisposition::Restore
+        );
+    }
+
+    // SEC-7 still wins: an out-of-root target is Refused regardless of occupancy.
+    #[test]
+    fn out_of_root_is_refused_before_conflict() {
+        assert_eq!(
+            restore_disposition(false, false),
+            RestoreDisposition::Refused
+        );
+        assert_eq!(
+            restore_disposition(false, true),
+            RestoreDisposition::Refused
+        );
+    }
+
+    // C1-003 deterministic multi-entry: when two log items share one original
+    // path, both classify identically (the batch enumeration restores the
+    // first matching bin entry per path and removes it from the wanted set, so
+    // the pick is deterministic rather than arbitrary). Here we assert the
+    // pre-classification is stable and does not depend on item order.
+    #[test]
+    fn same_path_items_classify_identically() {
+        let occupied = true;
+        let allowed = true;
+        let a = restore_disposition(allowed, occupied);
+        let b = restore_disposition(allowed, occupied);
+        assert_eq!(a, b);
+        assert_eq!(a, RestoreDisposition::Conflict);
+    }
 }

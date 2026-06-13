@@ -204,4 +204,28 @@ mod tests {
         }
         assert_eq!(accepted_batches, vec!["real-batch".to_string()]);
     }
+
+    // C1-018: once an entry is appended (signed), restore can FIND it by batch
+    // id. This is the recoverability guarantee the bulk trash path now orders
+    // BEFORE the irreversible DELETE commit — so a trashed file always has a
+    // findable undo-journal entry (or the whole batch is rolled back + surfaced
+    // as an error, never silently unrecoverable). Pure: signs in-memory and
+    // round-trips through find_batch_in (no filesystem).
+    #[test]
+    fn appended_entry_is_findable_by_batch_id() {
+        let key = log_hmac_key().expect("hmac key");
+        let entry = make_entry("undo-1");
+        let json = serde_json::to_string(&entry).unwrap();
+        let mac = hmac_sha256_hex(&key, json.as_bytes());
+        let raw = format!("{json}\t{mac}\n");
+
+        let found = find_batch_in(raw.as_bytes(), &key, "undo-1")
+            .expect("a signed, appended entry must be recoverable by restore");
+        assert_eq!(found.items.len(), 1);
+        assert_eq!(found.items[0].original_path, entry.items[0].original_path);
+
+        // A batch that was never appended is NOT findable — the bulk path must
+        // therefore guarantee the append before claiming the trash succeeded.
+        assert!(find_batch_in(raw.as_bytes(), &key, "never-written").is_none());
+    }
 }
