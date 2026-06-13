@@ -568,7 +568,7 @@ impl ModelStack {
                             Ok(tagger) => {
                                 tracing::info!(model = "RAM++", path = %p.display(), batch_size = ram_batch_size, "model loaded (batch-coordinator mode)");
                                 let coord = crate::models::ram_plus_batch::RamPlusBatchCoordinator::spawn(tagger);
-                                (None, Some(coord))
+                                (None, coord)
                             }
                             Err(err) => {
                                 tracing::warn!(model = "RAM++", ?err, "batch load failed; tagging falls back to CLIP scene-tags");

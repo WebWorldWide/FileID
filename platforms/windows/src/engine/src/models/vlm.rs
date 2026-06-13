@@ -200,10 +200,16 @@ pub async fn caption(
         // projector on the CPU — many-fold slower. Quality-neutral (same
         // weights/prompt/sampling); a no-op on a CPU-only llama.cpp build, and
         // on a small-VRAM card llama.cpp spills the overflow layers back to CPU.
-        cmd.arg("-ngl").arg("99");
-        // Pin to the discrete GPU on hybrid iGPU+dGPU systems (no-op otherwise).
-        if let Some(dev) = discrete_gpu_device(&runner.binary).await {
-            cmd.arg("--device").arg(dev);
+        // 0 offloaded layers when the user pinned the EP to CPU (GPU-TDR
+        // recovery), evacuating the GPU for the per-file CLI path too. (F-C1-006)
+        let forced_cpu = crate::models::runtime::user_forced_cpu();
+        cmd.arg("-ngl").arg(if forced_cpu { "0" } else { "99" });
+        // Pin to the discrete GPU on hybrid iGPU+dGPU systems (no-op otherwise);
+        // skipped under forced-CPU so we don't re-engage the evacuated GPU.
+        if !forced_cpu {
+            if let Some(dev) = discrete_gpu_device(&runner.binary).await {
+                cmd.arg("--device").arg(dev);
+            }
         }
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
