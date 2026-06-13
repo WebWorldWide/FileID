@@ -677,13 +677,20 @@ public sealed partial class RestructureView : UserControl
             var folder = AppViewModel.Instance.FolderPath;
             if (!string.IsNullOrEmpty(folder))
             {
-                try { _ = EngineClient.Instance.PlanRestructureAsync(folder!); }
-                catch (Exception ex)
-                {
-                    DebugLog.Warn("Restructure post-apply re-plan failed: " + ex.Message);
-                    _applying = false;
-                    RecomputeSelection();
-                }
+                // OBSERVE the re-plan Task rather than discarding it: PlanRestructureAsync
+                // faults its returned Task (frame-too-large/not-Ready/pipe IO all run
+                // async) and never throws synchronously, so a sync try/catch is dead
+                // code -- a faulted send would leave the single-flight guard stuck and
+                // the Apply buttons disabled forever. Release + log on the UI thread.
+                _ = EngineClient.Instance.PlanRestructureAsync(folder!).ContinueWith(t =>
+                    DispatcherQueue.TryEnqueue(() =>
+                    {
+                        if (_unloaded) return;
+                        DebugLog.Warn("Restructure post-apply re-plan failed: "
+                            + t.Exception?.GetBaseException().Message);
+                        _applying = false;
+                        RecomputeSelection();
+                    }), TaskContinuationOptions.OnlyOnFaulted);
             }
             else
             {
