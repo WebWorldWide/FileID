@@ -14,12 +14,15 @@ import CoreImage
 import ImageIO
 import UniformTypeIdentifiers
 
-/// Global concurrency cap for `VNImageRequestHandler.perform`. Set to the
-/// full worker count: throughput-first, with the per-call timeout below as
-/// the safety net for deadlock. (Earlier runs at gate=6 halved throughput
-/// from 150 → 75 files/s; the watchdog already handles the stuck-call case
-/// that the gate was previously protecting against.)
-let visionConcurrencyGate = DispatchSemaphore(value: 14)
+/// Global concurrency cap for `VNImageRequestHandler.perform`. Tied to the
+/// full worker count (`Hardware.workerCap`) so the Vision/ANE stage scales
+/// with the machine: throughput-first, with the per-call timeout below as the
+/// safety net for deadlock. (Earlier runs at gate=6 halved throughput from
+/// 150 → 75 files/s; the watchdog already handles the stuck-call case the gate
+/// was previously protecting against.) Was hardcoded 14 (= M1 Pro's workerCap);
+/// hardcoding silently throttled Vision/ANE on higher-core Macs (M-Ultra
+/// workerCap 32) — feeding the bigger ANE only 14-wide. Now it scales.
+let visionConcurrencyGate = DispatchSemaphore(value: Hardware.workerCap)
 
 /// Per-call hard wall-clock timeout for any `handler.perform` invocation.
 /// If Vision hasn't returned by `visionPerformTimeoutSeconds`, we abandon

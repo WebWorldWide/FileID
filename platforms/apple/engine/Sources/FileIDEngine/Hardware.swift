@@ -89,6 +89,21 @@ public enum Hardware {
         return min(32, max(4, bounded))
     }
 
+    /// Coarse RAM tier for sizing in-memory budgets (DB batch, read-ahead) so a
+    /// powerful box uses more of its headroom and a low-RAM box stays
+    /// conservative. Mirrors the Windows engine's `memory_tier`. M1 Pro 16 GB →
+    /// `.balanced`. Thresholds are coarse; per-machine tuning is an on-hardware
+    /// UAT knob (see NEXT.md). Static at startup (matches the worker-cap model);
+    /// runtime pressure adaptation is the separate F-3 item.
+    public enum MemoryTier { case low, balanced, high }
+
+    public static let memoryTier: MemoryTier = {
+        let gb = physicalMemoryGB
+        if gb < 12 { return .low }
+        if gb < 48 { return .balanced }
+        return .high
+    }()
+
     /// Resident-set MB of the current process.
     public static func residentMB() -> Int {
         var info = mach_task_basic_info()
