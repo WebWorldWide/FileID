@@ -30,6 +30,20 @@ pub(crate) fn append_caption_chunk(buf: &Arc<Mutex<String>>, chunk: &str) {
     b.push_str(trimmed);
 }
 
+/// Rolling-rate ETA for the Deep Analyze batch, mirroring the scan pipeline's
+/// EMA approach (scan_session.rs `maybe_emit_progress`): seconds-remaining =
+/// (total - completed) / rolling_fps, or None until there's a positive rate or
+/// when nothing remains. Keeps the Deep Analyze progress UI's ETA consistent
+/// with the scan sidebar (F-C2-008).
+fn batch_eta_seconds(rolling_fps: f64, completed: u64, total: u64) -> Option<f64> {
+    let remaining = total.saturating_sub(completed);
+    if rolling_fps > 0.01 && remaining > 0 {
+        Some(remaining as f64 / rolling_fps)
+    } else {
+        None
+    }
+}
+
 pub(crate) async fn handle_deep_analyze_file(
     sink: Sink,
     db: Arc<Mutex<rusqlite::Connection>>,
@@ -404,6 +418,10 @@ async fn run_deep_analyze_batch(
     // failing every one. (audit E5)
     let mut use_server = server.is_some();
     let started_at = Instant::now();
+    // Rolling files/sec over completed files → the ETA shown on the NEXT file's
+    // progress frames. EMA-smoothed (0.7 old / 0.3 new), mirroring the scan
+    // pipeline (scan_session.rs). (F-C2-008)
+    let mut rolling_fps = 0.0f64;
 
     // No runtime can run the (present) weights: the persistent server didn't
     // start AND there's no CLI binary. Surface the runtime problem ONCE here
@@ -491,7 +509,7 @@ async fn run_deep_analyze_batch(
                         DeepAnalyzeProgress {
                             processed: idx as u64,
                             total,
-                            eta_seconds: None,
+                            eta_seconds: batch_eta_seconds(rolling_fps, idx as u64, total),
                             current_path: None,
                             model_kind: model_kind.to_string(),
                             current_caption: None,
@@ -512,12 +530,16 @@ async fn run_deep_analyze_batch(
             )
             .ok()
         };
+        // ETA from the rate of the files completed BEFORE this one. The IPC
+        // currentPath carries the real path (not redacted) for parity with the
+        // macOS reference; we never log it here. (F-C2-008)
+        let eta_seconds = batch_eta_seconds(rolling_fps, idx as u64, total);
         sink.send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(Wrap::new(
             DeepAnalyzeProgress {
                 processed: idx as u64,
                 total,
-                eta_seconds: None,
-                current_path,
+                eta_seconds,
+                current_path: current_path.clone(),
                 model_kind: model_kind.to_string(),
                 current_caption: None,
             },
@@ -526,6 +548,10 @@ async fn run_deep_analyze_batch(
 
         let sink_c = sink.clone();
         let model_kind_c = model_kind.to_string();
+        // Carry ETA + the current file path onto the streamed caption frames too,
+        // so the Deep Analyze UI keeps showing both while a caption renders
+        // token-by-token (the macOS schema usage). (F-C2-008)
+        let current_path_cb = current_path.clone();
         let caption_buf = Arc::new(Mutex::new(String::new()));
         let last_emit = Arc::new(Mutex::new(Instant::now() - Duration::from_millis(500)));
         let caption_buf_cb = caption_buf.clone();
@@ -551,8 +577,8 @@ async fn run_deep_analyze_batch(
                 Wrap::new(DeepAnalyzeProgress {
                     processed: idx as u64,
                     total,
-                    eta_seconds: None,
-                    current_path: None,
+                    eta_seconds,
+                    current_path: current_path_cb.clone(),
                     model_kind: kind,
                     current_caption: Some(snapshot),
                 }),
@@ -561,6 +587,7 @@ async fn run_deep_analyze_batch(
         // Persistent server while it's healthy (model already resident); else
         // per-file CLI. `use_server` flips off below if the server dies. (audit E5)
         let server_active = if use_server { server.as_ref() } else { None };
+        let file_started = Instant::now();
         let outcome = if let Some(srv) = server_active {
             analyze_file_via_server(db.clone(), srv, file_id, model_kind, mode, cancel.clone(), on_token)
                 .await
@@ -573,6 +600,18 @@ async fn run_deep_analyze_batch(
                 "no VLM backend available — server failed to start and the CLI binary is missing"
             ))
         };
+
+        // Fold this file's wall time into the rolling rate driving the next
+        // file's ETA (EMA, mirroring scan_session.rs). (F-C2-008)
+        let dt = file_started.elapsed().as_secs_f64();
+        if dt > 0.0 {
+            let instant = 1.0 / dt;
+            rolling_fps = if rolling_fps <= 0.0 {
+                instant
+            } else {
+                0.7 * rolling_fps + 0.3 * instant
+            };
+        }
 
         match outcome {
             Ok(out) => {
@@ -645,6 +684,19 @@ mod tests {
         }
         let result = buf.lock().clone();
         result
+    }
+
+    #[test]
+    fn batch_eta_seconds_mirrors_scan_eta_semantics() {
+        // No rate yet (first file) → None, just like the scan ramp-up.
+        assert_eq!(super::batch_eta_seconds(0.0, 0, 100), None);
+        // 2 files/sec, 10 of 100 done → 90 remaining → 45 s.
+        assert_eq!(super::batch_eta_seconds(2.0, 10, 100), Some(45.0));
+        // Nothing remaining → None (no negative/zero ETA).
+        assert_eq!(super::batch_eta_seconds(2.0, 100, 100), None);
+        // A vanishingly small rate is treated as "no rate" (matches the scan
+        // pipeline's > 0.01 fps gate) so we don't emit an absurd ETA.
+        assert_eq!(super::batch_eta_seconds(0.001, 1, 100), None);
     }
 
     #[test]

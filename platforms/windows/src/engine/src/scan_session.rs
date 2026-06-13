@@ -297,6 +297,16 @@ impl ScanSession {
         // emits; the other skips. (audit E3)
         let notice_emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let notice_emitted_for_tick = notice_emitted.clone();
+        // discoveryComplete must fire EXACTLY ONCE on every scan terminal path
+        // (normal, empty, sub-250 ms drain, cancel-during-discovery) — the IPC
+        // parity invariant the app's progress bar depends on for its file total.
+        // The tick emits it on the normal path; the post-drain backstop below
+        // covers the paths where the tick is aborted mid-sleep or returns early
+        // on cancel. This shared single-shot flag keeps the two from double-
+        // emitting. (audit F-C2-006)
+        let discovery_complete_emitted =
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let discovery_complete_emitted_for_tick = discovery_complete_emitted.clone();
         // The tick takes `discovered_done` by move (async move); keep a clone for
         // the post-drain fallback's done-check below. (audit E3)
         let discovered_done_post = discovered_done.clone();
@@ -325,12 +335,18 @@ impl ScanSession {
                 if finished {
                     // IPC parity with macOS (FileIDEngineMain.swift:486):
                     // announce the discovery total once the walk ends —
-                    // macOS emits it even for a cancel-truncated walk.
-                    let _ = sink_for_tick.try_send(IpcEvent::now(
-                        EventPayload::DiscoveryComplete(
-                            crate::ipc::DiscoveryCompletePayload { total_files: count },
-                        ),
-                    ));
+                    // macOS emits it even for a cancel-truncated walk. Swap the
+                    // shared flag first so the post-drain backstop never re-emits
+                    // what the tick already sent. (audit F-C2-006)
+                    if !discovery_complete_emitted_for_tick
+                        .swap(true, std::sync::atomic::Ordering::SeqCst)
+                    {
+                        let _ = sink_for_tick.try_send(IpcEvent::now(
+                            EventPayload::DiscoveryComplete(
+                                crate::ipc::DiscoveryCompletePayload { total_files: count },
+                            ),
+                        ));
+                    }
                     // Empty-folder path: tagging would wait forever on its
                     // input channel if discovery produced zero files.
                     // Close out cleanly with a "no supported files found"
@@ -444,6 +460,22 @@ impl ScanSession {
                 return Err(err);
             }
         };
+
+        // discoveryComplete backstop (audit F-C2-006): the 250 ms tick emits this
+        // on a normal scan, but a sub-250 ms drain (empty folder / fully-current
+        // rescan) aborts the tick mid-first-sleep, and a cancel-during-discovery
+        // returns the tick early — both BEFORE it emits. The walk has ended by
+        // here (writer.run drained tagged_rx), so `discovered_count` is final.
+        // Emit unconditionally w.r.t. cancel to match the macOS reference, which
+        // announces the total even on a cancel-truncated walk; the shared single-
+        // shot flag the tick also swaps guarantees exactly-once across both paths.
+        if !discovery_complete_emitted.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            let count = discovered_count.load(std::sync::atomic::Ordering::Relaxed);
+            sink.send(IpcEvent::now(EventPayload::DiscoveryComplete(
+                crate::ipc::DiscoveryCompletePayload { total_files: count },
+            )))
+            .await;
+        }
 
         // Post-drain fallback for the empty/rescan/partial notice: if discovery
         // finished but the tick was aborted before it could emit (drained inside

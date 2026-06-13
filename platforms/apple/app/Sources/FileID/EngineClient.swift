@@ -765,7 +765,7 @@ public final class EngineClient {
     }
 
     public func deepAnalyzeAll(modelKind: String, skipExisting: Bool) {
-        guard send(.deepAnalyzeAll(modelKind: modelKind, skipExisting: skipExisting, tagsOnly: false)) else { return }
+        guard send(.deepAnalyzeAll(modelKind: modelKind, skipExisting: skipExisting, tagsOnly: false, proposeRenames: true)) else { return }
         deepAnalyzeInFlight = true
         deepAnalyzeProgress = nil
         deepAnalyzeComplete = nil
@@ -787,9 +787,10 @@ public final class EngineClient {
     }
 
     /// Cancel a running prewarm. Lands at the next Task.checkCancellation
-    /// inside swift-transformers' Hub fetcher (typically <1 s).
+    /// inside swift-transformers' Hub fetcher (typically <1 s). `nil` cancels
+    /// every in-flight prewarm (the only mode the welcome sheet uses today).
     public func cancelPrewarm() {
-        send(.cancelPrewarm)
+        send(.cancelPrewarm(modelKind: nil))
     }
 }
 

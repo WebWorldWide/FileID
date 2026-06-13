@@ -1050,6 +1050,52 @@ mod tests {
         assert_eq!(shutdown.as_object().unwrap().len(), 0);
     }
 
+    /// F-C2-001: a schema-conformant `deepAnalyzeAll` that OMITS `tagsOnly`
+    /// (and `proposeRenames`) must decode, defaulting `tags_only=false` and
+    /// `propose_renames=true`. This is the contract the Swift mirror must match.
+    #[test]
+    fn deep_analyze_all_decodes_with_optional_fields_omitted() {
+        let json = r#"{"id":"c-1","payload":{"deepAnalyzeAll":{"modelKind":"qwen2_5_vl_7b","skipExisting":true}}}"#;
+        let cmd: IpcCommand = serde_json::from_str(json).expect("decode without tagsOnly/proposeRenames");
+        match cmd.payload {
+            CommandPayload::DeepAnalyzeAll(p) => {
+                assert_eq!(p.model_kind, "qwen2_5_vl_7b");
+                assert!(p.skip_existing);
+                assert!(!p.tags_only, "tagsOnly must default to false when omitted");
+                assert!(p.propose_renames, "proposeRenames must default to true when omitted");
+            }
+            other => panic!("expected DeepAnalyzeAll, got {other:?}"),
+        }
+        // proposeRenames explicitly false must survive (caption + tags, no rename).
+        let json2 = r#"{"id":"c-2","payload":{"deepAnalyzeAll":{"modelKind":"m","skipExisting":false,"tagsOnly":false,"proposeRenames":false}}}"#;
+        let cmd2: IpcCommand = serde_json::from_str(json2).unwrap();
+        match cmd2.payload {
+            CommandPayload::DeepAnalyzeAll(p) => assert!(!p.propose_renames),
+            other => panic!("expected DeepAnalyzeAll, got {other:?}"),
+        }
+    }
+
+    /// F-C2-002: `cancelPrewarm` must decode with `modelKind` OMITTED (the
+    /// cancel-all form → `None`) and with it present (targeted per-model cancel).
+    /// The empty-object form `{"cancelPrewarm":{}}` is the canonical cancel-all.
+    #[test]
+    fn cancel_prewarm_decodes_with_optional_model_kind() {
+        let all = r#"{"id":"c-1","payload":{"cancelPrewarm":{}}}"#;
+        match serde_json::from_str::<IpcCommand>(all).unwrap().payload {
+            CommandPayload::CancelPrewarm(p) => {
+                assert!(p.model_kind.is_none(), "absent modelKind = cancel-all (None)");
+            }
+            other => panic!("expected CancelPrewarm, got {other:?}"),
+        }
+        let one = r#"{"id":"c-2","payload":{"cancelPrewarm":{"modelKind":"qwen2_5_vl_7b"}}}"#;
+        match serde_json::from_str::<IpcCommand>(one).unwrap().payload {
+            CommandPayload::CancelPrewarm(p) => {
+                assert_eq!(p.model_kind.as_deref(), Some("qwen2_5_vl_7b"));
+            }
+            other => panic!("expected CancelPrewarm, got {other:?}"),
+        }
+    }
+
     #[test]
     fn scan_phase_enum_lowercased() {
         let j = serde_json::to_string(&ScanPhase::Discovering).unwrap();

@@ -106,7 +106,11 @@ public enum FaceClustering {
         } catch {
             JSONLog.shared.error(ev: "face_cluster_query_failed", error: "\(error)")
             await sink.emit(.error(EngineError(
-                kind: "face_cluster_failed",
+                // Canonical cross-platform face-clustering failure kind (the
+                // Windows form); was `face_cluster_failed`. The app's gate
+                // release keys on the `face_cluster` prefix, so this still
+                // releases it. (audit F-C2-003)
+                kind: "face_clustering_failed",
                 message: "Could not load face prints: \(error)"
             )))
             return FaceClusteringResult(personCount: 0, faceCount: 0,

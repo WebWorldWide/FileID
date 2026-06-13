@@ -305,12 +305,12 @@ struct FileIDEngineMain {
                                              scope: .folder(prefix: prefix),
                                              modelKind: kind)
             })
-        case .deepAnalyzeAll(let modelKind, let skipExisting, let tagsOnly):
-            // `tagsOnly` (fast one-VLM-call/file pass) is accepted for wire
+        case .deepAnalyzeAll(let modelKind, let skipExisting, _, _):
+            // `tagsOnly` (fast one-VLM-call/file pass) and `proposeRenames`
+            // (full pass minus the smart-rename VLM call) are accepted for wire
             // parity; the macOS DeepAnalyzeRunner's wholeLibrary scope doesn't
-            // branch on it yet (tracked in NEXT.md) — full caption + tags runs
-            // regardless.
-            _ = tagsOnly
+            // branch on either yet (tracked in NEXT.md) — full caption + tags +
+            // rename runs regardless. (audit F-C2-001)
             guard let database, let kind = AIModelKind(rawValue: modelKind) else {
                 await sink.emit(.error(EngineError(
                     kind: "deep_invalid",
@@ -342,9 +342,14 @@ struct FileIDEngineMain {
             JSONLog.shared.info(ev: "deep_analyze_cancel_requested")
         case .prewarmModel(let modelKey):
             guard let kind = AIModelKind(rawValue: modelKey) else {
+                // Canonical cross-platform kind for "engine doesn't recognize
+                // this model id" — matches the Windows engine's `unknown_model`
+                // (was macOS `prewarm_invalid_kind`). Stamp `modelKind` so the
+                // app can route it to the right install slot. (audit F-C2-003)
                 await sink.emit(.error(EngineError(
-                    kind: "prewarm_invalid_kind",
-                    message: "Unknown model kind \(modelKey)."
+                    kind: "unknown_model",
+                    message: "This FileID engine doesn't recognize the model '\(modelKey)'. Reinstall or rebuild FileID so the app and engine match, then try again.",
+                    modelKind: modelKey
                 )))
                 return
             }

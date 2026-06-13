@@ -31,12 +31,16 @@ public struct IPCCommand: Codable, Sendable {
         case deepAnalyzeFile(fileID: Int64, modelKind: String)
         case deepAnalyzeFolder(pathPrefix: String, modelKind: String)
         /// `tagsOnly` runs the fast one-VLM-call/file pass (background
-        /// auto-tag chain) instead of full caption + smart-rename + tags.
-        /// The schema marks it optional (defaults false); the Windows
-        /// engine always serializes it, so a Windows-emitted command
-        /// decodes cleanly. Any extra schema key (e.g. `proposeRenames`)
-        /// is ignored by Swift's keyed decoder.
-        case deepAnalyzeAll(modelKind: String, skipExisting: Bool, tagsOnly: Bool)
+        /// auto-tag chain) instead of full caption + smart-rename + tags;
+        /// `proposeRenames` (full pass) also proposes smart filenames.
+        /// Both are OPTIONAL in the schema — `tagsOnly` defaults false,
+        /// `proposeRenames` defaults true — and are modeled here as optional
+        /// associated values so a schema-conformant payload that omits either
+        /// still decodes on macOS (Swift's enum Codable synthesis uses
+        /// `decodeIfPresent` for optional associated values). Consumers apply
+        /// the documented defaults: `tagsOnly ?? false`, `proposeRenames ?? true`.
+        /// (audit F-C2-001 — mirrors Rust DeepAnalyzeAllPayload + C# DeepAnalyzeAllCommand.)
+        case deepAnalyzeAll(modelKind: String, skipExisting: Bool, tagsOnly: Bool?, proposeRenames: Bool?)
         case deepAnalyzeCancel
         /// Pre-fetch a VLM's weights into the swift-transformers HF
         /// cache without running inference. Used by the welcome-sheet
@@ -46,8 +50,10 @@ public struct IPCCommand: Codable, Sendable {
         /// Cancel an in-flight prewarmModel. Lands at the next
         /// Task.checkCancellation point inside swift-transformers'
         /// fetch loop — usually within ~1 s. Safe no-op if no prewarm
-        /// is active.
-        case cancelPrewarm
+        /// is active. `modelKind` is OPTIONAL (schema): a value cancels that
+        /// one model's download; `nil`/absent cancels ALL in-flight prewarms.
+        /// (audit F-C2-002 — mirrors Rust CancelPrewarmPayload + C# CancelPrewarmCommand.)
+        case cancelPrewarm(modelKind: String?)
 
         // ── Windows-originated commands ───────────────────────────
         // These land on mac only when the schema needs to round-trip
