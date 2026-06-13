@@ -35,6 +35,10 @@ struct RestructureView: View {
     @State private var showingPicker = false
     @State private var staysPutExpanded: Bool = false
     @State private var confirmConvertToRealMoves: Bool = false
+    /// Single-flight guard for the apply / convert paths. A real move is
+    /// irreversible inside the app, so a double-click must never run apply
+    /// twice — the bar buttons disable while this is set.
+    @State private var applying = false
 
     @AppStorage("restructure.viewMode") private var viewModeRaw: String = ViewMode.cards.rawValue
     private var viewMode: ViewMode { ViewMode(rawValue: viewModeRaw) ?? .cards }
@@ -43,6 +47,10 @@ struct RestructureView: View {
     @State private var skippedOutcomes: Set<RestructureOutcome> = []
     @State private var expandedOutcome: RestructureOutcome?
     @State private var drillDown: DrillDownScope?
+    /// Filtered + grouped proposals for the active drill-down scope.
+    /// Rebuilt only when `drillDown` changes so a per-row checkbox tap
+    /// inside the sheet doesn't re-filter + re-group the whole set.
+    @State private var drillDownGroups: [Group] = []
 
     /// Shared hover state used by the Sankey, recommendation rows,
     /// tree, and staysPut disclosure to drive cross-highlight.
@@ -174,8 +182,9 @@ struct RestructureView: View {
                     selectedCount: selectedIDs.count,
                     totalCount: proposals.count,
                     canApply: !selectedIDs.isEmpty,
+                    isApplying: applying,
                     onApplyShortcuts: { applySelected(mode: .symlink) },
-                    onConvertToMoves: { confirmConvertToRealMoves = true }
+                    onConvertToMoves: { if !applying { confirmConvertToRealMoves = true } }
                 )
                 .padding(.horizontal, 18)
                 .padding(.bottom, 14)
@@ -236,6 +245,11 @@ struct RestructureView: View {
             guard libraryRoot != nil else { return }
             store.notifyChanged()
             Task { await regenerate() }
+        }
+        // Group the drill-down's proposals once per scope, not on every
+        // checkbox tap inside the sheet.
+        .onChange(of: drillDown) { _, newScope in
+            rebuildDrillDownGroups(for: newScope)
         }
     }
 
@@ -398,7 +412,7 @@ struct RestructureView: View {
                         folderCount: summary.anchorFolders,
                         isApproved: true,
                         isInformational: true,
-                        isHighlighted: hoverBus.touchesOutcome(.keep),
+                        hoverBus: hoverBus,
                         onHover: { hovering in
                             hoverBus.set(hovering ? .outcome(.keep) : nil)
                         },
@@ -419,7 +433,7 @@ struct RestructureView: View {
                         folderCount: summary.mixedFolders,
                         isApproved: approved,
                         isExpanded: expanded,
-                        isHighlighted: hoverBus.touchesOutcome(.tidy),
+                        hoverBus: hoverBus,
                         onToggleApproval: { toggleSkip(.tidy) },
                         onToggleExpand: { toggleExpand(.tidy) },
                         onHover: { hovering in
@@ -442,7 +456,7 @@ struct RestructureView: View {
                         folderCount: summary.junkFolders,
                         isApproved: approved,
                         isExpanded: expanded,
-                        isHighlighted: hoverBus.touchesOutcome(.reorganize),
+                        hoverBus: hoverBus,
                         onToggleApproval: { toggleSkip(.reorganize) },
                         onToggleExpand: { toggleExpand(.reorganize) },
                         onHover: { hovering in
@@ -535,31 +549,39 @@ struct RestructureView: View {
     /// writes `sourceFolder(name)` to the hover bus so the matching
     /// node in the Sankey lights up — the disclosure becomes a
     /// pointer into the diagram instead of a dead list.
-    @ViewBuilder
-    private func staysPutRow(_ entry: (folder: String, count: Int)) -> some View {
-        let isHovered = hoverBus.touchesSource(entry.folder)
-        HStack(spacing: 8) {
-            Image(systemName: "folder.fill")
-                .font(.caption)
-                .foregroundStyle(.green.opacity(isHovered ? 1.0 : 0.8))
-            Text(entry.folder)
-                .font(.caption.monospaced())
-                .foregroundStyle(isHovered ? Color.primary : .secondary)
-            Spacer()
-            Text("\(entry.count) file\(entry.count == 1 ? "" : "s")")
-                .font(.caption2.monospaced())
-                .foregroundStyle(.tertiary)
+    ///
+    /// A standalone view (not an inline @ViewBuilder) so its read of
+    /// `hoverBus` subscribes only this row — not the whole RestructureView
+    /// body, which would otherwise re-pass the full proposal array to the
+    /// Sankey/tree on every mouse-move.
+    private struct StaysPutRow: View {
+        let entry: (folder: String, count: Int)
+        let hoverBus: RestructureHoverBus
+        var body: some View {
+            let isHovered = hoverBus.touchesSource(entry.folder)
+            HStack(spacing: 8) {
+                Image(systemName: "folder.fill")
+                    .font(.caption)
+                    .foregroundStyle(.green.opacity(isHovered ? 1.0 : 0.8))
+                Text(entry.folder)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(isHovered ? Color.primary : .secondary)
+                Spacer()
+                Text("\(entry.count) file\(entry.count == 1 ? "" : "s")")
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 6).padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color.green.opacity(isHovered ? 0.10 : 0))
+            )
+            .contentShape(Rectangle())
+            .onHover { hovering in
+                hoverBus.set(hovering ? .sourceFolder(entry.folder) : nil)
+            }
+            .animation(.easeInOut(duration: 0.18), value: isHovered)
         }
-        .padding(.horizontal, 6).padding(.vertical, 3)
-        .background(
-            RoundedRectangle(cornerRadius: 4)
-                .fill(Color.green.opacity(isHovered ? 0.10 : 0))
-        )
-        .contentShape(Rectangle())
-        .onHover { hovering in
-            hoverBus.set(hovering ? .sourceFolder(entry.folder) : nil)
-        }
-        .animation(.easeInOut(duration: 0.18), value: isHovered)
     }
 
     private var staysPutSection: some View {
@@ -572,7 +594,7 @@ struct RestructureView: View {
                     if !summary.staysPutBreakdown.isEmpty {
                         Divider().opacity(0.3)
                         ForEach(Array(summary.staysPutBreakdown.enumerated()), id: \.offset) { _, entry in
-                            staysPutRow(entry)
+                            StaysPutRow(entry: entry, hoverBus: hoverBus)
                         }
                     }
                 }
@@ -773,6 +795,11 @@ struct RestructureView: View {
         defer { if token == regenToken { loading = false } }
         status = nil
         let root = libraryRoot
+        // Capture the user's per-file deselections (rows still in the current
+        // set that they unchecked) BEFORE recomputing, so a regenerate —
+        // including one triggered by a Deep Analyze finishing mid-review —
+        // doesn't silently re-check files the user unchecked.
+        let priorDeselected = Set(proposals.map(\.fileID)).subtracting(selectedIDs)
         let result = await Task.detached(priority: .userInitiated) {
             return RestructureEngine.compute(store: store, libraryRoot: root)
         }.value
@@ -785,6 +812,8 @@ struct RestructureView: View {
         groups = by.map { Group(bucket: $0.key, proposals: $0.value) }
             .sorted { $0.proposals.count > $1.proposals.count }
         selectedIDs = Set(result.proposals.map(\.fileID))
+        // Re-apply per-file deselections that carried into the fresh set.
+        selectedIDs.subtract(priorDeselected)
         // Preserve the user's "Skip these" choices across regenerate: re-exclude
         // any persisted skipped outcome's proposals from the fresh selection
         // (otherwise skipped rows render dimmed but get re-applied).
@@ -824,6 +853,7 @@ struct RestructureView: View {
     }
 
     private func applySelected(mode: RestructureEngine.ApplyMode) {
+        guard !applying else { return }
         guard let root = libraryRoot else {
             status = "Pick a library folder before applying."
             return
@@ -833,7 +863,9 @@ struct RestructureView: View {
         let toMove = proposals.filter {
             selectedIDs.contains($0.fileID) && !skippedOutcomes.contains(outcomeFor($0))
         }
+        applying = true
         Task {
+            defer { applying = false }
             let result = await RestructureEngine.apply(proposals: toMove,
                                                        store: store, mode: mode,
                                                        libraryRoot: root)
@@ -845,8 +877,13 @@ struct RestructureView: View {
     }
 
     private func convertAllToRealMoves() {
+        // Single-flight: a real move is irreversible inside the app, so a
+        // double-tap must not run the conversion twice.
+        guard !applying else { return }
         let candidates = proposals
+        applying = true
         Task {
+            defer { applying = false }
             let result = await RestructureEngine.convertSymlinksToMoves(
                 proposals: candidates, store: store
             )
@@ -1003,8 +1040,12 @@ struct RestructureView: View {
 
     @ViewBuilder
     private func drillDownSheet(_ scope: DrillDownScope) -> some View {
-        let matched = proposals.filter { matches(scope, $0) }
-        let title = drillDownTitle(scope, count: matched.count)
+        // Read the grouping cached in `drillDownGroups` (rebuilt only when
+        // the scope changes) so a per-row checkbox tap doesn't re-filter +
+        // re-group the whole proposal set on every render.
+        let groups = drillDownGroups
+        let matchedCount = groups.reduce(0) { $0 + $1.proposals.count }
+        let title = drillDownTitle(scope, count: matchedCount)
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: drillDownIcon(scope))
@@ -1012,7 +1053,7 @@ struct RestructureView: View {
                     .font(.title3)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(title).font(.headline)
-                    Text("\(matched.count) file\(matched.count == 1 ? "" : "s") affected. Tap any row to include or skip it before applying.")
+                    Text("\(matchedCount) file\(matchedCount == 1 ? "" : "s") affected. Tap any row to include or skip it before applying.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -1020,7 +1061,7 @@ struct RestructureView: View {
                     .keyboardShortcut(.defaultAction)
             }
             Divider().opacity(0.3)
-            if matched.isEmpty {
+            if groups.isEmpty {
                 VStack(spacing: 6) {
                     Image(systemName: "checkmark.seal.fill")
                         .font(.system(size: 36)).foregroundStyle(.green)
@@ -1031,19 +1072,12 @@ struct RestructureView: View {
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 8) {
-                        // Group the filtered proposals by destination
-                        // bucket so the user sees "files going to X"
-                        // structure even inside the scoped view. Inside
-                        // the drill-down we render `unlimited: true` so
-                        // big buckets aren't truncated — the LazyVStack
+                        // Buckets pre-grouped in `rebuildDrillDownGroups`.
+                        // Inside the drill-down we render `unlimited: true`
+                        // so big buckets aren't truncated — the LazyVStack
                         // keeps it cheap.
-                        let byBucket = Dictionary(grouping: matched, by: { $0.bucket })
-                        let bucketOrder = byBucket.keys.sorted {
-                            (byBucket[$0]?.count ?? 0) > (byBucket[$1]?.count ?? 0)
-                        }
-                        ForEach(Array(bucketOrder.enumerated()), id: \.element) { idx, bucket in
+                        ForEach(Array(groups.enumerated()), id: \.element.id) { idx, g in
                             if idx > 0 { Divider().opacity(0.18) }
-                            let g = Group(bucket: bucket, proposals: byBucket[bucket] ?? [])
                             bucketSection(g, unlimited: true)
                         }
                     }
@@ -1055,6 +1089,18 @@ struct RestructureView: View {
         .frame(minWidth: 600, minHeight: 480)
         .background(LavaLampBackground())
         .preferredColorScheme(.dark)
+    }
+
+    /// Recompute the filtered + bucketed proposals for a drill-down scope.
+    /// Called only when the scope changes (sheet open/close/switch), so the
+    /// O(N) filter + groupBy doesn't run on every checkbox tap.
+    private func rebuildDrillDownGroups(for scope: DrillDownScope?) {
+        guard let scope else { drillDownGroups = []; return }
+        let matched = proposals.filter { matches(scope, $0) }
+        let byBucket = Dictionary(grouping: matched, by: { $0.bucket })
+        drillDownGroups = byBucket.keys
+            .sorted { (byBucket[$0]?.count ?? 0) > (byBucket[$1]?.count ?? 0) }
+            .map { Group(bucket: $0, proposals: byBucket[$0] ?? []) }
     }
 
     private func matches(_ scope: DrillDownScope, _ p: Proposal) -> Bool {

@@ -13,6 +13,11 @@ struct RestructureRecommendationRow<ExpandedContent: View>: View {
     var isInformational = false
     var isExpanded = false
     var isHighlighted = false
+    /// When supplied, the row derives its hover-highlight from the shared
+    /// bus inside its OWN body — so the read doesn't live in the parent's
+    /// body and trigger a full re-render (re-passing the proposal array)
+    /// on every mouse-move.
+    var hoverBus: RestructureHoverBus? = nil
 
     var onToggleApproval: () -> Void = {}
     var onToggleExpand: () -> Void = {}
@@ -57,20 +62,26 @@ struct RestructureRecommendationRow<ExpandedContent: View>: View {
         .opacity(isApproved || isInformational ? 1.0 : 0.55)
         .background(
             Rectangle().fill(
-                isHighlighted ? outcome.tint.opacity(0.06) : Color.clear
+                highlighted ? outcome.tint.opacity(0.06) : Color.clear
             )
         )
         .overlay(alignment: .leading) {
             Rectangle()
                 .fill(outcome.tint)
                 .frame(width: 2)
-                .opacity(isHighlighted ? 1.0 : 0.0)
+                .opacity(highlighted ? 1.0 : 0.0)
         }
         .contentShape(Rectangle())
         .onHover(perform: onHover)
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: isExpanded)
         .animation(.easeInOut(duration: 0.18), value: isApproved)
-        .animation(.easeInOut(duration: 0.18), value: isHighlighted)
+        .animation(.easeInOut(duration: 0.18), value: highlighted)
+    }
+
+    /// Parent-provided flag OR, when a hover bus is supplied, derived here
+    /// so the observable read lives in this row's body.
+    private var highlighted: Bool {
+        isHighlighted || (hoverBus?.touchesOutcome(outcome) ?? false)
     }
 
     @ViewBuilder
