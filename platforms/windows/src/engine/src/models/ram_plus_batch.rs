@@ -86,7 +86,7 @@ impl RamPlusBatchCoordinator {
 
     /// Spawn the coordinator on a dedicated OS thread that owns `tagger` for the
     /// rest of the process. The thread exits when all senders drop.
-    pub fn spawn(mut tagger: RamPlusTagger) -> Arc<Self> {
+    pub fn spawn(mut tagger: RamPlusTagger) -> Option<Arc<Self>> {
         // The enable gate (ModelStack) already checked configured_batch_size() > 1;
         // re-read here defaulting to DEFAULT_BATCH_SIZE so a future auto-detect
         // caller that spawns without the env still gets a sane batch size.
@@ -103,12 +103,18 @@ impl RamPlusBatchCoordinator {
             _ => REQUEST_CHANNEL_CAP,
         };
         let (sender, receiver) = bounded::<RamPlusRequest>(channel_cap);
-        std::thread::Builder::new()
+        // Degrade gracefully on spawn failure (mirrors the sibling model-load
+        // sites) — batch tagging becomes unavailable and the caller falls back
+        // to the single-image pool, rather than panicking the engine. (F-C1-016)
+        if let Err(err) = std::thread::Builder::new()
             .name("fileid-ramplus-batch".to_string())
             .spawn(move || run_coordinator(&mut tagger, receiver, batch_size, batch_timeout_ms))
-            .expect("spawn fileid-ramplus-batch thread");
+        {
+            tracing::warn!(%err, "[RAMPLUS-BATCH] coordinator spawn failed; falling back to single-image tagging");
+            return None;
+        }
         tracing::info!(batch_size, batch_timeout_ms, "[RAMPLUS-BATCH] coordinator spawned");
-        Arc::new(Self { sender })
+        Some(Arc::new(Self { sender }))
     }
 
     /// Submit one image, await its tag list. Errs if the coordinator thread has

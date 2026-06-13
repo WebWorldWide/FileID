@@ -33,6 +33,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
     private readonly string _connString;
     private SqliteConnection? _connection;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private int _disposed;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -663,16 +664,44 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         return acc;
     }
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        Dispose();
-        return ValueTask.CompletedTask;
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        // Quiesce in-flight reads before freeing the native connection. Every
+        // read holds `_gate` for the whole time it touches `_connection`, so
+        // acquiring it here guarantees no thread-pool read is mid-query against
+        // the connection we're about to Dispose — otherwise the close frees it
+        // out from under the reader, a use-after-dispose native crash (mirror of
+        // macOS ReadStore F-C4-002). Reads ConfigureAwait(false) throughout and
+        // never re-enter the gate, so this can't self-deadlock.
+        await _gate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            _connection?.Dispose();
+            _connection = null;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+        _gate.Dispose();
     }
 
     public void Dispose()
     {
-        _connection?.Dispose();
-        _connection = null;
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        // Sync mirror of DisposeAsync: block until any in-flight read releases
+        // the gate before freeing the native connection (see DisposeAsync).
+        _gate.Wait();
+        try
+        {
+            _connection?.Dispose();
+            _connection = null;
+        }
+        finally
+        {
+            _gate.Release();
+        }
         _gate.Dispose();
     }
 }

@@ -100,35 +100,52 @@ public enum IdentityClustering {
         /// Total Pass-3 splits applied across all clusters.
         public let splitsApplied: Int
         public let durationSeconds: Double
+        /// True iff the pass aborted early on a cancellation/shutdown signal.
+        /// The caller must discard the (partial) result and skip persisting.
+        public let cancelled: Bool
     }
 
     /// Run the full pipeline.
     /// `embeddings[i]` must be L2-normalized. `searcher(i)` returns the
     /// kNN of face i with cosine similarities; FaceClustering supplies
-    /// an HNSW-backed implementation.
+    /// an HNSW-backed implementation. `shouldCancel` is polled inside the
+    /// hot loops so a mid-flight pass can abort cleanly at a safe boundary
+    /// (engine shutdown) — when it returns true the pass stops and reports
+    /// `cancelled = true` so the caller skips the persist transaction.
     public static func cluster(
         embeddings: [[Float]],
         searcher: (Int) -> [(neighbor: Int, similarity: Float)],
-        params: Hyperparameters = Hyperparameters()
+        params: Hyperparameters = Hyperparameters(),
+        shouldCancel: () -> Bool = { false }
     ) -> Result {
         let started = Date()
         let n = embeddings.count
         guard n > 0 else {
             return Result(clusterIDs: [], clusterCount: 0, coreCount: 0,
                           outliersAssigned: 0, outliersAsSingletons: 0,
-                          splitsApplied: 0, durationSeconds: 0)
+                          splitsApplied: 0, durationSeconds: 0, cancelled: false)
         }
         let dim = embeddings.first?.count ?? 0
         guard dim > 0 else {
             return Result(clusterIDs: [Int](repeating: 0, count: n),
                           clusterCount: 0, coreCount: 0,
                           outliersAssigned: 0, outliersAsSingletons: 0,
-                          splitsApplied: 0, durationSeconds: 0)
+                          splitsApplied: 0, durationSeconds: 0, cancelled: false)
+        }
+
+        func cancelledResult() -> Result {
+            Result(clusterIDs: [Int](repeating: 0, count: n),
+                   clusterCount: 0, coreCount: 0,
+                   outliersAssigned: 0, outliersAsSingletons: 0,
+                   splitsApplied: 0,
+                   durationSeconds: Date().timeIntervalSince(started),
+                   cancelled: true)
         }
 
         // ─── Pass 1: connected components above pass1Cosine ───────
         var uf = UnionFind(n: n)
         for i in 0..<n {
+            if shouldCancel() { return cancelledResult() }
             for hit in searcher(i) {
                 let j = hit.neighbor
                 guard j != i, j >= 0, j < n else { continue }
@@ -138,21 +155,33 @@ public enum IdentityClustering {
         }
         var rootMembers: [Int: [Int]] = [:]
         for i in 0..<n { rootMembers[uf.find(i), default: []].append(i) }
+        // Iterate in sorted-root order so cluster-ID assignment is deterministic
+        // across runs — otherwise HashMap iteration order leaks into People-tab
+        // cluster numbers and a re-scan of the same library renumbers everyone.
+        // (mirrors the Windows engine's sort_by_key(root); audit F-C3-007)
+        let sortedGroups = rootMembers.sorted { $0.key < $1.key }
         var cores: [[Int]] = []
         var outliers: [Int] = []
-        for (_, members) in rootMembers {
+        for (_, members) in sortedGroups {
             if members.count >= 2 { cores.append(members) }
             else { outliers.append(contentsOf: members) }
         }
         let pass1Cores = cores.count
 
         // ─── Pass 2: outlier assignment with margin ───────────────
-        var coreCentroids: [[Float]] = cores.map {
-            centroidNormalized(of: $0, embeddings: embeddings, dim: dim)
+        // Maintain a parallel unnormalized running sum per core alongside the
+        // normalized centroid. Recomputing the centroid over the full membership
+        // on every outlier add is O(S) per add → O(S²) over a pass; folding the
+        // outlier into the running sum is O(dim) per add. Mathematically
+        // identical (only floating-point reassociation differs). (audit F-C3-008)
+        var coreSums: [[Float]] = cores.map {
+            centroidSum(of: $0, embeddings: embeddings, dim: dim)
         }
+        var coreCentroids: [[Float]] = coreSums.map { normalizeSum($0, dim: dim) }
         var outliersAssigned = 0
         var outliersAsSingletons = 0
         for outlier in outliers {
+            if shouldCancel() { return cancelledResult() }
             let v = embeddings[outlier]
             var c1Idx = -1, c2Idx = -1
             var c1Sim: Float = -2, c2Sim: Float = -2
@@ -169,12 +198,15 @@ public enum IdentityClustering {
             let passesMargin = c2Idx < 0 || (c1Sim - c2Sim) >= params.pass2Margin
             if passesFloor && passesMargin {
                 cores[c1Idx].append(outlier)
-                coreCentroids[c1Idx] = centroidNormalized(
-                    of: cores[c1Idx], embeddings: embeddings, dim: dim
-                )
+                let m = min(dim, v.count)
+                for d in 0..<m { coreSums[c1Idx][d] += v[d] }
+                coreCentroids[c1Idx] = normalizeSum(coreSums[c1Idx], dim: dim)
                 outliersAssigned += 1
             } else {
                 cores.append([outlier])
+                // A singleton's unnormalized sum is the embedding itself; its
+                // normalized centroid is the (already L2-normalized) embedding.
+                coreSums.append(v)
                 coreCentroids.append(v)
                 outliersAsSingletons += 1
             }
@@ -205,7 +237,8 @@ public enum IdentityClustering {
             outliersAssigned: outliersAssigned,
             outliersAsSingletons: outliersAsSingletons,
             splitsApplied: splitsApplied,
-            durationSeconds: Date().timeIntervalSince(started)
+            durationSeconds: Date().timeIntervalSince(started),
+            cancelled: false
         )
     }
 
@@ -215,16 +248,32 @@ public enum IdentityClustering {
     private static func centroidNormalized(
         of indices: [Int], embeddings: [[Float]], dim: Int
     ) -> [Float] {
+        normalizeSum(centroidSum(of: indices, embeddings: embeddings, dim: dim), dim: dim)
+    }
+
+    /// Unnormalized component-wise sum of the indexed embeddings. Pass 2 keeps
+    /// this alongside the normalized centroid so an outlier add is O(dim), not
+    /// O(S). The `.min` is a release-safe backstop against a stray short vector.
+    private static func centroidSum(
+        of indices: [Int], embeddings: [[Float]], dim: Int
+    ) -> [Float] {
         var sum = [Float](repeating: 0, count: dim)
         for i in indices {
             let v = embeddings[i]
-            for d in 0..<dim { sum[d] += v[d] }
+            let m = min(dim, v.count)
+            for d in 0..<m { sum[d] += v[d] }
         }
+        return sum
+    }
+
+    /// L2-normalize a running sum vector into a unit centroid.
+    private static func normalizeSum(_ sum: [Float], dim: Int) -> [Float] {
         var norm: Float = 0
         for d in 0..<dim { norm += sum[d] * sum[d] }
         let invN = Float(1) / max(.leastNonzeroMagnitude, norm.squareRoot())
-        for d in 0..<dim { sum[d] *= invN }
-        return sum
+        var out = [Float](repeating: 0, count: dim)
+        for d in 0..<dim { out[d] = sum[d] * invN }
+        return out
     }
 
     /// Cosine on pre-normalized vectors = dot product.

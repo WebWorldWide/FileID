@@ -662,7 +662,15 @@ where
         ranges.push((i, start, end));
     }
 
-    let bytes_done = Arc::new(AtomicU64::new(0));
+    // Seed progress from bytes already on disk so a resume (Retry after a
+    // cancel/crash) doesn't report from 0 and make the bar jump backward. Each
+    // part contributes at most its planned range length — an OVERSIZED stale
+    // part (leftover from a different-sized remote file) is discarded by
+    // download_range_with_retry, so counting only the in-range prefix keeps the
+    // seed consistent with the bytes that will actually be re-used. (audit C1)
+    let resume_seed = resume_seed_bytes(&request.destination, &ranges).await;
+
+    let bytes_done = Arc::new(AtomicU64::new(resume_seed));
     let started = Instant::now();
     let last_emit_ms = Arc::new(parking_lot::Mutex::new(0u128));
 
@@ -851,6 +859,72 @@ fn part_file_path(dest: &Path, index: usize) -> PathBuf {
     parent.join(format!("{stem}.part-{index:02}"))
 }
 
+/// Sum the resumable bytes already on disk across all planned part files, so
+/// `download_parallel` can seed its progress counter on a resume instead of
+/// reporting from 0 (a backward-jumping bar on Retry). A part contributes only
+/// the bytes that actually survive into the resumed download: an oversized part
+/// (> its planned range) is discarded WHOLE by `download_range_with_retry`
+/// (its in-range prefix does NOT survive), so it must seed 0 — otherwise its
+/// range_len would be counted once here and again as re-download deltas, pushing
+/// bytes_done past bytes_total. `ranges` is `(index, start, end)` with an
+/// inclusive `end`.
+async fn resume_seed_bytes(dest: &Path, ranges: &[(usize, u64, u64)]) -> u64 {
+    let mut seed: u64 = 0;
+    for &(i, start, end) in ranges {
+        let range_len = end - start + 1;
+        let on_disk = tokio::fs::metadata(part_file_path(dest, i))
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
+        seed += if on_disk > range_len { 0 } else { on_disk };
+    }
+    seed
+}
+
+/// How `download_range_with_retry` reacts to a non-success / non-206 status on
+/// a range request, given how many bytes are already on disk for this part.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RangeResumeAction {
+    /// 2xx that honored our Range (206), or a fresh 200/206 with no prior bytes:
+    /// stream the body normally.
+    Proceed,
+    /// A resume where the server's answer means the on-disk prefix is unusable
+    /// (416 stale part, or a 200 full-body answer to a partial request): discard
+    /// the part and re-fetch the range cleanly. Recoverable — never a hard bail.
+    DiscardAndRetry,
+    /// A genuine error (bad URL/auth, or a 416 with nothing on disk to discard):
+    /// no recovery, bail.
+    Bail,
+}
+
+/// Classify a range response. `existing_len` is bytes already on disk for this
+/// part; `status` is the HTTP status code. Pure so it's unit-testable without a
+/// live server — the single source of truth for the resume-recovery branches in
+/// `download_range_with_retry` (416 + non-206-on-resume both auto-recover, in
+/// parity with `download_simple`). 429/5xx are handled separately (Retry-After)
+/// and never reach here.
+fn classify_range_status(status: u16, existing_len: u64) -> RangeResumeAction {
+    if status == 416 {
+        // A stale on-disk part is recoverable; a 416 with nothing to discard is a
+        // genuinely unsatisfiable request.
+        return if existing_len > 0 {
+            RangeResumeAction::DiscardAndRetry
+        } else {
+            RangeResumeAction::Bail
+        };
+    }
+    let success = (200..300).contains(&status);
+    if !success {
+        return RangeResumeAction::Bail;
+    }
+    // Resuming (bytes on disk) but the server sent a full body (not 206):
+    // appending would splice our prefix in front of the full file. Restart clean.
+    if existing_len > 0 && status != 206 {
+        return RangeResumeAction::DiscardAndRetry;
+    }
+    RangeResumeAction::Proceed
+}
+
 /// Download one byte range with retry-on-429/503 + resume support.
 /// If `<part_path>` already exists, send `Range: bytes={offset}-{end}`
 /// where offset = start + existing_len, and append.
@@ -940,22 +1014,26 @@ async fn download_range_with_retry(
             last_err = Some(anyhow::anyhow!("HTTP {status}"));
             continue;
         }
-        if !status.is_success() {
-            anyhow::bail!("range {range_header}: HTTP {status}");
-        }
-        // If we're resuming a partially-downloaded range (bytes already on disk)
-        // but the server answered 200 (full body) instead of 206 (partial),
-        // appending would splice our partial prefix in front of the full file →
-        // a corrupt, oversized part. Discard the partial and restart this range
-        // cleanly. (download_simple handles the same 200-on-resume case.)
-        if existing_len > 0 && status.as_u16() != 206 {
-            tracing::warn!(
-                part = %part_path.display(), %status,
-                "range resume answered non-206; discarding partial and restarting"
-            );
-            let _ = tokio::fs::remove_file(part_path).await;
-            last_err = Some(anyhow::anyhow!("range resume answered HTTP {status} (restarted)"));
-            continue;
+        // Resume-recovery classification (parity with download_simple): a 416 on
+        // a resume (stale on-disk part — remote shrank or a leftover from a
+        // different-sized revision) and a 200 full-body answer to a partial
+        // request both discard the part and re-fetch the range cleanly rather
+        // than bailing the whole parallel download. A 416 with nothing on disk,
+        // or any other non-2xx, is a genuine error.
+        match classify_range_status(status.as_u16(), existing_len) {
+            RangeResumeAction::Proceed => {}
+            RangeResumeAction::DiscardAndRetry => {
+                tracing::warn!(
+                    part = %part_path.display(), %status, existing_len, range_len,
+                    "range resume not honored (416/non-206); discarding stale part and re-fetching"
+                );
+                let _ = tokio::fs::remove_file(part_path).await;
+                last_err = Some(anyhow::anyhow!("range resume answered HTTP {status} (restarted)"));
+                continue;
+            }
+            RangeResumeAction::Bail => {
+                anyhow::bail!("range {range_header}: HTTP {status}");
+            }
         }
 
         // Open part file in append mode (resumes on retry too).
@@ -996,9 +1074,9 @@ async fn download_range_with_retry(
 #[cfg(test)]
 mod tests {
     use super::{
-        chain_has_disk_full, chain_has_pin_failure, check_size_plausible,
-        message_indicates_pin_failure, source_chain_indicates_pin_failure, RetryBudget,
-        PINNED_ROOT_CERTS,
+        chain_has_disk_full, chain_has_pin_failure, check_size_plausible, classify_range_status,
+        message_indicates_pin_failure, resume_seed_bytes, source_chain_indicates_pin_failure,
+        RangeResumeAction, RetryBudget, PINNED_ROOT_CERTS,
     };
     use std::time::Duration;
 
@@ -1169,5 +1247,75 @@ mod tests {
         assert!(check_size_plausible(100_000, Some(1_000_000), "u").is_err());
         // Zero-byte result against a 38 MB expectation.
         assert!(check_size_plausible(0, Some(38_696_353), "u").is_err());
+    }
+
+    // C1: ranged resume must seed progress from bytes already on disk, so the
+    // bar doesn't jump backward on Retry. Pre-fix, download_parallel started its
+    // counter at 0 regardless of the .part-NN bytes present.
+    #[tokio::test]
+    async fn resume_seed_counts_on_disk_part_bytes() {
+        let dir = std::env::temp_dir().join(format!(
+            "fileid-dl-seed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("model.bin");
+
+        // Plan three ranges of 100 bytes each: [0,99] [100,199] [200,299].
+        let ranges = vec![(0usize, 0u64, 99u64), (1, 100, 199), (2, 200, 299)];
+
+        // No parts yet → seed is 0.
+        assert_eq!(resume_seed_bytes(&dest, &ranges).await, 0);
+
+        // Part 0 fully done (100 B), part 1 half done (50 B), part 2 absent.
+        std::fs::write(super::part_file_path(&dest, 0), vec![0u8; 100]).unwrap();
+        std::fs::write(super::part_file_path(&dest, 1), vec![0u8; 50]).unwrap();
+        assert_eq!(
+            resume_seed_bytes(&dest, &ranges).await,
+            150,
+            "seed must reflect on-disk bytes (100 + 50), not 0"
+        );
+
+        // An OVERSIZED stale part (200 B in a 100 B range) contributes 0:
+        // download_range_with_retry discards the WHOLE part (not just the
+        // overflow), so seeding any of it would double-count against the re-
+        // download deltas and let bytes_done exceed bytes_total (R-05).
+        std::fs::write(super::part_file_path(&dest, 2), vec![0u8; 200]).unwrap();
+        assert_eq!(
+            resume_seed_bytes(&dest, &ranges).await,
+            150,
+            "oversized stale part seeds 0 (discarded whole), not its range length"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // C1: a 416 on a ranged resume must recover (discard the stale part + re-
+    // fetch the range), matching download_simple — not hard-bail the whole
+    // parallel download. Pre-fix, 416 fell through to the generic non-2xx bail.
+    #[test]
+    fn range_416_on_resume_recovers_instead_of_bailing() {
+        // 416 with bytes on disk → discard + re-fetch the range.
+        assert_eq!(
+            classify_range_status(416, 4096),
+            RangeResumeAction::DiscardAndRetry
+        );
+        // 416 with nothing to discard is genuinely unsatisfiable → bail.
+        assert_eq!(classify_range_status(416, 0), RangeResumeAction::Bail);
+        // A 200 full-body answer to a partial (resume) request also restarts.
+        assert_eq!(
+            classify_range_status(200, 1024),
+            RangeResumeAction::DiscardAndRetry
+        );
+        // Honored partial (206) and a fresh full GET both stream normally.
+        assert_eq!(classify_range_status(206, 1024), RangeResumeAction::Proceed);
+        assert_eq!(classify_range_status(200, 0), RangeResumeAction::Proceed);
+        // Other client/redirect errors still bail.
+        assert_eq!(classify_range_status(404, 0), RangeResumeAction::Bail);
+        assert_eq!(classify_range_status(403, 2048), RangeResumeAction::Bail);
     }
 }

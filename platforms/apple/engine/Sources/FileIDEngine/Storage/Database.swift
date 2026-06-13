@@ -48,6 +48,12 @@ public final class Database: @unchecked Sendable {
             try db.execute(sql: "PRAGMA mmap_size = 268435456")     // 256 MB
             try db.execute(sql: "PRAGMA cache_size = -65536")        // 64 MB
             try db.execute(sql: "PRAGMA wal_autocheckpoint = 10000") // ~40 MB
+            // Windows-parity: keep dirty pages pinned in the page cache for the
+            // life of a transaction instead of spilling them to a temp file
+            // mid-write under memory pressure (a spill can leave a transient
+            // -journal alongside the WAL and slows the writer). (F-C3-039,
+            // mirrors db/mod.rs SETUP_PRAGMAS).
+            try db.execute(sql: "PRAGMA cache_spill = 0")
         }
         self.pool = try DatabasePool(path: url.path, configuration: config)
         let migrator = Self.migrator
@@ -447,6 +453,44 @@ public final class Database: @unchecked Sendable {
         }
 
         return m
+    }
+
+    // MARK: - Cancellation-shielded writes
+
+    /// Run a writer transaction that MUST complete even when the calling task
+    /// is cancelled. GRDB 7's async `pool.write` throws `CancellationError`
+    /// the moment the surrounding `Task` is cancelled (documented behavior),
+    /// so terminal bookkeeping issued from a cancelled scan task — chiefly the
+    /// final `scan_sessions.status` UPDATE — would be swallowed, leaving the
+    /// row stuck `'running'` and mislabeled `'crashed'` on the next launch.
+    /// Detaching breaks cancellation inheritance so the write runs to
+    /// completion on the writer queue. Use ONLY for short terminal writes that
+    /// must not be lost — normal writes should stay cancellable. (F-C3-031)
+    public func writeUncancellable<T: Sendable>(
+        _ updates: @escaping @Sendable (GRDB.Database) throws -> T
+    ) async throws -> T {
+        let pool = self.pool
+        return try await Task.detached(priority: .userInitiated) {
+            try await pool.write(updates)
+        }.value
+    }
+
+    // MARK: - WAL maintenance
+
+    /// Best-effort PASSIVE WAL checkpoint, run OUTSIDE any transaction
+    /// (`writeWithoutTransaction`, not `write`, which would wrap it in a txn and
+    /// make the PRAGMA a no-op). The DB Writer calls this on a per-N-batch
+    /// cadence so the `-wal` file is trimmed in small increments instead of
+    /// ballooning to the 10000-page `wal_autocheckpoint` ceiling and then doing
+    /// one large synchronous checkpoint copy inside a user commit — which stalls
+    /// every tagging worker for its duration. PASSIVE never blocks readers or
+    /// writers; a transient SQLITE_BUSY just leaves the WAL slightly larger and
+    /// is retried at the next cadence. Mirrors the Windows engine's
+    /// per-32-batch `wal_checkpoint(PASSIVE)` (pipeline/dbwriter.rs). (F-C6-004)
+    public func checkpointPassive() async {
+        try? await pool.writeWithoutTransaction { db in
+            _ = try db.checkpoint(.passive)
+        }
     }
 
     // MARK: - Convenience reads

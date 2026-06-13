@@ -176,6 +176,27 @@ impl DbWriter {
         // lock — the JPEG encode + fs::write must not run inside the tx. (audit P1)
         let mut crops_to_write: Vec<(i64, Vec<u8>)> = Vec::new();
 
+        // Recipe-v1 legacy digests for over-cap files (>FULL_HASH_MAX_BYTES):
+        // computing one re-reads ~2 MB (head ‖ tail) off disk. Done BEFORE the
+        // writer lock so the blocking IO never runs inside the single-writer tx —
+        // a slow/sleeping disk on one over-cap file would otherwise stall every
+        // reader-blocking writer-lock holder for the whole batch. (F-C1-025)
+        // Index-parallel to `buffer`; `None` for files that need no legacy probe.
+        // Same guard the inline read used: only over-cap rows that carry a
+        // content_hash can match the recipe-v1 fallback (?4) below.
+        let legacy_hashes: Vec<Option<[u8; 32]>> = buffer
+            .iter()
+            .map(|f| {
+                if f.content_hash.is_some()
+                    && f.size_bytes > crate::util::content_hash::FULL_HASH_MAX_BYTES
+                {
+                    crate::util::content_hash::legacy_content_hash(&f.path, f.size_bytes).ok()
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         let conn = self.conn.lock();
         let tx = conn.unchecked_transaction().context("opening tx")?;
         {
@@ -233,7 +254,7 @@ impl DbWriter {
             let mut doc_text_delete = tx
                 .prepare_cached("DELETE FROM doc_text WHERE file_id = ?1")
                 .context("preparing doc_text delete")?;
-            for f in buffer.iter() {
+            for (i, f) in buffer.iter().enumerate() {
                 let insert_started = Instant::now();
                 let path_text = f.path.to_string_lossy();
                 // Path redaction is computed lazily INSIDE each error-context
@@ -243,6 +264,12 @@ impl DbWriter {
                 // (never raw) path is still what lands in the log + IPC wire on a
                 // real flush error. (audit P3)
                 let path_hash = crate::util::path_safety::stable_path_hash(&path_text);
+                // NFC-normalized search shadow of the path (v16 contract). macOS
+                // writers store `precomposedStringWithCanonicalMapping`; the
+                // Windows engine must match so an NFD filename (Mac/NAS/Dropbox-
+                // synced) is found by the app's NFC query. ASCII is the identity
+                // case (no alloc); only non-ASCII paths compose. (F-C2-005)
+                let path_search = nfc_path_search(&path_text);
                 let extension = f
                     .path
                     .extension()
@@ -263,14 +290,9 @@ impl DbWriter {
                     // before the composite hash gained interior samples hold
                     // blake3(head ‖ tail ‖ size) — a 2 MB read reproduces it so
                     // those rows still heal; the upsert below re-stamps the
-                    // current recipe.
-                    let legacy_hash = if f.content_hash.is_some()
-                        && f.size_bytes > crate::util::content_hash::FULL_HASH_MAX_BYTES
-                    {
-                        crate::util::content_hash::legacy_content_hash(&f.path, f.size_bytes).ok()
-                    } else {
-                        None
-                    };
+                    // current recipe. The read was hoisted out of the writer lock
+                    // (computed into `legacy_hashes` before `conn.lock()`). (F-C1-025)
+                    let legacy_hash = legacy_hashes[i];
                     let candidates: Vec<(i64, String, bool)> = heal_lookup_stmt
                         .query_map(
                             params![
@@ -294,7 +316,7 @@ impl DbWriter {
                         .into_iter()
                         .find(|(_, old, by_ref)| heal_candidate_moved(*by_ref, old))
                     {
-                        match heal_update_stmt.execute(params![path_text, path_hash, id]) {
+                        match heal_update_stmt.execute(params![path_text, path_hash, id, path_search]) {
                             Ok(_) => tracing::info!(
                                 id,
                                 new_path = %crate::platform::redact_path_for_log(&f.path),
@@ -350,7 +372,7 @@ impl DbWriter {
                             f.error_message,
                             f.content_hash.as_ref().map(|h| h.as_slice()),
                             f.file_ref.map(|r| r as i64),
-                            path_text,
+                            path_search,
                         ],
                         |row| row.get(0),
                     )
@@ -591,9 +613,9 @@ fn percentile(values: &mut [f64], p: f64) -> f64 {
 /// Bare INSERT (no RETURNING) — retained for test fixtures that don't
 /// need the id. The hot-path writer uses `INSERT_FILE_RETURNING_ID_SQL`
 /// below, which is identical plus a `RETURNING id` suffix.
-/// `path_search` (?20) binds the same value as `path_text` — Windows paths
-/// are NFC in practice and Rust has no NFC normalizer in the locked
-/// dependency set (see the v16 migration note).
+/// `path_search` (?20) is bound the NFC-normalized path (`nfc_path_search`),
+/// NOT the verbatim `path_text` (?1) — the v16 contract, so NFD filenames are
+/// found by the app's NFC query (F-C2-005).
 #[allow(dead_code)]  // used by test fixtures only; bin path uses the RETURNING variant.
 const INSERT_FILE_SQL: &str = r#"
     INSERT INTO files (
@@ -697,9 +719,12 @@ const HEAL_LOOKUP_SQL: &str = r#"
 // the rare case where ANOTHER row already sits at the new path (e.g. a copy
 // preceded the rename) — SQLite REPLACE deletes the colliding row and
 // FK-cascades its tags/embeddings/faces, then the healed row wins.
+// ?4 is the NFC-normalized search shadow (v16 contract) — bound separately
+// from ?1 (verbatim path_text) so a healed NFD path is still found by an NFC
+// query, mirroring the INSERT path. (F-C2-005)
 const HEAL_UPDATE_SQL: &str = r#"
     UPDATE files
-       SET path_text = ?1, path_hash = ?2, path_search = ?1
+       SET path_text = ?1, path_hash = ?2, path_search = ?4
      WHERE id = ?3
 "#;
 
@@ -753,6 +778,117 @@ fn floats_to_le_bytes(v: &[f32]) -> Vec<u8> {
     out
 }
 
+/// NFC-normalize a path string for the `path_search` shadow column (v16
+/// contract). macOS writers store `precomposedStringWithCanonicalMapping`;
+/// this is the cross-platform-clean Windows mirror, dependency-free (no NFC
+/// crate is in the locked set). It composes the canonical Latin base+combining
+/// pairs — the real-world NFD filename surface (Mac/HFS+/APFS, NAS, Dropbox
+/// sync decompose accented names: "cafe\u{0301}" -> "caf\u{e9}"). ASCII and
+/// already-composed paths return unchanged via the fast path (no allocation),
+/// so the 140 files/s hot loop pays nothing on the common case. Stacked
+/// multi-mark sequences (vanishingly rare in filenames) are left as-is — still
+/// no worse than the prior verbatim behavior. (F-C2-005)
+///
+/// `pub(crate)` so the other path-mutating writers (restructure-apply, bulk
+/// rename, trash-restore) can reuse this single canonical normalizer instead
+/// of re-stamping `path_search = path_text` verbatim.
+pub(crate) fn nfc_path_search(path: &str) -> String {
+    // Fast path: a pure-ASCII path is already NFC (NFC is the identity on
+    // ASCII), so skip the scan + allocation entirely.
+    if path.is_ascii() {
+        return path.to_string();
+    }
+    let mut out = String::with_capacity(path.len());
+    let mut chars = path.chars().peekable();
+    while let Some(base) = chars.next() {
+        // Try to fold a following combining mark into `base`.
+        if let Some(&mark) = chars.peek() {
+            if let Some(composed) = compose_canonical(base, mark) {
+                out.push(composed);
+                chars.next();
+                continue;
+            }
+        }
+        out.push(base);
+    }
+    out
+}
+
+/// Look up the canonical composition of `base` + a single combining `mark`.
+/// Table is sorted by (base, mark) for binary search; generated from the
+/// Unicode canonical-decomposition data for the Latin range.
+fn compose_canonical(base: char, mark: char) -> Option<char> {
+    let key = (base as u32, mark as u32);
+    NFC_LATIN_COMPOSE
+        .binary_search_by(|&(b, m, _)| (b, m).cmp(&key))
+        .ok()
+        .and_then(|i| char::from_u32(NFC_LATIN_COMPOSE[i].2))
+}
+
+/// (base, combining-mark, precomposed) canonical-composition triples for the
+/// Latin-1 Supplement + Latin Extended-A range. Sorted by (base, mark).
+#[rustfmt::skip]
+const NFC_LATIN_COMPOSE: &[(u32, u32, u32)] = &[
+    (0x0041, 0x0300, 0x00C0), (0x0041, 0x0301, 0x00C1), (0x0041, 0x0302, 0x00C2), (0x0041, 0x0303, 0x00C3),
+    (0x0041, 0x0304, 0x0100), (0x0041, 0x0306, 0x0102), (0x0041, 0x0307, 0x0226), (0x0041, 0x0308, 0x00C4),
+    (0x0041, 0x030A, 0x00C5), (0x0041, 0x030C, 0x01CD), (0x0041, 0x030F, 0x0200), (0x0041, 0x0311, 0x0202),
+    (0x0041, 0x0328, 0x0104), (0x0043, 0x0301, 0x0106), (0x0043, 0x0302, 0x0108), (0x0043, 0x0307, 0x010A),
+    (0x0043, 0x030C, 0x010C), (0x0043, 0x0327, 0x00C7), (0x0044, 0x030C, 0x010E), (0x0045, 0x0300, 0x00C8),
+    (0x0045, 0x0301, 0x00C9), (0x0045, 0x0302, 0x00CA), (0x0045, 0x0304, 0x0112), (0x0045, 0x0306, 0x0114),
+    (0x0045, 0x0307, 0x0116), (0x0045, 0x0308, 0x00CB), (0x0045, 0x030C, 0x011A), (0x0045, 0x030F, 0x0204),
+    (0x0045, 0x0311, 0x0206), (0x0045, 0x0327, 0x0228), (0x0045, 0x0328, 0x0118), (0x0047, 0x0301, 0x01F4),
+    (0x0047, 0x0302, 0x011C), (0x0047, 0x0306, 0x011E), (0x0047, 0x0307, 0x0120), (0x0047, 0x030C, 0x01E6),
+    (0x0047, 0x0327, 0x0122), (0x0048, 0x0302, 0x0124), (0x0048, 0x030C, 0x021E), (0x0049, 0x0300, 0x00CC),
+    (0x0049, 0x0301, 0x00CD), (0x0049, 0x0302, 0x00CE), (0x0049, 0x0303, 0x0128), (0x0049, 0x0304, 0x012A),
+    (0x0049, 0x0306, 0x012C), (0x0049, 0x0307, 0x0130), (0x0049, 0x0308, 0x00CF), (0x0049, 0x030C, 0x01CF),
+    (0x0049, 0x030F, 0x0208), (0x0049, 0x0311, 0x020A), (0x0049, 0x0328, 0x012E), (0x004A, 0x0302, 0x0134),
+    (0x004B, 0x030C, 0x01E8), (0x004B, 0x0327, 0x0136), (0x004C, 0x0301, 0x0139), (0x004C, 0x030C, 0x013D),
+    (0x004C, 0x0327, 0x013B), (0x004E, 0x0300, 0x01F8), (0x004E, 0x0301, 0x0143), (0x004E, 0x0303, 0x00D1),
+    (0x004E, 0x030C, 0x0147), (0x004E, 0x0327, 0x0145), (0x004F, 0x0300, 0x00D2), (0x004F, 0x0301, 0x00D3),
+    (0x004F, 0x0302, 0x00D4), (0x004F, 0x0303, 0x00D5), (0x004F, 0x0304, 0x014C), (0x004F, 0x0306, 0x014E),
+    (0x004F, 0x0307, 0x022E), (0x004F, 0x0308, 0x00D6), (0x004F, 0x030B, 0x0150), (0x004F, 0x030C, 0x01D1),
+    (0x004F, 0x030F, 0x020C), (0x004F, 0x0311, 0x020E), (0x004F, 0x031B, 0x01A0), (0x004F, 0x0328, 0x01EA),
+    (0x0052, 0x0301, 0x0154), (0x0052, 0x030C, 0x0158), (0x0052, 0x030F, 0x0210), (0x0052, 0x0311, 0x0212),
+    (0x0052, 0x0327, 0x0156), (0x0053, 0x0301, 0x015A), (0x0053, 0x0302, 0x015C), (0x0053, 0x030C, 0x0160),
+    (0x0053, 0x0326, 0x0218), (0x0053, 0x0327, 0x015E), (0x0054, 0x030C, 0x0164), (0x0054, 0x0326, 0x021A),
+    (0x0054, 0x0327, 0x0162), (0x0055, 0x0300, 0x00D9), (0x0055, 0x0301, 0x00DA), (0x0055, 0x0302, 0x00DB),
+    (0x0055, 0x0303, 0x0168), (0x0055, 0x0304, 0x016A), (0x0055, 0x0306, 0x016C), (0x0055, 0x0308, 0x00DC),
+    (0x0055, 0x030A, 0x016E), (0x0055, 0x030B, 0x0170), (0x0055, 0x030C, 0x01D3), (0x0055, 0x030F, 0x0214),
+    (0x0055, 0x0311, 0x0216), (0x0055, 0x031B, 0x01AF), (0x0055, 0x0328, 0x0172), (0x0057, 0x0302, 0x0174),
+    (0x0059, 0x0301, 0x00DD), (0x0059, 0x0302, 0x0176), (0x0059, 0x0304, 0x0232), (0x0059, 0x0308, 0x0178),
+    (0x005A, 0x0301, 0x0179), (0x005A, 0x0307, 0x017B), (0x005A, 0x030C, 0x017D), (0x0061, 0x0300, 0x00E0),
+    (0x0061, 0x0301, 0x00E1), (0x0061, 0x0302, 0x00E2), (0x0061, 0x0303, 0x00E3), (0x0061, 0x0304, 0x0101),
+    (0x0061, 0x0306, 0x0103), (0x0061, 0x0307, 0x0227), (0x0061, 0x0308, 0x00E4), (0x0061, 0x030A, 0x00E5),
+    (0x0061, 0x030C, 0x01CE), (0x0061, 0x030F, 0x0201), (0x0061, 0x0311, 0x0203), (0x0061, 0x0328, 0x0105),
+    (0x0063, 0x0301, 0x0107), (0x0063, 0x0302, 0x0109), (0x0063, 0x0307, 0x010B), (0x0063, 0x030C, 0x010D),
+    (0x0063, 0x0327, 0x00E7), (0x0064, 0x030C, 0x010F), (0x0065, 0x0300, 0x00E8), (0x0065, 0x0301, 0x00E9),
+    (0x0065, 0x0302, 0x00EA), (0x0065, 0x0304, 0x0113), (0x0065, 0x0306, 0x0115), (0x0065, 0x0307, 0x0117),
+    (0x0065, 0x0308, 0x00EB), (0x0065, 0x030C, 0x011B), (0x0065, 0x030F, 0x0205), (0x0065, 0x0311, 0x0207),
+    (0x0065, 0x0327, 0x0229), (0x0065, 0x0328, 0x0119), (0x0067, 0x0301, 0x01F5), (0x0067, 0x0302, 0x011D),
+    (0x0067, 0x0306, 0x011F), (0x0067, 0x0307, 0x0121), (0x0067, 0x030C, 0x01E7), (0x0067, 0x0327, 0x0123),
+    (0x0068, 0x0302, 0x0125), (0x0068, 0x030C, 0x021F), (0x0069, 0x0300, 0x00EC), (0x0069, 0x0301, 0x00ED),
+    (0x0069, 0x0302, 0x00EE), (0x0069, 0x0303, 0x0129), (0x0069, 0x0304, 0x012B), (0x0069, 0x0306, 0x012D),
+    (0x0069, 0x0308, 0x00EF), (0x0069, 0x030C, 0x01D0), (0x0069, 0x030F, 0x0209), (0x0069, 0x0311, 0x020B),
+    (0x0069, 0x0328, 0x012F), (0x006A, 0x0302, 0x0135), (0x006A, 0x030C, 0x01F0), (0x006B, 0x030C, 0x01E9),
+    (0x006B, 0x0327, 0x0137), (0x006C, 0x0301, 0x013A), (0x006C, 0x030C, 0x013E), (0x006C, 0x0327, 0x013C),
+    (0x006E, 0x0300, 0x01F9), (0x006E, 0x0301, 0x0144), (0x006E, 0x0303, 0x00F1), (0x006E, 0x030C, 0x0148),
+    (0x006E, 0x0327, 0x0146), (0x006F, 0x0300, 0x00F2), (0x006F, 0x0301, 0x00F3), (0x006F, 0x0302, 0x00F4),
+    (0x006F, 0x0303, 0x00F5), (0x006F, 0x0304, 0x014D), (0x006F, 0x0306, 0x014F), (0x006F, 0x0307, 0x022F),
+    (0x006F, 0x0308, 0x00F6), (0x006F, 0x030B, 0x0151), (0x006F, 0x030C, 0x01D2), (0x006F, 0x030F, 0x020D),
+    (0x006F, 0x0311, 0x020F), (0x006F, 0x031B, 0x01A1), (0x006F, 0x0328, 0x01EB), (0x0072, 0x0301, 0x0155),
+    (0x0072, 0x030C, 0x0159), (0x0072, 0x030F, 0x0211), (0x0072, 0x0311, 0x0213), (0x0072, 0x0327, 0x0157),
+    (0x0073, 0x0301, 0x015B), (0x0073, 0x0302, 0x015D), (0x0073, 0x030C, 0x0161), (0x0073, 0x0326, 0x0219),
+    (0x0073, 0x0327, 0x015F), (0x0074, 0x030C, 0x0165), (0x0074, 0x0326, 0x021B), (0x0074, 0x0327, 0x0163),
+    (0x0075, 0x0300, 0x00F9), (0x0075, 0x0301, 0x00FA), (0x0075, 0x0302, 0x00FB), (0x0075, 0x0303, 0x0169),
+    (0x0075, 0x0304, 0x016B), (0x0075, 0x0306, 0x016D), (0x0075, 0x0308, 0x00FC), (0x0075, 0x030A, 0x016F),
+    (0x0075, 0x030B, 0x0171), (0x0075, 0x030C, 0x01D4), (0x0075, 0x030F, 0x0215), (0x0075, 0x0311, 0x0217),
+    (0x0075, 0x031B, 0x01B0), (0x0075, 0x0328, 0x0173), (0x0077, 0x0302, 0x0175), (0x0079, 0x0301, 0x00FD),
+    (0x0079, 0x0302, 0x0177), (0x0079, 0x0304, 0x0233), (0x0079, 0x0308, 0x00FF), (0x007A, 0x0301, 0x017A),
+    (0x007A, 0x0307, 0x017C), (0x007A, 0x030C, 0x017E), (0x00C6, 0x0301, 0x01FC), (0x00C6, 0x0304, 0x01E2),
+    (0x00D8, 0x0301, 0x01FE), (0x00E6, 0x0301, 0x01FD), (0x00E6, 0x0304, 0x01E3), (0x00F8, 0x0301, 0x01FF),
+    (0x01B7, 0x030C, 0x01EE), (0x0292, 0x030C, 0x01EF),
+];
+
 /// Encode a 112×112 RGB crop as JPEG and write to face_crops/<face_id>.jpg.
 /// Cheap (37 KB raw → ~5 KB JPEG @ q85). Lets the People tab card render
 /// real faces instead of placeholder gray circles.
@@ -797,6 +933,8 @@ mod tests {
     fn insert_one(conn: &Connection, f: &TaggedFile) -> Result<()> {
         let path_text = f.path.to_string_lossy();
         let path_hash = crate::util::path_safety::stable_path_hash(&path_text);
+        // Mirror the production `flush`: path_search (?20) is the NFC form.
+        let path_search = nfc_path_search(&path_text);
         let extension = f
             .path
             .extension()
@@ -825,7 +963,7 @@ mod tests {
                 f.error_message,
                 f.content_hash.as_ref().map(|h| h.as_slice()),
                 f.file_ref.map(|r| r as i64),
-                path_text,
+                path_search,
             ],
         )?;
         Ok(())
@@ -1043,6 +1181,7 @@ mod tests {
     fn ingest_with_heal(conn: &Connection, f: &TaggedFile) -> i64 {
         let path_text = f.path.to_string_lossy();
         let path_hash = crate::util::path_safety::stable_path_hash(&path_text);
+        let path_search = nfc_path_search(&path_text);
         let extension = f
             .path
             .extension()
@@ -1073,7 +1212,7 @@ mod tests {
                 .unwrap();
             if let Some((id, old_path, by_ref)) = healed {
                 if heal_candidate_moved(by_ref, &old_path) {
-                    conn.execute(HEAL_UPDATE_SQL, params![path_text, path_hash, id])
+                    conn.execute(HEAL_UPDATE_SQL, params![path_text, path_hash, id, path_search])
                         .unwrap();
                 }
             }
@@ -1100,7 +1239,7 @@ mod tests {
                 f.error_message,
                 f.content_hash.as_ref().map(|h| h.as_slice()),
                 f.file_ref.map(|r| r as i64),
-                path_text,
+                path_search,
             ],
             |r| r.get(0),
         )
@@ -1421,11 +1560,150 @@ mod tests {
         let id: i64 = conn
             .query_row("SELECT id FROM files WHERE path_text = ?1", params![r"C:\lib\café.jpg"], |r| r.get(0))
             .unwrap();
-        conn.execute(HEAL_UPDATE_SQL, params![r"C:\lib\renamed.jpg", 42i64, id])
-            .unwrap();
+        let new_path = r"C:\lib\renamed.jpg";
+        conn.execute(
+            HEAL_UPDATE_SQL,
+            params![new_path, 42i64, id, nfc_path_search(new_path)],
+        )
+        .unwrap();
         let healed: String = conn
             .query_row("SELECT path_search FROM files WHERE id = ?1", params![id], |r| r.get(0))
             .unwrap();
         assert_eq!(healed, r"C:\lib\renamed.jpg", "heal must re-stamp path_search");
+    }
+
+    // F-C2-005: an NFD filename (decomposed — base letter + combining mark,
+    // the on-disk form for Mac/NAS/Dropbox-synced names) must be stored as
+    // NFC in path_search so the app's NFC query (LIKE) finds it. Before the
+    // write-side normalization the engine stored the verbatim NFD bytes, which
+    // an NFC query could never match.
+    #[test]
+    fn nfd_filename_is_searchable_by_nfc_query() {
+        // "cafe\u{0301}" is NFD: ASCII 'e' + COMBINING ACUTE ACCENT (U+0301).
+        let nfd_path = "C:\\lib\\cafe\u{0301}.jpg";
+        // "café" is NFC: precomposed 'é' (U+00E9) — what a search field yields.
+        let nfc_query = "%caf\u{00E9}.jpg";
+
+        // Sanity: the two byte-strings genuinely differ pre-normalization.
+        assert_ne!(nfd_path, "C:\\lib\\caf\u{00E9}.jpg",
+            "test vector must actually be NFD, not NFC");
+
+        let conn = in_memory_db();
+        let f = fixture(nfd_path);
+        insert_one(&conn, &f).unwrap();
+
+        // path_text keeps the verbatim (NFD) bytes; path_search is NFC.
+        let (stored_text, stored_search): (String, String) = conn
+            .query_row(
+                "SELECT path_text, path_search FROM files LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored_text, nfd_path, "path_text stays verbatim");
+        assert_eq!(stored_search, "C:\\lib\\caf\u{00E9}.jpg",
+            "path_search must be NFC-composed");
+
+        // The NFC query finds the row only via the NFC path_search column.
+        let found_via_search: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE path_search LIKE ?1",
+                params![nfc_query],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(found_via_search, 1,
+            "NFC query must match the NFC-normalized path_search");
+
+        // Control: the same NFC query against verbatim path_text would miss
+        // (this is the bug the column fixes).
+        let found_via_text: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE path_text LIKE ?1",
+                params![nfc_query],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(found_via_text, 0,
+            "NFC query cannot match verbatim NFD path_text — why path_search exists");
+    }
+
+    #[test]
+    fn nfc_path_search_is_identity_on_ascii() {
+        let p = r"C:\Users\me\Pictures\vacation_2024.jpg";
+        assert_eq!(nfc_path_search(p), p, "ASCII paths must not be altered");
+    }
+
+    // F-C1-025: the recipe-v1 (legacy) content-hash re-read for an over-cap
+    // (>16 MB) file is a ~2 MB blocking disk read. It must be computed BEFORE
+    // the writer lock (into `legacy_hashes`), never inside the single-writer
+    // transaction. This test drives the real `flush`: it seeds a row stamped
+    // with the legacy digest of an over-cap temp file at a now-gone path, then
+    // flushes the same content at a new path. The heal can only fire if `flush`
+    // read the legacy digest off disk and matched it via the `?4` fallback —
+    // exercising the hoisted (pre-lock) read path end-to-end.
+    #[test]
+    fn over_cap_legacy_hash_heal_runs_via_prelock_read() {
+        let dir = unique_tmp_dir("overcap_legacy");
+        let over_cap_bytes = crate::util::content_hash::FULL_HASH_MAX_BYTES + 4096;
+        let new_path = dir.join("moved_here.bin");
+        // Distinct, non-trivial byte pattern so head/tail samples are stable.
+        let mut content = vec![0u8; over_cap_bytes as usize];
+        for (i, b) in content.iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+        std::fs::write(&new_path, &content).unwrap();
+
+        // The recipe-v1 digest the decoder thread would NOT have stamped (the
+        // current recipe adds interior samples) — `flush` reproduces it by
+        // re-reading head+tail+size, which is the read we hoisted off the lock.
+        let legacy_digest =
+            crate::util::content_hash::legacy_content_hash(&new_path, over_cap_bytes).unwrap();
+
+        let conn = Arc::new(Mutex::new(in_memory_db()));
+
+        // Seed the prior row at a path that no longer exists on disk (genuine
+        // move) carrying the legacy digest as its content_hash.
+        let old_path = dir.join("was_here.bin"); // never written → gone from disk
+        {
+            let c = conn.lock();
+            let mut seed = fixture(old_path.to_str().unwrap());
+            seed.size_bytes = over_cap_bytes;
+            seed.kind = FileKind::Other;
+            seed.content_hash = Some(legacy_digest);
+            insert_one(&c, &seed).unwrap();
+        }
+
+        // Incoming file at the NEW path: a DIFFERENT (current-recipe) digest in
+        // ?2 so the heal can only match through the legacy ?4 fallback.
+        let mut incoming = fixture(new_path.to_str().unwrap());
+        incoming.size_bytes = over_cap_bytes;
+        incoming.kind = FileKind::Other;
+        incoming.content_hash = Some([0xABu8; 32]);
+
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let mut buffer = vec![incoming];
+        let mut total = 0u64;
+        let mut failed = 0u64;
+        writer.flush(&mut buffer, &mut total, &mut failed, 0).unwrap();
+
+        // Exactly one row, re-bound to the new path — proves the legacy digest
+        // was read (pre-lock) and consumed by the heal.
+        let c = conn.lock();
+        let row_count: i64 = c
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(row_count, 1, "heal must re-bind the prior row, not add a second");
+        let healed_path: String = c
+            .query_row("SELECT path_text FROM files LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            healed_path,
+            new_path.to_string_lossy(),
+            "over-cap row must heal to the new path via the legacy-digest fallback"
+        );
+
+        drop(c);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

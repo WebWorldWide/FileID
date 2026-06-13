@@ -18,6 +18,24 @@ struct LibraryView: View {
     /// Debounce against per-keystroke reloads while CLIP semantic
     /// search is active (~50ms per query).
     @State private var searchDebounce: Task<Void, Never>?
+    /// In-flight off-main reload. Cancelled before each new reload so a
+    /// slow query can't land its rows after a newer one (latest-wins).
+    @State private var reloadTask: Task<Void, Never>?
+    /// Tile-refresh epoch. `store.version` bumps on every change including
+    /// the per-second counter refresh during a live scan; keying each
+    /// visible tile's xattr/thumbnail `.task` on it re-reads Finder tags
+    /// for unchanged files every tick. Freeze the epoch during a scan —
+    /// Finder xattrs can't change while the engine only writes DB rows —
+    /// so tiles don't re-task; the terminal reload bumps `store.version`
+    /// once at the end to refresh them. Kept in sync with `store.version`
+    /// whenever no scan is active.
+    @State private var frozenTileVersion: Int = 0
+    /// Edit-only epoch, bumped by in-app tag / undo writes. Unlike
+    /// `frozenTileVersion` it is NOT frozen during a scan, so a Finder-tag
+    /// edit, bulk-tag, or undo performed while the engine is scanning still
+    /// refreshes the affected tiles' dots instead of going stale until the
+    /// scan ends. Combined with the counter epoch in `tileRefreshToken`.
+    @State private var editEpoch: Int = 0
     /// When set, the grid shows photos most-similar to this seed
     /// (CLIP image-embedding cosine).
     @State private var similarSeed: FileRow? = nil
@@ -49,6 +67,20 @@ struct LibraryView: View {
     private let columns = [
         GridItem(.adaptive(minimum: 160, maximum: 220), spacing: 12)
     ]
+
+    private var scanActive: Bool {
+        guard let p = engine.lastProgress else { return false }
+        return p.phase == .discovering || p.phase == .tagging || p.phase == .postScan
+    }
+
+    /// The composite id each tile's `.task` keys on. The counter epoch is
+    /// frozen during a scan (see `frozenTileVersion`) so the per-second batch
+    /// bump doesn't re-task every visible tile; the edit epoch is never frozen
+    /// so an in-app tag / undo write still refreshes the dots mid-scan. Either
+    /// component changing re-tasks the affected tiles.
+    private var tileRefreshToken: String {
+        "\(scanActive ? frozenTileVersion : store.version)·\(editEpoch)"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -133,6 +165,12 @@ struct LibraryView: View {
         }
         .onChange(of: kindFilterRaw) { _, _ in reload() }
         .onChange(of: similarSeed?.id) { _, _ in reload() }
+        // Keep the tile-refresh epoch tracking store.version while idle so a
+        // tag edit / undo refreshes the dots, but leave it frozen during a
+        // scan (the per-second counter bump must not re-task every tile).
+        .onChange(of: store.version) { _, v in
+            if !scanActive { frozenTileVersion = v }
+        }
         // The encoder's ORT session takes seconds to build after launch /
         // install; without this the first search silently stays keyword-only.
         .onChange(of: CLIPModelInstaller.shared.textEncoderReady) { _, ready in
@@ -508,6 +546,7 @@ struct LibraryView: View {
                 onComplete: {
                     selectMode = false
                     checkedFileIDs.removeAll()
+                    editEpoch += 1   // refresh tile dots even mid-scan
                 }
             )
         }
@@ -531,6 +570,7 @@ struct LibraryView: View {
                 undoStatus = "Reverted \(result.undone) rename\(result.undone == 1 ? "" : "s")"
                     + (result.skipped > 0 ? " · skipped \(result.skipped)" : "")
                     + (result.failed > 0 ? " · failed \(result.failed)" : "")
+                editEpoch += 1   // refresh tiles (renamed files) even mid-scan
                 refreshBulkState()
                 reload()
             }
@@ -543,12 +583,14 @@ struct LibraryView: View {
         Task.detached(priority: .userInitiated) {
             let result = TagWriter.undoBulkAdd(batch)
             await MainActor.run {
-                if result.failed == 0 {
+                if result.failed == 0 && result.skipped == 0 {
                     BulkTagSheet.clearLastBatch()
                 }
                 undoStatus = "Removed tags from \(result.undone) file\(result.undone == 1 ? "" : "s")"
+                    + (result.skipped > 0 ? " · skipped \(result.skipped)" : "")
                     + (result.failed > 0 ? " · failed \(result.failed)" : "")
                     + (result.firstError.map { " — \($0)" } ?? "")
+                editEpoch += 1   // refresh tile dots even mid-scan
                 refreshBulkState()
                 storeRef.notifyChanged()
                 reload()
@@ -596,7 +638,8 @@ struct LibraryView: View {
                     FileTile(row: row, store: store,
                              selectMode: selectMode,
                              isChecked: checkedFileIDs.contains(row.id),
-                             topTags: tagsByFile[row.id] ?? [])
+                             topTags: tagsByFile[row.id] ?? [],
+                             refreshToken: tileRefreshToken)
                         .onTapGesture {
                             if selectMode {
                                 if checkedFileIDs.contains(row.id) {
@@ -643,7 +686,8 @@ struct LibraryView: View {
         }
         .sheet(item: $selected) { file in
             FilePreviewSheet(file: file, store: store, engine: engine,
-                              siblings: previewSiblings, onSelect: { selected = $0 })
+                              siblings: previewSiblings, onSelect: { selected = $0 },
+                              onEdit: { editEpoch += 1 })
         }
     }
 
@@ -667,28 +711,45 @@ struct LibraryView: View {
     // MARK: - Data
 
     private func reload() {
-        defer {
-            // Batch chip tags for every visible tile in one SQL
-            // query — was N+1 across the grid before.
-            tagsByFile = store.topVisionTagsBulk(
-                forFileIDs: rows.map { $0.id }, limit: 2
-            )
+        // Off the MainActor: similarity + semantic search cosine-scan the full
+        // clip_embeddings table (O(N·512)) and the keyword query hits multiple
+        // tables plus a face join — multi-second on a 50k library, and the live
+        // scan re-fires this on every throttled batch. Run them on a background
+        // task via ReadStore's *Async twins and assign only the results on main.
+        // Latest-wins: cancel any in-flight reload so a slow query can never
+        // overwrite a newer one's results.
+        let seed = similarSeed
+        let query = searchText
+        let kind = kindFilter
+        let encoderReady = CLIPTextEncoder.shared.isReady
+        reloadTask?.cancel()
+        reloadTask = Task { @MainActor in
+            let newRows: [FileRow]
+            if let seed {
+                newRows = await store.similarFilesAsync(toFileID: seed.id, limit: 60)
+            } else {
+                // CLIP text→image semantic search when the encoder is installed
+                // and the query is non-trivial; otherwise keyword search.
+                let trimmed = query.trimmingCharacters(in: .whitespaces)
+                if trimmed.count >= 3, encoderReady,
+                   let semantic = await store.semanticSearchAsync(query: trimmed, limit: 60),
+                   !semantic.isEmpty {
+                    newRows = semantic
+                } else {
+                    newRows = await store.filesAsync(search: query, kindFilter: kind)
+                }
+            }
+            guard !Task.isCancelled else { return }
+            // Batch chip tags for every visible tile in one SQL query — was
+            // N+1 across the grid before. Off-main too (same read-store scan).
+            let ids = newRows.map { $0.id }
+            let tags = await Task.detached(priority: .userInitiated) { [store] in
+                store.topVisionTagsBulk(forFileIDs: ids, limit: 2)
+            }.value
+            guard !Task.isCancelled else { return }
+            rows = newRows
+            tagsByFile = tags
         }
-        if let seed = similarSeed {
-            rows = store.similarFiles(toFileID: seed.id, limit: 60)
-            return
-        }
-        // CLIP text→image semantic search when the encoder is
-        // installed and the query is non-trivial; otherwise fall
-        // through to keyword search.
-        let trimmed = searchText.trimmingCharacters(in: .whitespaces)
-        if trimmed.count >= 3, CLIPTextEncoder.shared.isReady,
-           let semantic = store.semanticSearch(query: trimmed, limit: 60),
-           !semantic.isEmpty {
-            rows = semantic
-            return
-        }
-        rows = store.files(search: searchText, kindFilter: kindFilter)
     }
 }
 
@@ -702,6 +763,11 @@ struct FileTile: View {
     /// Top vision tags injected from the parent's batch query —
     /// avoids N+1 SQL across visible tiles.
     var topTags: [String] = []
+    /// Composite refresh id from the parent (scan-frozen counter epoch +
+    /// never-frozen edit epoch). Keys the tile's `.task` so a tag edit / undo
+    /// refreshes it — including mid-scan — while a live scan's per-second
+    /// counter bump alone does not re-task every visible tile.
+    var refreshToken: String = ""
 
     @State private var thumb: NSImage?
     @State private var hovering = false
@@ -835,9 +901,12 @@ struct FileTile: View {
                 }
             }
         }
-        // Keyed on store.version so tag edits / bulk undo refresh the
-        // Finder-tag dots in place (thumbnail re-fetches are NSCache hits).
-        .task(id: "\(row.id)·\(store.version)") {
+        // Keyed on refreshToken (counter epoch + never-frozen edit epoch) so
+        // tag edits / bulk undo refresh the Finder-tag dots in place — even
+        // mid-scan — but the per-second counter refresh during a live scan
+        // doesn't re-task every visible tile, re-reading thumbnails + Finder
+        // xattrs for files that didn't change. Thumbnail re-fetches are NSCache hits.
+        .task(id: "\(row.id)·\(refreshToken)") {
             thumb = await ThumbnailService.shared.thumbnail(for: row.url, size: 264)
             // Off-main like FinderTagsEditor — xattr reads can stall on
             // slow / network volumes.
@@ -980,6 +1049,9 @@ private struct FilePreviewSheet: View {
     let engine: EngineClient
     let siblings: [FileRow]              // for prev/next arrow nav
     let onSelect: (FileRow) -> Void
+    /// Bump the parent's edit epoch so a Finder-tag edit / smart-name apply
+    /// made in this sheet refreshes the underlying grid tile even mid-scan.
+    var onEdit: () -> Void = {}
     @Environment(\.dismiss) var dismiss
     @State private var preview: NSImage?
 
@@ -1172,6 +1244,7 @@ private struct FilePreviewSheet: View {
                                                         newPath: newURL.path
                                                     )
                                                     BulkRenameSheet.saveLastBatch([outcome])
+                                                    onEdit()
                                                 }
                                                 dismiss()
                                             }
@@ -1195,7 +1268,7 @@ private struct FilePreviewSheet: View {
                                 }
                             }
                         }
-                        FinderTagsEditor(file: file, store: store)
+                        FinderTagsEditor(file: file, store: store, onEdit: onEdit)
                     }
                     .padding(16)
                 }
@@ -1243,6 +1316,9 @@ private struct FilePreviewSheet: View {
 private struct FinderTagsEditor: View {
     let file: FileRow
     let store: ReadStore
+    /// Notify the parent grid that this file's tags changed so its tile
+    /// re-reads the Finder-tag dots — needed for refresh during a live scan.
+    var onEdit: () -> Void = {}
     @State private var tags: [String] = []
     @State private var draft: String = ""
     @State private var error: String?
@@ -1311,6 +1387,7 @@ private struct FinderTagsEditor: View {
             draft = ""
             error = nil
             store.notifyChanged()  // refresh Library tile tag-count
+            onEdit()
         } catch {
             self.error = error.localizedDescription
         }
@@ -1321,6 +1398,7 @@ private struct FinderTagsEditor: View {
             tags = try TagWriter.removeTags([tag], at: file.url)
             error = nil
             store.notifyChanged()
+            onEdit()
         } catch {
             self.error = error.localizedDescription
         }

@@ -12,6 +12,19 @@ public enum Hardware {
 
     public static let coreCount: Int = ProcessInfo.processInfo.processorCount
 
+    /// Logical thread count (Intel Hyper-Threading siblings included). On
+    /// Apple Silicon this equals the physical core count — there is no SMT.
+    public static let logicalCoreCount: Int = max(1, ProcessInfo.processInfo.activeProcessorCount)
+
+    /// True when the kernel exposes Apple Silicon's P/E split (hw.perflevelN.*).
+    /// False on Intel Macs, where we derive a physical core count and lean on
+    /// the logical-core clamp instead. (F-C3-045)
+    static let hasPerformanceLevels: Bool = {
+        var size: size_t = MemoryLayout<Int32>.size
+        var value: Int32 = 0
+        return sysctlbyname("hw.perflevel0.physicalcpu", &value, &size, nil, 0) == 0
+    }()
+
     public static let performanceCoreCount: Int = {
         // sysctl hw.perflevel0.physicalcpu — Apple Silicon P-cores.
         var size: size_t = MemoryLayout<Int32>.size
@@ -19,8 +32,17 @@ public enum Hardware {
         if sysctlbyname("hw.perflevel0.physicalcpu", &value, &size, nil, 0) == 0 {
             return Int(value)
         }
-        // Fallback for Intel Macs / pre-M1 systems: assume all cores are P.
-        return ProcessInfo.processInfo.activeProcessorCount
+        // Intel Macs / pre-M1: no perf levels. Use the PHYSICAL core count
+        // (hw.physicalcpu) — NOT activeProcessorCount, which counts each
+        // Hyper-Threading sibling as a core and doubled the P-count, sizing the
+        // worker pool ~1.5x too large on every Intel Mac (F-C3-045).
+        var phys: Int32 = 0
+        var psize: size_t = MemoryLayout<Int32>.size
+        if sysctlbyname("hw.physicalcpu", &phys, &psize, nil, 0) == 0, phys > 0 {
+            return Int(phys)
+        }
+        // Last resort: logical count, which workerCap's clamp then bounds.
+        return logicalCoreCount
     }()
 
     public static let efficiencyCoreCount: Int = {
@@ -42,10 +64,30 @@ public enum Hardware {
     /// the sweet spot for this hardware tier — keeps ANE fed without
     /// overwhelming the file source. Faster local SSDs may benefit from
     /// more workers; revisit per-storage tier if needed.
-    public static let workerCap: Int = {
-        let computed = performanceCoreCount + efficiencyCoreCount + max(1, performanceCoreCount / 2)
-        return min(32, max(4, computed))
-    }()
+    public static let workerCap: Int = computeWorkerCap(
+        performanceCores: performanceCoreCount,
+        efficiencyCores: efficiencyCoreCount,
+        logicalCores: logicalCoreCount,
+        hasPerformanceLevels: hasPerformanceLevels)
+
+    /// Pure worker-cap formula (factored out so the topology is injectable in
+    /// tests). `performanceCores`/`efficiencyCores` are PHYSICAL counts;
+    /// `logicalCores` includes SMT siblings.
+    ///
+    /// On Apple Silicon (exact P/E split, `hasPerformanceLevels == true`) the
+    /// `+P/2` oversubscription is the tuned sweet spot — M1 Pro 8P+2E → 14 —
+    /// and is deliberately left above the 10 physical cores. On Intel (no perf
+    /// levels) the counts are generic, so the pool is clamped to logical
+    /// threads, mirroring the Windows `CpuTopology::worker_cap` clamp so a
+    /// fallback mis-count can never oversubscribe SMT. (F-C3-045)
+    static func computeWorkerCap(performanceCores: Int, efficiencyCores: Int,
+                                 logicalCores: Int, hasPerformanceLevels: Bool) -> Int {
+        let p = max(1, performanceCores)
+        let e = max(0, efficiencyCores)
+        let computed = p + e + max(1, p / 2)
+        let bounded = hasPerformanceLevels ? computed : min(computed, max(1, logicalCores))
+        return min(32, max(4, bounded))
+    }
 
     /// Resident-set MB of the current process.
     public static func residentMB() -> Int {

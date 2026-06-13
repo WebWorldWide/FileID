@@ -45,6 +45,13 @@ public sealed partial class DrillDownSheet : UserControl
     private static uint Key(Windows.UI.Color c)
         => ((uint)c.A << 24) | ((uint)c.R << 16) | ((uint)c.G << 8) | c.B;
 
+    // Cap on rows materialized per drill-down. BuildRow builds a UIElement AND
+    // fires a shell thumbnail per move (ItemsRepeater over a UIElement list does
+    // not virtualize), so an unbounded "See all" on a large outcome group froze
+    // the UI thread and flooded the shell. 200 fills several screens; the rest
+    // are summarized in the count line (F-C5-002).
+    private const int MaxRenderedRows = 200;
+
     public DrillDownSheet()
     {
         InitializeComponent();
@@ -130,11 +137,14 @@ public sealed partial class DrillDownSheet : UserControl
 
     private void Render(IList<RestructureMove> moves)
     {
-        CountText.Text = $"{moves.Count} file{(moves.Count == 1 ? "" : "s")}";
-        var rows = new List<UIElement>();
-        foreach (var m in moves)
+        int shown = Math.Min(moves.Count, MaxRenderedRows);
+        CountText.Text = moves.Count > shown
+            ? $"{moves.Count:N0} files - showing the first {shown:N0}"
+            : $"{moves.Count} file{(moves.Count == 1 ? "" : "s")}";
+        var rows = new List<UIElement>(shown);
+        for (int i = 0; i < shown; i++)
         {
-            rows.Add(BuildRow(m));
+            rows.Add(BuildRow(moves[i]));
         }
         FileRepeater.ItemsSource = rows;
     }

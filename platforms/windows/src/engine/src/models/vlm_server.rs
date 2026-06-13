@@ -76,6 +76,9 @@ impl VlmServer {
 
     async fn start_with_binary(bin: &Path, gguf: &Path, mmproj: &Path) -> Result<Self> {
         let port = pick_free_port()?;
+        // GPU-TDR recovery parity: when the user pinned the EP to CPU, evacuate
+        // the GPU for Deep Analyze too (not just the ORT scan path). (F-C1-006)
+        let forced_cpu = crate::models::runtime::user_forced_cpu();
         let mut cmd = Command::new(bin);
         cmd.arg("-m")
             .arg(gguf)
@@ -85,15 +88,18 @@ impl VlmServer {
             .arg("127.0.0.1")
             .arg("--port")
             .arg(port.to_string())
-            // Offload all layers to the GPU. Falls back to CPU layers if VRAM is
-            // short — llama.cpp handles the spill.
+            // Offload all layers to the GPU (0 when the user forced CPU). Falls
+            // back to CPU layers if VRAM is short — llama.cpp handles the spill.
             .arg("-ngl")
-            .arg("99")
+            .arg(if forced_cpu { "0" } else { "99" })
             .arg("-c")
             .arg("4096");
-        // Pin to the discrete GPU on hybrid iGPU+dGPU systems (no-op otherwise).
-        if let Some(dev) = crate::models::vlm::discrete_gpu_device(bin).await {
-            cmd.arg("--device").arg(dev);
+        // Pin to the discrete GPU on hybrid iGPU+dGPU systems (no-op otherwise);
+        // skipped under forced-CPU so we don't re-engage the evacuated GPU.
+        if !forced_cpu {
+            if let Some(dev) = crate::models::vlm::discrete_gpu_device(bin).await {
+                cmd.arg("--device").arg(dev);
+            }
         }
         cmd.stdout(Stdio::null())
             .stderr(Stdio::null())

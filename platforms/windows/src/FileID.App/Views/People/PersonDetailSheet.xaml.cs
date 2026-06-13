@@ -177,10 +177,58 @@ public sealed partial class PersonDetailSheet : UserControl
         }
     });
 
+    // Read-only existence probe for the rename pre-write guard. persons.id is
+    // INTEGER PRIMARY KEY AUTOINCREMENT, so an id is never reused — a present
+    // row is proof it's still the same person we loaded. Throws on a genuine
+    // read error so the caller can distinguish "definitely gone" from
+    // "couldn't check" and avoid blocking a legit rename on a transient fault.
+    internal static bool PersonExists(string dbPath, long personId)
+    {
+        if (!File.Exists(dbPath)) return false;
+        var connStr = new SqliteConnectionStringBuilder
+        {
+            DataSource = dbPath,
+            Mode = SqliteOpenMode.ReadOnly,
+        }.ToString();
+        using var conn = new SqliteConnection(connStr);
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT 1 FROM persons WHERE id = @id LIMIT 1";
+        cmd.Parameters.AddWithValue("@id", personId);
+        using var r = cmd.ExecuteReader();
+        return r.Read();
+    }
+
     public async Task<bool> CommitAsync()
     {
+        // Capture the target person id at commit start and write by that id. A
+        // background re-cluster can merge this person away while the sheet is
+        // open; because persons.id is AUTOINCREMENT the id is never reassigned,
+        // so a missing row means the person is genuinely gone (not a different
+        // person). The engine's renamePerson reports succeeded=1 even on a
+        // 0-row UPDATE, so without this pre-write existence check the dialog
+        // would close on a phantom save.
+        long personId = _personId;
         try
         {
+            bool gone;
+            try
+            {
+                gone = !await Task.Run(() => PersonExists(AppPaths.DbPath, personId)).ConfigureAwait(true);
+            }
+            catch (Exception ex)
+            {
+                // Couldn't verify (transient read error) — don't block the rename
+                // on a check we couldn't run; fall through to the IPC.
+                Services.DebugLog.Warn("PersonDetailSheet existence check failed: " + ex.Message);
+                gone = false;
+            }
+            if (gone)
+            {
+                StatusText.Text = "This person no longer exists — it may have been merged. Reopen People and try again.";
+                return false;
+            }
+
             // Await the engine's BulkActionResult instead of fire-and-forget:
             // renamePerson reports failure in the result (e.g. the row update
             // didn't take), not as a thrown exception, so declaring success on
@@ -191,7 +239,7 @@ public sealed partial class PersonDetailSheet : UserControl
             var result = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
                 "renamePerson",
                 () => ViewModels.EngineClient.Instance.RenamePersonAsync(
-                    _personId,
+                    personId,
                     TitleBox.Text,
                     FirstBox.Text,
                     MiddleBox.Text,

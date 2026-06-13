@@ -96,6 +96,21 @@ public final class CLIPTextEncoder: @unchecked Sendable {
         }
     }
 
+    /// Tear down the in-memory ORT session so semantic search stops querying
+    /// a model the user just uninstalled, instead of running against a deleted
+    /// file until the next app launch. After this, `isReady` is false and
+    /// `embedText` returns nil; a later `load()` re-builds if the model is
+    /// reinstalled. Takes `loadLock` so it can't race a build in progress and
+    /// drop a session another thread is mid-way through creating. (F-C4-017)
+    public func unload() {
+        loadLock.lock(); defer { loadLock.unlock() }
+        lock.lock()
+        session = nil
+        inputName = nil
+        lock.unlock()
+        // `env` is cheap to retain and reused if the user reinstalls CLIP.
+    }
+
     /// Embed a free-text query into the CLIP image-embedding space.
     /// L2-normalized; nil if the model/tokenizer isn't ready or inference fails.
     public func embedText(_ query: String) -> [Float]? {

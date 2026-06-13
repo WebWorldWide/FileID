@@ -198,4 +198,86 @@ public sealed class ReadStoreSemanticSearchTests : IDisposable
         Assert.Equal(expected, actualIds);
         Assert.DoesNotContain(2L, actualIds);
     }
+
+    // F-C5-001: Dispose / DisposeAsync must close the connection exactly once
+    // and tolerate being called repeatedly across both teardown paths.
+    [Fact]
+    public async Task Dispose_ClosesConnection_AndIsIdempotent()
+    {
+        BuildDb(new List<Row> { new(1, "image", false, Emb(0.9f, 0f, 0f)) });
+
+        var store = new ReadStore(_dbPath);
+        await store.OpenAsync(CancellationToken.None);
+        Assert.True(store.IsOpen);
+
+        store.Dispose();
+        Assert.False(store.IsOpen);
+
+        // Idempotent across both teardown paths — must not throw.
+        store.Dispose();
+        await store.DisposeAsync();
+    }
+
+    // F-C5-001: reads issued after disposal bail at the pre-gate null check and
+    // return empty without throwing (they never touch the disposed gate).
+    [Fact]
+    public async Task ReadsAfterDispose_ReturnEmpty_DoNotThrow()
+    {
+        BuildDb(new List<Row> { new(1, "image", false, Emb(0.9f, 0f, 0f)) });
+
+        var store = new ReadStore(_dbPath);
+        await store.OpenAsync(CancellationToken.None);
+        store.Dispose();
+
+        Assert.Empty(await store.SemanticSearchAsync(Query, 10, CancellationToken.None));
+        Assert.Empty(await store.RecentAsync(10, CancellationToken.None));
+        Assert.Empty(await store.SearchAsync("anything", 10, CancellationToken.None));
+        Assert.Empty(await store.SearchAsync(string.Empty, 10, CancellationToken.None));
+        Assert.Empty(await store.SimilarFilesAsync(1, 10, CancellationToken.None));
+    }
+
+    // F-C5-001 regression: Dispose must drain an in-flight thread-pool read via
+    // the gate before freeing the native connection. With the pre-fix teardown
+    // (free without acquiring the gate) the concurrent reader uses the connection
+    // after sqlite3_close — an access violation that crashes the test host. The
+    // gate-drain serializes the two, so no use-after-dispose surfaces.
+    [Fact(Timeout = 30000)]
+    public async Task Dispose_DrainsInFlightRead_NoUseAfterDispose()
+    {
+        var rows = new List<Row>();
+        var rng = new Random(1234);
+        for (int i = 1; i <= 4000; i++)
+        {
+            rows.Add(new(i, "image", false,
+                Emb((float)rng.NextDouble(), (float)rng.NextDouble(), (float)rng.NextDouble())));
+        }
+        BuildDb(rows);
+
+        var store = new ReadStore(_dbPath);
+        await store.OpenAsync(CancellationToken.None);
+
+        Exception? unexpected = null;
+        var reader = Task.Run(async () =>
+        {
+            try
+            {
+                for (int i = 0; i < 20; i++)
+                {
+                    _ = await store.SemanticSearchAsync(Query, 25, CancellationToken.None);
+                }
+            }
+            // Narrow start-after-dispose race on the gate is tolerated; the bug
+            // under test is the native use-after-free, which is NOT one of these.
+            catch (ObjectDisposedException) { }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { unexpected = ex; }
+        });
+
+        await store.DisposeAsync();
+        await reader;
+
+        Assert.Null(unexpected);
+        Assert.False(store.IsOpen);
+        store.Dispose();
+    }
 }

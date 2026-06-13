@@ -424,6 +424,14 @@ fn read_user_ep_override() -> Option<ExecutionProvider> {
     }
 }
 
+/// True when the user pinned the execution provider to CPU via
+/// `gpuExecutionProviderOverride`. The VLM (llama.cpp) path consults this so the
+/// documented GPU-TDR recovery — evacuate the GPU — also evacuates Deep Analyze,
+/// not just the ORT scan path that already honors the override. (F-C1-006)
+pub fn user_forced_cpu() -> bool {
+    matches!(read_user_ep_override(), Some(ExecutionProvider::Cpu))
+}
+
 fn pick_provider(
     vendor: GpuVendor,
     cuda_pack: bool,

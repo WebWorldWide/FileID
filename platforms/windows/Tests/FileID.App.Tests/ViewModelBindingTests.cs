@@ -653,3 +653,128 @@ public class EngineWarningClassificationTests
         Assert.False(EngineClient.IsNonFatalWarningKind(kind));
     }
 }
+
+/// <summary>
+/// F-C5-011: People multi-select must survive a background re-cluster that
+/// REPLACES a selected cluster's object instance. <c>PeopleViewModel.MergeByClusterId</c>
+/// reuses an instance only when anchor/count/name are unchanged; otherwise it
+/// swaps in a fresh <see cref="PersonCluster"/> with IsSelected=false, silently
+/// dropping the user's selection. The view keys selection by stable ClusterId
+/// and re-projects via <c>PeopleView.ReprojectSelection</c> after each refresh —
+/// both static + collection-only, so verifiable without the UI runtime.
+/// </summary>
+public class PeopleSelectionReprojectTests
+{
+    private static PersonCluster Cluster(int id, long anchor = 1, int members = 1, string? name = null) =>
+        new() { ClusterId = id, AnchorFaceId = anchor, MemberCount = members, DisplayName = name };
+
+    [Fact]
+    public void MergeByClusterId_ReplacesInstanceOnChangedCount_DropsSelection()
+    {
+        var a = Cluster(5, members: 3);
+        a.IsSelected = true;
+        var items = new ObservableCollection<PersonCluster> { a };
+        // A re-cluster that changed the member count forces an instance swap.
+        PeopleViewModel.MergeByClusterId(items, new[] { Cluster(5, members: 4) });
+        Assert.NotSame(a, items[0]);
+        Assert.False(items[0].IsSelected); // selection lost on the replacement — the bug
+    }
+
+    [Fact]
+    public void ReprojectSelection_RestoresSelectionByStableId_AfterInstanceReplace()
+    {
+        var a = Cluster(5, members: 3);
+        a.IsSelected = true;
+        var selected = new HashSet<int> { 5 };
+        var items = new ObservableCollection<PersonCluster> { a };
+        PeopleViewModel.MergeByClusterId(items, new[] { Cluster(5, members: 4) });
+        Assert.False(items[0].IsSelected);
+        FileID.Views.People.PeopleView.ReprojectSelection(items, selected);
+        Assert.True(items[0].IsSelected, "selection must survive an instance-replacing refresh");
+    }
+
+    [Fact]
+    public void ReprojectSelection_DeselectsClustersNotInSet()
+    {
+        var a = Cluster(5);
+        a.IsSelected = true;
+        var items = new ObservableCollection<PersonCluster> { a };
+        FileID.Views.People.PeopleView.ReprojectSelection(items, new HashSet<int>());
+        Assert.False(items[0].IsSelected);
+    }
+
+    [Fact]
+    public void ReprojectSelection_SelectsMultipleByIdAndLeavesOthers()
+    {
+        var items = new ObservableCollection<PersonCluster> { Cluster(1), Cluster(2), Cluster(3) };
+        FileID.Views.People.PeopleView.ReprojectSelection(items, new HashSet<int> { 1, 3 });
+        Assert.True(items[0].IsSelected);
+        Assert.False(items[1].IsSelected);
+        Assert.True(items[2].IsSelected);
+    }
+}
+
+/// <summary>
+/// F-C5-006: PersonDetailSheet must validate the target person still exists
+/// before sending renamePerson. A background re-cluster can merge the person
+/// away while the sheet is open; the engine's renamePerson reports succeeded=1
+/// even on a 0-row UPDATE, so without this pre-write probe the dialog closes on
+/// a phantom save. persons.id is AUTOINCREMENT (never reused), so a present row
+/// proves identity. <c>PersonDetailSheet.PersonExists</c> is a read-only static
+/// probe, verifiable against a throwaway DB without the UI runtime.
+/// </summary>
+public sealed class PersonRenameExistenceGuardTests : IDisposable
+{
+    private readonly string _dbPath;
+
+    public PersonRenameExistenceGuardTests()
+    {
+        _dbPath = Path.Combine(Path.GetTempPath(), $"fileid-person-exists-{Guid.NewGuid():N}.sqlite");
+    }
+
+    public void Dispose()
+    {
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        try { if (File.Exists(_dbPath)) File.Delete(_dbPath); } catch { /* best effort */ }
+    }
+
+    private void BuildDb(params long[] personIds)
+    {
+        var cs = new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = _dbPath }.ToString();
+        using var conn = new Microsoft.Data.Sqlite.SqliteConnection(cs);
+        conn.Open();
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = "CREATE TABLE persons (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT);";
+            cmd.ExecuteNonQuery();
+        }
+        foreach (var id in personIds)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "INSERT INTO persons (id, name) VALUES (@id, 'x')";
+            cmd.Parameters.AddWithValue("@id", id);
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    [Fact]
+    public void PersonExists_ReturnsTrue_WhenRowPresent()
+    {
+        BuildDb(42);
+        Assert.True(FileID.Views.People.PersonDetailSheet.PersonExists(_dbPath, 42));
+    }
+
+    [Fact]
+    public void PersonExists_ReturnsFalse_WhenRowMergedAway()
+    {
+        BuildDb(42);
+        // #7 was never created (or was merged + deleted by a background re-cluster).
+        Assert.False(FileID.Views.People.PersonDetailSheet.PersonExists(_dbPath, 7));
+    }
+
+    [Fact]
+    public void PersonExists_ReturnsFalse_WhenDbMissing()
+    {
+        Assert.False(FileID.Views.People.PersonDetailSheet.PersonExists(_dbPath, 1));
+    }
+}

@@ -279,7 +279,10 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
                 OnPropertyChanged(nameof(GpuDiagnosticsText));
                 OnPropertyChanged(nameof(PowerDiagnosticsText));
                 OnPropertyChanged(nameof(ThumbnailDiagnosticsText));
-                DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncNvidiaSection(); });
+                // SyncReprobeUi reads the live session's bound EP from Info, so
+                // refresh the cuDNN pill here too — after a restart re-binds CUDA
+                // the pill flips from "restart to switch" to "active".
+                DispatcherQueue.TryEnqueue(() => { if (!_unloaded) { SyncNvidiaSection(); SyncReprobeUi(); } });
             }
             else if (e.PropertyName == nameof(EngineClient.LastHardwareReprobe))
             {
@@ -352,6 +355,18 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             var s = AppViewModel.Instance.Settings;
             s.DisableAutoInstallCuda = !AutoInstallCudaToggle.IsOn;
             s.Save();
+            // Project policy forbids a silent GPU-pack fetch, so there is no
+            // engine-ready auto-install left to gate — persisting the flag alone
+            // left this toggle dead. Flipping it ON is itself the explicit user
+            // action that installs the CUDA llama.cpp pack now (skip when it is
+            // already on disk or an install is in flight: the button disables in
+            // both cases). OFF just persists the opt-out.
+            if (AutoInstallCudaToggle.IsOn
+                && InstallCudaLlamaButton.IsEnabled
+                && !SentinelExists("llama_runtime_cuda_x64"))
+            {
+                _ = InstallCudaLlamaAsync(InstallCudaLlamaButton);
+            }
         });
 
     private void OnProviderOverrideChanged(object sender, SelectionChangedEventArgs e)
@@ -861,6 +876,11 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     private async void OnInstallCudaLlamaClicked(object sender, RoutedEventArgs e)
     {
         if (sender is not Button button) return;
+        await InstallCudaLlamaAsync(button).ConfigureAwait(true);
+    }
+
+    private async Task InstallCudaLlamaAsync(Button button)
+    {
         var originalContent = button.Content;
         try
         {
@@ -970,25 +990,35 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         var reprobe = EngineClient.Instance.LastHardwareReprobe;
         if (reprobe is null) return;
         var present = reprobe.Hardware.CudaPackPresent;
-        var activeEp = (reprobe.Hardware.ExecutionProvider ?? "").ToLowerInvariant();
+        // The reprobe's ExecutionProvider is a FRESH probe (what the EP picker
+        // WOULD bind now), not the EP the running engine actually bound at
+        // startup — trusting it claims "CUDA active, no restart needed" while
+        // scans still run on DirectML. The authoritative active EP is the live
+        // session's bound EP that the engine reported on its ready event
+        // (Info.Hardware.ExecutionProvider). The full fix is engine-side: carry
+        // the bound EP on the reprobe event; until then, read it from Info.
+        var boundEp = (EngineClient.Instance.Info?.Hardware?.ExecutionProvider ?? "").ToLowerInvariant();
 
         if (present)
         {
             CudnnDiagnosticsText.Visibility = Visibility.Collapsed;
             CudnnSuccessPill.Visibility = Visibility.Visible;
-            if (activeEp == "cuda")
+            if (boundEp == "cuda")
             {
-                // Already on CUDA in this engine session — no restart needed.
+                // Running engine actually bound CUDA — no restart needed.
                 CudnnSuccessTitle.Text = "✓ cuDNN active — scanning uses CUDA EP.";
                 CudnnSuccessDetail.Text = $"Adapter: {reprobe.Hardware.AdapterName ?? "unknown"}. Execution provider: CUDA.";
                 RestartEngineButton.Visibility = Visibility.Collapsed;
             }
             else
             {
-                // cuDNN reachable but this session loaded DirectML at startup —
-                // need a restart to pick CUDA next spawn.
+                // CUDA pack is present but the running session bound a different
+                // EP at startup — a restart is required to re-pick CUDA. If the
+                // bound EP is unknown (Info not yet populated) say so, rather
+                // than implying CUDA is already live.
                 CudnnSuccessTitle.Text = "✓ cuDNN detected — restart engine to switch to CUDA";
-                CudnnSuccessDetail.Text = $"Current session: {activeEp}. Restart so the engine re-picks the execution provider.";
+                var current = string.IsNullOrEmpty(boundEp) ? "detected (not necessarily active)" : boundEp;
+                CudnnSuccessDetail.Text = $"Current session: {current}. Restart so the engine re-picks the execution provider.";
                 RestartEngineButton.Visibility = Visibility.Visible;
             }
         }

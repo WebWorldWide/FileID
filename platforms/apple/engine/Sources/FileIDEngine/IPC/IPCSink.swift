@@ -10,8 +10,11 @@
 // the pipe, every emit() blocks behind it and the engine wedges.
 // emit() enqueues non-blockingly; when the buffer is full, new
 // `progress` events overwrite the latest one in place and other
-// non-critical events drop the oldest. Critical events (`error`,
-// `scanComplete`, `ready`, `faceClusteringComplete`) are always kept.
+// non-critical events drop the OLDEST non-critical entry. Critical
+// events — every terminal completion (`scanComplete`,
+// `deepAnalyzeComplete`, `faceClusteringComplete`, `restructurePlan`,
+// `restructureApplyResult`, `error`) plus `ready` / `discoveryComplete`
+// / `phaseChanged` — are pinned and never evicted.
 import Foundation
 import Darwin
 import FileIDShared
@@ -50,40 +53,46 @@ public actor IPCSink {
             return
         }
 
-        // Backpressure policy: if buffer is full, drop oldest non-critical
-        // entry. Critical events go to the front of the line.
+        // Backpressure policy: a full buffer means the parent is draining
+        // slowly. Coalesce a progress flood in place; otherwise evict the
+        // OLDEST progress-class (non-critical) entry to make room. A pinned
+        // critical event — every terminal completion (scanComplete,
+        // deepAnalyzeComplete, faceClusteringComplete, restructurePlan,
+        // restructureApplyResult, error) plus ready / discoveryComplete /
+        // phaseChanged — is NEVER
+        // evicted: dropping a buffered terminal strands that tab's UI forever
+        // (F-C3-029/030). The old code's `removeFirst()` ignored criticality
+        // and could drop exactly such an entry sitting at the front.
         if buffer.count >= maxBuffer {
-            let isCritical = Self.isCritical(payload)
-            if isCritical {
-                // Find the oldest non-critical-looking entry to evict.
-                if let dropIdx = buffer.firstIndex(where: { !Self.entryLooksCritical($0) }) {
-                    buffer.remove(at: dropIdx)
-                } else {
-                    // All-critical buffer (shouldn't happen). Drop oldest.
-                    buffer.removeFirst()
-                }
-            } else {
-                // Non-critical can be dropped. For progress events, overwrite
-                // the most recent buffered PROGRESS entry instead of growing.
-                //
-                // The old predicate used `"\"progress\"".utf8.first!` — the
-                // FIRST byte of the literal, i.e. the `"` (0x22) character.
-                // `Data.contains(_: UInt8)` then just asked "does this line
-                // contain a double-quote?" — true for EVERY JSON line — so it
-                // overwrote the newest buffered entry of ANY kind, including a
-                // buffered scanComplete / faceClusteringComplete, which then
-                // never reached the app (UI stuck mid-scan). Match the full
-                // byte needle and never clobber a critical-looking entry.
-                if case .progress = payload,
-                   let lastProgressIdx = buffer.lastIndex(where: {
-                       $0.range(of: Self.progressNeedle) != nil && !Self.entryLooksCritical($0)
-                   }) {
-                    buffer[lastProgressIdx] = line
-                    return
-                }
-                // Otherwise drop oldest.
-                buffer.removeFirst()
+            // For progress events, overwrite the most recent buffered PROGRESS
+            // entry instead of growing/evicting.
+            //
+            // The old predicate used `"\"progress\"".utf8.first!` — the FIRST
+            // byte of the literal, i.e. the `"` (0x22) character.
+            // `Data.contains(_: UInt8)` then just asked "does this line contain
+            // a double-quote?" — true for EVERY JSON line — so it overwrote the
+            // newest buffered entry of ANY kind, including a buffered terminal
+            // event, which then never reached the app (UI stuck mid-scan).
+            // Match the full byte needle and never clobber a critical entry.
+            if case .progress = payload,
+               let lastProgressIdx = buffer.lastIndex(where: {
+                   $0.range(of: Self.progressNeedle) != nil && !Self.entryLooksCritical($0)
+               }) {
+                buffer[lastProgressIdx] = line
+                return
             }
+            // Make room by evicting the oldest NON-critical entry.
+            if let dropIdx = buffer.firstIndex(where: { !Self.entryLooksCritical($0) }) {
+                buffer.remove(at: dropIdx)
+            } else if !Self.isCritical(payload) {
+                // Every buffered entry is pinned and the newcomer isn't — drop
+                // the newcomer rather than evict a pinned event or grow.
+                return
+            }
+            // else: the buffer is all-critical AND the newcomer is critical too
+            // — fall through and append. Terminal/critical events are bounded (a
+            // handful per session), so this can't realistically exceed maxBuffer,
+            // and losing a terminal event is by far the worse outcome.
         }
         buffer.append(line)
         // Wake the drainer if it's waiting.
@@ -92,6 +101,24 @@ public actor IPCSink {
     }
 
     public func close() {
+        closed = true
+        drainerContinuation?.resume()
+        drainerContinuation = nil
+    }
+
+    /// Flush every buffered line straight to the wire, then close. Called once
+    /// on graceful shutdown right before `Darwin._exit(0)`: the detached drainer
+    /// can be parked between batches (or mid-250ms timeout) with a terminal
+    /// event still buffered, and `_exit` would drop it (F-C3-040). This runs
+    /// under the actor, so it can't race the drainer's own take-then-write
+    /// (both are actor-isolated) and never re-writes a batch the drainer
+    /// already removed. Idempotent.
+    public func drainAndClose() {
+        if !buffer.isEmpty {
+            let blob = buffer.reduce(Data(), +)
+            do { try wire.write(contentsOf: blob) } catch { /* parent gone */ }
+            buffer.removeAll()
+        }
         closed = true
         drainerContinuation?.resume()
         drainerContinuation = nil
@@ -163,9 +190,19 @@ public actor IPCSink {
 
     // MARK: - Critical-event policy
 
-    private static func isCritical(_ p: IPCEvent.Payload) -> Bool {
+    // `internal` (not `private`) so the eviction-policy regression tests can
+    // assert every terminal completion is pinned. (F-C3-029/030)
+    static func isCritical(_ p: IPCEvent.Payload) -> Bool {
         switch p {
-        case .ready, .error, .scanComplete, .faceClusteringComplete, .discoveryComplete, .phaseChanged:
+        // Terminal completions — every one strands a tab's UI if lost.
+        // restructurePlan is the success-path terminal reply for planRestructure
+        // (its error twin, plan_restructure_failed, is .error and already pinned);
+        // omitting it let a successful plan be evicted while a failed one always
+        // landed — the asymmetry the re-audit flagged (R-15).
+        case .scanComplete, .deepAnalyzeComplete, .faceClusteringComplete,
+             .restructurePlan, .restructureApplyResult, .error,
+        // Non-terminal but still must never be coalesced away.
+             .ready, .discoveryComplete, .phaseChanged:
             return true
         default:
             return false
@@ -180,11 +217,14 @@ public actor IPCSink {
         Data("\"ready\"".utf8),
         Data("\"error\"".utf8),
         Data("\"scanComplete\"".utf8),
+        Data("\"deepAnalyzeComplete\"".utf8),
         Data("\"faceClusteringComplete\"".utf8),
+        Data("\"restructurePlan\"".utf8),
+        Data("\"restructureApplyResult\"".utf8),
         Data("\"discoveryComplete\"".utf8),
         Data("\"phaseChanged\"".utf8),
     ]
-    private static func entryLooksCritical(_ data: Data) -> Bool {
+    static func entryLooksCritical(_ data: Data) -> Bool {
         for needle in criticalNeedles {
             if data.range(of: needle) != nil { return true }
         }

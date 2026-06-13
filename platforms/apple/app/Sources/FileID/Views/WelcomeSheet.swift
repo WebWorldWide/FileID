@@ -93,6 +93,13 @@ struct WelcomeSheet: View {
             arcface.refreshStatus()
         }
         .onDisappear { installAllRequested = false }
+        .onChange(of: anyInProgress) { _, inProgress in
+            // Once everything "Install all" kicked off has settled without
+            // completing the full set — a cancel or a failure leaves models
+            // missing and idle — re-enable the button instead of latching it
+            // disabled for the rest of the session. (F-C4-017)
+            if !inProgress && !allInstalled { installAllRequested = false }
+        }
         .onChange(of: vlmInstalled) { _, nowInstalled in
             if nowInstalled {
                 vlmRequested = false
@@ -122,7 +129,12 @@ struct WelcomeSheet: View {
             // not an install failure. Real load issues resurface on
             // first VLM use, where the banner has actual context.
             if ModelInstallStatus.isInstalled(kind: recommendedVLM) { return }
-            if err.kind.hasPrefix("prewarm_") || msg.contains(recommendedVLM.displayName) {
+            // `unknown_model` is the canonical unrecognized-model-kind error
+            // (renamed from the macOS-only `prewarm_invalid_kind` for cross-
+            // platform parity, audit F-C2-003); route it like the prewarm_*
+            // family so the row flips to Failed instead of spinning.
+            if err.kind.hasPrefix("prewarm_") || err.kind == "unknown_model"
+                || msg.contains(recommendedVLM.displayName) {
                 vlmLastError = msg
                 vlmRequested = false
             }
@@ -404,5 +416,12 @@ struct WelcomeSheet: View {
 
     private var allInstalled: Bool {
         clipInstalled && arcfaceInstalled && vlmInstalled
+    }
+
+    /// True while any of the three onboarding downloads is still running.
+    /// Drives "Install all" re-enablement once a cancel/failure settles
+    /// everything back to idle. (F-C4-017)
+    private var anyInProgress: Bool {
+        clipInProgress || arcfaceInProgress || vlmInProgress
     }
 }

@@ -5,7 +5,6 @@
 // and the video preview sheet has a placeholder.
 
 use anyhow::{Context, Result};
-use std::cell::Cell;
 use std::path::Path;
 use std::sync::Once;
 
@@ -24,36 +23,46 @@ use windows::Win32::Media::MediaFoundation::{
 const READF_ENDOFSTREAM: u32 = 0x00000002;
 const READF_NEWSTREAM: u32 = 0x00000004;
 const READF_CURRENTMEDIATYPECHANGED: u32 = 0x00000010;
-use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 use windows::Win32::System::Com::StructuredStorage::PropVariantClear;
 
 static MF_INIT: Once = Once::new();
 
-thread_local! {
-    static COM_INIT: Cell<bool> = const { Cell::new(false) };
+/// Balances a successful `CoInitializeEx` with `CoUninitialize` on drop so the
+/// COM apartment is scoped to a single `keyframe_25pct` call.
+///
+/// Keyframe extraction runs on tokio blocking-pool threads (Deep Analyze) and on
+/// the raw decoder-pool OS threads — both RECYCLED across tasks. The old code
+/// MTA-initialized such a thread ONCE and never uninitialized, so a later shell
+/// op (trash / tags / thumbnail) scheduled on that same recycled thread found it
+/// already MTA: its own `CoInitializeEx(STA)` returned RPC_E_CHANGED_MODE, it
+/// skipped both the init and the matching uninit, and ran against the wrong
+/// apartment. Scoping the init per call (uninit on every exit path) leaves the
+/// thread in whatever apartment state it had before, so the pool stays clean.
+///
+/// `did_init` is true only when WE performed the init (S_OK / S_FALSE); on
+/// RPC_E_CHANGED_MODE (the thread was already initialized by an outer caller) we
+/// must NOT uninitialize — that caller owns the apartment and its ref count.
+struct ComScope {
+    did_init: bool,
 }
 
-/// COM must be initialized on every thread that drives the MF source
-/// reader. The decoder pool spawns raw OS threads (`run_decoder_thread`)
-/// and Deep Analyze runs keyframe extraction on tokio blocking-pool
-/// threads — neither inherits the COM apartment of the thread that first
-/// called `MFStartup`. Without this, `MFCreateSourceReaderFromURL` fails
-/// with CO_E_NOTINITIALIZED on every thread but the one that won the
-/// `MF_INIT` race. Mirrors the per-thread `CoInitializeEx` the other
-/// `shell::*` modules (trash / thumbnail / tags / reveal) already do.
-/// MTA because these worker threads don't pump a message loop;
-/// RPC_E_CHANGED_MODE (a thread already init as STA) is fine — MF still
-/// works, we just don't own the apartment. No matching `CoUninitialize`:
-/// the threads live for the scan and process exit cleans up.
-fn ensure_com_initialized() {
-    COM_INIT.with(|flag| {
-        if !flag.get() {
-            unsafe {
-                let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-            }
-            flag.set(true);
+impl ComScope {
+    fn enter() -> Self {
+        // MTA: these worker threads don't pump a message loop. A prior STA init
+        // on the thread yields RPC_E_CHANGED_MODE — MF still works against the
+        // existing apartment, we just don't own (or release) it.
+        let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        ComScope { did_init: hr.is_ok() }
+    }
+}
+
+impl Drop for ComScope {
+    fn drop(&mut self) {
+        if self.did_init {
+            unsafe { CoUninitialize() };
         }
-    });
+    }
 }
 
 fn ensure_mf_started() {
@@ -76,7 +85,11 @@ pub struct VideoFrame {
 
 /// Extract a frame at 25% of duration. Returns the frame as RGB8.
 pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
-    ensure_com_initialized();
+    // Scoped COM init: balanced by CoUninitialize when `_com` drops at the end
+    // of this call, so a recycled blocking-pool thread isn't left MTA for a later
+    // STA-expecting shell op. Held for the whole function — the source reader and
+    // every COM object below need the apartment live.
+    let _com = ComScope::enter();
     ensure_mf_started();
 
     let path_str = path.to_str().context("video path must be UTF-8")?;
@@ -258,3 +271,43 @@ const _: () = {
     let _ = S_OK;
     let _ = FALSE;
 };
+
+#[cfg(test)]
+mod tests {
+    use super::ComScope;
+    use windows::Win32::System::Com::{
+        CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
+    };
+
+    /// Regression for the recycled-thread apartment leak: a `ComScope` must
+    /// uninitialize the MTA apartment it created, so the SAME thread can later
+    /// enter an STA apartment (as the shell trash/tags/thumbnail ops do) without
+    /// hitting RPC_E_CHANGED_MODE. A fresh STA `CoInitializeEx` succeeds (S_OK /
+    /// S_FALSE) only if no leftover MTA apartment clashes; with the pre-fix
+    /// permanent MTA init it returned the RPC_E_CHANGED_MODE error (`is_ok()`
+    /// false), failing this assertion.
+    ///
+    /// Runs on a dedicated thread so it can't perturb (or be perturbed by) the
+    /// test harness's main-thread apartment.
+    #[test]
+    fn com_scope_uninitializes_so_thread_can_re_enter_sta() {
+        let handle = std::thread::spawn(|| {
+            // Scoped MTA init, then drop — must leave the thread uninitialized.
+            {
+                let com = ComScope::enter();
+                assert!(com.did_init, "fresh thread should perform the MTA init");
+            }
+            // The thread is now back to no-apartment, so an STA init succeeds
+            // instead of clashing with a leftover MTA apartment.
+            unsafe {
+                let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+                assert!(
+                    hr.is_ok(),
+                    "ComScope leaked its MTA apartment: STA re-entry was refused ({hr:?})"
+                );
+                CoUninitialize();
+            }
+        });
+        handle.join().expect("com scope test thread panicked");
+    }
+}

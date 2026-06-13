@@ -207,6 +207,19 @@ struct DeepAnalyzeView: View {
         store.namedPersonCount() > 0
     }
 
+    // Engine is alive (not crashed / mid-respawn); the live run cards key
+    // off this so a crash mid-run tears them down at once (F-C4-016).
+    private var engineLive: Bool {
+        if case .ready = engine.state { return true }
+        return false
+    }
+
+    // Run requested but no per-file progress yet — the VLM cold-load /
+    // model-download window where the "Starting…" card shows.
+    private var isStartingDeepAnalyze: Bool {
+        engine.deepAnalyzeInFlight && engine.deepAnalyzeProgress == nil
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
@@ -227,18 +240,22 @@ struct DeepAnalyzeView: View {
                 // requested, even before the first progress event lands.
                 // Without this, hitting Skip from the People tab feels
                 // like a 10s freeze (the wait for the VLM model to load).
-                if engine.deepAnalyzeInFlight, engine.deepAnalyzeProgress == nil {
+                if isStartingDeepAnalyze, engineLive {
                     startingCard
                         .animation(.spring(response: 0.35, dampingFraction: 0.78),
                                    value: engine.deepAnalyzeInFlight)
                 }
-                if engine.deepAnalyzeProgress != nil {
+                if engine.deepAnalyzeProgress != nil, engineLive {
                     progressCard
                 }
                 if let lastDone = engine.deepAnalyzeComplete {
                     completionCard(lastDone)
                 }
-                if let lastFile = engine.deepAnalyzeLast {
+                // Suppress the prior run's caption while a fresh run spins
+                // up — otherwise a stale caption sits beside "Starting…"
+                // (F-C4-014; deepAnalyzeLast is private(set) on EngineClient
+                // so it can't be cleared from here).
+                if let lastFile = engine.deepAnalyzeLast, !isStartingDeepAnalyze {
                     lastFileCard(lastFile)
                 }
                 Spacer(minLength: 40)

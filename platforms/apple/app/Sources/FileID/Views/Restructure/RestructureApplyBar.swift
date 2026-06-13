@@ -5,6 +5,9 @@ struct RestructureApplyBar: View {
     let selectedCount: Int
     let totalCount: Int
     let canApply: Bool
+    /// True while an apply / convert is in flight — disables both buttons
+    /// so the irreversible path can't be double-fired.
+    var isApplying: Bool = false
     var onApplyShortcuts: () -> Void
     var onConvertToMoves: () -> Void
 
@@ -106,12 +109,12 @@ struct RestructureApplyBar: View {
                 )
             )
             .foregroundStyle(.black)
-            .opacity(canApply ? 1.0 : 0.45)
+            .opacity((canApply && !isApplying) ? 1.0 : 0.45)
         }
         .buttonStyle(.plain)
-        .disabled(!canApply)
+        .disabled(!canApply || isApplying)
         .help("Creates shortcuts at the new paths pointing back to the original files. Originals stay put — fully reversible.")
-        .scaleEffect(primaryHovered && canApply ? 1.02 : 1.0)
+        .scaleEffect(primaryHovered && canApply && !isApplying ? 1.02 : 1.0)
         .animation(.spring(response: 0.28, dampingFraction: 0.7),
                      value: primaryHovered)
         .onHover { primaryHovered = $0 }
@@ -130,8 +133,10 @@ struct RestructureApplyBar: View {
                     .stroke(Theme.gold.opacity(0.55), lineWidth: 1)
             )
             .foregroundStyle(Theme.gold)
+            .opacity(isApplying ? 0.45 : 1.0)
         }
         .buttonStyle(.plain)
+        .disabled(isApplying)
         .help("Once the structure looks right, replace every shortcut with a real on-disk move. Not reversible inside the app.")
     }
 }

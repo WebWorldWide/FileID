@@ -48,21 +48,28 @@ public enum Tagging {
         let ext = url.pathExtension.lowercased()
         let started = CFAbsoluteTimeGetCurrent()
 
+        var tagged: TaggedFile
         switch discovered.kind {
         case .image:
-            return await processImage(discovered: discovered, worker: worker, started: started)
+            tagged = await processImage(discovered: discovered, worker: worker, started: started)
         case .video:
-            return await processVideo(discovered: discovered, worker: worker, started: started)
+            tagged = await processVideo(discovered: discovered, worker: worker, started: started)
         case .pdf:
-            return await processPDF(discovered: discovered, worker: worker, started: started)
+            tagged = await processPDF(discovered: discovered, worker: worker, started: started)
         case .doc, .audio, .other:
-            return TaggedFile(
+            tagged = TaggedFile(
                 url: url, kind: kind, extension: ext, sizeBytes: discovered.sizeBytes,
                 createdAt: discovered.creationDate, modifiedAt: discovered.modificationDate,
                 visionTags: [discovered.kind.rawValue.capitalized],
-                perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000
+                perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000,
+                tagsEvaluated: true
             )
         }
+        // Single choke point: stamp the volume-local identity (st_ino) computed
+        // at discovery onto every TaggedFile so DBWriter's rename/move heal can
+        // re-bind a moved file's row instead of orphaning its tags/faces/OCR.
+        tagged.fileRef = discovered.fileRef
+        return tagged
     }
 
     // MARK: - Image pipeline
@@ -80,7 +87,7 @@ public enum Tagging {
                     let sizeMB = Double(discovered.sizeBytes) / 1_048_576
 
                     let loadStart = CFAbsoluteTimeGetCurrent()
-                    guard let (cgImage, exif) = loadImageAndEXIF(url: url) else {
+                    guard let (cgImage, exif) = loadImageAndEXIF(url: url, sizeBytes: discovered.sizeBytes) else {
                         JSONLog.shared.warn(ev: "image_decode_failed", path: redactPathForLog(url.path))
                         return TaggedFile(
                             url: url, kind: "image", extension: ext,
@@ -99,10 +106,36 @@ public enum Tagging {
                     let pass = worker.runPrimaryPass(cgImage)
                     let visionMs = (CFAbsoluteTimeGetCurrent() - visionStart) * 1000
 
-                    // OCR — only if classify suggests there's text to read.
+                    // A timed-out primary pass returns an empty result. Persisting
+                    // it as failed=false-and-empty would (a) let the DBWriter wipe
+                    // prior auto-tags/faces — gated below by tagsEvaluated/
+                    // facesEvaluated being false — and (b) strand the file at
+                    // failed=false so the incremental skip never re-tags it. Mark
+                    // it failed (gates all stay false) so the next scan retries it,
+                    // mirroring the Windows per-file-timeout row. (F-C3-001/036)
+                    if !pass.didComplete {
+                        JSONLog.shared.warn(ev: "vision_pass_timeout", path: redactPathForLog(url.path))
+                        return TaggedFile(
+                            url: url, kind: "image", extension: ext,
+                            sizeBytes: discovered.sizeBytes,
+                            createdAt: discovered.creationDate,
+                            modifiedAt: discovered.modificationDate,
+                            failed: true,
+                            errorMessage: "Vision pass timed out (will retry next scan)",
+                            perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000
+                        )
+                    }
+
+                    // OCR — only if classify suggests there's text to read. The
+                    // OCR stage "ran" iff we entered this branch; the DBWriter
+                    // gates its ocr_text delete/reinsert on ocrStageRan so a photo
+                    // we never OCR'd (or a primary-pass timeout) can't wipe valid
+                    // prior OCR text. Mirrors the Windows `ocr_stage_ran` gate.
                     var ocr: String? = nil
                     var ocrMs: Double = 0
+                    var ocrStageRan = false
                     if pass.classifyTags.contains(where: { docHints.contains($0.lowercased()) }) {
+                        ocrStageRan = true
                         let ocrStart = CFAbsoluteTimeGetCurrent()
                         let text = worker.ocrFast(cgImage)
                         ocr = text.isEmpty ? nil : text
@@ -151,7 +184,10 @@ public enum Tagging {
                         locationLat: exif.lat,
                         locationLon: exif.lon,
                         perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000,
-                        clipEmbeddingBlob: clipBlob
+                        clipEmbeddingBlob: clipBlob,
+                        tagsEvaluated: true,
+                        facesEvaluated: true,
+                        ocrStageRan: ocrStageRan
                     )
                     tagged.loadMs = loadMs
                     tagged.visionMs = visionMs
@@ -185,7 +221,8 @@ public enum Tagging {
             sizeBytes: discovered.sizeBytes,
             createdAt: discovered.creationDate,
             modifiedAt: discovered.modificationDate,
-            visionTags: ["Video"]
+            visionTags: ["Video"],
+            tagsEvaluated: true
         )
         _ = worker  // unused — kept for signature parity with image/pdf paths
         tagged.perFileTotalMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
@@ -215,7 +252,8 @@ public enum Tagging {
                 createdAt: discovered.creationDate,
                 modifiedAt: discovered.modificationDate,
                 visionTags: ["PDF", "Large_Document"],
-                perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000
+                perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000,
+                tagsEvaluated: true
             )
         }
 
@@ -229,7 +267,8 @@ public enum Tagging {
                             createdAt: discovered.creationDate,
                             modifiedAt: discovered.modificationDate,
                             visionTags: ["PDF"],
-                            perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000
+                            perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000,
+                            tagsEvaluated: true
                         )
                     }
                     let pageCount = min(pdf.numberOfPages, 3)
@@ -277,7 +316,9 @@ public enum Tagging {
                         modifiedAt: discovered.modificationDate,
                         visionTags: ["PDF"],
                         ocrText: ocr.isEmpty ? nil : ocr,
-                        perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000
+                        perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000,
+                        tagsEvaluated: true,
+                        ocrStageRan: true
                     )
                 }
                 cont.resume(returning: result)
@@ -290,15 +331,28 @@ public enum Tagging {
     // EXIF is read from the SAME CGImageSource as the decode — a separate
     // CGImageSourceCreateWithURL re-opened and re-parsed every file, which
     // on NAS volumes cost ms per image across 14-32 workers.
-    private static func loadImageAndEXIF(
-        url: URL
+    // `internal` (not `private`) so the no-redundant-stat property is unit-
+    // assertable via @testable — see TaggingLoadSizeTests.
+    static func loadImageAndEXIF(
+        url: URL,
+        sizeBytes: Int64
     ) -> (CGImage, (cameraModel: String?, lat: Double?, lon: Double?))? {
         // Skip files smaller than 256 B — corrupt or zero-byte. Avoids the
-        // ImageIO crash mode v1's Session-B-hardening fixed.
-        if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-           let size = attrs[.size] as? Int, size < 256 {
-            return nil
+        // ImageIO crash mode v1's Session-B-hardening fixed. Reuse the size
+        // Discovery (Stage A) already stat'd instead of a second
+        // attributesOfItem — one fewer SMB/NFS round-trip per image on NAS.
+        //
+        // R-13: a 0/absent discovered size means UNKNOWN, not tiny — Discovery's
+        // .fileSizeKey can come back empty on some SMB/NFS volumes (which this
+        // project targets), leaving sizeBytes 0 on a perfectly valid image. Only
+        // re-stat in that case so we don't mark a decodable file decode-failed;
+        // the common (size > 0) path keeps the no-redundant-stat win.
+        var effectiveSize = sizeBytes
+        if effectiveSize <= 0,
+           let n = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber {
+            effectiveSize = n.int64Value
         }
+        if effectiveSize > 0 && effectiveSize < 256 { return nil }
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
         // Iteration 5 perf finding: load (NAS I/O + decode) was P95 252ms — by
         // far the dominant per-file cost. Two changes:

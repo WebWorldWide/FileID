@@ -144,13 +144,37 @@ pub fn classify_folders(moves: &[ProposedMove]) -> Vec<ClassifiedFolder> {
 /// for them. The anchor COUNT for the informational "Keep" tile is the caller's
 /// responsibility, computed from the same `classified` slice BEFORE stripping.
 /// (audit A1/A3)
+///
+/// Test-only convenience: production now calls [`strip_anchor_folder_moves_except`]
+/// directly (the semantic butler exempts its claimed source folders, F-C1-004).
+#[cfg(test)]
 pub fn strip_anchor_folder_moves(
     moves: Vec<ProposedMove>,
     classified: &[ClassifiedFolder],
 ) -> Vec<ProposedMove> {
+    strip_anchor_folder_moves_except(moves, classified, &std::collections::HashSet::new())
+}
+
+/// Like [`strip_anchor_folder_moves`], but never strips a move whose source
+/// folder is in `exempt_folders`.
+///
+/// A homogeneous *source* folder whose files all route to a single *destination*
+/// group classifies Anchor on category homogeneity — but when that homogeneity
+/// is the semantic butler actively relocating every file into one new content
+/// group (not the rule cascade computing a stay-put canonical destination),
+/// stripping it would silently eat the highest-confidence proposals. The caller
+/// passes the source folders the butler claimed as `exempt_folders` so those
+/// real relocations survive; genuine in-place anchor folders still drop.
+/// (audit F-C1-004)
+pub fn strip_anchor_folder_moves_except<S: std::hash::BuildHasher>(
+    moves: Vec<ProposedMove>,
+    classified: &[ClassifiedFolder],
+    exempt_folders: &std::collections::HashSet<PathBuf, S>,
+) -> Vec<ProposedMove> {
     let anchor_folders: std::collections::HashSet<PathBuf> = classified
         .iter()
         .filter(|c| c.classification == FolderClassification::Anchor)
+        .filter(|c| !exempt_folders.contains(&c.source_folder))
         .map(|c| c.source_folder.clone())
         .collect();
     moves
@@ -350,6 +374,58 @@ mod tests {
         );
         let kept = strip_anchor_folder_moves(moves, &classified);
         assert!(kept.is_empty(), "anchor-folder moves must be dropped: {kept:?}");
+    }
+
+    #[test]
+    fn exempt_homogeneous_source_folder_survives_anchor_strip() {
+        // A homogeneous source folder whose files were ALL claimed by the
+        // semantic butler (one new content group) classifies Anchor on
+        // destination-category homogeneity — but it is a real relocation, not an
+        // in-place anchor. When the caller exempts that source folder, its moves
+        // must survive the strip; without the exemption they would be eaten.
+        // (audit F-C1-004)
+        let src_folder = PathBuf::from("D:/Library/inbox/dogs");
+        let moves = vec![
+            ProposedMove {
+                file_id: 1,
+                source: src_folder.join("a.jpg"),
+                destination: PathBuf::from("D:/Library/Dogs/a.jpg"),
+                category: "Dogs".into(),
+                confidence: Confidence::Auto,
+                reason: None,
+            },
+            ProposedMove {
+                file_id: 2,
+                source: src_folder.join("b.jpg"),
+                destination: PathBuf::from("D:/Library/Dogs/b.jpg"),
+                category: "Dogs".into(),
+                confidence: Confidence::Auto,
+                reason: None,
+            },
+            ProposedMove {
+                file_id: 3,
+                source: src_folder.join("c.jpg"),
+                destination: PathBuf::from("D:/Library/Dogs/c.jpg"),
+                category: "Dogs".into(),
+                confidence: Confidence::Auto,
+                reason: None,
+            },
+        ];
+        let classified = classify_folders(&moves);
+        assert!(
+            classified
+                .iter()
+                .any(|c| c.classification == FolderClassification::Anchor),
+            "homogeneous-destination source folder should classify Anchor: {classified:?}"
+        );
+        // Without the exemption it is stripped to nothing (the regressing path).
+        let stripped = strip_anchor_folder_moves(moves.clone(), &classified);
+        assert!(stripped.is_empty(), "baseline anchor-strip eats the moves");
+        // With the source folder exempted, the butler's moves survive.
+        let mut exempt = std::collections::HashSet::new();
+        exempt.insert(src_folder.clone());
+        let kept = strip_anchor_folder_moves_except(moves, &classified, &exempt);
+        assert_eq!(kept.len(), 3, "exempt semantic moves must survive: {kept:?}");
     }
 
     #[test]

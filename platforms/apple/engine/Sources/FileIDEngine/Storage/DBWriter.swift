@@ -23,6 +23,14 @@ public struct TaggedFile: Sendable {
     public let createdAt: Date?
     public let modifiedAt: Date?
 
+    /// Volume-local file identity (APFS/HFS inode, st_ino), propagated from
+    /// `DiscoveredFile.fileRef`. Powers DBWriter's rename/move heal: a moved file
+    /// with a matching `fileRef` whose old path is gone re-binds the existing row
+    /// (id + tags/faces/OCR/embeddings) instead of orphaning it. nil when stat
+    /// failed at discovery (no heal possible). The macOS analog of the Windows
+    /// NTFS MFT file_ref (dbwriter.rs).
+    public var fileRef: UInt64?
+
     // Tagging output — empty arrays for files we couldn't process.
     public var visionTags: [String]          // raw Vision classifier labels
     public var phash: UInt64?                // dHash (0 = none / failed)
@@ -51,9 +59,21 @@ public struct TaggedFile: Sendable {
     // non-images, files where the model isn't loaded, or inference failures.
     public var clipEmbeddingBlob: Data?
 
+    // Stage-ran gates (port of the Windows tags_evaluated / faces_evaluated /
+    // ocr_stage_ran flags, dbwriter.rs). Each is TRUE only when its producing
+    // stage actually ran AND returned this session — never on a Vision/ANE/OCR
+    // timeout. DBWriter.insertOne keys its `DELETE` on these so a swallowed
+    // timeout (empty result) cannot wipe a file's previously-persisted auto-tags,
+    // OCR text + FTS, or — critically — manual person_id assignments on a
+    // rescan. Default FALSE: the safe, no-delete state for any partial row.
+    public var tagsEvaluated: Bool
+    public var facesEvaluated: Bool
+    public var ocrStageRan: Bool
+
     public init(
         url: URL, kind: String, extension ext: String, sizeBytes: Int64,
         createdAt: Date?, modifiedAt: Date?,
+        fileRef: UInt64? = nil,
         visionTags: [String] = [], phash: UInt64? = nil,
         aestheticScore: Double? = nil, hasFaces: Bool = false,
         facePrints: [Data] = [], faceBBoxes: [String] = [],
@@ -63,7 +83,10 @@ public struct TaggedFile: Sendable {
         locationLat: Double? = nil, locationLon: Double? = nil,
         failed: Bool = false, errorMessage: String? = nil,
         perFileTotalMs: Double = 0,
-        clipEmbeddingBlob: Data? = nil
+        clipEmbeddingBlob: Data? = nil,
+        tagsEvaluated: Bool = false,
+        facesEvaluated: Bool = false,
+        ocrStageRan: Bool = false
     ) {
         self.url = url
         self.kind = kind
@@ -71,6 +94,7 @@ public struct TaggedFile: Sendable {
         self.sizeBytes = sizeBytes
         self.createdAt = createdAt
         self.modifiedAt = modifiedAt
+        self.fileRef = fileRef
         self.visionTags = visionTags
         self.phash = phash
         self.aestheticScore = aestheticScore
@@ -88,6 +112,9 @@ public struct TaggedFile: Sendable {
         self.errorMessage = errorMessage
         self.perFileTotalMs = perFileTotalMs
         self.clipEmbeddingBlob = clipEmbeddingBlob
+        self.tagsEvaluated = tagsEvaluated
+        self.facesEvaluated = facesEvaluated
+        self.ocrStageRan = ocrStageRan
     }
 }
 
@@ -131,10 +158,35 @@ public actor DBWriter {
         self.forceReprocess = forceReprocess
     }
 
+    /// A full batch handed off to the committer task. Sendable so it can cross
+    /// the rendezvous channel between the drain loop and the committer.
+    private struct PendingBatch: Sendable {
+        let files: [TaggedFile]
+        let startedAt: Date
+    }
+
     /// Drain `taggedChannel` until the channel closes (= tagging stage done).
     /// Called from the engine's main task; the writer keeps going until the
     /// upstream is exhausted, then performs a final flush.
+    ///
+    /// The DB transaction (and its WAL checkpoint) is DECOUPLED from this loop:
+    /// assembled batches are handed to a single committer task over a rendezvous
+    /// channel, so a commit runs CONCURRENTLY with the next batch being pulled
+    /// off `channel`. The old inline `await commit` stalled every tagging worker
+    /// for the full transaction duration — a busy writer stops draining the
+    /// unbuffered taggedChan, so the workers' `send` parks. At most one batch
+    /// commits while one assembles (bounded memory ≈ two batches); a full batch
+    /// assembled before the prior commit finishes still blocks on
+    /// `commitChan.send`, which preserves back-pressure and the batch bounds.
+    /// (F-C6-004)
     public func drain(_ channel: AsyncChannel<TaggedFile>) async {
+        let commitChan = AsyncChannel<PendingBatch>()
+        let committer = Task { [self] in
+            for await pending in commitChan {
+                await self.commitBatch(pending.files, batchStart: pending.startedAt)
+            }
+        }
+
         var buffer: [TaggedFile] = []
         buffer.reserveCapacity(maxBatchFiles)
         var batchStart = Date()
@@ -144,22 +196,33 @@ public actor DBWriter {
             // Trigger commit on either ceiling.
             let elapsedMs = Date().timeIntervalSince(batchStart) * 1000
             if buffer.count >= maxBatchFiles || elapsedMs >= Double(maxBatchMs) {
-                await commit(&buffer, batchStart: batchStart)
+                let batch = buffer
+                buffer.removeAll(keepingCapacity: true)
+                await commitChan.send(PendingBatch(files: batch, startedAt: batchStart))
                 batchStart = Date()
             }
         }
         // Tail flush — anything still buffered when upstream closes.
         if !buffer.isEmpty {
-            await commit(&buffer, batchStart: batchStart)
+            let batch = buffer
+            buffer.removeAll(keepingCapacity: true)
+            await commitChan.send(PendingBatch(files: batch, startedAt: batchStart))
         }
+        // Close the handoff and wait for the committer to finish the in-flight +
+        // tail batches, so `await writerTask.value` upstream still observes a
+        // fully-flushed, durable DB before the terminal scan event fires.
+        commitChan.finish()
+        await committer.value
     }
 
     // MARK: - Commit
 
-    private func commit(_ buffer: inout [TaggedFile], batchStart: Date) async {
-        guard !buffer.isEmpty else { return }
-        let batchFiles = buffer
-        buffer.removeAll(keepingCapacity: true)
+    /// Commit one assembled batch. Runs on the actor from the single committer
+    /// task, so batches commit serially (single-writer DB) and the counters /
+    /// `batchIndex` are mutated without races, while the actual `pool.write`
+    /// suspension lets the drain loop keep pulling files concurrently.
+    private func commitBatch(_ batchFiles: [TaggedFile], batchStart: Date) async {
+        guard !batchFiles.isEmpty else { return }
 
         let insertStart = Date()
         // Compute counts up-front so the closure doesn't need to mutate them.
@@ -185,9 +248,9 @@ public actor DBWriter {
                         // Update scan session high-water mark in the SAME
                         // transaction so a crash mid-batch can't leave the
                         // resume cursor pointing past the last committed file.
-                        try db.execute(sql: """
+                        try db.cachedStatement(sql: """
                             UPDATE scan_sessions SET last_file_index = ? WHERE id = ?
-                            """, arguments: [resumeCursor, sessionID])
+                            """).execute(arguments: [resumeCursor, sessionID])
                     }
                     break
                 } catch {
@@ -318,7 +381,19 @@ public actor DBWriter {
             residentMB:  Hardware.residentMB(),
             availableMB: Hardware.availableMemoryMB()
         )))
+
+        // Periodic PASSIVE WAL checkpoint, OUTSIDE the just-closed batch
+        // transaction, so the -wal file is trimmed incrementally instead of
+        // hitting the 10000-page autocheckpoint ceiling and doing one large
+        // synchronous checkpoint copy inside a future commit. Best-effort and
+        // non-blocking; mirrors the Windows per-32-batch cadence. (F-C6-004)
+        if self.batchIndex % Self.walCheckpointBatches == 0 {
+            await self.db.checkpointPassive()
+        }
     }
+
+    /// Commits between periodic PASSIVE WAL checkpoints. Windows-parity (32).
+    private static let walCheckpointBatches = 32
 
     /// Transient SQLite failures worth retrying (vs. a hard schema/constraint
     /// error). Keys on the primary result code, not the message string.
@@ -353,18 +428,50 @@ public actor DBWriter {
         // row on every re-scan, which — via ON DELETE CASCADE — wiped
         // face_prints (including the user's MANUAL person assignments), CLIP
         // embeddings, and FTS rows, and minted a brand-new rowid each time.
-        let existing = try Row.fetchOne(db, sql: """
-            SELECT id, size_bytes, modified_at, failed FROM files WHERE path_text = ?
-            """, arguments: [file.url.path])
+        // GRDB's `execute(sql:)` / `fetchOne(_:sql:)` compile a fresh statement
+        // every call; `cachedStatement` reuses one compiled plan per SQL for the
+        // life of the (pool-reused) writer connection, so the hot per-file path
+        // re-binds instead of re-parsing — the macOS analogue of the Windows
+        // prepared/cached-statement path (dbwriter.rs). (F-C6-010)
+        var existing = try Row.fetchOne(
+            db.cachedStatement(sql: """
+                SELECT id, size_bytes, modified_at, failed FROM files WHERE path_text = ?
+                """),
+            arguments: [file.url.path])
+
+        // Rename/move heal — port of dbwriter.rs (heal_candidate_moved). Run ONLY
+        // when no row yet sits at THIS path (a genuinely new path = a move's
+        // destination). If another row carries the same volume-local `file_ref`
+        // at a DIFFERENT path whose OLD location is now GONE from disk, re-bind
+        // that row to this path — preserving its id and every FK-linked tag /
+        // face (incl. manual person_id) / OCR / embedding — instead of orphaning
+        // it and inserting a brand-new row that loses all of it. The old-path-gone
+        // gate is the exact-duplicate guard: two COEXISTING hardlinks share an
+        // inode but both paths still exist, so neither heals — they stay two rows.
+        // After a heal the row lives at this path, so re-fetch `existing`: the
+        // upsert below then takes its DO UPDATE branch and `fileID` resolves to
+        // the preserved id. A pure move keeps size+mtime, so `unchanged` is true
+        // and the carried-over children are left intact (no re-detect).
+        if existing == nil, let ref = file.fileRef,
+           try Self.healMovedRow(
+               fileRef: ref, newPath: file.url.path, newPathHash: pathHash,
+               newPathSearch: file.url.path.precomposedStringWithCanonicalMapping,
+               db: db) != nil {
+            existing = try Row.fetchOne(
+                db.cachedStatement(sql: """
+                    SELECT id, size_bytes, modified_at, failed FROM files WHERE path_text = ?
+                    """),
+                arguments: [file.url.path])
+        }
 
         // A failure on a file that scanned before (transient decode error, NAS
         // hiccup) must not clobber the prior metadata or its child rows — incl.
         // manual person_id assignments. Record only the failure.
         if file.failed, let existing {
             let fileID: Int64 = existing["id"]
-            try db.execute(sql: """
+            try db.cachedStatement(sql: """
                 UPDATE files SET failed = 1, error_message = ?, scanned_at = ? WHERE id = ?
-                """, arguments: [file.errorMessage, Date().timeIntervalSince1970, fileID])
+                """).execute(arguments: [file.errorMessage, Date().timeIntervalSince1970, fileID])
             return
         }
 
@@ -395,9 +502,12 @@ public actor DBWriter {
         //   created_at + aesthetic are inserted but intentionally NOT in the
         //   DO UPDATE set (matches Windows): a rescan must not clobber the
         //   originally-recorded creation time, and aesthetic is scored elsewhere.
-        //   content_hash/file_ref aren't computed by the macOS scan path yet, so
-        //   they bind NULL and COALESCE preserves any previously-stored value.
-        try db.execute(sql: """
+        //   file_ref binds the volume-local inode (st_ino) computed at discovery,
+        //   stored bit-for-bit as the Windows `r as i64` (Int64(bitPattern:)) for
+        //   cross-platform byte-parity; content_hash stays NULL (no BLAKE3 on the
+        //   macOS scan path — a separate deferred decision). COALESCE preserves a
+        //   previously-stored identity when the incoming value is NULL.
+        try db.cachedStatement(sql: """
             INSERT INTO files
               (path_text, path_hash, path_search, size_bytes, created_at,
                modified_at, scanned_at, kind, extension, phash, aesthetic,
@@ -422,7 +532,7 @@ public actor DBWriter {
                 error_message = excluded.error_message,
                 content_hash  = COALESCE(excluded.content_hash, content_hash),
                 file_ref      = COALESCE(excluded.file_ref, file_ref)
-            """, arguments: [
+            """).execute(arguments: [
                 file.url.path,
                 pathHash,
                 file.url.path.precomposedStringWithCanonicalMapping,
@@ -442,9 +552,8 @@ public actor DBWriter {
                 file.failed ? 1 : 0,
                 file.errorMessage,
                 nil,
-                nil
-            ]
-        )
+                file.fileRef.map { Int64(bitPattern: $0) }
+            ])
         // last_insert_rowid() is NOT updated on the UPDATE branch of an upsert,
         // so resolve the id from the existing row when there was one. This
         // mirrors the row-id stability the Windows `RETURNING id` provides on
@@ -457,11 +566,19 @@ public actor DBWriter {
         // a file that didn't change. One exception: a CLIP model installed
         // AFTER the original scan means this scan produced an embedding the
         // DB doesn't have — backfill it without rebuilding the other children.
+        // For this branch to be REACHABLE on a normal incremental rescan, the
+        // discovery skip set must NOT drop an embeddable image that still lacks
+        // a clip_embeddings row — it keeps such files in the pipeline by AND-ing
+        // `skipSetClipBackfillExclusionSQL` (below) into its WHERE. Without that
+        // coordination F-C6-001's size+mtime skip filters these files out
+        // upstream and this backfill path is dead code (re-audit R-14).
         if unchanged {
             if let blob = file.clipEmbeddingBlob {
-                let hasEmbedding = try Bool.fetchOne(db, sql: """
-                    SELECT EXISTS(SELECT 1 FROM clip_embeddings WHERE file_id = ?)
-                    """, arguments: [fileID]) ?? false
+                let hasEmbedding = try Bool.fetchOne(
+                    db.cachedStatement(sql: """
+                        SELECT EXISTS(SELECT 1 FROM clip_embeddings WHERE file_id = ?)
+                        """),
+                    arguments: [fileID]) ?? false
                 if !hasEmbedding {
                     try insertClipEmbedding(fileID: fileID, blob: blob, db: db)
                 }
@@ -469,33 +586,47 @@ public actor DBWriter {
             return
         }
 
-        // 2. tags — auto (classifier output). Delete any prior `source='auto'`
-        // rows first so a rescan replaces stale tags atomically; user tags
-        // (`source='user'`) are untouched. Mirrors the Windows `tag_delete` +
-        // `INSERT OR REPLACE` in dbwriter.rs.
-        try db.execute(sql: """
-            DELETE FROM tags WHERE file_id = ? AND source = 'auto'
-            """, arguments: [fileID])
-        for tag in file.visionTags {
-            let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty { continue }
-            try db.execute(sql: """
-                INSERT OR REPLACE INTO tags (file_id, tag, source) VALUES (?, ?, ?)
-                """, arguments: [fileID, trimmed, "auto"])
+        // 2. tags — auto (classifier output). Gate the delete-then-reinsert on
+        // whether the tagging stage actually ran AND returned this session
+        // (tagsEvaluated). A Vision/ANE timeout emits an EMPTY visionTags; without
+        // this gate the unconditional DELETE would wipe a file's previously-
+        // persisted auto-tags on a transient timeout, with nothing re-inserted
+        // (data loss). When the stage DID run, delete any prior `source='auto'`
+        // rows and re-insert the fresh set atomically; user tags (`source='user'`)
+        // are untouched either way. Mirrors the Windows `tags_evaluated` gate
+        // (dbwriter.rs) — F-C3-001.
+        if file.tagsEvaluated {
+            try db.cachedStatement(sql: """
+                DELETE FROM tags WHERE file_id = ? AND source = 'auto'
+                """).execute(arguments: [fileID])
+            for tag in file.visionTags {
+                let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty { continue }
+                try db.cachedStatement(sql: """
+                    INSERT OR REPLACE INTO tags (file_id, tag, source) VALUES (?, ?, ?)
+                    """).execute(arguments: [fileID, trimmed, "auto"])
+            }
         }
 
         // 3. OCR text. The ocr_fts external-content index is maintained by the
         // AFTER INSERT/DELETE/UPDATE sync triggers (fts_sync_triggers
-        // migration), so we only touch ocr_text here. Explicit DELETE + INSERT
-        // rather than INSERT OR REPLACE: REPLACE's implicit delete fires the
-        // AFTER DELETE trigger only when recursive triggers are enabled, which
-        // would strand the old text's FTS postings. The bare DELETE also
-        // covers a changed file that no longer yields OCR text.
-        try db.execute(sql: "DELETE FROM ocr_text WHERE file_id = ?", arguments: [fileID])
-        if let text = file.ocrText, !text.isEmpty {
-            try db.execute(sql: """
-                INSERT INTO ocr_text (file_id, text) VALUES (?, ?)
-                """, arguments: [fileID, text])
+        // migration), so we only touch ocr_text here. Gate the delete-then-insert
+        // on whether the OCR stage actually ran this session (ocrStageRan): a
+        // swallowed OCR timeout (or a primary-pass timeout that never reaches the
+        // OCR branch) must NOT wipe valid prior OCR text + FTS postings. When the
+        // stage DID run, explicit DELETE + INSERT — not INSERT OR REPLACE, whose
+        // implicit delete fires the AFTER DELETE trigger only with recursive
+        // triggers enabled, stranding the old text's FTS postings — clears any
+        // now-empty text (covering a changed file that no longer yields OCR).
+        // Mirrors the Windows `ocr_stage_ran` gate (dbwriter.rs) — F-C3-001.
+        if file.ocrStageRan {
+            try db.cachedStatement(sql: "DELETE FROM ocr_text WHERE file_id = ?")
+                .execute(arguments: [fileID])
+            if let text = file.ocrText, !text.isEmpty {
+                try db.cachedStatement(sql: """
+                    INSERT INTO ocr_text (file_id, text) VALUES (?, ?)
+                    """).execute(arguments: [fileID, text])
+            }
         }
 
         // 4. face_prints — write one row per detected face. ArcFace
@@ -505,31 +636,38 @@ public actor DBWriter {
         // Quality + pose come from the inline detection pass and feed
         // the clustering quality filter (excluded=1 means "don't cluster
         // this face, but keep the row for display in PersonDetailSheet").
-        // The files row survives a rescan (ON CONFLICT DO UPDATE, no cascade
-        // delete), so clear this file's prior face rows even when this scan
-        // found none — otherwise a rescan accumulates duplicate or stale
-        // faces. Mirrors the Windows `face_delete` that precedes its inserts.
-        try db.execute(sql: """
-            DELETE FROM face_prints WHERE file_id = ?
-            """, arguments: [fileID])
-        let bboxes = file.faceBBoxes
-        if !bboxes.isEmpty {
-            for i in 0..<bboxes.count {
-                let print: Data = i < file.facePrints.count ? file.facePrints[i] : Data()
-                let quality: Double? = i < file.faceQualities.count
-                    ? (file.faceQualities[i] >= 0 ? file.faceQualities[i] : nil)
-                    : nil
-                let yaw: Double? = i < file.faceYaws.count ? file.faceYaws[i] : nil
-                let pitch: Double? = i < file.facePitches.count ? file.facePitches[i] : nil
-                let bboxArea = Self.bboxArea(bboxes[i])
-                let excluded = Self.isExcluded(quality: quality, yaw: yaw,
-                                               pitch: pitch, bboxArea: bboxArea)
-                try db.execute(sql: """
-                    INSERT INTO face_prints
-                      (file_id, print_data, bbox, face_quality, excluded)
-                    VALUES (?, ?, ?, ?, ?)
-                    """, arguments: [fileID, print, bboxes[i],
-                                     quality, excluded ? 1 : 0])
+        // Gate the stale-face DELETE on whether the face stage actually ran AND
+        // returned this session (facesEvaluated), NOT on `faceBBoxes.isEmpty`: an
+        // edited/zero-face re-process must clear orphaned face_prints (else they
+        // keep polluting clusters), while a Vision/ANE timeout (empty result)
+        // must leave still-valid rows — and, critically, their manual person_id
+        // assignments — intact. The files row survives a rescan (ON CONFLICT DO
+        // UPDATE, no cascade delete), so without this gate a swallowed timeout
+        // would silently wipe a named person's faces. Mirrors the Windows
+        // `faces_evaluated` gate (dbwriter.rs) — F-C3-001.
+        if file.facesEvaluated {
+            try db.cachedStatement(sql: """
+                DELETE FROM face_prints WHERE file_id = ?
+                """).execute(arguments: [fileID])
+            let bboxes = file.faceBBoxes
+            if !bboxes.isEmpty {
+                for i in 0..<bboxes.count {
+                    let print: Data = i < file.facePrints.count ? file.facePrints[i] : Data()
+                    let quality: Double? = i < file.faceQualities.count
+                        ? (file.faceQualities[i] >= 0 ? file.faceQualities[i] : nil)
+                        : nil
+                    let yaw: Double? = i < file.faceYaws.count ? file.faceYaws[i] : nil
+                    let pitch: Double? = i < file.facePitches.count ? file.facePitches[i] : nil
+                    let bboxArea = Self.bboxArea(bboxes[i])
+                    let excluded = Self.isExcluded(quality: quality, yaw: yaw,
+                                                   pitch: pitch, bboxArea: bboxArea)
+                    try db.cachedStatement(sql: """
+                        INSERT INTO face_prints
+                          (file_id, print_data, bbox, face_quality, excluded)
+                        VALUES (?, ?, ?, ?, ?)
+                        """).execute(arguments: [fileID, print, bboxes[i],
+                                                 quality, excluded ? 1 : 0])
+                }
             }
         }
 
@@ -540,11 +678,94 @@ public actor DBWriter {
         }
     }
 
+    /// SQL boolean fragment (no leading `AND`, references the unaliased `files`
+    /// table) the discovery incremental skip-set query must AND into its WHERE so
+    /// an embeddable image that still LACKS a clip_embeddings row is NEVER added
+    /// to the skip set. Keeping such files in the pipeline is what makes
+    /// `insertOne`'s unchanged-file CLIP-backfill branch reachable after a CLIP
+    /// model is installed post-scan — co-located with that branch so the two stay
+    /// in sync. Keyed on `kind = 'image'` + NOT EXISTS, so ONLY images are forced,
+    /// and only until they have an embedding (a backfilled image becomes skippable
+    /// again on the next scan). Re-audit R-14; analogous in spirit to the Windows
+    /// skip-set's content_hash carve-out (C1-013, scan_session.rs), which likewise
+    /// keeps a file whose derived data is still missing IN the pipeline.
+    static let skipSetClipBackfillExclusionSQL = """
+        NOT (files.kind = 'image' AND NOT EXISTS (
+            SELECT 1 FROM clip_embeddings WHERE clip_embeddings.file_id = files.id))
+        """
+
     private static func insertClipEmbedding(fileID: Int64, blob: Data, db: GRDB.Database) throws {
-        try db.execute(sql: """
+        // `blob` is the worker's already-finalized Data; bind it straight to the
+        // cached statement (no re-copy on the writer side). The remaining
+        // tensor→loop→normalize→Data copies live in the embedding producer
+        // (MobileCLIPService), which is outside this writer's scope. (F-C6-010)
+        try db.cachedStatement(sql: """
             INSERT OR REPLACE INTO clip_embeddings (file_id, embedding, model)
             VALUES (?, ?, ?)
-            """, arguments: [fileID, blob, "mobileclip_s2"])
+            """).execute(arguments: [fileID, blob, "mobileclip_s2"])
+    }
+
+    // MARK: - Rename/move heal
+
+    /// Lookup + gate + re-bind for a moved file. Returns the healed row id, or
+    /// nil if nothing healed. Port of the Windows HEAL_LOOKUP_SQL +
+    /// heal_candidate_moved + HEAL_UPDATE_SQL (dbwriter.rs). file_ref-only on
+    /// macOS — content_hash isn't computed by the scan path, and file_ref alone
+    /// covers same-volume rename/move, the dominant case.
+    private static func healMovedRow(
+        fileRef: UInt64, newPath: String, newPathHash: Int64,
+        newPathSearch: String, db: GRDB.Database
+    ) throws -> Int64? {
+        // Stored bit-for-bit as Windows binds it (`r as i64`) so the lookup keys
+        // match across a cross-platform DB round-trip.
+        let refInt = Int64(bitPattern: fileRef)
+        // Candidate rows: same volume-local identity, DIFFERENT path. NULL
+        // file_ref never matches (a row without identity can't be healed). More
+        // than one match only on hardlinks; the gate below keeps coexisting links
+        // distinct and re-binds only the genuinely-gone original.
+        let candidates = try Row.fetchAll(
+            db.cachedStatement(sql: """
+                SELECT id, path_text FROM files
+                WHERE path_text != ? AND file_ref IS NOT NULL AND file_ref = ?
+                """),
+            arguments: [newPath, refInt])
+        for row in candidates {
+            let oldPath: String = row["path_text"]
+            // Heal ONLY a genuine move: the candidate's old path must be GONE.
+            // A still-present old path means a coexisting copy/hardlink — skip, so
+            // both stay distinct rows (the exact-duplicate guard). Mirrors the
+            // Windows heal_candidate_moved old-path-gone gate exactly.
+            if pathExistsOnDisk(oldPath) { continue }
+            let id: Int64 = row["id"]
+            do {
+                try db.cachedStatement(sql: """
+                    UPDATE files SET path_text = ?, path_hash = ?, path_search = ?
+                    WHERE id = ?
+                    """).execute(arguments: [newPath, newPathHash, newPathSearch, id])
+                JSONLog.shared.info(ev: "rename_heal", path: redactPathForLog(newPath))
+                return id
+            } catch let e as DatabaseError
+                where e.resultCode.primaryResultCode == .SQLITE_CONSTRAINT {
+                // A content-identical row already occupies newPath (a copy scanned
+                // there independently). Skip the heal rather than colliding on the
+                // UNIQUE(path_text) constraint; the upsert below updates that
+                // occupant and the moved-away orphan is left for orphan-pruning.
+                // Mirrors the Windows ConstraintViolation skip (dbwriter.rs).
+                return nil
+            }
+        }
+        return nil
+    }
+
+    /// Old-path-gone probe for the rename-heal gate. `lstat` (not `stat`) so a
+    /// dangling symlink still counts as PRESENT and is never treated as a move,
+    /// mirroring the Windows `symlink_metadata` gate.
+    private static func pathExistsOnDisk(_ path: String) -> Bool {
+        var st = stat()
+        return URL(fileURLWithPath: path).withUnsafeFileSystemRepresentation { rep in
+            guard let rep else { return false }
+            return lstat(rep, &st) == 0
+        }
     }
 
     // MARK: - Face quality filter

@@ -21,6 +21,14 @@ pub(crate) const MAX_TEXT_BYTES: usize = 256 * 1024;
 /// `take()` on the reader (defends against a lying header).
 const MAX_MEMBER_BYTES: u64 = 16 * 1024 * 1024;
 
+/// C1: cap on the number of glob-matched members iterated (e.g. `ppt/slides/`
+/// slide parts). A crafted .pptx can list millions of `slideN.xml` entries; even
+/// with the per-member byte cap, sorting + parsing every one of them burns
+/// unbounded CPU on a decoder thread. No real presentation has tens of thousands
+/// of slides, and `out` saturates at MAX_TEXT_BYTES long before then, so a bound
+/// here is a pure DoS guard, never a correctness loss.
+const MAX_GLOB_MEMBERS: usize = 50_000;
+
 /// Extract text from `path` based on extension. Returns `Ok(None)` when the
 /// extension is recognised-as-doc-but-unsupported (e.g. `.doc` legacy OLE)
 /// AND when the extension isn't a document at all — callers treat both as
@@ -201,10 +209,18 @@ fn extract_zip_xml_glob_inner<R: Read + Seek>(
 ) -> Result<String> {
     let mut zip =
         zip::ZipArchive::new(reader).with_context(|| format!("zip open {}", path.display()))?;
-    let mut names: Vec<String> = zip.file_names().map(String::from).collect();
+    // Collect only the glob-matched members, hard-capped at MAX_GLOB_MEMBERS so a
+    // zip-bomb-shaped pptx (millions of slide entries) can't make the sort +
+    // per-member parse below burn unbounded CPU.
+    let mut names: Vec<String> = zip
+        .file_names()
+        .filter(|n| n.starts_with(prefix) && n.ends_with(suffix))
+        .take(MAX_GLOB_MEMBERS)
+        .map(String::from)
+        .collect();
     names.sort();
     let mut out = String::new();
-    for name in names.iter().filter(|n| n.starts_with(prefix) && n.ends_with(suffix)) {
+    for name in &names {
         let mut entry = match zip.by_name(name) {
             Ok(e) => e,
             Err(_) => continue,
@@ -365,6 +381,51 @@ mod tests {
         let out = xml_text_runs(xml, &["t"]);
         assert!(out.contains("aa"));
         assert!(out.contains("bb"));
+    }
+
+    #[test]
+    fn pptx_glob_member_iteration_is_capped() {
+        // A zip-bomb-shaped pptx: 2× MAX_GLOB_MEMBERS slide members, each emitting
+        // a single space (one <a:t> </a:t> run → one ' ' + a '\n' member separator
+        // ≈ 2 bytes). 100 K members ≈ 200 KB stays UNDER MAX_TEXT_BYTES (256 KB),
+        // so the byte cap never fires and can't mask the count cap. Without the
+        // MAX_GLOB_MEMBERS `.take()`, all 100 K members are parsed; with it, at
+        // most MAX_GLOB_MEMBERS are. We count emitted member segments (newline
+        // separators) and assert the bound — order-independent, so it doesn't rely
+        // on zip iteration order.
+        const OVER_CAP: usize = MAX_GLOB_MEMBERS * 2;
+        let mut buf = Vec::new();
+        {
+            use std::io::Write;
+            let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            // Stored (no deflate) keeps writing 100 K tiny members fast.
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            for i in 0..OVER_CAP {
+                zw.start_file::<_, ()>(format!("ppt/slides/slide{i:07}.xml"), opts)
+                    .unwrap();
+                // A single empty text run → exactly one space of output per member.
+                zw.write_all(b"<p><a:t> </a:t></p>").unwrap();
+            }
+            zw.finish().unwrap();
+        }
+        let path = std::path::Path::new("bomb.pptx");
+        let out = extract_zip_xml_glob_inner(
+            Cursor::new(&buf),
+            path,
+            "ppt/slides/slide",
+            ".xml",
+            &["a:t"],
+        )
+        .unwrap();
+        // One '\n' is inserted between members, so processed-member count is
+        // (newlines + 1). Bounded by the cap rather than the full OVER_CAP.
+        let processed = out.matches('\n').count() + 1;
+        assert!(
+            processed <= MAX_GLOB_MEMBERS,
+            "member iteration must stop at MAX_GLOB_MEMBERS, processed {processed}"
+        );
+        assert!(out.len() < MAX_TEXT_BYTES, "byte cap must not have masked the count cap");
     }
 
     #[test]

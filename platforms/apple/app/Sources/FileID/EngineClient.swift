@@ -15,7 +15,14 @@ public final class EngineClient {
 
     public private(set) var state: ConnectionState = .starting
     public private(set) var lastProgress: ScanProgress?
-    public private(set) var lastError: EngineError?
+    public private(set) var lastError: EngineError? {
+        didSet { lastErrorSignal &+= 1 }
+    }
+    /// Bumps on every `lastError` write, including a repeat of an identical
+    /// message. EngineError isn't Equatable, so views key error-recovery
+    /// `.onChange` on this monotonic counter rather than `lastError?.message`
+    /// — two consecutive identical failures must still re-fire the handler.
+    public private(set) var lastErrorSignal: Int = 0
     public private(set) var lastBatch: BatchSummary?
     public private(set) var lastFaceClustering: FaceClusteringResult?
     public private(set) var faceClusteringInFlight: Bool = false
@@ -36,6 +43,15 @@ public final class EngineClient {
     /// would crash on first VLM call. UI should disable + explain.
     public private(set) var deepAnalyzeAvailable: Bool = true
     public private(set) var deepAnalyzeUnavailableReason: String?
+
+    /// Bumped on every engine exit (crash or clean). A dead engine can't
+    /// emit the terminal events that clear a view's *own* in-flight UI
+    /// (e.g. Deep Analyze's StreamCard + Cancel), so it would freeze until
+    /// a tab switch. Views observe this via `.onChange` to reset that
+    /// local state. EngineClient's own published flags are already reset
+    /// in `handleEngineExit`; this is the signal for state the client
+    /// doesn't own.
+    public private(set) var engineResetSignal: Int = 0
 
     // MARK: - Auto-pilot ("Organize Everything")
     //
@@ -64,6 +80,18 @@ public final class EngineClient {
     public private(set) var queueState: QueueState = QueueState(
         running: nil, pending: [], totalEtaSeconds: nil
     )
+
+    // MARK: - Restructure butler (engine-routed plan + apply)
+    //
+    // F-C3-021-app: the macOS Restructure tab drives its plan + apply through
+    // the engine butler instead of the app-side classifier. These mirror the
+    // published-state pattern above; the `*Signal` counters bump on every fresh
+    // payload so views can react via `.onChange` even though the DTOs aren't
+    // Equatable (same idiom as `engineResetSignal`).
+    public private(set) var restructurePlan: RestructurePlan?
+    public private(set) var restructureApplyResult: RestructureApplyResult?
+    public private(set) var restructurePlanSignal: Int = 0
+    public private(set) var restructureApplyResultSignal: Int = 0
 
     private var process: Process?
     private var stdinPipe: Pipe?
@@ -109,6 +137,11 @@ public final class EngineClient {
     }
 
     public func start() {
+        // A live engine here means this is a restart (Settings ▸ Restart
+        // Engine calls start() directly). Terminate + reap it FIRST —
+        // two live engines = two SQLite writers against one DB =
+        // corruption. Single-flight stop-then-start.
+        terminateRunningEngine()
         guard let binURL = Self.locateEngineBinary() else {
             state = .crashed(reason: "Engine binary not found next to app executable")
             return
@@ -124,6 +157,45 @@ public final class EngineClient {
             return
         }
         spawn(binary: binURL)
+    }
+
+    /// Stop half of a restart: cancel any pending respawn and
+    /// synchronously terminate + reap the running engine, so a restart
+    /// never overlaps two live engines against the single-writer SQLite
+    /// DB. The bounded reap releases the WAL lock before the next spawn;
+    /// the old process's pipe handlers are left armed (so it keeps
+    /// draining and can't deadlock on a full pipe during shutdown) — its
+    /// late EOF is harmless because `handleEngineExit(for:)` rejects any
+    /// process that is no longer `self.process`. Idempotent.
+    private func terminateRunningEngine() {
+        pendingRespawn?.cancel()
+        pendingRespawn = nil
+        if let proc = process, proc.isRunning {
+            proc.terminate()
+            // Bounded reap, not an unbounded waitUntilExit() on the
+            // @MainActor: SIGTERM drops the WAL lock in well under a second
+            // (the engine installs no handler), but a wedged/uninterruptible
+            // engine must never hang the UI. Poll, then escalate to SIGKILL.
+            if !Self.waitForExit(proc, timeout: 3.0) {
+                kill(proc.processIdentifier, SIGKILL)
+                _ = Self.waitForExit(proc, timeout: 2.0)
+            }
+        }
+        process = nil
+        stdinPipe = nil
+    }
+
+    /// Bounded wait for a child to exit; true if it exited within `timeout`.
+    /// Polls `isRunning` (flipped by Foundation's background reaper, so it
+    /// updates even while this runs on the main actor) instead of the
+    /// timeout-free `waitUntilExit()`, which can hang indefinitely.
+    private static func waitForExit(_ proc: Process, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while proc.isRunning {
+            if Date() >= deadline { return false }
+            usleep(20_000)
+        }
+        return true
     }
 
     /// Returns a non-nil failure reason when the engine binary
@@ -219,20 +291,26 @@ public final class EngineClient {
             }
         }
         let stderrBuffer = MutexBox(Data())
-        // S5: mirror the engine's 1 MiB MAX_FRAME_BYTES guard so a wedged or
-        // compromised engine that never emits a newline can't grow this buffer
-        // without bound and OOM the app.
-        let maxFrameBytes = 1024 * 1024
-        errPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        // 32 MiB inbound frame cap — matches the Windows app's inbound cap.
+        // The engine emits whole event lines with no per-frame size limit
+        // (IPCSink.emit), and a butler restructurePlan (~3.5k+ moves) blows
+        // past the old 1 MiB guard, which silently dropped the frame and left
+        // the UI wedged with no plan and no error. Still bounded so a wedged
+        // engine that never emits a newline can't grow this buffer without
+        // limit and OOM the app — but an oversize frame now surfaces a visible
+        // error instead of vanishing.
+        let maxFrameBytes = 32 * 1024 * 1024
+        errPipe.fileHandleForReading.readabilityHandler = { [weak self, weak proc] handle in
             let data = handle.availableData
             if data.isEmpty {
                 handle.readabilityHandler = nil
-                Task { @MainActor [weak self] in
-                    self?.handleEngineExit()
+                Task { @MainActor in
+                    self?.handleEngineExit(for: proc)
                 }
                 return
             }
             // Append + drain whole lines under the lock.
+            var oversizeBytes: Int? = nil
             let lines: [Data] = stderrBuffer.withLock { buf in
                 buf.append(data)
                 var out: [Data] = []
@@ -241,14 +319,24 @@ public final class EngineClient {
                     buf.removeSubrange(buf.startIndex...nl)
                     if !line.isEmpty { out.append(line) }
                 }
-                // S5: a partial frame past the cap (no newline yet) means the
-                // engine is emitting garbage — drop it and resync to the next
-                // newline rather than buffering unbounded.
+                // A partial frame past the cap (no newline yet) means the engine
+                // is emitting garbage or a frame larger than the shared limit —
+                // drop it and resync to the next newline rather than buffering
+                // unbounded. Reported below instead of dropped silently.
                 if buf.count > maxFrameBytes {
-                    Self.debug("ENGINE: oversize IPC frame (\(buf.count) bytes, no newline) — discarding")
+                    oversizeBytes = buf.count
                     buf.removeAll(keepingCapacity: false)
                 }
                 return out
+            }
+            if let dropped = oversizeBytes {
+                Self.debug("ENGINE: oversize IPC frame (\(dropped) bytes, no newline) — discarding")
+                Task { @MainActor in
+                    self?.lastError = EngineError(
+                        kind: "ipc_frame_too_large",
+                        message: "The engine sent an oversized message (\(dropped / (1024 * 1024)) MB) over the \(maxFrameBytes / (1024 * 1024)) MB limit, so it was dropped. Some results may be incomplete — try again."
+                    )
+                }
             }
             for line in lines {
                 // U4: only lines that can be JSON frames earn a decode
@@ -334,6 +422,12 @@ public final class EngineClient {
                 startScan(rootURL: root)
             }
         case .progress(let p):
+            // Each IPC line is delivered to the main actor as its own
+            // unstructured Task, which the runtime may reorder — so a
+            // late "discovered: 100" must never overwrite the final
+            // "discovered: 4000". Drop any snapshot that would roll a
+            // counter (or the phase) backwards within the same session.
+            guard p.supersedes(lastProgress) else { break }
             lastProgress = p
             // Auto-pilot: cancel + failed phases must release the
             // assistant view, otherwise the user is stuck looking at
@@ -359,7 +453,7 @@ public final class EngineClient {
             // the engine itself, so just update the visible stage.
             // BUT: if there are no faces in the scanned library, the
             // engine won't fire clustering at all and we'd hang on
-            // .grouping. Watchdog kicks the next stage after 6s if no
+            // .grouping. Watchdog flips to .ready after 6s if no
             // clustering activity is seen.
             if autoPilotActive {
                 autoPilotStage = .grouping
@@ -369,21 +463,16 @@ public final class EngineClient {
                     guard let self else { return }
                     // Still in auto-pilot, still on grouping, and no
                     // clustering even started (no inflight + no result):
-                    // skip ahead.
+                    // hand control back to the user. Deep Analyze is
+                    // opt-in and waits for a named person, so the
+                    // no-faces path must NOT auto-launch whole-library
+                    // Deep Analyze.
                     if self.autoPilotActive,
                        self.autoPilotStage == .grouping,
                        !self.faceClusteringInFlight,
                        self.lastFaceClustering == nil,
                        self.lastTerminalEventAt == stamp {
-                        if self.deepAnalyzeAvailable {
-                            self.autoPilotStage = .captioning
-                            let activeKind = AIModelKind.migrated(
-                                rawValue: UserDefaults.standard.string(forKey: "deepAnalyzeActiveModel") ?? ""
-                            ).rawValue
-                            self.deepAnalyzeAll(modelKind: activeKind, skipExisting: true)
-                        } else {
-                            self.autoPilotStage = .ready
-                        }
+                        self.autoPilotStage = .ready
                     }
                 }
             }
@@ -478,16 +567,26 @@ public final class EngineClient {
                 }
             }
         case .modelDownloadProgress(let p):
-            modelDownloadProgress = p
+            // Clear the bar once the download completes so the model picker
+            // doesn't show a stale "Downloading 100%" forever; otherwise track
+            // progress. (F-C4-015) It also clears on engine exit (handleEngineExit).
+            modelDownloadProgress = p.fraction >= 1.0 ? nil : p
         case .queueState(let q):
             queueState = q
-        // ── Windows-originated reply events. The mac app's equivalent flows
-        //    are synchronous (per-tab actions), so these aren't consumed here
-        //    yet; they're decoded so a shared/cross-platform engine doesn't
-        //    wedge the wire. ──
-        case .restructurePlan,
-             .restructureApplyResult,
-             .bulkActionResult,
+        // ── Restructure butler replies (F-C3-021-app). handleEvent already
+        //    runs on the main actor (see spawn()'s dispatch), so these
+        //    assignments are isolation-safe. ──
+        case .restructurePlan(let plan):
+            restructurePlan = plan
+            restructurePlanSignal &+= 1
+        case .restructureApplyResult(let result):
+            restructureApplyResult = result
+            restructureApplyResultSignal &+= 1
+        // ── Remaining Windows-originated reply events. The mac app's
+        //    equivalent flows are synchronous (per-tab actions), so these
+        //    aren't consumed here yet; they're decoded so a shared/
+        //    cross-platform engine doesn't wedge the wire. ──
+        case .bulkActionResult,
              .clipTextEmbedding,
              .mergeSuggestions,
              .hardwareReprobed,
@@ -498,12 +597,16 @@ public final class EngineClient {
     }
 
     @MainActor
-    private func handleEngineExit() {
+    private func handleEngineExit(for proc: Process?) {
+        // Identity guard (mirrors the Windows sender != _process check):
+        // a late EOF from a process we already terminated/replaced — a
+        // Restart, or a respawn that raced — must NOT tear down the
+        // engine that's live now, or reset its in-flight UI.
+        guard let proc, proc === self.process else { return }
+
         // Nil pipe handlers so any in-flight GCD callback short-circuits.
-        if let proc = process {
-            (proc.standardError as? Pipe)?.fileHandleForReading.readabilityHandler = nil
-            (proc.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
-        }
+        (proc.standardError as? Pipe)?.fileHandleForReading.readabilityHandler = nil
+        (proc.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
         process = nil
         stdinPipe = nil
 
@@ -517,6 +620,10 @@ public final class EngineClient {
         faceClusteringInFlight = false
         isPaused = false
         queueState = QueueState(running: nil, pending: [], totalEtaSeconds: nil)
+        // Signal views that own their in-flight UI (e.g. Deep Analyze's
+        // StreamCard + inert Cancel) to reset — the engine can no longer
+        // emit the terminal event that would clear them.
+        engineResetSignal &+= 1
 
         // Expected exit (shutdown called or work just completed): silent
         // re-spawn, no error pill, no respawn budget burned. Covers
@@ -677,8 +784,13 @@ public final class EngineClient {
     public func resume()   { isPaused = false; send(.resumeScan) }
     public func cancel()   { isPaused = false; send(.cancelScan) }
     public func shutdown() {
-        expectedExit = true
-        send(.shutdown)
+        // Only latch the expected-exit suppression when the shutdown
+        // command actually left the app — otherwise a genuine crash that
+        // races the respawn window (stdinPipe nil → send() returns false)
+        // would be masked as a clean exit and skip the error pill.
+        if send(.shutdown) {
+            expectedExit = true
+        }
     }
 
     /// Wipes the SQLite library + scan logs and triggers a fresh
@@ -765,7 +877,7 @@ public final class EngineClient {
     }
 
     public func deepAnalyzeAll(modelKind: String, skipExisting: Bool) {
-        guard send(.deepAnalyzeAll(modelKind: modelKind, skipExisting: skipExisting, tagsOnly: false)) else { return }
+        guard send(.deepAnalyzeAll(modelKind: modelKind, skipExisting: skipExisting, tagsOnly: false, proposeRenames: true)) else { return }
         deepAnalyzeInFlight = true
         deepAnalyzeProgress = nil
         deepAnalyzeComplete = nil
@@ -774,6 +886,27 @@ public final class EngineClient {
 
     public func deepAnalyzeCancel() {
         send(.deepAnalyzeCancel)
+    }
+
+    // MARK: - Restructure butler commands
+
+    /// Ask the engine to compute a restructure plan for `libraryRoot`. The
+    /// reply lands on `restructurePlan` and bumps `restructurePlanSignal`.
+    /// Returns false when the command never left the app (engine starting /
+    /// down) so the caller can stop its "computing…" spinner.
+    @discardableResult
+    public func planRestructure(libraryRoot: String) -> Bool {
+        send(.planRestructure(libraryRoot: libraryRoot))
+    }
+
+    /// Apply the selected `moves` through the engine butler. macOS performs
+    /// real on-disk moves; `useSymlinks` is sent for wire parity and ignored
+    /// engine-side. The reply lands on `restructureApplyResult` and bumps
+    /// `restructureApplyResultSignal`.
+    @discardableResult
+    public func applyRestructure(libraryRoot: String, moves: [RestructureMove],
+                                 useSymlinks: Bool = false) -> Bool {
+        send(.applyRestructure(libraryRoot: libraryRoot, moves: moves, useSymlinks: useSymlinks))
     }
 
     /// Pre-fetch a VLM's weights without running inference. Used by the
@@ -787,9 +920,37 @@ public final class EngineClient {
     }
 
     /// Cancel a running prewarm. Lands at the next Task.checkCancellation
-    /// inside swift-transformers' Hub fetcher (typically <1 s).
+    /// inside swift-transformers' Hub fetcher (typically <1 s). `nil` cancels
+    /// every in-flight prewarm (the only mode the welcome sheet uses today).
     public func cancelPrewarm() {
-        send(.cancelPrewarm)
+        send(.cancelPrewarm(modelKind: nil))
+    }
+}
+
+extension ScanProgress {
+    /// True when `self` is a fresher scan-progress snapshot than `prior`
+    /// and should replace it. Snapshots reach the main actor as
+    /// independent unstructured Tasks the runtime may reorder; a stale
+    /// one must never roll a counter backwards — e.g. a late
+    /// `discovered: 100` overwriting the final `discovered: 4000`.
+    /// Within one session the counters are monotonic and the phase only
+    /// advances; a different session always supersedes.
+    func supersedes(_ prior: ScanProgress?) -> Bool {
+        guard let prior, prior.sessionID == sessionID else { return true }
+        func isTerminal(_ phase: ScanPhase) -> Bool {
+            switch phase {
+            case .completed, .cancelled, .failed: return true
+            case .idle, .discovering, .tagging, .postScan: return false
+            }
+        }
+        // Terminal snapshots always win; once terminal, nothing rolls back.
+        if isTerminal(phase) { return true }
+        if isTerminal(prior.phase) { return false }
+        if discovered < prior.discovered { return false }
+        if processed < prior.processed { return false }
+        // total latches 0 → positive at discovery's end; never drop it.
+        if prior.total > 0 && total == 0 { return false }
+        return true
     }
 }
 

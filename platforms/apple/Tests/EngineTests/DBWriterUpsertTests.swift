@@ -21,12 +21,18 @@ struct DBWriterUpsertTests {
         ocr: String? = "alpha bravo",
         withFace: Bool = true
     ) -> TaggedFile {
+        // Represents a fully-evaluated successful image scan: all three stage-ran
+        // gates true so the content-change assertions (auto-tag / face / OCR
+        // delete-then-reinsert) exercise the firing path.
         var f = TaggedFile(
             url: url, kind: "image", extension: "jpg", sizeBytes: 4,
             createdAt: Date(timeIntervalSince1970: 1_600_000_000),
             modifiedAt: mtime,
             visionTags: tags,
-            ocrText: ocr
+            ocrText: ocr,
+            tagsEvaluated: true,
+            facesEvaluated: true,
+            ocrStageRan: true
         )
         if withFace {
             f.hasFaces = true

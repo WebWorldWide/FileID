@@ -61,6 +61,10 @@ fn rewrite_breadcrumb(counts: &HashMap<String, usize>) {
 }
 
 fn packs_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(base) = tests::packs_dir_override() {
+        return Some(base);
+    }
     let root = crate::paths::models_dir().ok()?;
     Some(root.join("packs"))
 }
@@ -114,6 +118,33 @@ pub fn disarm(ep: &str) {
         }
     }
     rewrite_breadcrumb(&counts);
+}
+
+/// RAII disarm: [`arm`]s `ep` on construction and [`disarm`]s on drop — including
+/// the drop that happens when the owning future is CANCELLED (a graceful
+/// shutdown that lands mid-model-load, where the explicit `disarm` after the
+/// `.await` never runs). Without this, a clean shutdown during the first ORT
+/// bind left `.ep_attempt` on disk and the NEXT launch false-poisoned a healthy
+/// guarded EP. A real native crash still skips the drop (the process is gone),
+/// so the over-disable-on-crash breadcrumb is preserved. (audit C1-001)
+pub struct ArmGuard {
+    ep: String,
+    guarded: bool,
+}
+
+impl ArmGuard {
+    pub fn arm(ep: &str) -> Self {
+        arm(ep);
+        Self { ep: ep.to_string(), guarded: is_guarded(ep) }
+    }
+}
+
+impl Drop for ArmGuard {
+    fn drop(&mut self) {
+        if self.guarded {
+            disarm(&self.ep);
+        }
+    }
 }
 
 /// Run once at startup. If a guarded EP's `arm` was never followed by a
@@ -196,5 +227,94 @@ pub fn reenable_ep(ep: &str) {
     }
     if cleared {
         tracing::info!(ep, "[EP-GUARD] re-enabling previously crash-disabled execution provider");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // The breadcrumb file, the `.ep_disabled_*` markers, and the global
+    // `armed()` refcount map are all process-global, so ep_guard tests must run
+    // one at a time and reset that shared state between them.
+    fn guard() -> &'static Mutex<()> {
+        static G: OnceLock<Mutex<()>> = OnceLock::new();
+        G.get_or_init(|| Mutex::new(()))
+    }
+
+    fn override_cell() -> &'static Mutex<Option<PathBuf>> {
+        static C: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+        C.get_or_init(|| Mutex::new(None))
+    }
+
+    pub(super) fn packs_dir_override() -> Option<PathBuf> {
+        override_cell().lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Clears the `packs_dir()` override on drop so the real path is restored for
+    /// any other test that reaches an `ep_guard` public fn after this one.
+    struct OverrideReset(PathBuf);
+    impl Drop for OverrideReset {
+        fn drop(&mut self) {
+            *override_cell().lock().unwrap_or_else(|e| e.into_inner()) = None;
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Point `packs_dir()` at a fresh empty temp dir and clear all in-memory
+    /// arm state so each test starts from a clean slate.
+    fn fresh_packs() -> OverrideReset {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir()
+            .join("fileid-ep-guard-test")
+            .join(format!("{}-{}", std::process::id(), n));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        *override_cell().lock().unwrap_or_else(|e| e.into_inner()) = Some(dir.clone());
+        armed().lock().unwrap_or_else(|e| e.into_inner()).clear();
+        OverrideReset(dir)
+    }
+
+    #[test]
+    fn graceful_shutdown_mid_load_clears_breadcrumb() {
+        let _serial = guard().lock().unwrap_or_else(|e| e.into_inner());
+        let packs = fresh_packs();
+        let crumb = packs.0.join(".ep_attempt");
+
+        // Arm as a scan's first ORT bind would. The breadcrumb names the EP.
+        let g = ArmGuard::arm("cuda");
+        assert!(crumb.exists(), "arming should drop the crash breadcrumb");
+
+        // Graceful shutdown mid-load == the owning future is dropped before the
+        // explicit disarm runs. The RAII guard's drop must clear the breadcrumb,
+        // so the NEXT launch does not false-poison this healthy EP.
+        drop(g);
+        assert!(!crumb.exists(), "graceful drop should clear the crash breadcrumb");
+
+        // And the next-launch resolver finds nothing to disable.
+        assert_eq!(resolve_poison_at_startup(), None);
+        assert!(!is_disabled("cuda"), "healthy EP must not be disabled after a clean shutdown");
+    }
+
+    #[test]
+    fn actual_crash_still_over_disables() {
+        let _serial = guard().lock().unwrap_or_else(|e| e.into_inner());
+        let packs = fresh_packs();
+        let crumb = packs.0.join(".ep_attempt");
+
+        // A native crash == arm() ran but neither disarm() nor the guard's drop
+        // did (the process is gone). The breadcrumb persists to disk.
+        arm("cuda");
+        assert!(crumb.exists(), "a crash must leave the breadcrumb for the next launch");
+
+        // Next launch promotes the stale breadcrumb to a persistent disable.
+        assert_eq!(resolve_poison_at_startup().as_deref(), Some("cuda"));
+        assert!(is_disabled("cuda"), "crashed EP must stay disabled until re-enabled");
+        assert!(!crumb.exists(), "resolver consumes the breadcrumb");
+
+        reenable_ep("cuda");
+        assert!(!is_disabled("cuda"));
     }
 }

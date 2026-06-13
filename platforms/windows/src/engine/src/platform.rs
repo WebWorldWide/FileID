@@ -59,6 +59,44 @@ pub fn redact_path_for_log(path: impl AsRef<Path>) -> String {
     if parts.is_empty() {
         return "…".to_string();
     }
+    // Home-anchored masking (F-C2-004): for a file directly under a home dir
+    // (`…/Users/<user>/file` or `…/home/<user>/file`), the last-two-components
+    // tail would be `<user>/file` and leak the username. Detect a home-root
+    // keyword + username and, when the username would otherwise fall inside the
+    // kept two-component tail, drop everything up to and including the username
+    // so only the post-username components survive. Deeper paths
+    // (…/Users/<user>/Pictures/IMG) already push the username off the end and
+    // hit the generic tail below unchanged.
+    let home_anchor = parts.iter().position(|p| {
+        let l = p.to_lowercase();
+        l == "users" || l == "home"
+    });
+    if let Some(anchor) = home_anchor {
+        let user_idx = anchor + 1;
+        if user_idx < parts.len() {
+            // (a) The path ends AT the home dir itself (`C:\Users\<user>`,
+            // `/home/<user>`) — the username is the terminal component. Only a
+            // GENUINE home root (the keyword is the first component, anchor == 0)
+            // qualifies; fully mask it (baseline F-C2-004 behavior). A nested
+            // backup tree whose terminal IS a real file (anchor > 0, e.g.
+            // `E:\Backups\Users\file.txt`) is NOT a home dir and falls through
+            // so its filename survives. (audit R-06)
+            if user_idx == parts.len() - 1 && anchor == 0 {
+                return "…".to_string();
+            }
+            // (b) The username sits inside the kept last-two-component tail with
+            // at least one component after it (a real user dir above a file).
+            // Drop up to+including the username so only post-username context
+            // survives. The "component follows" guard stops a dir literally named
+            // users/home directly above a file from masking the FILENAME.
+            if user_idx + 1 < parts.len() && parts.len() - user_idx <= 2 {
+                let after = &parts[user_idx + 1..];
+                let kept: Vec<&str> =
+                    after.iter().rev().take(2).copied().collect::<Vec<_>>().into_iter().rev().collect();
+                return format!("…/{}", kept.join("/"));
+            }
+        }
+    }
     let tail = parts
         .iter()
         .rev()
@@ -160,6 +198,100 @@ mod redaction_tests {
         let r = redact_path_for_log(r"C:\Users\Adam\Code\FileID\src\secret.rs");
         assert_eq!(r, "…/src/secret.rs");
         assert!(!r.contains("Adam"), "username leaked: {r}");
+    }
+
+    /// F-C2-004: a file directly under a home dir must NOT expose the username.
+    /// Keeping the last two components alone would emit `…/Adam/resume.pdf` and
+    /// leak the username — home-anchored masking drops the user component.
+    #[test]
+    #[cfg(windows)]
+    fn redacts_home_direct_file_masking_username() {
+        let r = redact_path_for_log(r"C:\Users\Adam\resume.pdf");
+        assert!(!r.contains("Adam"), "username leaked: {r}");
+        assert!(r.ends_with("resume.pdf"), "filename lost: {r}");
+    }
+
+    /// F-C2-004 (POSIX shape): `/home/<user>/file` and `/Users/<user>/file`
+    /// must likewise mask the username. Runs on every host (the components
+    /// parse the same on non-Windows).
+    #[test]
+    fn redacts_posix_home_direct_file_masking_username() {
+        let r = redact_path_for_log("/home/adam/notes.txt");
+        assert!(!r.contains("adam"), "username leaked: {r}");
+        assert!(r.ends_with("notes.txt"), "filename lost: {r}");
+
+        let r2 = redact_path_for_log("/Users/adam/notes.txt");
+        assert!(!r2.contains("adam"), "username leaked: {r2}");
+        assert!(r2.ends_with("notes.txt"), "filename lost: {r2}");
+    }
+
+    /// R-06 regression: a path that ENDS at the home dir itself (the scan root
+    /// is the home directory — no file under it) must fully mask the username,
+    /// not fall through to the generic tail and leak it. Genuine home root only
+    /// (keyword is the first component); a nested backup tree is handled below.
+    #[test]
+    fn redacts_terminal_home_dir_masking_username() {
+        assert_eq!(redact_path_for_log("/Users/adam"), "…");
+        assert_eq!(redact_path_for_log("/home/adam"), "…");
+    }
+
+    /// F-C2-004 must NOT over-redact deep paths: `…/Users/<user>/Pictures/IMG`
+    /// already pushes the username off the kept tail, so the deeper context
+    /// (Pictures/Vacation) survives unchanged.
+    #[test]
+    #[cfg(windows)]
+    fn home_masking_leaves_deep_user_paths_unchanged() {
+        let r = redact_path_for_log(r"C:\Users\Adam\Pictures\Vacation\IMG.jpg");
+        assert_eq!(r, "…/Vacation/IMG.jpg");
+        assert!(!r.contains("Adam"), "username leaked: {r}");
+    }
+
+    /// R-06: a directory literally named `Users`/`home` sitting DIRECTLY above a
+    /// file (a backup tree, a NAS share) is not a home root and the next part is
+    /// the FILENAME, not a username. Home-anchored masking must fall through to
+    /// the generic tail and preserve the filename instead of collapsing to "…".
+    #[test]
+    #[cfg(windows)]
+    fn home_masking_preserves_filename_for_backup_tree() {
+        let r = redact_path_for_log(r"E:\Backups\Users\file.txt");
+        assert_eq!(r, "…/Users/file.txt");
+    }
+}
+
+// The dedicated-thread set/clear semantics only exist on Windows; off-Windows
+// SleepGuard is a no-op unit struct, so these thread-handoff tests run on the
+// Windows target (where the assertion is real). (F-C1-008)
+#[cfg(all(test, windows))]
+mod sleep_guard_tests {
+    use super::*;
+
+    /// F-C1-008: SetThreadExecutionState is thread-scoped, so the assertion
+    /// must be set AND cleared on the same thread. The guard owns a dedicated
+    /// thread for the whole lifecycle, so acquiring on one thread and dropping
+    /// on another (the real-world Tokio-worker case) still releases cleanly.
+    /// On non-Windows the guard is a no-op; on Windows the dedicated worker
+    /// thread is named "sleep-guard" and is joined by Drop, so no thread is
+    /// leaked and the clear is provably reached.
+    #[test]
+    fn acquire_and_drop_across_threads_does_not_panic_or_leak() {
+        // Acquire on the current thread, hand the guard to a DIFFERENT thread,
+        // and drop it there — mirroring acquire-on-worker-A / drop-on-worker-B.
+        let guard = SleepGuard::acquire();
+        let handle = std::thread::spawn(move || {
+            // Dropping here runs Drop on a thread that never called acquire().
+            drop(guard);
+        });
+        handle.join().expect("guard drop thread panicked");
+    }
+
+    /// The guard must be safe to acquire and drop repeatedly without wedging
+    /// the assertion (each cycle sets then clears on its own owned thread).
+    #[test]
+    fn repeated_acquire_release_cycles() {
+        for _ in 0..8 {
+            let g = SleepGuard::acquire();
+            drop(g);
+        }
     }
 }
 
@@ -809,13 +941,27 @@ pub async fn watch_parent(parent_pid: u32, shutdown: Arc<Notify>) {
 // SetThreadExecutionState equivalent of macOS IOPMAssertion. Set on scan
 // start, cleared on scan end. The OS keeps the system awake but lets the
 // display sleep — we pass ES_SYSTEM_REQUIRED but NOT ES_DISPLAY_REQUIRED.
+//
+// SetThreadExecutionState is THREAD-SCOPED: the assertion lives on the thread
+// that set it and is only released by a matching SetThreadExecutionState
+// (ES_CONTINUOUS) on that SAME thread (or when the thread exits). The guard is
+// acquired at the top of an async scan and dropped when it returns, but the
+// future is polled across Tokio worker threads — so a naive acquire-here /
+// clear-in-Drop would SET on one worker and CLEAR on another, leaving the
+// assertion permanently armed and the machine unable to sleep after a scan
+// (F-C1-008). We therefore pin the whole set→hold→clear lifecycle to one
+// dedicated thread the guard owns; the assertion clears on the thread that set
+// it no matter which Tokio worker runs Drop.
 
 /// RAII guard. While alive, prevents Windows from sleeping the system.
-/// Drop = release the assertion. Multiple guards stack (each thread sets
-/// independently); this is by Win32 design.
+/// Drop = release the assertion. The set and clear both run on a dedicated
+/// owned thread so the thread-scoped assertion is released on the same thread
+/// that armed it, independent of which Tokio worker polls/drops the guard.
 pub struct SleepGuard {
     #[cfg(windows)]
-    set: bool,
+    stop: Option<std::sync::mpsc::Sender<()>>,
+    #[cfg(windows)]
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl SleepGuard {
@@ -824,8 +970,40 @@ impl SleepGuard {
         use windows::Win32::System::Power::{
             SetThreadExecutionState, ES_CONTINUOUS, ES_SYSTEM_REQUIRED,
         };
-        let prev = unsafe { SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED) };
-        Self { set: prev.0 != 0 }
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+        // `armed_tx` lets acquire() block until the dedicated thread has either
+        // set the assertion or determined it could not — so the guard's state is
+        // known by the time `acquire` returns.
+        let (armed_tx, armed_rx) = std::sync::mpsc::channel::<bool>();
+        let thread = std::thread::Builder::new()
+            .name("sleep-guard".to_string())
+            .spawn(move || {
+                let prev = unsafe { SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED) };
+                let armed = prev.0 != 0;
+                let _ = armed_tx.send(armed);
+                if !armed {
+                    return;
+                }
+                // Block this dedicated thread until the guard is dropped (or the
+                // sender is dropped, which also wakes us). The clear runs on THIS
+                // thread, satisfying SetThreadExecutionState's same-thread rule.
+                let _ = stop_rx.recv();
+                unsafe { SetThreadExecutionState(ES_CONTINUOUS); }
+            });
+        match thread {
+            Ok(handle) => {
+                let armed = armed_rx.recv().unwrap_or(false);
+                if armed {
+                    Self { stop: Some(stop_tx), thread: Some(handle) }
+                } else {
+                    // Thread set nothing (or the API returned 0); let it finish
+                    // and don't hold a stop sender — there is nothing to clear.
+                    let _ = handle.join();
+                    Self { stop: None, thread: None }
+                }
+            }
+            Err(_) => Self { stop: None, thread: None },
+        }
     }
 
     #[cfg(not(windows))]
@@ -835,9 +1013,15 @@ impl SleepGuard {
 #[cfg(windows)]
 impl Drop for SleepGuard {
     fn drop(&mut self) {
-        if self.set {
-            use windows::Win32::System::Power::{SetThreadExecutionState, ES_CONTINUOUS};
-            unsafe { SetThreadExecutionState(ES_CONTINUOUS); }
+        // Signal the dedicated thread to clear, then join so the assertion is
+        // provably released before the guard is gone. Dropping the sender alone
+        // would also wake the thread (recv returns Err), but the explicit send +
+        // join makes the ordering deterministic for callers and tests.
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(handle) = self.thread.take() {
+            let _ = handle.join();
         }
     }
 }

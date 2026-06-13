@@ -6,7 +6,26 @@ import FileIDShared
 
 @Observable
 public final class ReadStore: @unchecked Sendable {
-    private var queue: DatabaseQueue?
+    // The read connection is guarded by `connLock`: many SwiftUI views
+    // read concurrently off the main actor while `openIfPossible`/`close`
+    // can swap or drop it. Without the lock, a reader's retain
+    // (`guard let q = queue`) racing the teardown's release (`_queue = nil`)
+    // is a data race that can over-release the live SQLite connection —
+    // the macOS mirror of the Windows ReadStore.Dispose UAF. Each reader
+    // captures a strong `q` under the lock, so ARC keeps the connection
+    // alive until the last in-flight read drains, even across `close()`.
+    @ObservationIgnored private let connLock = NSLock()
+    @ObservationIgnored private var _queue: DatabaseQueue?
+    private var queue: DatabaseQueue? {
+        get { connLock.lock(); defer { connLock.unlock() }; return _queue }
+        set { connLock.lock(); defer { connLock.unlock() }; _queue = newValue }
+    }
+    // Coalesce + throttle state for the off-main counters refresh. The
+    // duplicate-group window query is O(N log N) and must not run on the
+    // main thread on every scan tick — see `refreshCounters`.
+    @ObservationIgnored private let countersLock = NSLock()
+    @ObservationIgnored private var countersDirty = false
+    @ObservationIgnored private var countersRunning = false
     private let dbURL: URL
     public private(set) var version: Int = 0
     public private(set) var totalFiles: Int = 0
@@ -51,12 +70,20 @@ public final class ReadStore: @unchecked Sendable {
         refreshCounters()
     }
 
+    /// Explicit teardown. Drops our reference to the read connection
+    /// under the lock; ARC keeps the underlying SQLite connection alive
+    /// until every in-flight read (each holding a strong `q`) drains, so
+    /// closing never frees the connection out from under a reader.
+    public func close() {
+        queue = nil
+    }
+
     /// Brief writable connection for Cleanup row deletes. WAL allows this
     /// from a separate process without blocking the engine writer.
     public func deleteFiles(ids: [Int64]) -> Int {
         guard !ids.isEmpty else { return 0 }
         do {
-            let queue = try DatabaseQueue(path: dbURL.path)
+            let queue = try writeQueue()
             let deleted = try queue.write { db -> Int in
                 var total = 0
                 var affectedPersons = Set<Int64>()
@@ -103,12 +130,70 @@ public final class ReadStore: @unchecked Sendable {
         }
     }
 
+    private struct CounterSnapshot {
+        let totalFiles: Int
+        let totalImages: Int
+        let totalDuplicateGroups: Int
+        let totalReclaimableMB: Double
+    }
+
+    private enum CounterResult {
+        case ok(CounterSnapshot)
+        case failure(String)
+        case noDatabase
+    }
+
+    /// Schedule a counters refresh off the main thread. The duplicate-group
+    /// window query is O(N log N) over the whole `files` table; run inline it
+    /// pegged the UI because a live scan calls `notifyChanged` up to once a
+    /// second from `@MainActor` views. A single background worker coalesces
+    /// bursts (one in-flight run, re-run once if more requests arrived while
+    /// it ran) and throttles successive heavy queries, so the main thread
+    /// never pays for scan ticks and the table is scanned at most ~once a
+    /// second during a burst. Property writes still land on the main actor.
     private func refreshCounters() {
-        guard let q = queue else { return }
+        countersLock.lock()
+        countersDirty = true
+        if countersRunning {
+            countersLock.unlock()
+            return
+        }
+        countersRunning = true
+        countersLock.unlock()
+
+        Task.detached(priority: .utility) { [weak self] in
+            while let self {
+                self.countersLock.lock()
+                if !self.countersDirty {
+                    self.countersRunning = false
+                    self.countersLock.unlock()
+                    return
+                }
+                self.countersDirty = false
+                self.countersLock.unlock()
+
+                switch self.computeCounters() {
+                case .ok(let snapshot):
+                    await MainActor.run { self.applyCounters(snapshot) }
+                case .failure(let message):
+                    await MainActor.run { self.lastError = message }
+                case .noDatabase:
+                    break
+                }
+                // Throttle: cap the heavy window query to ~once per interval
+                // so a steady scan can't spin the background worker; the
+                // trailing dirty flag still guarantees a final, accurate run.
+                try? await Task.sleep(nanoseconds: 750_000_000)
+            }
+        }
+    }
+
+    private func computeCounters() -> CounterResult {
+        guard let q = queue else { return .noDatabase }
         do {
-            try q.read { db in
-                self.totalFiles  = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files") ?? 0
-                self.totalImages = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'image' AND failed = 0") ?? 0
+            return try q.read { db -> CounterResult in
+                let totalFiles  = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files") ?? 0
+                let totalImages = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'image' AND failed = 0") ?? 0
 
                 // Duplicate groups by phash (groups of size > 1). Mirror the
                 // Cleanup list exactly: filter failed = 0, and compute
@@ -134,13 +219,26 @@ public final class ReadStore: @unchecked Sendable {
                         (SELECT COUNT(DISTINCT phash) FROM ranked WHERE n > 1) AS groups,
                         COALESCE((SELECT SUM(size_bytes) FROM ranked WHERE n > 1 AND rk > 1), 0) AS reclaimable
                     """)
-                self.totalDuplicateGroups = dupRow?["groups"] ?? 0
+                let groups: Int = dupRow?["groups"] ?? 0
                 let reclaimableBytes: Int64 = dupRow?["reclaimable"] ?? 0
-                self.totalReclaimableMB = Double(reclaimableBytes) / 1_048_576
+                return .ok(CounterSnapshot(
+                    totalFiles: totalFiles,
+                    totalImages: totalImages,
+                    totalDuplicateGroups: groups,
+                    totalReclaimableMB: Double(reclaimableBytes) / 1_048_576
+                ))
             }
         } catch {
-            self.lastError = "Counters refresh failed: \(error)"
+            return .failure("Counters refresh failed: \(error)")
         }
+    }
+
+    @MainActor
+    private func applyCounters(_ snapshot: CounterSnapshot) {
+        self.totalFiles = snapshot.totalFiles
+        self.totalImages = snapshot.totalImages
+        self.totalDuplicateGroups = snapshot.totalDuplicateGroups
+        self.totalReclaimableMB = snapshot.totalReclaimableMB
     }
 
     // MARK: - Library queries
@@ -207,6 +305,19 @@ public final class ReadStore: @unchecked Sendable {
         }
     }
 
+    /// Off-main twin of `files(...)`. The keyword search runs a
+    /// multi-table FTS + LIKE + face-join query; on a live scan the view
+    /// reloaded it on the MainActor on every throttled batch event,
+    /// stuttering the UI. Callers debounce and await this so the query
+    /// runs on a background task and only the assignment lands on main.
+    public func filesAsync(offset: Int = 0, limit: Int = 200,
+                           search: String = "",
+                           kindFilter: String? = nil) async -> [FileRow] {
+        await Task.detached(priority: .userInitiated) { [self] in
+            files(offset: offset, limit: limit, search: search, kindFilter: kindFilter)
+        }.value
+    }
+
     /// CLIP text → image semantic search. Embeds the query via the
     /// CLIP text encoder, ranks files by cosine over their stored
     /// image embeddings. Returns nil when the text encoder isn't
@@ -214,6 +325,16 @@ public final class ReadStore: @unchecked Sendable {
     public func semanticSearch(query: String, limit: Int = 60) -> [FileRow]? {
         guard let textVec = CLIPTextEncoder.shared.embedText(query) else { return nil }
         return rankByCosine(against: textVec, limit: limit)
+    }
+
+    /// Off-main twin of `semanticSearch`. The full clip_embeddings cosine
+    /// scan is O(N·512) and froze the UI for seconds on a 50k library when
+    /// run inline on the MainActor. The text embed + ranking happen on a
+    /// background task; the caller awaits and publishes results on main.
+    public func semanticSearchAsync(query: String, limit: Int = 60) async -> [FileRow]? {
+        await Task.detached(priority: .userInitiated) { [self] in
+            semanticSearch(query: query, limit: limit)
+        }.value
     }
 
     /// "More photos like this one" — top-K by cosine over CLIP
@@ -230,13 +351,21 @@ public final class ReadStore: @unchecked Sendable {
         return rankByCosine(against: seedVec, limit: limit, excludeID: seedID)
     }
 
+    /// Off-main twin of `similarFiles` — the same full-table cosine scan
+    /// as semantic search, kept off the MainActor for the same reason.
+    public func similarFilesAsync(toFileID seedID: Int64, limit: Int = 24) async -> [FileRow] {
+        await Task.detached(priority: .userInitiated) { [self] in
+            similarFiles(toFileID: seedID, limit: limit)
+        }.value
+    }
+
     /// Top-K files ranked by cosine similarity to the given query
     /// vector (in CLIP image-embedding space). Used by both visual
     /// similarity (seed = a file's embedding) and semantic search
     /// (seed = a CLIP text embedding).
     public func rankByCosine(against query: [Float], limit: Int = 60,
                               excludeID: Int64? = nil) -> [FileRow] {
-        guard let q = queue, !query.isEmpty else { return [] }
+        guard let q = queue, !query.isEmpty, limit > 0 else { return [] }
         return (try? q.read { db -> [FileRow] in
             // failed = 0 at SQL time (parity with Windows
             // SemanticSearchAsync): a failed row scored here would land
@@ -259,21 +388,27 @@ public final class ReadStore: @unchecked Sendable {
                     """
                 args = []
             }
-            let rows = try Row.fetchAll(db, sql: sql, arguments: args)
-            struct Scored { let id: Int64; let score: Float }
-            var scored: [Scored] = []
-            scored.reserveCapacity(rows.count)
-            for r in rows {
+            // Stream rows through a cursor and keep only a bounded top-K
+            // min-heap. fetchAll would hold every 512-float embedding blob
+            // resident at once (~1 GB at 500k files); the cursor frees each
+            // blob right after it's scored. Ranking is (score desc, row-order
+            // asc) — identical to the previous stable sort-then-prefix(limit),
+            // so the result set and tie order are unchanged while retained
+            // state drops from O(N) to O(limit).
+            var heap = TopKByCosine(capacity: limit)
+            let cursor = try Row.fetchCursor(db, sql: sql, arguments: args)
+            var order = 0
+            while let r = try cursor.next() {
                 guard let fid: Int64 = r["file_id"],
                       let blob: Data = r["embedding"] else { continue }
                 let v = blobToFloats(blob)
                 guard v.count == query.count else { continue }
                 var s: Float = 0
                 for i in 0..<v.count { s += query[i] * v[i] }
-                scored.append(Scored(id: fid, score: s))
+                heap.offer(id: fid, score: s, order: order)
+                order += 1
             }
-            scored.sort { $0.score > $1.score }
-            let topIDs = scored.prefix(limit).map { $0.id }
+            let topIDs = heap.sortedDescending().map { $0.id }
             guard !topIDs.isEmpty else { return [] }
             let placeholders = topIDs.map { _ in "?" }.joined(separator: ",")
             let fileArgs: [DatabaseValueConvertible] = topIDs.map { Int($0) }
@@ -653,7 +788,7 @@ public final class ReadStore: @unchecked Sendable {
                              middleName: String?, lastName: String?,
                              suffix: String?, isUnknown: Bool) {
         do {
-            let queue = try DatabaseQueue(path: dbURL.path)
+            let queue = try writeQueue()
             try queue.write { db in
                 try db.execute(sql: """
                     UPDATE persons
@@ -693,7 +828,7 @@ public final class ReadStore: @unchecked Sendable {
                                   fileIDs: [Int64]) -> Int {
         guard !fileIDs.isEmpty, source != target else { return 0 }
         do {
-            let queue = try DatabaseQueue(path: dbURL.path)
+            let queue = try writeQueue()
             let moved = try queue.write { db -> Int in
                 let placeholders = fileIDs.map { _ in "?" }.joined(separator: ",")
                 var args: [DatabaseValueConvertible] = [target, source]
@@ -755,7 +890,7 @@ public final class ReadStore: @unchecked Sendable {
         let validSources = sources.filter { $0 != target }
         guard !validSources.isEmpty else { return nil }
         do {
-            let queue = try DatabaseQueue(path: dbURL.path)
+            let queue = try writeQueue()
             let newCount: Int = try queue.write { db in
                 let placeholders = validSources.map { _ in "?" }.joined(separator: ",")
                 // 1. Reassign every face_print from the source persons to
@@ -836,7 +971,7 @@ public final class ReadStore: @unchecked Sendable {
 
         var totalSources = 0
         do {
-            let q = try DatabaseQueue(path: dbURL.path)
+            let q = try writeQueue()
             try q.write { db in
                 for (target, sources) in byTarget {
                     for chunk in stride(from: 0, to: sources.count, by: 500).map({
@@ -927,7 +1062,7 @@ public final class ReadStore: @unchecked Sendable {
     /// the old batch-end variant had no busy timeout and swallowed the
     /// error after every file had already moved on disk.
     public func openPathUpdateQueue() throws -> DatabaseQueue {
-        try renameWriteQueue()
+        try writeQueue()
     }
 
     public func updatePathText(fileID: Int64, newPath: String, on queue: DatabaseQueue) throws {
@@ -1017,7 +1152,7 @@ public final class ReadStore: @unchecked Sendable {
         // connections.
         let queue: DatabaseQueue
         do {
-            queue = try renameWriteQueue()
+            queue = try writeQueue()
         } catch {
             self.lastError = "DB open for rename failed: \(error)"
             return BulkRenameResult(renamed: [], failed: files.count,
@@ -1082,9 +1217,7 @@ public final class ReadStore: @unchecked Sendable {
                 // now-nonexistent path on failure. If it fails, roll the file
                 // back so disk and DB stay consistent and report it as failed.
                 do {
-                    var config = Configuration()
-                    config.busyMode = .timeout(5)
-                    let q = try DatabaseQueue(path: dbURL.path, configuration: config)
+                    let q = try writeQueue()
                     try q.write { db in
                         try db.execute(
                             sql: "UPDATE files SET path_text = ?, path_search = ? WHERE id = ?",
@@ -1110,17 +1243,19 @@ public final class ReadStore: @unchecked Sendable {
     /// DB row. Returns the new path or nil on failure.
     public func applyProposedName(file: FileRow) -> URL? {
         do {
-            return applyProposedName(file: file, on: try renameWriteQueue())
+            return applyProposedName(file: file, on: try writeQueue())
         } catch {
             self.lastError = "DB open for rename failed: \(error)"
             return nil
         }
     }
 
-    // Busy timeout so momentary WAL contention with the engine writer
-    // retries instead of failing immediately (which used to strand the
-    // file: renamed on disk but the DB row still pointing at oldPath).
-    private func renameWriteQueue() throws -> DatabaseQueue {
+    // Every app write connection sets a busy timeout. The engine is the
+    // single writer; a People edit / Cleanup delete / rename that lands
+    // during a brief engine WAL write would otherwise hit SQLITE_BUSY and
+    // throw — silently no-opping the edit, or stranding a trashed file as
+    // a ghost DB row. The timeout makes the contended write retry instead.
+    private func writeQueue() throws -> DatabaseQueue {
         var config = Configuration()
         config.busyMode = .timeout(5)
         return try DatabaseQueue(path: dbURL.path, configuration: config)
@@ -1169,5 +1304,73 @@ public final class ReadStore: @unchecked Sendable {
             try? FileManager.default.moveItem(at: target, to: oldURL)
             return nil
         }
+    }
+}
+
+/// Bounded top-K selector for cosine ranking. Retains at most `capacity`
+/// scored ids in a min-heap keyed by rank (score desc, row-order asc): the
+/// root is the lowest-ranked kept item, so an incoming item only displaces
+/// it when it ranks strictly higher. This caps retained state at O(K)
+/// regardless of table size while reproducing exactly the output of a stable
+/// sort-by-score-descending truncated to K — row order breaks score ties, the
+/// same tie-break a stable sort gives. `order` is unique, so the rank is a
+/// strict total order and selection is deterministic.
+private struct TopKByCosine {
+    struct Item { let id: Int64; let score: Float; let order: Int }
+    private var items: [Item] = []
+    private let capacity: Int
+
+    init(capacity: Int) {
+        self.capacity = max(0, capacity)
+        items.reserveCapacity(self.capacity)
+    }
+
+    private func ranksAbove(_ a: Item, _ b: Item) -> Bool {
+        a.score != b.score ? a.score > b.score : a.order < b.order
+    }
+
+    mutating func offer(id: Int64, score: Float, order: Int) {
+        guard capacity > 0 else { return }
+        let item = Item(id: id, score: score, order: order)
+        if items.count < capacity {
+            items.append(item)
+            siftUp(from: items.count - 1)
+        } else if ranksAbove(item, items[0]) {
+            // New item outranks the worst kept — replace the root.
+            items[0] = item
+            siftDown(from: 0)
+        }
+    }
+
+    // Min-heap on rank: a parent never ranks above its children, so the
+    // worst-ranked kept item sits at the root for O(1) comparison in `offer`.
+    private mutating func siftUp(from start: Int) {
+        var i = start
+        while i > 0 {
+            let parent = (i - 1) / 2
+            guard ranksAbove(items[parent], items[i]) else { break }
+            items.swapAt(i, parent)
+            i = parent
+        }
+    }
+
+    private mutating func siftDown(from start: Int) {
+        var i = start
+        let n = items.count
+        while true {
+            let l = 2 * i + 1, r = 2 * i + 2
+            var worst = i
+            if l < n, ranksAbove(items[worst], items[l]) { worst = l }
+            if r < n, ranksAbove(items[worst], items[r]) { worst = r }
+            if worst == i { break }
+            items.swapAt(i, worst)
+            i = worst
+        }
+    }
+
+    /// The kept items, highest rank first — matching `prefix(limit)` of the
+    /// prior stable descending sort.
+    func sortedDescending() -> [Item] {
+        items.sorted { ranksAbove($0, $1) }
     }
 }

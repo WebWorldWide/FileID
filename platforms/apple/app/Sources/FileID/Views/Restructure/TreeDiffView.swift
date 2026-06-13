@@ -140,20 +140,16 @@ struct TreeDiffView: View {
             }
 
             HStack(alignment: .top, spacing: 12) {
-                paneCard(
-                    title: "Today",
-                    subtitle: "Where files live now",
-                    rows: sourceRows.map { row in
-                        AnyView(sourceRowView(row))
-                    }
-                )
-                paneCard(
-                    title: "Proposed",
-                    subtitle: "Where they'll live",
-                    rows: destRows.map { row in
-                        AnyView(destRowView(row))
-                    }
-                )
+                paneCard(title: "Today",
+                         subtitle: "Where files live now",
+                         rows: sourceRows) { row in
+                    sourceRowView(row)
+                }
+                paneCard(title: "Proposed",
+                         subtitle: "Where they'll live",
+                         rows: destRows) { row in
+                    destRowView(row)
+                }
             }
         }
     }
@@ -179,8 +175,17 @@ struct TreeDiffView: View {
         }
     }
 
+    // Rows are passed as DATA + a @ViewBuilder, not a pre-materialized
+    // [AnyView]. The old version eagerly built every row into an AnyView on
+    // each render, defeating LazyVStack virtualization (and erasing row
+    // identity) — fatal at 100k+ proposals. Now ForEach over Identifiable
+    // data lets the LazyVStack build only the visible rows.
     @ViewBuilder
-    private func paneCard(title: String, subtitle: String, rows: [AnyView]) -> some View {
+    private func paneCard<Row: Identifiable, RowContent: View>(
+        title: String, subtitle: String,
+        rows: [Row],
+        @ViewBuilder row: @escaping (Row) -> RowContent
+    ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(title).font(.caption.bold()).foregroundStyle(.primary)
@@ -189,8 +194,8 @@ struct TreeDiffView: View {
             .padding(.horizontal, 10).padding(.top, 8)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 4) {
-                    ForEach(0..<rows.count, id: \.self) { i in
-                        rows[i]
+                    ForEach(rows) { item in
+                        row(item)
                     }
                 }
                 .padding(8)
@@ -208,39 +213,19 @@ struct TreeDiffView: View {
     private func sourceRowView(_ row: SourceRow) -> some View {
         let (letter, tint) = sourceLetter(for: row.kind)
         let isHighlighted = hoverBus.touchesSource(row.folder)
-        Button {
-            onTapSource(row.folder)
-        } label: {
-            HStack(spacing: 6) {
-                Text(letter)
-                    .font(.caption.bold().monospaced())
-                    .foregroundStyle(.black)
-                    .frame(width: 18, height: 18)
-                    .background(Circle().fill(tint))
-                Image(systemName: "folder.fill")
-                    .font(.caption2)
-                    .foregroundStyle(tint)
-                Text(row.displayName)
-                    .font(.caption.monospaced())
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: 6)
-                Text("\(row.totalFiles)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+        let label = sourceRowLabel(row, letter: letter, tint: tint,
+                                   isHighlighted: isHighlighted)
+        Group {
+            // Anchor folders stay put — they generate no proposals, so a
+            // drill-down would open an empty "Nothing to show". Render the
+            // anchor row as a static (non-tappable) row instead.
+            if row.kind == .anchor {
+                label
+            } else {
+                Button { onTapSource(row.folder) } label: { label }
+                    .buttonStyle(.plain)
             }
-            .padding(.horizontal, 8).padding(.vertical, 5)
-            .background(
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(tint.opacity(isHighlighted ? 0.22 : 0.06))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 4)
-                    .stroke(tint.opacity(isHighlighted ? 0.7 : 0),
-                              lineWidth: isHighlighted ? 1 : 0)
-            )
         }
-        .buttonStyle(.plain)
         .help(sourceHelp(for: row))
         .onHover { hovering in
             hoverBus.set(hovering ? .sourceFolder(row.folder) : nil)
@@ -249,43 +234,56 @@ struct TreeDiffView: View {
     }
 
     @ViewBuilder
+    private func sourceRowLabel(_ row: SourceRow, letter: String,
+                                tint: Color, isHighlighted: Bool) -> some View {
+        HStack(spacing: 6) {
+            Text(letter)
+                .font(.caption.bold().monospaced())
+                .foregroundStyle(.black)
+                .frame(width: 18, height: 18)
+                .background(Circle().fill(tint))
+            Image(systemName: "folder.fill")
+                .font(.caption2)
+                .foregroundStyle(tint)
+            Text(row.displayName)
+                .font(.caption.monospaced())
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 6)
+            Text("\(row.totalFiles)")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 8).padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 4)
+                .fill(tint.opacity(isHighlighted ? 0.22 : 0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(tint.opacity(isHighlighted ? 0.7 : 0),
+                          lineWidth: isHighlighted ? 1 : 0)
+        )
+        .contentShape(Rectangle())
+    }
+
+    @ViewBuilder
     private func destRowView(_ row: DestRow) -> some View {
         let letter = row.isExisting ? "=" : "+"
         let tint: Color = row.isExisting ? .green : Theme.gold
         let isHighlighted = hoverBus.touchesDest(row.bucket)
-        Button {
-            onTapDestination(row.bucket)
-        } label: {
-            HStack(spacing: 6) {
-                Text(letter)
-                    .font(.caption.bold().monospaced())
-                    .foregroundStyle(.black)
-                    .frame(width: 18, height: 18)
-                    .background(Circle().fill(tint))
-                Image(systemName: bucketIcon(row.bucket))
-                    .font(.caption2)
-                    .foregroundStyle(tint)
-                Text(row.bucket)
-                    .font(.caption.monospaced())
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: 6)
-                Text("\(row.count)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+        let label = destRowLabel(row, letter: letter, tint: tint,
+                                 isHighlighted: isHighlighted)
+        Group {
+            // An existing/anchor destination is a folder staying put — there
+            // are no moving files to drill into, so keep it non-tappable.
+            if row.isExisting {
+                label
+            } else {
+                Button { onTapDestination(row.bucket) } label: { label }
+                    .buttonStyle(.plain)
             }
-            .padding(.horizontal, 8).padding(.vertical, 5)
-            .background(
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(tint.opacity(isHighlighted ? 0.22 : 0.06))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 4)
-                    .stroke(tint.opacity(isHighlighted ? 0.7 : 0),
-                              lineWidth: isHighlighted ? 1 : 0)
-            )
         }
-        .buttonStyle(.plain)
         .help(row.isExisting
               ? "Existing folder — \(row.count) file\(row.count == 1 ? "" : "s") staying."
               : "New folder — \(row.count) file\(row.count == 1 ? "" : "s") landing here.")
@@ -293,6 +291,40 @@ struct TreeDiffView: View {
             hoverBus.set(hovering ? .destBucket(row.bucket) : nil)
         }
         .animation(.easeInOut(duration: 0.18), value: isHighlighted)
+    }
+
+    @ViewBuilder
+    private func destRowLabel(_ row: DestRow, letter: String,
+                              tint: Color, isHighlighted: Bool) -> some View {
+        HStack(spacing: 6) {
+            Text(letter)
+                .font(.caption.bold().monospaced())
+                .foregroundStyle(.black)
+                .frame(width: 18, height: 18)
+                .background(Circle().fill(tint))
+            Image(systemName: bucketIcon(row.bucket))
+                .font(.caption2)
+                .foregroundStyle(tint)
+            Text(row.bucket)
+                .font(.caption.monospaced())
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 6)
+            Text("\(row.count)")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 8).padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 4)
+                .fill(tint.opacity(isHighlighted ? 0.22 : 0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(tint.opacity(isHighlighted ? 0.7 : 0),
+                          lineWidth: isHighlighted ? 1 : 0)
+        )
+        .contentShape(Rectangle())
     }
 
     private func sourceLetter(for kind: SourceKind) -> (String, Color) {

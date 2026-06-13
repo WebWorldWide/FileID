@@ -64,21 +64,25 @@ internal static class DebugLog
         {
             AppPaths.EnsureDirectories();
             var path = AppPaths.AppLogPath;
-            // Bound disk usage by truncating when oversized.
-            if (File.Exists(path))
-            {
-                var info = new FileInfo(path);
-                if (info.Length > MaxLogBytes)
-                {
-                    File.WriteAllText(path, "[log truncated at startup; oversized]\n");
-                }
-            }
             var stamp = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
             var line = $"{stamp} {level} [tid {Environment.CurrentManagedThreadId}] {message}\n";
             // Synchronous + flushed: a native fast-fail must not lose the last
-            // forensic line (see the field note above).
+            // forensic line (see the field note above). The oversize-truncation
+            // check + rewrite MUST share s_writeLock with the append — when run
+            // outside the lock they race a concurrent locked append and, once the
+            // log passes the cap, silently drop the very forensic tail this log
+            // exists to capture.
             lock (s_writeLock)
             {
+                // Bound disk usage by truncating when oversized.
+                if (File.Exists(path))
+                {
+                    var info = new FileInfo(path);
+                    if (info.Length > MaxLogBytes)
+                    {
+                        File.WriteAllText(path, "[log truncated; oversized]\n");
+                    }
+                }
                 File.AppendAllText(path, line, Encoding.UTF8);
             }
         }

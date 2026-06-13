@@ -42,15 +42,22 @@ public enum StreamingDownloadError: Error {
     case rangeNotSupported
     case checksumMismatch(expected: String, actual: String)
     case pinningFailed
+    case redirectBlocked(url: String)
+    case insufficientDiskSpace(needed: Int64, available: Int64)
+    case sizeImplausible(actual: Int64, expected: Int64)
     case underlying(Error)
 }
 
 public func streamingDownload(
     remote: URL,
     dest: URL,
+    approxBytes: Int64 = 0,
     expectedSHA256: String? = nil,
     onTick: @escaping @Sendable (DownloadTick) -> Void
 ) async throws {
+    // Single-stream transits the system temp dir then atomic-moves onto the
+    // destination volume — peak destination use is ~1×, not the parallel 2×.
+    try preflightDiskSpace(dest: dest, approxBytes: approxBytes, peakMultiplier: 1)
     let delegate = StreamingDownloadDelegate()
     let session = URLSession(configuration: streamingConfig(),
                               delegate: delegate, delegateQueue: nil)
@@ -82,6 +89,23 @@ public func streamingDownload(
                                 expected: expectedSHA256.lowercased(), actual: actual))
                             return
                         }
+                    }
+                    do {
+                        // Size sanity (no-hash gate): reject a truncated stream
+                        // or error page standing in for the artifact. Skipped
+                        // once a SHA256 verified above — an exact hash makes
+                        // this loose estimate a false-reject-only risk that
+                        // could delete a provably-correct file.
+                        if shouldEnforceSizeGate(expectedSHA256: expectedSHA256) {
+                            let actualSize = ((try? FileManager.default
+                                .attributesOfItem(atPath: tempURL.path))?[.size] as? NSNumber)?
+                                .int64Value ?? -1
+                            try checkSizePlausible(actual: actualSize, approxBytes: approxBytes)
+                        }
+                    } catch {
+                        try? FileManager.default.removeItem(at: tempURL)
+                        cont.resume(throwing: error)
+                        return
                     }
                     do {
                         try moveAtomically(from: tempURL, to: dest, fsync: true)
@@ -171,6 +195,9 @@ public func parallelStreamingDownload(
     expectedSHA256: String? = nil,
     onTick: @escaping @Sendable (DownloadTick) -> Void
 ) async throws {
+    // Parallel staging keeps every part plus the concat'd final on the
+    // destination volume → peak transient use is ~2× the file.
+    try preflightDiskSpace(dest: dest, approxBytes: approxBytes, peakMultiplier: 2)
     let probeCapture = RedirectCapture()
     let probeSession = URLSession(configuration: streamingConfig(approxBytes: approxBytes),
                                   delegate: probeCapture, delegateQueue: nil)
@@ -188,6 +215,9 @@ public func parallelStreamingDownload(
         throw StreamingDownloadError.underlying(error)
     }
     probeSession.finishTasksAndInvalidate()
+    if probeCapture.redirectRejected {
+        throw StreamingDownloadError.redirectBlocked(url: remote.absoluteString)
+    }
 
     guard let http = headResp as? HTTPURLResponse,
           (200..<300).contains(http.statusCode) else {
@@ -202,6 +232,7 @@ public func parallelStreamingDownload(
 
     if total <= 0 || !acceptsRanges {
         try await streamingDownload(remote: remote, dest: dest,
+                                    approxBytes: approxBytes,
                                     expectedSHA256: expectedSHA256, onTick: onTick)
         return
     }
@@ -259,6 +290,7 @@ public func parallelStreamingDownload(
         // a resolved per-redirect URL can be short-lived/expired, whereas the
         // sibling single-stream fallback (above) correctly re-follows `remote`.
         try await streamingDownload(remote: remote, dest: dest,
+                                    approxBytes: approxBytes,
                                     expectedSHA256: expectedSHA256, onTick: onTick)
         return
     } catch {
@@ -312,6 +344,20 @@ public func parallelStreamingDownload(
             cleanupParts()
             throw StreamingDownloadError.checksumMismatch(
                 expected: expectedSHA256.lowercased(), actual: actual)
+        }
+    }
+    // Size sanity (no-hash gate, mirrors the single-stream path): the
+    // exact-Content-Length check above can still pass for an error page that
+    // sets a matching small Content-Length, so reject anything implausibly
+    // far below the registry estimate. Skipped once a SHA256 verified above —
+    // an exact hash makes this loose estimate a false-reject-only risk.
+    if shouldEnforceSizeGate(expectedSHA256: expectedSHA256) {
+        do {
+            try checkSizePlausible(actual: assembledSize, approxBytes: approxBytes)
+        } catch {
+            try? FileManager.default.removeItem(at: finalTemp)
+            cleanupParts()
+            throw error
         }
     }
     cleanupParts()
@@ -406,6 +452,60 @@ private func downloadRange(
     }
 }
 
+/// Free bytes on the volume that will hold `url`, using the OS's
+/// "important usage" capacity (what it will actually free up for a
+/// foreground download) rather than the raw count.
+func volumeFreeBytes(forItemAt url: URL) -> Int64? {
+    let dir = url.deletingLastPathComponent()
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    guard let values = try? dir.resourceValues(
+            forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
+          let avail = values.volumeAvailableCapacityForImportantUsage else { return nil }
+    return avail
+}
+
+/// Free-disk preflight before a multi-GB fetch — mirrors the small CLIP /
+/// SFace installers so the VLM path (3.3–13.5 GB) no longer fails mid-fetch
+/// with an opaque write error. Peak transient use depends on the path, so the
+/// caller passes the multiplier: the parallel path stages every part then
+/// concatenates into a final temp on the destination volume (~2×), while the
+/// single-stream path transits the system temp dir and lands ~1× on the
+/// destination volume — a fixed 2× there false-rejects fetches that fit when
+/// free space is between 1× and 2×. Skipped when `approxBytes <= 0` (size
+/// unknown) or when free space can't be read.
+func preflightDiskSpace(dest: URL, approxBytes: Int64, peakMultiplier: Int64 = 2) throws {
+    guard approxBytes > 0 else { return }
+    let needed = approxBytes * max(1, peakMultiplier)
+    guard let free = volumeFreeBytes(forItemAt: dest) else { return }
+    if free < needed {
+        throw StreamingDownloadError.insufficientDiskSpace(needed: needed, available: free)
+    }
+}
+
+/// The post-download size gate is a *no-hash* fallback: when a SHA256 was
+/// pinned and matched, the bytes are provably correct, so the loose size
+/// estimate must be skipped — running it after a passing hash can only
+/// false-reject (and delete) a verified file when `approxBytes` over-estimates.
+func shouldEnforceSizeGate(expectedSHA256: String?) -> Bool {
+    expectedSHA256 == nil
+}
+
+/// Loose post-download size sanity — port of the Windows downloader's
+/// `check_size_plausible`. `approxBytes` is a registry/HF ESTIMATE so only
+/// an implausibly-small result is rejected: a truncated stream, an HTML
+/// error page, or an auth wall standing in for a model is orders of
+/// magnitude off, not a few percent (a ¼ floor never false-rejects a
+/// reasonable estimate). SHA256, when pinned, is the exact check; this is
+/// the gate for the no-hash case — VLM non-LFS configs carry no LFS oid, so
+/// without it they'd be promoted with no integrity check at all.
+func checkSizePlausible(actual: Int64, approxBytes: Int64) throws {
+    guard approxBytes > 0 else { return }
+    let floor = max(1, approxBytes / 4)
+    if actual < floor {
+        throw StreamingDownloadError.sizeImplausible(actual: actual, expected: approxBytes)
+    }
+}
+
 /// Streaming SHA256 of a file on disk — 4 MB autoreleasepool chunks so
 /// multi-GB models never load whole into RAM (M6). Hex, lowercase.
 public func sha256HexOfFile(at url: URL) throws -> String {
@@ -474,11 +574,22 @@ private func streamingConfig(approxBytes: Int64 = 0) -> URLSessionConfiguration 
 private final class RedirectCapture: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     var finalURL: URL?
     private(set) var pinningRejected = false
+    private(set) var redirectRejected = false
+    private var redirectCount = 0
 
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest,
                     completionHandler: @escaping (URLRequest?) -> Void) {
+        // https-only + host-allowlist + hop cap (Windows download.rs E11).
+        // Passing nil stops the chain so the caller surfaces redirectBlocked.
+        redirectCount += 1
+        guard redirectCount <= TLSPinning.maxRedirects,
+              TLSPinning.allowsRedirect(to: request.url) else {
+            redirectRejected = true
+            completionHandler(nil)
+            return
+        }
         self.finalURL = request.url
         completionHandler(request)
     }
@@ -574,6 +685,12 @@ private final class StreamingDownloadDelegate: NSObject, URLSessionDownloadDeleg
     /// instead of CancellationError so callers can tell a security
     /// rejection apart from a user cancel.
     private(set) var pinningRejected = false
+    /// Set when a redirect was refused for downgrading https→http, leaving
+    /// the host allowlist, or exceeding the hop cap (Windows download.rs
+    /// E11). Reported as `redirectBlocked` so the chain can't silently
+    /// connect to an unpinned/plaintext host.
+    private(set) var redirectRejected = false
+    private var redirectCount = 0
 
     func urlSession(_ session: URLSession,
                     didReceive challenge: URLAuthenticationChallenge,
@@ -581,6 +698,20 @@ private final class StreamingDownloadDelegate: NSObject, URLSessionDownloadDeleg
         let (disposition, credential) = TLSPinning.evaluate(challenge: challenge)
         if disposition == .cancelAuthenticationChallenge { pinningRejected = true }
         completionHandler(disposition, credential)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        redirectCount += 1
+        guard redirectCount <= TLSPinning.maxRedirects,
+              TLSPinning.allowsRedirect(to: request.url) else {
+            redirectRejected = true
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
     }
 
     private let didFinish = NSLock()
@@ -651,6 +782,14 @@ private final class StreamingDownloadDelegate: NSObject, URLSessionDownloadDeleg
             try? FileManager.default.removeItem(at: location)
             return
         }
+        if redirectRejected {
+            try? FileManager.default.removeItem(at: location)
+            let url = downloadTask.currentRequest?.url?.absoluteString
+                ?? downloadTask.originalRequest?.url?.absoluteString ?? ""
+            completion?(.failure(StreamingDownloadError.redirectBlocked(url: url)))
+            completion = nil
+            return
+        }
         if let http = downloadTask.response as? HTTPURLResponse {
             let status = http.statusCode
             if !(200..<300).contains(status) {
@@ -683,6 +822,13 @@ private final class StreamingDownloadDelegate: NSObject, URLSessionDownloadDeleg
                     didCompleteWithError error: Error?) {
         guard tryFinish() else { return }
         guard let completion else { return }
+        if redirectRejected {
+            let url = task.currentRequest?.url?.absoluteString
+                ?? task.originalRequest?.url?.absoluteString ?? ""
+            completion(.failure(StreamingDownloadError.redirectBlocked(url: url)))
+            self.completion = nil
+            return
+        }
         if let error {
             if let urlError = error as? URLError, urlError.code == .cancelled {
                 completion(.failure(pinningRejected
@@ -717,6 +863,14 @@ extension StreamingDownloadError: LocalizedError {
             return "Downloaded file failed integrity verification (expected SHA-256 \(expected.prefix(12))…, got \(actual.prefix(12))…). The file was discarded — try again; repeated failures may mean the download was tampered with."
         case .pinningFailed:
             return "Secure connection rejected: the server's certificate chain doesn't match FileID's pinned certificate authorities. Your network may be intercepting TLS — try a trusted connection."
+        case .redirectBlocked(let url):
+            return "Download blocked: the server tried to redirect to an unexpected or insecure location (\(url)). FileID only follows https redirects to HuggingFace, GitHub, and NVIDIA. Your network may be intercepting the connection."
+        case .insufficientDiskSpace(let needed, let available):
+            let neededMB = needed / 1_048_576
+            let availMB = available / 1_048_576
+            return "Not enough free disk space: this download needs about \(neededMB) MB but only \(availMB) MB is available. Free up space and try again."
+        case .sizeImplausible(let actual, let expected):
+            return "Download failed integrity check: got \(actual) bytes but expected roughly \(expected). The server likely returned a truncated file or an error page instead of the model — try again."
         case .underlying(let err):
             if let urlError = err as? URLError {
                 switch urlError.code {

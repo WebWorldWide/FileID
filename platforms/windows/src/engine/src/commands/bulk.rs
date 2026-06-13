@@ -59,6 +59,44 @@ fn no_clobber_rename(src: &std::path::Path, dst: &std::path::Path) -> std::io::R
     )
 }
 
+/// C1-012: best-effort durable record of an on-disk rename whose DB row is
+/// now stale (either the per-move UPDATE failed, or the end-of-batch commit
+/// rolled back every move's UPDATE). Mirrors restructure_apply.rs's B5
+/// `record_path_update_failure`: NDJSON, append-only, a recovery HINT (the
+/// next scan self-heals via rename-heal on the NTFS file_ref) — not a restore
+/// authority like trash_log, so no HMAC. Written beside the trash log.
+fn record_rename_recovery(file_id: i64, src: &str, dst: &str) {
+    let Ok(trash) = crate::paths::trash_log_path() else {
+        return;
+    };
+    let Some(dir) = trash.parent() else {
+        return;
+    };
+    write_rename_recovery_line(dir, &rename_recovery_line(file_id, src, dst));
+}
+
+/// Pure NDJSON line builder for the rename recovery sidecar (kept separate so
+/// the wire shape is unit-testable without touching the filesystem).
+fn rename_recovery_line(file_id: i64, src: &str, dst: &str) -> String {
+    serde_json::json!({ "file_id": file_id, "src": src, "dst": dst }).to_string()
+}
+
+/// Append one recovery line to `dir/rename_recover.ndjson`, creating it if
+/// absent. Best-effort: a write failure is swallowed (the next scan still
+/// self-heals via rename-heal on the NTFS file_ref).
+fn write_rename_recovery_line(dir: &std::path::Path, line: &str) {
+    let path = dir.join("rename_recover.ndjson");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{line}");
+        let _ = f.sync_all();
+    }
+}
+
 /// Bulk-apply tags to a set of files. Updates DB `tags` table + writes the
 /// sidecar JSON so Explorer + future scans see the same set.
 pub(crate) async fn handle_apply_tags(
@@ -205,6 +243,11 @@ pub(crate) async fn handle_rename_files(
         let mut succeeded = 0u32;
         let mut failed = 0u32;
         let mut messages = Vec::new();
+        // C1-012: every move that landed on disk, tracked so a failed
+        // end-of-batch commit (which rolls back ALL the per-move DB UPDATEs)
+        // can be reconciled via the recovery sidecar — the disk is renamed but
+        // the DB is stale across the whole batch otherwise.
+        let mut on_disk_moves: Vec<(i64, String, String)> = Vec::new();
         let conn = db.lock();
         let tx = conn.unchecked_transaction()?;
         for entry in &payload.renames {
@@ -274,6 +317,11 @@ pub(crate) async fn handle_rename_files(
             // ignored so it never turns a successful rename into a failure.
             crate::shell::tags::move_sidecar(&path, &dest);
             let dest_text = dest.to_string_lossy().to_string();
+            let src_text = path.to_string_lossy().to_string();
+            // C1-012: the on-disk move is now committed but the DB row is only
+            // updated below (and the whole tx commits at end-of-batch). Track it
+            // so a failed UPDATE or a failed end-of-batch commit is reconcilable.
+            on_disk_moves.push((entry.file_id, src_text, dest_text.clone()));
             // ENG-91: keep path_hash in sync with path_text (lookups/dedup key
             // on it). ENG-92: do NOT swallow the UPDATE error and still claim
             // success — a file renamed on disk but with a failed DB write must
@@ -293,6 +341,10 @@ pub(crate) async fn handle_rename_files(
                     });
                 }
                 Err(err) => {
+                    // C1-012: file is renamed on disk but its row update failed.
+                    // Record it to the recovery sidecar so the disk/DB desync is
+                    // reconcilable even if the next scan never runs.
+                    record_rename_recovery(entry.file_id, &path.to_string_lossy(), &dest_text);
                     failed += 1;
                     messages.push(BulkActionItem {
                         file_id: Some(entry.file_id),
@@ -302,7 +354,19 @@ pub(crate) async fn handle_rename_files(
                 }
             }
         }
-        tx.commit()?;
+        // C1-012: a failed end-of-batch commit rolls back EVERY per-move UPDATE,
+        // leaving every on-disk rename desynced from a now-stale DB across the
+        // whole batch. Record all of them to the recovery sidecar before
+        // surfacing the error so the batch is reconcilable (mirror restructure
+        // B5, which records per-move on a path-update failure).
+        if let Err(err) = tx.commit() {
+            for (fid, src, dst) in &on_disk_moves {
+                record_rename_recovery(*fid, src, dst);
+            }
+            tracing::error!(?err, moves = on_disk_moves.len(), "bulk rename commit failed — recorded on-disk moves for recovery");
+            return Err(anyhow::Error::from(err)
+                .context("bulk rename committed on disk but the DB commit failed; recovery sidecar written"));
+        }
         Ok(BulkActionResult {
             action: "renameFiles".into(),
             succeeded,
@@ -400,8 +464,14 @@ pub(crate) async fn handle_trash_files(
                 });
             }
         }
-        tx.commit()?;
-
+        // C1-018: write the undo journal BEFORE committing the row-DELETE. The
+        // bytes are already in the Recycle Bin (irreversible from here), and the
+        // journal is the ONLY map back to them — `restoreFromTrash` reads it to
+        // find which paths to bring back. If the append fails AFTER we delete the
+        // Library rows, the app's UndoStack restore is a silent no-op (no journal
+        // entry). So: append first; on failure, roll back the DELETE (drop the tx
+        // without commit) so the file rows survive as a recovery handle and
+        // surface a hard error rather than a silently-unrecoverable trash.
         let batch_id = uuid::Uuid::new_v4().to_string();
         if !log_items.is_empty() {
             let entry = TrashLogEntry {
@@ -413,9 +483,14 @@ pub(crate) async fn handle_trash_files(
                 items: log_items,
             };
             if let Err(err) = trash_log::append(&entry) {
-                tracing::warn!(?err, "trash_log append failed");
+                tracing::error!(?err, "trash_log append failed — rolling back DELETE so the trashed files stay recoverable");
+                drop(tx); // rollback: keep the Library rows as a recovery handle
+                anyhow::bail!(
+                    "files were moved to the Recycle Bin but the undo journal could not be written ({err}); restore is unavailable for this batch"
+                );
             }
         }
+        tx.commit()?;
 
         // Tag the BulkActionResult.action with the batch id so the app can
         // store it on the UndoStack entry without an extra IPC.
@@ -906,5 +981,74 @@ pub(crate) async fn handle_find_merge_suggestions(
         Err(err) => {
             tracing::warn!(?err, "find_merge_suggestions spawn failed");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("fileid-bulk-{tag}-{pid}-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // C1-012: the recovery line carries the file_id + src + dst so disk vs DB
+    // can be reconciled. Pure wire-shape check (no filesystem).
+    #[test]
+    fn rename_recovery_line_carries_id_src_dst() {
+        let line = rename_recovery_line(42, r"C:\a\old.jpg", r"C:\a\new.jpg");
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["file_id"], 42);
+        assert_eq!(v["src"], r"C:\a\old.jpg");
+        assert_eq!(v["dst"], r"C:\a\new.jpg");
+    }
+
+    // C1-012: a commit-failure path records EVERY on-disk move to the recovery
+    // sidecar (NDJSON, append-only). Before the fix there was no sidecar at all,
+    // so a failed end-of-batch commit left the whole batch silently desynced.
+    #[test]
+    fn commit_failure_writes_recovery_sidecar_for_every_move() {
+        let dir = unique_temp_dir("recover");
+        // Simulate the commit-failure reconciliation loop: write one line per
+        // on-disk move that the rolled-back transaction left stale.
+        let moves = [
+            (1i64, r"C:\lib\a-old.jpg".to_string(), r"C:\lib\a-new.jpg".to_string()),
+            (2i64, r"C:\lib\b-old.png".to_string(), r"C:\lib\b-new.png".to_string()),
+        ];
+        for (fid, src, dst) in &moves {
+            write_rename_recovery_line(&dir, &rename_recovery_line(*fid, src, dst));
+        }
+
+        let sidecar = dir.join("rename_recover.ndjson");
+        assert!(sidecar.exists(), "recovery sidecar must be written");
+        let contents = std::fs::read_to_string(&sidecar).unwrap();
+        let lines: Vec<&str> = contents.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 2, "one recovery line per on-disk move");
+
+        let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(first["file_id"], 1);
+        assert_eq!(first["dst"], r"C:\lib\a-new.jpg");
+        let second: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(second["file_id"], 2);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // C1-012: a second write appends rather than truncating (NDJSON growth).
+    #[test]
+    fn recovery_sidecar_appends() {
+        let dir = unique_temp_dir("append");
+        write_rename_recovery_line(&dir, &rename_recovery_line(1, "a", "b"));
+        write_rename_recovery_line(&dir, &rename_recovery_line(2, "c", "d"));
+        let contents = std::fs::read_to_string(dir.join("rename_recover.ndjson")).unwrap();
+        assert_eq!(contents.lines().filter(|l| !l.is_empty()).count(), 2);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

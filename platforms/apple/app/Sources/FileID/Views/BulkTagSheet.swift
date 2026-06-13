@@ -70,14 +70,12 @@ struct BulkTagSheet: View {
         // issues with the view's onComplete closure.
         Task {
             let result = await Task.detached(priority: .userInitiated) {
-                let detailed = TagWriter.addTagsBulkDetailed(tags, to: urls)
-                // Persist the exact per-file diff so "Undo last tags" can
-                // remove only what FileID added (same journal pattern as
-                // BulkRenameSheet.lastBatchKey).
-                if !detailed.outcomes.isEmpty,
-                   let data = try? JSONEncoder().encode(detailed.outcomes) {
-                    UserDefaults.standard.set(data, forKey: BulkTagSheet.lastBatchKey)
-                }
+                // journal: nil — the sheet owns the journal write so a
+                // total-failure batch can't clear a still-valid prior one
+                // (TagWriter clears on any empty batch). (F-C4-005)
+                let detailed = TagWriter.addTagsBulkDetailed(tags, to: urls, journal: nil)
+                BulkTagSheet.recordOrPreserveJournal(outcomes: detailed.outcomes,
+                                                     failed: detailed.failed)
                 return detailed
             }.value
             inFlight = false
@@ -98,6 +96,25 @@ struct BulkTagSheet: View {
     }
 
     nonisolated static let lastBatchKey = "bulkTag.lastBatch.v1"
+
+    /// Update the undo journal for a finished bulk-tag batch:
+    /// • successful additions → record them so "Undo last tags" strips ONLY
+    ///   what FileID just added.
+    /// • a clean all-unchanged batch (no failures, nothing new added) → clear
+    ///   it, so a stale earlier batch can't be undone by mistake (F-C3-034).
+    /// • a batch with failures and no successes → leave the prior journal
+    ///   intact; a failed batch must not destroy "Undo last tags". (F-C4-005)
+    nonisolated static func recordOrPreserveJournal(outcomes: [TagWriter.TagOutcome],
+                                                    failed: Int,
+                                                    in defaults: UserDefaults = .standard) {
+        if !outcomes.isEmpty {
+            if let data = try? JSONEncoder().encode(outcomes) {
+                defaults.set(data, forKey: lastBatchKey)
+            }
+        } else if failed == 0 {
+            defaults.removeObject(forKey: lastBatchKey)
+        }
+    }
 
     /// Decode the most recent tag batch from UserDefaults. Nil when no
     /// batch has been recorded yet.

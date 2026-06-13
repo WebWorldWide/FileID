@@ -344,6 +344,12 @@ struct CleanupView: View {
         groups = store.duplicateGroups()
         let visibleIDs = Set(groups.flatMap { $0.files.map(\.id) })
         selection.formIntersection(visibleIDs)
+        // Selection is stored by file id, but a mid-scan re-rank can change
+        // which copy is the keeper (index 0). Re-derive against the current
+        // ranking so a now-keeper is never left silently selected for trash.
+        for g in groups {
+            if let keeper = g.files.first { selection.remove(keeper.id) }
+        }
     }
 }
 

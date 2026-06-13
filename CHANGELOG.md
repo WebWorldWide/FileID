@@ -8,6 +8,13 @@ Per `shared/docs/PRIVACY.md` and `CLAUDE.md`: this project ships no telemetry, n
 
 ### Added
 
+#### 2026-06-13 — Restructure parity + safer moves (stability campaign)
+
+- **macOS Restructure now uses the same on-device butler as Windows.** The Restructure tab is driven by the engine's planner instead of a separate app-side classifier, so both platforms produce the same organized layout from one source of truth — full month names, photo / video / audio buckets, GPS-derived Places, and `Documents/<year>`.
+- **Moves never overwrite or silently skip.** When a destination filename is already taken, the file is auto-renamed `name (2).ext` (on both macOS and Windows) instead of being dropped or colliding; a move whose source has changed since the plan is skipped rather than misapplied.
+- **Renamed or moved files keep their tags, faces, and OCR (macOS).** Moving a file inside your library no longer loses its analysis on the next scan — the app recognizes it as the same file and carries everything forward, matching Windows.
+- **Restructure planning and applying can now be cancelled** and report progress while they run, on both platforms.
+
 #### 2026-05-20 — V16.8 VLM activated + faster, Settings tidied
 
 - **The on-device AI model now actually runs.** The bundled llama.cpp runtime was too old (it lacked the multimodal binary and predated the Qwen2.5-VL model), which is why image analysis failed with a "runtime not found" message. The app now ships a current runtime and auto-replaces the stale one on next launch — Deep Analyze (and the new VLM tagging) work without any manual steps.
@@ -31,6 +38,15 @@ Per `shared/docs/PRIVACY.md` and `CLAUDE.md`: this project ships no telemetry, n
 - **Broken-image placeholder on Library cards.** When the thumbnail service exhausts its fallback chain and returns null, the card now shows a muted procedural image-glyph placeholder instead of shimmering forever. Distinguishes "preview failed" from "still loading." Rendered in XAML (no asset binary).
 
 ### Fixed
+
+#### 2026-06-13 — Cross-platform stability campaign (audit-2026-06-10)
+
+- **Data safety: an interrupted scan can no longer wipe a file's tags, person, or recognized text (macOS).** Previously a face/text-recognition timeout could clear analysis a file already had; every destructive re-write is now gated on that step having actually run.
+- **People grouping is deterministic and no longer discards your edits.** Face clustering now produces the same groups on every run and reads your renames / merges / mark-as-unknown safely, so re-clustering never loses People-tab edits (macOS, matching Windows). It also no longer silently does nothing after you cancel a scan.
+- **"Restart Engine" no longer leaves two engines writing the same library at once (macOS).** The previous engine is stopped before the new one starts.
+- **Incremental rescans are faster and still correct.** Unchanged files are skipped at discovery while genuinely deleted files are still pruned and newly-installed models still backfill, so re-scanning an unchanged folder is effectively instant.
+- **Lighter, faster macOS scans.** Bounded-memory semantic search, decoupled database commits, cached queries, and a tighter image-decode path; a full large-library scan stayed well under the memory target with no crashes.
+- **Windows app polish:** reliable bulk-tag confirm/undo, single-flight Apply (no accidental double-apply), correct selection and rename identity, and a CUDA toggle that takes effect.
 
 #### 2026-05-20 — V16.6 thumbnails persist during scans, accurate tags, faces detected
 

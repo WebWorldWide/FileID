@@ -10,7 +10,7 @@
 // Adding a model: append a match arm in `lookup_full` and a sentinel
 // path in `sentinel_path`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::paths;
 
@@ -533,13 +533,66 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
     }
 }
 
+/// Stable, short token identifying the EXACT pinned artifacts of `model` —
+/// derived from every file's URL + sha256. Folding the URL in too means an
+/// unpinned (`None`-sha) entry whose `resolve/<rev>/...` URL bumps still
+/// invalidates. Deterministic FNV-1a (no deps), so the same pin always yields
+/// the same token across launches and machines.
+fn revision_token(model: &Model) -> String {
+    fn feed(h: u64, bytes: &[u8]) -> u64 {
+        let mut h = h;
+        for &b in bytes {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h
+    }
+    let mut h: u64 = 0xcbf29ce484222325;
+    for f in &model.files {
+        h = feed(h, f.url.as_bytes());
+        h = feed(h, b"\0");
+        h = feed(h, f.sha256.as_deref().unwrap_or("").as_bytes());
+        h = feed(h, b"\0");
+    }
+    format!("{h:016x}")
+}
+
 /// Sentinel file the engine drops after every file in `model.files`
 /// has landed. Welcome sheet + tagging stack poll it to know whether
 /// the model is installed without re-validating SHA256s on every
 /// launch.
+///
+/// The filename is keyed by [`revision_token`] (not just `model.id`) so a pin
+/// bump — a changed revision/sha256 for any file — yields a DIFFERENT sentinel
+/// name. The old `{id}-<oldtoken>.installed` no longer matches, so the install
+/// gate falls through to a re-fetch instead of trusting the stale artifact on
+/// disk. This mirrors the macOS revision-keyed sentinel that self-heals across
+/// a pin change (audit C1-024; the b4404→b9254 episode).
+///
+/// Pre-revision-key Windows builds dropped a bare `{id}.installed` with no token.
+/// [`migrate_legacy_sentinel`] renames that legacy marker to the current keyed
+/// name on first read so an already-present (multi-GB) install isn't reported as
+/// not-installed and re-downloaded merely because the naming scheme changed
+/// (R-04). A genuine pin bump still self-heals: a stale `{id}-<oldtoken>.installed`
+/// is not the legacy name and is left for the re-fetch path.
 pub fn sentinel_path(model: &Model) -> Option<PathBuf> {
-    let root = paths::models_dir().ok()?;
-    Some(root.join(".sentinels").join(format!("{}.installed", model.id)))
+    let dir = paths::models_dir().ok()?.join(".sentinels");
+    let keyed = dir.join(format!("{}-{}.installed", model.id, revision_token(model)));
+    migrate_legacy_sentinel(&dir, &model.id, &keyed);
+    Some(keyed)
+}
+
+/// Heal a pre-revision-key install in place by renaming a legacy bare
+/// `{id}.installed` to the current `keyed` sentinel. No-op when the keyed
+/// sentinel already exists or no legacy marker is present. See [`sentinel_path`].
+fn migrate_legacy_sentinel(dir: &Path, model_id: &str, keyed: &Path) {
+    if keyed.exists() {
+        return;
+    }
+    let legacy = dir.join(format!("{model_id}.installed"));
+    if legacy.exists() {
+        let _ = std::fs::rename(&legacy, keyed);
+    }
 }
 
 #[cfg(test)]
@@ -597,8 +650,99 @@ mod tests {
             if let Some(p) = sentinel_path(&m) {
                 let s = p.to_string_lossy();
                 assert!(s.contains(".sentinels"), "sentinel not under .sentinels: {s}");
-                assert!(s.ends_with("ram_plus.installed"), "unexpected sentinel: {s}");
+                let name = p.file_name().unwrap().to_string_lossy();
+                // Revision-keyed: `ram_plus-<token>.installed` (audit C1-024).
+                assert!(name.starts_with("ram_plus-"), "sentinel not id-prefixed: {s}");
+                assert!(name.ends_with(".installed"), "unexpected sentinel: {s}");
             }
         }
+    }
+
+    /// A pin bump (revision/sha256 change on any file) must move the sentinel
+    /// filename so the stale `.installed` no longer matches and the install gate
+    /// re-fetches. Before the revision-key fix the name was a bare
+    /// `{id}.installed` that survived the b4404→b9254 hash bump. (audit C1-024)
+    #[test]
+    fn pin_bump_invalidates_sentinel() {
+        let LookupResult::Found(model) = lookup_full("ram_plus") else {
+            return;
+        };
+        let before = sentinel_path(&model).expect("sentinel path");
+
+        // Simulate a pin bump: same id/files, one sha256 changed.
+        let mut bumped = model.clone();
+        assert!(!bumped.files.is_empty(), "ram_plus must have at least one file");
+        bumped.files[0].sha256 =
+            Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".into());
+        let after = sentinel_path(&bumped).expect("sentinel path");
+
+        assert_ne!(
+            before, after,
+            "sentinel filename must change when a pinned hash changes"
+        );
+    }
+
+    /// The token is a pure function of the pins — identical models yield an
+    /// identical sentinel across launches (no spurious re-fetch).
+    #[test]
+    fn sentinel_is_stable_for_unchanged_pins() {
+        if let LookupResult::Found(m) = lookup_full("mobileclip_s2") {
+            assert_eq!(sentinel_path(&m), sentinel_path(&m.clone()));
+        }
+    }
+
+    /// R-04: a pre-revision-key install has a bare `{id}.installed`. On first
+    /// read it must be migrated (renamed) to the current keyed name so the
+    /// install gate sees it as installed — not re-download a multi-GB model that
+    /// is already present and valid.
+    #[test]
+    fn legacy_sentinel_is_migrated_to_keyed_name() {
+        let dir = std::env::temp_dir().join(format!(
+            "fileid-sentinel-migrate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy = dir.join("ram_plus.installed");
+        std::fs::write(&legacy, b"ram_plus").unwrap();
+        let keyed = dir.join("ram_plus-deadbeef00000000.installed");
+
+        migrate_legacy_sentinel(&dir, "ram_plus", &keyed);
+
+        assert!(keyed.exists(), "keyed sentinel not created from legacy marker");
+        assert!(!legacy.exists(), "legacy marker not consumed by migration");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Migration must NOT clobber an existing keyed sentinel, and is a no-op when
+    /// no legacy marker is present (a genuine pin bump's stale keyed name is left
+    /// for the re-fetch path).
+    #[test]
+    fn migration_noop_without_legacy_marker() {
+        let dir = std::env::temp_dir().join(format!(
+            "fileid-sentinel-noop-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let keyed = dir.join("ram_plus-cafebabe00000000.installed");
+
+        // No legacy, no keyed → stays absent (re-fetch path).
+        migrate_legacy_sentinel(&dir, "ram_plus", &keyed);
+        assert!(!keyed.exists(), "migration must not fabricate a sentinel");
+
+        // Existing keyed + a legacy marker → keyed preserved, legacy untouched.
+        std::fs::write(&keyed, b"ram_plus").unwrap();
+        let legacy = dir.join("ram_plus.installed");
+        std::fs::write(&legacy, b"ram_plus").unwrap();
+        migrate_legacy_sentinel(&dir, "ram_plus", &keyed);
+        assert!(keyed.exists() && legacy.exists(), "existing keyed sentinel must not trigger a rename");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

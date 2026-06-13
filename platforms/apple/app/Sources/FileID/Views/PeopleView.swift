@@ -553,7 +553,11 @@ struct PeopleView: View {
 
     private func reload() {
         totalFacePrints = store.totalFacePrints()
+        // Drop emptied clusters: moving every face out of a person leaves a
+        // 0-face row whose stale representative_face_id now points at the
+        // target's face — a ghost card showing the wrong person. Hide it.
         let rows = store.persons(includeUnknown: showHiddenUnknowns)
+            .filter { $0.faceCount > 0 }
         persons = rows
         hiddenUnknownCount = store.hiddenUnknownCount()
         // `merging:` to tolerate duplicate ids (uniqueKeysWithValues traps).
@@ -597,9 +601,17 @@ private struct PersonCardDragMergeModifier: ViewModifier {
                     guard let s = items.first,
                           let sourceID = Int64(s),
                           sourceID != personID else { return false }
-                    let n = store.mergePersons(target: personID,
-                                                sources: [sourceID]) ?? 0
-                    onMerged(n)
+                    // Merge reassigns face_prints + deletes the source row;
+                    // on large clusters it blocks for seconds. Run it off the
+                    // main thread, then report the result on the main actor.
+                    let storeRef = store
+                    let targetID = personID
+                    let completion = onMerged
+                    Task.detached(priority: .userInitiated) {
+                        let n = storeRef.mergePersons(target: targetID,
+                                                      sources: [sourceID]) ?? 0
+                        await MainActor.run { completion(n) }
+                    }
                     return true
                 } isTargeted: { _ in }
         } else {

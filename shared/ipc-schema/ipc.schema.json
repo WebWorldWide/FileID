@@ -455,7 +455,7 @@
             "additionalProperties": false,
             "required": ["kind", "message"],
             "properties": {
-              "kind":      { "type": "string", "description": "discovery_failed | vision_failed | db_failed | model_load_failed | model_download_failed | download_tls_pin_failed | pack_not_available | unknown | ..." },
+              "kind":      { "type": "string", "description": "Stable cross-platform error-kind vocabulary: both engines MUST emit the SAME string for the same condition (audit F-C2-003); the app single-flight gates + toasts key on these exact strings. Canonical kinds: discovery_failed | vision_failed | db_failed | model_load_failed | model_download_failed | download_tls_pin_failed | pack_not_available | face_clustering_failed | unknown_model | unknown | … . `face_clustering_failed` (Windows form) is the canonical face-clustering failure kind on BOTH engines — the macOS legacy `face_cluster_failed` was renamed to it. `unknown_model` is the canonical 'engine doesn't recognize this model id' kind on BOTH engines — the macOS legacy `prewarm_invalid_kind` was renamed to it. Scan-discovery notices (rescan_no_changes | empty_folder | discovery_partial) are emitted by the Windows engine; the macOS engine surfaces those conditions through its scan-completion flow rather than as distinct error kinds." },
               "message":   { "type": "string" },
               "path":      { "type": ["string", "null"] },
               "modelKind": { "type": ["string", "null"], "description": "For errors pertaining to a specific model/pack install (e.g. mobileclip_s2, cuda_pack_x64), the model id. Lets the app route errors to the right install slot without path-string heuristics." }

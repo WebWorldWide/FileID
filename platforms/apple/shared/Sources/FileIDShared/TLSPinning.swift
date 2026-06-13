@@ -83,6 +83,29 @@ public enum TLSPinning {
         return (.cancelAuthenticationChallenge, nil)
     }
 
+    // MARK: - Redirect policy (Windows download.rs E11 parity)
+
+    /// Maximum redirect hops to follow before treating the chain as
+    /// hostile. Mirrors the Windows downloader's 10-hop cap — an on-path
+    /// attacker could otherwise bounce a 302 chain to dodge the source-URL
+    /// allowlist (which only checks the ORIGINAL URL).
+    public static let maxRedirects = 10
+
+    /// Whether a redirect target may be followed. Enforces https-only AND
+    /// the pinning host scope, so EVERY hop terminates on a pin-covered
+    /// host: a 302 can neither downgrade to plaintext `http://` (which an
+    /// on-path attacker could MITM — every CDN we use serves https) nor
+    /// bounce to an off-allowlist host where `evaluate` would fall back to
+    /// plain system-trust and CA pinning would silently stop applying.
+    /// Tying the redirect allowlist to `hostMatches` keeps a single source
+    /// of truth — anything we follow is exactly the set we pin. (audit E11)
+    public static func allowsRedirect(to url: URL?) -> Bool {
+        guard let url,
+              url.scheme?.lowercased() == "https",
+              let host = url.host else { return false }
+        return hostMatches(host)
+    }
+
     /// `*.` patterns require at least one extra label — `*.hf.co`
     /// matches `cas-bridge.xethub.hf.co` but not `hf.co` itself.
     static func hostMatches(_ host: String) -> Bool {

@@ -14,6 +14,7 @@
 // `Restructure.proposeAll`. Stays byte-faithful with the Rust implementation so
 // a library round-trips across platforms.
 import Foundation
+import FileIDShared
 
 public enum RestructureSemantic {
 
@@ -122,6 +123,15 @@ public enum RestructureSemantic {
         for (i, cid) in clusterIDs.enumerated() { clusters[cid, default: []].append(i) }
 
         var moves: [Move] = []
+        // Group names already claimed by a *different* new-group cluster this
+        // run. Without this, two clusters with identical top tags collapse into
+        // one folder (#9). Consulted ONLY by the new-group branch; the
+        // existing-folder branch legitimately routes many clusters into one
+        // user folder. Tracked in the SANITIZED namespace that actually backs
+        // the directory. (F-C3-014)
+        var usedGroupNames = Set<String>()
+        // Stable cluster iteration (smallest id first) so the dedup below is
+        // deterministic across runs.
         for cid in clusters.keys.sorted() {
             let members = clusters[cid]!
             // Singletons (the clusterer's outliers) have no group signal.
@@ -135,7 +145,12 @@ public enum RestructureSemantic {
             let confidence: Confidence
             let reason: String
 
-            if let (proto, sim, runnerUp) = nearestTwoFolders(centroid, prototypes), sim >= folderMatchCos {
+            // Containment guard: only an in-root prototype is a valid
+            // destination — routing to a folder outside libraryRoot would be
+            // rejected by the apply layer (canonicalizes outside root), so such
+            // a match falls through to a new in-root group instead. (E12, F-C3-015)
+            if let (proto, sim, runnerUp) = nearestTwoFolders(centroid, prototypes),
+               sim >= folderMatchCos, Self.pathContained(proto.path, in: libraryRoot) {
                 // Learn-your-style: route to the nearest confident existing
                 // folder. Auto only when strong AND unambiguous on a tight cluster.
                 let name = (proto.path as NSString).lastPathComponent
@@ -147,9 +162,40 @@ public enum RestructureSemantic {
             } else {
                 // New group named from the cluster's most distinctive tags.
                 let terms = distinctiveTerms(members, files: files, globalFreq: globalFreq)
-                let name = groupName(fromTerms: terms)
-                category = name
-                destDir = (libraryRoot as NSString).appendingPathComponent(name)
+                let base = groupName(fromTerms: terms)
+                // Disambiguate a name already claimed by another new-group
+                // cluster so distinct clusters get distinct folders (#9). Work in
+                // the SANITIZED namespace (#2): two pretty names that differ only
+                // in chars componentSafe maps to "_" (e.g. "16:9" and "16/9" →
+                // "16_9") must still back two physical directories. (F-C3-013/014)
+                var pretty = base
+                let safeBase = FilesystemNameSafe.componentSafe(base)
+                var safe = safeBase
+                // Prefer the next distinctive term first.
+                if usedGroupNames.contains(safe), terms.count > 2 {
+                    pretty = "\(base) \(titleCase(terms[2]))"
+                    safe = FilesystemNameSafe.componentSafe(pretty)
+                }
+                // Numeric-suffix fallback. Build each candidate so the suffix
+                // ALWAYS survives the 200-scalar cap: a base that already
+                // sanitizes to ~200 scalars would otherwise truncate every
+                // "{base} {n}" to the SAME string, so the uniqueness check never
+                // clears and the loop spins forever. Reserve room on the
+                // already-sanitized base — distinct n ⇒ distinct candidate ⇒
+                // guaranteed termination. (F-C3-014)
+                let safeNameMax = 200  // mirrors FilesystemNameSafe default maxLength
+                var n = 2
+                while usedGroupNames.contains(safe) {
+                    let suffix = " \(n)"
+                    let room = max(0, safeNameMax - suffix.unicodeScalars.count)
+                    let prefix = String(safeBase.unicodeScalars.prefix(room))
+                    safe = "\(prefix)\(suffix)"
+                    pretty = "\(base) \(n)"
+                    n += 1
+                }
+                usedGroupNames.insert(safe)
+                category = pretty
+                destDir = (libraryRoot as NSString).appendingPathComponent(safe)
                 confidence = (coh >= autoCohesion && members.count >= autoMinMembers)
                     ? .auto : (coh >= reviewCohesion ? .review : .ask)
                 if terms.isEmpty {
@@ -296,6 +342,15 @@ public enum RestructureSemantic {
     }
 
     // MARK: - Small numeric + string helpers
+
+    /// Component-wise containment: is `path` the root itself or a descendant of
+    /// it? Mirrors Rust `Path::starts_with` (so `/lib2` doesn't match `/lib`).
+    /// (F-C3-015)
+    static func pathContained(_ path: String, in root: String) -> Bool {
+        if path == root { return true }
+        let rootPrefix = root.hasSuffix("/") ? root : root + "/"
+        return path.hasPrefix(rootPrefix)
+    }
 
     @inline(__always)
     private static func dot(_ a: [Float], _ b: [Float]) -> Float {

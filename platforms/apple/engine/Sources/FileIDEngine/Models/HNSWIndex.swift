@@ -61,6 +61,14 @@ final class HNSWIndex {
     private var entryLevel: Int = 0
     private var deletedCount: Int = 0
 
+    /// Fixed seed for the geometric level-draw RNG. Pins the HNSW topology —
+    /// and thus the approximate kNN neighbour sets — so face clustering derives
+    /// the same cluster IDs and inherited People names on every re-cluster of an
+    /// unchanged library. `Float.random` (system entropy) made identities hop
+    /// run-to-run. Same constant the Windows engine pins. (audit F-C3-006)
+    private static let levelSeed: UInt64 = 0xF11E_1D00
+    private var rngState: UInt64 = HNSWIndex.levelSeed
+
     // MARK: - Init
 
     init(dim: Int, M: Int = 16, efConstruction: Int = 200, efSearch: Int = 50) {
@@ -245,14 +253,26 @@ final class HNSWIndex {
     // MARK: - Internals
 
     /// Geometric-distribution level draw. mL controls the decay; expected
-    /// number of layers ≈ log_M(N).
+    /// number of layers ≈ log_M(N). Draws from a fixed-seed SplitMix64 stream
+    /// (not system entropy) so the built graph is identical across runs.
     private func randomLevel() -> Int {
-        // Stay deterministic across the test suite by using SystemRandom only
-        // when not under XCTest; tests can subclass + inject if needed.
-        let r = Float.random(in: Float.leastNonzeroMagnitude..<1.0)
+        let r = nextUniform()
         let l = -log(r) * mL
         // Cap at 16 layers — even at N=10 M, log_16(N) ≈ 5.8.
         return min(Int(floor(l)), 16)
+    }
+
+    /// SplitMix64 → a Float in (0, 1]. Deterministic given `rngState`; the
+    /// `+1` keeps it strictly positive so `-log(r)` is finite.
+    private func nextUniform() -> Float {
+        rngState = rngState &+ 0x9E37_79B9_7F4A_7C15
+        var z = rngState
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        z = z ^ (z >> 31)
+        // Top 24 bits → [0, 2²⁴); (+1)/2²⁴ → (0, 1].
+        let mantissa = Float(z >> 40)
+        return (mantissa + 1) / Float(1 << 24)
     }
 
     /// Single-best greedy walk at a given layer.

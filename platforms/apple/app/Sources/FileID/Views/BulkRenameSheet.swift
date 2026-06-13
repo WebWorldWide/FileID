@@ -185,6 +185,11 @@ struct BulkRenameSheet: View {
     nonisolated static let lastBatchMaxAge: TimeInterval = 7 * 24 * 60 * 60
 
     nonisolated static func saveLastBatch(_ entries: [ReadStore.RenameOutcome]) {
+        // A zero-success batch (e.g. a bulk rename where every file failed)
+        // must NOT overwrite a still-valid prior journal — that would silently
+        // destroy "Undo last rename" for the earlier batch the user can still
+        // legitimately revert. (F-C4-005)
+        guard !entries.isEmpty else { return }
         let batch = PersistedRenameBatch(savedAt: Date(), entries: entries)
         guard let data = try? JSONEncoder().encode(batch) else { return }
         UserDefaults.standard.set(data, forKey: lastBatchKey)
