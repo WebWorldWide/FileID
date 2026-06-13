@@ -81,7 +81,7 @@ public enum Tagging {
                     let sizeMB = Double(discovered.sizeBytes) / 1_048_576
 
                     let loadStart = CFAbsoluteTimeGetCurrent()
-                    guard let (cgImage, exif) = loadImageAndEXIF(url: url) else {
+                    guard let (cgImage, exif) = loadImageAndEXIF(url: url, sizeBytes: discovered.sizeBytes) else {
                         JSONLog.shared.warn(ev: "image_decode_failed", path: redactPathForLog(url.path))
                         return TaggedFile(
                             url: url, kind: "image", extension: ext,
@@ -325,15 +325,17 @@ public enum Tagging {
     // EXIF is read from the SAME CGImageSource as the decode — a separate
     // CGImageSourceCreateWithURL re-opened and re-parsed every file, which
     // on NAS volumes cost ms per image across 14-32 workers.
-    private static func loadImageAndEXIF(
-        url: URL
+    // `internal` (not `private`) so the no-redundant-stat property is unit-
+    // assertable via @testable — see TaggingLoadSizeTests.
+    static func loadImageAndEXIF(
+        url: URL,
+        sizeBytes: Int64
     ) -> (CGImage, (cameraModel: String?, lat: Double?, lon: Double?))? {
         // Skip files smaller than 256 B — corrupt or zero-byte. Avoids the
-        // ImageIO crash mode v1's Session-B-hardening fixed.
-        if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-           let size = attrs[.size] as? Int, size < 256 {
-            return nil
-        }
+        // ImageIO crash mode v1's Session-B-hardening fixed. Reuse the size
+        // Discovery (Stage A) already stat'd instead of a second
+        // attributesOfItem — one fewer SMB/NFS round-trip per image on NAS.
+        if sizeBytes < 256 { return nil }
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
         // Iteration 5 perf finding: load (NAS I/O + decode) was P95 252ms — by
         // far the dominant per-file cost. Two changes:

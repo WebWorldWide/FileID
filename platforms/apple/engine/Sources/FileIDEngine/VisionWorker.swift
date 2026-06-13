@@ -49,7 +49,12 @@ func runVisionWithTimeout(_ body: @escaping () -> Void) -> Bool {
     let sem = DispatchSemaphore(value: 0)
     let box = _VisionUncheckedBox(body)
     DispatchQueue.global(qos: .userInitiated).async {
-        box.value()
+        // Drain this perform's Vision/CoreImage intermediates here: the global
+        // concurrent queue's root-queue threads never drain a top-level
+        // autorelease pool, and the per-file Tagging pool runs on the caller's
+        // visionQueue thread — a different thread — so without this the
+        // autoreleased intermediates accumulate for the engine's lifetime.
+        autoreleasepool { box.value() }
         sem.signal()
     }
     return sem.wait(timeout: .now() + visionPerformTimeoutSeconds) == .success
