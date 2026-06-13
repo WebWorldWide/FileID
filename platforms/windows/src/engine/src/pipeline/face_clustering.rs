@@ -456,6 +456,58 @@ pub fn consolidate<S: std::hash::BuildHasher>(
     (new_assignments, new_anchors)
 }
 
+/// Derive the name-based auto-merge blocked pairs from a face→name snapshot.
+///
+/// `face_name` maps each named face's id to the user-assigned name of the person
+/// it currently belongs to; `cluster_of` maps face ids to their freshly-computed
+/// cluster ids. Each cluster gets a single name by majority vote (ties broken to
+/// the lexicographically smallest name, never HashMap order, for determinism),
+/// then every pair of clusters carrying DIFFERENT names is blocked.
+///
+/// The caller MUST pass the snapshot read under the phase-3 persist lock (not a
+/// pre-clustering phase-1 capture): a rename committed in the lock-free window
+/// would otherwise leave a stale name in the guard and could unblock a
+/// wrong-cluster auto-merge. (audit C1-023) Same-named fragments and
+/// named+unnamed pairs are intentionally NOT blocked — they still consolidate.
+pub fn name_blocked_pairs<S: std::hash::BuildHasher>(
+    face_name: &HashMap<i64, String, S>,
+    cluster_of: &HashMap<i64, i32, S>,
+) -> std::collections::HashSet<(i32, i32)> {
+    let mut cname_votes: HashMap<i32, HashMap<String, u32>> = HashMap::new();
+    for (fid, name) in face_name {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(&cid) = cluster_of.get(fid) {
+            *cname_votes
+                .entry(cid)
+                .or_default()
+                .entry(trimmed.to_owned())
+                .or_insert(0) += 1;
+        }
+    }
+    let cluster_name: Vec<(i32, String)> = cname_votes
+        .into_iter()
+        .filter_map(|(cid, votes)| {
+            votes
+                .into_iter()
+                .max_by(|(na, ca), (nb, cb)| ca.cmp(cb).then_with(|| nb.cmp(na)))
+                .map(|(n, _)| (cid, n))
+        })
+        .collect();
+    let mut blocked = std::collections::HashSet::new();
+    for i in 0..cluster_name.len() {
+        for j in (i + 1)..cluster_name.len() {
+            if cluster_name[i].1 != cluster_name[j].1 {
+                let (a, b) = (cluster_name[i].0, cluster_name[j].0);
+                blocked.insert(if a < b { (a, b) } else { (b, a) });
+            }
+        }
+    }
+    blocked
+}
+
 /// Pairs in the uncertain similarity band 0.45..=0.70. The VLM verifier
 /// is invoked on these — outputs go back into the union-find.
 #[allow(dead_code)]
@@ -642,6 +694,89 @@ mod tests {
             anchor_embedding: e,
             member_count: count,
         }
+    }
+
+    #[test]
+    fn name_guard_is_derived_from_the_passed_snapshot() {
+        // Two clusters of near-identical faces (would auto-merge by centroid).
+        // cluster_of: faces 1,2 → cluster 1; faces 3,4 → cluster 2.
+        let mut cluster_of: HashMap<i64, i32> = HashMap::new();
+        cluster_of.insert(1, 1);
+        cluster_of.insert(2, 1);
+        cluster_of.insert(3, 2);
+        cluster_of.insert(4, 2);
+
+        // STALE (phase-1) snapshot: both clusters are still named "Alice" — the
+        // user hadn't split them yet. The name guard finds no DIFFERING names, so
+        // nothing is blocked and the two clusters would auto-merge.
+        let mut stale: HashMap<i64, String> = HashMap::new();
+        stale.insert(1, "Alice".into());
+        stale.insert(2, "Alice".into());
+        stale.insert(3, "Alice".into());
+        stale.insert(4, "Alice".into());
+        let blocked_stale = name_blocked_pairs(&stale, &cluster_of);
+        assert!(
+            blocked_stale.is_empty(),
+            "same-named clusters are not blocked (they consolidate) — \
+             so a stale snapshot would let the merge through"
+        );
+
+        // FRESH (under phase-3 lock) snapshot: a rename committed in the lock-free
+        // window renamed cluster 2's people to "Bob". Re-derived from THIS
+        // snapshot, the guard now blocks the (1,2) pair — the merge can't sneak
+        // through off the stale name. This is exactly the regression: the guard
+        // must reflect whichever snapshot it's handed, and production now hands it
+        // the under-lock one.
+        let mut fresh: HashMap<i64, String> = HashMap::new();
+        fresh.insert(1, "Alice".into());
+        fresh.insert(2, "Alice".into());
+        fresh.insert(3, "Bob".into());
+        fresh.insert(4, "Bob".into());
+        let blocked_fresh = name_blocked_pairs(&fresh, &cluster_of);
+        assert!(
+            blocked_fresh.contains(&(1, 2)),
+            "differently-named clusters must be blocked when derived from the fresh snapshot"
+        );
+
+        // And the blocked pair, fed to consolidate, actually keeps the two apart.
+        let v = unit(&[1.0, 0.0, 0.0]);
+        let faces = vec![
+            row(1, 1, v.clone(), 0.9),
+            row(2, 2, v.clone(), 0.9),
+            row(3, 3, v.clone(), 0.9),
+            row(4, 4, v.clone(), 0.9),
+        ];
+        let assignments = vec![
+            ClusterAssignment { face_id: 1, cluster_id: 1 },
+            ClusterAssignment { face_id: 2, cluster_id: 1 },
+            ClusterAssignment { face_id: 3, cluster_id: 2 },
+            ClusterAssignment { face_id: 4, cluster_id: 2 },
+        ];
+        let anchors = vec![anchor(1, 1, v.clone(), 2), anchor(2, 3, v.clone(), 2)];
+        let (a, an) = consolidate(&faces, assignments, anchors, &blocked_fresh, 0.75);
+        assert_eq!(an.len(), 2, "the name guard kept the renamed cluster apart");
+        let cid = |f: i64| a.iter().find(|x| x.face_id == f).unwrap().cluster_id;
+        assert_ne!(cid(1), cid(3), "Alice and Bob clusters never co-located");
+    }
+
+    #[test]
+    fn name_guard_ignores_blank_names_and_majority_votes() {
+        // Cluster 1 is majority "Alice" (one stray blank); cluster 2 is "Alice"
+        // too → same name, not blocked. Cluster 3 is "Carol" → blocked vs both.
+        let mut cluster_of: HashMap<i64, i32> = HashMap::new();
+        for (f, c) in [(1, 1), (2, 1), (3, 1), (10, 2), (20, 3)] {
+            cluster_of.insert(f, c);
+        }
+        let mut names: HashMap<i64, String> = HashMap::new();
+        names.insert(1, "Alice".into());
+        names.insert(2, "Alice".into());
+        names.insert(3, "  ".into()); // blank — ignored, doesn't win the vote
+        names.insert(10, "Alice".into());
+        names.insert(20, "Carol".into());
+        let blocked = name_blocked_pairs(&names, &cluster_of);
+        assert!(!blocked.contains(&(1, 2)), "same majority name → not blocked");
+        assert!(blocked.contains(&(1, 3)), "Alice vs Carol blocked");
+        assert!(blocked.contains(&(2, 3)), "Alice vs Carol blocked");
     }
 
     #[test]

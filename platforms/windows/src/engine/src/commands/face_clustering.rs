@@ -19,13 +19,15 @@ pub(crate) async fn handle_run_face_clustering(
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<FaceClusteringResult> {
         let started = Instant::now();
 
-        // PHASE 1 — hold the writer lock only for the DB reads. cluster() +
-        // consolidate() below run lock-free so suggested-merges (a read-only
-        // query) and other writes don't serialize behind a multi-second
-        // clustering pass. The engine-side single-flight guard (main.rs) keeps
-        // two clustering runs from racing; a face inserted between phase 1 and
-        // phase 3 is benign — it lands with person_id=NULL and is picked up next
-        // run.
+        // PHASE 1 — hold the writer lock only for the DB reads. The multi-second
+        // cluster() pass below runs lock-free so suggested-merges (a read-only
+        // query) and other writes don't serialize behind it. consolidate() —
+        // which is cheap relative to clustering — runs in phase 3 under the
+        // persist lock, so its name-based auto-merge guard sees the same snapshot
+        // the persist uses (audit C1-023). The engine-side single-flight guard
+        // (main.rs) keeps two clustering runs from racing; a face inserted between
+        // phase 1 and phase 3 is benign — it lands with person_id=NULL and is
+        // picked up next run.
         struct PriorIdentity {
             name: Option<String>,
             title: Option<String>,
@@ -38,10 +40,13 @@ pub(crate) async fn handle_run_face_clustering(
         }
 
         let mut faces: Vec<FaceRow> = Vec::new();
-        // (b) raw "different people" verdict pairs and (c) raw name rows, loaded
-        // here so phase 2 can build the blocked set without touching the DB.
+        // (b) raw "different people" verdict pairs, loaded here so phase 2 can
+        // build that part of the blocked set without touching the DB. The NAME
+        // guard is NOT loaded here — it's re-derived in PHASE 3 from the
+        // under-lock identity snapshot (see audit C1-023 below), so a rename
+        // committed during the lock-free phase-2 window can't unblock a
+        // wrong-cluster auto-merge off a stale phase-1 name snapshot.
         let verdict_pairs: Vec<(i64, i64)>;
-        let name_rows: Vec<(i64, String)>;
         {
             let conn = db.lock();
 
@@ -95,26 +100,7 @@ pub(crate) async fn handle_run_face_clustering(
                 rows
             };
 
-            // (c) Raw name rows for the same-name guard. Names are re-attached to
-            // clusters on EVERY re-cluster (the majority-vote snapshot below), so —
-            // unlike the volatile face-id verdict link in (b) — this guard is stable
-            // across re-scans: a user who labeled two DISTINCT people must never have
-            // them silently rejoined, however close their centroids. Same-named
-            // fragments and named+unnamed pairs still merge (intended consolidation).
-            name_rows = {
-                let mut nstmt = conn.prepare(
-                    "SELECT fp.id, p.name FROM face_prints fp \
-                     JOIN persons p ON fp.person_id = p.id \
-                     WHERE p.name IS NOT NULL AND TRIM(p.name) <> ''",
-                )?;
-                let rows = nstmt
-                    .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
-                    .filter_map(|r| r.ok())
-                    .collect::<Vec<(i64, String)>>();
-                rows
-            };
-
-            // (d) The user-identity snapshot (prior names/title/is_unknown + the
+            // (c) The user-identity snapshot (prior names/title/is_unknown + the
             // face->person map) is read in PHASE 3 under the persist lock — NOT
             // here — so a People-tab edit (rename / merge / mark-unknown) that
             // commits during the lock-free phase 2 is carried forward instead of
@@ -151,87 +137,12 @@ pub(crate) async fn handle_run_face_clustering(
         }
 
         let face_count = faces.len() as u64;
+        // Raw clustering only. Auto-consolidation (which applies the name-based
+        // auto-merge guard) is deferred to PHASE 3 so the name guard can be built
+        // from the identity snapshot read UNDER the persist lock, not from a
+        // phase-1 snapshot that a rename during the lock-free window would
+        // invalidate. (audit C1-023)
         let (assignments, anchors) = cluster(&faces);
-
-        // Auto-consolidate near-certain duplicate clusters the over-split-safe
-        // clusterer left fragmented (the "WAY too many similar faces" symptom).
-        // Verification-aware via TWO blocked-pair sources so a confirmed split is
-        // never silently re-merged:
-        let (assignments, anchors) = {
-            let threshold = crate::pipeline::face_clustering::automerge_threshold();
-            let cluster_of: HashMap<i64, i32> =
-                assignments.iter().map(|a| (a.face_id, a.cluster_id)).collect();
-            let mut blocked: std::collections::HashSet<(i32, i32)> =
-                std::collections::HashSet::new();
-
-            // (a) Explicit "different people" verdicts, re-projected onto the
-            // faces' CURRENT clusters. Precise, but the link rides face_prints.id,
-            // which a faces_evaluated re-scan churns (DELETE+INSERT) — after which
-            // a stored verdict's faces no longer resolve. Guard (b) backstops that.
-            // Reads the pre-loaded `verdict_pairs` (phase 1), not the DB.
-            for &(fa, fb) in &verdict_pairs {
-                if let (Some(&ca), Some(&cb)) = (cluster_of.get(&fa), cluster_of.get(&fb)) {
-                    if ca != cb {
-                        blocked.insert(if ca < cb { (ca, cb) } else { (cb, ca) });
-                    }
-                }
-            }
-
-            // (b) Never auto-merge two clusters carrying DIFFERENT user-assigned
-            // names. Names are re-attached to clusters on EVERY re-cluster (the
-            // majority-vote snapshot below), so — unlike the volatile face-id
-            // verdict link in (a) — this guard is stable across re-scans: a user
-            // who labeled two DISTINCT people must never have them silently
-            // rejoined, however close their centroids. Same-named fragments and
-            // named+unnamed pairs still merge (the intended consolidation).
-            // Reads the pre-loaded `name_rows` (phase 1), not the DB.
-            let mut cname_votes: HashMap<i32, HashMap<String, u32>> = HashMap::new();
-            for (fid, name) in &name_rows {
-                if let Some(&cid) = cluster_of.get(fid) {
-                    *cname_votes
-                        .entry(cid)
-                        .or_default()
-                        .entry(name.clone())
-                        .or_insert(0) += 1;
-                }
-            }
-            let cluster_name: Vec<(i32, String)> = cname_votes
-                .into_iter()
-                .filter_map(|(cid, votes)| {
-                    // Deterministic: highest vote wins; an exact tie resolves to
-                    // the lexicographically smallest name (nb.cmp(na)) — never
-                    // HashMap iteration order, so identical re-clusters yield the
-                    // same blocked set + the same People grouping.
-                    votes
-                        .into_iter()
-                        .max_by(|(na, ca), (nb, cb)| ca.cmp(cb).then_with(|| nb.cmp(na)))
-                        .map(|(n, _)| (cid, n))
-                })
-                .collect();
-            for i in 0..cluster_name.len() {
-                for j in (i + 1)..cluster_name.len() {
-                    if cluster_name[i].1 != cluster_name[j].1 {
-                        let (a, b) = (cluster_name[i].0, cluster_name[j].0);
-                        blocked.insert(if a < b { (a, b) } else { (b, a) });
-                    }
-                }
-            }
-
-            let before = anchors.len();
-            let (a, an) = crate::pipeline::face_clustering::consolidate(
-                &faces, assignments, anchors, &blocked, threshold,
-            );
-            if an.len() != before {
-                tracing::info!(
-                    before,
-                    after = an.len(),
-                    merged = before - an.len(),
-                    threshold,
-                    "[CLUSTER] auto-consolidated near-duplicate clusters"
-                );
-            }
-            (a, an)
-        };
 
         // PHASE 3 — re-acquire the writer lock for the persist transaction.
         let conn = db.lock();
@@ -288,6 +199,72 @@ pub(crate) async fn handle_run_face_clustering(
                 }
             }
         }
+
+        // Auto-consolidate near-certain duplicate clusters the over-split-safe
+        // clusterer left fragmented (the "WAY too many similar faces" symptom),
+        // RIGHT HERE under the persist lock — not in the lock-free phase 2 — so
+        // the verification-aware blocked set is built from the same under-lock
+        // snapshot the persist below uses. Two blocked-pair sources keep a
+        // confirmed split from being silently re-merged:
+        let (assignments, anchors) = {
+            let threshold = crate::pipeline::face_clustering::automerge_threshold();
+            let cluster_of: HashMap<i64, i32> =
+                assignments.iter().map(|a| (a.face_id, a.cluster_id)).collect();
+            let mut blocked: std::collections::HashSet<(i32, i32)> =
+                std::collections::HashSet::new();
+
+            // (a) Explicit "different people" verdicts, re-projected onto the
+            // faces' CURRENT clusters. Precise, but the link rides face_prints.id,
+            // which a faces_evaluated re-scan churns (DELETE+INSERT) — after which
+            // a stored verdict's faces no longer resolve. Guard (b) backstops that.
+            // Reads the pre-loaded `verdict_pairs` (phase 1), not the DB.
+            for &(fa, fb) in &verdict_pairs {
+                if let (Some(&ca), Some(&cb)) = (cluster_of.get(&fa), cluster_of.get(&fb)) {
+                    if ca != cb {
+                        blocked.insert(if ca < cb { (ca, cb) } else { (cb, ca) });
+                    }
+                }
+            }
+
+            // (b) Never auto-merge two clusters carrying DIFFERENT user-assigned
+            // names. The face→name mapping is RE-DERIVED here from the under-lock
+            // phase-3 identity snapshot (`face_to_prior` + `prior_by_person`),
+            // exactly like the S0 identity carry-forward — NOT from a phase-1
+            // `name_rows` capture. A rename committed during the lock-free phase-2
+            // window (it had to take this same writer lock) is therefore reflected
+            // in the guard, so it can never unblock a wrong-cluster auto-merge off
+            // a stale name. Same-named fragments and named+unnamed pairs still
+            // merge (the intended consolidation). (audit C1-023)
+            let face_name: HashMap<i64, String> = face_to_prior
+                .iter()
+                .filter_map(|(&fid, &pid)| {
+                    prior_by_person
+                        .get(&pid)
+                        .and_then(|p| p.name.clone())
+                        .map(|name| (fid, name))
+                })
+                .collect();
+            for pair in
+                crate::pipeline::face_clustering::name_blocked_pairs(&face_name, &cluster_of)
+            {
+                blocked.insert(pair);
+            }
+
+            let before = anchors.len();
+            let (a, an) = crate::pipeline::face_clustering::consolidate(
+                &faces, assignments, anchors, &blocked, threshold,
+            );
+            if an.len() != before {
+                tracing::info!(
+                    before,
+                    after = an.len(),
+                    merged = before - an.len(),
+                    threshold,
+                    "[CLUSTER] auto-consolidated near-duplicate clusters"
+                );
+            }
+            (a, an)
+        };
 
         // Persist clusters: clear existing person_id assignments + persons,
         // re-create one persons row per anchor, point face_prints at it.
