@@ -126,8 +126,27 @@ impl ScanSession {
             // in practice, but a spawn(async { send.await }) pattern
             // could pile up unbounded tasks waiting on a full sink.
             // try_send bounds the engine's worst-case memory.
+            //
+            // C1-002: this droppable path is for NON-terminal phases only.
+            // Terminal phases (Cancelled / Failed / Completed) MUST go through
+            // `emit_phase_guaranteed` below — a dropped terminal PhaseChanged
+            // makes the app render a cancelled/failed scan as Completed and
+            // auto-fire face clustering. The engine's "terminal events must
+            // not drop" rule.
             let p = phase.as_ipc_phase();
             let _ = sink.try_send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(p))));
+        };
+
+        // C1-002: guaranteed (blocking/backpressuring) terminal-phase emit.
+        // Awaits channel capacity rather than dropping, so a cancelled/failed
+        // terminal state can never be silently lost under sink backpressure.
+        let emit_phase_guaranteed = |sink: &Sink, phase: SessionPhase| {
+            let p = phase.as_ipc_phase();
+            let sink = sink.clone();
+            async move {
+                sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(p))))
+                    .await;
+            }
         };
 
         on_phase(SessionPhase::Discovering);
@@ -194,17 +213,34 @@ impl ScanSession {
             // modified_at IS NULL rows fall out automatically: NULL comparisons
             // are NULL → treated as false in WHERE, so the row is omitted from
             // the skip set and gets reprocessed.
+            //
+            // C1-013: a content-bearing file scanned as an online-only
+            // (dehydrated OneDrive Files-On-Demand) placeholder records
+            // content_hash=NULL — the tagger skips the content read so it
+            // never triggers a network hydration. Hydration does NOT bump
+            // modified_at, so the bare `scanned_at >= modified_at` predicate
+            // would strand the now-local file in the skip set forever. Exclude
+            // any content-bearing kind that lacks a content_hash so a
+            // dehydrated→hydrated file is reprocessed; a transient hash failure
+            // re-scans too, which is the skip set's documented fail-safe.
+            let content_hash_gate = SKIP_SET_CONTENT_HASH_GATE;
             let select_sql = if hi.is_some() {
-                "SELECT path_text FROM files \
-                 WHERE path_text >= ?1 AND path_text < ?2 \
-                 AND failed = 0 \
-                 AND scanned_at >= modified_at"
+                format!(
+                    "SELECT path_text FROM files \
+                     WHERE path_text >= ?1 AND path_text < ?2 \
+                     AND failed = 0 \
+                     AND scanned_at >= modified_at \
+                     {content_hash_gate}"
+                )
             } else {
-                "SELECT path_text FROM files \
-                 WHERE failed = 0 \
-                 AND scanned_at >= modified_at"
+                format!(
+                    "SELECT path_text FROM files \
+                     WHERE failed = 0 \
+                     AND scanned_at >= modified_at \
+                     {content_hash_gate}"
+                )
             };
-            if let Ok(mut stmt) = conn.prepare(select_sql) {
+            if let Ok(mut stmt) = conn.prepare(&select_sql) {
                 // One closure literal shared across both arms — two separate
                 // closures are distinct types and `match` can't unify them.
                 let row_to_string = |r: &rusqlite::Row| r.get::<_, String>(0);
@@ -499,10 +535,30 @@ impl ScanSession {
             ))))
             .await;
             on_phase(SessionPhase::Failed);
-            emit_phase(SessionPhase::Failed);
+            // C1-002: terminal Failed phase via the guaranteed path — a drop
+            // here would render the TDR-aborted scan as Completed and auto-fire
+            // face clustering on a half-scanned library.
+            emit_phase_guaranteed(&sink, SessionPhase::Failed).await;
+            // C1-002 backstop: Failed had no terminal ScanComplete. Without it,
+            // a consumer that missed the (now-guaranteed) PhaseChanged still has
+            // no terminal frame to settle the scan. Emit one carrying the final
+            // counts; the preceding phaseChanged(failed) is the authoritative
+            // STATE — consumers must not infer "completed" from this event.
+            sink.send(IpcEvent::now(EventPayload::ScanComplete(Wrap::new(
+                ScanComplete {
+                    session_id: session_id.clone(),
+                    total_files: discovered_count.load(std::sync::atomic::Ordering::Relaxed),
+                    processed_files: total,
+                    failed_files: failed,
+                    total_seconds: elapsed,
+                },
+            ))))
+            .await;
         } else if self.coordinator.is_cancelled() {
             on_phase(SessionPhase::Cancelled);
-            emit_phase(SessionPhase::Cancelled);
+            // C1-002: terminal Cancelled phase via the guaranteed path — a drop
+            // makes the app treat a cancelled scan as Completed.
+            emit_phase_guaranteed(&sink, SessionPhase::Cancelled).await;
             // IPC parity with macOS (markSessionFinal emits scanComplete
             // unconditionally, pinned by ScanCancellationTests): cancelled
             // scans still get the terminal scanComplete carrying the final
@@ -525,7 +581,9 @@ impl ScanSession {
             on_phase(SessionPhase::PostScan);
             emit_phase(SessionPhase::PostScan);
             on_phase(SessionPhase::Completed);
-            emit_phase(SessionPhase::Completed);
+            // C1-002: terminal Completed phase via the guaranteed path so the
+            // app's terminal state can never be lost under backpressure.
+            emit_phase_guaranteed(&sink, SessionPhase::Completed).await;
             sink.send(IpcEvent::now(EventPayload::ScanComplete(Wrap::new(
                 ScanComplete {
                     session_id: session_id.clone(),
@@ -622,6 +680,15 @@ fn emit_batch_summary(sink: &Sink, stats: &BatchStats) {
     // preferable to spawning an unbounded tail of tasks awaiting capacity.
     let _ = sink.try_send(IpcEvent::now(EventPayload::BatchSummary(Wrap::new(summary))));
 }
+
+/// C1-013 skip-set guard: drop any content-bearing row that was scanned
+/// without a content_hash (the signature of an online-only OneDrive
+/// placeholder, whose content read is skipped to avoid a network hydration).
+/// Because hydration doesn't bump `modified_at`, this is the only durable
+/// signal that a now-local file still needs ML processing.
+pub(crate) const SKIP_SET_CONTENT_HASH_GATE: &str =
+    "AND NOT (content_hash IS NULL \
+      AND kind IN ('image', 'video', 'pdf', 'doc', 'audio'))";
 
 /// Exclusive upper bound for a sargable prefix range: `prefix` with its last
 /// Unicode scalar incremented, so `path_text >= prefix AND path_text < upper`
@@ -769,6 +836,80 @@ mod tests {
         let _ = st.observe_rate(10, t0 + Duration::from_secs(1)); // seeds ~10/s
         let held = st.observe_rate(1000, t0 + Duration::from_millis(1100)); // only +0.1 s
         assert!(held < 50.0, "a rapid sample (<0.5s) must not spike the rate, got {held}");
+    }
+
+    /// C1-013: the incremental skip-set must NOT skip a file whose
+    /// reparse/placeholder state changed (dehydrated→hydrated). A OneDrive
+    /// online-only placeholder is recorded with `content_hash = NULL` and
+    /// `scanned_at >= modified_at`; after the user hydrates it, the modified
+    /// time is unchanged, so the bare `scanned_at >= modified_at` predicate
+    /// would strand it forever. The content_hash gate must drop it from the
+    /// skip set while keeping fully-scanned files in it.
+    #[test]
+    fn skip_set_excludes_hydrated_placeholder_keeps_scanned_file() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE files (
+                 path_text    TEXT NOT NULL UNIQUE,
+                 kind         TEXT NOT NULL,
+                 modified_at  DOUBLE,
+                 scanned_at   DOUBLE NOT NULL,
+                 failed       INTEGER NOT NULL DEFAULT 0,
+                 content_hash BLOB
+             );",
+        )
+        .unwrap();
+        // A dehydrated image scanned as an online-only placeholder: no
+        // content_hash, scanned_at >= modified_at, failed=0. After hydration
+        // modified_at is unchanged — the row below is exactly that state.
+        conn.execute(
+            "INSERT INTO files (path_text, kind, modified_at, scanned_at, failed, content_hash) \
+             VALUES ('C:\\OneDrive\\dehydrated.jpg', 'image', 100.0, 200.0, 0, NULL)",
+            [],
+        )
+        .unwrap();
+        // A fully-scanned local image: has a content_hash → belongs in the skip set.
+        conn.execute(
+            "INSERT INTO files (path_text, kind, modified_at, scanned_at, failed, content_hash) \
+             VALUES ('C:\\Local\\photo.jpg', 'image', 100.0, 200.0, 0, X'00112233')",
+            [],
+        )
+        .unwrap();
+        // A non-content kind (e.g. 'other') legitimately lacks a content_hash
+        // and must NOT be force-rescanned by the gate.
+        conn.execute(
+            "INSERT INTO files (path_text, kind, modified_at, scanned_at, failed, content_hash) \
+             VALUES ('C:\\Local\\notes.bin', 'other', 100.0, 200.0, 0, NULL)",
+            [],
+        )
+        .unwrap();
+
+        // Run the EXACT production skip-set predicate (no path-prefix arm).
+        let sql = format!(
+            "SELECT path_text FROM files \
+             WHERE failed = 0 \
+             AND scanned_at >= modified_at \
+             {SKIP_SET_CONTENT_HASH_GATE}"
+        );
+        let mut stmt = conn.prepare(&sql).unwrap();
+        let skip: std::collections::HashSet<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .flatten()
+            .collect();
+
+        assert!(
+            !skip.contains("C:\\OneDrive\\dehydrated.jpg"),
+            "a dehydrated→hydrated placeholder (content_hash NULL) must be reprocessed, not skipped"
+        );
+        assert!(
+            skip.contains("C:\\Local\\photo.jpg"),
+            "a fully-scanned content-bearing file must stay in the skip set"
+        );
+        assert!(
+            skip.contains("C:\\Local\\notes.bin"),
+            "a non-content kind without a content_hash must not be force-rescanned"
+        );
     }
 }
 
