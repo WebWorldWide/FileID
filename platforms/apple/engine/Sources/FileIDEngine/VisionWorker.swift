@@ -90,6 +90,12 @@ public final class VisionWorker: @unchecked Sendable {
         public var faceYaws: [Double?]         // radians, parallel to faceBBoxes; nil if missing
         public var facePitches: [Double?]      // radians, parallel to faceBBoxes; nil if missing
         public var facePrints: [Data]          // EMPTY here — extracted lazily in Stage D
+        /// False iff `handler.perform` exceeded the wall-clock timeout and was
+        /// abandoned (empty result). The tagging stage keys its stage-ran gates
+        /// (tagsEvaluated / facesEvaluated) on this so a timed-out pass never
+        /// wipes previously-persisted auto-tags or faces (incl. manual
+        /// person_id) on a rescan, and marks the file for retry. (F-C3-001/036)
+        public var didComplete: Bool
     }
 
     /// Bundled face/scene/saliency Vision pass over `cgImage`.
@@ -102,7 +108,7 @@ public final class VisionWorker: @unchecked Sendable {
         var pass = PrimaryPass(classifyTags: [], faceCount: 0,
                                faceBBoxes: [], faceQualities: [],
                                faceYaws: [], facePitches: [],
-                               facePrints: [])
+                               facePrints: [], didComplete: false)
 
         let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
         // Per-call request objects — never shared across files (see init note).
@@ -121,8 +127,9 @@ public final class VisionWorker: @unchecked Sendable {
             do { try handler.perform([cReq, fReq, qReq]) } catch { /* swallow */ }
         }
         if !didReturn {
-            return pass   // timed out — return empty, file logged downstream
+            return pass   // timed out — didComplete stays false; file marked for retry downstream
         }
+        pass.didComplete = true
 
         if let results = cReq.results {
             // 0.30 confidence floor: VNClassifyImageRequest emits ~1300

@@ -51,6 +51,17 @@ public struct TaggedFile: Sendable {
     // non-images, files where the model isn't loaded, or inference failures.
     public var clipEmbeddingBlob: Data?
 
+    // Stage-ran gates (port of the Windows tags_evaluated / faces_evaluated /
+    // ocr_stage_ran flags, dbwriter.rs). Each is TRUE only when its producing
+    // stage actually ran AND returned this session — never on a Vision/ANE/OCR
+    // timeout. DBWriter.insertOne keys its `DELETE` on these so a swallowed
+    // timeout (empty result) cannot wipe a file's previously-persisted auto-tags,
+    // OCR text + FTS, or — critically — manual person_id assignments on a
+    // rescan. Default FALSE: the safe, no-delete state for any partial row.
+    public var tagsEvaluated: Bool
+    public var facesEvaluated: Bool
+    public var ocrStageRan: Bool
+
     public init(
         url: URL, kind: String, extension ext: String, sizeBytes: Int64,
         createdAt: Date?, modifiedAt: Date?,
@@ -63,7 +74,10 @@ public struct TaggedFile: Sendable {
         locationLat: Double? = nil, locationLon: Double? = nil,
         failed: Bool = false, errorMessage: String? = nil,
         perFileTotalMs: Double = 0,
-        clipEmbeddingBlob: Data? = nil
+        clipEmbeddingBlob: Data? = nil,
+        tagsEvaluated: Bool = false,
+        facesEvaluated: Bool = false,
+        ocrStageRan: Bool = false
     ) {
         self.url = url
         self.kind = kind
@@ -88,6 +102,9 @@ public struct TaggedFile: Sendable {
         self.errorMessage = errorMessage
         self.perFileTotalMs = perFileTotalMs
         self.clipEmbeddingBlob = clipEmbeddingBlob
+        self.tagsEvaluated = tagsEvaluated
+        self.facesEvaluated = facesEvaluated
+        self.ocrStageRan = ocrStageRan
     }
 }
 
@@ -469,33 +486,46 @@ public actor DBWriter {
             return
         }
 
-        // 2. tags — auto (classifier output). Delete any prior `source='auto'`
-        // rows first so a rescan replaces stale tags atomically; user tags
-        // (`source='user'`) are untouched. Mirrors the Windows `tag_delete` +
-        // `INSERT OR REPLACE` in dbwriter.rs.
-        try db.execute(sql: """
-            DELETE FROM tags WHERE file_id = ? AND source = 'auto'
-            """, arguments: [fileID])
-        for tag in file.visionTags {
-            let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty { continue }
+        // 2. tags — auto (classifier output). Gate the delete-then-reinsert on
+        // whether the tagging stage actually ran AND returned this session
+        // (tagsEvaluated). A Vision/ANE timeout emits an EMPTY visionTags; without
+        // this gate the unconditional DELETE would wipe a file's previously-
+        // persisted auto-tags on a transient timeout, with nothing re-inserted
+        // (data loss). When the stage DID run, delete any prior `source='auto'`
+        // rows and re-insert the fresh set atomically; user tags (`source='user'`)
+        // are untouched either way. Mirrors the Windows `tags_evaluated` gate
+        // (dbwriter.rs) — F-C3-001.
+        if file.tagsEvaluated {
             try db.execute(sql: """
-                INSERT OR REPLACE INTO tags (file_id, tag, source) VALUES (?, ?, ?)
-                """, arguments: [fileID, trimmed, "auto"])
+                DELETE FROM tags WHERE file_id = ? AND source = 'auto'
+                """, arguments: [fileID])
+            for tag in file.visionTags {
+                let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty { continue }
+                try db.execute(sql: """
+                    INSERT OR REPLACE INTO tags (file_id, tag, source) VALUES (?, ?, ?)
+                    """, arguments: [fileID, trimmed, "auto"])
+            }
         }
 
         // 3. OCR text. The ocr_fts external-content index is maintained by the
         // AFTER INSERT/DELETE/UPDATE sync triggers (fts_sync_triggers
-        // migration), so we only touch ocr_text here. Explicit DELETE + INSERT
-        // rather than INSERT OR REPLACE: REPLACE's implicit delete fires the
-        // AFTER DELETE trigger only when recursive triggers are enabled, which
-        // would strand the old text's FTS postings. The bare DELETE also
-        // covers a changed file that no longer yields OCR text.
-        try db.execute(sql: "DELETE FROM ocr_text WHERE file_id = ?", arguments: [fileID])
-        if let text = file.ocrText, !text.isEmpty {
-            try db.execute(sql: """
-                INSERT INTO ocr_text (file_id, text) VALUES (?, ?)
-                """, arguments: [fileID, text])
+        // migration), so we only touch ocr_text here. Gate the delete-then-insert
+        // on whether the OCR stage actually ran this session (ocrStageRan): a
+        // swallowed OCR timeout (or a primary-pass timeout that never reaches the
+        // OCR branch) must NOT wipe valid prior OCR text + FTS postings. When the
+        // stage DID run, explicit DELETE + INSERT — not INSERT OR REPLACE, whose
+        // implicit delete fires the AFTER DELETE trigger only with recursive
+        // triggers enabled, stranding the old text's FTS postings — clears any
+        // now-empty text (covering a changed file that no longer yields OCR).
+        // Mirrors the Windows `ocr_stage_ran` gate (dbwriter.rs) — F-C3-001.
+        if file.ocrStageRan {
+            try db.execute(sql: "DELETE FROM ocr_text WHERE file_id = ?", arguments: [fileID])
+            if let text = file.ocrText, !text.isEmpty {
+                try db.execute(sql: """
+                    INSERT INTO ocr_text (file_id, text) VALUES (?, ?)
+                    """, arguments: [fileID, text])
+            }
         }
 
         // 4. face_prints — write one row per detected face. ArcFace
@@ -505,31 +535,38 @@ public actor DBWriter {
         // Quality + pose come from the inline detection pass and feed
         // the clustering quality filter (excluded=1 means "don't cluster
         // this face, but keep the row for display in PersonDetailSheet").
-        // The files row survives a rescan (ON CONFLICT DO UPDATE, no cascade
-        // delete), so clear this file's prior face rows even when this scan
-        // found none — otherwise a rescan accumulates duplicate or stale
-        // faces. Mirrors the Windows `face_delete` that precedes its inserts.
-        try db.execute(sql: """
-            DELETE FROM face_prints WHERE file_id = ?
-            """, arguments: [fileID])
-        let bboxes = file.faceBBoxes
-        if !bboxes.isEmpty {
-            for i in 0..<bboxes.count {
-                let print: Data = i < file.facePrints.count ? file.facePrints[i] : Data()
-                let quality: Double? = i < file.faceQualities.count
-                    ? (file.faceQualities[i] >= 0 ? file.faceQualities[i] : nil)
-                    : nil
-                let yaw: Double? = i < file.faceYaws.count ? file.faceYaws[i] : nil
-                let pitch: Double? = i < file.facePitches.count ? file.facePitches[i] : nil
-                let bboxArea = Self.bboxArea(bboxes[i])
-                let excluded = Self.isExcluded(quality: quality, yaw: yaw,
-                                               pitch: pitch, bboxArea: bboxArea)
-                try db.execute(sql: """
-                    INSERT INTO face_prints
-                      (file_id, print_data, bbox, face_quality, excluded)
-                    VALUES (?, ?, ?, ?, ?)
-                    """, arguments: [fileID, print, bboxes[i],
-                                     quality, excluded ? 1 : 0])
+        // Gate the stale-face DELETE on whether the face stage actually ran AND
+        // returned this session (facesEvaluated), NOT on `faceBBoxes.isEmpty`: an
+        // edited/zero-face re-process must clear orphaned face_prints (else they
+        // keep polluting clusters), while a Vision/ANE timeout (empty result)
+        // must leave still-valid rows — and, critically, their manual person_id
+        // assignments — intact. The files row survives a rescan (ON CONFLICT DO
+        // UPDATE, no cascade delete), so without this gate a swallowed timeout
+        // would silently wipe a named person's faces. Mirrors the Windows
+        // `faces_evaluated` gate (dbwriter.rs) — F-C3-001.
+        if file.facesEvaluated {
+            try db.execute(sql: """
+                DELETE FROM face_prints WHERE file_id = ?
+                """, arguments: [fileID])
+            let bboxes = file.faceBBoxes
+            if !bboxes.isEmpty {
+                for i in 0..<bboxes.count {
+                    let print: Data = i < file.facePrints.count ? file.facePrints[i] : Data()
+                    let quality: Double? = i < file.faceQualities.count
+                        ? (file.faceQualities[i] >= 0 ? file.faceQualities[i] : nil)
+                        : nil
+                    let yaw: Double? = i < file.faceYaws.count ? file.faceYaws[i] : nil
+                    let pitch: Double? = i < file.facePitches.count ? file.facePitches[i] : nil
+                    let bboxArea = Self.bboxArea(bboxes[i])
+                    let excluded = Self.isExcluded(quality: quality, yaw: yaw,
+                                                   pitch: pitch, bboxArea: bboxArea)
+                    try db.execute(sql: """
+                        INSERT INTO face_prints
+                          (file_id, print_data, bbox, face_quality, excluded)
+                        VALUES (?, ?, ?, ?, ?)
+                        """, arguments: [fileID, print, bboxes[i],
+                                         quality, excluded ? 1 : 0])
+                }
             }
         }
 

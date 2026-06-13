@@ -60,7 +60,8 @@ public enum Tagging {
                 url: url, kind: kind, extension: ext, sizeBytes: discovered.sizeBytes,
                 createdAt: discovered.creationDate, modifiedAt: discovered.modificationDate,
                 visionTags: [discovered.kind.rawValue.capitalized],
-                perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000
+                perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000,
+                tagsEvaluated: true
             )
         }
     }
@@ -99,10 +100,36 @@ public enum Tagging {
                     let pass = worker.runPrimaryPass(cgImage)
                     let visionMs = (CFAbsoluteTimeGetCurrent() - visionStart) * 1000
 
-                    // OCR — only if classify suggests there's text to read.
+                    // A timed-out primary pass returns an empty result. Persisting
+                    // it as failed=false-and-empty would (a) let the DBWriter wipe
+                    // prior auto-tags/faces — gated below by tagsEvaluated/
+                    // facesEvaluated being false — and (b) strand the file at
+                    // failed=false so the incremental skip never re-tags it. Mark
+                    // it failed (gates all stay false) so the next scan retries it,
+                    // mirroring the Windows per-file-timeout row. (F-C3-001/036)
+                    if !pass.didComplete {
+                        JSONLog.shared.warn(ev: "vision_pass_timeout", path: redactPathForLog(url.path))
+                        return TaggedFile(
+                            url: url, kind: "image", extension: ext,
+                            sizeBytes: discovered.sizeBytes,
+                            createdAt: discovered.creationDate,
+                            modifiedAt: discovered.modificationDate,
+                            failed: true,
+                            errorMessage: "Vision pass timed out (will retry next scan)",
+                            perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000
+                        )
+                    }
+
+                    // OCR — only if classify suggests there's text to read. The
+                    // OCR stage "ran" iff we entered this branch; the DBWriter
+                    // gates its ocr_text delete/reinsert on ocrStageRan so a photo
+                    // we never OCR'd (or a primary-pass timeout) can't wipe valid
+                    // prior OCR text. Mirrors the Windows `ocr_stage_ran` gate.
                     var ocr: String? = nil
                     var ocrMs: Double = 0
+                    var ocrStageRan = false
                     if pass.classifyTags.contains(where: { docHints.contains($0.lowercased()) }) {
+                        ocrStageRan = true
                         let ocrStart = CFAbsoluteTimeGetCurrent()
                         let text = worker.ocrFast(cgImage)
                         ocr = text.isEmpty ? nil : text
@@ -151,7 +178,10 @@ public enum Tagging {
                         locationLat: exif.lat,
                         locationLon: exif.lon,
                         perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000,
-                        clipEmbeddingBlob: clipBlob
+                        clipEmbeddingBlob: clipBlob,
+                        tagsEvaluated: true,
+                        facesEvaluated: true,
+                        ocrStageRan: ocrStageRan
                     )
                     tagged.loadMs = loadMs
                     tagged.visionMs = visionMs
@@ -185,7 +215,8 @@ public enum Tagging {
             sizeBytes: discovered.sizeBytes,
             createdAt: discovered.creationDate,
             modifiedAt: discovered.modificationDate,
-            visionTags: ["Video"]
+            visionTags: ["Video"],
+            tagsEvaluated: true
         )
         _ = worker  // unused — kept for signature parity with image/pdf paths
         tagged.perFileTotalMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
@@ -215,7 +246,8 @@ public enum Tagging {
                 createdAt: discovered.creationDate,
                 modifiedAt: discovered.modificationDate,
                 visionTags: ["PDF", "Large_Document"],
-                perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000
+                perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000,
+                tagsEvaluated: true
             )
         }
 
@@ -229,7 +261,8 @@ public enum Tagging {
                             createdAt: discovered.creationDate,
                             modifiedAt: discovered.modificationDate,
                             visionTags: ["PDF"],
-                            perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000
+                            perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000,
+                            tagsEvaluated: true
                         )
                     }
                     let pageCount = min(pdf.numberOfPages, 3)
@@ -277,7 +310,9 @@ public enum Tagging {
                         modifiedAt: discovered.modificationDate,
                         visionTags: ["PDF"],
                         ocrText: ocr.isEmpty ? nil : ocr,
-                        perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000
+                        perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000,
+                        tagsEvaluated: true,
+                        ocrStageRan: true
                     )
                 }
                 cont.resume(returning: result)
