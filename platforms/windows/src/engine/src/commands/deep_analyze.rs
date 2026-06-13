@@ -187,13 +187,14 @@ pub(crate) async fn handle_deep_analyze_folder(
     // P16: sargable range seek on the path_text index instead of a
     // non-sargable `LIKE 'prefix%'` full-table scan.
     let lo = payload.path_prefix.clone();
+    let filter = deep_analyze_target_filter();
     let ids_result = match crate::scan_session::prefix_upper_bound(&lo) {
         Some(hi) => collect_file_ids(
             &db,
-            "WHERE path_text >= ?1 AND path_text < ?2 AND kind IN ('image','video')",
+            &format!("WHERE path_text >= ?1 AND path_text < ?2 AND {filter}"),
             &[&lo, &hi],
         ),
-        None => collect_file_ids(&db, "WHERE kind IN ('image','video')", &[]),
+        None => collect_file_ids(&db, &format!("WHERE {filter}"), &[]),
     };
     let ids = match ids_result {
         Ok(v) => v,
@@ -224,7 +225,11 @@ pub(crate) async fn handle_deep_analyze_all(
     payload: ipc::DeepAnalyzeAllPayload,
     cancel: Arc<AtomicBool>,
 ) {
-    let ids = match collect_file_ids(&db, "WHERE kind IN ('image','video')", &[]) {
+    let ids = match collect_file_ids(
+        &db,
+        &format!("WHERE {}", deep_analyze_target_filter()),
+        &[],
+    ) {
         Ok(v) => v,
         Err(err) => {
             tracing::warn!(?err, "deep_analyze_all query");
@@ -254,6 +259,23 @@ pub(crate) async fn handle_deep_analyze_all(
         payload.propose_renames,
     )
     .await;
+}
+
+/// The `kind IN (...) AND failed = 0` predicate every Deep Analyze target query
+/// shares. `'pdf'` is included only when the `pdf-analyze` render path is
+/// compiled in (default-on) — without it `rasterize_for_vlm` returns a
+/// feature-gate error for every PDF, so queuing them would only manufacture
+/// failures (F-C1-005). `failed = 0` excludes rows a prior GPU death marked
+/// failed, parity with the macOS reference (F-C1-022).
+pub(crate) fn deep_analyze_target_filter() -> &'static str {
+    #[cfg(feature = "pdf-analyze")]
+    {
+        "kind IN ('image','video','pdf') AND failed = 0"
+    }
+    #[cfg(not(feature = "pdf-analyze"))]
+    {
+        "kind IN ('image','video') AND failed = 0"
+    }
 }
 
 fn collect_file_ids(
@@ -447,13 +469,19 @@ async fn run_deep_analyze_batch(
                     )
                     .unwrap_or(false)
                 } else {
+                    // F-C1-020: the full pass is model-aware too. "Already done"
+                    // must mean "captioned BY THIS MODEL" (vlm_model match), not
+                    // "captioned by anything" — otherwise switching the VLM and
+                    // re-running skips every file the OLD model captioned, so the
+                    // new model never runs. Require both a non-null caption AND a
+                    // matching vlm_model so a model switch re-analyzes.
                     conn.query_row(
-                        "SELECT vlm_description FROM files WHERE id = ?1",
-                        rusqlite::params![file_id],
-                        |r| r.get::<_, Option<String>>(0),
+                        "SELECT EXISTS(SELECT 1 FROM files \
+                         WHERE id=?1 AND vlm_model=?2 AND vlm_description IS NOT NULL)",
+                        rusqlite::params![file_id, model_kind],
+                        |r| r.get::<_, bool>(0),
                     )
-                    .unwrap_or(None)
-                    .is_some()
+                    .unwrap_or(false)
                 }
             };
             if already {
@@ -562,14 +590,31 @@ async fn run_deep_analyze_batch(
             Err(err) => {
                 failed += 1;
                 tracing::warn!(?err, file_id, "deep analyze file failed");
-                // If the persistent server errored but a CLI runner is available,
-                // assume the server died and fall back to per-file CLI for the
-                // REMAINING files rather than failing every one. (audit E5)
+                // F-C1-021: a per-file error (unreadable image, decode failure,
+                // one rejected request) must NOT tear down a HEALTHY persistent
+                // server and downgrade the rest of the batch to the many-times
+                // slower per-file CLI. Only genuine server DEATH justifies the
+                // fallback. Re-probe the server with the same one-shot payload
+                // self-test used at startup; abandon it for the remaining files
+                // ONLY if that probe also fails (the server is actually gone).
                 if use_server && runner.is_some() {
-                    tracing::warn!(
-                        "[DEEP-ANALYZE] persistent server call failed; falling back to per-file CLI for the rest of the batch"
-                    );
-                    use_server = false;
+                    let server_dead = match server.as_ref() {
+                        Some(srv) => crate::pipeline::deep_analyze::vlm_server_payload_ok(srv)
+                            .await
+                            .is_err(),
+                        None => true,
+                    };
+                    if server_dead {
+                        tracing::warn!(
+                            "[DEEP-ANALYZE] persistent server is unresponsive; falling back to per-file CLI for the rest of the batch"
+                        );
+                        use_server = false;
+                    } else {
+                        tracing::debug!(
+                            file_id,
+                            "[DEEP-ANALYZE] per-file error but server still healthy; keeping the persistent server"
+                        );
+                    }
                 }
             }
         }
@@ -629,5 +674,99 @@ mod tests {
         // spacing intact, single-space at line boundary.
         let out = run_caption_chunks(&["A dog sits", "on a couch"]);
         assert_eq!(out, "A dog sits on a couch");
+    }
+
+    fn in_memory_db() -> Arc<Mutex<rusqlite::Connection>> {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).expect("migrations apply");
+        Arc::new(Mutex::new(conn))
+    }
+
+    /// Insert a minimal `files` row, returning its id. `vlm_model` /
+    /// `vlm_description` are set only when provided so the skip predicate
+    /// tests can model "captioned by a specific model" vs "never analyzed".
+    fn insert_file(
+        db: &Arc<Mutex<rusqlite::Connection>>,
+        path: &str,
+        kind: &str,
+        failed: i64,
+        vlm_model: Option<&str>,
+        vlm_description: Option<&str>,
+    ) -> i64 {
+        let conn = db.lock();
+        conn.execute(
+            "INSERT INTO files \
+             (path_text, path_hash, size_bytes, scanned_at, kind, extension, failed, vlm_model, vlm_description) \
+             VALUES (?1, 0, 1, 0.0, ?2, '', ?3, ?4, ?5)",
+            rusqlite::params![path, kind, failed, vlm_model, vlm_description],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// F-C1-005 + F-C1-022: the shared target filter selects renderable PDFs
+    /// (when the pdf-analyze render path is compiled in) and excludes rows a
+    /// prior GPU death marked failed=1 — parity with the macOS reference.
+    #[test]
+    fn target_filter_includes_pdfs_and_excludes_failed() {
+        let db = in_memory_db();
+        let img = insert_file(&db, r"C:\lib\a.jpg", "image", 0, None, None);
+        let vid = insert_file(&db, r"C:\lib\b.mp4", "video", 0, None, None);
+        let pdf = insert_file(&db, r"C:\lib\c.pdf", "pdf", 0, None, None);
+        // failed=1 image (GPU-death-marked) must NOT be a target.
+        let dead = insert_file(&db, r"C:\lib\d.jpg", "image", 1, None, None);
+        // A non-renderable kind is never a Deep Analyze target.
+        let _doc = insert_file(&db, r"C:\lib\e.docx", "doc", 0, None, None);
+
+        let ids = super::collect_file_ids(
+            &db,
+            &format!("WHERE {}", super::deep_analyze_target_filter()),
+            &[],
+        )
+        .unwrap();
+
+        assert!(ids.contains(&img), "image must be a target");
+        assert!(ids.contains(&vid), "video must be a target");
+        #[cfg(feature = "pdf-analyze")]
+        assert!(ids.contains(&pdf), "pdf must be a target when render ships");
+        #[cfg(not(feature = "pdf-analyze"))]
+        assert!(!ids.contains(&pdf), "pdf excluded without the render feature");
+        assert!(!ids.contains(&dead), "failed=1 row must be excluded");
+    }
+
+    /// F-C1-020: the full-pass skip predicate keys on (file, vlm_model). A file
+    /// captioned by an OLD model is NOT "already done" for a NEW model, so a
+    /// VLM switch re-analyzes instead of skipping every prior file.
+    #[test]
+    fn full_pass_skip_is_model_aware() {
+        let db = in_memory_db();
+        let fid = insert_file(
+            &db,
+            r"C:\lib\a.jpg",
+            "image",
+            0,
+            Some("gemma-3-4b"),
+            Some("a dog on a couch"),
+        );
+
+        // This is the exact predicate the non-tags-only skip branch runs.
+        let skip_for = |model: &str| -> bool {
+            let conn = db.lock();
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM files \
+                 WHERE id=?1 AND vlm_model=?2 AND vlm_description IS NOT NULL)",
+                rusqlite::params![fid, model],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap_or(false)
+        };
+
+        // Same model that captioned it → skip (already done by this model).
+        assert!(skip_for("gemma-3-4b"), "same-model row is already done");
+        // Different model → NOT skipped, so the new model re-analyzes the file.
+        assert!(
+            !skip_for("qwen2.5-vl-7b"),
+            "a model switch must re-analyze, not skip the old model's caption"
+        );
     }
 }
