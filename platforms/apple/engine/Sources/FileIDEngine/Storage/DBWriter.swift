@@ -148,10 +148,35 @@ public actor DBWriter {
         self.forceReprocess = forceReprocess
     }
 
+    /// A full batch handed off to the committer task. Sendable so it can cross
+    /// the rendezvous channel between the drain loop and the committer.
+    private struct PendingBatch: Sendable {
+        let files: [TaggedFile]
+        let startedAt: Date
+    }
+
     /// Drain `taggedChannel` until the channel closes (= tagging stage done).
     /// Called from the engine's main task; the writer keeps going until the
     /// upstream is exhausted, then performs a final flush.
+    ///
+    /// The DB transaction (and its WAL checkpoint) is DECOUPLED from this loop:
+    /// assembled batches are handed to a single committer task over a rendezvous
+    /// channel, so a commit runs CONCURRENTLY with the next batch being pulled
+    /// off `channel`. The old inline `await commit` stalled every tagging worker
+    /// for the full transaction duration — a busy writer stops draining the
+    /// unbuffered taggedChan, so the workers' `send` parks. At most one batch
+    /// commits while one assembles (bounded memory ≈ two batches); a full batch
+    /// assembled before the prior commit finishes still blocks on
+    /// `commitChan.send`, which preserves back-pressure and the batch bounds.
+    /// (F-C6-004)
     public func drain(_ channel: AsyncChannel<TaggedFile>) async {
+        let commitChan = AsyncChannel<PendingBatch>()
+        let committer = Task { [self] in
+            for await pending in commitChan {
+                await self.commitBatch(pending.files, batchStart: pending.startedAt)
+            }
+        }
+
         var buffer: [TaggedFile] = []
         buffer.reserveCapacity(maxBatchFiles)
         var batchStart = Date()
@@ -161,22 +186,33 @@ public actor DBWriter {
             // Trigger commit on either ceiling.
             let elapsedMs = Date().timeIntervalSince(batchStart) * 1000
             if buffer.count >= maxBatchFiles || elapsedMs >= Double(maxBatchMs) {
-                await commit(&buffer, batchStart: batchStart)
+                let batch = buffer
+                buffer.removeAll(keepingCapacity: true)
+                await commitChan.send(PendingBatch(files: batch, startedAt: batchStart))
                 batchStart = Date()
             }
         }
         // Tail flush — anything still buffered when upstream closes.
         if !buffer.isEmpty {
-            await commit(&buffer, batchStart: batchStart)
+            let batch = buffer
+            buffer.removeAll(keepingCapacity: true)
+            await commitChan.send(PendingBatch(files: batch, startedAt: batchStart))
         }
+        // Close the handoff and wait for the committer to finish the in-flight +
+        // tail batches, so `await writerTask.value` upstream still observes a
+        // fully-flushed, durable DB before the terminal scan event fires.
+        commitChan.finish()
+        await committer.value
     }
 
     // MARK: - Commit
 
-    private func commit(_ buffer: inout [TaggedFile], batchStart: Date) async {
-        guard !buffer.isEmpty else { return }
-        let batchFiles = buffer
-        buffer.removeAll(keepingCapacity: true)
+    /// Commit one assembled batch. Runs on the actor from the single committer
+    /// task, so batches commit serially (single-writer DB) and the counters /
+    /// `batchIndex` are mutated without races, while the actual `pool.write`
+    /// suspension lets the drain loop keep pulling files concurrently.
+    private func commitBatch(_ batchFiles: [TaggedFile], batchStart: Date) async {
+        guard !batchFiles.isEmpty else { return }
 
         let insertStart = Date()
         // Compute counts up-front so the closure doesn't need to mutate them.
@@ -202,9 +238,9 @@ public actor DBWriter {
                         // Update scan session high-water mark in the SAME
                         // transaction so a crash mid-batch can't leave the
                         // resume cursor pointing past the last committed file.
-                        try db.execute(sql: """
+                        try db.cachedStatement(sql: """
                             UPDATE scan_sessions SET last_file_index = ? WHERE id = ?
-                            """, arguments: [resumeCursor, sessionID])
+                            """).execute(arguments: [resumeCursor, sessionID])
                     }
                     break
                 } catch {
@@ -335,7 +371,19 @@ public actor DBWriter {
             residentMB:  Hardware.residentMB(),
             availableMB: Hardware.availableMemoryMB()
         )))
+
+        // Periodic PASSIVE WAL checkpoint, OUTSIDE the just-closed batch
+        // transaction, so the -wal file is trimmed incrementally instead of
+        // hitting the 10000-page autocheckpoint ceiling and doing one large
+        // synchronous checkpoint copy inside a future commit. Best-effort and
+        // non-blocking; mirrors the Windows per-32-batch cadence. (F-C6-004)
+        if self.batchIndex % Self.walCheckpointBatches == 0 {
+            await self.db.checkpointPassive()
+        }
     }
+
+    /// Commits between periodic PASSIVE WAL checkpoints. Windows-parity (32).
+    private static let walCheckpointBatches = 32
 
     /// Transient SQLite failures worth retrying (vs. a hard schema/constraint
     /// error). Keys on the primary result code, not the message string.
@@ -370,18 +418,25 @@ public actor DBWriter {
         // row on every re-scan, which — via ON DELETE CASCADE — wiped
         // face_prints (including the user's MANUAL person assignments), CLIP
         // embeddings, and FTS rows, and minted a brand-new rowid each time.
-        let existing = try Row.fetchOne(db, sql: """
-            SELECT id, size_bytes, modified_at, failed FROM files WHERE path_text = ?
-            """, arguments: [file.url.path])
+        // GRDB's `execute(sql:)` / `fetchOne(_:sql:)` compile a fresh statement
+        // every call; `cachedStatement` reuses one compiled plan per SQL for the
+        // life of the (pool-reused) writer connection, so the hot per-file path
+        // re-binds instead of re-parsing — the macOS analogue of the Windows
+        // prepared/cached-statement path (dbwriter.rs). (F-C6-010)
+        let existing = try Row.fetchOne(
+            db.cachedStatement(sql: """
+                SELECT id, size_bytes, modified_at, failed FROM files WHERE path_text = ?
+                """),
+            arguments: [file.url.path])
 
         // A failure on a file that scanned before (transient decode error, NAS
         // hiccup) must not clobber the prior metadata or its child rows — incl.
         // manual person_id assignments. Record only the failure.
         if file.failed, let existing {
             let fileID: Int64 = existing["id"]
-            try db.execute(sql: """
+            try db.cachedStatement(sql: """
                 UPDATE files SET failed = 1, error_message = ?, scanned_at = ? WHERE id = ?
-                """, arguments: [file.errorMessage, Date().timeIntervalSince1970, fileID])
+                """).execute(arguments: [file.errorMessage, Date().timeIntervalSince1970, fileID])
             return
         }
 
@@ -414,7 +469,7 @@ public actor DBWriter {
         //   originally-recorded creation time, and aesthetic is scored elsewhere.
         //   content_hash/file_ref aren't computed by the macOS scan path yet, so
         //   they bind NULL and COALESCE preserves any previously-stored value.
-        try db.execute(sql: """
+        try db.cachedStatement(sql: """
             INSERT INTO files
               (path_text, path_hash, path_search, size_bytes, created_at,
                modified_at, scanned_at, kind, extension, phash, aesthetic,
@@ -439,7 +494,7 @@ public actor DBWriter {
                 error_message = excluded.error_message,
                 content_hash  = COALESCE(excluded.content_hash, content_hash),
                 file_ref      = COALESCE(excluded.file_ref, file_ref)
-            """, arguments: [
+            """).execute(arguments: [
                 file.url.path,
                 pathHash,
                 file.url.path.precomposedStringWithCanonicalMapping,
@@ -460,8 +515,7 @@ public actor DBWriter {
                 file.errorMessage,
                 nil,
                 nil
-            ]
-        )
+            ])
         // last_insert_rowid() is NOT updated on the UPDATE branch of an upsert,
         // so resolve the id from the existing row when there was one. This
         // mirrors the row-id stability the Windows `RETURNING id` provides on
@@ -476,9 +530,11 @@ public actor DBWriter {
         // DB doesn't have — backfill it without rebuilding the other children.
         if unchanged {
             if let blob = file.clipEmbeddingBlob {
-                let hasEmbedding = try Bool.fetchOne(db, sql: """
-                    SELECT EXISTS(SELECT 1 FROM clip_embeddings WHERE file_id = ?)
-                    """, arguments: [fileID]) ?? false
+                let hasEmbedding = try Bool.fetchOne(
+                    db.cachedStatement(sql: """
+                        SELECT EXISTS(SELECT 1 FROM clip_embeddings WHERE file_id = ?)
+                        """),
+                    arguments: [fileID]) ?? false
                 if !hasEmbedding {
                     try insertClipEmbedding(fileID: fileID, blob: blob, db: db)
                 }
@@ -496,15 +552,15 @@ public actor DBWriter {
         // are untouched either way. Mirrors the Windows `tags_evaluated` gate
         // (dbwriter.rs) — F-C3-001.
         if file.tagsEvaluated {
-            try db.execute(sql: """
+            try db.cachedStatement(sql: """
                 DELETE FROM tags WHERE file_id = ? AND source = 'auto'
-                """, arguments: [fileID])
+                """).execute(arguments: [fileID])
             for tag in file.visionTags {
                 let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
                 if trimmed.isEmpty { continue }
-                try db.execute(sql: """
+                try db.cachedStatement(sql: """
                     INSERT OR REPLACE INTO tags (file_id, tag, source) VALUES (?, ?, ?)
-                    """, arguments: [fileID, trimmed, "auto"])
+                    """).execute(arguments: [fileID, trimmed, "auto"])
             }
         }
 
@@ -520,11 +576,12 @@ public actor DBWriter {
         // now-empty text (covering a changed file that no longer yields OCR).
         // Mirrors the Windows `ocr_stage_ran` gate (dbwriter.rs) — F-C3-001.
         if file.ocrStageRan {
-            try db.execute(sql: "DELETE FROM ocr_text WHERE file_id = ?", arguments: [fileID])
+            try db.cachedStatement(sql: "DELETE FROM ocr_text WHERE file_id = ?")
+                .execute(arguments: [fileID])
             if let text = file.ocrText, !text.isEmpty {
-                try db.execute(sql: """
+                try db.cachedStatement(sql: """
                     INSERT INTO ocr_text (file_id, text) VALUES (?, ?)
-                    """, arguments: [fileID, text])
+                    """).execute(arguments: [fileID, text])
             }
         }
 
@@ -545,9 +602,9 @@ public actor DBWriter {
         // would silently wipe a named person's faces. Mirrors the Windows
         // `faces_evaluated` gate (dbwriter.rs) — F-C3-001.
         if file.facesEvaluated {
-            try db.execute(sql: """
+            try db.cachedStatement(sql: """
                 DELETE FROM face_prints WHERE file_id = ?
-                """, arguments: [fileID])
+                """).execute(arguments: [fileID])
             let bboxes = file.faceBBoxes
             if !bboxes.isEmpty {
                 for i in 0..<bboxes.count {
@@ -560,12 +617,12 @@ public actor DBWriter {
                     let bboxArea = Self.bboxArea(bboxes[i])
                     let excluded = Self.isExcluded(quality: quality, yaw: yaw,
                                                    pitch: pitch, bboxArea: bboxArea)
-                    try db.execute(sql: """
+                    try db.cachedStatement(sql: """
                         INSERT INTO face_prints
                           (file_id, print_data, bbox, face_quality, excluded)
                         VALUES (?, ?, ?, ?, ?)
-                        """, arguments: [fileID, print, bboxes[i],
-                                         quality, excluded ? 1 : 0])
+                        """).execute(arguments: [fileID, print, bboxes[i],
+                                                 quality, excluded ? 1 : 0])
                 }
             }
         }
@@ -578,10 +635,14 @@ public actor DBWriter {
     }
 
     private static func insertClipEmbedding(fileID: Int64, blob: Data, db: GRDB.Database) throws {
-        try db.execute(sql: """
+        // `blob` is the worker's already-finalized Data; bind it straight to the
+        // cached statement (no re-copy on the writer side). The remaining
+        // tensor→loop→normalize→Data copies live in the embedding producer
+        // (MobileCLIPService), which is outside this writer's scope. (F-C6-010)
+        try db.cachedStatement(sql: """
             INSERT OR REPLACE INTO clip_embeddings (file_id, embedding, model)
             VALUES (?, ?, ?)
-            """, arguments: [fileID, blob, "mobileclip_s2"])
+            """).execute(arguments: [fileID, blob, "mobileclip_s2"])
     }
 
     // MARK: - Face quality filter

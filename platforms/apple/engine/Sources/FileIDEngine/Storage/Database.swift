@@ -475,6 +475,24 @@ public final class Database: @unchecked Sendable {
         }.value
     }
 
+    // MARK: - WAL maintenance
+
+    /// Best-effort PASSIVE WAL checkpoint, run OUTSIDE any transaction
+    /// (`writeWithoutTransaction`, not `write`, which would wrap it in a txn and
+    /// make the PRAGMA a no-op). The DB Writer calls this on a per-N-batch
+    /// cadence so the `-wal` file is trimmed in small increments instead of
+    /// ballooning to the 10000-page `wal_autocheckpoint` ceiling and then doing
+    /// one large synchronous checkpoint copy inside a user commit — which stalls
+    /// every tagging worker for its duration. PASSIVE never blocks readers or
+    /// writers; a transient SQLITE_BUSY just leaves the WAL slightly larger and
+    /// is retried at the next cadence. Mirrors the Windows engine's
+    /// per-32-batch `wal_checkpoint(PASSIVE)` (pipeline/dbwriter.rs). (F-C6-004)
+    public func checkpointPassive() async {
+        try? await pool.writeWithoutTransaction { db in
+            _ = try db.checkpoint(.passive)
+        }
+    }
+
     // MARK: - Convenience reads
 
     /// Total file count — used by the read-side UI (M4) and quick health checks.

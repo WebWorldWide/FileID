@@ -561,8 +561,14 @@ struct FileIDEngineMain {
         // "cancel during discovery" gap is now closed.
         let discovery = Discovery()
         let scanStart = Date()
+        // F-C6-001: pass the DB + rescan flag so discovery drops files the DB
+        // already holds unchanged BEFORE the ANE/Vision/CLIP/OCR pass (a non-
+        // forced rescan no longer re-runs ML on every unchanged file). On
+        // `rescan` the skip set is empty (full reprocess), mirroring Windows.
         let files = await discovery.walk(
             root: url,
+            database: database,
+            forceReprocess: rescan,
             cancelCheck: { ScanCoordinator.isCancelledSync() },
             progress: { count in
                 Task { await coordinator.bumpDiscovered(to: count) }
