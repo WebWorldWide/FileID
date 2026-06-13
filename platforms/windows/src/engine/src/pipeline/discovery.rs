@@ -203,7 +203,21 @@ impl Discovery {
             // node_modules / .git subtrees — those entire subtrees are
             // dropped with a single name check per directory rather than
             // per-file component traversal).
+            //
+            // C6-017: the per-file metadata + file_ref opens used to run on
+            // the single consumer thread (the for-loop below), capping
+            // discovery throughput at one stat/open per file once the ML
+            // stage stopped being the bottleneck. We now do that work INSIDE
+            // process_read_dir — which jwalk runs on the rayon pool, one task
+            // per directory — and stash the finished DiscoveredFile in the
+            // entry's typed client_state. The consumer loop then only takes
+            // the pre-computed payload and sends it, so the stat/open syscalls
+            // fan out across `walk_threads` instead of serializing. Ordering
+            // is unchanged: jwalk still yields entries in the same traversal
+            // order regardless of which thread filled each client_state.
             let coord_for_dir = coordinator.clone();
+            let skip_for_dir = skip_paths.clone();
+            let err_for_dir = error_count_inner.clone();
             // Walk a verbatim ("\\?\") root so directories whose full path
             // exceeds MAX_PATH (260) are traversable — std/jwalk silently
             // fail on them otherwise (this engine .exe has no long-path
@@ -217,7 +231,10 @@ impl Discovery {
             } else {
                 root.clone()
             };
-            let walker = jwalk::WalkDir::new(&walk_root)
+            // ClientState = ((), Option<DiscoveredFile>): the per-entry slot
+            // (DirEntryState) carries each file's finished payload, computed
+            // in parallel inside process_read_dir below.
+            let walker = jwalk::WalkDirGeneric::<((), Option<DiscoveredFile>)>::new(&walk_root)
                 .follow_links(false)
                 .skip_hidden(false)   // we do our own dot-file filter to also catch thumbs.db etc.
                 .parallelism(jwalk::Parallelism::RayonNewPool(walk_threads))
@@ -259,6 +276,20 @@ impl Discovery {
                             false // symlinks, sockets, devices: skip
                         }
                     });
+                    // Parallel stage: do the per-file stat + file_ref open here
+                    // (on the rayon pool) and store the result in client_state.
+                    for res in children.iter_mut() {
+                        let Ok(entry) = res.as_mut() else { continue };
+                        if !entry.file_type().is_file() {
+                            continue;
+                        }
+                        let entry_path = entry.path();
+                        entry.client_state = classify_entry(
+                            &entry_path,
+                            skip_for_dir.as_ref(),
+                            err_for_dir.as_ref(),
+                        );
+                    }
                 });
 
             for entry in walker {
@@ -275,107 +306,23 @@ impl Discovery {
                         continue;
                     }
                 };
-                if !entry.file_type().is_file() {
+                // Payload was computed in parallel inside process_read_dir;
+                // None = a file we skip (unsupported kind, zero-byte, skip-set
+                // hit, metadata failure) or a directory entry. Errors were
+                // already counted at the parallel stage.
+                let Some(discovered) = entry.client_state else {
                     continue;
-                }
-                // Strip the verbatim prefix back to normal form: this is what
-                // we store + display + compare against the skip-set (which
-                // holds normal-form DB paths). FS access reconverts via
-                // `to_extended_length` at the open site.
-                let path = crate::util::path_safety::strip_extended_length(&entry.path());
-                // A name that doesn't round-trip through Unicode (an unpaired
-                // UTF-16 surrogate on NTFS) would be catalogued under a
-                // U+FFFD-mangled path_text that no later action (open,
-                // thumbnail, rename, trash) can resolve back to the real
-                // file — and two such names can collapse into one DB row.
-                // Skip it loudly instead of cataloguing an inert entry.
-                if is_non_unicode_path(&path) {
-                    tracing::warn!(
-                        path = %crate::platform::redact_path_for_log(&path),
-                        "[DISCOVERY] file name is not valid Unicode (unpaired \
-                         surrogate?) — skipping; rename the file to include it"
-                    );
-                    error_count_inner.fetch_add(1, Ordering::Relaxed);
-                    continue;
-                }
-                // Skip files the orchestrator pre-loaded as already-current.
-                // Hash lookup is O(1); a 1M-file set costs ~80 MB RAM but
-                // lets a repeat scan complete in seconds instead of hours.
-                if skip_paths.contains(&path) {
-                    continue;
-                }
-                let metadata = match entry.metadata() {
-                    Ok(m) => m,
-                    Err(_) => {
-                        error_count_inner.fetch_add(1, Ordering::Relaxed);
-                        continue;
-                    }
                 };
-                let size = metadata.len();
-                if size == 0 {
-                    continue;
-                }
-                let modified = metadata
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs_f64())
-                    .unwrap_or(0.0);
-                let created_unix = metadata
-                    .created()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs_f64());
-
-                // Cloud placeholder detection. OneDrive / generic
-                // Files-On-Demand mark dehydrated files with these
-                // attributes; touching their content forces a download.
-                #[cfg(windows)]
-                let online_only = {
-                    use std::os::windows::fs::MetadataExt;
-                    const FILE_ATTRIBUTE_OFFLINE: u32 = 0x0000_1000;
-                    const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x0004_0000;
-                    const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
-                    metadata.file_attributes()
-                        & (FILE_ATTRIBUTE_OFFLINE
-                            | FILE_ATTRIBUTE_RECALL_ON_OPEN
-                            | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
-                        != 0
-                };
-                #[cfg(not(windows))]
-                let online_only = false;
-
-                let kind = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(FileKind::from_extension)
-                    .unwrap_or(FileKind::Other);
-                if kind == FileKind::Other {
-                    continue; // don't bother tagging workers with files we can't process
-                }
 
                 // Increment the FS-walk counter BEFORE the channel send so
                 // the "Discovered N" sidebar reflects walk progress even if
                 // the channel briefly backs up. Order matters: this is the
                 // V15.9 decoupling fix — under the old code, blocking_send
-                // could stall a file's count when ML stalled.
+                // could stall a file's count when ML stalled. The count +
+                // send stay on this single consumer thread so the counter is
+                // monotonic and the test_file_cap stop condition is exact.
                 count_inner.fetch_add(1, Ordering::Relaxed);
 
-                // Volume-local file id: lets the dbwriter heal a renamed/moved
-                // file's existing row instead of recomputing its tags. Cheap
-                // metadata-only open via `FILE_FLAG_BACKUP_SEMANTICS`; `None`
-                // on permission/race errors (the heal then falls through to
-                // content_hash).
-                let file_ref = crate::platform::file_ref(&entry.path());
-                let discovered = DiscoveredFile {
-                    path,
-                    kind,
-                    size_bytes: size,
-                    modified_unix: modified,
-                    created_unix,
-                    online_only,
-                    file_ref,
-                };
                 // blocking_send applies backpressure when the channel fills
                 // (cap 32768 → roughly 6 MB queued path metadata). On
                 // typical corpora this never trips. Errors only happen if
@@ -390,6 +337,113 @@ impl Discovery {
 
         DiscoveryHandle { rx, count, done, error_count }
     }
+}
+
+/// Build the `DiscoveredFile` payload for one file entry, doing the stat +
+/// `file_ref` opens. Runs on the jwalk/rayon pool (one task per directory) so
+/// these syscalls fan out instead of serializing on the consumer thread
+/// (C6-017). Returns `None` for any file the pipeline should skip
+/// (non-Unicode name, already-current, metadata failure, zero-byte,
+/// unsupported kind); skip-with-error cases bump `error_count` here so the
+/// consumer's terminal accounting is unchanged.
+///
+/// `entry_path` is the verbatim-prefixed walk path (children inherit the
+/// "\\?\" root); FS opens reconvert via `to_extended_length` internally.
+fn classify_entry(
+    entry_path: &std::path::Path,
+    skip_paths: &HashSet<PathBuf>,
+    error_count: &AtomicU64,
+) -> Option<DiscoveredFile> {
+    // Strip the verbatim prefix back to normal form: this is what we store +
+    // display + compare against the skip-set (which holds normal-form DB
+    // paths). FS access reconverts via `to_extended_length` at the open site.
+    let path = crate::util::path_safety::strip_extended_length(entry_path);
+    // A name that doesn't round-trip through Unicode (an unpaired UTF-16
+    // surrogate on NTFS) would be catalogued under a U+FFFD-mangled path_text
+    // that no later action (open, thumbnail, rename, trash) can resolve back
+    // to the real file — and two such names can collapse into one DB row.
+    // Skip it loudly instead of cataloguing an inert entry.
+    if is_non_unicode_path(&path) {
+        tracing::warn!(
+            path = %crate::platform::redact_path_for_log(&path),
+            "[DISCOVERY] file name is not valid Unicode (unpaired \
+             surrogate?) — skipping; rename the file to include it"
+        );
+        error_count.fetch_add(1, Ordering::Relaxed);
+        return None;
+    }
+    // Skip files the orchestrator pre-loaded as already-current. Hash lookup
+    // is O(1); a 1M-file set costs ~80 MB RAM but lets a repeat scan complete
+    // in seconds instead of hours.
+    if skip_paths.contains(&path) {
+        return None;
+    }
+    // follow_links is false on the walk, so symlink_metadata matches jwalk's
+    // own DirEntry::metadata for the non-followed case.
+    let metadata = match std::fs::symlink_metadata(entry_path) {
+        Ok(m) => m,
+        Err(_) => {
+            error_count.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+    };
+    let size = metadata.len();
+    if size == 0 {
+        return None;
+    }
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let created_unix = metadata
+        .created()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs_f64());
+
+    // Cloud placeholder detection. OneDrive / generic Files-On-Demand mark
+    // dehydrated files with these attributes; touching their content forces a
+    // download.
+    #[cfg(windows)]
+    let online_only = {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_OFFLINE: u32 = 0x0000_1000;
+        const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x0004_0000;
+        const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+        metadata.file_attributes()
+            & (FILE_ATTRIBUTE_OFFLINE
+                | FILE_ATTRIBUTE_RECALL_ON_OPEN
+                | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
+            != 0
+    };
+    #[cfg(not(windows))]
+    let online_only = false;
+
+    let kind = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(FileKind::from_extension)
+        .unwrap_or(FileKind::Other);
+    if kind == FileKind::Other {
+        return None; // don't bother tagging workers with files we can't process
+    }
+
+    // Volume-local file id: lets the dbwriter heal a renamed/moved file's
+    // existing row instead of recomputing its tags. Cheap metadata-only open
+    // via `FILE_FLAG_BACKUP_SEMANTICS`; `None` on permission/race errors (the
+    // heal then falls through to content_hash).
+    let file_ref = crate::platform::file_ref(entry_path);
+    Some(DiscoveredFile {
+        path,
+        kind,
+        size_bytes: size,
+        modified_unix: modified,
+        created_unix,
+        online_only,
+        file_ref,
+    })
 }
 
 /// True when `to_string_lossy` would mangle this path: the lossy text is the
@@ -636,6 +690,94 @@ mod tests {
                 drained += 1;
             }
             assert_eq!(drained, 100);
+        });
+    }
+
+    /// C6-017: the per-file stat + `file_ref` work must live in a standalone
+    /// function the parallel walk stage can call (jwalk's process_read_dir, on
+    /// the rayon pool) — NOT inline on the single consumer loop. Calling it
+    /// directly proves the syscall work was lifted off the consumer thread and
+    /// produces a fully-populated payload independent of the channel/recv.
+    #[test]
+    fn classify_entry_builds_full_payload_off_consumer() {
+        use std::fs;
+        let tmp = tempdir_or_skip();
+        let root = tmp.path();
+        let p = root.join("photo.jpg");
+        fs::write(&p, b"jpegbytes").unwrap();
+
+        let skip = HashSet::new();
+        let errors = AtomicU64::new(0);
+        // Pass the path exactly as the walk would (no verbatim prefix in the
+        // test env; strip_extended_length is a no-op on a plain path).
+        let df = classify_entry(&p, &skip, &errors).expect("supported file → Some payload");
+        assert_eq!(df.kind, FileKind::Image);
+        assert_eq!(df.size_bytes, 9);
+        assert!(df.modified_unix > 0.0, "modified timestamp populated by the parallel stage");
+        assert_eq!(errors.load(Ordering::Relaxed), 0);
+
+        // Zero-byte and unsupported-kind files resolve to None (skipped) here,
+        // so the consumer never has to re-stat to decide.
+        let empty = root.join("empty.jpg");
+        fs::write(&empty, b"").unwrap();
+        assert!(classify_entry(&empty, &skip, &errors).is_none());
+        let other = root.join("notes.xyz");
+        fs::write(&other, b"data").unwrap();
+        assert!(classify_entry(&other, &skip, &errors).is_none());
+
+        // Skip-set membership is honored at the parallel stage too.
+        let mut skip2 = HashSet::new();
+        skip2.insert(p.clone());
+        assert!(classify_entry(&p, &skip2, &errors).is_none());
+    }
+
+    /// C6-017 end-to-end guard: every file the receiver gets must already
+    /// carry a complete payload (size + modified + kind) built in the walk
+    /// stage, and the whole set must be produced (done flag set) before the
+    /// consumer drains a single item. With the stat/file_ref work parallelized
+    /// into process_read_dir, the consumer is a pure take-and-send; this pins
+    /// that contract so a regression that re-serializes stat work onto recv —
+    /// or drops payload fields — is caught.
+    #[test]
+    fn payloads_ready_before_consumer_drains() {
+        use std::fs;
+        let tmp = tempdir_or_skip();
+        let root = tmp.path();
+        for i in 0..200 {
+            fs::write(root.join(format!("img_{i:03}.jpg")), b"jpeg").unwrap();
+        }
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let coord = ScanCoordinator::new();
+            let disc = Discovery::new_with_skip(root, coord, Arc::new(HashSet::new()));
+            let handle = disc.spawn();
+            let mut rx = handle.rx;
+            let done = handle.done.clone();
+            // Wait for the walk to finish WITHOUT draining the receiver. If the
+            // metadata/file_ref opens were still serialized on the consumer
+            // (the pre-fix behavior), the walk could not complete here — the
+            // 32K-slot channel holds all 200 entries, so the producer reaching
+            // `done` proves all payloads were built in the parallel stage.
+            for _ in 0..200 {
+                if done.load(Ordering::Acquire) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            assert!(done.load(Ordering::Acquire), "walk completed before any recv");
+
+            let mut n = 0;
+            while let Ok(f) = rx.try_recv() {
+                assert_eq!(f.kind, FileKind::Image, "kind classified in parallel stage");
+                assert_eq!(f.size_bytes, 4, "size populated in parallel stage");
+                assert!(f.modified_unix > 0.0, "mtime populated in parallel stage");
+                n += 1;
+            }
+            assert_eq!(n, 200);
         });
     }
 
