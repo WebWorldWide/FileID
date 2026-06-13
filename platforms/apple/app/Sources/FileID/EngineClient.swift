@@ -74,6 +74,18 @@ public final class EngineClient {
         running: nil, pending: [], totalEtaSeconds: nil
     )
 
+    // MARK: - Restructure butler (engine-routed plan + apply)
+    //
+    // F-C3-021-app: the macOS Restructure tab drives its plan + apply through
+    // the engine butler instead of the app-side classifier. These mirror the
+    // published-state pattern above; the `*Signal` counters bump on every fresh
+    // payload so views can react via `.onChange` even though the DTOs aren't
+    // Equatable (same idiom as `engineResetSignal`).
+    public private(set) var restructurePlan: RestructurePlan?
+    public private(set) var restructureApplyResult: RestructureApplyResult?
+    public private(set) var restructurePlanSignal: Int = 0
+    public private(set) var restructureApplyResultSignal: Int = 0
+
     private var process: Process?
     private var stdinPipe: Pipe?
     /// Serial queue for stdin command writes. The global CONCURRENT queue used
@@ -518,13 +530,20 @@ public final class EngineClient {
             modelDownloadProgress = p.fraction >= 1.0 ? nil : p
         case .queueState(let q):
             queueState = q
-        // ── Windows-originated reply events. The mac app's equivalent flows
-        //    are synchronous (per-tab actions), so these aren't consumed here
-        //    yet; they're decoded so a shared/cross-platform engine doesn't
-        //    wedge the wire. ──
-        case .restructurePlan,
-             .restructureApplyResult,
-             .bulkActionResult,
+        // ── Restructure butler replies (F-C3-021-app). handleEvent already
+        //    runs on the main actor (see spawn()'s dispatch), so these
+        //    assignments are isolation-safe. ──
+        case .restructurePlan(let plan):
+            restructurePlan = plan
+            restructurePlanSignal &+= 1
+        case .restructureApplyResult(let result):
+            restructureApplyResult = result
+            restructureApplyResultSignal &+= 1
+        // ── Remaining Windows-originated reply events. The mac app's
+        //    equivalent flows are synchronous (per-tab actions), so these
+        //    aren't consumed here yet; they're decoded so a shared/
+        //    cross-platform engine doesn't wedge the wire. ──
+        case .bulkActionResult,
              .clipTextEmbedding,
              .mergeSuggestions,
              .hardwareReprobed,
@@ -824,6 +843,27 @@ public final class EngineClient {
 
     public func deepAnalyzeCancel() {
         send(.deepAnalyzeCancel)
+    }
+
+    // MARK: - Restructure butler commands
+
+    /// Ask the engine to compute a restructure plan for `libraryRoot`. The
+    /// reply lands on `restructurePlan` and bumps `restructurePlanSignal`.
+    /// Returns false when the command never left the app (engine starting /
+    /// down) so the caller can stop its "computing…" spinner.
+    @discardableResult
+    public func planRestructure(libraryRoot: String) -> Bool {
+        send(.planRestructure(libraryRoot: libraryRoot))
+    }
+
+    /// Apply the selected `moves` through the engine butler. macOS performs
+    /// real on-disk moves; `useSymlinks` is sent for wire parity and ignored
+    /// engine-side. The reply lands on `restructureApplyResult` and bumps
+    /// `restructureApplyResultSignal`.
+    @discardableResult
+    public func applyRestructure(libraryRoot: String, moves: [RestructureMove],
+                                 useSymlinks: Bool = false) -> Bool {
+        send(.applyRestructure(libraryRoot: libraryRoot, moves: moves, useSymlinks: useSymlinks))
     }
 
     /// Pre-fetch a VLM's weights without running inference. Used by the

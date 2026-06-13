@@ -10,8 +10,13 @@
 //   Junk folder (generic name OR fully heterogeneous):
 //     Every file dissolves — re-buckets via the heuristic.
 //
-// The classifier lives in Database/FolderClassifier.swift. The View
-// here visualizes the resulting proposals + their impact category.
+// F-C3-021-app: the plan + apply now route through the ENGINE butler
+// (Restructure.proposeAll / Restructure.apply via IPC), not the app-side
+// classifier. `requestPlan()` sends `planRestructure`; the engine's
+// `restructurePlan` event is mapped onto the view's `Proposal`/`AssistantSummary`
+// model in `applyPlan()` and drives the Sankey + TreeDiff + recommendation rows.
+// Apply sends `applyRestructure` and reacts to `restructureApplyResult`. The
+// app-side `RestructureEngine` below is retained (unreferenced) for reference.
 import SwiftUI
 import AppKit
 import GRDB
@@ -25,7 +30,7 @@ struct RestructureView: View {
     @State private var proposals: [Proposal] = []
     @State private var summary: AssistantSummary = .empty
     @State private var groups: [Group] = []
-    /// Per-outcome groups precomputed in `regenerate()` so
+    /// Per-outcome groups precomputed in `applyPlan()` so
     /// `inlineFileList(for:)` doesn't rebuild them on every render.
     @State private var inlineGroupsByOutcome: [RestructureOutcome: [Group]] = [:]
     @State private var inlineMatchedCountByOutcome: [RestructureOutcome: Int] = [:]
@@ -34,7 +39,7 @@ struct RestructureView: View {
     @State private var status: String?
     @State private var showingPicker = false
     @State private var staysPutExpanded: Bool = false
-    @State private var confirmConvertToRealMoves: Bool = false
+    @State private var confirmApply: Bool = false
     /// Single-flight guard for the apply / convert paths. A real move is
     /// irreversible inside the app, so a double-click must never run apply
     /// twice — the bar buttons disable while this is set.
@@ -59,9 +64,10 @@ struct RestructureView: View {
     @State private var captionedFraction: Double = 0
     @State private var totalAnalyzableFiles = 0
     @State private var dismissedDeepAnalyzeHint = false
-    /// Monotonic guard: regenerate() runs from four triggers; only the newest
-    /// run may publish, so a slow stale compute can't overwrite fresh proposals.
-    @State private var regenToken = 0
+    /// Per-file deselections captured at `requestPlan()` time and re-applied in
+    /// `applyPlan()`, so an engine re-plan (e.g. after Deep Analyze finishes
+    /// mid-review) doesn't silently re-check rows the user unchecked.
+    @State private var priorDeselectedIDs: Set<Int64> = []
 
     /// Which subset of proposals the drill-down sheet renders.
     enum DrillDownScope: Identifiable, Hashable {
@@ -183,23 +189,29 @@ struct RestructureView: View {
                     totalCount: proposals.count,
                     canApply: !selectedIDs.isEmpty,
                     isApplying: applying,
-                    onApplyShortcuts: { applySelected(mode: .symlink) },
-                    onConvertToMoves: { if !applying { confirmConvertToRealMoves = true } }
+                    onApplyShortcuts: { if !applying { confirmApply = true } },
+                    onConvertToMoves: { if !applying { confirmApply = true } }
                 )
                 .padding(.horizontal, 18)
                 .padding(.bottom, 14)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
+                // F-C3-021-app: both apply-bar actions now route through the
+                // engine butler, which performs real on-disk moves (it has no
+                // macOS symlink-preview mode). The button labels still read
+                // "shortcuts"/"convert" — that copy lives in RestructureApplyBar
+                // and is now stale; the confirmation below states the real,
+                // irreversible behavior so the user always confirms first.
                 .confirmationDialog(
-                    "Convert all shortcuts to real moves?",
-                    isPresented: $confirmConvertToRealMoves,
+                    "Apply \(selectedIDs.count) move\(selectedIDs.count == 1 ? "" : "s")?",
+                    isPresented: $confirmApply,
                     titleVisibility: .visible
                 ) {
-                    Button("Convert to real moves", role: .destructive) {
-                        convertAllToRealMoves()
+                    Button("Apply real moves", role: .destructive) {
+                        applyViaEngine()
                     }
                     Button("Cancel", role: .cancel) { }
                 } message: {
-                    Text("Every shortcut in the new tree will be replaced with the actual file moved into place. This isn't reversible inside the app — only do this once you've reviewed the structure.")
+                    Text("FileID will move the selected files into the new structure on disk and update its library. This runs through the engine and isn't reversible inside the app — review the structure first.")
                 }
             }
         }
@@ -214,7 +226,7 @@ struct RestructureView: View {
             case .success(let urls):
                 if let url = urls.first {
                     libraryRoot = url
-                    Task { await regenerate() }
+                    requestPlan()
                 }
             case .failure: break
             }
@@ -229,22 +241,57 @@ struct RestructureView: View {
                 let url = URL(fileURLWithPath: session.rootPath)
                 if FileManager.default.fileExists(atPath: url.path) {
                     libraryRoot = url
-                    await regenerate()
+                    requestPlan()
                 }
             }
         }
-        // Recompute proposals only on Deep Analyze terminal events
+        // Re-request a plan only on Deep Analyze terminal events
         // (`.deepAnalyzeComplete`). The previous per-file 3-s throttle
-        // still triggered up to 50K full recomputations during a long
-        // batch — `regenerate()` walks every file in the library, so
-        // even at 3-s spacing it caused UI stutters and slowed the
-        // engine. Terminal-only is the right granularity: Deep Analyze
-        // is a single batch run, and proposals don't need to track
-        // mid-flight progress.
+        // still triggered up to 50K full re-plans during a long batch —
+        // `proposeAll` walks every file in the library, so even at 3-s
+        // spacing it caused UI stutters and slowed the engine. Terminal-only
+        // is the right granularity: Deep Analyze is a single batch run, and
+        // proposals don't need to track mid-flight progress.
         .onChange(of: engine.deepAnalyzeComplete?.processed ?? -1) { _, _ in
             guard libraryRoot != nil else { return }
             store.notifyChanged()
-            Task { await regenerate() }
+            requestPlan()
+        }
+        // Engine-authoritative plan arrived (F-C3-021-app) — map it onto the
+        // view's proposal model + summary and rebuild the render caches.
+        .onChange(of: engine.restructurePlanSignal) { _, _ in
+            applyPlan()
+        }
+        // Apply finished engine-side — surface the result, release the
+        // single-flight guard, and re-request a fresh plan (moved files now
+        // carry new path_text).
+        .onChange(of: engine.restructureApplyResultSignal) { _, _ in
+            guard libraryRoot != nil, let result = engine.restructureApplyResult else { return }
+            applying = false
+            if let priv = result.privilegeError, !priv.isEmpty {
+                status = priv
+            } else {
+                status = "\(result.applied) moved · \(result.failed) failed"
+            }
+            store.notifyChanged()
+            requestPlan()
+        }
+        // The engine died before a terminal plan/apply event could clear the
+        // local in-flight UI — release it so the tab doesn't wedge.
+        .onChange(of: engine.engineResetSignal) { _, _ in
+            if applying {
+                applying = false
+                status = "Engine restarted — apply interrupted. Recheck your library and try again."
+            }
+            loading = false
+        }
+        // A plan computation that failed engine-side ends the "Computing…"
+        // spinner (it would otherwise spin forever waiting for a plan event).
+        .onChange(of: engine.lastError?.message) { _, _ in
+            guard loading, let kind = engine.lastError?.kind,
+                  kind == "plan_restructure_failed" || kind == "db_unavailable" else { return }
+            loading = false
+            status = "Couldn't compute a plan. Please try again."
         }
         // Group the drill-down's proposals once per scope, not on every
         // checkbox tap inside the sheet.
@@ -786,52 +833,63 @@ struct RestructureView: View {
 
     private func bucketIcon(_ bucket: String) -> String { bucketIconName(bucket) }
 
-    // MARK: - Compute
+    // MARK: - Engine-routed plan + apply (F-C3-021-app)
 
-    private func regenerate() async {
-        regenToken &+= 1
-        let token = regenToken
+    /// Ask the engine butler for a fresh restructure plan. The reply arrives
+    /// asynchronously on `engine.restructurePlan`; `applyPlan()` (driven by
+    /// `engine.restructurePlanSignal`) maps it onto the view's proposal model.
+    private func requestPlan() {
+        guard let root = libraryRoot else { return }
+        // Capture per-file deselections BEFORE the new plan lands so a re-plan
+        // (e.g. after Deep Analyze finishes mid-review) doesn't re-check rows
+        // the user unchecked. Re-applied in applyPlan().
+        priorDeselectedIDs = Set(proposals.map(\.fileID)).subtracting(selectedIDs)
         loading = true
-        defer { if token == regenToken { loading = false } }
         status = nil
-        let root = libraryRoot
-        // Capture the user's per-file deselections (rows still in the current
-        // set that they unchecked) BEFORE recomputing, so a regenerate —
-        // including one triggered by a Deep Analyze finishing mid-review —
-        // doesn't silently re-check files the user unchecked.
-        let priorDeselected = Set(proposals.map(\.fileID)).subtracting(selectedIDs)
-        let result = await Task.detached(priority: .userInitiated) {
-            return RestructureEngine.compute(store: store, libraryRoot: root)
-        }.value
-        // A newer regenerate() began while we were computing — discard this
-        // stale result instead of clobbering the fresh proposals/selection.
-        guard token == regenToken else { return }
-        proposals = result.proposals
-        summary = result.summary
-        let by = Dictionary(grouping: result.proposals, by: { $0.bucket })
+        if !engine.planRestructure(libraryRoot: root.path) {
+            loading = false
+            status = "Engine is starting — reopen the tab to load your plan."
+        }
+    }
+
+    /// Map the engine's authoritative plan onto the view's `Proposal`/summary
+    /// model, then rebuild the grouping/selection/inline caches the Sankey,
+    /// TreeDiff, recommendation rows, and drill-down render from.
+    private func applyPlan() {
+        guard let plan = engine.restructurePlan, let root = libraryRoot else { return }
+        // Ignore a plan computed for a different destination root (the user may
+        // have switched folders while a plan was in flight).
+        guard Self.pathsMatch(plan.libraryRoot, root.path) else { return }
+
+        let mapped = Self.mapProposals(from: plan)
+        proposals = mapped
+        summary = Self.makeSummary(from: plan, proposals: mapped)
+
+        let by = Dictionary(grouping: mapped, by: { $0.bucket })
         groups = by.map { Group(bucket: $0.key, proposals: $0.value) }
             .sorted { $0.proposals.count > $1.proposals.count }
-        selectedIDs = Set(result.proposals.map(\.fileID))
+
+        selectedIDs = Set(mapped.map(\.fileID))
         // Re-apply per-file deselections that carried into the fresh set.
-        selectedIDs.subtract(priorDeselected)
-        // Preserve the user's "Skip these" choices across regenerate: re-exclude
-        // any persisted skipped outcome's proposals from the fresh selection
-        // (otherwise skipped rows render dimmed but get re-applied).
+        selectedIDs.subtract(priorDeselectedIDs)
+        // Preserve the user's "Skip these" choices: re-exclude any persisted
+        // skipped outcome's proposals (otherwise skipped rows render dimmed but
+        // get re-applied).
         for outcome in skippedOutcomes {
-            for p in result.proposals where outcomeFor(p) == outcome {
+            for p in mapped where outcomeFor(p) == outcome {
                 selectedIDs.remove(p.fileID)
             }
         }
 
-        // Per-outcome groupings the recommendation row's expand-in-
-        // place file list reads from. Built here so the render path
-        // can return cached values without re-running filter/groupBy.
+        // Per-outcome groupings the recommendation row's expand-in-place file
+        // list reads from. Built here so the render path returns cached values
+        // without re-running filter/groupBy.
         let totalCap = 30
         let bucketCap = 4
         var byOutcome: [RestructureOutcome: [Group]] = [:]
         var matchedCount: [RestructureOutcome: Int] = [:]
         for outcome in [RestructureOutcome.tidy, .reorganize] {
-            let matched = result.proposals.filter { outcomeFor($0) == outcome }
+            let matched = mapped.filter { outcomeFor($0) == outcome }
             matchedCount[outcome] = matched.count
             let buckets = Dictionary(grouping: matched, by: \.bucket)
             let order = buckets.keys.sorted {
@@ -850,46 +908,115 @@ struct RestructureView: View {
         let (total, captioned) = store.filesAnalysisStats()
         totalAnalyzableFiles = total
         captionedFraction = total > 0 ? Double(captioned) / Double(total) : 0
+
+        loading = false
     }
 
-    private func applySelected(mode: RestructureEngine.ApplyMode) {
+    /// Apply the selected, non-skipped moves through the engine butler.
+    /// Single-flight (F-C4-003): `applying` gates the apply-bar buttons and is
+    /// cleared when `restructureApplyResult` arrives (or the engine resets).
+    private func applyViaEngine() {
         guard !applying else { return }
-        guard let root = libraryRoot else {
+        guard let root = libraryRoot, let plan = engine.restructurePlan else {
             status = "Pick a library folder before applying."
             return
         }
-        // Belt-and-suspenders: never move a proposal whose outcome is skipped,
-        // regardless of selection state.
-        let toMove = proposals.filter {
-            selectedIDs.contains($0.fileID) && !skippedOutcomes.contains(outcomeFor($0))
+        // Selected ∧ not-skipped (F-C4-012). Belt-and-suspenders: filter the
+        // engine plan's own moves by this set so a skipped outcome never moves.
+        let eligible = Set(
+            proposals
+                .filter { selectedIDs.contains($0.fileID) && !skippedOutcomes.contains(outcomeFor($0)) }
+                .map(\.fileID))
+        let moves = plan.moves.filter { eligible.contains($0.fileID) }
+        guard !moves.isEmpty else {
+            status = "Nothing selected to apply."
+            return
         }
         applying = true
-        Task {
-            defer { applying = false }
-            let result = await RestructureEngine.apply(proposals: toMove,
-                                                       store: store, mode: mode,
-                                                       libraryRoot: root)
-            let modeLabel = mode == .symlink ? "linked" : "moved"
-            status = "\(result.moved) \(modeLabel) · skipped \(result.skipped) · failed \(result.failed)"
-                + (result.conflicts.isEmpty ? "" : " · \(result.conflicts.count) conflicts")
-            await regenerate()
+        status = nil
+        if !engine.applyRestructure(libraryRoot: root.path, moves: moves) {
+            applying = false
+            status = "Engine is unavailable — try again in a moment."
         }
     }
 
-    private func convertAllToRealMoves() {
-        // Single-flight: a real move is irreversible inside the app, so a
-        // double-tap must not run the conversion twice.
-        guard !applying else { return }
-        let candidates = proposals
-        applying = true
-        Task {
-            defer { applying = false }
-            let result = await RestructureEngine.convertSymlinksToMoves(
-                proposals: candidates, store: store
-            )
-            status = "Converted \(result.moved) shortcuts to real moves · skipped \(result.skipped) · failed \(result.failed)"
-            await regenerate()
+    // MARK: - Engine plan → view-model mapping
+
+    /// Build the view's proposal model from the engine plan. The display
+    /// `bucket` is the destination's parent directory relative to the library
+    /// root (e.g. "Photos/2023/January", "People/Marie Curie/2023") so the
+    /// Sankey/TreeDiff bucket icons + grouping match the prior app-side output;
+    /// `kind` comes from the engine's per-move folder tier when present.
+    static func mapProposals(from plan: RestructurePlan) -> [Proposal] {
+        plan.moves.map { m in
+            Proposal(
+                fileID: m.fileID,
+                oldPath: m.source,
+                newPath: m.destination,
+                bucket: bucketLabel(destination: m.destination,
+                                    root: plan.libraryRoot, fallback: m.category),
+                sourceFolder: (m.source as NSString).deletingLastPathComponent,
+                kind: kind(forTier: m.tier))
         }
+    }
+
+    /// Derive the at-a-glance summary from the plan. Folder tiers come from the
+    /// engine's `folderClassifications` when present; otherwise (current macOS
+    /// engine) every received move is a relocation — the engine strips
+    /// anchor-folder moves before sending — so we count distinct source folders
+    /// per outcome. That is aggregation of the engine's moves, NOT a re-run of
+    /// the retired app-side classifier.
+    static func makeSummary(from plan: RestructurePlan, proposals: [Proposal]) -> AssistantSummary {
+        let movedOut = proposals.filter { $0.kind == .movedOutAsOutlier }
+        let dissolved = proposals.filter { $0.kind == .dissolved }
+        let anchorFolders: Int
+        let mixedFolders: Int
+        let junkFolders: Int
+        if let fc = plan.folderClassifications {
+            anchorFolders = fc.anchorFolders
+            mixedFolders = fc.mixedFolders
+            junkFolders = fc.junkFolders
+        } else {
+            anchorFolders = 0
+            mixedFolders = Set(movedOut.map(\.sourceFolder)).count
+            junkFolders = Set(dissolved.map(\.sourceFolder)).count
+        }
+        return AssistantSummary(
+            anchorFolders: anchorFolders,
+            mixedFolders: mixedFolders,
+            junkFolders: junkFolders,
+            // The plan carries only moves; stay-put (anchor) files are absent,
+            // so a stay-put file count isn't derivable here.
+            staysPutFiles: 0,
+            movedOutFiles: movedOut.count,
+            dissolvedFiles: dissolved.count,
+            staysPutBreakdown: [])
+    }
+
+    /// "Mixed" folders contribute outliers (Tidy); "Junk"/unknown/absent
+    /// dissolve (Reorganize). The current macOS engine sends `nil` → Reorganize.
+    static func kind(forTier tier: String?) -> ProposalKind {
+        tier?.lowercased() == "mixed" ? .movedOutAsOutlier : .dissolved
+    }
+
+    /// Destination's parent directory relative to the library root, or the
+    /// engine's category label when the destination isn't under the root.
+    static func bucketLabel(destination: String, root: String, fallback: String) -> String {
+        let parent = (destination as NSString).deletingLastPathComponent
+        let rootNorm = root.hasSuffix("/") ? String(root.dropLast()) : root
+        if parent == rootNorm { return fallback }
+        let prefix = rootNorm + "/"
+        if parent.hasPrefix(prefix) {
+            let rel = String(parent.dropFirst(prefix.count))
+            return rel.isEmpty ? fallback : rel
+        }
+        return fallback
+    }
+
+    static func pathsMatch(_ a: String, _ b: String) -> Bool {
+        if a == b { return true }
+        return URL(fileURLWithPath: a).standardizedFileURL.path
+            == URL(fileURLWithPath: b).standardizedFileURL.path
     }
 
     // MARK: - View-mode toggle + Sankey + recommendations
@@ -950,7 +1077,7 @@ struct RestructureView: View {
 
     /// Inline file-list view for a recommendation card. Reads from
     /// the precomputed `inlineGroupsByOutcome` cache populated in
-    /// `regenerate()` — no `proposals.filter` or `Dictionary(grouping:)`
+    /// `applyPlan()` — no `proposals.filter` or `Dictionary(grouping:)`
     /// runs on the render path. The cache covers `.outcome(...)`
     /// scopes, which are the only scopes inline lists ever receive.
     @ViewBuilder
