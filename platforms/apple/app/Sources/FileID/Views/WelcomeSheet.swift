@@ -93,6 +93,13 @@ struct WelcomeSheet: View {
             arcface.refreshStatus()
         }
         .onDisappear { installAllRequested = false }
+        .onChange(of: anyInProgress) { _, inProgress in
+            // Once everything "Install all" kicked off has settled without
+            // completing the full set — a cancel or a failure leaves models
+            // missing and idle — re-enable the button instead of latching it
+            // disabled for the rest of the session. (F-C4-017)
+            if !inProgress && !allInstalled { installAllRequested = false }
+        }
         .onChange(of: vlmInstalled) { _, nowInstalled in
             if nowInstalled {
                 vlmRequested = false
@@ -409,5 +416,12 @@ struct WelcomeSheet: View {
 
     private var allInstalled: Bool {
         clipInstalled && arcfaceInstalled && vlmInstalled
+    }
+
+    /// True while any of the three onboarding downloads is still running.
+    /// Drives "Install all" re-enablement once a cancel/failure settles
+    /// everything back to idle. (F-C4-017)
+    private var anyInProgress: Bool {
+        clipInProgress || arcfaceInProgress || vlmInProgress
     }
 }

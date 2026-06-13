@@ -248,7 +248,13 @@ struct CLIPSemanticSearchCard: View {
             isPresented: $confirmUninstall,
             titleVisibility: .visible
         ) {
-            Button("Remove", role: .destructive) { installer.uninstall() }
+            Button("Remove", role: .destructive) {
+                installer.uninstall()
+                // Drop the in-memory text encoder too — otherwise semantic
+                // search keeps running against the model we just deleted until
+                // the next app launch, with no fallback. (F-C4-017)
+                CLIPTextEncoder.shared.unload()
+            }
             Button("Keep", role: .cancel) {}
         } message: {
             Text("Frees ~350 MB. Semantic search will revert to keyword search until you reinstall.")
