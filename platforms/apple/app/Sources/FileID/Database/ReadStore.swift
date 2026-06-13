@@ -6,7 +6,20 @@ import FileIDShared
 
 @Observable
 public final class ReadStore: @unchecked Sendable {
-    private var queue: DatabaseQueue?
+    // The read connection is guarded by `connLock`: many SwiftUI views
+    // read concurrently off the main actor while `openIfPossible`/`close`
+    // can swap or drop it. Without the lock, a reader's retain
+    // (`guard let q = queue`) racing the teardown's release (`_queue = nil`)
+    // is a data race that can over-release the live SQLite connection —
+    // the macOS mirror of the Windows ReadStore.Dispose UAF. Each reader
+    // captures a strong `q` under the lock, so ARC keeps the connection
+    // alive until the last in-flight read drains, even across `close()`.
+    @ObservationIgnored private let connLock = NSLock()
+    @ObservationIgnored private var _queue: DatabaseQueue?
+    private var queue: DatabaseQueue? {
+        get { connLock.lock(); defer { connLock.unlock() }; return _queue }
+        set { connLock.lock(); defer { connLock.unlock() }; _queue = newValue }
+    }
     private let dbURL: URL
     public private(set) var version: Int = 0
     public private(set) var totalFiles: Int = 0
@@ -51,12 +64,20 @@ public final class ReadStore: @unchecked Sendable {
         refreshCounters()
     }
 
+    /// Explicit teardown. Drops our reference to the read connection
+    /// under the lock; ARC keeps the underlying SQLite connection alive
+    /// until every in-flight read (each holding a strong `q`) drains, so
+    /// closing never frees the connection out from under a reader.
+    public func close() {
+        queue = nil
+    }
+
     /// Brief writable connection for Cleanup row deletes. WAL allows this
     /// from a separate process without blocking the engine writer.
     public func deleteFiles(ids: [Int64]) -> Int {
         guard !ids.isEmpty else { return 0 }
         do {
-            let queue = try DatabaseQueue(path: dbURL.path)
+            let queue = try writeQueue()
             let deleted = try queue.write { db -> Int in
                 var total = 0
                 var affectedPersons = Set<Int64>()
@@ -207,6 +228,19 @@ public final class ReadStore: @unchecked Sendable {
         }
     }
 
+    /// Off-main twin of `files(...)`. The keyword search runs a
+    /// multi-table FTS + LIKE + face-join query; on a live scan the view
+    /// reloaded it on the MainActor on every throttled batch event,
+    /// stuttering the UI. Callers debounce and await this so the query
+    /// runs on a background task and only the assignment lands on main.
+    public func filesAsync(offset: Int = 0, limit: Int = 200,
+                           search: String = "",
+                           kindFilter: String? = nil) async -> [FileRow] {
+        await Task.detached(priority: .userInitiated) { [self] in
+            files(offset: offset, limit: limit, search: search, kindFilter: kindFilter)
+        }.value
+    }
+
     /// CLIP text → image semantic search. Embeds the query via the
     /// CLIP text encoder, ranks files by cosine over their stored
     /// image embeddings. Returns nil when the text encoder isn't
@@ -214,6 +248,16 @@ public final class ReadStore: @unchecked Sendable {
     public func semanticSearch(query: String, limit: Int = 60) -> [FileRow]? {
         guard let textVec = CLIPTextEncoder.shared.embedText(query) else { return nil }
         return rankByCosine(against: textVec, limit: limit)
+    }
+
+    /// Off-main twin of `semanticSearch`. The full clip_embeddings cosine
+    /// scan is O(N·512) and froze the UI for seconds on a 50k library when
+    /// run inline on the MainActor. The text embed + ranking happen on a
+    /// background task; the caller awaits and publishes results on main.
+    public func semanticSearchAsync(query: String, limit: Int = 60) async -> [FileRow]? {
+        await Task.detached(priority: .userInitiated) { [self] in
+            semanticSearch(query: query, limit: limit)
+        }.value
     }
 
     /// "More photos like this one" — top-K by cosine over CLIP
@@ -228,6 +272,14 @@ public final class ReadStore: @unchecked Sendable {
         }) ?? []
         guard !seedVec.isEmpty else { return [] }
         return rankByCosine(against: seedVec, limit: limit, excludeID: seedID)
+    }
+
+    /// Off-main twin of `similarFiles` — the same full-table cosine scan
+    /// as semantic search, kept off the MainActor for the same reason.
+    public func similarFilesAsync(toFileID seedID: Int64, limit: Int = 24) async -> [FileRow] {
+        await Task.detached(priority: .userInitiated) { [self] in
+            similarFiles(toFileID: seedID, limit: limit)
+        }.value
     }
 
     /// Top-K files ranked by cosine similarity to the given query
@@ -653,7 +705,7 @@ public final class ReadStore: @unchecked Sendable {
                              middleName: String?, lastName: String?,
                              suffix: String?, isUnknown: Bool) {
         do {
-            let queue = try DatabaseQueue(path: dbURL.path)
+            let queue = try writeQueue()
             try queue.write { db in
                 try db.execute(sql: """
                     UPDATE persons
@@ -693,7 +745,7 @@ public final class ReadStore: @unchecked Sendable {
                                   fileIDs: [Int64]) -> Int {
         guard !fileIDs.isEmpty, source != target else { return 0 }
         do {
-            let queue = try DatabaseQueue(path: dbURL.path)
+            let queue = try writeQueue()
             let moved = try queue.write { db -> Int in
                 let placeholders = fileIDs.map { _ in "?" }.joined(separator: ",")
                 var args: [DatabaseValueConvertible] = [target, source]
@@ -755,7 +807,7 @@ public final class ReadStore: @unchecked Sendable {
         let validSources = sources.filter { $0 != target }
         guard !validSources.isEmpty else { return nil }
         do {
-            let queue = try DatabaseQueue(path: dbURL.path)
+            let queue = try writeQueue()
             let newCount: Int = try queue.write { db in
                 let placeholders = validSources.map { _ in "?" }.joined(separator: ",")
                 // 1. Reassign every face_print from the source persons to
@@ -836,7 +888,7 @@ public final class ReadStore: @unchecked Sendable {
 
         var totalSources = 0
         do {
-            let q = try DatabaseQueue(path: dbURL.path)
+            let q = try writeQueue()
             try q.write { db in
                 for (target, sources) in byTarget {
                     for chunk in stride(from: 0, to: sources.count, by: 500).map({
@@ -927,7 +979,7 @@ public final class ReadStore: @unchecked Sendable {
     /// the old batch-end variant had no busy timeout and swallowed the
     /// error after every file had already moved on disk.
     public func openPathUpdateQueue() throws -> DatabaseQueue {
-        try renameWriteQueue()
+        try writeQueue()
     }
 
     public func updatePathText(fileID: Int64, newPath: String, on queue: DatabaseQueue) throws {
@@ -1017,7 +1069,7 @@ public final class ReadStore: @unchecked Sendable {
         // connections.
         let queue: DatabaseQueue
         do {
-            queue = try renameWriteQueue()
+            queue = try writeQueue()
         } catch {
             self.lastError = "DB open for rename failed: \(error)"
             return BulkRenameResult(renamed: [], failed: files.count,
@@ -1082,9 +1134,7 @@ public final class ReadStore: @unchecked Sendable {
                 // now-nonexistent path on failure. If it fails, roll the file
                 // back so disk and DB stay consistent and report it as failed.
                 do {
-                    var config = Configuration()
-                    config.busyMode = .timeout(5)
-                    let q = try DatabaseQueue(path: dbURL.path, configuration: config)
+                    let q = try writeQueue()
                     try q.write { db in
                         try db.execute(
                             sql: "UPDATE files SET path_text = ?, path_search = ? WHERE id = ?",
@@ -1110,17 +1160,19 @@ public final class ReadStore: @unchecked Sendable {
     /// DB row. Returns the new path or nil on failure.
     public func applyProposedName(file: FileRow) -> URL? {
         do {
-            return applyProposedName(file: file, on: try renameWriteQueue())
+            return applyProposedName(file: file, on: try writeQueue())
         } catch {
             self.lastError = "DB open for rename failed: \(error)"
             return nil
         }
     }
 
-    // Busy timeout so momentary WAL contention with the engine writer
-    // retries instead of failing immediately (which used to strand the
-    // file: renamed on disk but the DB row still pointing at oldPath).
-    private func renameWriteQueue() throws -> DatabaseQueue {
+    // Every app write connection sets a busy timeout. The engine is the
+    // single writer; a People edit / Cleanup delete / rename that lands
+    // during a brief engine WAL write would otherwise hit SQLITE_BUSY and
+    // throw — silently no-opping the edit, or stranding a trashed file as
+    // a ghost DB row. The timeout makes the contended write retry instead.
+    private func writeQueue() throws -> DatabaseQueue {
         var config = Configuration()
         config.busyMode = .timeout(5)
         return try DatabaseQueue(path: dbURL.path, configuration: config)

@@ -37,6 +37,15 @@ public final class EngineClient {
     public private(set) var deepAnalyzeAvailable: Bool = true
     public private(set) var deepAnalyzeUnavailableReason: String?
 
+    /// Bumped on every engine exit (crash or clean). A dead engine can't
+    /// emit the terminal events that clear a view's *own* in-flight UI
+    /// (e.g. Deep Analyze's StreamCard + Cancel), so it would freeze until
+    /// a tab switch. Views observe this via `.onChange` to reset that
+    /// local state. EngineClient's own published flags are already reset
+    /// in `handleEngineExit`; this is the signal for state the client
+    /// doesn't own.
+    public private(set) var engineResetSignal: Int = 0
+
     // MARK: - Auto-pilot ("Organize Everything")
     //
     // When the user clicks "Organize Everything" instead of plain
@@ -109,6 +118,11 @@ public final class EngineClient {
     }
 
     public func start() {
+        // A live engine here means this is a restart (Settings ▸ Restart
+        // Engine calls start() directly). Terminate + reap it FIRST —
+        // two live engines = two SQLite writers against one DB =
+        // corruption. Single-flight stop-then-start.
+        terminateRunningEngine()
         guard let binURL = Self.locateEngineBinary() else {
             state = .crashed(reason: "Engine binary not found next to app executable")
             return
@@ -124,6 +138,25 @@ public final class EngineClient {
             return
         }
         spawn(binary: binURL)
+    }
+
+    /// Stop half of a restart: cancel any pending respawn and
+    /// synchronously terminate + reap the running engine, so a restart
+    /// never overlaps two live engines against the single-writer SQLite
+    /// DB. `waitUntilExit()` releases the WAL lock before the next spawn;
+    /// the old process's pipe handlers are left armed (so it keeps
+    /// draining and can't deadlock on a full pipe during shutdown) — its
+    /// late EOF is harmless because `handleEngineExit(for:)` rejects any
+    /// process that is no longer `self.process`. Idempotent.
+    private func terminateRunningEngine() {
+        pendingRespawn?.cancel()
+        pendingRespawn = nil
+        if let proc = process, proc.isRunning {
+            proc.terminate()
+            proc.waitUntilExit()
+        }
+        process = nil
+        stdinPipe = nil
     }
 
     /// Returns a non-nil failure reason when the engine binary
@@ -223,12 +256,12 @@ public final class EngineClient {
         // compromised engine that never emits a newline can't grow this buffer
         // without bound and OOM the app.
         let maxFrameBytes = 1024 * 1024
-        errPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        errPipe.fileHandleForReading.readabilityHandler = { [weak self, weak proc] handle in
             let data = handle.availableData
             if data.isEmpty {
                 handle.readabilityHandler = nil
-                Task { @MainActor [weak self] in
-                    self?.handleEngineExit()
+                Task { @MainActor in
+                    self?.handleEngineExit(for: proc)
                 }
                 return
             }
@@ -334,6 +367,12 @@ public final class EngineClient {
                 startScan(rootURL: root)
             }
         case .progress(let p):
+            // Each IPC line is delivered to the main actor as its own
+            // unstructured Task, which the runtime may reorder — so a
+            // late "discovered: 100" must never overwrite the final
+            // "discovered: 4000". Drop any snapshot that would roll a
+            // counter (or the phase) backwards within the same session.
+            guard p.supersedes(lastProgress) else { break }
             lastProgress = p
             // Auto-pilot: cancel + failed phases must release the
             // assistant view, otherwise the user is stuck looking at
@@ -359,7 +398,7 @@ public final class EngineClient {
             // the engine itself, so just update the visible stage.
             // BUT: if there are no faces in the scanned library, the
             // engine won't fire clustering at all and we'd hang on
-            // .grouping. Watchdog kicks the next stage after 6s if no
+            // .grouping. Watchdog flips to .ready after 6s if no
             // clustering activity is seen.
             if autoPilotActive {
                 autoPilotStage = .grouping
@@ -369,21 +408,16 @@ public final class EngineClient {
                     guard let self else { return }
                     // Still in auto-pilot, still on grouping, and no
                     // clustering even started (no inflight + no result):
-                    // skip ahead.
+                    // hand control back to the user. Deep Analyze is
+                    // opt-in and waits for a named person, so the
+                    // no-faces path must NOT auto-launch whole-library
+                    // Deep Analyze.
                     if self.autoPilotActive,
                        self.autoPilotStage == .grouping,
                        !self.faceClusteringInFlight,
                        self.lastFaceClustering == nil,
                        self.lastTerminalEventAt == stamp {
-                        if self.deepAnalyzeAvailable {
-                            self.autoPilotStage = .captioning
-                            let activeKind = AIModelKind.migrated(
-                                rawValue: UserDefaults.standard.string(forKey: "deepAnalyzeActiveModel") ?? ""
-                            ).rawValue
-                            self.deepAnalyzeAll(modelKind: activeKind, skipExisting: true)
-                        } else {
-                            self.autoPilotStage = .ready
-                        }
+                        self.autoPilotStage = .ready
                     }
                 }
             }
@@ -498,12 +532,16 @@ public final class EngineClient {
     }
 
     @MainActor
-    private func handleEngineExit() {
+    private func handleEngineExit(for proc: Process?) {
+        // Identity guard (mirrors the Windows sender != _process check):
+        // a late EOF from a process we already terminated/replaced — a
+        // Restart, or a respawn that raced — must NOT tear down the
+        // engine that's live now, or reset its in-flight UI.
+        guard let proc, proc === self.process else { return }
+
         // Nil pipe handlers so any in-flight GCD callback short-circuits.
-        if let proc = process {
-            (proc.standardError as? Pipe)?.fileHandleForReading.readabilityHandler = nil
-            (proc.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
-        }
+        (proc.standardError as? Pipe)?.fileHandleForReading.readabilityHandler = nil
+        (proc.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
         process = nil
         stdinPipe = nil
 
@@ -517,6 +555,10 @@ public final class EngineClient {
         faceClusteringInFlight = false
         isPaused = false
         queueState = QueueState(running: nil, pending: [], totalEtaSeconds: nil)
+        // Signal views that own their in-flight UI (e.g. Deep Analyze's
+        // StreamCard + inert Cancel) to reset — the engine can no longer
+        // emit the terminal event that would clear them.
+        engineResetSignal &+= 1
 
         // Expected exit (shutdown called or work just completed): silent
         // re-spawn, no error pill, no respawn budget burned. Covers
@@ -677,8 +719,13 @@ public final class EngineClient {
     public func resume()   { isPaused = false; send(.resumeScan) }
     public func cancel()   { isPaused = false; send(.cancelScan) }
     public func shutdown() {
-        expectedExit = true
-        send(.shutdown)
+        // Only latch the expected-exit suppression when the shutdown
+        // command actually left the app — otherwise a genuine crash that
+        // races the respawn window (stdinPipe nil → send() returns false)
+        // would be masked as a clean exit and skip the error pill.
+        if send(.shutdown) {
+            expectedExit = true
+        }
     }
 
     /// Wipes the SQLite library + scan logs and triggers a fresh
@@ -791,6 +838,33 @@ public final class EngineClient {
     /// every in-flight prewarm (the only mode the welcome sheet uses today).
     public func cancelPrewarm() {
         send(.cancelPrewarm(modelKind: nil))
+    }
+}
+
+extension ScanProgress {
+    /// True when `self` is a fresher scan-progress snapshot than `prior`
+    /// and should replace it. Snapshots reach the main actor as
+    /// independent unstructured Tasks the runtime may reorder; a stale
+    /// one must never roll a counter backwards — e.g. a late
+    /// `discovered: 100` overwriting the final `discovered: 4000`.
+    /// Within one session the counters are monotonic and the phase only
+    /// advances; a different session always supersedes.
+    func supersedes(_ prior: ScanProgress?) -> Bool {
+        guard let prior, prior.sessionID == sessionID else { return true }
+        func isTerminal(_ phase: ScanPhase) -> Bool {
+            switch phase {
+            case .completed, .cancelled, .failed: return true
+            case .idle, .discovering, .tagging, .postScan: return false
+            }
+        }
+        // Terminal snapshots always win; once terminal, nothing rolls back.
+        if isTerminal(phase) { return true }
+        if isTerminal(prior.phase) { return false }
+        if discovered < prior.discovered { return false }
+        if processed < prior.processed { return false }
+        // total latches 0 → positive at discovery's end; never drop it.
+        if prior.total > 0 && total == 0 { return false }
+        return true
     }
 }
 
