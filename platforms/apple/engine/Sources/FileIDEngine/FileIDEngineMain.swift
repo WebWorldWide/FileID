@@ -154,6 +154,11 @@ struct FileIDEngineMain {
         JSONLog.shared.info(ev: "engine_exit")
         JSONLog.shared.flush()
 
+        // Deliver any IPC event still buffered (e.g. a terminal scanComplete /
+        // restructureApplyResult the detached drainer hadn't flushed yet)
+        // before the hard exit drops it. (F-C3-040)
+        await sink.drainAndClose()
+
         // Hard-exit. MLX's static destructors SEGV during normal atexit
         // teardown on macOS 26; `_exit` skips them. Our work is already
         // flushed to disk above.
@@ -170,6 +175,14 @@ struct FileIDEngineMain {
                 await sink.emit(.error(EngineError(
                     kind: "db_unavailable",
                     message: "Database failed to open at engine startup; cannot scan."
+                )))
+                // A bare error leaves the app's auto-pilot stuck on "Scanning…"
+                // forever — it advances only on a scan-terminal event. Emit an
+                // empty scanComplete so the assistant leaves the scanning state.
+                // (F-C3-032)
+                await sink.emit(.scanComplete(ScanComplete(
+                    sessionID: "", totalFiles: 0, processedFiles: 0,
+                    failedFiles: 0, totalSeconds: 0
                 )))
                 return
             }
@@ -405,14 +418,73 @@ struct FileIDEngineMain {
             await DeepAnalyze.shared.cancelPrewarm()
             JSONLog.shared.info(ev: "prewarm_cancel_requested")
 
+        // ── Restructure butler (Windows-parity, wired) ───────────
+        // Port of commands/restructure.rs: compute the plan / apply the
+        // moves through the engine's Restructure butler and emit the
+        // corresponding reply event. Run detached so the command loop stays
+        // responsive to pause/cancel/shutdown during a long plan computation.
+        case .planRestructure(let libraryRoot):
+            guard let database else {
+                await sink.emit(.error(EngineError(
+                    kind: "db_unavailable",
+                    message: "Database failed to open at engine startup; cannot plan a restructure."
+                )))
+                return
+            }
+            let planRoot = URL(fileURLWithPath: libraryRoot)
+            Task.detached(priority: .userInitiated) {
+                JSONLog.shared.info(ev: "plan_restructure_requested",
+                                    path: redactPathForLog(libraryRoot))
+                do {
+                    let proposals = try await Restructure.proposeAll(
+                        database: database, libraryRoot: planRoot)
+                    let plan = Self.restructurePlan(from: proposals, libraryRoot: libraryRoot)
+                    await sink.emit(.restructurePlan(plan))
+                    JSONLog.shared.info(ev: "plan_restructure_done",
+                                        extra: ["moves": AnyCodable(plan.moves.count)])
+                } catch {
+                    // Terminal error so the Restructure tab's "Computing plan…"
+                    // status recovers instead of awaiting forever (mirrors
+                    // restructure.rs's plan_restructure_failed JoinError arm).
+                    JSONLog.shared.warn(ev: "plan_restructure_failed", error: "\(error)")
+                    await sink.emit(.error(EngineError(
+                        kind: "plan_restructure_failed",
+                        message: "Restructure planning did not complete: \(error)"
+                    )))
+                }
+            }
+        case .applyRestructure(let libraryRoot, let moves, _):
+            // macOS performs real filesystem moves; the Windows engine's
+            // symlink-preview mode has no macOS equivalent, so `useSymlinks`
+            // is accepted for wire parity and ignored.
+            guard let database else {
+                await sink.emit(.error(EngineError(
+                    kind: "db_unavailable",
+                    message: "Database failed to open at engine startup; cannot apply a restructure."
+                )))
+                return
+            }
+            let applyRoot = URL(fileURLWithPath: libraryRoot)
+            let proposals = moves.map { m in
+                RestructureProposal(
+                    fileID: m.fileID, oldPath: m.source, newPath: m.destination,
+                    bucket: m.category, confidence: m.confidence, reason: m.reason)
+            }
+            Task.detached(priority: .userInitiated) {
+                JSONLog.shared.info(ev: "apply_restructure_requested",
+                                    extra: ["moves": AnyCodable(proposals.count)])
+                let result = await Restructure.apply(
+                    proposals: proposals, database: database, libraryRoot: applyRoot)
+                await sink.emit(.restructureApplyResult(RestructureApplyResult(
+                    applied: result.moved, failed: result.failed, privilegeError: nil)))
+            }
+
         // ── Windows-originated commands ──────────────────────────
         // The schema keeps these symmetric across platforms. Mac
         // exposes equivalent flows through per-tab UI actions, not
         // the IPC, so the engine returns a structured pointer rather
         // than silently dropping.
-        case .planRestructure,
-             .applyRestructure,
-             .applyTags,
+        case .applyTags,
              .renameFiles,
              .trashFiles,
              .mergeClusters,
@@ -828,6 +900,32 @@ struct FileIDEngineMain {
         })
     }
 
+    /// Build the IPC `RestructurePlan` DTO from engine proposals: map each
+    /// proposal to a `RestructureMove` and roll up per-bucket category counts
+    /// (descending by count, then category for a stable order). The macOS
+    /// proposer doesn't compute the Windows butler's Anchor/Mixed/Junk folder
+    /// tiers, so `folderClassifications` is nil — the app renders the Sankey
+    /// without the engine-authoritative Keep tile (its "null on older engines"
+    /// path), and the per-move `tier` is likewise nil.
+    static func restructurePlan(
+        from proposals: [RestructureProposal], libraryRoot: String
+    ) -> RestructurePlan {
+        let moves = proposals.map { p in
+            RestructureMove(
+                fileID: p.fileID, source: p.oldPath, destination: p.newPath,
+                category: p.bucket, tier: nil,
+                confidence: p.confidence, reason: p.reason)
+        }
+        var counts: [String: Int] = [:]
+        for p in proposals { counts[p.bucket, default: 0] += 1 }
+        let categoryCounts = counts
+            .map { RestructureCategoryCount(category: $0.key, count: $0.value) }
+            .sorted { $0.count != $1.count ? $0.count > $1.count : $0.category < $1.category }
+        return RestructurePlan(
+            libraryRoot: libraryRoot, moves: moves,
+            categoryCounts: categoryCounts, folderClassifications: nil)
+    }
+
     /// Mark the session completed/cancelled in the DB + emit terminal events.
     private static func markSessionFinal(
         database: Database,
@@ -842,16 +940,20 @@ struct FileIDEngineMain {
         let processed = snap?.processed ?? 0
         let failed    = snap?.failed ?? 0
         let total     = snap?.total ?? 0
+        // The common reason we reach markSessionFinal is a CANCELLED scan,
+        // and the scan runs inside a task that requestCancel() cancelled — so a
+        // plain pool.write here throws CancellationError and the terminal status
+        // is never written (row stuck 'running' → false 'crashed' next launch).
+        // Shield the terminal write from the cancellation. (F-C3-031)
+        let status = cancelled ? "cancelled" : "completed"
+        let completedAt = Date().timeIntervalSince1970
+        let sessionID = session.id
         do {
-            try await database.pool.write { db in
+            try await database.writeUncancellable { db in
                 try db.execute(sql: """
                     UPDATE scan_sessions SET status = ?, completed_at = ?
                     WHERE id = ?
-                    """, arguments: [
-                        cancelled ? "cancelled" : "completed",
-                        Date().timeIntervalSince1970,
-                        session.id
-                    ])
+                    """, arguments: [status, completedAt, sessionID])
             }
         } catch {
             JSONLog.shared.warn(ev: "scan_session_update_failed",

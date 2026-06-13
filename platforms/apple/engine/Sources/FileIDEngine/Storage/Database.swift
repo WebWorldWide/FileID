@@ -48,6 +48,12 @@ public final class Database: @unchecked Sendable {
             try db.execute(sql: "PRAGMA mmap_size = 268435456")     // 256 MB
             try db.execute(sql: "PRAGMA cache_size = -65536")        // 64 MB
             try db.execute(sql: "PRAGMA wal_autocheckpoint = 10000") // ~40 MB
+            // Windows-parity: keep dirty pages pinned in the page cache for the
+            // life of a transaction instead of spilling them to a temp file
+            // mid-write under memory pressure (a spill can leave a transient
+            // -journal alongside the WAL and slows the writer). (F-C3-039,
+            // mirrors db/mod.rs SETUP_PRAGMAS).
+            try db.execute(sql: "PRAGMA cache_spill = 0")
         }
         self.pool = try DatabasePool(path: url.path, configuration: config)
         let migrator = Self.migrator
@@ -447,6 +453,26 @@ public final class Database: @unchecked Sendable {
         }
 
         return m
+    }
+
+    // MARK: - Cancellation-shielded writes
+
+    /// Run a writer transaction that MUST complete even when the calling task
+    /// is cancelled. GRDB 7's async `pool.write` throws `CancellationError`
+    /// the moment the surrounding `Task` is cancelled (documented behavior),
+    /// so terminal bookkeeping issued from a cancelled scan task — chiefly the
+    /// final `scan_sessions.status` UPDATE — would be swallowed, leaving the
+    /// row stuck `'running'` and mislabeled `'crashed'` on the next launch.
+    /// Detaching breaks cancellation inheritance so the write runs to
+    /// completion on the writer queue. Use ONLY for short terminal writes that
+    /// must not be lost — normal writes should stay cancellable. (F-C3-031)
+    public func writeUncancellable<T: Sendable>(
+        _ updates: @escaping @Sendable (GRDB.Database) throws -> T
+    ) async throws -> T {
+        let pool = self.pool
+        return try await Task.detached(priority: .userInitiated) {
+            try await pool.write(updates)
+        }.value
     }
 
     // MARK: - Convenience reads
