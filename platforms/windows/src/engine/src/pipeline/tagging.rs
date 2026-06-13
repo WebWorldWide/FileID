@@ -1060,7 +1060,15 @@ fn run_decoder_thread(
                         }
                     }
                 }
-                _ => {}
+                // Video, over-cap Doc/Pdf/Audio, and Other: compute the
+                // rename-heal content_hash HERE on the decoder thread via the
+                // bounded composite (head + interior samples + tail + size — no
+                // full read), so the async worker's `or_else` fallback never
+                // re-opens the file as blocking IO on a tokio worker. (F-C1-025)
+                _ => {
+                    content_hash =
+                        crate::util::content_hash::content_hash(&file.path, file.size_bytes).ok();
+                }
             }
         }
 
@@ -1343,14 +1351,16 @@ async fn process_file_predecoded(
         tags_evaluated: false,
     };
 
-    // Content identity for rename/move heal. Skipped for cloud placeholders
-    // so we never trigger a content read (which would hydrate a OneDrive
-    // online-only file). On any read error the row simply lacks a
-    // content_hash — the heal-by-file_ref path still applies.
+    // Content identity for rename/move heal. The decoder thread already
+    // computed `content_hash` for every non-online kind (image/doc/pdf/audio
+    // via the single read; video/over-cap/other via the bounded composite),
+    // so this async worker NEVER re-opens the file — the previous `.or_else`
+    // fallback was blocking filesystem IO on a tokio worker. (F-C1-025) On a
+    // decoder-thread read error the row simply lacks a content_hash and the
+    // heal-by-file_ref path still applies; cloud placeholders stay None so we
+    // never hydrate a OneDrive online-only file.
     if !file.online_only {
-        tagged.content_hash = content_hash.or_else(|| {
-            crate::util::content_hash::content_hash(&file.path, file.size_bytes).ok()
-        });
+        tagged.content_hash = content_hash;
     }
 
     // Document content (Phase 4): the decoder thread already pulled the text
@@ -1937,7 +1947,8 @@ fn push_enriched_extras(tagged: &mut TaggedFile) {
     // is absent the user still sees something useful.
     //
     // Priority (highest first):
-    //   1. Year (from modified_unix; the single most useful low-cost tag)
+    //   1. Year (creation date in local time; the single most useful
+    //      low-cost tag — pinned to the macOS `extraTags` rule)
     //   2. Camera family (iPhone / Canon / etc. — useful for filtering)
     //
     // The generic capability tags (Has Faces / Has Text / Has Location) used to
@@ -1953,12 +1964,19 @@ fn push_enriched_extras(tagged: &mut TaggedFile) {
     // is a UI concern — the tile's own rendering already conveys it —
     // not a useful tag for search/filtering. Mirrors a macOS Tagging.swift
     // refinement.
-    if tagged.modified_unix > 0.0 {
-        let secs = tagged.modified_unix as i64;
-        // Days since epoch via integer math (no chrono dep — already
-        // available transitively but avoid the call cost here).
-        if let Some(year) = unix_seconds_to_year(secs) {
-            if (1990..2100).contains(&year) {
+    // Canonical Year_ rule (converged with macOS `Tagging.swift::extraTags`):
+    // creation date when present, else modification date; local timezone;
+    // year strictly inside (1990, 2100). macOS reads `creationDate` via the
+    // local `gregorianCalendar`; Windows mirrors that here (creation-time
+    // wins over modified-at — the latter only fills in when the platform
+    // reported no birth time).
+    let year_source = tagged
+        .created_unix
+        .filter(|&c| c > 0.0)
+        .unwrap_or(tagged.modified_unix);
+    if year_source > 0.0 {
+        if let Some(year) = local_unix_seconds_to_year(year_source) {
+            if year > 1990 && year < 2100 {
                 tagged.tags.push((format!("Year_{year}"), None));
             }
         }
@@ -1982,26 +2000,19 @@ fn push_enriched_extras(tagged: &mut TaggedFile) {
     }
 }
 
-/// Minimal proleptic-Gregorian unix→year. Avoids pulling in chrono just
-/// for a year extraction. Accurate for the 1970-2100 range the enriched-
-/// extras call site cares about.
-fn unix_seconds_to_year(secs: i64) -> Option<i32> {
-    if secs < 0 { return None; }
-    // Days since 1970-01-01.
-    let days = secs / 86_400;
-    // Iterate years adding 365 / 366 — simple, exact, runs in O(1) for
-    // recent dates (<200 iterations).
-    let mut year: i32 = 1970;
-    let mut remaining = days;
-    loop {
-        let leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
-        let year_days = if leap { 366 } else { 365 };
-        if remaining < year_days {
-            return Some(year);
-        }
-        remaining -= year_days;
-        year += 1;
-        if year > 2200 { return None; }
+/// Unix-seconds → calendar year in the machine's **local** timezone. macOS
+/// derives the Year_ tag with the local `gregorianCalendar`, so a New
+/// Year's-Eve photo lands in the same year on both platforms (a UTC-based
+/// extraction would shift e.g. a 2023-12-31 23:00 local capture in a
+/// UTC-negative zone into 2024). chrono's `Local` is already a dependency.
+fn local_unix_seconds_to_year(unix: f64) -> Option<i32> {
+    use chrono::{Datelike, Local, TimeZone};
+    let secs = unix as i64;
+    let nanos = ((unix - secs as f64) * 1_000_000_000.0) as u32;
+    match Local.timestamp_opt(secs, nanos) {
+        chrono::LocalResult::Single(dt) => Some(dt.year()),
+        chrono::LocalResult::Ambiguous(dt, _) => Some(dt.year()),
+        chrono::LocalResult::None => None,
     }
 }
 
@@ -2460,6 +2471,62 @@ mod tests {
         assert!(!t.tags.iter().any(|(s, _)| s == "Square"));
         assert!(!t.tags.iter().any(|(s, _)| s == "Wide"));
         assert!(!t.tags.iter().any(|(s, _)| s == "Tall"));
+    }
+
+    // F-C1-019: the Year_ tag is pinned to the macOS `extraTags` rule —
+    // creation date (when present) in local time, year strictly inside
+    // (1990, 2100). These vectors use mid-year noon-UTC timestamps so the
+    // resolved calendar year is identical in every real-world timezone
+    // (UTC-12 .. UTC+14), keeping the test deterministic across CI hosts.
+
+    // 2021-07-01 12:00:00 UTC.
+    const TS_2021_MIDYEAR: f64 = 1_625_140_800.0;
+    // 2018-07-01 12:00:00 UTC.
+    const TS_2018_MIDYEAR: f64 = 1_530_446_400.0;
+    // 1990-07-01 12:00:00 UTC — exactly ON the boundary. The canonical rule is
+    // strictly `> 1990` (macOS), so 1990 emits NO tag; the prior Windows
+    // `(1990..2100)` (`>= 1990`) would have emitted `Year_1990`.
+    const TS_1990_MIDYEAR: f64 = 646_833_600.0;
+
+    fn year_tag(t: &TaggedFile) -> Option<i32> {
+        t.tags.iter().find_map(|(s, _)| {
+            s.strip_prefix("Year_").and_then(|y| y.parse::<i32>().ok())
+        })
+    }
+
+    #[test]
+    fn year_tag_prefers_creation_date_over_modified() {
+        let mut t = stub_tagged(800, 600, 1_000);
+        // Modified in 2021, created in 2018 — creation date must win
+        // (a file edited years after capture still tags by capture year).
+        t.modified_unix = TS_2021_MIDYEAR;
+        t.created_unix = Some(TS_2018_MIDYEAR);
+        push_enriched_extras(&mut t);
+        assert_eq!(year_tag(&t), Some(2018),
+            "Year_ tag must derive from creation date, not modified");
+    }
+
+    #[test]
+    fn year_tag_falls_back_to_modified_when_no_creation() {
+        let mut t = stub_tagged(800, 600, 1_000);
+        t.modified_unix = TS_2021_MIDYEAR;
+        t.created_unix = None;
+        push_enriched_extras(&mut t);
+        assert_eq!(year_tag(&t), Some(2021),
+            "no birth time → fall back to modified date");
+    }
+
+    #[test]
+    fn year_tag_respects_strict_1990_lower_bound() {
+        // macOS uses `y > 1990` (strict). A capture in exactly 1990 emits no
+        // Year_ tag — this discriminates the boundary convergence (the prior
+        // Windows `>= 1990` would have emitted `Year_1990`).
+        let mut t = stub_tagged(800, 600, 1_000);
+        t.created_unix = Some(TS_1990_MIDYEAR);
+        t.modified_unix = TS_1990_MIDYEAR;
+        push_enriched_extras(&mut t);
+        assert_eq!(year_tag(&t), None,
+            "year == 1990 must not emit a Year_ tag (macOS uses strict > 1990)");
     }
 
     #[test]

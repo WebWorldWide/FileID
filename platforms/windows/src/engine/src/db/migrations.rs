@@ -125,12 +125,16 @@ END;
 /// v16: normalization-insensitive filename search (C15). SQLite LIKE compares
 /// bytes, so an NFC query can never match an NFD-stored name (Mac/NAS/Dropbox-
 /// synced files). `path_search` holds the NFC form of `path_text`; the app
-/// NFC-normalizes the query and LIKEs against it. Asymmetry by design: Rust
-/// has no NFC normalizer in the locked dependency set, and Windows paths are
-/// NFC in practice (NTFS preserves what apps write; Win32 input is composed),
-/// so this engine populates `path_search = path_text` verbatim while macOS
-/// applies real NFC at its writers. NOTE: macOS must register an identical
-/// `v16_path_search` identifier for cross-platform DB parity.
+/// NFC-normalizes the query and LIKEs against it. Both the Windows dbwriter
+/// (`nfc_path_search`) and macOS (`precomposedStringWithCanonicalMapping`)
+/// apply real NFC at their writers so the contract is symmetric across
+/// platforms (F-C2-005 — the prior verbatim `path_search = path_text`
+/// asymmetry left NFD filenames unsearchable on Windows only). This migration
+/// itself is append-only and unchanged: the bulk `UPDATE` backfills the
+/// identity case (ASCII / already-NFC rows are correct verbatim) and any
+/// not-yet-NFC row heals to the composed form on its next rescan. NOTE: macOS
+/// must register an identical `v16_path_search` identifier for cross-platform
+/// DB parity.
 const V16_PATH_SEARCH: &str = "
 ALTER TABLE files ADD COLUMN path_search TEXT;
 UPDATE files SET path_search = path_text;
