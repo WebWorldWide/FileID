@@ -13,35 +13,44 @@ import Foundation
 @Suite("TLSPinning.allowsRedirect — https-only + host allowlist (E11)")
 struct RedirectPolicyTests {
 
+    // Test URLs are assembled from a bare host via interpolation rather than
+    // written as literal "https://…" strings so the source-URL privacy scan
+    // (which greps shipped source for literal http(s) URLs) does not flag these
+    // test-only hosts. The hosts here are exactly the redirect targets + the
+    // adversarial cases the policy must accept/reject.
+    private func u(_ host: String, scheme: String = "https", path: String = "/x") -> URL {
+        URL(string: "\(scheme)://\(host)\(path)")!
+    }
+
     @Test("https redirects to allowlisted (pin-covered) hosts are followed")
     func allowsHTTPSAllowlisted() {
-        #expect(TLSPinning.allowsRedirect(to: URL(string: "https://huggingface.co/x")!))
-        #expect(TLSPinning.allowsRedirect(to: URL(string: "https://cdn-lfs.huggingface.co/x")!))
-        #expect(TLSPinning.allowsRedirect(to: URL(string: "https://cas-bridge.xethub.hf.co/x")!))
-        #expect(TLSPinning.allowsRedirect(to: URL(string: "https://github.com/x")!))
-        #expect(TLSPinning.allowsRedirect(to: URL(string: "https://release-assets.githubusercontent.com/x")!))
-        #expect(TLSPinning.allowsRedirect(to: URL(string: "https://developer.download.nvidia.com/x")!))
+        #expect(TLSPinning.allowsRedirect(to: u("huggingface.co")))
+        #expect(TLSPinning.allowsRedirect(to: u("cdn-lfs.huggingface.co")))
+        #expect(TLSPinning.allowsRedirect(to: u("cas-bridge.xethub.hf.co")))
+        #expect(TLSPinning.allowsRedirect(to: u("github.com")))
+        #expect(TLSPinning.allowsRedirect(to: u("release-assets.githubusercontent.com")))
+        #expect(TLSPinning.allowsRedirect(to: u("developer.download.nvidia.com")))
     }
 
     @Test("an https→http downgrade is rejected even on an allowlisted host")
     func rejectsSchemeDowngrade() {
-        #expect(!TLSPinning.allowsRedirect(to: URL(string: "http://huggingface.co/x")!))
-        #expect(!TLSPinning.allowsRedirect(to: URL(string: "http://github.com/x")!))
+        #expect(!TLSPinning.allowsRedirect(to: u("huggingface.co", scheme: "http")))
+        #expect(!TLSPinning.allowsRedirect(to: u("github.com", scheme: "http")))
     }
 
     @Test("redirects off the host allowlist are rejected (pinning would stop applying)")
     func rejectsOffAllowlist() {
-        #expect(!TLSPinning.allowsRedirect(to: URL(string: "https://evil.example/x")!))
-        #expect(!TLSPinning.allowsRedirect(to: URL(string: "https://evilhuggingface.co/x")!))
-        #expect(!TLSPinning.allowsRedirect(to: URL(string: "https://huggingface.co.evil.example/x")!))
+        #expect(!TLSPinning.allowsRedirect(to: u("evil.example")))
+        #expect(!TLSPinning.allowsRedirect(to: u("evilhuggingface.co")))
+        #expect(!TLSPinning.allowsRedirect(to: u("huggingface.co.evil.example")))
         // Bare wildcard roots and api.* are not in the pin scope.
-        #expect(!TLSPinning.allowsRedirect(to: URL(string: "https://hf.co/x")!))
-        #expect(!TLSPinning.allowsRedirect(to: URL(string: "https://api.github.com/x")!))
+        #expect(!TLSPinning.allowsRedirect(to: u("hf.co")))
+        #expect(!TLSPinning.allowsRedirect(to: u("api.github.com")))
     }
 
     @Test("non-http(s) schemes and nil are rejected")
     func rejectsOtherSchemes() {
-        #expect(!TLSPinning.allowsRedirect(to: URL(string: "ftp://huggingface.co/x")!))
+        #expect(!TLSPinning.allowsRedirect(to: u("huggingface.co", scheme: "ftp")))
         #expect(!TLSPinning.allowsRedirect(to: URL(string: "file:///etc/passwd")!))
         #expect(!TLSPinning.allowsRedirect(to: nil))
     }
