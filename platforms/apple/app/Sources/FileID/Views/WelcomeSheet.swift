@@ -16,6 +16,7 @@ struct WelcomeSheet: View {
 
     @State private var vlmRequested = false
     @State private var vlmRequestedAt: Date?
+    @State private var vlmLastProgressAt: Date?   // R6-07: progress-stall watchdog
     @State private var installAllRequested = false
     @State private var vlmLockedTotalBytes: Int64?
     @State private var vlmLastError: String?
@@ -118,9 +119,13 @@ struct WelcomeSheet: View {
             guard vlmRequested,
                   let p = engine.modelDownloadProgress,
                   p.modelKind == recommendedVLM.rawValue else { return }
+            vlmLastProgressAt = Date()   // R6-07: feed the stall watchdog
             updateVLMRate(progress: p)
         }
-        .onChange(of: engine.lastError?.message ?? "") { _, msg in
+        // R6-07: key on `lastErrorSignal` (bumps on EVERY error write) not the
+        // message string, so a retry that fails with the identical message still
+        // flips the row to Failed instead of spinning forever.
+        .onChange(of: engine.lastErrorSignal) { _, _ in
             // prewarm_cancelled is the engine echoing a user Cancel —
             // local state is already cleared, no error UI needed.
             guard vlmRequested, let err = engine.lastError else { return }
@@ -134,8 +139,8 @@ struct WelcomeSheet: View {
             // platform parity, audit F-C2-003); route it like the prewarm_*
             // family so the row flips to Failed instead of spinning.
             if err.kind.hasPrefix("prewarm_") || err.kind == "unknown_model"
-                || msg.contains(recommendedVLM.displayName) {
-                vlmLastError = msg
+                || err.message.contains(recommendedVLM.displayName) {
+                vlmLastError = err.message
                 vlmRequested = false
             }
         }
@@ -241,6 +246,21 @@ struct WelcomeSheet: View {
                   engine.modelDownloadProgress?.modelKind != recommendedVLM.rawValue else { return }
             vlmLastError = "No response from engine — try again."
             vlmRequested = false
+        }
+        // R6-07: started-then-stalled watchdog. A download that emits ≥1 progress
+        // event then goes silent (server hang / dropped link without RST) defeats
+        // the 30 s "never started" timer above. Poll for progress staleness.
+        Task { @MainActor in
+            while vlmRequested, vlmRequestedAt == started {
+                try? await Task.sleep(for: .seconds(5))
+                guard vlmRequested, vlmRequestedAt == started, !vlmInstalled else { return }
+                if let last = vlmLastProgressAt,
+                   Date().timeIntervalSince(last) > 45 {
+                    vlmLastError = "Download stalled — check your connection and try again."
+                    vlmRequested = false
+                    return
+                }
+            }
         }
     }
 
@@ -411,6 +431,7 @@ struct WelcomeSheet: View {
         vlmSmoothedBytesPerSec = 0
         vlmLastFraction = 0
         vlmLockedTotalBytes = nil
+        vlmLastProgressAt = nil   // R6-07
         vlmLastError = nil
     }
 

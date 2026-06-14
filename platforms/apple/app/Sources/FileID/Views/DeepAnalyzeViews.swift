@@ -195,17 +195,17 @@ struct DeepAnalyzeView: View {
     @State private var bulkRenameSheetOpen = false
     @State private var pendingRenameCount: Int = 0
 
-    private var pendingTotals: (total: Int, pending: Int) {
-        store.deepAnalyzePending(modelKey: settings.activeKind.rawValue)
-    }
+    // R6-02: cached. body re-evaluates at the 4 Hz deepAnalyzeProgress rate during
+    // a run, and these fed synchronous SQLite COUNT(*) on the main thread on every
+    // pass (multi-hour overnight runs). Refreshed on the same coarse triggers as
+    // pendingRenameCount, plus active-model changes (pending is keyed by model).
+    @State private var pendingTotals: (total: Int, pending: Int) = (0, 0)
 
     /// True when at least one person cluster has been given a name.
     /// Hard requirement before Deep Analyze can run — the VLM uses the
     /// names in captions, and "a person doing X" captions are nearly
     /// useless. User must visit People and name at least one cluster.
-    private var hasNamedAnyone: Bool {
-        store.namedPersonCount() > 0
-    }
+    @State private var hasNamedAnyone = false
 
     // Engine is alive (not crashed / mid-respawn); the live run cards key
     // off this so a crash mid-run tears them down at once (F-C4-016).
@@ -263,12 +263,17 @@ struct DeepAnalyzeView: View {
             .padding(24)
         }
         .background(Color.clear)
-        .onAppear { refreshPendingRenameCount() }
+        .onAppear { refreshPendingRenameCount(); refreshStatusCounts() }
         .onChange(of: engine.deepAnalyzeComplete?.processed ?? -1) { _, _ in
             refreshPendingRenameCount()
+            refreshStatusCounts()
         }
         .onChange(of: store.version) { _, _ in
             refreshPendingRenameCount()
+            refreshStatusCounts()
+        }
+        .onChange(of: settings.activeKind.rawValue) { _, _ in
+            refreshStatusCounts()   // pending is keyed by active model (R6-02)
         }
         .sheet(isPresented: $bulkRenameSheetOpen, onDismiss: refreshPendingRenameCount) {
             BulkRenameSheet(store: store)
@@ -277,6 +282,12 @@ struct DeepAnalyzeView: View {
 
     private func refreshPendingRenameCount() {
         pendingRenameCount = store.countFilesWithProposedNames()
+    }
+
+    // R6-02: refresh the cached status counts off the 4 Hz body-eval path.
+    private func refreshStatusCounts() {
+        pendingTotals = store.deepAnalyzePending(modelKey: settings.activeKind.rawValue)
+        hasNamedAnyone = store.namedPersonCount() > 0
     }
 
     private var smartNamesCard: some View {
