@@ -10,12 +10,6 @@ import Foundation
 @testable import FileIDEngine
 import FileIDShared
 
-private actor ByteSink {
-    private var data = Data()
-    func append(_ d: Data) { data.append(d) }
-    func snapshot() -> Data { data }
-}
-
 @Suite("IPCSink terminal-event pinning (F-C3-029/030)")
 struct IPCSinkEvictionTests {
 
@@ -61,16 +55,8 @@ struct IPCSinkEvictionTests {
 
     @Test("deepAnalyzeComplete + restructureApplyResult reach the wire under a progress flood")
     func newTerminalsSurviveFlood() async throws {
-        let pipe = Pipe()
-        let sink = IPCSink(wire: pipe.fileHandleForWriting)
-        let collector = ByteSink()
-        let reader = Task.detached {
-            while true {
-                let chunk = pipe.fileHandleForReading.availableData
-                if chunk.isEmpty { break }
-                await collector.append(chunk)
-            }
-        }
+        let cap = WireCapture()
+        let sink = cap.sink
 
         let progress = ScanProgress(
             sessionID: "flood", phase: .tagging, total: 100, discovered: 100,
@@ -87,20 +73,18 @@ struct IPCSinkEvictionTests {
         await sink.emit(.restructureApplyResult(RestructureApplyResult(
             applied: 7, failed: 1, privilegeError: nil)))
         for _ in 0..<300 { await sink.emit(.progress(progress)) }
-        await sink.close()
+        await cap.finish()
 
         let dac = Data("\"deepAnalyzeComplete\"".utf8)
         let rar = Data("\"restructureApplyResult\"".utf8)
         let deadline = Date().addingTimeInterval(10)
         while Date() < deadline {
-            let out = await collector.snapshot()
+            let out = cap.bytes()
             if out.range(of: dac) != nil && out.range(of: rar) != nil { break }
             try await Task.sleep(nanoseconds: 50_000_000)
         }
-        try? pipe.fileHandleForWriting.close()
-        _ = await reader.value
 
-        let out = await collector.snapshot()
+        let out = cap.bytes()
         #expect(out.range(of: dac) != nil,
                 "deepAnalyzeComplete must reach the wire under full-buffer pressure")
         #expect(out.range(of: rar) != nil,
@@ -111,16 +95,8 @@ struct IPCSinkEvictionTests {
     // so a buffered terminal event isn't dropped on the hard exit.
     @Test("drainAndClose flushes a buffered terminal event and then closes the sink")
     func drainAndCloseFlushesThenCloses() async throws {
-        let pipe = Pipe()
-        let sink = IPCSink(wire: pipe.fileHandleForWriting)
-        let collector = ByteSink()
-        let reader = Task.detached {
-            while true {
-                let chunk = pipe.fileHandleForReading.availableData
-                if chunk.isEmpty { break }
-                await collector.append(chunk)
-            }
-        }
+        let cap = WireCapture()
+        let sink = cap.sink
 
         await sink.emit(.faceClusteringComplete(FaceClusteringResult(
             personCount: 1, faceCount: 1, unmatchedFaces: 0, durationSeconds: 1)))
@@ -132,13 +108,11 @@ struct IPCSinkEvictionTests {
         let want = Data("\"faceClusteringComplete\"".utf8)
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
-            if await collector.snapshot().range(of: want) != nil { break }
+            if cap.bytes().range(of: want) != nil { break }
             try await Task.sleep(nanoseconds: 20_000_000)
         }
-        try? pipe.fileHandleForWriting.close()
-        _ = await reader.value
-
-        let out = await collector.snapshot()
+        let out = cap.bytes()
+        await cap.finish()
         #expect(out.range(of: want) != nil,
                 "drainAndClose must flush the buffered terminal event before exit")
         #expect(out.range(of: Data("\"after_close\"".utf8)) == nil,

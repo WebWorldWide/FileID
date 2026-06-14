@@ -52,8 +52,11 @@ public enum FaceClustering {
     /// only when it flips true AFTER this run began (`baseline == false`) — a
     /// genuine shutdown/cancel mid-pass — preserving the F-C3-042 cooperative
     /// cancel. (audit R-07)
-    static func clusterShouldCancel(baseline: Bool, current: Bool) -> Bool {
-        current && !baseline
+    static func clusterShouldCancel(baseline: Bool, current: Bool,
+                                    shuttingDown: Bool = false) -> Bool {
+        // A genuine shutdown always aborts (its dedicated mirror is never set by a
+        // stale scan-cancel), regardless of the sticky scan-cancel baseline. (R-07)
+        shuttingDown || (current && !baseline)
     }
 
     /// Run a clustering pass. Returns a summary the engine emits over IPC.
@@ -231,7 +234,8 @@ public enum FaceClustering {
             // persisted. (F-C3-042, R-07)
             shouldCancel: {
                 Self.clusterShouldCancel(baseline: cancelBaseline,
-                                         current: ScanCoordinator.isCancelledSync())
+                                         current: ScanCoordinator.isCancelledSync(),
+                                         shuttingDown: ScanCoordinator.isShuttingDownSync())
             }
         )
 

@@ -20,10 +20,22 @@ public actor ScanCoordinator {
     private static let mirrorLock = NSLock()
     private nonisolated(unsafe) static var cancelMirror: Bool = false
     private nonisolated(unsafe) static var pauseMirror: Bool = false
+    // Distinct from cancelMirror: set ONLY on `.shutdown`, never on `.cancelScan`,
+    // and never reset (shutdown is terminal). The scan-cancel mirror is sticky and
+    // can't tell a stale prior scan-cancel from a fresh shutdown, so a clustering
+    // pass started after a cancelled scan would ignore a real shutdown
+    // (`clusterShouldCancel` filters out the already-true mirror). This flag lets
+    // clustering abort promptly on a genuine shutdown regardless of baseline. (R-07)
+    private nonisolated(unsafe) static var shutdownMirror: Bool = false
 
     public nonisolated static func isCancelledSync() -> Bool {
         mirrorLock.lock(); defer { mirrorLock.unlock() }
         return cancelMirror
+    }
+
+    public nonisolated static func isShuttingDownSync() -> Bool {
+        mirrorLock.lock(); defer { mirrorLock.unlock() }
+        return shutdownMirror
     }
 
     public nonisolated static func isPausedSync() -> Bool {
@@ -39,6 +51,11 @@ public actor ScanCoordinator {
     private nonisolated static func setPauseMirror(_ value: Bool) {
         mirrorLock.lock(); defer { mirrorLock.unlock() }
         pauseMirror = value
+    }
+
+    private nonisolated static func setShutdownMirror(_ value: Bool) {
+        mirrorLock.lock(); defer { mirrorLock.unlock() }
+        shutdownMirror = value
     }
 
     public struct Session: Sendable {
@@ -149,6 +166,15 @@ public actor ScanCoordinator {
         // No stale-cancel risk: a fresh apply registers a new (un-cancelled)
         // handle, and only a subsequent requestCancel cancels it.
         activeRestructureTask?.cancel()
+    }
+
+    /// `.shutdown` path: set the dedicated shutdown mirror (so a clustering pass
+    /// started after a cancelled scan still aborts promptly — R-07), then perform
+    /// the normal cancel/unwind. Distinct from `requestCancel()` so a plain
+    /// `.cancelScan` does NOT trip the shutdown signal.
+    public func requestShutdown() {
+        Self.setShutdownMirror(true)
+        requestCancel()
     }
 
     /// Track the in-flight scan task so the engine can await it on shutdown

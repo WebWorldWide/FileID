@@ -84,8 +84,17 @@ jobs:
           # green — the macOS test gate silently never failed (a stale
           # non-compiling test target rode green for weeks). Run directly,
           # capture $? immediately, then branch.
+          # `--no-parallel`: several engine tests read an IPCSink pipe with a
+          # BLOCKING `availableData` read on a Task (cooperative-pool thread).
+          # Run in parallel across suites, enough of those park pool threads at
+          # once to starve the executor and intermittently wedge the
+          # swift-testing harness to the 12-min SIGALRM (a flaky exit 142 that
+          # the old masked gate hid). Serial execution runs at most one such
+          # reader at a time, so the pool can't be starved. The tests are small
+          # and fast; serial adds only seconds. (The blocking-read pattern is
+          # also being removed in the tests themselves.)
           set +e
-          perl -e 'alarm 720; exec @ARGV or die "exec: $!"' swift test
+          perl -e 'alarm 720; exec @ARGV or die "exec: $!"' swift test --no-parallel
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then

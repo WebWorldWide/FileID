@@ -255,16 +255,8 @@ struct DeepAnalyzeRunnerTests {
         let (db, tmp) = try makeDB()
         defer { try? FileManager.default.removeItem(at: tmp) }
 
-        let pipe = Pipe()
-        let sink = IPCSink(wire: pipe.fileHandleForWriting)
-        let collector = ByteSink()
-        let reader = Task.detached {
-            while true {
-                let chunk = pipe.fileHandleForReading.availableData
-                if chunk.isEmpty { break }
-                await collector.append(chunk)
-            }
-        }
+        let cap = WireCapture()
+        let sink = cap.sink
 
         // Cancel BEFORE run dispatches — mirrors a cancel pressed while the
         // job sat in the JobQueue.
@@ -275,19 +267,17 @@ struct DeepAnalyzeRunnerTests {
             database: db, sink: sink,
             scope: .wholeLibrary(skipExisting: false),
             modelKind: .qwen3VL4B)
-        await sink.close()
+        await cap.finish()
 
         let completeNeedle = Data("\"deepAnalyzeComplete\"".utf8)
         let cancelledNeedle = Data("\"cancelled\":true".utf8)
         let deadline = Date().addingTimeInterval(10)
         while Date() < deadline {
-            if await collector.snapshot().range(of: completeNeedle) != nil { break }
+            if cap.bytes().range(of: completeNeedle) != nil { break }
             try await Task.sleep(nanoseconds: 50_000_000)
         }
-        try? pipe.fileHandleForWriting.close()
-        _ = await reader.value
 
-        let out = await collector.snapshot()
+        let out = cap.bytes()
         #expect(Self.count(of: completeNeedle, in: out) == 1,
                 "exactly one terminal deepAnalyzeComplete must be emitted")
         #expect(out.range(of: cancelledNeedle) != nil,
@@ -308,8 +298,3 @@ struct DeepAnalyzeRunnerTests {
     }
 }
 
-private actor ByteSink {
-    private var data = Data()
-    func append(_ d: Data) { data.append(d) }
-    func snapshot() -> Data { data }
-}
