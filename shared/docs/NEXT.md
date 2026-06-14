@@ -1,5 +1,29 @@
 # NEXT — resume here
 
+## 2026-06-14 (newest) — every actionable engine/app item is landed; what remains needs HARDWARE, a GUI, or LABELED DATA
+
+After the 2026-06-14 push (PRs #16–#20, all merged + CI-green on `main`), there are **no open
+code-actionable items left** — every remaining entry below is now in a terminal state:
+
+- **DONE this session** (verified by build/test/on-hardware): cross-platform restructure-apply
+  cancellation (#16), the macOS test-gate restoration + flaky-CI fix (#16/#18), `ReadStore` lock (#18),
+  R-07 clustering shutdown signal (#18), restructure per-move `tier` + honest apply bar (#19), Windows
+  `hardwareReprobed` actually-bound EP (#20), and Deep Analyze end-to-end (single/folder/corrupt-input)
+  once Xcode was installed.
+- **BLOCKED ON A SPECIFIC RESOURCE** (cannot be done correctly without it — recipe in each entry):
+  - *Labeled data:* **F-4** face-clustering mutual-kNN structure (blind = clustering regression).
+  - *Owner's Mac / GUI:* CLIP semantic **search** (app-side text encoder), the Tidy/Keep tile + apply-bar
+    *visual* render, `walkStreaming` progress-UX, restructure-apply UAT on a real copy library.
+  - *RTX 2060 (+ AMD/Intel/Snapdragon):* per-vendor GPU throughput + `hardwareReprobed` EP-match.
+- **DELIBERATELY DEFERRED** (shipping blind would regress a working path — rationale in each entry):
+  `walkStreaming` activation, **R-11** ModelLoadGate continuation, the in-process rewrite of the
+  process-spawning cancel test, and the intentional per-run face-embedding backfill cap.
+
+Detail for each is in the dated sections below. Nothing here is a vague TODO; each is "done", "blocked
+on X — here's how", or "deferred because Y".
+
+---
+
 ## 2026-06-13 (later) — macOS adaptive hardware scaling landed; per-chip tuning is a hardware-UAT knob (branch `perf/adaptive-scaling-2026-06-13`)
 
 The macOS engine now scales its Vision/ANE concurrency and DB batch size with the
@@ -68,17 +92,25 @@ corpus. What remains are the write-path and threshold items that need the owner'
   in-root moves). Driver: `/tmp/fileid-apply-test.sh`. STILL OPEN: the privileged-denial path
   (permission error → `privilegeError` populated) needs a real permission-denied destination — low
   priority. Any real-corpus apply must run on an isolated COPY, never the live corpus.
-- **Restructure apply-bar relabel + Tidy/Keep tier split.** The two-step symlink-preview→copy apply
-  bar is stale now that the engine performs direct real moves — relabel it to one real-move step.
-  And the engine plan must populate per-move `tier` + `folderClassifications` so the UI shows
-  Tidy/Keep correctly; today every move renders as "Reorganize". *Acceptance:* Tidy and Keep tiles
-  show accurate non-zero counts; the apply bar describes a single real-move action.
-- **F-C6-005 `walkStreaming` activation.** Implemented but dormant. After the apply UAT, wire
-  `FileIDEngineMain` to `walkStreaming` and re-run the full-corpus scan. *Acceptance:* parity with
-  the current discovery path on file count + tags, no RSS regression vs the 1,187 MB baseline.
-- **`ReadStore.refreshCounters` NSLock-in-async.** Compiles today but holds an `NSLock` across an
-  `await` in the counters loop; replace with a Swift-6-concurrency-safe lock. *Acceptance:* builds
-  clean under Swift 6 mode with no actor-isolation warnings.
+- ~~**Restructure apply-bar relabel + Tidy/Keep tier split.**~~ **DONE 2026-06-14 (PR #19).** The
+  engine `RestructurePlan` now populates per-move `tier` (Anchor/Mixed/Junk) + `folderClassifications`
+  from `Restructure.classifyFolders`, so the app shows engine-authoritative Tidy/Keep tiles instead of
+  its local-heuristic fallback. The vestigial two-step "apply as shortcuts → convert" apply bar (both
+  buttons routed to the SAME engine real-move confirmation — its "reversible/shortcuts" copy mislabeled
+  an irreversible move) is collapsed to one honest "Apply moves" button. The Tidy/Keep tile *visual*
+  rendering is GUI and confirmed only by inspection; verify on the owner's Mac.
+- **F-C6-005 `walkStreaming` activation — DEFERRED (engine ready + tested; UX-coupled).** The streaming
+  walk is implemented and parity-tested (`streamingMatchesWalk`), but activating it interleaves
+  discovery with tagging, which REORDERS the IPC contract the app's progress UI depends on
+  (`discoveryComplete`/total now arrive after tagging starts). The engine side is verifiable headlessly
+  (file-count parity + no deadlock via a FIFO driver), but the progress-UX behavior needs a GUI session
+  to confirm, and the benefit is marginal (~12 MB RSS — the file list isn't the RSS driver — plus a few
+  seconds' earlier start). Not worth shipping a possibly-confusing progress UI blind. Activate + verify
+  the phase/total UX on the owner's Mac.
+- ~~**`ReadStore.refreshCounters` NSLock-in-async.**~~ **DONE 2026-06-14 (PR #18).** The background
+  counters worker now uses a scoped `withLock {}` (synchronous critical section) instead of bare
+  `lock()`/`unlock()` in an async closure — the Swift-6 "lock unavailable in async context" diagnostic
+  is gone; `swift build` clean.
 - ~~**Deep Analyze (MLX)**~~ — **DONE 2026-06-14 (on-hardware, Xcode 26.5 installed).** With the cached
   `mlx.metallib` next to the engine + Qwen3-VL 4B downloaded, `deepAnalyzeFile` and `deepAnalyzeFolder`
   produce accurate captions + smart-renames offline (~8 s/image after a ~30 s load), persist
@@ -93,32 +125,35 @@ corpus. What remains are the write-path and threshold items that need the owner'
   `requestCancelCancelsRestructureTask`. *Fix:* rewrite it to drive the scan pipeline IN-PROCESS (test
   sink + temp DB, no `Process`) so the C1 cancel-deadlock regression runs on CI too. *Acceptance:* the
   cancel-deadlock test runs and passes on the GitHub runner with no SIGALRM.
-- **R-11 (DeepAnalyze ModelLoadGate JobQueue wedge).** When a same-model prewarm is *joined* to a
-  run's single-flight model load and the run is cancelled, the run's JobQueue lane stays wedged until
-  the joined download finishes (self-resolving, not a permanent hang). The ref-count gate correctly
-  protects the prewarm's download; the missing piece is freeing THIS waiter's lane immediately. A
-  correct fix needs a per-waiter `CheckedContinuation` wakeup (`await task.value` is not interruptible,
-  so it can't be done safely blind) — verify on a Mac with the real concurrency. *Acceptance:*
-  cancelling a run that shares a load with a prewarm frees the run's lane within ~1s while the prewarm
-  download continues.
-- **R-07 (face clustering un-cancellable after a cancelled scan).** A manual `runFaceClustering`
-  issued after a `.cancelScan` (sticky mirror) ignores a *fresh* `.shutdown` during the run (LOW; the
-  only harm is the pass may run to its persist before `_exit`). The scan-cancel mirror can't
-  distinguish a stale scan-cancel from a fresh shutdown — give clustering a dedicated shutdown/
-  generation signal distinct from the scan mirror. *Acceptance:* a shutdown during a baseline-cancelled
-  cluster aborts at a safe boundary before the persist txn.
+- **R-11 (DeepAnalyze ModelLoadGate JobQueue wedge) — DEFERRED (LOW harm vs. deadlock risk).** When a
+  same-model prewarm is *joined* to a run's single-flight model load and the run is cancelled, the run's
+  JobQueue lane stays wedged until the joined download finishes — **self-resolving, NOT a permanent
+  hang**. The correct fix (a per-waiter `CheckedContinuation` to free this waiter's lane immediately,
+  since `await task.value` isn't interruptible) is an intricate change to the model-load path where a
+  mistake introduces a REAL deadlock — strictly worse than the current self-resolving wait — and the
+  exact join/cancel race can't be reproduced deterministically without a live multi-GB MLX download.
+  Not shipping an unverifiable concurrency change to a working path for a self-resolving LOW issue.
+  Approach is captured here; do it with the real concurrency on the owner's Mac.
+- ~~**R-07 (face clustering ignores a fresh shutdown after a cancelled scan).**~~ **DONE 2026-06-14
+  (PR #18).** Added a dedicated shutdown mirror on `ScanCoordinator` (set only by `.shutdown` via
+  `requestShutdown()`, distinct from `.cancelScan`'s `requestCancel()`); `clusterShouldCancel` now
+  aborts on a genuine shutdown regardless of the sticky scan-cancel baseline. Unit-tested
+  (`clusterShouldCancelSemantics`).
 
 **Hardware-UAT (thresholds / GPU / runtime — need labeled data or specific hardware):**
-- **F-4 face-clustering pass-1 structural change (mutual-kNN / density-gated).** SPECED ONLY — the
-  current single-linkage pass-1 is retained. The structural fix needs a hand-labeled `G:\TrueNAS`
-  subset to find the precision/recall optimum (a blunt threshold bump over-splits genuine
-  identities). *Recipe:* hand-label a corpus subset, sweep `pass1_cosine` + the mutual-kNN/density
-  bands, pick the F1 optimum. *Acceptance:* on the labeled subset, no cross-identity merges and fewer
-  spurious singletons than single-linkage at equal recall.
-- **F-C5-005 engine half — `hardwareReprobed` accuracy.** The reprobe should report the
-  actually-bound EP, not a fresh independent probe (runtime/hardware). *Acceptance:* on the RTX 2060,
-  `hardwareReprobed` reflects the EP the engine actually bound (DirectML/CUDA/CPU), verified against
-  `engine.jsonl`.
+- **F-4 face-clustering pass-1 structural change (mutual-kNN / density-gated) — BLOCKED ON LABELED
+  DATA.** Cannot be done safely blind: mutual-kNN/density-gating is more conservative than the current
+  single-linkage, so without a hand-labeled subset to tune the bands it would OVER-split genuine
+  identities (regressing the People tab, which already over-splits — 853 persons / 5000 faces on the
+  test set). Shipping uncalibrated would make clustering worse, not better. *Unblock:* hand-label a
+  `G:\TrueNAS` (or Adlon) subset, sweep `pass1_cosine` + the mutual-kNN/density bands, pick the F1
+  optimum, THEN land the structure with those constants. *Acceptance:* on the labeled subset, no
+  cross-identity merges and fewer spurious singletons than single-linkage at equal recall.
+- ~~**F-C5-005 engine half — `hardwareReprobed` accuracy.**~~ **DONE 2026-06-14 (PR #20).** The reprobe
+  now reports the memoized `active_provider()` (the EP the process actually bound) for
+  `execution_provider`, not a fresh capability probe — so after a pack install the card shows
+  "pack ✓ — restart to use it" rather than a misleading active EP. clippy + 338 tests green.
+  *Remaining UAT (hardware):* on the RTX 2060, confirm the reprobed EP matches `engine.jsonl`.
 - **People-tab face-embedding backfill is incremental (UX papercut, by design).** Verified on-hardware
   2026-06-13: each clustering run backfills exactly `maxExtractionsPerRun` (5000) ArcFace/SFace
   embeddings then clusters, so a large library (the test DB has 46,079 detected faces) needs ~10
