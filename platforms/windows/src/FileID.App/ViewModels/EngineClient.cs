@@ -90,6 +90,12 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     private int _consecutiveFailures;
     private DateTime _failureWindowStart = DateTime.MinValue;
     private static readonly TimeSpan FailureWindow = TimeSpan.FromSeconds(60);
+    // R5-07: the engine must stay continuously Ready at least this long before a
+    // subsequent crash counts as recovery (and clears the strike counter). A
+    // shorter Ready→crash is a flap that must keep ticking toward the 3-strike
+    // terminal cap instead of resetting every ~1s.
+    private DateTime _lastReadyAt = DateTime.MinValue;
+    private static readonly TimeSpan StabilitySettle = TimeSpan.FromSeconds(30);
 
     // BUG-3: respawn debouncing — prevents two-spawn races during the
     // 1s/4s/16s backoff window when the engine flaps quickly.
@@ -857,6 +863,16 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             // Auto-respawn with bounded backoff. The 3-strike window is
             // 60 s wide; failures beyond that reset the counter.
             var now = DateTime.UtcNow;
+            // R5-07: a crash that follows a STABLE Ready (engine ran continuously
+            // for >= StabilitySettle) is genuine recovery — clear the strike state.
+            // A crash that recurs faster than that (Ready→crash flapping) is NOT
+            // recovery and must keep ticking toward the 3-strike terminal cap.
+            if (_lastReadyAt != DateTime.MinValue && now - _lastReadyAt >= StabilitySettle)
+            {
+                _consecutiveFailures = 0;
+                _failureWindowStart = DateTime.MinValue;
+            }
+            _lastReadyAt = DateTime.MinValue;
             if (now - _failureWindowStart > FailureWindow)
             {
                 _failureWindowStart = now;
@@ -920,6 +936,16 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             try { p.Dispose(); } catch { }
         }
         _process = null;
+
+        // R5-06: release the auto-advance gates on every engine teardown. A crash
+        // mid-clustering (or mid-deep-analyze) never emits the Complete/Failed
+        // event that normally clears these, so without this a respawned engine
+        // would see the gate still held and skip auto face-clustering / deep
+        // analyze for the rest of the session. Cleanup() is the single teardown
+        // chokepoint (crash, graceful shutdown, Dispose); the dead engine's
+        // in-flight job is moot here. (Mirrors macOS handleEngineExit.)
+        Interlocked.Exchange(ref _faceClusterAutoInFlight, 0);
+        Interlocked.Exchange(ref _autoDeepAnalyzeInFlight, 0);
     }
 
     public void Dispose()
@@ -1058,16 +1084,18 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         Services.CudaAutoInstaller.ResetAttempt();
                         State = LifecycleState.Ready;
                         CrashReason = null;
-                        // A successful Ready is the canonical signal that the
-                        // engine has fully recovered from any prior crash.
-                        // Reset both the failure counter AND the failure-window
-                        // timestamp so a subsequent crash doesn't tick toward
-                        // the 3-strike limit using stale state. Without this
-                        // reset, a deterministic-crash file (corrupt .gguf)
-                        // could permanently lock the engine in Crashed even
-                        // after the user removes the bad file.
-                        _consecutiveFailures = 0;
-                        _failureWindowStart = DateTime.MinValue;
+                        // R5-07: record when the engine reached Ready, but do NOT
+                        // reset the strike counter here. An engine that reaches
+                        // Ready then deterministically crashes within seconds (a
+                        // re-armed auto-installer re-firing a fatal model load, or
+                        // the first command hitting a fatal native path) would
+                        // otherwise zero the counter on every respawn and flap ~1s
+                        // forever, never reaching terminal Crashed. OnProcessExited
+                        // treats a crash AFTER >= StabilitySettle of continuous
+                        // Ready as genuine recovery and only then clears the
+                        // counter — preserving the corrupt-.gguf "user removed the
+                        // bad file" recovery without the flap.
+                        _lastReadyAt = DateTime.UtcNow;
                         break;
                     case ProgressEvent p:
                         // Discovery + tagging emit ProgressEvents CONCURRENTLY
