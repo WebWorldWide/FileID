@@ -550,12 +550,26 @@ fn has_reparse_point_in_chain(parent: &Path, root: &Path) -> bool {
 /// case-insensitive). Unlike a lowercased-string `starts_with`, this respects
 /// path-component boundaries so a sibling like `…\PhotosBackup` cannot
 /// prefix-match `…\Photos`. (audit F-A2)
+///
+/// Folds with full Unicode `to_lowercase`, not `eq_ignore_ascii_case`: an
+/// ASCII-only fold left a non-ASCII component (e.g. `Café` vs `CAFÉ`) compared
+/// byte-exact, so a library root with a case-differing accented component made
+/// `under` false on the first iteration and the SEC-5 reparse walk broke after
+/// inspecting only the leaf parent — leaving every intermediate ancestor
+/// unchecked. Unicode folding keeps the component-wise structure (siblings
+/// still can't prefix-match) and only ever makes the walk continue further,
+/// the conservative/safe direction. (audit R3-18)
 #[cfg(windows)]
 fn ci_starts_with(p: &Path, prefix: &Path) -> bool {
     let mut pc = p.components();
     for pre in prefix.components() {
         match pc.next() {
-            Some(c) if c.as_os_str().eq_ignore_ascii_case(pre.as_os_str()) => continue,
+            Some(c)
+                if c.as_os_str().to_string_lossy().to_lowercase()
+                    == pre.as_os_str().to_string_lossy().to_lowercase() =>
+            {
+                continue
+            }
             _ => return false,
         }
     }
@@ -745,6 +759,24 @@ mod tests {
         bodies.insert(std::fs::read(&second).unwrap());
         assert!(bodies.contains(b"AAAA".as_slice()) && bodies.contains(b"BBBB".as_slice()));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// R3-18: ci_starts_with must fold NON-ASCII case (NTFS is case-insensitive
+    /// for accented letters too), or the SEC-5 reparse-point walk breaks early
+    /// on a library root with a case-differing accented component. The
+    /// component-wise structure must still reject a sibling prefix.
+    #[test]
+    #[cfg(windows)]
+    fn ci_starts_with_folds_non_ascii_and_respects_boundaries() {
+        use std::path::Path;
+        assert!(
+            ci_starts_with(Path::new(r"D:\Photos\CAFÉ\2024"), Path::new(r"D:\Photos\café")),
+            "non-ASCII case must fold (NTFS is case-insensitive for accented letters)"
+        );
+        assert!(
+            !ci_starts_with(Path::new(r"D:\PhotosBackup"), Path::new(r"D:\Photos")),
+            "a sibling must not prefix-match (component boundaries respected)"
+        );
     }
 
     /// B4: a move whose source no longer matches the live DB row for its
