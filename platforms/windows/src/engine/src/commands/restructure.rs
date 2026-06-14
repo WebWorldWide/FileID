@@ -352,14 +352,22 @@ pub(crate) async fn handle_apply_restructure(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
     payload: ipc::ApplyRestructurePayload,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let result = tokio::task::spawn_blocking(
         move || -> anyhow::Result<ipc::RestructureApplyResult> {
+            // F-C6-013 wiring: inject the shared cancel flag the CancelScan
+            // dispatch arm sets, so a long apply is actually stoppable. Before
+            // this, the apply built a fresh never-set flag and the cooperative
+            // cancel poll was dead in production. (The flag is reset to false in
+            // the ApplyRestructure dispatch arm so a stale cancel can't pre-stop
+            // a fresh apply.)
             let apply = RestructureApply::new(
                 db,
                 PathBuf::from(payload.library_root),
                 payload.use_symlinks,
-            );
+            )
+            .with_cancel(cancel);
             apply.apply(&payload.moves)
         },
     )
@@ -489,5 +497,58 @@ mod tests {
         // An effectively-uncapped load (Balanced/High) returns the full table.
         let full = load_capped_embeddings(&conn, usize::MAX).unwrap();
         assert_eq!(full.len(), 100, "uncapped load returns every qualifying row");
+    }
+
+    /// F-C6-013 dispatch wiring: `handle_apply_restructure` must honor the
+    /// cancel flag the CancelScan arm sets. Before the wiring it built a fresh
+    /// never-set flag and ignored cancellation entirely — this calls the
+    /// dispatch entry with a pre-set flag and asserts NOTHING moves.
+    #[tokio::test]
+    async fn apply_dispatch_honors_preset_cancel() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let root =
+            std::env::temp_dir().join(format!("fileid-dispatch-cancel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let src = root.join("a.jpg");
+        std::fs::write(&src, b"data").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, kind, extension, failed) \
+             VALUES (1, ?1, 0, 4, 0.0, 'image', 'jpg', 0)",
+            rusqlite::params![src.to_string_lossy()],
+        )
+        .unwrap();
+        let db = Arc::new(parking_lot::Mutex::new(conn));
+
+        let dest = root.join("Sorted").join("a.jpg").to_string_lossy().into_owned();
+        let payload = ipc::ApplyRestructurePayload {
+            library_root: root.to_string_lossy().into_owned(),
+            moves: vec![ipc::RestructureMove {
+                file_id: 1,
+                source: src.to_string_lossy().into_owned(),
+                destination: dest,
+                category: "Sorted".into(),
+                tier: None,
+                confidence: String::new(),
+                reason: None,
+            }],
+            use_symlinks: false,
+        };
+
+        // Pre-set the cancel flag: a wired dispatch refuses to move anything.
+        let cancel = Arc::new(AtomicBool::new(true));
+        let (sink, _rx) = Sink::channel_for_test(4);
+        handle_apply_restructure(sink, db, payload, cancel).await;
+
+        assert!(src.exists(), "source untouched when apply is cancelled at the dispatch");
+        assert!(
+            !root.join("Sorted").join("a.jpg").exists(),
+            "no move performed under a pre-set cancel"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

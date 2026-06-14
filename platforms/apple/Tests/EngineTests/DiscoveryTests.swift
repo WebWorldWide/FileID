@@ -5,6 +5,8 @@ import Testing
 import Foundation
 import GRDB
 @testable import FileIDEngine
+// Disambiguate from GRDB.Database (both modules export `Database`).
+private typealias Database = FileIDEngine.Database
 
 @Suite("Discovery")
 struct DiscoveryTests {
@@ -92,9 +94,17 @@ struct DiscoveryTests {
 
         let db = try Database(at: tmp.appendingPathComponent("test.sqlite"))
 
+        // Resolve to the REAL path so the inserted path_text, the skip-set prefix
+        // range, AND the enumerator's output all agree. `realpath` (not
+        // Foundation's resolvingSymlinksInPath, which STRIPS /private) yields the
+        // /private-prefixed form the FileManager enumerator actually emits for a
+        // /var temp dir; otherwise the skip range excludes the row and nothing
+        // skips. (Real scan roots are /Users/.. or /Volumes/.. — no /private.)
+        let root = realResolved(tmp)
+
         // A non-image doc: skippable without a CLIP embedding (the R-14 carve-out
         // forces only embeddingless IMAGES to stay in the pipeline).
-        let doc = tmp.appendingPathComponent("report.pdf")
+        let doc = root.appendingPathComponent("report.pdf")
         let bytes = Data("hello".utf8)                              // 5 bytes
         try bytes.write(to: doc)
         let fixedMtime = Date(timeIntervalSince1970: 1_700_000_000) // whole second
@@ -117,7 +127,7 @@ struct DiscoveryTests {
         }
 
         let discovery = Discovery()
-        let result = await discovery.walk(root: tmp, database: db, forceReprocess: false)
+        let result = await discovery.walk(root: root, database: db, forceReprocess: false)
 
         // Unchanged → SKIPPED (never re-emitted to the pipeline)…
         #expect(!result.contains { $0.url.lastPathComponent == "report.pdf" })

@@ -331,6 +331,12 @@ async fn async_main() -> Result<()> {
     let face_cluster_active: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
     let dispatch_face_cluster_active = face_cluster_active.clone();
+    // Restructure-apply cancel flag (F-C6-013 wiring). CancelScan sets it; the
+    // ApplyRestructure arm resets it to false before each apply so a stale
+    // cancel can't pre-stop a fresh apply; the apply loop polls it per move.
+    let restructure_apply_cancel: Arc<std::sync::atomic::AtomicBool> =
+        Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dispatch_restructure_apply_cancel = restructure_apply_cancel.clone();
 
     // Sidebar job tracker (macOS JobQueue parity): scan / cluster /
     // deep-analyze jobs push on accept and finish via RAII guards;
@@ -403,6 +409,7 @@ async fn async_main() -> Result<()> {
                                 &dispatch_deep_cancel,
                                 &dispatch_deep_active,
                                 &dispatch_face_cluster_active,
+                                &dispatch_restructure_apply_cancel,
                                 &dispatch_jobs,
                                 &dispatch_http_client,
                                 &text,
@@ -678,6 +685,7 @@ async fn handle_line(
     deep_analyze_cancel: &Arc<std::sync::atomic::AtomicBool>,
     deep_analyze_active: &Arc<std::sync::atomic::AtomicBool>,
     face_cluster_active: &Arc<std::sync::atomic::AtomicBool>,
+    restructure_apply_cancel: &Arc<std::sync::atomic::AtomicBool>,
     jobs: &job_queue::JobQueue,
     http_client: &Arc<reqwest::Client>,
     line: &str,
@@ -758,8 +766,14 @@ async fn handle_line(
             };
             let sink_c = sink.clone();
             let db_c = db.clone();
+            // Fresh apply: clear any stale cancel from a prior operation so this
+            // apply isn't pre-stopped. Reset + the CancelScan set are serialized
+            // by the command loop, so they can't race each other.
+            restructure_apply_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+            let cancel_c = restructure_apply_cancel.clone();
             tokio::spawn(async move {
-                commands::restructure::handle_apply_restructure(sink_c, db_c, payload).await;
+                commands::restructure::handle_apply_restructure(sink_c, db_c, payload, cancel_c)
+                    .await;
             });
         }
         CommandPayload::StartScan(payload) => {
@@ -793,6 +807,9 @@ async fn handle_line(
                 coord.request_cancel();
                 tracing::info!("scan cancel requested");
             }
+            // CancelScan is the app's single "stop the current long op" signal;
+            // also stop an in-flight restructure apply (cooperative, per-move).
+            restructure_apply_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         CommandPayload::ApplyTags(payload) => {
             let Some(db) = db else {

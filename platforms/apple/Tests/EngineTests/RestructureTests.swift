@@ -6,6 +6,8 @@ import Foundation
 import GRDB
 import FileIDShared
 @testable import FileIDEngine
+// Disambiguate from GRDB.Database (both modules export `Database`).
+private typealias Database = FileIDEngine.Database
 
 @Suite("Restructure rule cascade + folder classification")
 struct RestructureCascadeTests {

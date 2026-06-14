@@ -8,6 +8,8 @@ import Testing
 import Foundation
 import GRDB
 @testable import FileIDEngine
+// Disambiguate from GRDB.Database (both modules export `Database`).
+private typealias Database = FileIDEngine.Database
 
 private func l2norm(_ v: [Float]) -> [Float] {
     var n: Float = 0

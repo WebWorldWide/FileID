@@ -111,7 +111,7 @@ impl Sink {
     /// writer task — lets tests assert backpressure semantics (try_send drops,
     /// send blocks) without writing to real stdout.
     #[cfg(test)]
-    fn channel_for_test(capacity: usize) -> (Self, mpsc::Receiver<IpcEvent>) {
+    pub(crate) fn channel_for_test(capacity: usize) -> (Self, mpsc::Receiver<IpcEvent>) {
         let (tx, rx) = mpsc::channel::<IpcEvent>(capacity);
         (Self { tx }, rx)
     }

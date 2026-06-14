@@ -76,8 +76,19 @@ jobs:
           # perl's alarm survives exec, and perl is always on the runner
           # (coreutils timeout/gtimeout is not). SIGALRM kills the test
           # process tree's leader at 12 min → exit 142.
-          if ! perl -e 'alarm 720; exec @ARGV or die "exec: $!"' swift test; then
-            status=$?
+          #
+          # Capture swift test's REAL exit code: the previous
+          # `if ! cmd; then status=$?` form captured the status of the negated
+          # condition (always 0 when the `then` runs), so a failing OR
+          # non-compiling test suite was reported as exit 0 and the job went
+          # green — the macOS test gate silently never failed (a stale
+          # non-compiling test target rode green for weeks). Run directly,
+          # capture $? immediately, then branch.
+          set +e
+          perl -e 'alarm 720; exec @ARGV or die "exec: $!"' swift test
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
             echo "::error::swift test exited $status (142 = 12-min SIGALRM timeout)"
             echo "--- surviving processes ---"
             ps ax -o pid,ppid,etime,command | grep -E "FileID|swiftpm" | grep -v grep || true

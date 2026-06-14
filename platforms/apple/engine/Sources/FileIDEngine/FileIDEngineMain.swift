@@ -140,6 +140,9 @@ struct FileIDEngineMain {
         }
 
         await coordinator.awaitActiveScan()
+        // Also drain an in-flight restructure apply so a shutdown mid-apply lets
+        // it cancel cleanly and flush its terminal restructureApplyResult. (F-C6-013)
+        await coordinator.awaitActiveRestructure()
         progressTicker.cancel()
 
         // GRDB checkpoints on connection close (via atexit handlers we
@@ -470,14 +473,20 @@ struct FileIDEngineMain {
                     fileID: m.fileID, oldPath: m.source, newPath: m.destination,
                     bucket: m.category, confidence: m.confidence, reason: m.reason)
             }
-            Task.detached(priority: .userInitiated) {
+            let applyTask = Task.detached(priority: .userInitiated) {
                 JSONLog.shared.info(ev: "apply_restructure_requested",
                                     extra: ["moves": AnyCodable(proposals.count)])
                 let result = await Restructure.apply(
                     proposals: proposals, database: database, libraryRoot: applyRoot)
                 await sink.emit(.restructureApplyResult(RestructureApplyResult(
                     applied: result.moved, failed: result.failed, privilegeError: nil)))
+                // Clear the handle so a later cancelScan can't cancel a finished
+                // apply, and awaitActiveRestructure() returns promptly.
+                await coordinator.setActiveRestructure(nil)
             }
+            // Register so cancelScan can stop a long apply (F-C6-013 wiring) and
+            // shutdown awaits the terminal result instead of _exit-ing over it.
+            await coordinator.setActiveRestructure(applyTask)
 
         // ── Windows-originated commands ──────────────────────────
         // The schema keeps these symmetric across platforms. Mac
