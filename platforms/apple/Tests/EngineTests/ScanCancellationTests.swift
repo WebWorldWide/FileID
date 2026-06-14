@@ -79,18 +79,34 @@ struct ScanCancellationTests {
             if data.isEmpty { handle.readabilityHandler = nil; return }
             collector.feed(data)
         }
+        // DRAIN stdout: the engine's IPC is on fd 2 (wire); fd 1 is incidental
+        // (library/MLX chatter). An UNREAD stdout Pipe fills its 64 KB buffer and
+        // blocks the engine's next write — wedging it so it never processes
+        // shutdown and never exits. Discard whatever lands here.
+        stdout.fileHandleForReading.readabilityHandler = { handle in
+            if handle.availableData.isEmpty { handle.readabilityHandler = nil }
+        }
         try proc.run()
-        // A leaked engine child holds the test harness's output pipe open
-        // and turns "suite finished" into an infinite hang (the job-level
-        // symptom: swiftpm-testing + FileIDEngine reaped as orphans at the
-        // 60-min CI timeout). Close stdin (the engine's EOF exit path),
-        // then escalate to SIGKILL — never leave it running.
+        // A leaked engine child holds the test harness's output pipe open and
+        // turns "suite finished" into a hang that only the job's 12-min SIGALRM
+        // breaks (observed on CI: the engine rode 11 min as an orphan). Two
+        // guarantees: (1) an out-of-band watchdog SIGKILLs the engine after a
+        // hard ceiling REGARDLESS of where the test body is blocked — so a wedged
+        // engine can never hang the harness; (2) the defer closes stdin and
+        // force-kills on the normal path. The watchdog uses the raw pid (valid
+        // after run()) so it needs no access to `proc`'s state.
+        let enginePID = proc.processIdentifier
+        let watchdog = Task.detached {
+            try? await Task.sleep(nanoseconds: 180_000_000_000)   // 180 s << 720 s SIGALRM
+            kill(enginePID, SIGKILL)
+        }
         defer {
+            watchdog.cancel()
             try? stdin.fileHandleForWriting.close()
-            if proc.isRunning {
-                proc.terminate()
-                kill(proc.processIdentifier, SIGKILL)
-            }
+            proc.terminate()
+            kill(enginePID, SIGKILL)   // unconditional; harmless if already gone
+            wire.fileHandleForReading.readabilityHandler = nil
+            stdout.fileHandleForReading.readabilityHandler = nil
         }
 
         func send(_ json: String) throws {
