@@ -2999,3 +2999,27 @@ Branch `fix/audit-2026-06-10`; full inventory in `shared/docs/audit-2026-06-10/`
   (`MemoryPressureMonitor` with fast-down/slow-up hysteresis driving worker admission + PDF pixel
   ceiling + batch target) remains the separate F-3 item — these tiers do not pre-empt it, they just
   size the startup budgets so a powerful box isn't pinned to M1-Pro defaults.
+
+## 2026-06-13 (later) — SEC-7 containment guard hardened for /private-resolved roots (on-hardware find)
+
+- **`pathIsContained` now resolves symlinks against the deepest EXISTING ancestor, not the (possibly
+  non-existent) destination parent directly.** An isolated on-hardware restructure-apply run surfaced
+  that every valid in-root move was rejected as "escapes_root": macOS `resolvingSymlinksInPath()`
+  applies its `/private` shortening ONLY when the resulting path exists, so the apply call site's
+  resolved root (`/private/tmp/…/lib` → `/tmp/…/lib`, stripped because it exists) and the guard's
+  resolution of the not-yet-created destination parent (`/private/tmp/…/lib/Photos`, NOT stripped
+  because `Photos` doesn't exist) landed in different canonical forms, and the prefix check failed.
+  Real libraries under `/Users/…` never touch `/private`, so this was latent in production — but it is
+  a genuine correctness hole in a SECURITY guard for any root that resolves through `/private`
+  (`/tmp`, `/var`, symlinked mounts), so it was fixed rather than worked around in the test. The fix
+  resolves symlinks on the existing prefix (still closing the real SEC-7 symlink-escape vector — proven
+  by a retained existing-symlink-escape unit test) and re-appends the literal non-existent tail, then
+  standardizes. Chosen over (a) stripping `/private` symmetrically by hand (fragile, special-cases an
+  OS quirk) and (b) only fixing the test (would leave the guard wrong for non-`/Users` roots). Both
+  the true-`../`-escape and the symlink-escape cases remain rejected; verified end-to-end on hardware
+  (`applied=2 failed=2`, the two failures being the stale-plan and the escape).
+- **On-hardware write-path testing uses an isolated `HOME`/`CFFIXED_USER_HOME` override, not the real
+  DB.** The engine derives its DB + model + log dirs from the home directory; pointing both env vars at
+  a throwaway dir gives a fully disposable library DB while exercising the REAL release binary, so write
+  paths (apply, rename-heal, cancel) can be verified end-to-end without ever touching the user's library
+  or the read-only Adlon/TrueNAS corpus. This is now the standard macOS write-path UAT harness pattern.

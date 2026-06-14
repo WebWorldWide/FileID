@@ -8,6 +8,45 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-13 (latest) — on-hardware write-path + perf verification loop; 1 bug found+fixed (PR #13 merged)
+
+Drove the **real release engine** against isolated throwaway sandboxes (`HOME`/`CFFIXED_USER_HOME`
+override → disposable DB; synthetic `/tmp` libraries) and the read-only Adlon/TrueNAS corpus, to
+exercise every path the earlier campaign couldn't on hardware. No corpus data or the user's library DB
+was ever modified.
+
+**Bug found + fixed (merged to main, PR #13, commit `b927031`):** the restructure-apply SEC-7
+containment guard (`pathIsContained`) rejected **valid in-root moves** when the library root resolved
+through macOS's `/private` shortening. `resolvingSymlinksInPath()` strips `/private` only when the path
+EXISTS, so the (existing) root canonicalized to `/tmp/…` while a not-yet-created destination parent
+stayed `/private/tmp/…`, breaking the prefix check — every move failed as "escapes_root". Latent in
+production (real libraries live under `/Users/…`, never `/private`) but a real hole in a security guard.
+Fixed by resolving symlinks against the deepest EXISTING ancestor then re-appending the literal tail;
+the escape vector stays closed (true-escape + existing-symlink-escape both still rejected, unit cover
+added in `PathContainmentTests`). After the fix the isolated apply run reports `applied=2 failed=2`:
+both valid moves land (D-7 → `shared (2).jpg`), `path_text`+`path_hash` refreshed, the stale-plan move
+and the `../` escape both fail with files untouched.
+
+**Verified working on-hardware (no change needed):**
+- **Restructure apply** — the one write-path never exercised on hardware: D-7 auto-rename, B4
+  stale-plan guard, SEC-7 escape rejection, `path_hash` refresh — all confirmed end-to-end.
+- **Incremental skip-set** — rescan of the already-scanned 9,745-file Bernadine/CD processed **0 files
+  in 2.95 s** (vs 156 s full): ~53× rescan speedup, the unchanged files skipped at discovery.
+- **Rename/move heal (F-2)** — rename `foo.jpg→bar.jpg` then rescan: same row id re-bound to the new
+  path, attached tag preserved, no duplicate row, `rename_heal` logged.
+- **Garbage-file robustness** — the 10 perpetual `image_decode_failed` files on Bernadine/CD are not
+  JPEGs at all (UTF-16LE `\\?\C:\Users\…` Windows path stubs / cloud placeholders with `.JPG`
+  extensions); the engine fails them gracefully and continues, no crash. Source-data artifact, not a bug.
+- **Graceful mid-scan cancel** — cancel during tagging returns a prompt terminal `scanComplete` (178
+  files persisted, 0 failed), no crash, no hang.
+
+**Perf assessment (M1 Pro):** decode is already capped at 512 px (`CGImageSourceCreateThumbnailAtIndex`,
+EXIF from the same source); CLIP + faces run on the CoreML EP; first-scan CPU is genuinely maxed
+(~875 %/1000 %) doing real pipeline work across 14 workers — near-optimal for this tier. The remaining
+levers (faces ANE vs CPU+GPU compute-units, model size) are correctness-sensitive and stay ML-UAT
+items, not blind flips. Adaptive scaling (PR #13) gives bigger machines headroom without touching the
+M1 baseline.
+
 ## 2026-06-13 (later) — macOS adaptive hardware scaling (branch `perf/adaptive-scaling-2026-06-13`, commit `f80d768`)
 
 The macOS engine was using M1-Pro-shaped constants for the two stages that should
