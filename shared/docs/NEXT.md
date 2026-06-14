@@ -33,6 +33,13 @@ exceed what can be verified/landed safely in one pass — both have a complete r
   (25) + engine `sink.rs` MAX_FRAME_BYTES (28) / `main.rs` (50) together. **Recipe:** bump all four
   constants to 64 MiB; gate the macOS newline scan so it resumes from the last search index instead of
   re-scanning the whole buffer each readability tick.
+  **Round-5 update (R5-12 ≡ this):** re-confirmed in round 5, and verified it degrades GRACEFULLY both
+  ways — the Windows engine `sink.rs` write_line ALSO caps OUTBOUND and substitutes a structured
+  `ipc_frame_too_large` error (so an over-cap plan is never silently dropped on the wire, on either
+  platform), and the Windows C# scan is already O(n) (the `StdoutFraming.Scanned` resume field). So the
+  only remaining work is the 64 MiB bump (4 constants) + the macOS newline-scan resume. Also fix the
+  now-false comment at `EngineClient.cs:60` ("outbound plan events are unbounded on the wire" — they're
+  capped by sink.rs).
 
 ## 2026-06-14 (newest) — every actionable engine/app item is landed; what remains needs HARDWARE, a GUI, or LABELED DATA
 

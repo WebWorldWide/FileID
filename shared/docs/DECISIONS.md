@@ -7,6 +7,20 @@
 
 ---
 
+## 2026-06-14 — The delta re-audit is mandatory, not optional (rounds 3–5)
+
+Empirical addendum to the audit methodology below: after landing each round's fixes we ran a
+**delta re-audit** — one reviewer per changed file over `git diff <pre-round> HEAD`, looking ONLY
+for regressions / weakened guards / incomplete fixes the batch itself introduced. It caught a
+**self-inflicted regression in every single round**: round-3 delta found 2 (an HNSW node-id desync,
+a Cleanup query pile-up), round-4 delta found 2 (a name over-graft on merge, a cancel attributed to
+the wrong epoch), round-5 delta found 1 (a lost-update race + draft-wipe from moving tag edits
+off-main). All were in OUR OWN fixes, and all were missed by the original find+verify+expert passes
+because those reason about the *bug*, not the *patch*. Conclusion: a fix is not done when it compiles
++ tests pass; it's done after an adversarial review of the diff itself + a confirm-dry re-review of
+the corrected files. Loop until two consecutive dry rounds (per file). This is now standard for any
+multi-fix batch.
+
 ## 2026-06-14 — Audit methodology: skeptic vote screens, domain-expert recipe decides; and R3-15 schema migration deferred
 
 Two decisions from the round-3 adversarial audit.
