@@ -163,14 +163,20 @@ public final class ReadStore: @unchecked Sendable {
 
         Task.detached(priority: .utility) { [weak self] in
             while let self {
-                self.countersLock.lock()
-                if !self.countersDirty {
-                    self.countersRunning = false
-                    self.countersLock.unlock()
-                    return
+                // `withLock` (synchronous critical section) instead of bare
+                // lock()/unlock(): NSLock's lock() is unavailable in an async
+                // context under Swift 6 (it must never be held across a
+                // suspension point — it isn't here, but the scoped form makes
+                // that guarantee explicit and silences the diagnostic).
+                let shouldStop = self.countersLock.withLock { () -> Bool in
+                    if !self.countersDirty {
+                        self.countersRunning = false
+                        return true
+                    }
+                    self.countersDirty = false
+                    return false
                 }
-                self.countersDirty = false
-                self.countersLock.unlock()
+                if shouldStop { return }
 
                 switch self.computeCounters() {
                 case .ok(let snapshot):
