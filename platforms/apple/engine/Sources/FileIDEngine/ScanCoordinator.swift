@@ -74,6 +74,12 @@ public actor ScanCoordinator {
     private var paused = false
     private var activeScanTask: Task<Void, Never>?
     private var activeRestructureTask: Task<Void, Never>?
+    // R4-11: a cancelScan arriving in the window between `.startScan` enqueue and
+    // `startSession` was lost — startSession unconditionally reset cancelled=false.
+    // Attribute each cancel to the latest-enqueued scan epoch so startSession can
+    // preserve a cancel meant for the scan it's starting.
+    private var enqueueEpoch = 0
+    private var cancelledEpoch = -1
 
     private var lastEmitAt: Date = .distantPast
     private var lastProcessedSnapshot: Int = 0
@@ -82,7 +88,7 @@ public actor ScanCoordinator {
 
     public init() {}
 
-    public func startSession(rootDisplayPath: String) -> Session {
+    public func startSession(rootDisplayPath: String, epoch: Int) -> Session {
         let s = Session(
             id: UUID().uuidString,
             rootDisplayPath: rootDisplayPath,
@@ -94,9 +100,13 @@ public actor ScanCoordinator {
             failed: 0
         )
         current = s
-        cancelled = false
+        // R4-11: honor a cancel that landed in the start window — clear cancel
+        // state only when no cancelScan has arrived for this epoch (or later). The
+        // old unconditional reset dropped a back-to-back Start→Cancel.
+        let cancelPending = cancelledEpoch >= epoch
+        cancelled = cancelPending
         paused = false
-        Self.setCancelMirror(false)            // reset for new session
+        Self.setCancelMirror(cancelPending)    // reset for new session (unless cancel pending)
         Self.setPauseMirror(false)
         lastProcessedSnapshot = 0
         lastSnapshotAt = Date()
@@ -147,8 +157,18 @@ public actor ScanCoordinator {
         paused = false
         Self.setPauseMirror(false)
     }
+    /// Allocate a monotonic epoch for a scan about to be enqueued. Called from the
+    /// command loop's `.startScan` dispatch (serial) BEFORE the next command is
+    /// read, so a cancelScan in the start window is attributed to this scan and
+    /// survives startSession. (R4-11)
+    public func nextScanEpoch() -> Int {
+        enqueueEpoch += 1
+        return enqueueEpoch
+    }
+
     public func requestCancel() {
         cancelled = true
+        cancelledEpoch = enqueueEpoch          // attribute to latest-enqueued scan (R4-11)
         Self.setCancelMirror(true)             // visible to sync Discovery + workers
         // Setting the flag alone is NOT enough: the discovery producer can be
         // suspended inside `await discoveryChan.send(file)` on an UNBUFFERED

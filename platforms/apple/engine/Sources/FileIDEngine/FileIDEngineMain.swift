@@ -193,6 +193,10 @@ struct FileIDEngineMain {
             // path before sending, so the engine receives a ready-to-walk
             // path. `rootDisplay` defaults to `rootPath` when omitted.
             let displayPath = rootDisplay ?? rootPath
+            // R4-11: allocate the scan epoch synchronously here (the command loop
+            // is serial), BEFORE the next command is read, so a quick cancelScan is
+            // attributed to this scan and survives startSession.
+            let epoch = await coordinator.nextScanEpoch()
             // Enqueue — runs immediately if nothing else queued, else
             // waits for predecessors to finish.
             let title = "Scan \((displayPath as NSString).lastPathComponent)"
@@ -203,7 +207,7 @@ struct FileIDEngineMain {
             ) {
                 let task = Task.detached(priority: .userInitiated) {
                     await runScan(rootPath: rootPath, displayPath: displayPath,
-                                  rescan: rescan,
+                                  rescan: rescan, epoch: epoch,
                                   coordinator: coordinator, sink: sink,
                                   database: database)
                 }
@@ -529,7 +533,7 @@ struct FileIDEngineMain {
     /// `database` is the engine's single shared `Database` (one DatabasePool
     /// per engine process — opening more would trigger SQLITE_BUSY).
     static func runScan(
-        rootPath: String, displayPath: String, rescan: Bool,
+        rootPath: String, displayPath: String, rescan: Bool, epoch: Int,
         coordinator: ScanCoordinator, sink: IPCSink,
         database: Database
     ) async {
@@ -549,7 +553,7 @@ struct FileIDEngineMain {
         SleepGuard.shared.begin(reason: "Scanning \(url.lastPathComponent)")
         defer { SleepGuard.shared.end() }
 
-        let session = await coordinator.startSession(rootDisplayPath: url.lastPathComponent)
+        let session = await coordinator.startSession(rootDisplayPath: url.lastPathComponent, epoch: epoch)
         await sink.emit(.phaseChanged(.discovering))
         JSONLog.shared.info(ev: "scan_started", sess: session.id, path: redactPathForLog(url.path))
 
@@ -565,6 +569,18 @@ struct FileIDEngineMain {
             }
         } catch {
             JSONLog.shared.warn(ev: "scan_session_insert_failed", sess: session.id, error: "\(error)")
+        }
+
+        // R4-11: a cancelScan that landed in the start window is preserved by the
+        // epoch check in startSession; honor it before spending the discovery walk.
+        // markSessionFinal emits the cancelled terminal phase via the shielded
+        // writer so the app's UI returns to idle.
+        if await coordinator.isCancelled {
+            JSONLog.shared.info(ev: "scan_cancelled_at_start", sess: session.id)
+            await markSessionFinal(database: database, session: session,
+                                   coordinator: coordinator, sink: sink,
+                                   totalSeconds: 0)
+            return
         }
 
         // Stage A — Discovery. Walk the tree, sort by path for I/O locality.
