@@ -161,10 +161,13 @@ struct BulkRenameSheet: View {
             let result = storeRef.applyProposedNamesBulk(toRename)
             // Persist the batch to UserDefaults so the user can undo.
             BulkRenameSheet.saveLastBatch(result.renamed)
+            // R5-09: run the up-to-1000-row SELECT * off-main (we're already in a
+            // detached task); only the assignment hops to the main actor.
+            let refreshed = storeRef.filesWithProposedNames()
             await MainActor.run {
                 inFlight = false
-                files = storeRef.filesWithProposedNames()
-                selectedIDs = Set(files.map(\.id))
+                files = refreshed
+                selectedIDs = Set(refreshed.map(\.id))
                 if result.failed == 0 {
                     status = "Renamed \(result.renamed.count) file\(result.renamed.count == 1 ? "" : "s")"
                 } else {
