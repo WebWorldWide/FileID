@@ -1,5 +1,39 @@
 # NEXT — resume here
 
+## 2026-06-14 (round-3 audit) — two findings deferred with full recipes (the rest landed in #25–#27)
+
+The round-3 audit (see STATE.md) landed 20 fixes. Two were deliberately NOT landed because they
+exceed what can be verified/landed safely in one pass — both have a complete recipe here.
+
+- **R3-15 — "different people" verdict lost after a face-print id churn (P2 data-loss, BOTH engines).**
+  `face_verifications.face_a/face_b` (the v13 "anchors") are face_print ids, which are DELETE+re-INSERTed
+  with fresh AUTOINCREMENT ids on every `faces_evaluated` re-scan (Windows `dbwriter.rs` ~405–457;
+  macOS DBWriter mirror). After a churn the stored ids no longer resolve in `cluster_of`, so the
+  auto-merge "block these two" guard silently no-ops and two user-confirmed-different lookalikes can
+  re-merge. **Why deferred:** the only churn-stable face identity is a stored `(file_id, bbox)` (or
+  embedding) key → a NEW append-only migration (`vN+1`) that MUST be registered with the IDENTICAL
+  name on BOTH engines (the code's own C12 fork-bug test, `migrations.rs` ~511, shows divergent v14
+  names corrupted cross-platform libraries) AND verified on the Windows runtime (CI can't exercise the
+  ORT/SQLite write path). **Recipe:** (1) `vN+1_face_verification_stable_keys` on both engines: add
+  `file_a TEXT, bbox_a TEXT, file_b TEXT, bbox_b TEXT` to `face_verifications` (or a side table keyed
+  by content). (2) On verdict WRITE (Windows `bulk.rs handle_mark_persons_different`; macOS
+  markPersonsDifferent) populate the stable keys from the faces' current `(file_id, bbox)`. (3) On
+  verdict APPLY (Windows `commands/face_clustering.rs` ~92/221; macOS `tightPairAutoMerge` verdict
+  projection) resolve via the stable keys → current face ids → `cluster_of`, falling back to the
+  legacy face_a/face_b for un-migrated rows. (4) Backfill once on migrate where the old ids still
+  resolve. Acceptance: a verdict survives a full re-scan (id churn) and still blocks the merge — add a
+  both-engine regression test that re-scans between verdict and clustering.
+
+- **R3-07 PART B — inbound IPC frame cap 32→64 MiB + O(n²) buffer-scan (P2, both apps).** The 32 MiB
+  cap drops a whole-library restructure plan above ~100k moves; PART A (landed in #27) made the drop
+  graceful + actionable, but a ~200k-move target needs the bump. **Why deferred:** raising the cap
+  without fixing the full-buffer newline rescan makes the accumulating-buffer scan quadratic, and the
+  "matches the Windows app's inbound cap" symmetry means changing macOS `EngineClient.maxFrameBytes`
+  (302), Windows `EngineClient.cs` MaxFrameChars (64) + `EngineClient.Commands.cs` MaxIpcFrameBytes
+  (25) + engine `sink.rs` MAX_FRAME_BYTES (28) / `main.rs` (50) together. **Recipe:** bump all four
+  constants to 64 MiB; gate the macOS newline scan so it resumes from the last search index instead of
+  re-scanning the whole buffer each readability tick.
+
 ## 2026-06-14 (newest) — every actionable engine/app item is landed; what remains needs HARDWARE, a GUI, or LABELED DATA
 
 After the 2026-06-14 push (PRs #16–#20, all merged + CI-green on `main`), there are **no open
