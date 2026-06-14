@@ -22,10 +22,19 @@ struct ScanCancellationTests {
             .appendingPathComponent(".build/debug/FileIDEngine")
     }
 
-    private actor LineCollector {
+    // Lock-based (not an actor): the readability handler can feed SYNCHRONOUSLY
+    // instead of spawning a `Task { await … }` per output chunk. Under the
+    // 2000-file scan's event flood those unstructured tasks piled up and
+    // contended with `await snapshot()` on the actor, starving the bounded
+    // waitFor loops on a slow CI runner — the suite then hung past the 12-min
+    // SIGALRM with a leaked engine child. Synchronous feed/snapshot removes the
+    // task pile-up and the await entirely.
+    private final class LineCollector: @unchecked Sendable {
+        private let lock = NSLock()
         private var pending = Data()
-        private(set) var lines: [String] = []
+        private var lines: [String] = []
         func feed(_ chunk: Data) {
+            lock.lock(); defer { lock.unlock() }
             pending.append(chunk)
             while let nl = pending.firstIndex(of: 0x0A) {
                 let line = pending.subdata(in: pending.startIndex..<nl)
@@ -35,7 +44,7 @@ struct ScanCancellationTests {
                 }
             }
         }
-        func snapshot() -> [String] { lines }
+        func snapshot() -> [String] { lock.lock(); defer { lock.unlock() }; return lines }
     }
 
     @Test("Cancel mid-scan still yields scanComplete; engine stays responsive")
@@ -68,7 +77,7 @@ struct ScanCancellationTests {
         wire.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             if data.isEmpty { handle.readabilityHandler = nil; return }
-            Task { await collector.feed(data) }
+            collector.feed(data)
         }
         try proc.run()
         // A leaked engine child holds the test harness's output pipe open
@@ -90,7 +99,7 @@ struct ScanCancellationTests {
         func waitFor(_ needle: String, timeout: TimeInterval) async -> Bool {
             let deadline = Date().addingTimeInterval(timeout)
             while Date() < deadline {
-                if await collector.snapshot().contains(where: { $0.contains(needle) }) {
+                if collector.snapshot().contains(where: { $0.contains(needle) }) {
                     return true
                 }
                 try? await Task.sleep(nanoseconds: 100_000_000)
@@ -132,7 +141,7 @@ struct ScanCancellationTests {
 
         // U4: every line on the wire must be a JSON object — no library
         // chatter may reach the IPC stream.
-        for line in await collector.snapshot() {
+        for line in collector.snapshot() {
             #expect(line.hasPrefix("{"), "non-JSON line on the IPC wire: \(line.prefix(120))")
         }
     }
