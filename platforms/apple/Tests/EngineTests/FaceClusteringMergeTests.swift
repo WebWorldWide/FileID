@@ -126,6 +126,44 @@ struct FaceClusteringMergeTests {
         #expect(names.contains("Adam") && names.contains("Bob"))
     }
 
+    // R3-10 — a person named ONLY via a structured field other than first/last/
+    // name (title / middle_name / suffix) must still count as NAMED, so two such
+    // persons never auto-merge (the merge would delete one identity). The `named`
+    // SQL predicate previously checked only first_name/last_name/name.
+    @Test("a title/middle/suffix-only-named person is treated as named")
+    func structuredNameOnlyCountsAsNamed() async throws {
+        let (db, dir) = try makeDB(); defer { try? FileManager.default.removeItem(at: dir) }
+        let v = l2norm([1, 0, 0])
+        func insertTitled(title: String?, middle: String?, suffix: String?) async throws -> Int64 {
+            try await db.pool.write { d -> Int64 in
+                try d.execute(sql: """
+                    INSERT INTO persons (name, representative_face_id, file_count, created_at,
+                                         title, middle_name, suffix, is_unknown)
+                    VALUES (NULL, NULL, 5, ?, ?, ?, ?, 0)
+                    """, arguments: [Date().timeIntervalSince1970, title, middle, suffix])
+                let pid = d.lastInsertedRowID
+                let blob = ArcFaceService.embeddingToBlob(v)
+                try d.execute(sql: """
+                    INSERT INTO files (path_text, path_hash, size_bytes, scanned_at, kind, extension)
+                    VALUES (?, ?, 1, ?, 'image', 'jpg')
+                    """, arguments: ["/titled\(pid).jpg", pid * 7000, Date().timeIntervalSince1970])
+                let fileID = d.lastInsertedRowID
+                try d.execute(sql: """
+                    INSERT INTO face_prints (file_id, person_id, print_data, bbox, arcface_embedding)
+                    VALUES (?, ?, ?, '0,0,1,1', ?)
+                    """, arguments: [fileID, pid, Data(), blob])
+                return pid
+            }
+        }
+        let a = try await insertTitled(title: "Dr.", middle: nil, suffix: nil)
+        let b = try await insertTitled(title: nil, middle: "Quincy", suffix: "Jr.")
+
+        let merged = await FaceClustering.tightPairAutoMerge(database: db)
+        #expect(merged == 0, "two persons named via title/middle/suffix must not merge")
+        let ids = try await personIDs(db)
+        #expect(ids.contains(a) && ids.contains(b), "neither structured-named identity is deleted")
+    }
+
     // F-C3-002 — the persist's identity carry-forward re-reads persons UNDER the
     // writer lock, so an edit committed during the lock-free clustering window
     // survives. `priorAnchors(from:)` is that under-lock read; it must reflect a

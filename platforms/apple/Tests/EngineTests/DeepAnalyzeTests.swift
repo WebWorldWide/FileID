@@ -232,6 +232,18 @@ struct DeepAnalyzeRunnerTests {
         #expect(row.desc == "newer")
         #expect(row.name == "new-name")
         #expect(row.model == "m3")
+
+        // R3-01: an EMPTY-but-present caption/name must be treated like NULL —
+        // COALESCE alone wouldn't protect "" (it's not NULL), so a parse() that
+        // yielded an empty DESCRIPTION section would otherwise clobber the prior
+        // good value. persist() maps "" → nil so the prior value survives.
+        try await DeepAnalyzeRunner.persist(
+            database: db, fileID: id,
+            description: "", proposedName: "", modelKey: "m4")
+        row = try await fetchVLM(db, id)
+        #expect(row.desc == "newer", "empty caption must not clobber prior value")
+        #expect(row.name == "new-name", "empty proposed_name must not clobber prior value")
+        #expect(row.model == "m4")
     }
 
     private func fetchVLM(_ db: FileIDEngine.Database, _ id: Int64) async throws

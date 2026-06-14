@@ -261,14 +261,21 @@ public enum Tagging {
             visionQueue.async {
                 let result = autoreleasepool { () -> TaggedFile in
                     guard let pdf = CGPDFDocument(url as CFURL) else {
+                        // R3-13: a transient open failure must be recorded as a
+                        // FAILURE (not a success with tagsEvaluated:true) — mirrors
+                        // the image-decode branch. failed:true keeps the row out of
+                        // the next scan's `failed = 0` skip set so the PDF is
+                        // retried, and dropping tagsEvaluated stops the DBWriter
+                        // from delete/reinserting auto-tags on this failed pass.
+                        JSONLog.shared.warn(ev: "pdf_open_failed", path: redactPathForLog(url.path))
                         return TaggedFile(
                             url: url, kind: "pdf", extension: "pdf",
                             sizeBytes: discovered.sizeBytes,
                             createdAt: discovered.creationDate,
                             modifiedAt: discovered.modificationDate,
-                            visionTags: ["PDF"],
-                            perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000,
-                            tagsEvaluated: true
+                            failed: true,
+                            errorMessage: "Could not open PDF (will retry next scan)",
+                            perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000
                         )
                     }
                     let pageCount = min(pdf.numberOfPages, 3)
