@@ -8,6 +8,56 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-14 (latest) — deep-audit batch: 8 confirmed defects fixed across both engines (PRs #23–#24 merged; main green) + full on-hardware e2e
+
+Ran an adversarial multi-agent audit (finder shards → 2-of-3 skeptic verification) over the
+highest-risk subsystems, then **expert-re-verified every candidate before fixing** — the skeptic pass
+alone still carried a ~40% false-positive rate. Net: **8 genuinely-real defects fixed, 6
+false/over-stated rejected with rationale.**
+
+**Windows engine (PR #23, CI-verified — `#[cfg(windows)]` paths don't compile under macOS clippy):**
+- **SEC-5 casing bypass** (`restructure_apply.rs`): the reparse-point-in-chain walk compared
+  paths with case-sensitive `starts_with` after only one side was normalized, so a drive whose
+  casing differed from the root could slip the containment break. Replaced with a component-wise
+  case-insensitive `ci_starts_with` (avoids the sibling-prefix bug a lowercased-string compare would
+  reintroduce).
+- **Verdict swallow** (`bulk.rs handle_find_merge_suggestions`): a `face_verifications` query whose
+  error was `.ok()`-dropped could silently skip the "these two are different people" exclusions and
+  re-suggest a rejected merge. Now propagates with `?`.
+- **`cancelled` flag** (`deep_analyze.rs`): four non-cancel error exits hard-coded `cancelled: true`,
+  mislabeling a model-load / DB-query failure as a user cancel. Now reports the real
+  `cancel.load(Relaxed)`.
+
+**macOS engine (PR #24, `swift build` debug+release clean, `swift test` 194/194):**
+- **F-A2 heal size corroboration** (`DBWriter.healMovedRow`): rename/move heal matched on `file_ref`
+  (st_ino) alone; st_ino has no generation number, so a reused inode could re-bind a deleted row onto
+  an unrelated new file and hand it the prior file's tags / named person / OCR. Candidate now also
+  requires `size_bytes` match. New regression test (reused inode + different size → fresh row,
+  inherits nothing).
+- **F-A4 restructure conflicts array**: `apply()` never populated `conflicts` despite the `(2)`
+  uniquify path. Now reports each uniquified planned dest; existing test updated.
+- **F-A5 restructure mkdir error swallowed**: silent `failed += 1` on `createDirectory` failure →
+  added a redacted `restructure_mkdir_failed` warning.
+- **F-A6 Deep Analyze empty VLM output**: empty generation → `description=""` →
+  `COALESCE(?, vlm_description)` overwrote a prior good caption. Now surfaced as `Inference failed:`
+  so the runner's `isFailure` skips the destructive write.
+- **F-A7 VisionWorkerPool continuation leak**: a task cancelled while parked in `acquire()` leaked
+  its continuation (`withCheckedContinuation` ignores cancellation). Now wrapped in
+  `withTaskCancellationHandler`; `acquire()`→Optional, `with()`→`T?`, caller breaks on nil.
+
+**Rejected (verified false/over-stated):** #1 file_ref COALESCE (current behavior correct; the "fix"
+would leave a stale ref), #8 ReadStore TOCTOU (read-only double-open, low impact), #9 semantic
+containment (PathBuf `.starts_with` is component-aware), #10 empty VLM tags (DELETE is inside
+`if !tags.is_empty()`), #12 int width (face counts ≪ INT64_MAX), #13 mtime 1s tolerance (deliberate
+FS-precision accommodation).
+
+**On-hardware e2e (isolated /tmp copy of 40 Adlon photos, throwaway HOME, real models symlinked
+read-only — corpus never modified):** scan 40/40 (0 failed) → face clustering 87 faces/41 persons →
+semantic plan 40 moves → **apply 40/40 applied, 0 failed** → DB consistency check: 40 rows = 40 files
+on disk, **0 missing, 0 orphans** (path_text refreshed correctly). The 41-from-87 person
+fragmentation is the documented F-4 single-linkage limitation (blocked on labeled data), not a
+regression.
+
 ## 2026-06-14 (later) — backlog cleared to terminal states (PRs #18–#20 merged; main green)
 
 Continued the finish-everything push after PR #16. Five more PRs landed + merged, all CI-green:

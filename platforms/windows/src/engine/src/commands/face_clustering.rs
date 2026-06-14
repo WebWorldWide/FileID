@@ -250,6 +250,24 @@ pub(crate) async fn handle_run_face_clustering(
                 blocked.insert(pair);
             }
 
+            // (c) Never fold a user-marked UNKNOWN cluster into a different prior
+            // person. mark-as-unknown nulls the name, so guard (b) is blind to it;
+            // without this the unknown cluster consolidates into a named/other
+            // person and the majority-vote persist (below) can overwrite a
+            // user-assigned name with NULL. Keyed on is_unknown=1 (not name=NULL),
+            // so untouched auto-clustered persons still consolidate normally. (R3-03)
+            let unknown_persons: std::collections::HashSet<i64> = prior_by_person
+                .iter()
+                .filter_map(|(&pid, p)| (p.is_unknown == 1).then_some(pid))
+                .collect();
+            for pair in crate::pipeline::face_clustering::unknown_blocked_pairs(
+                &face_to_prior,
+                &unknown_persons,
+                &cluster_of,
+            ) {
+                blocked.insert(pair);
+            }
+
             let before = anchors.len();
             let (a, an) = crate::pipeline::face_clustering::consolidate(
                 &faces, assignments, anchors, &blocked, threshold,
