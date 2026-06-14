@@ -44,6 +44,12 @@ struct RestructureView: View {
     /// irreversible inside the app, so a double-click must never run apply
     /// twice — the bar buttons disable while this is set.
     @State private var applying = false
+    /// R6-01: moves frozen at the instant the apply-confirmation dialog is
+    /// presented. A background re-plan (e.g. Deep Analyze finishing mid-review)
+    /// rewrites proposals/selectedIDs/engine.restructurePlan while the dialog
+    /// stays open; the confirm action must apply exactly what the user reviewed,
+    /// not the re-planned set (TOCTOU → unreviewed irreversible moves).
+    @State private var pendingMoves: [RestructureMove] = []
 
     @AppStorage("restructure.viewMode") private var viewModeRaw: String = ViewMode.cards.rawValue
     private var viewMode: ViewMode { ViewMode(rawValue: viewModeRaw) ?? .cards }
@@ -189,7 +195,12 @@ struct RestructureView: View {
                     totalCount: proposals.count,
                     canApply: !selectedIDs.isEmpty,
                     isApplying: applying,
-                    onApply: { if !applying { confirmApply = true } }
+                    onApply: {
+                        guard !applying else { return }
+                        pendingMoves = eligibleMoves()   // R6-01: freeze the reviewed set
+                        guard !pendingMoves.isEmpty else { return }
+                        confirmApply = true
+                    }
                 )
                 .padding(.horizontal, 18)
                 .padding(.bottom, 14)
@@ -200,7 +211,7 @@ struct RestructureView: View {
                 // "Apply moves" action; this confirmation states the real,
                 // irreversible behavior so the user always confirms first.
                 .confirmationDialog(
-                    "Apply \(selectedIDs.count) move\(selectedIDs.count == 1 ? "" : "s")?",
+                    "Apply \(pendingMoves.count) move\(pendingMoves.count == 1 ? "" : "s")?",
                     isPresented: $confirmApply,
                     titleVisibility: .visible
                 ) {
@@ -422,10 +433,11 @@ struct RestructureView: View {
             SankeyFlowView(
                 proposals: proposals,
                 onTapSource: { folder in
-                    let match = proposals.first(where: {
-                        ($0.sourceFolder as NSString).lastPathComponent == folder
-                    })?.sourceFolder ?? folder
-                    drillDown = .sourceFolder(match)
+                    // R6-03: `folder` is now the FULL source path (SankeyFlowView
+                    // passes node.identityKey), so use it directly — the old
+                    // basename reverse-map collapsed same-basename folders to the
+                    // first match, making the others unreachable for review.
+                    drillDown = .sourceFolder(folder)
                 },
                 onTapDestination: { bucket in
                     drillDown = .destBucket(bucket)
@@ -925,19 +937,29 @@ struct RestructureView: View {
     /// Apply the selected, non-skipped moves through the engine butler.
     /// Single-flight (F-C4-003): `applying` gates the apply-bar buttons and is
     /// cleared when `restructureApplyResult` arrives (or the engine resets).
-    private func applyViaEngine() {
-        guard !applying else { return }
-        guard let root = libraryRoot, let plan = engine.restructurePlan else {
-            status = "Pick a library folder before applying."
-            return
-        }
-        // Selected ∧ not-skipped (F-C4-012). Belt-and-suspenders: filter the
-        // engine plan's own moves by this set so a skipped outcome never moves.
+    /// R6-01: selected ∧ not-skipped (F-C4-012) moves from the CURRENT
+    /// plan/selection. Snapshotted into `pendingMoves` at dialog-present time so a
+    /// background re-plan can't change the set the confirm action applies.
+    /// Belt-and-suspenders: filter the engine plan's own moves so a skipped
+    /// outcome never moves.
+    private func eligibleMoves() -> [RestructureMove] {
+        guard let plan = engine.restructurePlan else { return [] }
         let eligible = Set(
             proposals
                 .filter { selectedIDs.contains($0.fileID) && !skippedOutcomes.contains(outcomeFor($0)) }
                 .map(\.fileID))
-        let moves = plan.moves.filter { eligible.contains($0.fileID) }
+        return plan.moves.filter { eligible.contains($0.fileID) }
+    }
+
+    private func applyViaEngine() {
+        guard !applying else { return }
+        guard let root = libraryRoot else {
+            status = "Pick a library folder before applying."
+            return
+        }
+        // R6-01: apply exactly the set frozen when the dialog was presented, not
+        // a set a mid-dialog re-plan may have rewritten.
+        let moves = pendingMoves
         guard !moves.isEmpty else {
             status = "Nothing selected to apply."
             return
