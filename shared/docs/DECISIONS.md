@@ -7,6 +7,29 @@
 
 ---
 
+## 2026-06-14 — The bug-hunt audit is converged at round 7; UI fixers fan out per-file, but only on disjoint files
+
+After round 7 the find→verify→expert→read→delta method has covered the engine, the data paths, and
+the full action-bearing UI surface on both platforms (7 find-rounds, 64 real defects, 5 delta-rounds).
+Round 7 — the deepest UI tier (big C# Views/VMs + remaining Swift Views) — found 39 defects but **zero
+P0/P1**: the high-severity space is exhausted and the residual is P2/P3 polish. We are declaring the
+*static* audit converged; further correctness gains now require on-hardware / GUI / labeled-data UAT
+(see NEXT.md), not more static rounds. Two coordinated cross-platform changes (R3-15 stable
+face-verification keys; R3-07B/R5-12 IPC-cap bump) stay deferred — they need a both-engine append-only
+migration + Windows-runtime verification CI can't do.
+
+**Operational lesson — parallel per-file fixers must operate on DISJOINT files.** Round 7 applied
+fixes with one subagent per file in parallel. This is safe ONLY because each fixer owns a distinct
+file; two agents editing the same file race and one silently clobbers the other. We hit exactly that:
+a finding attributed to `SettingsView.swift` whose fix actually spanned its backing
+`CLIPModelInstaller.swift`, which a *different* fixer was editing concurrently — both edits happened to
+survive, but it was luck. Rule: when a finding's fix touches a second file, route both files to the
+SAME fixer (or serialize them). Also: a "read-only" finder workflow whose agents have Edit access will
+sometimes apply fixes anyway — treat finder output as advisory and reconcile the working tree before
+the fix phase. And always `swift build` (Swift) / lean on CI (C#) AFTER the fixers: round 7's fixers
+were individually correct but the orchestrator's build caught a pre-existing Swift-6-mode captured-var
+warning surfaced by the edits, and the delta pass caught 4 self-inflicted regressions.
+
 ## 2026-06-14 — The delta re-audit is mandatory, not optional (rounds 3–5)
 
 Empirical addendum to the audit methodology below: after landing each round's fixes we ran a
