@@ -179,10 +179,14 @@ impl ScanSession {
         // discovery walk. The rescan flag forces a full rescan.
         let skip_paths = if self.rescan {
             tracing::info!("[SCAN] rescan=true; processing every file regardless of prior scan state");
-            std::sync::Arc::new(std::collections::HashSet::new())
+            std::sync::Arc::new(std::collections::HashMap::new())
         } else {
             let conn = self.db_conn.lock();
-            let mut set = std::collections::HashSet::<std::path::PathBuf>::new();
+            // R4-01: carry (size_bytes, modified_at) per path so discovery can
+            // revalidate against the LIVE file mtime — a bare path set skipped any
+            // file edited after its last scan.
+            let mut set =
+                std::collections::HashMap::<std::path::PathBuf, (i64, Option<f64>)>::new();
             let root_prefix = root.to_string_lossy().to_string();
             // Diagnostic counts so we can tell at a glance whether (a) the
             // DB is empty, (b) the LIKE prefix is wrong, or (c) the
@@ -224,33 +228,41 @@ impl ScanSession {
             // dehydrated→hydrated file is reprocessed; a transient hash failure
             // re-scans too, which is the skip set's documented fail-safe.
             let content_hash_gate = SKIP_SET_CONTENT_HASH_GATE;
+            // R4-01: drop the tautological `scanned_at >= modified_at` predicate
+            // (both are stored at scan time, so it's true for every scanned file
+            // and STAYS true after an edit). Fetch size+mtime instead and let
+            // discovery compare them against the live file.
             let select_sql = if hi.is_some() {
                 format!(
-                    "SELECT path_text FROM files \
+                    "SELECT path_text, size_bytes, modified_at FROM files \
                      WHERE path_text >= ?1 AND path_text < ?2 \
                      AND failed = 0 \
-                     AND scanned_at >= modified_at \
                      {content_hash_gate}"
                 )
             } else {
                 format!(
-                    "SELECT path_text FROM files \
+                    "SELECT path_text, size_bytes, modified_at FROM files \
                      WHERE failed = 0 \
-                     AND scanned_at >= modified_at \
                      {content_hash_gate}"
                 )
             };
             if let Ok(mut stmt) = conn.prepare(&select_sql) {
                 // One closure literal shared across both arms — two separate
                 // closures are distinct types and `match` can't unify them.
-                let row_to_string = |r: &rusqlite::Row| r.get::<_, String>(0);
+                let row_to_entry = |r: &rusqlite::Row| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, Option<f64>>(2)?,
+                    ))
+                };
                 let rows = match &hi {
-                    Some(hi) => stmt.query_map(rusqlite::params![lo, hi], row_to_string),
-                    None => stmt.query_map([], row_to_string),
+                    Some(hi) => stmt.query_map(rusqlite::params![lo, hi], row_to_entry),
+                    None => stmt.query_map([], row_to_entry),
                 };
                 if let Ok(rows) = rows {
-                    for p in rows.flatten() {
-                        set.insert(std::path::PathBuf::from(p));
+                    for (p, size, modified) in rows.flatten() {
+                        set.insert(std::path::PathBuf::from(p), (size, modified));
                     }
                 }
             }

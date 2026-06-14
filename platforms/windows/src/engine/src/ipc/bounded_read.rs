@@ -6,7 +6,7 @@
 //! by byte (well, in 8 KB chunks via the BufReader's internal buffer) and
 //! rejects the moment the in-progress line crosses `max_bytes`.
 
-use tokio::io::{AsyncBufRead, AsyncReadExt};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt};
 
 /// Outcome of one stdin line read.
 pub(crate) enum BoundedRead {
@@ -24,36 +24,51 @@ pub(crate) async fn bounded_read_line<R: AsyncBufRead + Unpin>(
     max_bytes: usize,
 ) -> std::io::Result<BoundedRead> {
     buf.clear();
-    let mut byte = [0u8; 1];
     loop {
-        match reader.read_exact(&mut byte).await {
-            Ok(_) => {
-                if byte[0] == b'\n' {
-                    if buf.last() == Some(&b'\r') {
-                        buf.pop();
-                    }
-                    // Build the String from a borrow, NOT `mem::take(buf)`:
-                    // taking swaps the caller's pre-grown 8 KB Vec out for an
-                    // empty one, so every frame after the first re-grows from
-                    // capacity 0 — defeating the documented zero-alloc reuse.
-                    // `buf` is cleared at the top of the next call.
-                    let text = String::from_utf8_lossy(buf).into_owned();
-                    return Ok(BoundedRead::Line(text));
-                }
-                if buf.len() >= max_bytes {
-                    return Ok(BoundedRead::Oversized(buf.len()));
-                }
-                buf.push(byte[0]);
+        // R4-04: pull the BufReader's already-buffered slice (<= 8 KiB) in one
+        // shot instead of one ReadExact future per byte — O(bytes / 8192) polls,
+        // not O(bytes). fill_buf returns an empty slice at EOF.
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if buf.is_empty() {
+                return Ok(BoundedRead::Eof);
             }
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                if buf.is_empty() {
-                    return Ok(BoundedRead::Eof);
+            // Trailing partial line at EOF — treat as a complete frame.
+            let text = String::from_utf8_lossy(buf).into_owned();
+            return Ok(BoundedRead::Line(text));
+        }
+        match available.iter().position(|&b| b == b'\n') {
+            Some(nl) => {
+                // Reject before copying if the line content crosses the cap;
+                // leave the '\n' unconsumed so drain_to_newline can resync.
+                if buf.len() + nl > max_bytes {
+                    let seen = buf.len() + nl;
+                    reader.consume(nl);
+                    return Ok(BoundedRead::Oversized(seen));
                 }
-                // Trailing partial line at EOF — treat as a complete frame.
+                buf.extend_from_slice(&available[..nl]);
+                reader.consume(nl + 1);
+                if buf.last() == Some(&b'\r') {
+                    buf.pop();
+                }
+                // Build the String from a borrow, NOT `mem::take(buf)`:
+                // taking swaps the caller's pre-grown 8 KB Vec out for an
+                // empty one, so every frame after the first re-grows from
+                // capacity 0 — defeating the documented zero-alloc reuse.
+                // `buf` is cleared at the top of the next call.
                 let text = String::from_utf8_lossy(buf).into_owned();
                 return Ok(BoundedRead::Line(text));
             }
-            Err(e) => return Err(e),
+            None => {
+                let take = available.len();
+                if buf.len() + take > max_bytes {
+                    let seen = buf.len() + take;
+                    reader.consume(take);
+                    return Ok(BoundedRead::Oversized(seen));
+                }
+                buf.extend_from_slice(available);
+                reader.consume(take);
+            }
         }
     }
 }
