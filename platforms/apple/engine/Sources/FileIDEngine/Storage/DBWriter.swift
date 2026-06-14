@@ -249,12 +249,17 @@ public actor DBWriter {
             // drop the entire in-flight batch (up to 100 files) silently.
             // `batchFiles` is a value copy, so retrying re-runs the same inserts
             // safely (each is an idempotent upsert).
+            // R3-14: resolve rename/move heal old-path existence OFF the writer
+            // transaction (one read query + off-tx lstat per fileRef-carrying
+            // file), so no filesystem syscall runs while the write lock is held.
+            let oldPathExists = await self.healOldPathExistence(batchFiles)
             var attempt = 0
             while true {
                 do {
                     try await db.pool.write { db in
                         for file in batchFiles {
-                            try Self.insertOne(file: file, forceReprocess: forceReprocess, db: db)
+                            try Self.insertOne(file: file, forceReprocess: forceReprocess,
+                                               oldPathExists: oldPathExists, db: db)
                         }
                         // Update scan session high-water mark in the SAME
                         // transaction so a crash mid-batch can't leave the
@@ -427,7 +432,8 @@ public actor DBWriter {
     /// failure rolls back this file but not the rest of the batch.
     /// Static + nonisolated so the GRDB write closure can call it without
     /// crossing the actor's executor (Swift 6 strict concurrency).
-    private static func insertOne(file: TaggedFile, forceReprocess: Bool, db: GRDB.Database) throws {
+    private static func insertOne(file: TaggedFile, forceReprocess: Bool,
+                                  oldPathExists: [String: Bool], db: GRDB.Database) throws {
         // NOT String.hashValue — that's per-process seeded, so every engine
         // launch would mint a different value, breaking the stable
         // cross-platform path_hash contract (path_safety.rs stable_path_hash).
@@ -468,7 +474,7 @@ public actor DBWriter {
                fileRef: ref, newSize: file.sizeBytes, newPath: file.url.path,
                newPathHash: pathHash,
                newPathSearch: file.url.path.precomposedStringWithCanonicalMapping,
-               db: db) != nil {
+               oldPathExists: oldPathExists, db: db) != nil {
             existing = try Row.fetchOne(
                 db.cachedStatement(sql: """
                     SELECT id, size_bytes, modified_at, failed FROM files WHERE path_text = ?
@@ -726,7 +732,7 @@ public actor DBWriter {
     /// covers same-volume rename/move, the dominant case.
     private static func healMovedRow(
         fileRef: UInt64, newSize: Int64, newPath: String, newPathHash: Int64,
-        newPathSearch: String, db: GRDB.Database
+        newPathSearch: String, oldPathExists: [String: Bool], db: GRDB.Database
     ) throws -> Int64? {
         // Stored bit-for-bit as Windows binds it (`r as i64`) so the lookup keys
         // match across a cross-platform DB round-trip.
@@ -752,7 +758,11 @@ public actor DBWriter {
             // A still-present old path means a coexisting copy/hardlink — skip, so
             // both stay distinct rows (the exact-duplicate guard). Mirrors the
             // Windows heal_candidate_moved old-path-gone gate exactly.
-            if pathExistsOnDisk(oldPath) { continue }
+            // R3-14: existence resolved off-transaction (healOldPathExistence) so
+            // no FS syscall runs while the writer transaction is open. Unknown ⇒
+            // treat as PRESENT (skip heal): a rare same-batch race just inserts a
+            // fresh row + leaves an orphan for the next prune, never an in-tx lstat.
+            if oldPathExists[oldPath] ?? true { continue }
             let id: Int64 = row["id"]
             do {
                 try db.cachedStatement(sql: """
@@ -783,6 +793,33 @@ public actor DBWriter {
             guard let rep else { return false }
             return lstat(rep, &st) == 0
         }
+    }
+
+    /// Off-transaction old-path existence pre-pass for the rename/move heal.
+    /// healMovedRow's gate needs an `lstat` per candidate; running it inside
+    /// commitBatch's `pool.write` would hold the writer lock for the filesystem
+    /// latency — unbounded on a slow/stale network mount — defeating the
+    /// committer decoupling. Resolve existence here on a READ connection +
+    /// off-transaction `lstat`, keyed by old path. (R3-14, mirrors Windows R3-16)
+    private func healOldPathExistence(_ batchFiles: [TaggedFile]) async -> [String: Bool] {
+        let oldPaths: Set<String> = (try? await db.pool.read { db -> Set<String> in
+            var paths: Set<String> = []
+            for file in batchFiles {
+                guard let ref = file.fileRef else { continue }
+                let refInt = Int64(bitPattern: ref)
+                let rows = try Row.fetchAll(db, sql: """
+                    SELECT path_text FROM files
+                    WHERE path_text != ? AND file_ref IS NOT NULL AND file_ref = ?
+                      AND size_bytes = ?
+                    """, arguments: [file.url.path, refInt, file.sizeBytes])
+                for row in rows { paths.insert(row["path_text"]) }
+            }
+            return paths
+        }) ?? []
+        var existence: [String: Bool] = [:]
+        existence.reserveCapacity(oldPaths.count)
+        for path in oldPaths { existence[path] = Self.pathExistsOnDisk(path) }
+        return existence
     }
 
     // MARK: - Face quality filter

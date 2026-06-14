@@ -546,6 +546,16 @@ public actor DeepAnalyze {
                                    proposedName: nil)
         }
         let parsed = Self.parse(rawOutput: raw)
+        // F-A6 (extended, R3-01): a NON-empty raw whose DESCRIPTION section parses
+        // to "" (e.g. "DESCRIPTION:\nFILENAME: x", or a bare "DESCRIPTION:") must
+        // ALSO be a failure. The runner's isFailure check keys off the "Inference
+        // failed" prefix, and persist's COALESCE(?, vlm_description) only guards
+        // NULL — not an empty-but-present string — so persisting "" would clobber
+        // a prior good caption and report false success.
+        guard !parsed.description.isEmpty else {
+            return AnalysisResult(description: "Inference failed: empty parsed description",
+                                   proposedName: nil)
+        }
         // Drain MLX scratch periodically — keeps weights resident, drops
         // per-image temporary tensors.
         MLX.GPU.clearCache()

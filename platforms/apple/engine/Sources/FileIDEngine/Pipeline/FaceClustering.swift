@@ -103,6 +103,13 @@ public enum FaceClustering {
         let unknownFaceIDs: Set<Int64> = Set(
             priorAnchors.filter { $0.isUnknown }.flatMap { $0.faceIDs }
         )
+        // Persons whose faces are excluded from THIS run's pool (Phase-0 unknown).
+        // The persist must preserve these rows even if the user un-marks one during
+        // the lock-free window: their faces are in NO new cluster, so a wipe would
+        // orphan the faces and destroy the just-entered name. (R3-02)
+        let poolExcludedPersonIDs: Set<Int64> = Set(
+            priorAnchors.filter { $0.isUnknown }.map { $0.id }
+        )
 
         // PHASE 1 — extract any pending ArcFace embeddings. Idempotent.
         await extractPendingPrints(database: database, sink: sink,
@@ -326,11 +333,21 @@ public enum FaceClustering {
                 // moves under the lock. (audit F-C3-002 / Windows S0)
                 let freshPriors = try Self.priorAnchors(from: db)
 
-                // Unknown anchors are excluded from name-inheritance matching:
-                // their face_ids weren't in the clustering pool, so their faces
-                // stay attached to the existing unknown person row, and a Wave-2
-                // cosine match must not transfer is_unknown=true onto a new cluster.
-                let inheritanceCandidates = freshPriors.filter { !$0.isUnknown }
+                // Preserve set = persons whose faces left the pool. Union the FRESH
+                // unknowns (someone newly marked unknown in the window) with the
+                // PHASE-0 unknowns (someone UN-marked in the window — their faces
+                // were still excluded from the pool, so there is no new cluster to
+                // rebuild them from). Recomputing 'preserve' from the current
+                // is_unknown flag alone would delete the un-marked person and
+                // orphan its faces. (R3-02; companion to F-C3-002)
+                let preserveIDs: Set<Int64> =
+                    Set(freshPriors.filter { $0.isUnknown }.map { $0.id })
+                        .union(poolExcludedPersonIDs)
+                // Preserved rows keep their own identity, so they must not also be
+                // inheritance targets (that would duplicate a name onto a new
+                // cluster). In a race-free run preserveIDs == the fresh unknowns,
+                // so this matches the prior `!$0.isUnknown` filter exactly.
+                let inheritanceCandidates = freshPriors.filter { !preserveIDs.contains($0.id) }
                 let matches = matchClustersToPriorAnchors(
                     newClusters: nextClusters.map { ($0.centroid, $0.faceIDs) },
                     priorAnchors: inheritanceCandidates
@@ -338,7 +355,7 @@ public enum FaceClustering {
                 let priorsWithNames = inheritanceCandidates.filter { $0.hasName }.count
                 let claimedPriorIDs = Set(matches.compactMap { $0?.priorPersonID })
                 let lostAnchorCount = max(0, priorsWithNames - claimedPriorIDs.count)
-                let unknownPriorIDs = freshPriors.filter { $0.isUnknown }.map { $0.id }
+                let preserveList = Array(preserveIDs)
 
                 let personsList: [ClusterPersist] = nextClusters.enumerated().map { idx, c in
                     ClusterPersist(
@@ -351,24 +368,26 @@ public enum FaceClustering {
                     )
                 }
 
-                // Preserve unknown persons in place. Their face_ids stay bound to
-                // their existing row; only non-unknown rows get wiped + recreated.
-                if unknownPriorIDs.isEmpty {
+                // Preserve pool-excluded persons in place (fresh unknowns + anyone
+                // whose faces never entered this run's pool). Their face_ids stay
+                // bound to their existing row; only persons whose faces WERE
+                // clustered this run get wiped + recreated. (R3-02)
+                if preserveList.isEmpty {
                     try db.execute(sql: "UPDATE face_prints SET person_id = NULL")
                     try db.execute(sql: "DELETE FROM persons")
                 } else {
-                    let placeholders = unknownPriorIDs.map { _ in "?" }.joined(separator: ",")
-                    let unknownArgs = StatementArguments(unknownPriorIDs.map { Int($0) })
+                    let placeholders = preserveList.map { _ in "?" }.joined(separator: ",")
+                    let preserveArgs = StatementArguments(preserveList.map { Int($0) })
                     try db.execute(
                         sql: """
                             UPDATE face_prints SET person_id = NULL
                             WHERE person_id IS NULL OR person_id NOT IN (\(placeholders))
                             """,
-                        arguments: unknownArgs
+                        arguments: preserveArgs
                     )
                     try db.execute(
                         sql: "DELETE FROM persons WHERE id NOT IN (\(placeholders))",
-                        arguments: unknownArgs
+                        arguments: preserveArgs
                     )
                 }
 
@@ -507,8 +526,11 @@ public enum FaceClustering {
                 let r = try GRDB.Row.fetchAll(db, sql: """
                     SELECT fp.person_id AS pid, fp.arcface_embedding AS blob,
                            p.file_count AS fc,
-                           (COALESCE(p.first_name,'') != ''
+                           (COALESCE(p.title,'') != ''
+                             OR COALESCE(p.first_name,'') != ''
+                             OR COALESCE(p.middle_name,'') != ''
                              OR COALESCE(p.last_name,'') != ''
+                             OR COALESCE(p.suffix,'') != ''
                              OR COALESCE(p.name,'') != '') AS named
                     FROM face_prints fp
                     INNER JOIN persons p ON p.id = fp.person_id
@@ -693,13 +715,30 @@ public enum FaceClustering {
         let byTargetSnapshot: [(target: Int64, sources: [Int64])] =
             byTarget.map { (target: $0.key, sources: $0.value) }
         let targetIDs: [Int64] = byTargetSnapshot.map(\.target)
-        let totalSources = byTargetSnapshot.reduce(0) { $0 + $1.sources.count }
-
+        let merged: Int
         do {
-            try await database.pool.write { db in
+            merged = try await database.pool.write { db -> Int in
+                // R3-11: re-read identity UNDER the writer lock before deleting. A
+                // rename / mark-unknown the user committed during the lock-free
+                // compute window (on macOS the app writes the persons table on its
+                // own connection) must not be clobbered by the now-stale plan.
+                // Mirrors the phase-4 persist's F-C3-002 under-lock re-read,
+                // extended to the auto-merge polish path.
+                let freshByID = Dictionary(uniqueKeysWithValues:
+                    try Self.priorAnchors(from: db).map { ($0.id, $0) })
+                var absorbed = 0
                 for entry in byTargetSnapshot {
+                    // Skip the group if the survivor vanished mid-window.
+                    guard freshByID[entry.target] != nil else { continue }
                     let target = entry.target
-                    let sources = entry.sources
+                    // Drop any source that became named / unknown / deleted since
+                    // the read — it is no longer an eligible merge source.
+                    let sources = entry.sources.filter { sid in
+                        guard let a = freshByID[sid] else { return false }
+                        return !a.hasName
+                    }
+                    guard !sources.isEmpty else { continue }
+                    absorbed += sources.count
                     for chunk in stride(from: 0, to: sources.count, by: 500).map({
                         Array(sources[$0..<min($0 + 500, sources.count)])
                     }) {
@@ -729,6 +768,7 @@ public enum FaceClustering {
                         WHERE id IN (\(placeholders))
                         """, arguments: StatementArguments(chunk.map { Int($0) }))
                 }
+                return absorbed
             }
         } catch {
             JSONLog.shared.error(ev: "face_auto_merge_persist_failed", error: "\(error)")
@@ -738,9 +778,9 @@ public enum FaceClustering {
         JSONLog.shared.info(ev: "face_auto_merge_done",
                             extra: ["persons": AnyCodable(clusters.count),
                                     "pairsFound": AnyCodable(pairCount),
-                                    "merged": AnyCodable(totalSources),
+                                    "merged": AnyCodable(merged),
                                     "seconds": AnyCodable(Date().timeIntervalSince(started))])
-        return totalSources
+        return merged
     }
 
     @inline(__always)

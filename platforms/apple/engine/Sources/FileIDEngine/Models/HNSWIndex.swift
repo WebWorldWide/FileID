@@ -390,10 +390,11 @@ final class HNSWIndex {
     /// as `FaceClusteringService.l2` — returns .infinity on dim mismatch.
     private func l2(_ a: [Float], _ b: [Float]) -> Float {
         guard a.count == b.count, a.count == dim else { return .infinity }
-        var diff = [Float](repeating: 0, count: dim)
-        vDSP_vsub(b, 1, a, 1, &diff, 1, vDSP_Length(dim))
+        // R3-09: vDSP_distancesq computes Σ(a−b)² in one pass with no temporary,
+        // dropping the per-call dim-sized `[Float]` alloc + zero-fill that ran in
+        // the innermost HNSW distance loop.
         var sumSq: Float = 0
-        vDSP_svesq(diff, 1, &sumSq, vDSP_Length(dim))
+        vDSP_distancesq(a, 1, b, 1, &sumSq, vDSP_Length(dim))
         return sumSq.squareRoot()
     }
 }
