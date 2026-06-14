@@ -39,6 +39,16 @@ and the `../` escape both fail with files untouched.
   extensions); the engine fails them gracefully and continues, no crash. Source-data artifact, not a bug.
 - **Graceful mid-scan cancel** — cancel during tagging returns a prompt terminal `scanComplete` (178
   files persisted, 0 failed), no crash, no hang.
+- **People pipeline / face-embedding backfill** — ran clustering once on the real DB: ArcFace/SFace
+  embeddings went `533 → 5533` (exactly +5000 = `maxExtractionsPerRun`), clustered into 947 persons,
+  `unmatchedFaces=0`, 52.6 s, no crash. Confirms the lazy backfill (`extractPendingPrints`) embeds a
+  fresh window per run and clustering is stable. The DB has 46,079 detected faces (all with Vision
+  `print_data`); embedding is the same incremental-per-run backfill as CLIP, so a large library needs
+  several clustering passes to fully populate People — by design (`maxFacesPerRun`/`maxExtractionsPerRun`
+  caps), documented as a UX item in NEXT, not a bug.
+- **DB health** — `PRAGMA integrity_check` = ok and `foreign_key_check` empty after all the scans,
+  clustering, apply, and heal operations (59,998 files, 50,518 phashes, 947 persons). **phash/dedup
+  foundation** confirmed: byte-identical images get identical phash, a different image a different one.
 
 **Perf assessment (M1 Pro):** decode is already capped at 512 px (`CGImageSourceCreateThumbnailAtIndex`,
 EXIF from the same source); CLIP + faces run on the CoreML EP; first-scan CPU is genuinely maxed
