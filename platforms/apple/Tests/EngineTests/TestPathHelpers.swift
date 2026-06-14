@@ -44,9 +44,15 @@ final class WireCapture: @unchecked Sendable {
     /// All bytes received so far (synchronous; poll this in a deadline loop).
     func bytes() -> Data { box.bytes() }
 
-    /// Close the sink and the write end so the reader sees EOF and deregisters.
+    /// Flush + close. Uses `drainAndClose()` (SYNCHRONOUS buffer flush under the
+    /// sink actor), NOT `close()`: `close()` only resumes the detached drainer,
+    /// whose write is asynchronous, so closing the write end right after raced
+    /// the drainer and dropped events in low-volume tests (a flaky failure that
+    /// flood tests masked because the drainer kept up). `drainAndClose` writes the
+    /// buffer to the pipe before we return, so the bytes are present before the
+    /// write end closes and the reader can deliver them.
     func finish() async {
-        await sink.close()
+        await sink.drainAndClose()
         try? pipe.fileHandleForWriting.close()
     }
 }
