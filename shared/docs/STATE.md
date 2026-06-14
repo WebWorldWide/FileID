@@ -8,6 +8,38 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-14 — Xcode-unblocked: Deep Analyze verified, cross-platform apply-cancel fixed, macOS test gate restored (PR #16 merged)
+
+Xcode 26.5 was installed on the dev Mac, lifting the "no `swift test` / no Metal" ceiling. That
+immediately surfaced and fixed three real defects and verified the last blocked feature.
+
+**Bugs found + fixed (PR #16, both platforms, all CI-green):**
+- **Restructure apply was uncancellable on BOTH platforms.** The F-C6-013 cooperative cancel loop
+  existed but neither dispatcher ever set the flag — Windows built a fresh never-set `AtomicBool`
+  (`with_cancel` was test-only); macOS ran the apply in a discarded `Task.detached` while `cancelScan`
+  used a different mechanism (`ScanCoordinator`). A long apply on a large library could not be stopped.
+  Wired `CancelScan`/`cancelScan` → the apply on both sides, with no stale-cancel (fresh apply = fresh
+  signal). Deterministic tests added (`apply_dispatch_honors_preset_cancel`,
+  `requestCancelCancelsRestructureTask`).
+- **The macOS `EngineTests` target hadn't compiled since campaign commit `976a248`** — `Database`
+  ambiguous (GRDB vs FileIDEngine) in 11 files, a stale `dbModified:` label, a Swift-6 capture, plus
+  never-run tests with latent setup bugs (a `/private` vs `realpath` root mismatch, the R-14 CLIP
+  carve-out, and an impossible `cache_spill == 0` assertion). Repaired → **192 tests, 48 suites, green**
+  — the first time the macOS suite has actually run.
+- **The CI `swift test` step never failed the job.** `if ! cmd; then status=$?` captured the negated
+  condition's status (always 0), so a failing OR non-compiling suite reported exit 0 — the macOS test
+  gate had silently never failed. Fixed to capture the real exit code. (This immediately caught a
+  pre-existing CI-only hang in the process-spawning `ScanCancellationTests` — a leaked engine child
+  wedging the harness; after collector/watchdog/stdout-drain hardening it's skipped on the GitHub
+  runner and runs on every local `swift test`. Tracked in NEXT for an in-process rewrite.)
+
+**Deep Analyze (MLX VLM) verified end-to-end on-hardware** (the last previously-blocked feature):
+placed the cached `mlx.metallib` next to the engine, downloaded Qwen3-VL 4B (3.5 GB). `deepAnalyzeFile`
+produced an accurate caption ("A smiling boy in a white Nike shirt hugs a happy, fluffy dog…") + a
+smart-rename (`boy_hugging_dog_wooden_background`) in 8.5 s; `deepAnalyzeFolder` captioned 3/3 images;
+a corrupt non-image stub was gracefully skipped (processed=0, failed=0, no crash). Caption quality is
+genuinely good.
+
 ## 2026-06-13 (latest) — on-hardware write-path + perf verification loop; 1 bug found+fixed (PR #13 merged)
 
 Drove the **real release engine** against isolated throwaway sandboxes (`HOME`/`CFFIXED_USER_HOME`

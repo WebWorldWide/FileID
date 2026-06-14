@@ -3023,3 +3023,31 @@ Branch `fix/audit-2026-06-10`; full inventory in `shared/docs/audit-2026-06-10/`
   a throwaway dir gives a fully disposable library DB while exercising the REAL release binary, so write
   paths (apply, rename-heal, cancel) can be verified end-to-end without ever touching the user's library
   or the read-only Adlon/TrueNAS corpus. This is now the standard macOS write-path UAT harness pattern.
+
+## 2026-06-14 — Xcode unblock: test-gate integrity, cancel wiring, and a /private theme
+
+- **The macOS CI `swift test` gate had silently never failed — a `$?`-capture bug, not a flaky test.**
+  `if ! perl … swift test; then status=$?` captures the status of the negated condition (0 when the
+  `then` branch runs), so `exit "$status"` always exited 0. Combined with the EngineTests target not
+  having compiled since `976a248`, the macOS suite never actually ran in CI yet every run was green.
+  Fixed by capturing swift test's real exit code (`set +e; cmd; status=$?; set -e; if [ $status -ne 0 ]`).
+  Lesson: a CI step that *can* fail must be proven to fail — author a deliberately-failing run once.
+- **Restructure apply cancellation: wire the dispatcher, don't trust the loop.** Both engines had the
+  F-C6-013 cooperative cancel poll but neither dispatcher set the flag in production (Windows
+  `with_cancel` was test-only; macOS ran the apply in a discarded `Task.detached`). The fix routes the
+  existing single "stop" signal (CancelScan / cancelScan) to the apply, resetting per-apply so a stale
+  cancel can't pre-stop a fresh run. Chose to reuse the scan-cancel signal over adding a new IPC
+  command (no schema churn; the app already treats it as "stop the current long op").
+- **macOS `/private` symlink is a recurring footgun; prefer `realpath` over `resolvingSymlinksInPath`.**
+  Foundation's `resolvingSymlinksInPath()` STRIPS a leading `/private` when the result exists, but the
+  FileManager directory enumerator emits `/private/var/…` paths — so a `/var`-form root mismatches the
+  enumerated paths and the discovery skip-set silently misses (same root cause as the earlier
+  `pathIsContained` containment bug). Tests now resolve temp roots with `realpath` (`realResolved`
+  helper). Real scan roots (`/Users`, `/Volumes`) never touch `/private`, so production is unaffected —
+  but any code comparing a root against enumerator output should resolve via `realpath`, not Foundation.
+- **A process-spawning integration test that's CI-harness-incompatible is skipped on CI, not deleted.**
+  `ScanCancellationTests` spawns the real engine and wedges the swift-testing harness on the GitHub
+  runner (leaked child; not reproducible locally). Hardened (sync collector, GCD watchdog, stdout
+  drain) then gated to local-only, mirroring the existing "Corpus tests skip when corpus absent"
+  pattern, with the cancel wiring kept under deterministic unit cover. An in-process rewrite is the
+  tracked proper fix (NEXT). Skipping a genuinely-CI-incompatible test ≠ hiding a product bug.
