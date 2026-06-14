@@ -39,6 +39,13 @@ public final class Database: @unchecked Sendable {
         )
         var config = Configuration()
         config.qos = .userInitiated
+        // R4-10: the app is a concurrent cross-process writer (ReadStore.writeQueue
+        // opens People edits / Cleanup deletes / renames with busyMode=.timeout(5)).
+        // Without a busy timeout the engine writer uses GRDB's default
+        // .immediateError and gets SQLITE_BUSY the instant the app holds the WAL
+        // write lock — silently dropping no-retry writes and outracing DBWriter's
+        // ~300ms commit retry. Wait the lock out instead. Mirrors ReadStore.swift.
+        config.busyMode = .timeout(5)
         // GRDB sets journal_mode=WAL by default, but be explicit so a
         // future config tweak doesn't silently flip it.
         config.prepareDatabase { db in
