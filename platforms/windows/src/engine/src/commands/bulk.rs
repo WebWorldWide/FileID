@@ -538,12 +538,14 @@ pub(crate) async fn handle_merge_clusters(
             rusqlite::params![dst, src],
         )? as u32;
         // R4-07: carry the source's user-assigned identity onto the destination
-        // when the destination has none, BEFORE deleting src (the subqueries must
+        // when the destination has NONE, BEFORE deleting src (the subqueries must
         // still see src). Merge direction is arbitrary (suggestions order by id;
         // drag/bulk by user choice), so a named cluster can be the source —
         // without this its name/title/first/middle/last/suffix is silently lost.
-        // COALESCE keeps any field the destination already set; is_unknown clears
-        // once the merged result is named.
+        // The WHERE gate fires only when EVERY name-bearing column on the
+        // destination is NULL, so merging two differently-named people never
+        // grafts the source's sub-fields onto an already-named destination
+        // (R4-07 delta). is_unknown clears once the carried name lands.
         let _ = tx.execute(
             "UPDATE persons SET
                  name        = COALESCE(name,        (SELECT name        FROM persons WHERE id = ?2)),
@@ -553,7 +555,9 @@ pub(crate) async fn handle_merge_clusters(
                  last_name   = COALESCE(last_name,   (SELECT last_name   FROM persons WHERE id = ?2)),
                  suffix      = COALESCE(suffix,      (SELECT suffix      FROM persons WHERE id = ?2)),
                  is_unknown  = CASE WHEN COALESCE(name, (SELECT name FROM persons WHERE id = ?2)) IS NOT NULL THEN 0 ELSE is_unknown END
-             WHERE id = ?1",
+             WHERE id = ?1
+               AND name IS NULL AND title IS NULL AND first_name IS NULL
+               AND middle_name IS NULL AND last_name IS NULL AND suffix IS NULL",
             rusqlite::params![dst, src],
         );
         let _ = tx.execute("DELETE FROM persons WHERE id = ?1", rusqlite::params![src]);
