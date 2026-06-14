@@ -254,7 +254,14 @@ struct WelcomeSheet: View {
             while vlmRequested, vlmRequestedAt == started {
                 try? await Task.sleep(for: .seconds(5))
                 guard vlmRequested, vlmRequestedAt == started, !vlmInstalled else { return }
-                if let last = vlmLastProgressAt,
+                // R6-07 delta: only treat silence as a stall while the DOWNLOAD is
+                // still in flight. Once it hits 100%, the post-download MLX cold-load
+                // (~10s+, no progress events, sentinel not yet written) is silent by
+                // design — without this gate the watchdog false-fired "Download
+                // stalled" on a legitimately-loading model. The vlmInstalled sentinel
+                // path owns the cold-load phase.
+                if vlmLastFraction < 0.999,
+                   let last = vlmLastProgressAt,
                    Date().timeIntervalSince(last) > 45 {
                     vlmLastError = "Download stalled — check your connection and try again."
                     vlmRequested = false
