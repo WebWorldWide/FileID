@@ -7,6 +7,29 @@
 
 ---
 
+## 2026-06-14 — Audit methodology: skeptic vote screens, domain-expert recipe decides; and R3-15 schema migration deferred
+
+Two decisions from the round-3 adversarial audit.
+
+**(1) The 3-lens skeptic vote is a screen, not the verdict.** Across rounds 1–3, findings confirmed
+by a 2-of-3 (or even 3-of-3) skeptic pass still carried ~40% false positives — plausible-but-wrong
+claims about code the skeptics didn't fully trace. So the pipeline is: per-file finders → 3-lens
+**default-reject** vote (drops the obviously-guarded/unreachable) → a per-finding **domain-expert
+re-verification that also writes the exact fix recipe**, and every landed fix is read against the
+real code before applying. Round-3: 32 candidates → 21 survived the vote → all 21 confirmed real by
+the expert pass (3 with the suggested fix corrected). The expert/recipe pass is the load-bearing
+filter; the vote alone is not trusted to gate a code change.
+
+**(2) R3-15 (verdict-churn) is deferred, not fixed in-pass.** The "different people" verdict is keyed
+on face_print ids that churn on every re-scan, so the verdict is silently lost (lookalikes re-merge).
+The fix needs a churn-stable face identity → a new append-only migration. We chose NOT to land it in
+the audit pass because (a) an append-only migration must be registered with the IDENTICAL identifier
+on BOTH engines or it reproduces the C12 fork-bug (a divergent v14 name that corrupted cross-platform
+libraries — see `migrations.rs` regression test), and (b) the Windows SQLite/ORT write path can't be
+exercised in this dev env (CI builds but doesn't run the runtime). Landing a cross-platform,
+append-only, runtime-unverifiable schema change blind fails our "verification strength ≥ blast
+radius" bar. Full both-platform recipe is in NEXT.md; it's a deliberate, coordinated follow-up.
+
 ## 2026-06-10 — IPC event backpressure stays asymmetric by design (Sweep B R2-8)
 
 When the app stops reading the event pipe, the two engines respond differently and we are
