@@ -141,7 +141,18 @@ public actor DBWriter {
     /// iteration 2: workers produce ~7 files / 60 ms steady state, so the
     /// 50ms ceiling fired before batches could grow past ~10 files. 200ms
     /// lets batches accumulate to ~30 files, cutting commit overhead 3-4×.
-    private let maxBatchFiles = 100
+    /// Batch ceiling scales with the machine's RAM tier (mirrors the Windows
+    /// engine): a high-memory box commits in bigger chunks (fewer transactions,
+    /// less WAL churn, more of its headroom used), a low-RAM box stays small.
+    /// M1 Pro 16 GB → .balanced → 250. The decoupled committer (F-C6-004) keeps
+    /// at most ~2 batches resident, so even 500 is a low-MB buffer.
+    private let maxBatchFiles: Int = {
+        switch Hardware.memoryTier {
+        case .low:      return 64    // <12 GB — conservative
+        case .balanced: return 100   // 12–48 GB (incl. M1 Pro 16 GB) — the proven baseline, unchanged
+        case .high:     return 500   // ≥48 GB — bigger chunks use the headroom
+        }
+    }()
     private let maxBatchMs    = 200
 
     /// startScan's `rescan` flag: true forces every file through the full
