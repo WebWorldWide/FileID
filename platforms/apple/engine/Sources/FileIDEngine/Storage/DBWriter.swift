@@ -465,7 +465,8 @@ public actor DBWriter {
         // and the carried-over children are left intact (no re-detect).
         if existing == nil, let ref = file.fileRef,
            try Self.healMovedRow(
-               fileRef: ref, newPath: file.url.path, newPathHash: pathHash,
+               fileRef: ref, newSize: file.sizeBytes, newPath: file.url.path,
+               newPathHash: pathHash,
                newPathSearch: file.url.path.precomposedStringWithCanonicalMapping,
                db: db) != nil {
             existing = try Row.fetchOne(
@@ -724,22 +725,27 @@ public actor DBWriter {
     /// macOS — content_hash isn't computed by the scan path, and file_ref alone
     /// covers same-volume rename/move, the dominant case.
     private static func healMovedRow(
-        fileRef: UInt64, newPath: String, newPathHash: Int64,
+        fileRef: UInt64, newSize: Int64, newPath: String, newPathHash: Int64,
         newPathSearch: String, db: GRDB.Database
     ) throws -> Int64? {
         // Stored bit-for-bit as Windows binds it (`r as i64`) so the lookup keys
         // match across a cross-platform DB round-trip.
         let refInt = Int64(bitPattern: fileRef)
-        // Candidate rows: same volume-local identity, DIFFERENT path. NULL
-        // file_ref never matches (a row without identity can't be healed). More
-        // than one match only on hardlinks; the gate below keeps coexisting links
-        // distinct and re-binds only the genuinely-gone original.
+        // Candidate rows: same volume-local identity AND same size, DIFFERENT
+        // path. NULL file_ref never matches. The size corroboration is the
+        // R-10 caution made real: st_ino carries no generation number, so APFS/
+        // HFS reuse a deleted file's inode freely — without a second signal a
+        // reused inode would re-bind a deleted row onto an unrelated new file and
+        // hand it stale tags/faces/OCR. A genuine move preserves size, so
+        // requiring size_bytes match blocks the reuse case while keeping true
+        // moves healable. (audit F-A2)
         let candidates = try Row.fetchAll(
             db.cachedStatement(sql: """
                 SELECT id, path_text FROM files
                 WHERE path_text != ? AND file_ref IS NOT NULL AND file_ref = ?
+                  AND size_bytes = ?
                 """),
-            arguments: [newPath, refInt])
+            arguments: [newPath, refInt, newSize])
         for row in candidates {
             let oldPath: String = row["path_text"]
             // Heal ONLY a genuine move: the candidate's old path must be GONE.

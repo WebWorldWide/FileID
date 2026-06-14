@@ -536,6 +536,15 @@ public actor DeepAnalyze {
                                    proposedName: nil)
         }
         let raw = collector.snapshot().trimmingCharacters(in: .whitespacesAndNewlines)
+        // An empty generation (model emitted nothing / only whitespace) must be a
+        // FAILURE, not a successful empty caption: parse("") yields description=""
+        // and the runner's COALESCE(?, vlm_description) persist would then OVERWRITE
+        // a previously-good caption with "". The runner's isFailure check keys off
+        // the "Inference failed" prefix, so surface it in that shape. (audit F-A6)
+        guard !raw.isEmpty else {
+            return AnalysisResult(description: "Inference failed: empty model output",
+                                   proposedName: nil)
+        }
         let parsed = Self.parse(rawOutput: raw)
         // Drain MLX scratch periodically — keeps weights resident, drops
         // per-image temporary tensors.

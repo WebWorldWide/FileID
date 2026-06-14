@@ -456,7 +456,11 @@ public enum Restructure {
         var moved = 0
         var skipped = 0
         var failed = 0
-        let conflicts: [String] = []
+        // Destinations whose planned basename already existed and were resolved to
+        // a ` (2)`-style sibling by uniqueDestination — surfaced so the app can
+        // tell the user which moves were renamed rather than placed verbatim.
+        // Was a dead `let [] ` despite the uniquify path below. (audit F-A4)
+        var conflicts: [String] = []
         let resolvedRoot = libraryRoot.resolvingSymlinksInPath().path
         // B3: destinations claimed by an earlier move in THIS batch, so two
         // distinct sources mapping to the same basename don't collide before
@@ -529,7 +533,16 @@ public enum Restructure {
                 try fm.createDirectory(at: plannedURL.deletingLastPathComponent(),
                                        withIntermediateDirectories: true)
             } catch {
-                failed += 1; continue
+                failed += 1
+                // Mirror the moveItem/DB-update sites: a swallowed mkdir failure
+                // left a `failed` count with no breadcrumb. Domain+code only — the
+                // NSError text embeds the full path. (audit F-A5)
+                let ns = error as NSError
+                JSONLog.shared.warn(ev: "restructure_mkdir_failed",
+                                    path: redactPathForLog(
+                                        plannedURL.deletingLastPathComponent().path),
+                                    error: "\(ns.domain) \(ns.code)")
+                continue
             }
             // SEC-5 port: re-verify after createDirectory (an attacker can
             // plant a symlink between check and use; cheap defense in depth).
@@ -563,6 +576,7 @@ public enum Restructure {
             // NOT also count it failed (no double-count); it's recorded for
             // recovery (and self-heals on the next scan). (F-C3-012)
             moved += 1
+            if finalURL.path != plannedURL.path { conflicts.append(plannedURL.path) }
             do {
                 let finalPath = finalURL.path
                 // ENG-91: refresh path_hash too (notNull, indexed StablePathHash
