@@ -1891,7 +1891,20 @@ async fn process_file_predecoded(
             "GPU device removed mid-scan; file not fully processed (will retry next scan)".into()
         });
     }
-    tagged.tags_evaluated = !coord.is_gpu_dead() && !tagged.failed && !file.online_only;
+    // Mirror faces_evaluated (~1598): a visual file's tag set is authoritative
+    // only when a tagger was actually available to evaluate it this session.
+    // With RAM++ absent (a supported fallback) AND no usable CLIP scene path
+    // (labeler missing, or this file's embed failed transiently), `tags` holds
+    // only the Year/camera enriched extras — not an authoritative empty — so
+    // setting tags_evaluated would make the dbwriter delete-then-reinsert wipe
+    // the file's previously-persisted content tags. (audit R3-19)
+    let visual_tagger_ran = models.ram_plus.is_some()
+        || models.ram_plus_batch.is_some()
+        || (models.scene_labeler.is_some() && tagged.clip_embedding.is_some());
+    tagged.tags_evaluated = !coord.is_gpu_dead()
+        && !tagged.failed
+        && !file.online_only
+        && (!matches!(file.kind, FileKind::Image | FileKind::Video) || visual_tagger_ran);
     tagged
 }
 

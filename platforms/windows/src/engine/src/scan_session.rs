@@ -352,49 +352,60 @@ impl ScanSession {
                     // Close out cleanly with a "no supported files found"
                     // error so the user knows what happened.
                     let errs = errors_for_tick.load(std::sync::atomic::Ordering::Relaxed);
-                    let already =
-                        notice_emitted_for_tick.swap(true, std::sync::atomic::Ordering::SeqCst);
-                    if !already && count == 0 && skip_count > 0 {
+                    // Build the notice this tick would emit (None when there's
+                    // nothing to say) so the single-shot flag is only CLAIMED
+                    // when a notice is actually delivered. (audit R3-21)
+                    let notice = if count == 0 && skip_count > 0 {
                         // Incremental rescan where every file was already
                         // current — not an error. Non-fatal "already up to
                         // date" notice (#21).
-                        let _ = sink_for_tick.try_send(IpcEvent::now(EventPayload::Error(
-                            Wrap::new(crate::ipc::EngineError {
-                                kind: "rescan_no_changes".into(),
-                                message: "Library is already up to date — no new or changed files to scan."
-                                    .into(),
-                                path: Some(root_for_tick.clone()),
-                                model_kind: None,
-                            }),
-                        )));
-                    } else if !already && count == 0 {
+                        Some(crate::ipc::EngineError {
+                            kind: "rescan_no_changes".into(),
+                            message: "Library is already up to date — no new or changed files to scan."
+                                .into(),
+                            path: Some(root_for_tick.clone()),
+                            model_kind: None,
+                        })
+                    } else if count == 0 {
                         // Genuinely empty / unsupported folder.
-                        let _ = sink_for_tick.try_send(IpcEvent::now(EventPayload::Error(
-                            Wrap::new(crate::ipc::EngineError {
-                                kind: "empty_folder".into(),
-                                message: format!(
-                                    "No supported files found in {}.\n\
-                                     Pick a folder with images, videos, PDFs, or documents.",
-                                    root_for_tick
-                                ),
-                                path: Some(root_for_tick.clone()),
-                                model_kind: None,
-                            }),
-                        )));
-                    } else if !already && errs > 0 {
+                        Some(crate::ipc::EngineError {
+                            kind: "empty_folder".into(),
+                            message: format!(
+                                "No supported files found in {}.\n\
+                                 Pick a folder with images, videos, PDFs, or documents.",
+                                root_for_tick
+                            ),
+                            path: Some(root_for_tick.clone()),
+                            model_kind: None,
+                        })
+                    } else if errs > 0 {
                         // Non-fatal: walk recovered after the failures.
-                        let _ = sink_for_tick.try_send(IpcEvent::now(EventPayload::Error(
-                            Wrap::new(crate::ipc::EngineError {
-                                kind: "discovery_partial".into(),
-                                message: format!(
-                                    "Scanned {} file(s); {} path(s) couldn't be read \
-                                     (permission denied or removed mid-scan). Scan continues.",
-                                    count, errs
-                                ),
-                                path: Some(root_for_tick.clone()),
-                                model_kind: None,
-                            }),
-                        )));
+                        Some(crate::ipc::EngineError {
+                            kind: "discovery_partial".into(),
+                            message: format!(
+                                "Scanned {} file(s); {} path(s) couldn't be read \
+                                 (permission denied or removed mid-scan). Scan continues.",
+                                count, errs
+                            ),
+                            path: Some(root_for_tick.clone()),
+                            model_kind: None,
+                        })
+                    } else {
+                        None
+                    };
+                    if let Some(err) = notice {
+                        // Claim the single-shot, but RELEASE it if the droppable
+                        // try_send drops under sink backpressure — otherwise a
+                        // dropped notice would also suppress the reliable
+                        // post-drain .await fallback, losing it entirely. (R3-21)
+                        if !notice_emitted_for_tick.swap(true, std::sync::atomic::Ordering::SeqCst)
+                            && sink_for_tick
+                                .try_send(IpcEvent::now(EventPayload::Error(Wrap::new(err))))
+                                .is_err()
+                        {
+                            notice_emitted_for_tick
+                                .store(false, std::sync::atomic::Ordering::SeqCst);
+                        }
                     }
                     return;
                 }
