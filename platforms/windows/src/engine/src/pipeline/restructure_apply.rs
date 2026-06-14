@@ -528,14 +528,38 @@ fn has_reparse_point_in_chain(parent: &Path, root: &Path) -> bool {
                 return true;
             }
         }
-        // Stop once we reach (or pass) the root — compared in the same path form.
+        // Stop once we reach (or pass) the root. Compared CASE-INSENSITIVELY and
+        // component-wise: NTFS is case-insensitive, so a raw IPC parent that
+        // differs only in casing from the canonical root (e.g. `d:\library\…` vs
+        // canonical `D:\Library`) must still be recognized as inside it. Plain
+        // `Path::starts_with` is case-sensitive and broke this walk after a single
+        // level on any casing mismatch — silently reducing SEC-5 to one ancestor.
+        // (audit F-A2)
         let cur_norm = strip_extended_length(&cur);
-        if cur_norm == root_norm || !cur_norm.starts_with(&root_norm) {
+        let under = ci_starts_with(&cur_norm, &root_norm);
+        let at_root = under && ci_starts_with(&root_norm, &cur_norm);
+        if at_root || !under {
             break;
         }
         if !cur.pop() { break; }
     }
     false
+}
+
+/// Component-wise, case-insensitive prefix test (Windows NTFS is
+/// case-insensitive). Unlike a lowercased-string `starts_with`, this respects
+/// path-component boundaries so a sibling like `…\PhotosBackup` cannot
+/// prefix-match `…\Photos`. (audit F-A2)
+#[cfg(windows)]
+fn ci_starts_with(p: &Path, prefix: &Path) -> bool {
+    let mut pc = p.components();
+    for pre in prefix.components() {
+        match pc.next() {
+            Some(c) if c.as_os_str().eq_ignore_ascii_case(pre.as_os_str()) => continue,
+            _ => return false,
+        }
+    }
+    true
 }
 
 #[cfg(not(windows))]
