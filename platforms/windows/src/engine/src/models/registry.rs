@@ -578,21 +578,59 @@ fn revision_token(model: &Model) -> String {
 pub fn sentinel_path(model: &Model) -> Option<PathBuf> {
     let dir = paths::models_dir().ok()?.join(".sentinels");
     let keyed = dir.join(format!("{}-{}.installed", model.id, revision_token(model)));
-    migrate_legacy_sentinel(&dir, &model.id, &keyed);
+    migrate_legacy_sentinel(&dir, model, &keyed);
     Some(keyed)
 }
 
 /// Heal a pre-revision-key install in place by renaming a legacy bare
 /// `{id}.installed` to the current `keyed` sentinel. No-op when the keyed
 /// sentinel already exists or no legacy marker is present. See [`sentinel_path`].
-fn migrate_legacy_sentinel(dir: &Path, model_id: &str, keyed: &Path) {
+fn migrate_legacy_sentinel(dir: &Path, model: &Model, keyed: &Path) {
     if keyed.exists() {
         return;
     }
-    let legacy = dir.join(format!("{model_id}.installed"));
-    if legacy.exists() {
-        let _ = std::fs::rename(&legacy, keyed);
+    let legacy = dir.join(format!("{}.installed", model.id));
+    if !legacy.exists() {
+        return;
     }
+    // R5-05: a legacy bare marker carries no revision token, so it cannot signal
+    // a pin bump on its own. Re-validate the on-disk artifacts against the CURRENT
+    // pins before vouching, or a stale pre-bump install masquerades as the current
+    // one (C1-024). approx_bytes is a rounded estimate, so SHA256 (the exact,
+    // mandatory pin) is the check. Runs at most once per legacy install (this
+    // branch is unreachable once keyed exists or the marker is gone), so the
+    // one-time hash is off the hot path.
+    let pins_valid = model.files.iter().all(|f| match f.sha256.as_deref() {
+        Some(expected) => file_sha256_matches(&f.dest, expected),
+        None => f.dest.exists(),
+    });
+    if pins_valid {
+        let _ = std::fs::rename(&legacy, keyed);
+    } else {
+        // Stale/partial pre-bump install: drop the marker so the install gate +
+        // scan pre-flight fall through to a clean re-fetch (and the C# bare-name
+        // SentinelExists check stops reporting it installed).
+        let _ = std::fs::remove_file(&legacy);
+    }
+}
+
+/// True iff `path` exists and its SHA256 hex digest equals `expected`
+/// (case-insensitive). Streams the file so a multi-GB weight isn't read into RAM.
+fn file_sha256_matches(path: &Path, expected: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        match std::io::Read::read(&mut f, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&buf[..n]),
+            Err(_) => return false,
+        }
+    }
+    hex::encode(hasher.finalize()).eq_ignore_ascii_case(expected)
 }
 
 #[cfg(test)]
@@ -691,14 +729,24 @@ mod tests {
         }
     }
 
-    /// R-04: a pre-revision-key install has a bare `{id}.installed`. On first
-    /// read it must be migrated (renamed) to the current keyed name so the
-    /// install gate sees it as installed — not re-download a multi-GB model that
-    /// is already present and valid.
-    #[test]
-    fn legacy_sentinel_is_migrated_to_keyed_name() {
+    // Build a one-file Model fixture pointing `dest` at a path under `dir`.
+    fn test_model(dir: &Path, file_name: &str, sha256: Option<String>) -> Model {
+        Model {
+            id: "ram_plus",
+            display_name: "RAM++",
+            files: vec![FileEntry {
+                url: String::new(),
+                dest: dir.join(file_name),
+                sha256,
+                approx_bytes: 0,
+            }],
+        }
+    }
+
+    fn unique_sentinel_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "fileid-sentinel-migrate-{}-{}",
+            "fileid-sentinel-{}-{}-{}",
+            tag,
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -706,42 +754,73 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// R-04: a pre-revision-key install has a bare `{id}.installed`. On first read
+    /// it must be migrated (renamed) to the current keyed name — BUT only when the
+    /// on-disk artifacts still satisfy the current pins (R5-05). Here the lone file
+    /// is present (sha256=None → existence is the gate), so migration proceeds.
+    #[test]
+    fn legacy_sentinel_is_migrated_when_pins_valid() {
+        let dir = unique_sentinel_dir("migrate");
+        std::fs::write(dir.join("ram_plus.onnx"), b"weights").unwrap(); // satisfies the pin
         let legacy = dir.join("ram_plus.installed");
         std::fs::write(&legacy, b"ram_plus").unwrap();
         let keyed = dir.join("ram_plus-deadbeef00000000.installed");
 
-        migrate_legacy_sentinel(&dir, "ram_plus", &keyed);
+        migrate_legacy_sentinel(&dir, &test_model(&dir, "ram_plus.onnx", None), &keyed);
 
-        assert!(keyed.exists(), "keyed sentinel not created from legacy marker");
+        assert!(keyed.exists(), "keyed sentinel not created from a valid legacy marker");
         assert!(!legacy.exists(), "legacy marker not consumed by migration");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// R5-05: a legacy marker whose on-disk artifacts no longer satisfy the
+    /// current pins (missing file, or sha256 mismatch after a pin bump) must NOT
+    /// be promoted — it is DELETED so the install gate re-fetches.
+    #[test]
+    fn legacy_sentinel_dropped_when_pins_stale() {
+        // (a) required file missing → not valid → marker dropped.
+        let dir = unique_sentinel_dir("stale-missing");
+        let legacy = dir.join("ram_plus.installed");
+        std::fs::write(&legacy, b"ram_plus").unwrap();
+        let keyed = dir.join("ram_plus-deadbeef00000000.installed");
+        migrate_legacy_sentinel(&dir, &test_model(&dir, "ram_plus.onnx", None), &keyed);
+        assert!(!keyed.exists(), "must not vouch when the pinned file is missing");
+        assert!(!legacy.exists(), "stale legacy marker must be dropped for a re-fetch");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // (b) file present but sha256 mismatches the (bumped) pin → dropped.
+        let dir = unique_sentinel_dir("stale-sha");
+        std::fs::write(dir.join("ram_plus.onnx"), b"OLD pre-bump bytes").unwrap();
+        let legacy = dir.join("ram_plus.installed");
+        std::fs::write(&legacy, b"ram_plus").unwrap();
+        let keyed = dir.join("ram_plus-cafebabe00000000.installed");
+        let wrong = Some("0000000000000000000000000000000000000000000000000000000000000000".into());
+        migrate_legacy_sentinel(&dir, &test_model(&dir, "ram_plus.onnx", wrong), &keyed);
+        assert!(!keyed.exists(), "must not vouch when sha256 mismatches the current pin");
+        assert!(!legacy.exists(), "sha-mismatched legacy marker must be dropped");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Migration must NOT clobber an existing keyed sentinel, and is a no-op when
-    /// no legacy marker is present (a genuine pin bump's stale keyed name is left
-    /// for the re-fetch path).
+    /// no legacy marker is present (both early-return before pin validation).
     #[test]
     fn migration_noop_without_legacy_marker() {
-        let dir = std::env::temp_dir().join(format!(
-            "fileid-sentinel-noop-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = unique_sentinel_dir("noop");
         let keyed = dir.join("ram_plus-cafebabe00000000.installed");
+        let model = test_model(&dir, "ram_plus.onnx", None);
 
         // No legacy, no keyed → stays absent (re-fetch path).
-        migrate_legacy_sentinel(&dir, "ram_plus", &keyed);
+        migrate_legacy_sentinel(&dir, &model, &keyed);
         assert!(!keyed.exists(), "migration must not fabricate a sentinel");
 
         // Existing keyed + a legacy marker → keyed preserved, legacy untouched.
         std::fs::write(&keyed, b"ram_plus").unwrap();
         let legacy = dir.join("ram_plus.installed");
         std::fs::write(&legacy, b"ram_plus").unwrap();
-        migrate_legacy_sentinel(&dir, "ram_plus", &keyed);
+        migrate_legacy_sentinel(&dir, &model, &keyed);
         assert!(keyed.exists() && legacy.exists(), "existing keyed sentinel must not trigger a rename");
         let _ = std::fs::remove_dir_all(&dir);
     }
