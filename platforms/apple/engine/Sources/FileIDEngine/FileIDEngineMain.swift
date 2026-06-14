@@ -229,7 +229,10 @@ struct FileIDEngineMain {
             // deterministically. Without this, a scan paused at shutdown
             // leaves its workers spinning in the pause-poll loop forever and
             // `awaitActiveScan()` (in main) blocks the clean exit indefinitely.
-            await coordinator.requestCancel()
+            // requestShutdown (not requestCancel) also trips the dedicated
+            // shutdown mirror so a clustering pass started after a cancelled scan
+            // aborts promptly instead of running to its persist first. (R-07)
+            await coordinator.requestShutdown()
         case .runFaceClustering:
             guard let database else {
                 await sink.emit(.error(EngineError(

@@ -102,4 +102,21 @@ struct FaceClusteringDeterminismTests {
         #expect(!completed.cancelled)
         #expect(completed.clusterCount == 1, "the uncancelled pass runs to completion")
     }
+
+    // R-07: the scan-cancel mirror is sticky, so a cluster started after a
+    // cancelled scan sees current==true at entry (baseline==true) and must NOT
+    // abort on that stale signal — but a genuine shutdown (dedicated mirror) must
+    // always abort, even with that stale baseline.
+    @Test("clusterShouldCancel: stale scan-cancel ignored; fresh cancel + shutdown honored")
+    func clusterShouldCancelSemantics() {
+        // Stale scan-cancel (true at entry, still true) → keep running.
+        #expect(!FaceClustering.clusterShouldCancel(baseline: true, current: true))
+        // Cancel that flips true DURING the run → abort.
+        #expect(FaceClustering.clusterShouldCancel(baseline: false, current: true))
+        // No cancel → keep running.
+        #expect(!FaceClustering.clusterShouldCancel(baseline: false, current: false))
+        // Shutdown ALWAYS aborts, even under a stale scan-cancel baseline.
+        #expect(FaceClustering.clusterShouldCancel(baseline: true, current: true, shuttingDown: true))
+        #expect(FaceClustering.clusterShouldCancel(baseline: false, current: false, shuttingDown: true))
+    }
 }
