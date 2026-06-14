@@ -79,10 +79,20 @@ corpus. What remains are the write-path and threshold items that need the owner'
 - **`ReadStore.refreshCounters` NSLock-in-async.** Compiles today but holds an `NSLock` across an
   `await` in the counters loop; replace with a Swift-6-concurrency-safe lock. *Acceptance:* builds
   clean under Swift 6 mode with no actor-isolation warnings.
-- **Deep Analyze (MLX) + face/CLIP model features** could not be exercised on the dev box (no Xcode
-  Metal toolchain; models not installed). Graceful model-absence handling WAS verified; the populated
-  path needs a Mac with the models installed. *Acceptance:* a full Deep Analyze run completes offline
-  against an installed VLM (no network round-trip); face crops + CLIP semantic search return rows.
+- ~~**Deep Analyze (MLX)**~~ — **DONE 2026-06-14 (on-hardware, Xcode 26.5 installed).** With the cached
+  `mlx.metallib` next to the engine + Qwen3-VL 4B downloaded, `deepAnalyzeFile` and `deepAnalyzeFolder`
+  produce accurate captions + smart-renames offline (~8 s/image after a ~30 s load), persist
+  `vlm_*` columns, and gracefully skip a corrupt non-image (no crash). See the memory
+  `onhardware-engine-testing` for the exact setup. STILL untested headlessly: face crops + **CLIP
+  semantic SEARCH** (text→image) — the text encoder is app-side (`CLIPTextEncoder`); the engine returns
+  `not_implemented` for `embedTextQuery`, so search needs a GUI session.
+- **`ScanCancellationTests` is skipped on the GitHub macOS runner** (`.enabled(if: GITHUB_ACTIONS==nil)`):
+  the process-spawning test leaks the engine child and wedges the swift-testing harness to the 12-min
+  SIGALRM there (does not reproduce on a dev Mac; passes <2 s; collector/GCD-watchdog/stdout-drain
+  hardening didn't make it deterministic on CI). The cancel WIRING is covered on CI by
+  `requestCancelCancelsRestructureTask`. *Fix:* rewrite it to drive the scan pipeline IN-PROCESS (test
+  sink + temp DB, no `Process`) so the C1 cancel-deadlock regression runs on CI too. *Acceptance:* the
+  cancel-deadlock test runs and passes on the GitHub runner with no SIGALRM.
 - **R-11 (DeepAnalyze ModelLoadGate JobQueue wedge).** When a same-model prewarm is *joined* to a
   run's single-flight model load and the run is cancelled, the run's JobQueue lane stays wedged until
   the joined download finishes (self-resolving, not a permanent hang). The ref-count gate correctly
