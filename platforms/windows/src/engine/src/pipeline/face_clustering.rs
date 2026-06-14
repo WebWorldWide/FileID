@@ -508,6 +508,54 @@ pub fn name_blocked_pairs<S: std::hash::BuildHasher>(
     blocked
 }
 
+/// Block auto-merge of a user-marked UNKNOWN cluster into a DIFFERENT person's
+/// cluster. mark-as-unknown nulls the name (bulk.rs), so `name_blocked_pairs`
+/// can't see it and `consolidate()` would otherwise fold the unknown cluster
+/// into a named/other person — reversing the user's verdict and, when the
+/// unknown owner wins the persist vote, overwriting a user-assigned name with
+/// NULL. (audit R3-03)
+///
+/// `face_owner` maps each carried-forward face to its prior person id;
+/// `unknown_persons` is the set of prior person ids with is_unknown=1. Each
+/// fresh cluster is assigned its majority prior PERSON id (ties → lowest id,
+/// matching the persist vote). Any pair of clusters whose majority owners
+/// differ is blocked when EITHER owner is unknown. Same-prior-person fragments
+/// (incl. two fragments of one unknown person) are never blocked, and untouched
+/// auto-clustered persons (name=NULL, is_unknown=0) are absent from `face_owner`,
+/// so normal over-split consolidation is unaffected.
+pub fn unknown_blocked_pairs<S: std::hash::BuildHasher>(
+    face_owner: &HashMap<i64, i64, S>,
+    unknown_persons: &std::collections::HashSet<i64, S>,
+    cluster_of: &HashMap<i64, i32, S>,
+) -> std::collections::HashSet<(i32, i32)> {
+    let mut owner_votes: HashMap<i32, HashMap<i64, u32>> = HashMap::new();
+    for (fid, &pid) in face_owner {
+        if let Some(&cid) = cluster_of.get(fid) {
+            *owner_votes.entry(cid).or_default().entry(pid).or_insert(0) += 1;
+        }
+    }
+    let cluster_owner: Vec<(i32, i64)> = owner_votes
+        .into_iter()
+        .filter_map(|(cid, votes)| {
+            votes
+                .into_iter()
+                .max_by(|(pa, ca), (pb, cb)| ca.cmp(cb).then_with(|| pb.cmp(pa)))
+                .map(|(pid, _)| (cid, pid))
+        })
+        .collect();
+    let mut blocked = std::collections::HashSet::new();
+    for i in 0..cluster_owner.len() {
+        for j in (i + 1)..cluster_owner.len() {
+            let (ci, pi) = cluster_owner[i];
+            let (cj, pj) = cluster_owner[j];
+            if pi != pj && (unknown_persons.contains(&pi) || unknown_persons.contains(&pj)) {
+                blocked.insert(if ci < cj { (ci, cj) } else { (cj, ci) });
+            }
+        }
+    }
+    blocked
+}
+
 /// Pairs in the uncertain similarity band 0.45..=0.70. The VLM verifier
 /// is invoked on these — outputs go back into the union-find.
 #[allow(dead_code)]

@@ -197,6 +197,56 @@ impl DbWriter {
             })
             .collect();
 
+        // Rename/move heal old-path existence is resolved BEFORE the writer
+        // lock: `heal_candidate_moved()` does a blocking `symlink_metadata()`
+        // stat (is the candidate's old path still on disk?). On a dead/slow
+        // mount (unmounted NAS, pulled SD/external drive) that stat can block
+        // for the full fs/SMB timeout; inside the tx it would stall the single
+        // writer for the whole batch — the same hazard the `legacy_hashes` hoist
+        // above and the post-commit crop write defend against. Enumerate
+        // candidate old paths under a brief read lock, then stat them with the
+        // writer lock RELEASED, into a path -> "gone" map the in-tx loop
+        // consults instead of statting. (audit R3-16)
+        let heal_old_path_gone: std::collections::HashMap<String, bool> = {
+            let mut old_paths: Vec<String> = Vec::new();
+            {
+                let conn = self.conn.lock();
+                let mut heal_lookup = conn
+                    .prepare_cached(HEAL_LOOKUP_SQL)
+                    .context("preparing rename-heal lookup (pre-pass)")?;
+                for (i, f) in buffer.iter().enumerate() {
+                    if f.file_ref.is_none() && f.content_hash.is_none() {
+                        continue;
+                    }
+                    let path_text = f.path.to_string_lossy();
+                    let rows = heal_lookup
+                        .query_map(
+                            params![
+                                f.file_ref.map(|r| r as i64),
+                                f.content_hash.as_ref().map(|h| h.as_slice()),
+                                path_text.as_ref(),
+                                legacy_hashes[i].as_ref().map(|h| h.as_slice()),
+                                f.size_bytes as i64
+                            ],
+                            |r| r.get::<_, String>(1),
+                        )
+                        .context("rename-heal lookup (pre-pass)")?;
+                    for old in rows {
+                        old_paths.push(old.context("rename-heal lookup row (pre-pass)")?);
+                    }
+                }
+            } // writer lock released before any filesystem IO
+            old_paths.sort();
+            old_paths.dedup();
+            old_paths
+                .into_iter()
+                .map(|old| {
+                    let gone = heal_candidate_moved(false, &old);
+                    (old, gone)
+                })
+                .collect()
+        };
+
         let conn = self.conn.lock();
         let tx = conn.unchecked_transaction().context("opening tx")?;
         {
@@ -299,7 +349,8 @@ impl DbWriter {
                                 f.file_ref.map(|r| r as i64),
                                 ch_bytes,
                                 path_text.as_ref(),
-                                legacy_hash.as_ref().map(|h| h.as_slice())
+                                legacy_hash.as_ref().map(|h| h.as_slice()),
+                                f.size_bytes as i64
                             ],
                             |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)),
                         )
@@ -314,7 +365,7 @@ impl DbWriter {
                     // ordered first in SQL (the precise rename signal).
                     if let Some((id, _old, _by_ref)) = candidates
                         .into_iter()
-                        .find(|(_, old, by_ref)| heal_candidate_moved(*by_ref, old))
+                        .find(|(_, old, _by_ref)| heal_old_path_gone.get(old).copied().unwrap_or(false))
                     {
                         match heal_update_stmt.execute(params![path_text, path_hash, id, path_search]) {
                             Ok(_) => tracing::info!(
@@ -373,6 +424,10 @@ impl DbWriter {
                             f.content_hash.as_ref().map(|h| h.as_slice()),
                             f.file_ref.map(|r| r as i64),
                             path_search,
+                            // ?21/?22 stage-ran gates for the has_faces/has_text
+                            // CASE WHEN in the upsert (R3-04).
+                            f.faces_evaluated,
+                            f.ocr_stage_ran || f.doc_stage_ran,
                         ],
                         |row| row.get(0),
                     )
@@ -637,12 +692,22 @@ const INSERT_FILE_SQL: &str = r#"
         scanned_at   = excluded.scanned_at,
         kind         = excluded.kind,
         extension    = excluded.extension,
-        phash        = excluded.phash,
-        has_faces    = excluded.has_faces,
-        has_text     = excluded.has_text,
-        camera_model = excluded.camera_model,
-        location_lat = excluded.location_lat,
-        location_lon = excluded.location_lon,
+        -- Preserve previously-computed vision/EXIF metadata when this re-scan
+        -- produced no value (decode failed, file lock, mid-scan GPU TDR, or an
+        -- online-only/dehydrated placeholder leaves these NULL). A genuine
+        -- content change bumps modified_at and the successful re-decode supplies
+        -- a fresh Some(_) that COALESCE picks instead. Mirrors content_hash. (R3-04)
+        phash        = COALESCE(excluded.phash, phash),
+        camera_model = COALESCE(excluded.camera_model, camera_model),
+        location_lat = COALESCE(excluded.location_lat, location_lat),
+        location_lon = COALESCE(excluded.location_lon, location_lon),
+        -- has_faces/has_text are NOT NULL 0/1, so COALESCE can't protect them.
+        -- Only overwrite when the producing stage actually ran this session
+        -- (?21 = faces_evaluated, ?22 = ocr/doc text stage ran) — keeps the
+        -- files row consistent with its still-present face_prints/ocr_text
+        -- children on a models-missing / GPU-dead / online-only re-scan. (R3-04)
+        has_faces    = CASE WHEN ?21 THEN excluded.has_faces ELSE has_faces END,
+        has_text     = CASE WHEN ?22 THEN excluded.has_text  ELSE has_text  END,
         failed       = excluded.failed,
         error_message= excluded.error_message,
         content_hash = COALESCE(excluded.content_hash, content_hash),
@@ -674,16 +739,24 @@ const INSERT_FILE_RETURNING_ID_SQL: &str = r#"
         scanned_at   = excluded.scanned_at,
         kind         = excluded.kind,
         extension    = excluded.extension,
-        phash        = excluded.phash,
-        has_faces    = excluded.has_faces,
-        has_text     = excluded.has_text,
-        camera_model = excluded.camera_model,
-        location_lat = excluded.location_lat,
-        location_lon = excluded.location_lon,
+        -- Preserve previously-computed vision/EXIF metadata when this re-scan
+        -- produced no value (decode failed, file lock, mid-scan GPU TDR, or an
+        -- online-only/dehydrated placeholder leaves these NULL). A genuine
+        -- content change bumps modified_at and the successful re-decode supplies
+        -- a fresh Some(_) that COALESCE picks instead. Mirrors content_hash. (R3-04)
+        phash        = COALESCE(excluded.phash, phash),
+        camera_model = COALESCE(excluded.camera_model, camera_model),
+        location_lat = COALESCE(excluded.location_lat, location_lat),
+        location_lon = COALESCE(excluded.location_lon, location_lon),
+        -- has_faces/has_text are NOT NULL 0/1, so COALESCE can't protect them.
+        -- Only overwrite when the producing stage actually ran this session
+        -- (?21 = faces_evaluated, ?22 = ocr/doc text stage ran) — keeps the
+        -- files row consistent with its still-present face_prints/ocr_text
+        -- children on a models-missing / GPU-dead / online-only re-scan. (R3-04)
+        has_faces    = CASE WHEN ?21 THEN excluded.has_faces ELSE has_faces END,
+        has_text     = CASE WHEN ?22 THEN excluded.has_text  ELSE has_text  END,
         failed       = excluded.failed,
         error_message= excluded.error_message,
-        -- Preserve a previously-computed identity if the incoming value is
-        -- NULL (e.g. an online-only re-scan after the original full read).
         content_hash = COALESCE(excluded.content_hash, content_hash),
         file_ref     = COALESCE(excluded.file_ref, file_ref)
     RETURNING id
@@ -704,11 +777,11 @@ const INSERT_FILE_RETURNING_ID_SQL: &str = r#"
 // upsert after the heal re-stamps the current recipe.
 const HEAL_LOOKUP_SQL: &str = r#"
     SELECT id, path_text,
-           (?1 IS NOT NULL AND file_ref IS NOT NULL AND file_ref = ?1) AS by_ref
+           (?1 IS NOT NULL AND file_ref IS NOT NULL AND file_ref = ?1 AND size_bytes = ?5) AS by_ref
     FROM files
     WHERE path_text != ?3
       AND (
-          (file_ref IS NOT NULL AND file_ref = ?1)
+          (file_ref IS NOT NULL AND file_ref = ?1 AND size_bytes = ?5)
           OR (content_hash IS NOT NULL AND content_hash IN (?2, ?4))
       )
     ORDER BY by_ref DESC
@@ -964,6 +1037,8 @@ mod tests {
                 f.content_hash.as_ref().map(|h| h.as_slice()),
                 f.file_ref.map(|r| r as i64),
                 path_search,
+                f.faces_evaluated,
+                f.ocr_stage_ran || f.doc_stage_ran,
             ],
         )?;
         Ok(())
@@ -1053,19 +1128,79 @@ mod tests {
             INSERT_FILE_RETURNING_ID_SQL,
             params![row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7,
                     row.8, row.9, row.10, row.11, row.12, row.13, row.14, row.15, row.16,
-                    row.17, row.18, row.0],
+                    row.17, row.18, row.0, false, false],
             |r| r.get(0),
         ).expect("first insert returns id");
         let id2: i64 = conn.query_row(
             INSERT_FILE_RETURNING_ID_SQL,
             params![row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7,
                     row.8, row.9, row.10, row.11, row.12, row.13, row.14, row.15, row.16,
-                    row.17, row.18, row.0],
+                    row.17, row.18, row.0, false, false],
             |r| r.get(0),
         ).expect("ON CONFLICT branch must also return id");
         assert_eq!(id1, id2, "RETURNING must yield stable id across insert + update");
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 1);
+    }
+
+    /// R3-04: a re-scan whose vision/EXIF stage produced no values (decode
+    /// failed / online-only placeholder / GPU dead) must NOT null out
+    /// previously-computed phash/camera/GPS, nor flip has_faces/has_text off
+    /// while their child rows still exist. COALESCE protects the nullable
+    /// scalars; the ?21/?22 stage-ran gates protect the NOT NULL booleans.
+    #[test]
+    fn stage_skipped_rescan_preserves_prior_metadata() {
+        let conn = in_memory_db();
+        let mut a = fixture(r"C:\lib\IMG_META.jpg");
+        a.phash = Some(0x1234_5678);
+        a.camera_model = Some("Canon".into());
+        a.location_lat = Some(40.0);
+        a.location_lon = Some(-73.0);
+        a.has_faces = true;
+        a.has_text = true;
+        a.faces_evaluated = true;
+        a.ocr_stage_ran = true;
+        insert_one(&conn, &a).unwrap();
+
+        // Re-scan where nothing was produced this session (placeholder / decode
+        // fail / models missing): all metadata NULL/false, no stage ran.
+        let mut b = fixture(r"C:\lib\IMG_META.jpg");
+        b.phash = None;
+        b.camera_model = None;
+        b.location_lat = None;
+        b.location_lon = None;
+        b.has_faces = false;
+        b.has_text = false;
+        b.faces_evaluated = false;
+        b.ocr_stage_ran = false;
+        b.doc_stage_ran = false;
+        insert_one(&conn, &b).unwrap();
+
+        let (phash, cam, lat, lon, hf, ht): (Option<i64>, Option<String>, Option<f64>, Option<f64>, i64, i64) =
+            conn.query_row(
+                "SELECT phash, camera_model, location_lat, location_lon, has_faces, has_text \
+                 FROM files WHERE path_text = ?1",
+                params![r"C:\lib\IMG_META.jpg"],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )
+            .unwrap();
+        assert_eq!(phash, Some(0x1234_5678), "phash preserved when re-scan produced none");
+        assert_eq!(cam.as_deref(), Some("Canon"), "camera_model preserved");
+        assert_eq!(lat, Some(40.0), "location_lat preserved");
+        assert_eq!(lon, Some(-73.0), "location_lon preserved");
+        assert_eq!(hf, 1, "has_faces not cleared when the faces stage didn't run");
+        assert_eq!(ht, 1, "has_text not cleared when the text stage didn't run");
+
+        // Positive control: a stage that DID run with a fresh value overwrites.
+        let mut c = fixture(r"C:\lib\IMG_META.jpg");
+        c.has_faces = false;
+        c.faces_evaluated = true; // stage ran and found none → must clear
+        insert_one(&conn, &c).unwrap();
+        let hf2: i64 = conn
+            .query_row("SELECT has_faces FROM files WHERE path_text = ?1",
+                       params![r"C:\lib\IMG_META.jpg"], |r| r.get(0))
+            .unwrap();
+        assert_eq!(hf2, 0, "has_faces cleared when the faces stage actually ran and found none");
     }
 
     /// ON CONFLICT must UPDATE (not skip) so a rescan with new
@@ -1204,7 +1339,8 @@ mod tests {
                         f.file_ref.map(|r| r as i64),
                         ch_bytes,
                         path_text.as_ref(),
-                        legacy_hash.as_ref().map(|h| h.as_slice())
+                        legacy_hash.as_ref().map(|h| h.as_slice()),
+                        f.size_bytes as i64
                     ],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)),
                 )
@@ -1240,6 +1376,8 @@ mod tests {
                 f.content_hash.as_ref().map(|h| h.as_slice()),
                 f.file_ref.map(|r| r as i64),
                 path_search,
+                f.faces_evaluated,
+                f.ocr_stage_ran || f.doc_stage_ran,
             ],
             |r| r.get(0),
         )
@@ -1260,7 +1398,7 @@ mod tests {
         let by_ref: bool = conn
             .query_row(
                 HEAL_LOOKUP_SQL,
-                params![Some(0xABCDu64), Some([7u8; 32].as_slice()), r"C:\lib\new\IMG.jpg", None::<&[u8]>],
+                params![Some(0xABCDu64), Some([7u8; 32].as_slice()), r"C:\lib\new\IMG.jpg", None::<&[u8]>, 1234i64],
                 |r| Ok(r.get::<_, i64>(2)? != 0),
             )
             .unwrap();
@@ -1271,7 +1409,7 @@ mod tests {
         let by_ref_none: bool = conn
             .query_row(
                 HEAL_LOOKUP_SQL,
-                params![None::<u64>, Some([7u8; 32].as_slice()), r"C:\lib\new\IMG.jpg", None::<&[u8]>],
+                params![None::<u64>, Some([7u8; 32].as_slice()), r"C:\lib\new\IMG.jpg", None::<&[u8]>, 1234i64],
                 |r| Ok(r.get::<_, i64>(2)? != 0),
             )
             .unwrap();
@@ -1295,7 +1433,8 @@ mod tests {
                     None::<u64>,
                     Some([0x33u8; 32].as_slice()), // current-recipe digest: no row has it
                     r"C:\lib\new\HUGE.tif",
-                    Some([0x22u8; 32].as_slice())
+                    Some([0x22u8; 32].as_slice()),
+                    1234i64
                 ],
                 |r| Ok((r.get(0)?, r.get::<_, i64>(2)? != 0)),
             )
@@ -1438,6 +1577,40 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 2, "two coexisting files must stay distinct rows");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R3-17: a file_ref match while the old path is GONE but the candidate
+    /// row's size DIFFERS is NOT a genuine move. An NTFS MFT reference is only
+    /// volume-local, so a cross-volume collision (or a reused ref) whose old
+    /// path happens to be absent must not re-bind an unrelated file's row and
+    /// FK-cascade its tags/faces onto a different file. The size_bytes
+    /// corroboration on the file_ref heal arm blocks it; a true rename (same
+    /// size) still heals (see file_ref_rename_with_old_path_gone_heals).
+    #[test]
+    fn file_ref_heal_requires_matching_size() {
+        let dir = unique_tmp_dir("r3_17_size");
+        let new_path = dir.join("after.png");
+        std::fs::write(&new_path, b"x").unwrap();
+        // Old path never created on disk → "gone" → would heal if size matched.
+        let old_path = dir.join("gone").join("before.png");
+
+        let conn = in_memory_db();
+        let mut a = fixture(old_path.to_str().unwrap());
+        a.file_ref = Some(0xC0FF_EE00);
+        a.size_bytes = 1000; // original file's size
+        let id_a = ingest_with_heal(&conn, &a);
+
+        let mut b = fixture(new_path.to_str().unwrap());
+        b.file_ref = Some(0xC0FF_EE00); // same ref, old path gone …
+        b.size_bytes = 2000; // … but a different size → a different file
+        let id_b = ingest_with_heal(&conn, &b);
+
+        assert_ne!(id_a, id_b, "same ref + old path gone but different size must not heal");
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2, "the size mismatch keeps them as two distinct rows");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
