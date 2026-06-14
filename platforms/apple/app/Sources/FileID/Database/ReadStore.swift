@@ -34,6 +34,23 @@ public final class ReadStore: @unchecked Sendable {
     public private(set) var totalReclaimableMB: Double = 0
     public private(set) var lastError: String?
 
+    // R3-06: `lastError` is an @Observable property SwiftUI reads on the
+    // MainActor, but it's written from off-main detached tasks (bulk rename /
+    // merge / undo). A bare off-main write of an Optional<String> racing a
+    // MainActor read is undefined behavior under Swift 6. Route every write
+    // through `reportError`: it updates a lock-backed shadow synchronously (so
+    // the rare synchronous read-after-write paths still see the value) and
+    // publishes the observable property on the main actor.
+    @ObservationIgnored private let errorLock = NSLock()
+    @ObservationIgnored private var _lastErrorShadow: String?
+    private func reportError(_ message: String?) {
+        errorLock.withLock { _lastErrorShadow = message }
+        Task { @MainActor in self.lastError = message }
+    }
+    private func lastErrorSnapshot() -> String? {
+        errorLock.withLock { _lastErrorShadow }
+    }
+
     public init(dbURL: URL = ReadStore.defaultDBURL) {
         self.dbURL = dbURL
     }
@@ -58,7 +75,7 @@ public final class ReadStore: @unchecked Sendable {
                 config.readonly = true
                 self.queue = try DatabaseQueue(path: dbURL.path, configuration: config)
             } catch {
-                self.lastError = "Could not open DB: \(error)"
+                reportError("Could not open DB: \(error)")
                 return
             }
         }
@@ -66,7 +83,13 @@ public final class ReadStore: @unchecked Sendable {
     }
 
     public func notifyChanged() {
-        version &+= 1
+        // R3-06: `version` is an @Observable property SwiftUI reads on the
+        // MainActor; notifyChanged() is reached OFF main from the bulk-rename /
+        // merge / undo detached tasks, so a bare `version &+= 1` is an off-main
+        // write racing a MainActor read (torn RMW / lost update). Serialize the
+        // increment on the main actor. refreshCounters() is already internally
+        // thread-safe (countersLock + Task.detached → MainActor.run publish).
+        Task { @MainActor in self.version &+= 1 }
         refreshCounters()
     }
 
@@ -125,7 +148,7 @@ public final class ReadStore: @unchecked Sendable {
             self.notifyChanged()
             return deleted
         } catch {
-            self.lastError = "Prune failed: \(error)"
+            reportError("Prune failed: \(error)")
             return 0
         }
     }
@@ -306,7 +329,7 @@ public final class ReadStore: @unchecked Sendable {
                 return rows.map { Self.toFileRow($0) }
             }
         } catch {
-            self.lastError = "Library query failed: \(error)"
+            reportError("Library query failed: \(error)")
             return []
         }
     }
@@ -594,9 +617,22 @@ public final class ReadStore: @unchecked Sendable {
                 return groups
             }
         } catch {
-            self.lastError = "Duplicate query failed: \(error)"
+            reportError("Duplicate query failed: \(error)")
             return []
         }
+    }
+
+    /// Off-main twin of `duplicateGroups()`. The materialization does a GROUP BY
+    /// over `files`, a chunked SELECT * of every duplicate-group file, FileRow
+    /// mapping, and a per-group sort — work proportional to the duplicated-file
+    /// count. Run inline on the MainActor, the Cleanup tab re-fired it on every
+    /// throttled scan batch (notifyChanged ~once/s), janking the UI. Callers await
+    /// this so the heavy read runs on a background task and only the assignment
+    /// lands on main. (R3-05)
+    public func duplicateGroupsAsync() async -> [DuplicateGroup] {
+        await Task.detached(priority: .userInitiated) { [self] in
+            duplicateGroups()
+        }.value
     }
 
     // MARK: - Scan sessions
@@ -708,7 +744,7 @@ public final class ReadStore: @unchecked Sendable {
                 }
             }
         } catch {
-            self.lastError = "People query failed: \(error)"
+            reportError("People query failed: \(error)")
             return []
         }
     }
@@ -809,7 +845,7 @@ public final class ReadStore: @unchecked Sendable {
             }
             self.notifyChanged()
         } catch {
-            self.lastError = "Person update failed: \(error)"
+            reportError("Person update failed: \(error)")
         }
     }
 
@@ -859,7 +895,7 @@ public final class ReadStore: @unchecked Sendable {
             self.notifyChanged()
             return moved
         } catch {
-            self.lastError = "Move person faces failed: \(error)"
+            reportError("Move person faces failed: \(error)")
             return 0
         }
     }
@@ -877,7 +913,7 @@ public final class ReadStore: @unchecked Sendable {
                 return rows.map { Self.toFileRow($0) }
             }
         } catch {
-            self.lastError = "People-file query failed: \(error)"
+            reportError("People-file query failed: \(error)")
             return []
         }
     }
@@ -927,7 +963,7 @@ public final class ReadStore: @unchecked Sendable {
             self.notifyChanged()
             return newCount
         } catch {
-            self.lastError = "Merge failed: \(error)"
+            reportError("Merge failed: \(error)")
             return nil
         }
     }
@@ -1016,7 +1052,7 @@ public final class ReadStore: @unchecked Sendable {
             self.notifyChanged()
             return totalSources
         } catch {
-            self.lastError = "Batch merge failed: \(error)"
+            reportError("Batch merge failed: \(error)")
             return 0
         }
     }
@@ -1096,7 +1132,7 @@ public final class ReadStore: @unchecked Sendable {
                 return rows.map { Self.toFileRow($0) }
             }
         } catch {
-            self.lastError = "Proposed-name query failed: \(error)"
+            reportError("Proposed-name query failed: \(error)")
             return []
         }
     }
@@ -1160,9 +1196,9 @@ public final class ReadStore: @unchecked Sendable {
         do {
             queue = try writeQueue()
         } catch {
-            self.lastError = "DB open for rename failed: \(error)"
+            reportError("DB open for rename failed: \(error)")
             return BulkRenameResult(renamed: [], failed: files.count,
-                                    firstError: self.lastError)
+                                    firstError: lastErrorSnapshot())
         }
         var renamed: [RenameOutcome] = []
         var failed = 0
@@ -1177,7 +1213,7 @@ public final class ReadStore: @unchecked Sendable {
                 }
             } else {
                 failed += 1
-                if firstError == nil { firstError = self.lastError }
+                if firstError == nil { firstError = lastErrorSnapshot() }
             }
         }
         return BulkRenameResult(renamed: renamed, failed: failed, firstError: firstError)
@@ -1251,7 +1287,7 @@ public final class ReadStore: @unchecked Sendable {
         do {
             return applyProposedName(file: file, on: try writeQueue())
         } catch {
-            self.lastError = "DB open for rename failed: \(error)"
+            reportError("DB open for rename failed: \(error)")
             return nil
         }
     }
@@ -1285,7 +1321,7 @@ public final class ReadStore: @unchecked Sendable {
         do {
             try FileManager.default.moveItem(at: oldURL, to: target)
         } catch {
-            self.lastError = "Rename failed: \(error.localizedDescription)"
+            reportError("Rename failed: \(error.localizedDescription)")
             return nil
         }
         do {
@@ -1306,7 +1342,7 @@ public final class ReadStore: @unchecked Sendable {
         } catch {
             // DB update failed after the on-disk move — roll the file back so
             // disk and DB stay consistent and the rename remains undoable.
-            self.lastError = "DB update after rename failed: \(error)"
+            reportError("DB update after rename failed: \(error)")
             try? FileManager.default.moveItem(at: target, to: oldURL)
             return nil
         }

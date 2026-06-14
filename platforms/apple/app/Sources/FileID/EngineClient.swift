@@ -120,7 +120,23 @@ public final class EngineClient {
     /// AttributeGraph overflows on a fast Deep Analyze run.
     private var lastDeepAnalyzeFileDoneAt: Date = .distantPast
 
-    public init() {}
+    // R3-08: every decoded event is funnelled through ONE serial AsyncStream
+    // consumed by a single long-lived @MainActor task, so handleEvent runs in
+    // strict receipt order. The previous per-event `Task { @MainActor }` dispatch
+    // had no ordering guarantee, so events could be applied out of order — e.g.
+    // wedging the Deep Analyze / face-clustering in-flight flag.
+    private let eventContinuation: AsyncStream<IPCEvent>.Continuation
+    private var eventPump: Task<Void, Never>?
+
+    public init() {
+        let (stream, continuation) = AsyncStream.makeStream(of: IPCEvent.self)
+        eventContinuation = continuation
+        eventPump = Task { @MainActor [weak self] in
+            for await event in stream {
+                self?.handleEvent(event)
+            }
+        }
+    }
 
     public static func locateEngineBinary() -> URL? {
         let exec = Bundle.main.executablePath ?? CommandLine.arguments[0]
@@ -300,6 +316,9 @@ public final class EngineClient {
         // limit and OOM the app — but an oversize frame now surfaces a visible
         // error instead of vanishing.
         let maxFrameBytes = 32 * 1024 * 1024
+        // R3-08: hand decoded events to the serial pump (Sendable continuation
+        // captured as a local) instead of spawning an unordered Task per event.
+        let continuation = self.eventContinuation
         errPipe.fileHandleForReading.readabilityHandler = { [weak self, weak proc] handle in
             let data = handle.availableData
             if data.isEmpty {
@@ -334,7 +353,7 @@ public final class EngineClient {
                 Task { @MainActor in
                     self?.lastError = EngineError(
                         kind: "ipc_frame_too_large",
-                        message: "The engine sent an oversized message (\(dropped / (1024 * 1024)) MB) over the \(maxFrameBytes / (1024 * 1024)) MB limit, so it was dropped. Some results may be incomplete — try again."
+                        message: "The engine sent an oversized message (\(dropped / (1024 * 1024)) MB) over the \(maxFrameBytes / (1024 * 1024)) MB limit, so it was dropped. For a Restructure plan this large, restructure a smaller subfolder instead. (R3-07)"
                     )
                 }
             }
@@ -348,9 +367,8 @@ public final class EngineClient {
                     continue
                 }
                 if let event = try? IPCCoder.decoder.decode(IPCEvent.self, from: line) {
-                    Task { @MainActor [weak self] in
-                        self?.handleEvent(event)
-                    }
+                    // Serial, ordered hand-off to the @MainActor pump (R3-08).
+                    continuation.yield(event)
                 } else {
                     Self.debug("ENGINE: undecodable frame: \(Self.redactFrameSample(line))")
                 }

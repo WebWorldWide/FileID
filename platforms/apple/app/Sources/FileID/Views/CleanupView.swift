@@ -17,6 +17,7 @@ struct CleanupView: View {
     /// Initialized lazily on first reload to non-keepers per group.
     @State private var selection: Set<Int64> = []
     @State private var skippedGroups: Set<Int64> = []
+    @State private var reloadTask: Task<Void, Never>?
 
     private var visibleGroups: [DuplicateGroup] {
         groups.filter { !skippedGroups.contains($0.id) }
@@ -341,14 +342,25 @@ struct CleanupView: View {
     }
 
     private func reload() {
-        groups = store.duplicateGroups()
-        let visibleIDs = Set(groups.flatMap { $0.files.map(\.id) })
-        selection.formIntersection(visibleIDs)
-        // Selection is stored by file id, but a mid-scan re-rank can change
-        // which copy is the keeper (index 0). Re-derive against the current
-        // ranking so a now-keeper is never left silently selected for trash.
-        for g in groups {
-            if let keeper = g.files.first { selection.remove(keeper.id) }
+        // R3-05: off the MainActor — duplicateGroups() does a GROUP BY over
+        // `files`, a chunked SELECT * of every duplicate-group file, FileRow
+        // mapping, and a per-group sort, and the live scan re-fires this on every
+        // throttled batch. Run it via ReadStore's async twin and assign only the
+        // result on main. Latest-wins: cancel any in-flight reload so a slow query
+        // can't overwrite a newer one's results.
+        reloadTask?.cancel()
+        reloadTask = Task { @MainActor in
+            let newGroups = await store.duplicateGroupsAsync()
+            guard !Task.isCancelled else { return }
+            groups = newGroups
+            let visibleIDs = Set(newGroups.flatMap { $0.files.map(\.id) })
+            selection.formIntersection(visibleIDs)
+            // Selection is stored by file id, but a mid-scan re-rank can change
+            // which copy is the keeper (index 0). Re-derive against the current
+            // ranking so a now-keeper is never left silently selected for trash.
+            for g in newGroups {
+                if let keeper = g.files.first { selection.remove(keeper.id) }
+            }
         }
     }
 }
