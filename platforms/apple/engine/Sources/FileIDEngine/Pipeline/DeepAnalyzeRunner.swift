@@ -313,6 +313,13 @@ public enum DeepAnalyzeRunner {
         proposedName: String?,
         modelKey: String
     ) async throws {
+        // R3-01 defense-in-depth: COALESCE only guards NULL, so an empty-but-
+        // present "" would overwrite a prior good value. Map an empty string to
+        // nil here too, so even a direct persist("") preserves the prior
+        // caption/name. (analyze() already classifies empty output as a failure
+        // upstream; this closes the persist layer regardless of caller.)
+        let safeDesc = (description?.isEmpty == true) ? nil : description
+        let safeName = (proposedName?.isEmpty == true) ? nil : proposedName
         try await database.pool.write { db in
             // F-C3-044: COALESCE so a NULL result (model returned no caption or
             // no proposed name on this pass) preserves a prior good value rather
@@ -325,8 +332,8 @@ public enum DeepAnalyzeRunner {
                     vlm_analyzed_at = ?
                 WHERE id = ?
                 """, arguments: [
-                    description,
-                    proposedName,
+                    safeDesc,
+                    safeName,
                     modelKey,
                     Date().timeIntervalSince1970,
                     fileID

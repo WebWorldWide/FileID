@@ -172,15 +172,23 @@ public actor VLMDownloader {
                     let inFlight = tick.written
                     let total = await tracker.total()
                     let absDone = fileStartTotalDone + inFlight
-                    let frac = total > 0 ? min(1.0, Double(absDone) / Double(total)) : 0
-                    progress(frac, absDone, total)
+                    // R3-20: gate through the monotonic guard so a late-running tick
+                    // Task built from an earlier (smaller) snapshot can't regress
+                    // the displayed fraction.
+                    if let emit = await tracker.report(absDone) {
+                        let frac = total > 0 ? min(1.0, Double(emit) / Double(total)) : 0
+                        progress(frac, emit, total)
+                    }
                 }
             }
             await tracker.commitFile(bytes: fileSize)
-            let absDone = await tracker.totalDone()
             let total = await tracker.total()
-            let frac = total > 0 ? min(1.0, Double(absDone) / Double(total)) : 1.0
-            progress(frac, absDone, total)
+            // R3-20: the committed total is the new max, so report() passes here
+            // and raises lastEmitted — rejecting any lingering smaller tick Task.
+            if let emit = await tracker.report(await tracker.totalDone()) {
+                let frac = total > 0 ? min(1.0, Double(emit) / Double(total)) : 1.0
+                progress(frac, emit, total)
+            }
         }
 
         Self.writeVerifiedSentinel(verifiedSentinel)
@@ -275,6 +283,18 @@ public actor VLMDownloader {
 private actor AggregateTracker {
     private var baseDone: Int64 = 0
     private var totalBytes: Int64 = 0
+    private var lastEmitted: Int64 = -1
+
+    /// Monotonic emit guard (R3-20): returns `absDone` only when it strictly
+    /// exceeds the largest value already reported, so out-of-order per-tick Tasks
+    /// (unstructured `Task {}` snapshots have no execution-order guarantee) can
+    /// never drive the displayed download fraction backward. Returns nil when the
+    /// value would regress — the caller then skips that emission.
+    func report(_ absDone: Int64) -> Int64? {
+        guard absDone > lastEmitted else { return nil }
+        lastEmitted = absDone
+        return absDone
+    }
 
     func setBaseDone(_ n: Int64) { baseDone = n }
     func setTotal(_ n: Int64) { totalBytes = n }

@@ -270,12 +270,31 @@ public enum RestructureSemantic {
         let params = fileHyperparams()
         let k = params.kNN
         let n = fused.count
-        // Brute-force cosine kNN (mirrors the Rust < HNSW_MIN path). An HNSW
-        // index is the upgrade for very large libraries (Windows uses one
-        // above 5k files).
+        // R3-12: brute-force cosine kNN below HNSW_MIN; an approximate HNSW index
+        // above it, so the O(n²) searcher can't stall the Restructure tab at the
+        // documented "tens of thousands of files" scale. Mirrors the Windows
+        // engine's restructure_semantic::cluster (HNSW_MIN = 5_000) and reuses the
+        // same conversion FaceClustering uses (search returns L2; cosine =
+        // 1 − L2²/2 for unit vectors). All fused vectors share one dim, so insert
+        // order == node id.
+        let hnswMin = 5_000
+        let index: HNSWIndex? = {
+            guard n >= hnswMin, let dim = fused.first?.count, dim > 0 else { return nil }
+            let idx = HNSWIndex(dim: dim, M: 16, efConstruction: 200, efSearch: 50)
+            for v in fused { _ = idx.insert(v) }
+            return idx
+        }()
         let result = IdentityClustering.cluster(
             embeddings: fused,
             searcher: { i in
+                if let index {
+                    let hits = index.search(fused[i], k: k + 1)
+                    return hits.compactMap { (rawID, l2dist) -> (neighbor: Int, similarity: Float)? in
+                        let nID = Int(rawID)
+                        guard nID >= 0, nID < n, nID != i else { return nil }
+                        return (neighbor: nID, similarity: 1.0 - (l2dist * l2dist) / 2.0)
+                    }
+                }
                 var hits = (0..<n).compactMap { j -> (neighbor: Int, similarity: Float)? in
                     j == i ? nil : (neighbor: j, similarity: dot(fused[i], fused[j]))
                 }
