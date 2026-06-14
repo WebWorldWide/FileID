@@ -847,28 +847,32 @@ pub(crate) async fn handle_find_merge_suggestions(
         // clusters. Re-deriving the person pair from current membership closes
         // that gap without a schema change.
         let mut verified_face_pairs: Vec<(i64, i64)> = Vec::new();
-        if let Ok(mut vstmt) = conn.prepare(
-            "SELECT person_a, person_b, face_a, face_b FROM face_verifications WHERE same_person = 0",
-        ) {
-            let rs = vstmt
-                .query_map([], |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, i64>(1)?,
-                        r.get::<_, Option<i64>>(2)?,
-                        r.get::<_, Option<i64>>(3)?,
-                    ))
-                })
-                .ok();
-            if let Some(rs) = rs {
-                for (pa, pb, fa, fb) in rs.flatten() {
-                    let pk = if pa < pb { (pa, pb) } else { (pb, pa) };
-                    verified_persons.insert(pk);
-                    if let (Some(fa), Some(fb)) = (fa, fb) {
-                        let fk = if fa < fb { (fa, fb) } else { (fb, fa) };
-                        verified_faces.insert(fk);
-                        verified_face_pairs.push((fa, fb));
-                    }
+        {
+            // Propagate (not `.ok()`-swallow) any failure loading the user's
+            // "different people" verdicts: silently dropping them left
+            // `verified_persons` empty so the suppression below never fired and
+            // already-rejected pairs resurfaced as suggestions — a silent
+            // correctness loss. Failing visibly is correct: a broken verdicts
+            // read means the suggestion set can't be trusted. (audit F-A2)
+            let mut vstmt = conn.prepare(
+                "SELECT person_a, person_b, face_a, face_b FROM face_verifications WHERE same_person = 0",
+            )?;
+            let rows = vstmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                    r.get::<_, Option<i64>>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (pa, pb, fa, fb) = row?;
+                let pk = if pa < pb { (pa, pb) } else { (pb, pa) };
+                verified_persons.insert(pk);
+                if let (Some(fa), Some(fb)) = (fa, fb) {
+                    let fk = if fa < fb { (fa, fb) } else { (fb, fa) };
+                    verified_faces.insert(fk);
+                    verified_face_pairs.push((fa, fb));
                 }
             }
         }
