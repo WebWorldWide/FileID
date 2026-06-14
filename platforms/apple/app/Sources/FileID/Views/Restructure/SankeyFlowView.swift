@@ -114,7 +114,12 @@ struct SankeyFlowView: View {
                                     if node.id == Self.otherSourceID {
                                         onTapSourceRollup(layout.rollupSourceFolders)
                                     } else {
-                                        onTapSource(node.label)
+                                        // R6-03: pass the FULL path (identityKey),
+                                        // not the basename `label` — two source
+                                        // folders sharing a basename otherwise both
+                                        // drill into the first match. Mirrors the
+                                        // hover path + TreeDiffView's callback.
+                                        onTapSource(node.identityKey)
                                     }
                                 }
                                 .onHover { hovering in
@@ -386,11 +391,13 @@ struct SankeyFlowView: View {
                 hoverBus.set(nil)
             }
         case .active(let point):
-            cursorPos = point
-            cursorActive = true
-            // Only hit-test inside the ribbon strip — node columns
-            // own their own hover logic.
+            // R6-06: only write the cursor @State when actually OVER a ribbon (the
+            // tooltip is their sole reader and only shows over a flow). Writing on
+            // every mouse-move — including empty space and the node columns —
+            // re-evaluated body and re-stroked all ~70 ribbon Paths at move rate.
+            // Only hit-test inside the ribbon strip — node columns own their hover.
             guard ribbonAreaX.contains(point.x) else {
+                cursorActive = false
                 if case .flow = hoverBus.context {
                     hoverBus.set(nil)
                 }
@@ -418,13 +425,18 @@ struct SankeyFlowView: View {
                 }
             }
             if let flow = bestFlow {
+                cursorPos = point      // R6-06: only update cursor state over a ribbon
+                cursorActive = true
                 let next: RestructureHoverContext = .flow(
                     sourceFolder: flow.sourceFolder,
                     destBucket: flow.destBucket
                 )
                 if hoverBus.context != next { hoverBus.set(next) }
-            } else if case .flow = hoverBus.context {
-                hoverBus.set(nil)
+            } else {
+                cursorActive = false
+                if case .flow = hoverBus.context {
+                    hoverBus.set(nil)
+                }
             }
         }
     }
