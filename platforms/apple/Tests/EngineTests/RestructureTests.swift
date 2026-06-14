@@ -136,7 +136,9 @@ struct RestructureApplyTests {
 
     /// F-C3-009 + F-C3-011: two proposals to the SAME destination both apply via
     /// uniquified names (no skipped-conflict), and each moved row's path_hash is
-    /// refreshed to StablePathHash(newPath).
+    /// refreshed to StablePathHash(newPath). The second move's planned basename
+    /// collided and was uniquified, so it is reported in `conflicts` (audit
+    /// F-A4 — the array was previously dead/always-empty).
     @Test("Two proposals to one dest both apply (uniquified); path_hash refreshed")
     func applyUniquifyAndPathHash() async throws {
         let tmp = FileManager.default.temporaryDirectory
@@ -166,7 +168,9 @@ struct RestructureApplyTests {
 
         #expect(result.moved == 2)
         #expect(result.failed == 0)
-        #expect(result.conflicts.isEmpty)
+        // Exactly one collision: the second proposal's planned dest already held
+        // the first move, so it was renamed to ` (2)` and reported here.
+        #expect(result.conflicts == [dest.path])
         let first = root.appendingPathComponent("Sorted/IMG_0001.jpg")
         let second = root.appendingPathComponent("Sorted/IMG_0001 (2).jpg")
         #expect(FileManager.default.fileExists(atPath: first.path))

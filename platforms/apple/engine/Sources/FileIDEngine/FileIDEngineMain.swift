@@ -671,9 +671,11 @@ struct FileIDEngineMain {
                             try? await Task.sleep(nanoseconds: 200_000_000)
                         }
                         if ScanCoordinator.isCancelledSync() { break }
-                        let tagged = await pool.with { worker in
+                        // nil only when this task was cancelled while waiting for
+                        // a Vision worker — stop pulling files in that case.
+                        guard let tagged = await pool.with({ worker in
                             await Tagging.processFile(discovered: disc, worker: worker)
-                        }
+                        }) else { break }
                         await taggedChan.send(tagged)
                     }
                 }

@@ -237,28 +237,58 @@ public final class VisionWorker: @unchecked Sendable {
 
 public actor VisionWorkerPool {
     private var available: [VisionWorker]
-    private var waiters: [CheckedContinuation<VisionWorker, Never>] = []
+    private struct Waiter { let id: Int; let cont: CheckedContinuation<VisionWorker?, Never> }
+    private var waiters: [Waiter] = []
+    private var nextWaiterID = 0
 
     public init(count: Int) {
         self.available = (0..<max(1, count)).map { _ in VisionWorker() }
     }
 
-    public func acquire() async -> VisionWorker {
+    /// Returns nil when the awaiting task is cancelled while parked. Previously
+    /// a cancelled waiter parked forever — `withCheckedContinuation` ignores
+    /// cancellation, so the continuation was never resumed and never removed,
+    /// growing `waiters` (and stranding the awaiting task) across every
+    /// cancelled scan. Now the cancellation handler removes the waiter and
+    /// resumes it with nil, so each continuation resumes exactly once and a
+    /// cancelled acquirer frees its slot cleanly. (audit F-A7)
+    public func acquire() async -> VisionWorker? {
         if let worker = available.popLast() { return worker }
-        return await withCheckedContinuation { waiters.append($0) }
+        let id = nextWaiterID
+        nextWaiterID &+= 1
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (cont: CheckedContinuation<VisionWorker?, Never>) in
+                if Task.isCancelled {
+                    cont.resume(returning: nil)
+                } else {
+                    waiters.append(Waiter(id: id, cont: cont))
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id) }
+        }
+    }
+
+    private func cancelWaiter(_ id: Int) {
+        if let idx = waiters.firstIndex(where: { $0.id == id }) {
+            let w = waiters.remove(at: idx)
+            w.cont.resume(returning: nil)
+        }
     }
 
     public func release(_ worker: VisionWorker) {
         if !waiters.isEmpty {
             let waiter = waiters.removeFirst()
-            waiter.resume(returning: worker)
+            waiter.cont.resume(returning: worker)
         } else {
             available.append(worker)
         }
     }
 
-    public func with<T: Sendable>(_ body: @Sendable (VisionWorker) async throws -> T) async rethrows -> T {
-        let worker = await acquire()
+    /// Returns nil if no worker could be acquired because the caller was
+    /// cancelled — the body is then skipped and no worker is consumed.
+    public func with<T: Sendable>(_ body: @Sendable (VisionWorker) async throws -> T) async rethrows -> T? {
+        guard let worker = await acquire() else { return nil }
         do {
             let result = try await body(worker)
             release(worker)
