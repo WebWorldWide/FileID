@@ -80,6 +80,11 @@ public actor ScanCoordinator {
     // preserve a cancel meant for the scan it's starting.
     private var enqueueEpoch = 0
     private var cancelledEpoch = -1
+    // The epoch of the scan that startSession is currently running. requestCancel
+    // attributes a cancel to THIS (the running scan) when one is live, falling back
+    // to enqueueEpoch only in the genuine pre-startSession start window — otherwise
+    // cancelling a running scan poisoned a separately-queued later scan. (R4-11 delta)
+    private var runningEpoch = -1
 
     private var lastEmitAt: Date = .distantPast
     private var lastProcessedSnapshot: Int = 0
@@ -104,6 +109,7 @@ public actor ScanCoordinator {
         // state only when no cancelScan has arrived for this epoch (or later). The
         // old unconditional reset dropped a back-to-back Start→Cancel.
         let cancelPending = cancelledEpoch >= epoch
+        runningEpoch = epoch                   // this scan is now the running one (R4-11 delta)
         cancelled = cancelPending
         paused = false
         Self.setCancelMirror(cancelPending)    // reset for new session (unless cancel pending)
@@ -168,7 +174,11 @@ public actor ScanCoordinator {
 
     public func requestCancel() {
         cancelled = true
-        cancelledEpoch = enqueueEpoch          // attribute to latest-enqueued scan (R4-11)
+        // Attribute the cancel to the RUNNING scan when one is live (so a queued
+        // later scan whose epoch is higher is NOT poisoned); fall back to the
+        // latest-enqueued epoch only in the genuine pre-startSession start window.
+        // (R4-11 + delta fix)
+        cancelledEpoch = hasActiveScan ? runningEpoch : enqueueEpoch
         Self.setCancelMirror(true)             // visible to sync Discovery + workers
         // Setting the flag alone is NOT enough: the discovery producer can be
         // suspended inside `await discoveryChan.send(file)` on an UNBUFFERED
