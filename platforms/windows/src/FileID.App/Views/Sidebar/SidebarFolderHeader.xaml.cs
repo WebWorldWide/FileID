@@ -338,16 +338,19 @@ public sealed partial class SidebarFolderHeader : UserControl
         {
             try
             {
-                if (System.IO.File.Exists(path)) System.IO.File.Delete(path);
+                await Task.Run(() =>
+                {
+                    if (System.IO.File.Exists(path)) System.IO.File.Delete(path);
+                }).ConfigureAwait(false);
                 return;
             }
             catch (System.IO.IOException) when (attempt < maxAttempts - 1)
             {
-                await Task.Delay(100 * (1 << attempt));
+                await Task.Delay(100 * (1 << attempt)).ConfigureAwait(false);
             }
             catch (UnauthorizedAccessException) when (attempt < maxAttempts - 1)
             {
-                await Task.Delay(100 * (1 << attempt));
+                await Task.Delay(100 * (1 << attempt)).ConfigureAwait(false);
             }
         }
     }
@@ -363,20 +366,23 @@ public sealed partial class SidebarFolderHeader : UserControl
         {
             try
             {
-                if (System.IO.Directory.Exists(dir))
+                await Task.Run(() =>
                 {
-                    System.IO.Directory.Delete(dir, recursive: true);
-                }
-                System.IO.Directory.CreateDirectory(dir);
+                    if (System.IO.Directory.Exists(dir))
+                    {
+                        System.IO.Directory.Delete(dir, recursive: true);
+                    }
+                    System.IO.Directory.CreateDirectory(dir);
+                }).ConfigureAwait(false);
                 return;
             }
             catch (System.IO.IOException) when (attempt < 2)
             {
-                await Task.Delay(200);
+                await Task.Delay(200).ConfigureAwait(false);
             }
             catch (UnauthorizedAccessException) when (attempt < 2)
             {
-                await Task.Delay(200);
+                await Task.Delay(200).ConfigureAwait(false);
             }
         }
     }

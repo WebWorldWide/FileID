@@ -44,11 +44,6 @@ public sealed partial class BulkRenameSheet : UserControl
 
         // Build out the row UI. Pure code-behind so we don't have to
         // fight a DataTemplate compile-time issue.
-        var stack = new StackPanel { Spacing = 6 };
-        foreach (var item in _items)
-        {
-            stack.Children.Add(BuildRow(item));
-        }
         RenameRepeater.ItemsSource = _items
             .Select(p => BuildRow(p))
             .ToList();

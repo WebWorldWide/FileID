@@ -24,6 +24,12 @@ public sealed partial class DeepAnalyzeView : UserControl
     private string _captionAccumulator = string.Empty;
     private bool _unloaded;
 
+    // Trips when Cancel is clicked during an "Analyze Selected" batch so the
+    // per-file send loop stops dispatching the remaining files. The engine
+    // cancel only stops the in-flight file; without this the loop would keep
+    // queuing files 2..N after the user pressed Cancel.
+    private bool _selectedRunCancelled;
+
     // Monotonic generation for the streamed-thumbnail load. Each progress event
     // fires LoadStreamThumbAsync fire-and-forget; a slow decode for an earlier
     // file can resolve after a later one's. We bump this at the start of every
@@ -336,6 +342,12 @@ public sealed partial class DeepAnalyzeView : UserControl
     }
 
     private int _proposedNameCount;
+    // DeepAnalyzeLast is a latched EngineClient property: the engine nulls it
+    // only on DeepAnalyzeStarting and overwrites it on the next (throttled)
+    // FileDone — it is NOT cleared on a progress event. Remember the instance
+    // already consumed so the last-result effects run exactly once per file and
+    // a later file's progress tick can't re-process the previous file's result.
+    private FileID.IpcSchema.DeepAnalyzeFileDone? _lastConsumedFileDone;
 
     private void SyncStream()
     {
@@ -370,6 +382,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             // Reset the smart-rename tally at the start of each run so the pill
             // reflects only THIS run, not a cumulative count across runs. (audit A13)
             _proposedNameCount = 0;
+            _lastConsumedFileDone = null;
             SyncProposedNamesPill();
             OverallProgress.Value = 0;
             OverallProgress.IsIndeterminate = true;
@@ -413,8 +426,14 @@ public sealed partial class DeepAnalyzeView : UserControl
             }
         }
 
-        if (last is not null)
+        // Only act on a genuinely new FileDone. DeepAnalyzeLast stays latched
+        // across every subsequent progress tick for the *next* file; without
+        // this reference guard those ticks would re-increment _proposedNameCount
+        // (inflated pill) and clobber the current file's live caption / proposed
+        // name with the previous file's finished text. (audit A13 follow-up)
+        if (last is not null && !ReferenceEquals(last, _lastConsumedFileDone))
         {
+            _lastConsumedFileDone = last;
             StreamCaptionText.Text = last.Description ?? string.Empty;
             if (!string.IsNullOrEmpty(last.ProposedName))
             {
@@ -597,7 +616,14 @@ public sealed partial class DeepAnalyzeView : UserControl
         // whole app (no managed exception). This path calls GetThumbnailAsync
         // directly, bypassing ThumbnailService, so it must apply the same skip —
         // single source of truth in ThumbnailService.SkipShellThumbnailForExtension.
-        if (Services.ThumbnailService.SkipShellThumbnailForExtension(path)) return;
+        if (Services.ThumbnailService.SkipShellThumbnailForExtension(path))
+        {
+            // No shell thumbnail for video/audio — clear any prior file's image so
+            // the stream card doesn't show a stale preview under the current
+            // filename (placeholder, not stale). Mirrors the no-thumbnail paths below.
+            ClearStreamImageOnDispatcher(DispatcherQueue, generation);
+            return;
+        }
         var dispatcher = DispatcherQueue;
         Windows.Storage.FileProperties.StorageItemThumbnail? thumb = null;
         try
@@ -765,10 +791,12 @@ public sealed partial class DeepAnalyzeView : UserControl
         {
             var sel = SelectionRegistry.Instance.LibrarySelection;
             if (sel.Count == 0) return;
+            _selectedRunCancelled = false;
             StreamCard.Visibility = Visibility.Visible;
             CancelButton.IsEnabled = true;
             foreach (var id in sel)
             {
+                if (_selectedRunCancelled) break;
                 try { await EngineClient.Instance.DeepAnalyzeFileAsync(id, _activeModel); }
                 catch (Exception ex) { DebugLog.Warn($"DeepAnalyzeFile({id}) failed: {ex.Message}"); }
             }
@@ -790,6 +818,9 @@ public sealed partial class DeepAnalyzeView : UserControl
 
     private async void OnCancelClicked(object sender, RoutedEventArgs e)
     {
+        // Also stop the per-file "Analyze Selected" send loop — the engine
+        // cancel below only stops the file currently in flight.
+        _selectedRunCancelled = true;
         try { await EngineClient.Instance.DeepAnalyzeCancelAsync(); }
         catch (Exception ex) { DebugLog.Warn("Cancel failed: " + ex); }
     }

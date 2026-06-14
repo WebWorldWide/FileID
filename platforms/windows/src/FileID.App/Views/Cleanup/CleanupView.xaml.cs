@@ -81,6 +81,15 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     // ensures only one refresh is ever pending at a time.
     private int _refreshPending; // 0 = idle, 1 = refresh queued
 
+    // Re-entrancy guard shared by OnTrashNonKeepersClicked + OnGroupTrashNow.
+    // Both are async void and stay re-clickable during the multi-second engine
+    // BulkActionResult wait (the confirm dialog is dismissed before that await).
+    // WaitForBulkActionResultAsync and the UndoStack "once" handlers match only
+    // on the "trashFiles" prefix with no per-command correlation, so a second
+    // confirm makes both ops resolve on the FIRST reply (wrong counts) and both
+    // push an undo entry for the first batchId (second op gets none). 0 = idle.
+    private int _trashInFlight;
+
     private void RequestCleanupRefresh()
     {
         _lastReloadAt = DateTime.UtcNow;
@@ -228,7 +237,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         if (member.Thumbnail != null) return;
         var cts = new CancellationTokenSource();
         if (!_inflightThumbs.TryAdd(member, cts)) { cts.Dispose(); return; }
-        _ = LoadMemberThumbAsync(member, cts.Token);
+        _ = LoadMemberThumbAsync(member, cts);
     }
 
     private void OnMemberClearing(Microsoft.UI.Xaml.Controls.ItemsRepeater sender,
@@ -240,8 +249,11 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         if (_inflightThumbs.TryRemove(member, out var cts)) { try { cts.Cancel(); } catch { /* swallow */ } cts.Dispose(); }
     }
 
-    private async System.Threading.Tasks.Task LoadMemberThumbAsync(DuplicateMember member, CancellationToken ct)
+    private async System.Threading.Tasks.Task LoadMemberThumbAsync(DuplicateMember member, CancellationTokenSource ownCts)
     {
+        // Capture the token before the first await: OnMemberClearing can cancel +
+        // dispose ownCts while we're suspended, after which ownCts.Token throws.
+        var ct = ownCts.Token;
         try
         {
             var bmp = await _thumbnails.RequestAsync(member.Path, member.ModifiedAt, ct).ConfigureAwait(false);
@@ -253,7 +265,18 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
             });
         }
         catch { /* best-effort thumbnail */ }
-        finally { _inflightThumbs.TryRemove(member, out _); }
+        finally
+        {
+            // Remove only OUR entry (key+value): a clear+re-prepare of the same
+            // member can replace ours with a newer live CTS, and a key-only remove
+            // would drop that one — orphaning the live load (uncancellable on
+            // recycle) and leaking its CTS. Dispose only the CTS we still own.
+            if (_inflightThumbs.TryRemove(
+                    new System.Collections.Generic.KeyValuePair<DuplicateMember, CancellationTokenSource>(member, ownCts)))
+            {
+                ownCts.Dispose();
+            }
+        }
     }
 
     public string StatusText
@@ -316,6 +339,13 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         });
 
     private async void OnTrashNonKeepersClicked(object sender, RoutedEventArgs e)
+    {
+        if (System.Threading.Interlocked.CompareExchange(ref _trashInFlight, 1, 0) != 0) return;
+        try { await TrashNonKeepersAsync(); }
+        finally { System.Threading.Interlocked.Exchange(ref _trashInFlight, 0); }
+    }
+
+    private async System.Threading.Tasks.Task TrashNonKeepersAsync()
     {
         var ids = new List<long>();
         long bytes = 0;
@@ -418,19 +448,31 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     // WinUI 3 MenuFlyoutItem inside a Grid.ContextFlyout does NOT
     // inherit the parent Grid's DataContext, so the prior version's
     // `item.DataContext as DuplicateGroup` always returned null and every
-    // per-group action silently no-op'd. Fix: cache the right-tapped group
-    // here at the moment the context menu is invoked.
-    private DuplicateGroup? _lastRightTappedGroup;
+    // per-group action silently no-op'd. Fix: cache the right-tapped group's
+    // ContentHash (the group's stable identity) at the moment the context menu
+    // is invoked, then re-resolve the live instance at action time. Caching the
+    // instance itself goes stale: a background scan refresh (MergeByContentHash)
+    // replaces a group's instance whenever its member set changes, detaching the
+    // cached copy from ViewModel.Groups while the flyout is still open — the
+    // MenuFlyout doesn't block the dispatcher — so the action would mutate a
+    // discarded instance and silently no-op again.
+    private string? _lastRightTappedHash;
 
     private void OnGroupRightTapped(object sender, Microsoft.UI.Xaml.Input.RightTappedRoutedEventArgs e)
     {
         if (sender is FrameworkElement fe && fe.DataContext is DuplicateGroup g)
         {
-            _lastRightTappedGroup = g;
+            _lastRightTappedHash = g.ContentHash;
         }
     }
 
-    private DuplicateGroup? GroupFromFlyoutItem(object sender) => _lastRightTappedGroup;
+    // Resolve the live group by the cached ContentHash so every per-group action
+    // hits the instance currently in ViewModel.Groups, not a snapshot a mid-flyout
+    // refresh may have replaced; no-op safely if the group is gone.
+    private DuplicateGroup? GroupFromFlyoutItem(object sender) =>
+        _lastRightTappedHash is null
+            ? null
+            : ViewModel.Groups.FirstOrDefault(g => g.ContentHash == _lastRightTappedHash);
 
     private void OnGroupKeepFirst(object sender, RoutedEventArgs e)
     {
@@ -504,6 +546,13 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     }
 
     private async void OnGroupTrashNow(object sender, RoutedEventArgs e)
+    {
+        if (System.Threading.Interlocked.CompareExchange(ref _trashInFlight, 1, 0) != 0) return;
+        try { await TrashGroupAsync(sender); }
+        finally { System.Threading.Interlocked.Exchange(ref _trashInFlight, 0); }
+    }
+
+    private async System.Threading.Tasks.Task TrashGroupAsync(object sender)
     {
         var grp = GroupFromFlyoutItem(sender);
         if (grp == null) return;

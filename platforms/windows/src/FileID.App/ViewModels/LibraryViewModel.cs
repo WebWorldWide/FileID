@@ -328,7 +328,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         }
         catch (Exception ex)
         {
-            OnUi(() => { if (!_disposed) ErrorMessage = ex.Message; });
+            OnUi(() => { if (!_disposed && Interlocked.Read(ref _refreshGen) == myGen) ErrorMessage = ex.Message; });
         }
         finally
         {
@@ -345,6 +345,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     public async Task SemanticSearchWithSeedAsync(float[] seed, CancellationToken ct)
     {
         if (_disposed) return;
+        CancelPendingSearchDebounce();
         long myGen = Interlocked.Increment(ref _refreshGen);
         Interlocked.Increment(ref _activeLoads);
         try
@@ -375,7 +376,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         }
         catch (OperationCanceledException) { /* expected */ }
         catch (ObjectDisposedException) { /* expected during teardown */ }
-        catch (Exception ex) { OnUi(() => { if (!_disposed) ErrorMessage = ex.Message; }); }
+        catch (Exception ex) { OnUi(() => { if (!_disposed && Interlocked.Read(ref _refreshGen) == myGen) ErrorMessage = ex.Message; }); }
         finally
         {
             Interlocked.Decrement(ref _activeLoads);
@@ -390,6 +391,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     public async Task FindSimilarAsync(long fileId, CancellationToken ct)
     {
         if (_disposed) return;
+        CancelPendingSearchDebounce();
         long myGen = Interlocked.Increment(ref _refreshGen);
         Interlocked.Increment(ref _activeLoads);
         try
@@ -421,7 +423,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         }
         catch (OperationCanceledException) { /* expected */ }
         catch (ObjectDisposedException) { /* expected during teardown */ }
-        catch (Exception ex) { OnUi(() => { if (!_disposed) ErrorMessage = ex.Message; }); }
+        catch (Exception ex) { OnUi(() => { if (!_disposed && Interlocked.Read(ref _refreshGen) == myGen) ErrorMessage = ex.Message; }); }
         finally
         {
             Interlocked.Decrement(ref _activeLoads);
@@ -604,6 +606,23 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             catch (OperationCanceledException) { /* expected */ }
             catch (ObjectDisposedException) { /* cts disposed by a newer refresh */ }
         });
+    }
+
+    /// <summary>Drop a queued search debounce so an explicit context-menu action
+    /// (Find similar / semantic search) isn't undone when the still-pending
+    /// keystroke debounce fires AFTER it. _refreshGen orders by start-of-execution
+    /// and the 200 ms debounce makes an earlier keystroke's refresh run (and thus
+    /// win) last, so the explicit action must cancel the queued refresh outright.
+    /// Interlocked.Exchange mirrors ScheduleRefresh's BUG-1 swap so cancel+dispose
+    /// can't race a concurrent ScheduleRefresh into a double-dispose.</summary>
+    private void CancelPendingSearchDebounce()
+    {
+        var prior = Interlocked.Exchange(ref _searchCts, null);
+        if (prior != null)
+        {
+            try { prior.Cancel(); } catch (ObjectDisposedException) { }
+            prior.Dispose();
+        }
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
