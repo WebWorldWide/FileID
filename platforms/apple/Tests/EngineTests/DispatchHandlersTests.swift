@@ -102,11 +102,16 @@ struct DispatchHandlersTests {
         #expect(first.destination == "/lib/People/Mom/1.jpg")
         #expect(first.category == "People/Mom")
         #expect(first.confidence == "auto")
-        #expect(first.tier == nil)
+        // All three proposals live in "/a": 2× People/Mom + 1× Documents = 67%
+        // homogeneity (< 80%) over 3 files → the source folder is Mixed.
+        #expect(first.tier == "Mixed")
         // Counts: People/Mom=2 (most), Documents=1; descending by count.
         #expect(plan.categoryCounts.first?.category == "People/Mom")
         #expect(plan.categoryCounts.first?.count == 2)
         #expect(plan.categoryCounts.reduce(0) { $0 + $1.count } == 3)
-        #expect(plan.folderClassifications == nil)
+        // folderClassifications is now engine-authoritative: one Mixed folder.
+        #expect(plan.folderClassifications?.mixedFolders == 1)
+        #expect(plan.folderClassifications?.anchorFolders == 0)
+        #expect(plan.folderClassifications?.junkFolders == 0)
     }
 }

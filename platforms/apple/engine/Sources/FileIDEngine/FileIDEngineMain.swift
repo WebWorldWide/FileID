@@ -920,18 +920,29 @@ struct FileIDEngineMain {
 
     /// Build the IPC `RestructurePlan` DTO from engine proposals: map each
     /// proposal to a `RestructureMove` and roll up per-bucket category counts
-    /// (descending by count, then category for a stable order). The macOS
-    /// proposer doesn't compute the Windows butler's Anchor/Mixed/Junk folder
-    /// tiers, so `folderClassifications` is nil — the app renders the Sankey
-    /// without the engine-authoritative Keep tile (its "null on older engines"
-    /// path), and the per-move `tier` is likewise nil.
+    /// (descending by count, then category for a stable order). Per-move `tier`
+    /// (Anchor/Mixed/Junk) and the rolled-up `folderClassifications` are derived
+    /// from `Restructure.classifyFolders` so the app renders the
+    /// engine-authoritative Tidy/Keep tiles instead of its local heuristic
+    /// fallback (the "null on older engines" path). (F-C3-035 wiring)
     static func restructurePlan(
         from proposals: [RestructureProposal], libraryRoot: String
     ) -> RestructurePlan {
+        // Per-source-folder classification → a tier string per move's parent.
+        var tierByFolder: [String: String] = [:]
+        var anchor = 0, mixed = 0, junk = 0
+        for f in Restructure.classifyFolders(proposals) {
+            switch f.classification {
+            case .anchor: tierByFolder[f.sourceFolder] = "Anchor"; anchor += 1
+            case .mixed:  tierByFolder[f.sourceFolder] = "Mixed";  mixed += 1
+            case .junk:   tierByFolder[f.sourceFolder] = "Junk";   junk += 1
+            }
+        }
         let moves = proposals.map { p in
-            RestructureMove(
+            let parent = (p.oldPath as NSString).deletingLastPathComponent
+            return RestructureMove(
                 fileID: p.fileID, source: p.oldPath, destination: p.newPath,
-                category: p.bucket, tier: nil,
+                category: p.bucket, tier: tierByFolder[parent],
                 confidence: p.confidence, reason: p.reason)
         }
         var counts: [String: Int] = [:]
@@ -941,7 +952,9 @@ struct FileIDEngineMain {
             .sorted { $0.count != $1.count ? $0.count > $1.count : $0.category < $1.category }
         return RestructurePlan(
             libraryRoot: libraryRoot, moves: moves,
-            categoryCounts: categoryCounts, folderClassifications: nil)
+            categoryCounts: categoryCounts,
+            folderClassifications: FolderClassificationCounts(
+                anchorFolders: anchor, mixedFolders: mixed, junkFolders: junk))
     }
 
     /// Mark the session completed/cancelled in the DB + emit terminal events.
