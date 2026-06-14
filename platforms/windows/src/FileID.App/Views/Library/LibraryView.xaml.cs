@@ -695,10 +695,15 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             // RequestAsync await uses ConfigureAwait(false)). A key-only remove
             // would evict that newer source, orphaning its load (uncancellable +
             // undisposed). The KeyValuePair overload removes only when the mapped
-            // value is still ours. Dispose exactly once — idempotent if
-            // ElementClearing / OnUnloaded already disposed it.
-            _inflight.TryRemove(new KeyValuePair<FileTile, CancellationTokenSource>(tile, cts));
-            cts.Dispose();
+            // value is still ours. Dispose ONLY when we won the removal so the CTS
+            // has a single owner: ElementClearing/OnUnloaded run Cancel()+Dispose()
+            // on the UI thread while this finally resumed on the pool, and
+            // CancellationTokenSource forbids concurrent Dispose(). (matches the
+            // CleanupView thumbnail twin.)
+            if (_inflight.TryRemove(new KeyValuePair<FileTile, CancellationTokenSource>(tile, cts)))
+            {
+                cts.Dispose();
+            }
         }
     }
 

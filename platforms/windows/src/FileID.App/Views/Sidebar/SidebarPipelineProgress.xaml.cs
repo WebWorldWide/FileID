@@ -234,26 +234,60 @@ public sealed partial class SidebarPipelineProgress : UserControl
             }
         });
 
-    // A wipe empties the library AND clears the folder (FinishWipeAsync nulls
-    // FolderPath in both the engine-side and fallback paths). Drop the launch-
-    // time DB floor and invalidate the render cache so SyncStage can fall back
-    // to the empty/grey state — ResetForWipe has already collapsed the live
-    // latches. A plain "Clear folder" also lands here, but it leaves the DB and
-    // the latches intact, so SyncStage keeps the strip lit (no regression).
+    // HasFolder goes false on BOTH a wipe (FinishWipeAsync nulls FolderPath after
+    // the engine-side truncate / fallback DB-delete+restart has settled the DB)
+    // and a plain "Clear folder" (which leaves the DB fully populated). Don't
+    // hard-blank the floor on the signal — that wrongly greyed the strip after a
+    // clear-then-repick of an intact library (the DB floor is seeded only once in
+    // the ctor, so it never re-derives). Instead re-derive the floor from the DB:
+    // a real wipe leaves it empty/gone -> floor -1 -> SyncStage blanks to grey;
+    // a clear-folder leaves it populated -> floor 2 -> the strip stays lit.
     private void OnAppChanged(object? sender, PropertyChangedEventArgs e)
         => DebugLog.SafeRun("SidebarPipelineProgress.OnAppChanged", () =>
         {
             if (e.PropertyName is nameof(AppViewModel.HasFolder)
                 && !AppViewModel.Instance.HasFolder)
             {
-                DispatcherQueue.TryEnqueue(() =>
-                {
-                    _dbDerivedIndex = -1;
-                    _lastRenderedIndex = int.MinValue;
-                    SyncStage();
-                });
+                ReseedFloorFromDb();
             }
         });
+
+    // Re-derive the persisted DB floor and APPLY it (raise OR lower — unlike
+    // SeedFromPersistedState, which only raises on launch) after a folder
+    // transition. The DB is in its settled post-op state when HasFolder flips
+    // (wipe truncates/recreates before nulling FolderPath; clear-folder doesn't
+    // touch it), so KindCounts is authoritative.
+    private void ReseedFloorFromDb()
+    {
+        var ui = DispatcherQueue;
+        _ = DebugLog.SafeRunAsync(nameof(ReseedFloorFromDb), async () =>
+        {
+            int derived = await Task.Run(async () =>
+            {
+                try
+                {
+                    await using var store = new ReadStore(AppPaths.DbPath);
+                    await store.OpenAsync().ConfigureAwait(false);
+                    if (!store.IsOpen) return -1; // wiped/absent DB
+                    var counts = await store.KindCountsAsync(default).ConfigureAwait(false);
+                    int total = 0;
+                    foreach (var n in counts.Values) total += n;
+                    return total > 0 ? 2 : -1;
+                }
+                catch
+                {
+                    return -1;
+                }
+            }).ConfigureAwait(false);
+
+            ui.TryEnqueue(() =>
+            {
+                _dbDerivedIndex = derived;
+                _lastRenderedIndex = int.MinValue;
+                SyncStage();
+            });
+        });
+    }
 
     // Last activeIndex actually rendered; lets SyncStage early-return on the
     // ~10 Hz LastProgress storm when the pipeline stage hasn't changed.
