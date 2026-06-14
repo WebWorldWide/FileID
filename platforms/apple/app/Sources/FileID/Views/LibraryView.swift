@@ -1331,6 +1331,10 @@ private struct FinderTagsEditor: View {
     @State private var tags: [String] = []
     @State private var draft: String = ""
     @State private var error: String?
+    // R5-11 delta: serial chain for off-main tag edits. addTags/removeTags are
+    // non-atomic read-modify-write on the xattr, so two quick edits must NOT run
+    // concurrently (one would clobber the other). Each edit awaits the previous.
+    @State private var tagEditChain: Task<Void, Never>?
 
     var body: some View {
         GlassCard {
@@ -1391,39 +1395,34 @@ private struct FinderTagsEditor: View {
     private func addDraft() {
         let trimmed = draft.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
-        let url = file.url
-        // R5-11: write xattr off the main thread — like reload()'s read, the
-        // setResourceValue write can stall the preview sheet on slow / network
-        // volumes. Assign + notify on the main actor.
-        Task.detached {
-            do {
-                let updated = try TagWriter.addTags([trimmed], at: url)
-                await MainActor.run {
-                    tags = updated
-                    draft = ""
-                    error = nil
-                    store.notifyChanged()  // refresh Library tile tag-count
-                    onEdit()
-                }
-            } catch {
-                await MainActor.run { self.error = error.localizedDescription }
-            }
-        }
+        // R5-11 delta: clear the field SYNCHRONOUSLY (the value is captured in
+        // `trimmed`) so a slow off-main write can't wipe the user's next-typed tag.
+        draft = ""
+        runTagEdit { try TagWriter.addTags([trimmed], at: $0) }
     }
 
     private func remove(_ tag: String) {
+        runTagEdit { try TagWriter.removeTags([tag], at: $0) }
+    }
+
+    /// R5-11 (+delta): run a non-atomic xattr read-modify-write OFF the main
+    /// thread (slow/network volumes can stall the sheet) while SERIALIZING edits
+    /// through `tagEditChain` so two quick taps can't interleave their RMW and
+    /// lose one. Each edit awaits the previous, then does its write on a detached
+    /// task, then assigns on the main actor.
+    private func runTagEdit(_ write: @escaping @Sendable (URL) throws -> [String]) {
         let url = file.url
-        Task.detached {  // R5-11: off-main xattr write (see addDraft)
+        let previous = tagEditChain
+        tagEditChain = Task { @MainActor in
+            _ = await previous?.value   // serialize: the prior edit's write has landed
             do {
-                let updated = try TagWriter.removeTags([tag], at: url)
-                await MainActor.run {
-                    tags = updated
-                    error = nil
-                    store.notifyChanged()
-                    onEdit()
-                }
+                let updated = try await Task.detached { try write(url) }.value
+                tags = updated
+                error = nil
+                store.notifyChanged()   // refresh Library tile tag-count
+                onEdit()
             } catch {
-                await MainActor.run { self.error = error.localizedDescription }
+                self.error = error.localizedDescription
             }
         }
     }
