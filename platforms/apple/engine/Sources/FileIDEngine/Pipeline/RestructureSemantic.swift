@@ -279,7 +279,15 @@ public enum RestructureSemantic {
         // order == node id.
         let hnswMin = 5_000
         let index: HNSWIndex? = {
-            guard n >= hnswMin, let dim = fused.first?.count, dim > 0 else { return nil }
+            // Require UNIFORM dims: HNSWIndex.insert returns -1 WITHOUT appending a
+            // node on a dim mismatch, which would shift every later node id and
+            // desync the `fused[nID]` neighbor mapping below — silent mis-clustering.
+            // A truncated/corrupt blob or a stale different-dim embedding (the loader
+            // only checks `count % 4 == 0`, not == dim) can produce a ragged vector,
+            // so fall back to the dim-tolerant brute-force path in that case rather
+            // than trusting "insert order == node id". (audit R3-12 delta fix)
+            guard n >= hnswMin, let dim = fused.first?.count, dim > 0,
+                  fused.allSatisfy({ $0.count == dim }) else { return nil }
             let idx = HNSWIndex(dim: dim, M: 16, efConstruction: 200, efSearch: 50)
             for v in fused { _ = idx.insert(v) }
             return idx
