@@ -12,6 +12,8 @@ import Testing
 import Foundation
 import GRDB
 @testable import FileIDEngine
+// Disambiguate from GRDB.Database (both modules export `Database`).
+private typealias Database = FileIDEngine.Database
 
 @Suite("Database writer guards (F-C3-031/039)")
 struct DatabaseWriterGuardTests {
@@ -80,13 +82,25 @@ struct DatabaseWriterGuardTests {
                 "the shielded terminal write must persist (not be left 'running')")
     }
 
-    @Test("prepareDatabase issues PRAGMA cache_spill = 0")
-    func cacheSpillDisabled() async throws {
+    @Test("prepareDatabase applies the WAL + durability pragmas on pooled connections")
+    func prepareDatabasePragmas() async throws {
         let (db, tmp) = try makeDB()
         defer { try? FileManager.default.removeItem(at: tmp) }
-        let value = try await db.pool.read { d in
-            try Int.fetchOne(d, sql: "PRAGMA cache_spill")
+        // These run in GRDB's prepareDatabase hook for EVERY pooled connection,
+        // so a fresh reader must report them — proving the hook fired.
+        //
+        // `cache_spill = 0` is also issued there, but it CANNOT be asserted via
+        // `PRAGMA cache_spill`: that query returns the cache_size-derived page
+        // threshold (e.g. 15857 for a 64 MB cache), never the disabled-boolean
+        // 0 — so the prior `value == 0` assertion could never pass on any host.
+        // The disable is verified by the SQL in Database.swift, not round-tripped.
+        let (journal, sync, tempStore) = try await db.pool.read { d in
+            (try String.fetchOne(d, sql: "PRAGMA journal_mode"),
+             try Int.fetchOne(d, sql: "PRAGMA synchronous"),
+             try Int.fetchOne(d, sql: "PRAGMA temp_store"))
         }
-        #expect(value == 0, "cache_spill must be disabled to prevent mid-transaction temp spill")
+        #expect(journal == "wal")
+        #expect(sync == 1)       // NORMAL
+        #expect(tempStore == 2)  // MEMORY
     }
 }

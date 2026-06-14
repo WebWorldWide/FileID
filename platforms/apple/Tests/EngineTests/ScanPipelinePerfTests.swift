@@ -11,6 +11,8 @@ import Foundation
 import GRDB
 import AsyncAlgorithms
 @testable import FileIDEngine
+// Disambiguate from GRDB.Database (both modules export `Database`).
+private typealias Database = FileIDEngine.Database
 
 @Suite("C6 scan pipeline perf")
 struct ScanPipelinePerfTests {
@@ -20,7 +22,7 @@ struct ScanPipelinePerfTests {
     @Test("isAlreadyCurrent: unchanged file (same size, mtime == stored modified_at) skips")
     func skipPredicateUnchanged() {
         #expect(Discovery.isAlreadyCurrent(
-            dbModified: 1_000, dbSize: 100, currentModified: 1_000, currentSize: 100))
+            dbModifiedAt: 1_000, dbSize: 100, currentModified: 1_000, currentSize: 100))
     }
 
     @Test("isAlreadyCurrent: a changed on-disk mtime never skips")
@@ -28,7 +30,7 @@ struct ScanPipelinePerfTests {
         // Mirrors DBWriter's `unchanged` contract: only an EXACT mtime match
         // counts as captured, so a newer mtime reprocesses.
         #expect(!Discovery.isAlreadyCurrent(
-            dbModified: 1_000, dbSize: 100, currentModified: 1_500, currentSize: 100))
+            dbModifiedAt: 1_000, dbSize: 100, currentModified: 1_500, currentSize: 100))
     }
 
     @Test("isAlreadyCurrent: a backdated same-size edit (mtime != stored) reprocesses")
@@ -39,24 +41,24 @@ struct ScanPipelinePerfTests {
         // (stale tags/OCR); DBWriter would have reprocessed (M1 != M2), so the
         // skip predicate must agree and NOT skip.
         #expect(!Discovery.isAlreadyCurrent(
-            dbModified: 1_500, dbSize: 100, currentModified: 1_000, currentSize: 100))
+            dbModifiedAt: 1_500, dbSize: 100, currentModified: 1_000, currentSize: 100))
     }
 
     @Test("isAlreadyCurrent: a size change never skips")
     func skipPredicateSize() {
         #expect(!Discovery.isAlreadyCurrent(
-            dbModified: 1_000, dbSize: 100, currentModified: 1_000, currentSize: 101))
+            dbModifiedAt: 1_000, dbSize: 100, currentModified: 1_000, currentSize: 101))
     }
 
     @Test("isAlreadyCurrent: a one-sided nil mtime can't prove equality → never skips")
     func skipPredicateNilMtime() {
         #expect(!Discovery.isAlreadyCurrent(
-            dbModified: 1_000, dbSize: 100, currentModified: nil, currentSize: 100))
+            dbModifiedAt: 1_000, dbSize: 100, currentModified: nil, currentSize: 100))
         #expect(!Discovery.isAlreadyCurrent(
-            dbModified: nil, dbSize: 100, currentModified: 1_000, currentSize: 100))
+            dbModifiedAt: nil, dbSize: 100, currentModified: 1_000, currentSize: 100))
         // Both-nil mtimes match DBWriter's (nil, nil) == unchanged branch.
         #expect(Discovery.isAlreadyCurrent(
-            dbModified: nil, dbSize: 100, currentModified: nil, currentSize: 100))
+            dbModifiedAt: nil, dbSize: 100, currentModified: nil, currentSize: 100))
     }
 
     // MARK: - F-C6-001: end-to-end discovery skip set
@@ -70,10 +72,12 @@ struct ScanPipelinePerfTests {
             .appendingPathComponent("FileIDSkipTest-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tmp) }
-        // Use the resolved root so the skip-set prefix range (built from
-        // root.path) matches the enumerator's symlink-resolved paths — in
-        // production the scan root arrives already resolved from the app side.
-        let root = tmp.resolvingSymlinksInPath()
+        // Use the REAL resolved root (realpath, keeps /private) so the skip-set
+        // prefix range (built from root.path) matches the enumerator's
+        // /private-prefixed output. Foundation's resolvingSymlinksInPath strips
+        // /private and so would NOT match (the range would exclude every row).
+        // In production the scan root (/Users, /Volumes) never involves /private.
+        let root = realResolved(tmp)
 
         let names = ["a.jpg", "b.jpg", "c.jpg", "d.jpg"]
         for n in names { try Data("payload".utf8).write(to: tmp.appendingPathComponent(n)) }
@@ -86,14 +90,19 @@ struct ScanPipelinePerfTests {
         // the current mtime, mirroring DBWriter).
         let baseline = await discovery.walk(root: root)
         #expect(baseline.count == 4)
-        var pathByName: [String: String] = [:]
-        var sizeByName: [String: Int64] = [:]
-        var modByName: [String: Double?] = [:]
+        var pathByNameBuild: [String: String] = [:]
+        var sizeByNameBuild: [String: Int64] = [:]
+        var modByNameBuild: [String: Double?] = [:]
         for f in baseline {
-            pathByName[f.url.lastPathComponent] = f.url.path
-            sizeByName[f.url.lastPathComponent] = f.sizeBytes
-            modByName[f.url.lastPathComponent] = f.modificationDate?.timeIntervalSince1970
+            pathByNameBuild[f.url.lastPathComponent] = f.url.path
+            sizeByNameBuild[f.url.lastPathComponent] = f.sizeBytes
+            modByNameBuild[f.url.lastPathComponent] = f.modificationDate?.timeIntervalSince1970
         }
+        // Immutable bindings: the GRDB read/write closures below are @Sendable,
+        // and capturing a `var` is an error under Swift 6 strict concurrency.
+        let pathByName = pathByNameBuild
+        let sizeByName = sizeByNameBuild
+        let modByName = modByNameBuild
 
         // scanned_at far in the future: proves the R-08 touch fired (it bumps
         // scanned_at DOWN to the current scan time for the skipped row).
@@ -113,6 +122,19 @@ struct ScanPipelinePerfTests {
         try insert(name: "a.jpg", size: sizeByName["a.jpg"]!,     modified: modByName["a.jpg"]!, failed: 0)
         try insert(name: "b.jpg", size: sizeByName["b.jpg"]! + 1, modified: modByName["b.jpg"]!, failed: 0)
         try insert(name: "c.jpg", size: sizeByName["c.jpg"]!,     modified: modByName["c.jpg"]!, failed: 1)
+        // a.jpg is an image and the skip candidate: give it a CLIP embedding so
+        // the R-14 backfill carve-out (active whenever a CLIP model is installed
+        // on the host — true on a dev box that ran a real scan) doesn't force the
+        // embeddingless image to stay in the pipeline. Without this the test is
+        // green only on a CLIP-less runner — env-fragile.
+        try await db.pool.write { d in
+            let aID = try Int64.fetchOne(
+                d, sql: "SELECT id FROM files WHERE path_text = ?",
+                arguments: [pathByName["a.jpg"]!])!
+            try d.execute(
+                sql: "INSERT INTO clip_embeddings (file_id, embedding, model) VALUES (?, ?, 'test')",
+                arguments: [aID, Data(count: 2048)])
+        }
 
         let incremental = await discovery.walk(root: root, database: db, forceReprocess: false)
         let got = Set(incremental.map { $0.url.lastPathComponent })

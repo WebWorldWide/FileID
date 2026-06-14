@@ -12,6 +12,8 @@ import Foundation
 import GRDB
 import AsyncAlgorithms
 @testable import FileIDEngine
+// Disambiguate from GRDB.Database (both modules export `Database`).
+private typealias Database = FileIDEngine.Database
 
 @Suite("DBWriter rename/move heal (F-2)")
 struct DBWriterRenameHealTests {

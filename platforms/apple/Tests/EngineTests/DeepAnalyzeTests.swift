@@ -12,6 +12,8 @@ import Testing
 import Foundation
 import GRDB
 @testable import FileIDEngine
+// Disambiguate from GRDB.Database (both modules export `Database`).
+private typealias Database = FileIDEngine.Database
 import FileIDShared
 
 @Suite("Deep Analyze pure-logic fixes (C3-DA)")
@@ -232,7 +234,7 @@ struct DeepAnalyzeRunnerTests {
         #expect(row.model == "m3")
     }
 
-    private func fetchVLM(_ db: Database, _ id: Int64) async throws
+    private func fetchVLM(_ db: FileIDEngine.Database, _ id: Int64) async throws
         -> (desc: String?, name: String?, model: String?) {
         try await db.pool.read { db in
             guard let r = try Row.fetchOne(db, sql:

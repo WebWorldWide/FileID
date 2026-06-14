@@ -14,6 +14,8 @@ import Foundation
 import GRDB
 import AsyncAlgorithms
 @testable import FileIDEngine
+// Disambiguate from GRDB.Database (both modules export `Database`).
+private typealias Database = FileIDEngine.Database
 
 @Suite("DBWriter CLIP backfill reachability (R-14)")
 struct DBWriterClipBackfillTests {

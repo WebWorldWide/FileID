@@ -10,6 +10,8 @@ import Testing
 import Foundation
 import GRDB
 @testable import FileIDEngine
+// Disambiguate from GRDB.Database (both modules export `Database`).
+private typealias Database = FileIDEngine.Database
 
 @Suite("Migration chain parity (C12)")
 struct MigrationParityTests {
