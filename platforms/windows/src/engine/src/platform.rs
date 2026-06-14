@@ -346,7 +346,17 @@ pub fn cpu_topology() -> CpuTopology {
         // We cast u64* → struct* directly so clippy sees the alignment is
         // satisfied; intermediate u8* hides the source alignment.
         let words = bytes.div_ceil(8) as usize;
-        let mut aligned: Vec<u64> = vec![0u64; words];
+        // R4-03: over-allocate one full fixed-size struct of slack. windows-rs
+        // models SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX at its largest union
+        // variant (~80 B), but a single-group RelationProcessorCore record is only
+        // ~48 B. Without slack, `&*rec_ptr` on the FINAL record forms an 80-byte
+        // place that runs past this exactly-sized buffer — a partially-dangling
+        // reference (UB) even though only the leading bytes are ever read. The
+        // second call still passes the OS-reported (smaller) `bytes` as the length
+        // and `total_words = bytes.div_ceil(8)` still bounds the loop to real
+        // records, so this only adds zero-padded headroom.
+        let slack_words = std::mem::size_of::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>().div_ceil(8);
+        let mut aligned: Vec<u64> = vec![0u64; words + slack_words];
         let head = aligned.as_mut_ptr().cast::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>();
         if GetLogicalProcessorInformationEx(RelationProcessorCore, Some(head), &mut bytes).is_err() {
             return CpuTopology { p_cores: physical_fallback, e_cores: 0, logical };

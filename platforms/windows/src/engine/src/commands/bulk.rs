@@ -537,13 +537,40 @@ pub(crate) async fn handle_merge_clusters(
             "UPDATE face_prints SET person_id = ?1 WHERE person_id = ?2",
             rusqlite::params![dst, src],
         )? as u32;
+        // R4-07: carry the source's user-assigned identity onto the destination
+        // when the destination has none, BEFORE deleting src (the subqueries must
+        // still see src). Merge direction is arbitrary (suggestions order by id;
+        // drag/bulk by user choice), so a named cluster can be the source —
+        // without this its name/title/first/middle/last/suffix is silently lost.
+        // COALESCE keeps any field the destination already set; is_unknown clears
+        // once the merged result is named.
+        let _ = tx.execute(
+            "UPDATE persons SET
+                 name        = COALESCE(name,        (SELECT name        FROM persons WHERE id = ?2)),
+                 title       = COALESCE(title,       (SELECT title       FROM persons WHERE id = ?2)),
+                 first_name  = COALESCE(first_name,  (SELECT first_name  FROM persons WHERE id = ?2)),
+                 middle_name = COALESCE(middle_name, (SELECT middle_name FROM persons WHERE id = ?2)),
+                 last_name   = COALESCE(last_name,   (SELECT last_name   FROM persons WHERE id = ?2)),
+                 suffix      = COALESCE(suffix,      (SELECT suffix      FROM persons WHERE id = ?2)),
+                 is_unknown  = CASE WHEN COALESCE(name, (SELECT name FROM persons WHERE id = ?2)) IS NOT NULL THEN 0 ELSE is_unknown END
+             WHERE id = ?1",
+            rusqlite::params![dst, src],
+        );
         let _ = tx.execute("DELETE FROM persons WHERE id = ?1", rusqlite::params![src]);
         // Clean up face-verification verdicts referencing the merged-away source
         // person — otherwise findMergeSuggestions JOINs on a now-deleted persons
         // row and surfaces stale suggestions (orphan rows that never GC). The
         // "src != X" verdict is moot once src is folded into dst.
+        // R4-06: only GC legacy person-keyed rows that can't re-project (NULL
+        // anchors). A v13 face-anchored verdict (face_a/face_b set) must SURVIVE
+        // the merge so its (fa,fb) pair keeps re-projecting onto current cluster
+        // membership (fa→dst, fb→other) — deleting it would let two
+        // user-confirmed-different people re-merge. A row whose faces now land in
+        // one cluster is auto-inert (find_merge_suggestions `pa != pb`, consolidate
+        // `ca != cb`).
         let _ = tx.execute(
-            "DELETE FROM face_verifications WHERE person_a = ?1 OR person_b = ?1",
+            "DELETE FROM face_verifications WHERE (person_a = ?1 OR person_b = ?1) \
+             AND (face_a IS NULL OR face_b IS NULL)",
             rusqlite::params![src],
         );
         // Recompute the destination's file_count AND representative_face_id
@@ -674,7 +701,11 @@ pub(crate) async fn handle_mark_persons_as_unknown(
         let mut messages = Vec::new();
         for id in &payload.person_ids {
             match tx.execute(
-                "UPDATE persons SET is_unknown = 1, name = NULL, first_name = NULL, last_name = NULL WHERE id = ?1",
+                // R4-05: clear EVERY name-bearing column (name + all five
+                // structured fields), not just name/first/last — otherwise a
+                // title/middle_name/suffix survives, the re-cluster snapshot
+                // carries a stale partial identity, and the editor pre-fills it.
+                "UPDATE persons SET is_unknown = 1, name = NULL, title = NULL, first_name = NULL, middle_name = NULL, last_name = NULL, suffix = NULL WHERE id = ?1",
                 rusqlite::params![id],
             ) {
                 Ok(_) => {

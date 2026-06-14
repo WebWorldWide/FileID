@@ -357,7 +357,14 @@ pub fn armed_provider() -> ExecutionProvider {
             _ => {}
         }
     }
-    active_provider()
+    // R4-09: no guarded EP is reachable in the override-aware bind chain, so the
+    // real session bind registers no cuda/openvino dispatch — nothing guarded will
+    // bind. Return an UNGUARDED EP so `ep_guard::arm` no-ops. Must NOT fall back to
+    // `active_provider()`: it ignores the user override, so on a forced-"cpu"
+    // override (the GPU-TDR recovery path) it returns Cuda on an NVIDIA+pack box,
+    // arming a CUDA breadcrumb around a CPU-only bind — an unrelated native crash
+    // then false-poisons a healthy CUDA pack. (B6 follow-up)
+    ExecutionProvider::Cpu
 }
 
 /// Apply execution-provider-specific session tuning that would otherwise be
@@ -629,20 +636,24 @@ fn cuda_bin_from_default_install() -> Option<PathBuf> {
         return None;
     }
     // Pick the highest "v<MAJOR.MINOR>" sibling — newest CUDA wins.
-    let mut versions: Vec<(String, PathBuf)> = std::fs::read_dir(&root)
+    // R4-12: parse the version NUMERICALLY. A lexicographic string sort ranks
+    // "v9.0" above "v12.0" (and "v12.4" above "v12.10"), registering an older
+    // toolkit's bin/ over a newer one. (u32,u32) tuple Ord compares major then
+    // minor; non-parsing entries (e.g. "vlatest", bare "v12") are dropped rather
+    // than winning a string compare.
+    std::fs::read_dir(&root)
         .ok()?
         .flatten()
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('v') && entry.path().join("bin").is_dir() {
-                Some((name, entry.path().join("bin")))
-            } else {
-                None
-            }
+            let ver = name.strip_prefix('v')?;
+            let (major, minor) = ver.split_once('.')?;
+            let version = (major.parse::<u32>().ok()?, minor.parse::<u32>().ok()?);
+            let bin = entry.path().join("bin");
+            bin.is_dir().then_some((version, bin))
         })
-        .collect();
-    versions.sort_by(|a, b| b.0.cmp(&a.0));
-    versions.into_iter().next().map(|(_, bin)| bin)
+        .max_by_key(|(version, _)| *version)
+        .map(|(_, bin)| bin)
 }
 
 #[cfg(not(windows))]
