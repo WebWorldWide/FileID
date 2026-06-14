@@ -29,11 +29,16 @@ final class WireCapture: @unchecked Sendable {
     init() {
         sink = IPCSink(wire: pipe.fileHandleForWriting)
         let box = self.box   // capture the Sendable box, not self
-        pipe.fileHandleForReading.readabilityHandler = { handle in
+        // Explicit @Sendable type: the older CI Swift toolchain does not infer
+        // the readability-handler closure as @Sendable from context, so annotate
+        // it. The only capture is `box` (an @unchecked Sendable class), so the
+        // check passes.
+        let handler: @Sendable (FileHandle) -> Void = { handle in
             let chunk = handle.availableData
             guard !chunk.isEmpty else { handle.readabilityHandler = nil; return }
             box.append(chunk)
         }
+        pipe.fileHandleForReading.readabilityHandler = handler
     }
 
     /// All bytes received so far (synchronous; poll this in a deadline loop).
