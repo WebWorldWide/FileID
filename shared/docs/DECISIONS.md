@@ -3051,3 +3051,37 @@ Branch `fix/audit-2026-06-10`; full inventory in `shared/docs/audit-2026-06-10/`
   drain) then gated to local-only, mirroring the existing "Corpus tests skip when corpus absent"
   pattern, with the cancel wiring kept under deterministic unit cover. An in-process rewrite is the
   tracked proper fix (NEXT). Skipping a genuinely-CI-incompatible test ≠ hiding a product bug.
+
+## 2026-06-14 (later) — backlog finalization: what was landed vs. deliberately deferred
+
+- **Restructure apply bar collapsed to one honest action.** The two-step "apply as shortcuts → convert
+  to real moves" UI was vestigial — both buttons invoked the SAME engine real-move confirmation (the
+  macOS engine has no symlink-preview mode) — and its "originals stay put / fully reversible" copy
+  actively MISREPRESENTED an irreversible operation (a user-safety issue, not cosmetics). Collapsed to a
+  single "Apply moves" button with honest irreversible messaging. The engine now also emits per-move
+  `tier` + `folderClassifications` so the app's Tidy/Keep tiles are engine-authoritative.
+- **`hardwareReprobed` reports the actually-bound EP, not a fresh probe.** `build_hardware_info` is
+  shared by the ready handshake and the verifyCudaPack reprobe. Using a fresh `RuntimeProbe::detect()`
+  for `execution_provider` meant that after a pack install the reprobe advertised the now-available GPU
+  EP while the running session was still bound to its original EP (restart required). Now it reports the
+  memoized `active_provider()`; pack-present/recommendation stay fresh. Honest "✓ installed, restart to
+  use" instead of a misleading active EP.
+- **Several backlog items were DELIBERATELY NOT shipped because a blind change would regress a working
+  path — the prime directive is "perfect, without crashing", and the dev box can't verify them:**
+  - **F-4 mutual-kNN clustering:** more conservative than the current single-linkage, so without
+    hand-labeled data to tune the bands it would over-split identities — a People-tab regression.
+    Blocked on labeled data, not on effort.
+  - **R-11 ModelLoadGate continuation:** the current behavior is a self-resolving wait (LOW harm); a
+    wrong `CheckedContinuation` in the model-load path introduces a REAL deadlock (worse), and the
+    join/cancel race isn't reproducible without a live multi-GB MLX download. Approach documented;
+    deferred.
+  - **`walkStreaming` activation:** interleaving discovery + tagging reorders the `discoveryComplete`/
+    total IPC events the app's progress UI depends on — engine-verifiable, but the progress UX needs a
+    GUI to confirm, for a marginal (~12 MB / few-seconds) benefit. Deferred to a GUI session.
+  - **In-process rewrite of `ScanCancellationTests`:** the test spawns a process specifically to ISOLATE
+    the engine's process-global state (cancel mirror, IPCSink/SleepGuard singletons); an in-process
+    rewrite re-introduces cross-test contamination. Skip-on-CI (with local + unit coverage) is the
+    sounder terminal state.
+  This is the high-integrity reading of "finish everything": every item reaches a terminal state —
+  landed, blocked-on-a-named-resource (with a recipe), or deferred-with-rationale — rather than shipping
+  unverifiable changes that risk regressing shipped features.

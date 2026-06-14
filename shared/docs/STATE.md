@@ -8,6 +8,30 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-14 (later) — backlog cleared to terminal states (PRs #18–#20 merged; main green)
+
+Continued the finish-everything push after PR #16. Five more PRs landed + merged, all CI-green:
+- **#18 — macOS concurrency + flaky-CI fix.** `ReadStore` counters worker uses scoped `withLock`
+  (Swift-6 lock-in-async gone); R-07 dedicated shutdown mirror so clustering aborts a fresh shutdown;
+  AND the real fix for the intermittent CI hang the restored gate exposed — six tests read an IPCSink
+  pipe with a BLOCKING `availableData` on the cooperative pool (parallel runs starved the executor and
+  wedged the harness to the 12-min SIGALRM). Replaced with a shared non-blocking `WireCapture` (GCD
+  readability handler + lock buffer) and added `swift test --no-parallel` as defense-in-depth. The
+  process-spawning `ScanCancellationTests` is skipped on the GitHub runner (local + unit coverage kept).
+- **#19 — restructure tiers + honest apply bar.** Engine `RestructurePlan` now populates per-move
+  `tier` + `folderClassifications` (engine-authoritative Tidy/Keep); the vestigial two-step
+  "shortcuts → convert" apply bar (both buttons did the same real-move confirmation; "reversible" copy
+  mislabeled an irreversible move) collapsed to one "Apply moves" button.
+- **#20 — Windows `hardwareReprobed`** reports the memoized `active_provider()` (actually-bound EP),
+  not a fresh probe, so a post-install "Verify" shows "pack ✓ — restart to use it".
+
+**Net:** every code-actionable backlog item is landed (this session also: containment fix, both-platform
+apply-cancel, test-gate integrity, Deep Analyze verification). What remains in NEXT.md is exclusively
+blocked on a specific resource (hand-labeled face data for F-4; the RTX 2060 for per-vendor GPU; the
+owner's Mac/GUI for semantic search + Tidy/Keep render + `walkStreaming` UX) or deliberately deferred
+because a blind change would regress a working path (R-11, in-process cancel test, the intentional
+face-embedding backfill cap). `main` is the only branch; all GitHub workflows green.
+
 ## 2026-06-14 — Xcode-unblocked: Deep Analyze verified, cross-platform apply-cancel fixed, macOS test gate restored (PR #16 merged)
 
 Xcode 26.5 was installed on the dev Mac, lifting the "no `swift test` / no Metal" ceiling. That
