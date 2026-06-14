@@ -22,11 +22,23 @@ public final class CLIPModelInstaller {
     }
 
     public private(set) var status: Status = .unknown
+    /// On-disk presence of each required file, refreshed only on real disk
+    /// transitions (appear / install / uninstall) via refreshStatus — never on
+    /// download ticks. The Settings card reads this instead of calling
+    /// FileManager.fileExists in its row builder, so an active download no longer
+    /// fires a stat() syscall on the main thread on every progress tick. (R7)
+    public private(set) var presentFilePaths: Set<String> = []
     /// Flips once the text encoder's ORT session finishes its
     /// multi-second build — Library observes it to drop the
     /// keyword-only hint and re-run the active search.
     public private(set) var textEncoderReady = false
     private var task: Task<Void, Never>?
+    /// True only while a hub fetch is actively running. Progress ticks
+    /// arrive as queued MainActor tasks and can be scheduled AFTER the
+    /// catch arm wrote a terminal status — gate `publishFromTracker` on
+    /// liveness so a stale tick can't resurrect a phantom "Downloading…"
+    /// footer with a dead Cancel button. Mirrors ArcFaceModelInstaller.active.
+    private var installing = false
 
     private init() {}
 
@@ -82,16 +94,34 @@ public final class CLIPModelInstaller {
     }
 
     public func refreshStatus() {
-        let files = Self.requiredFiles
+        recomputePresentFiles()
         var totalSize: Int64 = 0
-        for f in files {
-            guard FileManager.default.fileExists(atPath: f.path) else {
-                status = .missing(reason: "Missing: \((f.lastPathComponent))")
-                return
+        var firstMissing: String?
+        for f in Self.requiredFiles {
+            if presentFilePaths.contains(f.path) {
+                totalSize += directorySize(f)
+            } else if firstMissing == nil {
+                firstMissing = f.lastPathComponent
             }
-            totalSize += directorySize(f)
         }
-        status = .installed(sizeBytes: totalSize)
+        if let missing = firstMissing {
+            status = .missing(reason: "Missing: \(missing)")
+        } else {
+            status = .installed(sizeBytes: totalSize)
+        }
+    }
+
+    /// Refresh on-disk presence WITHOUT touching `status`. The partial-install
+    /// failure paths (promote / verify / extract) leave some required files in
+    /// the live tree but must keep their `.installFailed` status — calling
+    /// refreshStatus() there would overwrite it with .missing/.installed, so they
+    /// call this instead to keep the per-file Settings rows accurate. (R7 delta)
+    private func recomputePresentFiles() {
+        var present: Set<String> = []
+        for f in Self.requiredFiles where FileManager.default.fileExists(atPath: f.path) {
+            present.insert(f.path)
+        }
+        presentFilePaths = present
     }
 
     // MARK: - Install paths
@@ -138,6 +168,8 @@ public final class CLIPModelInstaller {
     /// Files stage into a sibling dir and atomic-promote on full
     /// success — a partial install never poisons the production tree.
     private func runHubFetch() async {
+        installing = true
+        defer { installing = false }
         Self.sweepOrphanedStagingRoots()
         let approxBytes: Int64 = 250 * 1024 * 1024
         if let free = freeDiskBytes(), free < approxBytes * 2 {
@@ -198,12 +230,14 @@ public final class CLIPModelInstaller {
             }
         } catch {
             status = .installFailed("Couldn't promote staged files: \(error.localizedDescription)")
+            recomputePresentFiles()  // promote may have moved some files into the live tree
             return
         }
 
         for f in Self.requiredFiles {
             if !FileManager.default.fileExists(atPath: f.path) {
                 status = .installFailed("Missing after install: \(f.lastPathComponent).")
+                recomputePresentFiles()
                 return
             }
         }
@@ -292,6 +326,7 @@ public final class CLIPModelInstaller {
 
     @MainActor
     private func publishFromTracker(_ tracker: ProgressTracker) {
+        guard installing else { return }
         let snap = tracker.snapshot()
         let total = snap.totalBytes
         let written = snap.writtenBytes
@@ -433,12 +468,14 @@ public final class CLIPModelInstaller {
             let errData: Data = ((try? stderr.fileHandleForReading.readToEnd()) ?? nil) ?? Data()
             let errStr = String(data: errData, encoding: .utf8) ?? ""
             status = .installFailed("Extract failed (\(proc.terminationStatus)): \(errStr.trimmingCharacters(in: .whitespacesAndNewlines))")
+            recomputePresentFiles()  // unzip extracts straight into the live tree — may be partial
             return
         }
 
         for f in Self.requiredFiles {
             if !FileManager.default.fileExists(atPath: f.path) {
                 status = .installFailed("Zip didn't contain \(f.lastPathComponent).")
+                recomputePresentFiles()
                 return
             }
         }

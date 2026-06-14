@@ -54,7 +54,6 @@ struct LibraryView: View {
     /// nav context (the LIMIT 200 query reorders by scanned_at).
     @State private var previewSiblings: [FileRow] = []
     @State private var bulkRenameSheetOpen: Bool = false
-    @State private var pendingRenameCount: Int = 0
     @State private var lastBatchAvailable: Bool = false
     @State private var lastTagBatchAvailable: Bool = false
     @State private var undoStatus: String?
@@ -556,7 +555,6 @@ struct LibraryView: View {
     }
 
     private func refreshBulkState() {
-        pendingRenameCount = store.countFilesWithProposedNames()
         lastBatchAvailable = (BulkRenameSheet.loadLastBatch()?.isEmpty == false)
         lastTagBatchAvailable = (BulkTagSheet.loadLastBatch()?.isEmpty == false)
     }
@@ -1299,9 +1297,20 @@ private struct FilePreviewSheet: View {
         .onKeyPress(.rightArrow) {
             step(1); return .handled
         }
-        .task {
-            // Generate a larger preview for the sheet (640px).
-            preview = await ThumbnailService.shared.thumbnail(for: file.url, size: 640)
+        .task(id: file.id) {
+            // Generate a larger preview for the sheet (640px). Keyed on
+            // file.id so it re-fires on sibling arrow nav — the sheet keeps
+            // identity across `.sheet(item:)` value changes, so a plain .task
+            // would load only the first file. Clear first so the spinner shows
+            // and the prior file's poster never bleeds into the new image.
+            preview = nil
+            let image = await ThumbnailService.shared.thumbnail(for: file.url, size: 640)
+            // ThumbnailService doesn't honor Task cancellation, so a slow load for
+            // the prior file (network volume) can resolve AFTER the user arrowed on;
+            // drop it once `.task(id:)` superseded us, else it overwrites the current
+            // file's image. Mirrors the FinderTagsEditor read guard (R7).
+            guard !Task.isCancelled else { return }
+            preview = image
         }
     }
 
@@ -1375,20 +1384,19 @@ private struct FinderTagsEditor: View {
                 }
             }
         }
-        .task(id: file.id) { reload() }
-    }
-
-    private func reload() {
-        // Read xattr off the main thread — for files on slow / network
-        // volumes the read can stall the preview sheet for hundreds of
-        // milliseconds while the user is trying to scrub through.
-        let url = file.url
-        Task.detached {
-            let result = TagWriter.readTags(at: url)
-            await MainActor.run {
-                tags = result
-                error = nil
-            }
+        .task(id: file.id) {
+            // Read xattr off the main thread — for files on slow / network
+            // volumes the read can stall the preview sheet for hundreds of
+            // milliseconds while the user is trying to scrub through.
+            let url = file.url
+            let result = await Task.detached { TagWriter.readTags(at: url) }.value
+            // R7: the detached read doesn't inherit `.task` cancellation; if the
+            // user arrowed to another file mid-read, a slow stale read on a
+            // network volume could land after the newer one and overwrite it.
+            // Mirror FileTile (R5-10): drop it once `.task(id:)` is superseded.
+            guard !Task.isCancelled else { return }
+            tags = result
+            error = nil
         }
     }
 
