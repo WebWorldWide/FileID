@@ -515,7 +515,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             cts.Dispose();
             return;
         }
-        _ = LoadThumbAsync(tile, cts.Token);
+        _ = LoadThumbAsync(tile, cts);
     }
 
     /// <summary>macOS-parity tile-entry animation — a scale-in "pop"
@@ -627,8 +627,12 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         // refresh — only on real scroll — so this fires far less often now.
     }
 
-    private async Task LoadThumbAsync(FileTile tile, CancellationToken ct)
+    private async Task LoadThumbAsync(FileTile tile, CancellationTokenSource cts)
     {
+        // Read the token synchronously here — this runs on the UI thread inside
+        // ElementPrepared before the first await, so ElementClearing / OnUnloaded
+        // cannot have disposed cts yet.
+        var ct = cts.Token;
         try
         {
             // explicit UI dispatcher post for the bind. The previous
@@ -686,7 +690,15 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         }
         finally
         {
-            _inflight.TryRemove(tile, out _);
+            // Compare-and-remove: a re-prepare can replace our entry with a fresh
+            // CTS for the same tile while this finally is queued to the pool (the
+            // RequestAsync await uses ConfigureAwait(false)). A key-only remove
+            // would evict that newer source, orphaning its load (uncancellable +
+            // undisposed). The KeyValuePair overload removes only when the mapped
+            // value is still ours. Dispose exactly once — idempotent if
+            // ElementClearing / OnUnloaded already disposed it.
+            _inflight.TryRemove(new KeyValuePair<FileTile, CancellationTokenSource>(tile, cts));
+            cts.Dispose();
         }
     }
 

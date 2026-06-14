@@ -65,7 +65,12 @@ public sealed partial class SidebarPipelineProgress : UserControl
 
         Loaded += (_, _) => SyncStage();
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
-        Unloaded += (_, _) => EngineClient.Instance.PropertyChanged -= OnEngineChanged;
+        AppViewModel.Instance.PropertyChanged += OnAppChanged;
+        Unloaded += (_, _) =>
+        {
+            EngineClient.Instance.PropertyChanged -= OnEngineChanged;
+            AppViewModel.Instance.PropertyChanged -= OnAppChanged;
+        };
 
         // Seed from the persisted (DB-derived) scan state so the strip reflects
         // a prior session's work instead of blanking to grey on every launch of
@@ -226,6 +231,27 @@ public sealed partial class SidebarPipelineProgress : UserControl
             {
                 DebugLog.Debug($"[ENGINE-SUB:SidebarPipelineProgress] {e.PropertyName}");
                 DispatcherQueue.TryEnqueue(SyncStage);
+            }
+        });
+
+    // A wipe empties the library AND clears the folder (FinishWipeAsync nulls
+    // FolderPath in both the engine-side and fallback paths). Drop the launch-
+    // time DB floor and invalidate the render cache so SyncStage can fall back
+    // to the empty/grey state — ResetForWipe has already collapsed the live
+    // latches. A plain "Clear folder" also lands here, but it leaves the DB and
+    // the latches intact, so SyncStage keeps the strip lit (no regression).
+    private void OnAppChanged(object? sender, PropertyChangedEventArgs e)
+        => DebugLog.SafeRun("SidebarPipelineProgress.OnAppChanged", () =>
+        {
+            if (e.PropertyName is nameof(AppViewModel.HasFolder)
+                && !AppViewModel.Instance.HasFolder)
+            {
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    _dbDerivedIndex = -1;
+                    _lastRenderedIndex = int.MinValue;
+                    SyncStage();
+                });
             }
         });
 
