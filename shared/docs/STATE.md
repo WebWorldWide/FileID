@@ -8,7 +8,54 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
-## 2026-06-14 (latest) — round-3 deep audit: 20 more defects fixed across both platforms (PRs #25–#27); 1 schema-migration finding deferred
+## 2026-06-14 (latest) — rounds 4–5 deep audit: 23 more defects fixed (PRs #30–#35); the engine + app are now exhaustively audited
+
+Extended the round-3 method to the surfaces rounds 1–3 didn't reach. Each round:
+per-file finders → 3-lens default-reject vote → per-finding domain-expert
+re-verification + fix recipe (with cross-platform parity check) → apply + test →
+**delta re-audit of the landed diff** → confirm-dry. The delta stage earned its
+keep: it caught a self-inflicted regression in **every** round (round-3 delta 2,
+round-4 delta 2, round-5 delta 1 — all fixed + confirm-dry'd clean), which the
+find+verify passes missed.
+
+**Round 4 — engine files rounds 1–3 skipped (FFI, IPC, migrations, stdio loop,
+person-ops, core clustering, discovery).** 14 candidates → 12 real.
+- **#30 Windows engine (9):** R4-01 incremental skip-set was a tautological
+  stored-vs-stored predicate that silently stranded edited files (P1) → now carries
+  (size,mtime) + revalidates vs the live file (macOS already did this); R4-02/08
+  Pass-2 clustering O(n²)+singleton-merge (P1); R4-03 cpu_topology FFI heap-OOB UB;
+  R4-04 one-byte-per-read stdin; R4-05/06/07 person-ops data-loss (mark-unknown
+  leaves sub-fields / merge deletes face-anchored verdicts / merge drops the
+  source name); R4-09 EP-arm-on-forced-CPU false-poison; R4-12 CUDA version sort.
+- **#31 macOS engine (3):** R4-02/08 Pass-2 twin; R4-10 engine-writer busy timeout
+  (was dropping writes under the app's WAL lock); R4-11 cancelScan start-window race.
+- **Round-4 delta (#32):** R4-07 over-grafted a name onto an already-named merge
+  target; R4-11 cancel attributed to the enqueued (not running) epoch could poison
+  a queued scan. Both fixed.
+
+**Round 5 — app-side data paths + model install + C# (rounds 1–4 skipped).**
+15 candidates → 11 real (the 12th = the already-deferred R3-07 PART B).
+- **#33 macOS app (9):** R5-01 bulk-merge union-find could DELETE a user-named
+  person + leave the survivor unnamed (P1) → keeps the named/larger root;
+  R5-02 bulkMarkUnknown off-main batch; R5-03 bulk-rename notify-once; R5-04
+  bulk-tag dropped off-window selections → id→FileRow model; R5-07 respawn-flap cap;
+  R5-08 case-only-rename inode check; R5-09/10/11 off-main + cancellation hardening.
+- **#34 Windows+C# (3):** R5-05 model-install legacy-sentinel now SHA256-revalidates
+  before vouching (stale installs masqueraded as current); R5-06 C# auto-cluster gate
+  reset on crash; R5-07 C# respawn-flap cap (cross-platform twin).
+- **Round-5 delta (#35):** R5-11's off-main tag-edit conversion introduced a
+  lost-update race + deferred draft-wipe → serialized via a per-editor task chain.
+
+**Tally for the session:** 53 real defects fixed across 5 find-rounds + 3 delta-rounds
+(8 + 20 + 2 + 12 + 11), all merged CI-green; 3 deferred with full both-platform
+recipes in NEXT.md (R3-15 cross-platform face-verification-anchor migration; R3-07
+PART B / R5-12 IPC cap raise). Gates at HEAD: Windows `cargo clippy -D warnings` +
+341 tests; macOS `swift build` debug+release + 195 tests; both CI workflows + the
+.NET app build green on `main`. On-hardware e2e (isolated Adlon copy) GREEN. Only
+`main`; no open PRs. Remaining work is exclusively HARDWARE / GUI / LABELED-DATA /
+the two deferred coordinated changes — see NEXT.md.
+
+## 2026-06-14 (round 3) — round-3 deep audit: 20 more defects fixed across both platforms (PRs #25–#27); 1 schema-migration finding deferred
 
 Ran a third, deeper adversarial audit: 16 per-file finders over the highest-risk subsystems →
 3-lens **default-reject** verification (32 candidates → 21 survivors) → a per-finding
