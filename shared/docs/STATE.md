@@ -8,7 +8,42 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
-## 2026-06-14 (latest) — deep-audit batch: 8 confirmed defects fixed across both engines (PRs #23–#24 merged; main green) + full on-hardware e2e
+## 2026-06-14 (latest) — round-3 deep audit: 20 more defects fixed across both platforms (PRs #25–#27); 1 schema-migration finding deferred
+
+Ran a third, deeper adversarial audit: 16 per-file finders over the highest-risk subsystems →
+3-lens **default-reject** verification (32 candidates → 21 survivors) → a per-finding
+**domain-expert re-verification + fix-recipe** pass (all 21 confirmed real; 3 had the suggested
+fix corrected). Landed in three platform-clean PRs:
+
+- **#25 Windows engine (7):** R3-03 face-clustering unknown→named merge (P1 data-loss);
+  R3-04 upsert nulling phash/camera/GPS + flipping has_faces/has_text on a stage-skipped re-scan
+  (P1); R3-16 hoist heal `symlink_metadata` out of the writer txn; R3-17 heal size corroboration
+  (cross-volume MFT-ref collision — Windows mirror of F-A2); R3-18 SEC-5 non-ASCII case-fold bypass;
+  R3-19 `tags_evaluated` wiping auto-tags when no tagger ran; R3-21 scan-notice lost under
+  backpressure. clippy clean; 340 tests (+2).
+- **#26 macOS engine (9):** R3-01 empty-PARSED-description clobbering a caption (P1, extends F-A6);
+  R3-02 unknown-unmark-during-window deletes a person + orphans faces (P1 data-loss); R3-09 HNSW
+  `vDSP_distancesq` (no per-call scratch); R3-10 auto-merge `named` predicate widened to
+  title/middle/suffix; R3-11 auto-merge re-reads identity under the writer lock; R3-12 semantic
+  restructure HNSW above 5_000 files (was O(n²)); R3-13 PDF open-failure recorded as success;
+  R3-14 hoist heal `lstat` out of the writer txn; R3-20 download progress monotonic guard.
+  swift build debug+release clean; 195 tests (+1, persistCoalesces extended).
+- **#27 macOS app (4):** R3-05 `duplicateGroupsAsync` off-main twin (Cleanup tab); R3-06 off-main
+  `@Observable` writes (`version`/`lastError`) serialized on main + lock-backed `lastError` shadow;
+  R3-07 PART A oversized-frame message made actionable; R3-08 serial AsyncStream event pump so
+  `handleEvent` runs in receipt order. Built via `swift build --product FileID`.
+
+**Deferred (see NEXT.md):** R3-15 (a "different people" verdict is lost after a re-scan churns
+face_print ids — needs a churn-stable face identity → a NEW append-only migration mirrored
+identically on BOTH engines, the C12 fork-bug class, plus Windows-runtime verification; not landed
+blind). R3-07 PART B (32→64 MiB inbound cap + O(n²) buffer-scan fix + cross-platform constant
+mirror — IPC-contract change, land coordinated).
+
+Method note: the 3-lens skeptic pass over-passes (~40% historical FP), so the per-finding
+domain-expert recipe pass is the load-bearing filter; every landed fix was read against the real
+code before applying. See DECISIONS.md.
+
+## 2026-06-14 (earlier) — deep-audit batch: 8 confirmed defects fixed across both engines (PRs #23–#24 merged; main green) + full on-hardware e2e
 
 Ran an adversarial multi-agent audit (finder shards → 2-of-3 skeptic verification) over the
 highest-risk subsystems, then **expert-re-verified every candidate before fixing** — the skeptic pass
