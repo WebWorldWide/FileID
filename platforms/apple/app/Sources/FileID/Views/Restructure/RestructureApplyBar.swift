@@ -1,25 +1,29 @@
 import SwiftUI
 
 /// Floating frosted bar pinned to the bottom of the Restructure tab.
+///
+/// One real-move action: the engine butler performs direct on-disk moves (there
+/// is no macOS symlink-preview mode), so the prior two-step "apply as shortcuts →
+/// convert to real moves" UI was vestigial — both buttons routed to the same
+/// real-move confirmation — and its "originals stay put / reversible" copy
+/// misrepresented an irreversible operation. Collapsed to a single Apply action
+/// with honest, irreversible messaging; the caller still gates it behind a
+/// confirmation dialog.
 struct RestructureApplyBar: View {
     let selectedCount: Int
     let totalCount: Int
     let canApply: Bool
-    /// True while an apply / convert is in flight — disables both buttons
-    /// so the irreversible path can't be double-fired.
+    /// True while an apply is in flight — disables the button so the
+    /// irreversible path can't be double-fired.
     var isApplying: Bool = false
-    var onApplyShortcuts: () -> Void
-    var onConvertToMoves: () -> Void
+    var onApply: () -> Void
 
     @State private var primaryHovered = false
 
     var body: some View {
         HStack(alignment: .center, spacing: 18) {
             selectionSummary
-            Divider().frame(height: 32).opacity(0.25)
-            stepChips
             Spacer(minLength: 16)
-            secondaryButton
             primaryButton
         }
         .padding(.horizontal, 18).padding(.vertical, 14)
@@ -54,49 +58,20 @@ struct RestructureApplyBar: View {
             }
             Text(selectedCount == 0
                   ? "Approve a recommendation above to enable Apply."
-                  : "Originals stay put — applying creates shortcuts you can review.")
+                  : "Selected files are moved on disk when you apply — review first.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
-        }
-    }
-
-    @ViewBuilder
-    private var stepChips: some View {
-        HStack(spacing: 8) {
-            stepChip(number: "1", label: "Apply as shortcuts",
-                      hint: "Safe preview", filled: true)
-            Image(systemName: "arrow.right")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-            stepChip(number: "2", label: "Convert to real moves",
-                      hint: "When ready", filled: false)
-        }
-    }
-
-    @ViewBuilder
-    private func stepChip(number: String, label: String,
-                            hint: String, filled: Bool) -> some View {
-        HStack(spacing: 6) {
-            Text(number)
-                .font(.caption2.bold().monospacedDigit())
-                .foregroundStyle(filled ? .black : Theme.gold)
-                .frame(width: 16, height: 16)
-                .background(Circle().fill(filled ? Theme.gold : Theme.gold.opacity(0.15)))
-            VStack(alignment: .leading, spacing: 0) {
-                Text(label).font(.caption.weight(.semibold))
-                Text(hint).font(.system(size: 9)).foregroundStyle(.tertiary)
-            }
         }
     }
 
     @ViewBuilder
     private var primaryButton: some View {
-        Button(action: onApplyShortcuts) {
+        Button(action: onApply) {
             HStack(spacing: 6) {
-                Image(systemName: "link").font(.callout.bold())
+                Image(systemName: "folder.fill.badge.gearshape").font(.callout.bold())
                 Text(selectedCount > 0
-                      ? "Apply as shortcuts (\(selectedCount))"
-                      : "Apply as shortcuts")
+                      ? "Apply moves (\(selectedCount))"
+                      : "Apply moves")
                     .font(.callout.weight(.semibold))
             }
             .padding(.horizontal, 16).padding(.vertical, 9)
@@ -113,30 +88,10 @@ struct RestructureApplyBar: View {
         }
         .buttonStyle(.plain)
         .disabled(!canApply || isApplying)
-        .help("Creates shortcuts at the new paths pointing back to the original files. Originals stay put — fully reversible.")
+        .help("Moves the selected files into the new structure on disk and updates the library. Runs through the engine and is not reversible inside the app — review the structure first.")
         .scaleEffect(primaryHovered && canApply && !isApplying ? 1.02 : 1.0)
         .animation(.spring(response: 0.28, dampingFraction: 0.7),
                      value: primaryHovered)
         .onHover { primaryHovered = $0 }
-    }
-
-    @ViewBuilder
-    private var secondaryButton: some View {
-        Button(action: onConvertToMoves) {
-            HStack(spacing: 6) {
-                Image(systemName: "arrow.triangle.swap").font(.callout)
-                Text("Convert to real moves").font(.callout)
-            }
-            .padding(.horizontal, 14).padding(.vertical, 8)
-            .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(Theme.gold.opacity(0.55), lineWidth: 1)
-            )
-            .foregroundStyle(Theme.gold)
-            .opacity(isApplying ? 0.45 : 1.0)
-        }
-        .buttonStyle(.plain)
-        .disabled(isApplying)
-        .help("Once the structure looks right, replace every shortcut with a real on-disk move. Not reversible inside the app.")
     }
 }

@@ -189,17 +189,15 @@ struct RestructureView: View {
                     totalCount: proposals.count,
                     canApply: !selectedIDs.isEmpty,
                     isApplying: applying,
-                    onApplyShortcuts: { if !applying { confirmApply = true } },
-                    onConvertToMoves: { if !applying { confirmApply = true } }
+                    onApply: { if !applying { confirmApply = true } }
                 )
                 .padding(.horizontal, 18)
                 .padding(.bottom, 14)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
-                // F-C3-021-app: both apply-bar actions now route through the
-                // engine butler, which performs real on-disk moves (it has no
-                // macOS symlink-preview mode). The button labels still read
-                // "shortcuts"/"convert" — that copy lives in RestructureApplyBar
-                // and is now stale; the confirmation below states the real,
+                // F-C3-021-app: the apply action routes through the engine
+                // butler, which performs real on-disk moves (it has no macOS
+                // symlink-preview mode). The apply bar is now a single honest
+                // "Apply moves" action; this confirmation states the real,
                 // irreversible behavior so the user always confirms first.
                 .confirmationDialog(
                     "Apply \(selectedIDs.count) move\(selectedIDs.count == 1 ? "" : "s")?",
@@ -677,7 +675,7 @@ struct RestructureView: View {
             EmptyStateView(
                 icon: "rectangle.3.offgrid",
                 title: "Pick a destination root",
-                message: "Choose where the proposed folder hierarchy should live. Files won't move yet — you'll preview the changes first and apply them as shortcuts before committing to real moves."
+                message: "Choose where the proposed folder hierarchy should live. Nothing moves until you review the proposed structure and choose Apply — then the selected files are moved on disk."
             )
         } else if loading {
             // Computing state lives on a clipped LavaLamp surface so
