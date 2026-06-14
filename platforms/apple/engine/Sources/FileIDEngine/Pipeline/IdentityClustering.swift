@@ -180,12 +180,19 @@ public enum IdentityClustering {
         var coreCentroids: [[Float]] = coreSums.map { normalizeSum($0, dim: dim) }
         var outliersAssigned = 0
         var outliersAsSingletons = 0
+        // R4-02/R4-08: snapshot the Pass-1 core count. An outlier may only join a
+        // genuine size>=2 Pass-1 core, never a singleton appended below — otherwise
+        // the inner scan grows by every singleton (O(M^2) at scale) AND an outlier
+        // can order-dependently merge into a PRIOR outlier's singleton. Assigned
+        // outliers update a core in place at index < coreN, so real cores keep
+        // being re-scanned with fresh values; only the singletons are excluded.
+        let coreN = coreCentroids.count
         for outlier in outliers {
             if shouldCancel() { return cancelledResult() }
             let v = embeddings[outlier]
             var c1Idx = -1, c2Idx = -1
             var c1Sim: Float = -2, c2Sim: Float = -2
-            for (idx, centroid) in coreCentroids.enumerated() {
+            for (idx, centroid) in coreCentroids.prefix(coreN).enumerated() {
                 let s = dot(v, centroid)
                 if s > c1Sim {
                     c2Sim = c1Sim; c2Idx = c1Idx
