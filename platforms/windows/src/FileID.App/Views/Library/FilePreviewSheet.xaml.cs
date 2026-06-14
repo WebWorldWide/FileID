@@ -514,13 +514,16 @@ public sealed partial class FilePreviewSheet : UserControl
     private void OnMediaPlayerFailed(Windows.Media.Playback.MediaPlayer sender,
                                      Windows.Media.Playback.MediaPlayerFailedEventArgs args)
     {
-        // Fires on a Media Foundation worker thread. Marshal to UI thread
-        // before touching XAML state. Capture the kind under the lock so a
-        // navigation that races our failure doesn't bleed kind labels.
+        // Fires on a Media Foundation worker thread. Marshal to UI thread before
+        // touching XAML state. R6-05: capture the kind + media generation up front
+        // so a navigation/close that races our failure can't stamp a stale
+        // placeholder over the current sibling or touch a torn-down content tree.
         var kind = _currentMediaKind;
         var err = args.ErrorMessage ?? args.Error.ToString();
+        var gen = _mediaGen;
         DispatcherQueue.TryEnqueue(() =>
         {
+            if (_unloaded || gen != _mediaGen) return; // superseded media failure
             Services.DebugLog.Warn($"FilePreviewSheet media failed ({kind}): {err}");
             ShowPlaceholder(kind, kind switch
             {
