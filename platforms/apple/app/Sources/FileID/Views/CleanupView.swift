@@ -57,6 +57,11 @@ struct CleanupView: View {
                 reload()
             }
         }
+        .onChange(of: confirmDelete) { _, presented in
+            // Dialog dismissed (confirm, cancel, or click-away): apply any scan
+            // batches we deferred while it was open, re-deriving keepers.
+            if !presented { reload() }
+        }
     }
 
     // MARK: - Header
@@ -314,28 +319,37 @@ struct CleanupView: View {
             freedBytes += r.size
         }
         let mb = Double(freedBytes) / 1_048_576
-        let pruned = store.deleteFiles(ids: trashedIDs)
-        for id in trashedIDs { selection.remove(id) }
 
         // P5 — auto-tag keepers (Settings toggle, default on). Useful so
         // the user can find "files I deduped this session" in Finder.
-        var tagSummary = ""
         let autoTagOn = UserDefaults.standard.object(forKey: AppSettings.cleanupAutoTagKey) == nil
             ? AppSettings.cleanupAutoTagDefault
             : UserDefaults.standard.bool(forKey: AppSettings.cleanupAutoTagKey)
-        if autoTagOn, !keeperURLsToTag.isEmpty {
-            let result = TagWriter.addTagsBulk([AppSettings.cleanupAutoTagName],
-                                                 to: keeperURLsToTag)
-            if result.added > 0 {
-                tagSummary = " · tagged \(result.added) keeper\(result.added == 1 ? "" : "s") with \"\(AppSettings.cleanupAutoTagName)\""
-            }
-            store.notifyChanged()
-        }
+        let shouldTag = autoTagOn && !keeperURLsToTag.isEmpty
+
+        // Run the chunked DELETE (+ person reconciliation) and the per-keeper
+        // xattr writes OFF the MainActor — on a large dedup pass these are
+        // thousands of synchronous DB/FS ops and would re-freeze the UI the
+        // off-main trashing above just avoided. Resume on the MainActor only
+        // to mutate @State. (mirrors BulkTagSheet.apply)
+        let taggedAdded: Int = await Task.detached(priority: .userInitiated) {
+            [store, trashedIDs, keeperURLsToTag, shouldTag] in
+            _ = store.deleteFiles(ids: trashedIDs)
+            guard shouldTag else { return 0 }
+            return TagWriter.addTagsBulk([AppSettings.cleanupAutoTagName],
+                                         to: keeperURLsToTag).added
+        }.value
+
+        for id in trashedIDs { selection.remove(id) }
+        if shouldTag { store.notifyChanged() }
 
         // Plain-language status. "DB rows pruned" is internal noise —
         // users care about file count + reclaimed space. Tag summary
         // appended only when the auto-tag toggle did something.
-        _ = pruned // intentionally not surfaced in the UI string
+        var tagSummary = ""
+        if taggedAdded > 0 {
+            tagSummary = " · tagged \(taggedAdded) keeper\(taggedAdded == 1 ? "" : "s") with \"\(AppSettings.cleanupAutoTagName)\""
+        }
         status = "Trashed \(trashedIDs.count) file\(trashedIDs.count == 1 ? "" : "s")"
             + " · freed \(String(format: "%.1f", mb)) MB"
             + tagSummary
@@ -356,6 +370,11 @@ struct CleanupView: View {
         // finishes — at most one in-flight + one pending. A result known-stale
         // (a newer reload was requested mid-query) is skipped, not assigned, so the
         // final assignment is always the freshest (latest-wins). (audit R3-05 delta fix)
+        // R7: freeze the duplicate re-query + selection re-derivation while a
+        // destructive confirmation is on screen, so the count the user is
+        // confirming can't drift mid-scan. Re-runs on dialog dismissal
+        // (onChange of confirmDelete), which re-applies the keeper protection.
+        if confirmDelete { return }
         if reloadTask != nil { reloadPending = true; return }
         reloadTask = Task { @MainActor in
             repeat {
@@ -364,14 +383,23 @@ struct CleanupView: View {
                 // A newer reload landed while this query ran — its result is stale;
                 // loop and re-query rather than assigning it.
                 if reloadPending { continue }
+                // Prior keeper of each group (by phash id) before we overwrite `groups`,
+                // so we can tell which copies *became* the keeper across this reload.
+                let priorKeepers = Set(groups.compactMap { $0.files.first?.id })
                 groups = newGroups
                 let visibleIDs = Set(newGroups.flatMap { $0.files.map(\.id) })
                 selection.formIntersection(visibleIDs)
                 // Selection is stored by file id, but a mid-scan re-rank can change
-                // which copy is the keeper (index 0). Re-derive against the current
-                // ranking so a now-keeper is never left silently selected for trash.
+                // which copy is the keeper (index 0). Only drop a copy that *became*
+                // the keeper this reload — a copy that was already the keeper and is
+                // still selected was explicitly checked by the user ("trash the keeper
+                // too", see header/CopyTile help) and must not be silently reverted on
+                // every throttled batch during a live scan.
                 for g in newGroups {
-                    if let keeper = g.files.first { selection.remove(keeper.id) }
+                    guard let keeper = g.files.first else { continue }
+                    if !priorKeepers.contains(keeper.id) {
+                        selection.remove(keeper.id)
+                    }
                 }
             } while reloadPending
             reloadTask = nil
@@ -457,7 +485,7 @@ private struct GroupCard: View {
 
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 12) {
-                        ForEach(Array(group.files.enumerated()), id: \.offset) { idx, file in
+                        ForEach(Array(group.files.enumerated()), id: \.element.id) { idx, file in
                             CopyTile(
                                 file: file,
                                 isKeeper: idx == 0,
@@ -537,7 +565,7 @@ private struct CopyTile: View {
             }
             .frame(width: 132)
         }
-        .task { thumb = await ThumbnailService.shared.thumbnail(for: file.url, size: 264) }
+        .task(id: file.id) { thumb = await ThumbnailService.shared.thumbnail(for: file.url, size: 264) }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityDescription)
         .accessibilityAddTraits([.isButton, isSelected ? .isSelected : []])

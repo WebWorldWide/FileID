@@ -378,7 +378,7 @@ struct CLIPSemanticSearchCard: View {
 
     @ViewBuilder
     private func fileStatusRow(name: String, url: URL) -> some View {
-        let installed = FileManager.default.fileExists(atPath: url.path)
+        let installed = installer.presentFilePaths.contains(url.path)
         HStack(alignment: .center, spacing: 8) {
             Image(systemName: installed ? "checkmark.circle.fill" : "circle.dashed")
                 .foregroundStyle(installed ? .green : .secondary)
