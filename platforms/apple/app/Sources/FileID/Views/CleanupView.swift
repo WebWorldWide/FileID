@@ -18,6 +18,7 @@ struct CleanupView: View {
     @State private var selection: Set<Int64> = []
     @State private var skippedGroups: Set<Int64> = []
     @State private var reloadTask: Task<Void, Never>?
+    @State private var reloadPending = false
 
     private var visibleGroups: [DuplicateGroup] {
         groups.filter { !skippedGroups.contains($0.id) }
@@ -345,22 +346,35 @@ struct CleanupView: View {
         // R3-05: off the MainActor — duplicateGroups() does a GROUP BY over
         // `files`, a chunked SELECT * of every duplicate-group file, FileRow
         // mapping, and a per-group sort, and the live scan re-fires this on every
-        // throttled batch. Run it via ReadStore's async twin and assign only the
-        // result on main. Latest-wins: cancel any in-flight reload so a slow query
-        // can't overwrite a newer one's results.
-        reloadTask?.cancel()
+        // throttled batch (~1/s).
+        //
+        // COALESCE instead of cancel-and-restart: the heavy read runs in a
+        // Task.detached that does NOT honor cancellation (duplicateGroups() has no
+        // cooperative checks), so cancelling and spawning a fresh one each tick
+        // would just pile superseded queries on GRDB's serial queue. Instead, if a
+        // reload is already running, mark it dirty and let it re-run once when it
+        // finishes — at most one in-flight + one pending. A result known-stale
+        // (a newer reload was requested mid-query) is skipped, not assigned, so the
+        // final assignment is always the freshest (latest-wins). (audit R3-05 delta fix)
+        if reloadTask != nil { reloadPending = true; return }
         reloadTask = Task { @MainActor in
-            let newGroups = await store.duplicateGroupsAsync()
-            guard !Task.isCancelled else { return }
-            groups = newGroups
-            let visibleIDs = Set(newGroups.flatMap { $0.files.map(\.id) })
-            selection.formIntersection(visibleIDs)
-            // Selection is stored by file id, but a mid-scan re-rank can change
-            // which copy is the keeper (index 0). Re-derive against the current
-            // ranking so a now-keeper is never left silently selected for trash.
-            for g in newGroups {
-                if let keeper = g.files.first { selection.remove(keeper.id) }
-            }
+            repeat {
+                reloadPending = false
+                let newGroups = await store.duplicateGroupsAsync()
+                // A newer reload landed while this query ran — its result is stale;
+                // loop and re-query rather than assigning it.
+                if reloadPending { continue }
+                groups = newGroups
+                let visibleIDs = Set(newGroups.flatMap { $0.files.map(\.id) })
+                selection.formIntersection(visibleIDs)
+                // Selection is stored by file id, but a mid-scan re-rank can change
+                // which copy is the keeper (index 0). Re-derive against the current
+                // ranking so a now-keeper is never left silently selected for trash.
+                for g in newGroups {
+                    if let keeper = g.files.first { selection.remove(keeper.id) }
+                }
+            } while reloadPending
+            reloadTask = nil
         }
     }
 }
