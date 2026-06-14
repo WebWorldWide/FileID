@@ -12,43 +12,24 @@ import Foundation
 @testable import FileIDEngine
 import FileIDShared
 
-private actor WireBytes {
-    private var data = Data()
-    func append(_ d: Data) { data.append(d) }
-    func snapshot() -> Data { data }
-}
-
 @Suite("Engine dispatch handlers (F-C3-032/021)", .serialized)
 struct DispatchHandlersTests {
 
-    private func pipeSink() -> (IPCSink, WireBytes, Pipe, Task<Void, Never>) {
-        let pipe = Pipe()
-        let sink = IPCSink(wire: pipe.fileHandleForWriting)
-        let collector = WireBytes()
-        let reader = Task.detached {
-            while true {
-                let chunk = pipe.fileHandleForReading.availableData
-                if chunk.isEmpty { break }
-                await collector.append(chunk)
-            }
-        }
-        return (sink, collector, pipe, reader)
-    }
-
-    private func waitFor(_ needles: [Data], in collector: WireBytes,
+    private func waitFor(_ needles: [Data], in cap: WireCapture,
                          timeout: TimeInterval = 10) async -> Data {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            let out = await collector.snapshot()
+            let out = cap.bytes()
             if needles.allSatisfy({ out.range(of: $0) != nil }) { return out }
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
-        return await collector.snapshot()
+        return cap.bytes()
     }
 
     @Test("startScan with no database emits a terminal scanComplete, not just an error")
     func startScanDbUnavailableEmitsTerminal() async throws {
-        let (sink, collector, pipe, reader) = pipeSink()
+        let cap = WireCapture()
+        let sink = cap.sink
         let cmd = IPCCommand(payload: .startScan(
             rootPath: "/tmp/does-not-matter", rootDisplay: nil, rescan: false))
 
@@ -57,10 +38,8 @@ struct DispatchHandlersTests {
 
         let errNeedle = Data("\"db_unavailable\"".utf8)
         let doneNeedle = Data("\"scanComplete\"".utf8)
-        let out = await waitFor([errNeedle, doneNeedle], in: collector)
-        await sink.close()
-        try? pipe.fileHandleForWriting.close()
-        _ = await reader.value
+        let out = await waitFor([errNeedle, doneNeedle], in: cap)
+        await cap.finish()
 
         #expect(out.range(of: errNeedle) != nil, "db_unavailable error must still be emitted")
         #expect(out.range(of: doneNeedle) != nil,
@@ -75,7 +54,8 @@ struct DispatchHandlersTests {
         defer { try? FileManager.default.removeItem(at: tmp) }
         let db = try Database(at: tmp.appendingPathComponent("test.sqlite"))
 
-        let (sink, collector, pipe, reader) = pipeSink()
+        let cap = WireCapture()
+        let sink = cap.sink
 
         // Empty library → an empty (but real) plan. Proves the dead IPC is wired
         // to proposeAll instead of returning not_implemented_yet.
@@ -84,7 +64,7 @@ struct DispatchHandlersTests {
             coordinator: ScanCoordinator(), sink: sink, database: db)
         let planNeedle = Data("\"restructurePlan\"".utf8)
         let notImpl = Data("\"not_implemented_yet\"".utf8)
-        var out = await waitFor([planNeedle], in: collector)
+        var out = await waitFor([planNeedle], in: cap)
         #expect(out.range(of: planNeedle) != nil, "planRestructure must emit a restructurePlan event")
         #expect(out.range(of: notImpl) == nil, "planRestructure must no longer be not_implemented_yet")
 
@@ -93,10 +73,8 @@ struct DispatchHandlersTests {
             IPCCommand(payload: .applyRestructure(libraryRoot: tmp.path, moves: [], useSymlinks: false)),
             coordinator: ScanCoordinator(), sink: sink, database: db)
         let applyNeedle = Data("\"restructureApplyResult\"".utf8)
-        out = await waitFor([applyNeedle], in: collector)
-        await sink.close()
-        try? pipe.fileHandleForWriting.close()
-        _ = await reader.value
+        out = await waitFor([applyNeedle], in: cap)
+        await cap.finish()
 
         #expect(out.range(of: applyNeedle) != nil,
                 "applyRestructure must emit a restructureApplyResult event")

@@ -1,4 +1,40 @@
 import Foundation
+@testable import FileIDEngine
+
+/// Captures everything written to an `IPCSink` over a pipe, WITHOUT parking a
+/// cooperative-pool thread on a blocking read. The prior per-test pattern —
+/// `let reader = Task.detached { while true { pipe…availableData … } }` — held a
+/// Swift concurrency thread on the blocking `availableData`; several of those
+/// running in parallel across suites starved the executor and intermittently
+/// wedged the swift-testing harness to the 12-min CI SIGALRM. A GCD
+/// `readabilityHandler` reads on GCD's own threads (off the cooperative pool) and
+/// appends to a lock-guarded buffer in arrival order (the handler fires serially
+/// per handle), so no actor `await` and no thread parking.
+final class WireCapture: @unchecked Sendable {
+    let sink: IPCSink
+    private let pipe = Pipe()
+    private let lock = NSLock()
+    private var buffer = Data()
+
+    init() {
+        sink = IPCSink(wire: pipe.fileHandleForWriting)
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let chunk = handle.availableData
+            guard !chunk.isEmpty else { handle.readabilityHandler = nil; return }
+            guard let self else { return }
+            self.lock.lock(); self.buffer.append(chunk); self.lock.unlock()
+        }
+    }
+
+    /// All bytes received so far (synchronous; poll this in a deadline loop).
+    func bytes() -> Data { lock.lock(); defer { lock.unlock() }; return buffer }
+
+    /// Close the sink and the write end so the reader sees EOF and deregisters.
+    func finish() async {
+        await sink.close()
+        try? pipe.fileHandleForWriting.close()
+    }
+}
 
 /// Resolve a URL to its REAL filesystem path via `realpath(3)`.
 ///

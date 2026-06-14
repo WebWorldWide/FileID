@@ -8,27 +8,13 @@ import Foundation
 @testable import FileIDEngine
 import FileIDShared
 
-private actor ByteCollector {
-    private var data = Data()
-    func append(_ d: Data) { data.append(d) }
-    func snapshot() -> Data { data }
-}
-
 @Suite("IPCSink full-buffer coalescing (H3)")
 struct IPCSinkCoalescingTests {
 
     @Test("Buffered scanComplete survives progress-flood coalescing")
     func scanCompleteSurvivesFlood() async throws {
-        let pipe = Pipe()
-        let sink = IPCSink(wire: pipe.fileHandleForWriting)
-        let collector = ByteCollector()
-        let reader = Task.detached {
-            while true {
-                let chunk = pipe.fileHandleForReading.availableData
-                if chunk.isEmpty { break }
-                await collector.append(chunk)
-            }
-        }
+        let cap = WireCapture()
+        let sink = cap.sink
 
         let progress = ScanProgress(
             sessionID: "h3", phase: .tagging, total: 100, discovered: 100,
@@ -44,18 +30,16 @@ struct IPCSinkCoalescingTests {
             failedFiles: 0, totalSeconds: 1
         )))
         for _ in 0..<300 { await sink.emit(.progress(progress)) }
-        await sink.close()
+        await cap.finish()
 
         let needle = Data("\"scanComplete\"".utf8)
         let deadline = Date().addingTimeInterval(10)
         while Date() < deadline {
-            if await collector.snapshot().range(of: needle) != nil { break }
+            if cap.bytes().range(of: needle) != nil { break }
             try await Task.sleep(nanoseconds: 50_000_000)
         }
-        try? pipe.fileHandleForWriting.close()
-        _ = await reader.value
 
-        let out = await collector.snapshot()
+        let out = cap.bytes()
         #expect(out.range(of: needle) != nil,
                 "scanComplete must reach the wire even under full-buffer coalescing")
     }

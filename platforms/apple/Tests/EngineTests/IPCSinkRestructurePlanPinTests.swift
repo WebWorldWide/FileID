@@ -10,12 +10,6 @@ import Foundation
 @testable import FileIDEngine
 import FileIDShared
 
-private actor ByteSink {
-    private var data = Data()
-    func append(_ d: Data) { data.append(d) }
-    func snapshot() -> Data { data }
-}
-
 @Suite("IPCSink restructurePlan pinning (R-15)")
 struct IPCSinkRestructurePlanPinTests {
 
@@ -35,16 +29,8 @@ struct IPCSinkRestructurePlanPinTests {
 
     @Test("restructurePlan reaches the wire under a full-buffer progress flood")
     func restructurePlanSurvivesFlood() async throws {
-        let pipe = Pipe()
-        let sink = IPCSink(wire: pipe.fileHandleForWriting)
-        let collector = ByteSink()
-        let reader = Task.detached {
-            while true {
-                let chunk = pipe.fileHandleForReading.availableData
-                if chunk.isEmpty { break }
-                await collector.append(chunk)
-            }
-        }
+        let cap = WireCapture()
+        let sink = cap.sink
 
         let progress = ScanProgress(
             sessionID: "flood", phase: .tagging, total: 100, discovered: 100,
@@ -56,18 +42,16 @@ struct IPCSinkRestructurePlanPinTests {
         for _ in 0..<2000 { await sink.emit(.progress(progress)) }
         await sink.emit(Self.plan())
         for _ in 0..<500 { await sink.emit(.progress(progress)) }
-        await sink.close()
+        await cap.finish()
 
         let needle = Data("\"restructurePlan\"".utf8)
         let deadline = Date().addingTimeInterval(10)
         while Date() < deadline {
-            if await collector.snapshot().range(of: needle) != nil { break }
+            if cap.bytes().range(of: needle) != nil { break }
             try await Task.sleep(nanoseconds: 50_000_000)
         }
-        try? pipe.fileHandleForWriting.close()
-        _ = await reader.value
 
-        let out = await collector.snapshot()
+        let out = cap.bytes()
         #expect(out.range(of: needle) != nil,
                 "restructurePlan must reach the wire under full-buffer pressure")
     }
