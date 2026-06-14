@@ -6,7 +6,7 @@
 use crate::ipc::{
     sink::Sink, EngineInfo, EventPayload, HardwareInfo, HardwareReprobed, IpcEvent, Wrap,
 };
-use crate::models::runtime::{ExecutionProvider, GpuVendor, RuntimeProbe};
+use crate::models::runtime::{active_provider, ExecutionProvider, GpuVendor, RuntimeProbe};
 use crate::platform;
 
 const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -57,7 +57,15 @@ pub(crate) fn build_hardware_info() -> HardwareInfo {
     HardwareInfo {
         gpu_vendor: vendor_str.into(),
         adapter_name: probe.adapter_name.clone(),
-        execution_provider: probe.provider.as_str().into(),
+        // F-C5-005: report the EP this process ACTUALLY bound (the memoized
+        // `active_provider()`), not a fresh `probe.provider`. They agree at
+        // startup, but on a `verifyCudaPack` reprobe AFTER the user installs a
+        // pack, a fresh probe would advertise the now-available GPU EP even
+        // though the running session is still bound to its original EP (a
+        // restart is required — see `reenable_ep` above). `cuda_pack_present` &
+        // friends stay fresh (they reflect the install), so the card shows
+        // "pack ✓, restart to use it" rather than a misleading active EP.
+        execution_provider: active_provider().as_str().into(),
         physical_cpu_cores: num_cpus::get_physical().max(1) as u32,
         cuda_pack_present: probe.cuda_pack_present,
         openvino_pack_present: probe.openvino_pack_present,
