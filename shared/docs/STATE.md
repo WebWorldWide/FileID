@@ -8,7 +8,87 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
-## 2026-06-14 (latest) — rounds 4–5 deep audit: 23 more defects fixed (PRs #30–#35); the engine + app are now exhaustively audited
+## 2026-06-14 (latest) — round 7: the last-uncovered UI surface — 39 defects fixed + 4 delta regressions (PRs #40–#41); audit converged
+
+Swept the surface rounds 1–6 never reached: the big action-bearing **C# Views +
+ViewModels** (Library/People/Cleanup/DeepAnalyze + their VMs, EngineClient command
+senders, modal sheets, sidebar) and the **remaining Swift Views** (Settings,
+Cleanup, TreeDiff, sidebar, window shell, and the uncovered parts of the big three).
+17 finder units → 3-lens default-reject vote → domain-expert recipe surfaced
+**39 confirmed real defects** (0 P0/P1, 17 P2, 22 P3). All fixed via per-file
+parallel fixers, every diff re-verified against live code + read before commit.
+
+- **#40 macOS app (17):** stale thumbnails/previews from offset-keyed lists and
+  `.task` without `id:` (Cleanup CopyTile, FilePreview, FinderTags, TreeDiff dup-id);
+  heavy sync work off the MainActor (bulk delete+tag, face-reassign write, the 27×
+  COUNT(*)/render pipeline strip, a dead per-batch COUNT); missing in-flight guards
+  on bulk-merge (+ no silent row-drop on failure); a suggestions sheet force-opening
+  over user nav; a bookmark-restore lost-update; an un-cancellable tag read; CLIP
+  phantom "Downloading…" + per-tick syscalls; Start-button un-wedge; folder-pick
+  readability pre-validation.
+- **#41 Windows app (22):** overlapping-refresh races in 3 ViewModels (mirror the
+  CI-green LibraryViewModel A4/A5 generation-guard + active-loads); re-entrant
+  double-apply on bulk merge / mark-unknown / trash / per-row merge; inflight
+  thumbnail-CTS removed by key without identity check (+ leak); the latched
+  DeepAnalyzeLast re-applied every progress tick (inflated pill / stale caption);
+  Cancel not stopping the Analyze-Selected batch; multi-MB IPC encode + blocking
+  recursive wipe deletes on the UI thread; an O(N²)→O(N) selection-maintenance
+  coalesce; a stale select-mode snapshot; a dead double row-build; the pipeline
+  strip not resetting after a wipe; the per-prefix BulkActionResult reply gate.
+- **Round-7 delta (folded into #40/#41):** the delta stage caught a self-inflicted
+  regression in **4 files** (its 5th straight non-empty round): the FilePreview
+  `.task(id:)` lacked the cancellation guard its own sibling added (stale-poster
+  race); the CLIP `presentFilePaths` cache wasn't refreshed on partial-install
+  failure; the Windows thumbnail `cts.Dispose()` was unconditional (cross-thread
+  concurrent dispose) vs the guarded CleanupView twin; the pipeline-strip reset
+  fired on "Clear folder" too (blanked an intact library) → re-derive the floor
+  from the DB. All fixed; **delta-2 came back dry.**
+
+**Audit converged.** Tally across the campaign: **64 real defects fixed** over
+7 find-rounds (8/20/12/11/7/+delta/39) + 5 delta-rounds, every batch merged
+CI-green with the only-`main`/no-open-PRs terminal state held between batches.
+The find→verify→expert→read→delta→confirm-dry method covered the engine, data
+paths, and the full UI surface on both platforms; round 7 was the last untouched
+tier. Gates at HEAD: macOS `swift build` debug+release + 195 tests; Windows
+`cargo clippy -D warnings` + 341 tests + .NET app (x64/arm64) + engine
+(x64/arm64-native/arm64-cross); all post-merge `main` CI green. Remaining work is
+exclusively HARDWARE / GUI / LABELED-DATA UAT + the two deferred coordinated
+cross-platform changes — see NEXT.md.
+
+## 2026-06-14 — round 6: action-bearing UI Views audited — 7 defects fixed (PRs #37–#39)
+
+Pushed the same method onto the surface rounds 1–5 left for last: the **action-bearing
+UI Views** on both platforms (Restructure, Deep Analyze, People naming, the model-install
+Welcome sheet, the file-preview sheet). 7 candidates → 7 real, all merged CI-green; the
+delta stage again caught a self-inflicted regression (R6-07), continuing its 4-for-4 record.
+
+- **#37 macOS app Views (5):** R6-01 RestructureView applied the *live* eligible-move set
+  at confirm time, not the set shown when the confirm dialog opened — a move that became
+  ineligible between present and tap was still applied (P1) → snapshot `pendingMoves` at
+  present; R6-02 DeepAnalyzeViews ran 4 Hz on-main DB `COUNT`s for the status header →
+  cached via `refreshStatusCounts()` on appear/change; R6-03 Sankey source-tap drilled down
+  on the basename, colliding distinct folders that share a leaf name → use the full
+  `identityKey` path; R6-06 Sankey cursor `@State` was written on every mouse move even off
+  any ribbon (layout thrash) → write only over a ribbon; R6-07 WelcomeSheet keyed the
+  Failed-state `onChange` on the error *message string*, so a retry failing with the same
+  message never re-flipped to Failed (spun forever) → key on the monotonic `lastErrorSignal`;
+  also added a 45 s VLM download-stall watchdog.
+- **#38 Windows app Views (2):** R6-04 RestructureView.xaml.cs `_applying`/`_applyingPlan`
+  were per-instance, so a re-navigated view could release the plan another apply was mid-flight
+  on → made `static` + release-guarded on `ReferenceEquals(plan, _applyingPlan)`; R6-05
+  FilePreviewSheet.xaml.cs `OnMediaPlayerFailed` could enqueue against a stale media generation
+  after unload → capture `_mediaGen` and bail on mismatch/unload.
+- **Round-6 delta (#39):** R6-07's stall watchdog kept its 45 s timer armed through the
+  silent post-download MLX cold-load and false-fired "Download stalled" on a legitimately
+  loading model → gated the fire on `vlmLastFraction < 0.999` so it arms only while the
+  download is actually in flight; the `vlmInstalled` sentinel owns the cold-load phase.
+
+Gates at HEAD: macOS `swift build` debug+release + CI macOS-app green; Windows `cargo clippy
+-D warnings` + 341 tests + both Windows workflows green; all post-merge `main` CI green.
+Only `main`; no open PRs. Running tally across the campaign: 60 real defects fixed over
+6 find-rounds + 4 delta-rounds.
+
+## 2026-06-14 — rounds 4–5 deep audit: 23 more defects fixed (PRs #30–#35); the engine + app are now exhaustively audited
 
 Extended the round-3 method to the surfaces rounds 1–3 didn't reach. Each round:
 per-file finders → 3-lens default-reject vote → per-finding domain-expert

@@ -1,5 +1,32 @@
 # NEXT — resume here
 
+## 2026-06-14 (round 7) — audit CONVERGED; the only code-side work left is the two deferred coordinated changes below
+
+Round 7 swept the last untouched tier — the action-bearing C# Views + ViewModels and the remaining
+Swift Views — and landed 39 fixes + 4 delta regressions (PRs #40/#41, see STATE.md), with delta-2
+coming back dry. Across 7 find-rounds the method has now covered the **engine, data paths, and the
+full UI surface on both platforms**; each round still found real bugs (8/20/12/11/7/39), and the
+deepest UI round was almost all P2/P3 (zero P0/P1) — the high-severity space is exhausted. **Treat
+the find→verify→expert→read→delta audit as converged.**
+
+What remains is NOT findable by more static rounds — it needs hardware, a GUI, or labeled data:
+- **macOS:** `bash run.sh` on a Mac; exercise every tab (tag/dedupe/restructure/people/cleanup/deep
+  analyze) against a real library; confirm the round-5/6/7 UI fixes behave (bulk-merge in-flight
+  guard, suggestions-sheet-no-force-open, preview/thumbnail `.task(id:)` re-fire, CLIP install/cancel,
+  pipeline-strip floor on wipe-vs-clear). Schema v13 face-verification anchors still need a Mac to
+  exercise the write path.
+- **Windows:** `iterate.ps1` on the RTX 2060 / `G:\TrueNAS`; confirm the WinUI-runtime fixes (the 3
+  ViewModel generation-guards, the bulk re-entrancy guards, the thumbnail-CTS single-owner dispose,
+  DeepAnalyze once-per-FileDone + cancel-stops-batch, the off-UI-thread IPC encode + wipe deletes,
+  the O(N²)→O(N) selection coalesce, the pipeline-strip ReseedFloorFromDb). Per-vendor NPU (AMD/Intel/
+  Snapdragon) + ARM64 hardware passes.
+- **Labeled data:** ML threshold tuning (face-cluster precision/recall, RAM++ per-class thresholds) —
+  tune against real corpora, never by guess.
+
+The two coordinated cross-platform changes below remain the ONLY open code-side items — both still
+gated on a both-engine append-only migration / four-constant cross-platform bump that CI can't fully
+exercise. Everything else from rounds 1–7 is landed and green on `main`.
+
 ## 2026-06-14 (round-3 audit) — two findings deferred with full recipes (the rest landed in #25–#27)
 
 The round-3 audit (see STATE.md) landed 20 fixes. Two were deliberately NOT landed because they
