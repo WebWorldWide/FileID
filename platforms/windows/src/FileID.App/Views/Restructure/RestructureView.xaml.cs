@@ -45,7 +45,13 @@ public sealed partial class RestructureView : UserControl
 
     private bool _unloaded;
     private bool _suppressRecompute;
-    private bool _applying;
+    // R6-04: static so the in-flight-apply guard survives the view's per-tab-switch
+    // recreation (mirrors the existing static _deselectedFileIds). _applyingPlan is
+    // the plan currently being applied; SyncPlan compares against it to tell a
+    // genuine post-apply re-plan (release the guard) from a returning instance
+    // re-rendering the SAME cached pre-apply plan (keep it engaged).
+    private static bool _applying;
+    private static RestructurePlan? _applyingPlan;
     private bool _deepAnalyzeHintDismissed;
     private RestructureOutcome? _hovered;
     private EngineError? _lastHandledError;
@@ -203,9 +209,19 @@ public sealed partial class RestructureView : UserControl
         var plan = EngineClient.Instance.LastRestructurePlan;
         if (plan is null) return;
 
-        // A fresh plan supersedes any in-flight apply — release the single-flight
-        // guard so the new plan's buttons enable correctly (F-C5-003).
-        _applying = false;
+        // R6-04: a GENUINELY fresh plan supersedes any in-flight apply — release the
+        // single-flight guard (F-C5-003). But the view is recreated on every tab
+        // switch, so a returning instance can re-enter here with the SAME cached
+        // pre-apply plan while the apply is still mid-flight; releasing then would
+        // re-enable Apply and let a duplicate apply fire against already-moved
+        // sources (the false "some changes couldn't be applied" alarm this guard
+        // exists to prevent). Every plan event deserializes a NEW record instance,
+        // so the post-apply re-plan is a different reference and still releases.
+        if (!ReferenceEquals(plan, _applyingPlan))
+        {
+            _applying = false;
+            _applyingPlan = null;
+        }
 
         _allFileRows.Clear();
         _filesByOutcome.Clear();
@@ -636,6 +652,7 @@ public sealed partial class RestructureView : UserControl
         }
         if (sel.Count == 0) return;
         _applying = true;
+        _applyingPlan = plan;   // R6-04: record the in-flight plan (see SyncPlan)
         ApplySymlinkButton.IsEnabled = false;
         ApplyMovesButton.IsEnabled = false;
         ApplyStatusText.Text = useSymlinks
