@@ -70,12 +70,9 @@ impl RestructureApply {
         }
     }
 
-    /// Inject a shared cancellation flag (the dispatcher sets it on a user
-    /// stop); `apply` polls it at the top of each move. (F-C6-013)
-    // Allowed-dead in the non-test bin: the apply-side poll + the unit test
-    // exercise it now; the dispatcher (CancelScan path in main.rs) wiring that
-    // calls this is a follow-up outside this file's ownership.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Inject a shared cancellation flag. `handle_apply_restructure` passes the
+    /// flag that the CancelScan dispatch arm sets; `apply` polls it at the top of
+    /// each move so a long apply is stoppable. (F-C6-013)
     pub fn with_cancel(mut self, cancel: Arc<AtomicBool>) -> Self {
         self.cancel = cancel;
         self
