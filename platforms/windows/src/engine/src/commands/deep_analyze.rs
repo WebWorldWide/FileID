@@ -77,7 +77,9 @@ pub(crate) async fn handle_deep_analyze_file(
                     failed: 1,
                     total_seconds: 0.0,
                     model_kind: payload.model_kind.clone(),
-                    cancelled: true,
+                    // Non-cancellation error path: report the ACTUAL cancel state
+                    // (a load/query failure isn't a user cancel). (audit F-A2)
+                    cancelled: cancel.load(Ordering::Relaxed),
                 },
             ))))
             .await;
@@ -222,7 +224,9 @@ pub(crate) async fn handle_deep_analyze_folder(
                     failed: 1,
                     total_seconds: 0.0,
                     model_kind: payload.model_kind.clone(),
-                    cancelled: true,
+                    // Non-cancellation error path: report the ACTUAL cancel state
+                    // (a load/query failure isn't a user cancel). (audit F-A2)
+                    cancelled: cancel.load(Ordering::Relaxed),
                 },
             ))))
             .await;
@@ -255,7 +259,9 @@ pub(crate) async fn handle_deep_analyze_all(
                     failed: 1,
                     total_seconds: 0.0,
                     model_kind: payload.model_kind.clone(),
-                    cancelled: true,
+                    // Non-cancellation error path: report the ACTUAL cancel state
+                    // (a load/query failure isn't a user cancel). (audit F-A2)
+                    cancelled: cancel.load(Ordering::Relaxed),
                 },
             ))))
             .await;
@@ -444,7 +450,8 @@ async fn run_deep_analyze_batch(
                 failed: 0,
                 total_seconds: started_at.elapsed().as_secs_f64(),
                 model_kind: model_kind.to_string(),
-                cancelled: true,
+                // Runtime-missing error, not a user cancel. (audit F-A2)
+                cancelled: cancel.load(Ordering::Relaxed),
             },
         ))))
         .await;
