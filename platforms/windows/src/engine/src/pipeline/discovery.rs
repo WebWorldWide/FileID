@@ -31,7 +31,7 @@
 //   - Unsupported file kinds: skipped early so tagging workers don't
 //     waste work
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -120,7 +120,7 @@ pub struct Discovery {
     /// (DB `scanned_at >= modified_unix`). Discovery silently skips these,
     /// turning a re-run of a 1M-file corpus into a near-instant no-op.
     /// Empty = classic full-scan.
-    skip_paths: Arc<HashSet<PathBuf>>,
+    skip_paths: Arc<HashMap<PathBuf, (i64, Option<f64>)>>,
 }
 
 /// Handle returned from `Discovery::spawn`. `count` is a live counter the
@@ -145,7 +145,7 @@ impl Discovery {
     pub fn new_with_skip(
         root: impl Into<PathBuf>,
         coordinator: ScanCoordinator,
-        skip_paths: Arc<HashSet<PathBuf>>,
+        skip_paths: Arc<HashMap<PathBuf, (i64, Option<f64>)>>,
     ) -> Self {
         Self {
             root: root.into(),
@@ -351,7 +351,7 @@ impl Discovery {
 /// "\\?\" root); FS opens reconvert via `to_extended_length` internally.
 fn classify_entry(
     entry_path: &std::path::Path,
-    skip_paths: &HashSet<PathBuf>,
+    skip_paths: &HashMap<PathBuf, (i64, Option<f64>)>,
     error_count: &AtomicU64,
 ) -> Option<DiscoveredFile> {
     // Strip the verbatim prefix back to normal form: this is what we store +
@@ -370,12 +370,6 @@ fn classify_entry(
              surrogate?) — skipping; rename the file to include it"
         );
         error_count.fetch_add(1, Ordering::Relaxed);
-        return None;
-    }
-    // Skip files the orchestrator pre-loaded as already-current. Hash lookup
-    // is O(1); a 1M-file set costs ~80 MB RAM but lets a repeat scan complete
-    // in seconds instead of hours.
-    if skip_paths.contains(&path) {
         return None;
     }
     // follow_links is false on the walk, so symlink_metadata matches jwalk's
@@ -397,6 +391,22 @@ fn classify_entry(
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0);
+    // R4-01 incremental skip: drop a file only when the DB row for THIS path is
+    // genuinely current — same size AND same on-disk mtime as the stored values.
+    // Mirrors the macOS reference (Discovery.isAlreadyCurrent) and the dbwriter
+    // "unchanged" contract. The previous bare path-membership skip stranded any
+    // file edited after its last scan, because the stored modified_at is never
+    // refreshed for a skipped row (its UPSERT never runs).
+    if let Some(&(db_size, db_modified)) = skip_paths.get(&path) {
+        let unchanged = db_size == size as i64
+            && match db_modified {
+                Some(m) => (m - modified).abs() < 0.000_001,
+                None => false,
+            };
+        if unchanged {
+            return None;
+        }
+    }
     let created_unix = metadata
         .created()
         .ok()
@@ -634,7 +644,7 @@ mod tests {
             .unwrap();
         let (got, count) = rt.block_on(async {
             let coord = ScanCoordinator::new();
-            let disc = Discovery::new_with_skip(root, coord, Arc::new(HashSet::new()));
+            let disc = Discovery::new_with_skip(root, coord, Arc::new(HashMap::new()));
             let handle = disc.spawn();
             let mut rx = handle.rx;
             let mut got = Vec::new();
@@ -669,7 +679,7 @@ mod tests {
             .unwrap();
         rt.block_on(async {
             let coord = ScanCoordinator::new();
-            let disc = Discovery::new_with_skip(root, coord, Arc::new(HashSet::new()));
+            let disc = Discovery::new_with_skip(root, coord, Arc::new(HashMap::new()));
             let handle = disc.spawn();
             let mut rx = handle.rx;
             let count = handle.count.clone();
@@ -711,7 +721,7 @@ mod tests {
         let p = root.join("photo.jpg");
         fs::write(&p, b"jpegbytes").unwrap();
 
-        let skip = HashSet::new();
+        let skip = HashMap::new();
         let errors = AtomicU64::new(0);
         // Pass the path exactly as the walk would (no verbatim prefix in the
         // test env; strip_extended_length is a no-op on a plain path).
@@ -730,10 +740,19 @@ mod tests {
         fs::write(&other, b"data").unwrap();
         assert!(classify_entry(&other, &skip, &errors).is_none());
 
-        // Skip-set membership is honored at the parallel stage too.
-        let mut skip2 = HashSet::new();
-        skip2.insert(p.clone());
-        assert!(classify_entry(&p, &skip2, &errors).is_none());
+        // R4-01: skip honors size+mtime, not bare membership. An entry whose
+        // stored size+mtime MATCH the live file is skipped (unchanged)...
+        let mut skip2 = HashMap::new();
+        skip2.insert(p.clone(), (df.size_bytes as i64, Some(df.modified_unix)));
+        assert!(classify_entry(&p, &skip2, &errors).is_none(), "unchanged file is skipped");
+        // ...but a changed mtime defeats the skip so the edit is re-processed.
+        let mut skip3 = HashMap::new();
+        skip3.insert(p.clone(), (df.size_bytes as i64, Some(df.modified_unix + 100.0)));
+        assert!(classify_entry(&p, &skip3, &errors).is_some(), "mtime change defeats the skip");
+        // A changed size likewise re-processes.
+        let mut skip4 = HashMap::new();
+        skip4.insert(p.clone(), (df.size_bytes as i64 + 1, Some(df.modified_unix)));
+        assert!(classify_entry(&p, &skip4, &errors).is_some(), "size change defeats the skip");
     }
 
     /// C6-017 end-to-end guard: every file the receiver gets must already
@@ -758,7 +777,7 @@ mod tests {
             .unwrap();
         rt.block_on(async {
             let coord = ScanCoordinator::new();
-            let disc = Discovery::new_with_skip(root, coord, Arc::new(HashSet::new()));
+            let disc = Discovery::new_with_skip(root, coord, Arc::new(HashMap::new()));
             let handle = disc.spawn();
             let mut rx = handle.rx;
             let done = handle.done.clone();

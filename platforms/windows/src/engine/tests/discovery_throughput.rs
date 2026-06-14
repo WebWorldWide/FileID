@@ -14,7 +14,7 @@
 //! The release profile matters: the dev profile's debug assertions inside
 //! jwalk are slow enough to fail the timing budget on slower runners.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -50,7 +50,7 @@ fn walk_10k_files_in_under_5_seconds() {
 
     let (count, elapsed) = rt.block_on(async {
         let coord = ScanCoordinator::new();
-        let disc = Discovery::new_with_skip(root, coord, Arc::new(HashSet::new()));
+        let disc = Discovery::new_with_skip(root, coord, Arc::new(HashMap::new()));
         let handle = disc.spawn();
         let mut rx = handle.rx;
         let count_ref = handle.count.clone();
@@ -108,7 +108,7 @@ fn count_advances_independently_of_consumer_drain() {
 
     rt.block_on(async {
         let coord = ScanCoordinator::new();
-        let disc = Discovery::new_with_skip(root, coord, Arc::new(HashSet::new()));
+        let disc = Discovery::new_with_skip(root, coord, Arc::new(HashMap::new()));
         let handle = disc.spawn();
         let count = handle.count.clone();
         let done = handle.done.clone();

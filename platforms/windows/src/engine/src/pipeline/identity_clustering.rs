@@ -228,13 +228,20 @@ where
         core_sums.iter().map(|s| normalize_sum(s, dim)).collect();
     let mut outliers_assigned = 0;
     let mut outliers_as_singletons = 0;
+    // R4-02/R4-08: snapshot the Pass-1 core count. An outlier may only join a
+    // genuine size>=2 Pass-1 core, never a singleton appended below. Without the
+    // bound the inner scan grows by every appended singleton (O(M^2) at scale)
+    // AND an outlier can order-dependently merge into a PRIOR outlier's singleton.
+    // Assigned-outlier centroid updates write in place at index < core_n, so real
+    // cores keep being re-scanned with fresh values; only the singletons are excluded.
+    let core_n = core_centroids.len();
     for outlier in outliers {
         let v = &embeddings[outlier];
         let mut c1_idx: isize = -1;
         let mut c2_idx: isize = -1;
         let mut c1_sim: f32 = -2.0;
         let mut c2_sim: f32 = -2.0;
-        for (idx, centroid) in core_centroids.iter().enumerate() {
+        for (idx, centroid) in core_centroids.iter().take(core_n).enumerate() {
             let s = dot(v, centroid);
             if s > c1_sim {
                 c2_sim = c1_sim;
