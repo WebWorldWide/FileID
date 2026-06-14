@@ -194,7 +194,10 @@ struct TreeDiffView: View {
             .padding(.horizontal, 10).padding(.top, 8)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 4) {
-                    ForEach(rows) { item in
+                    // Index-keyed: anchor rows derive their Identifiable id from
+                    // a folder basename, which collides when two anchors share a
+                    // last path component (.../2023/Receipts, .../2024/Receipts).
+                    ForEach(Array(rows.enumerated()), id: \.offset) { _, item in
                         row(item)
                     }
                 }

@@ -27,6 +27,7 @@ struct PeopleView: View {
 
     @State private var suggestions: [ClusterSuggestions.Candidate] = []
     @State private var suggestionsLoading: Bool = false
+    @State private var mergeInFlight: Bool = false
 
     /// Single sheet driver. Three stacked .sheet modifiers wedged the
     /// view graph on macOS 26 (blanked the sidebar on tab transition).
@@ -76,7 +77,9 @@ struct PeopleView: View {
                     candidates: suggestions,
                     personByID: personByID,
                     store: store,
+                    inFlight: mergeInFlight,
                     onAccept: { candidate in
+                        guard !mergeInFlight else { return }
                         let a = personByID[candidate.personA]
                         let b = personByID[candidate.personB]
                         let target = preferredTarget(a, b) ?? a ?? b
@@ -90,13 +93,17 @@ struct PeopleView: View {
                             let storeRef = store
                             let candidateID = candidate.id
                             let displayName = t.displayName
+                            mergeInFlight = true
                             Task.detached(priority: .userInitiated) {
                                 let n = storeRef.mergePersons(target: t.id, sources: [s.id])
                                 await MainActor.run {
                                     if let n {
                                         mergeStatus = "Merged into \"\(displayName)\" (\(n) photos)."
+                                        suggestions.removeAll { $0.id == candidateID }
+                                    } else {
+                                        mergeStatus = "Merge failed — see logs."
                                     }
-                                    suggestions.removeAll { $0.id == candidateID }
+                                    mergeInFlight = false
                                     reload()
                                 }
                             }
@@ -106,6 +113,7 @@ struct PeopleView: View {
                         }
                     },
                     onAcceptMany: { batch in
+                        guard !mergeInFlight else { return }
                         // One transaction for the whole batch. ReadStore's
                         // union-find resolves chains (A→B, B→C → A→C),
                         // so we just submit raw (target, source) pairs.
@@ -120,12 +128,23 @@ struct PeopleView: View {
                             pairs.append((target.id, s.id))
                         }
                         let batchToRemove = batch
+                        guard !pairs.isEmpty else {
+                            suggestions.removeAll { batchToRemove.contains($0) }
+                            reload()
+                            return
+                        }
                         let storeRef = store
+                        mergeInFlight = true
                         Task.detached(priority: .userInitiated) {
                             let merged = storeRef.mergePersonsBatch(pairs)
                             await MainActor.run {
-                                suggestions.removeAll { batchToRemove.contains($0) }
-                                mergeStatus = "Bulk-merged \(merged) cluster\(merged == 1 ? "" : "s")."
+                                if merged > 0 {
+                                    suggestions.removeAll { batchToRemove.contains($0) }
+                                    mergeStatus = "Bulk-merged \(merged) cluster\(merged == 1 ? "" : "s")."
+                                } else {
+                                    mergeStatus = "Merge failed — see logs."
+                                }
+                                mergeInFlight = false
                                 reload()
                             }
                         }
@@ -213,8 +232,13 @@ struct PeopleView: View {
                             dbPath: ReadStore.defaultDBURL.path
                         )
                     }.value
-                    suggestions = result
                     suggestionsLoading = false
+                    // The scan is multi-second; don't preempt whatever the
+                    // user navigated to while it ran. Only surface the sheet
+                    // if they're still on a neutral People view — no sheet
+                    // already up, not mid merge/unknown selection.
+                    guard activeSheet == nil, !mergeMode, !unknownMode else { return }
+                    suggestions = result
                     activeSheet = .suggestedMerges
                 }
             } label: {
@@ -1005,10 +1029,12 @@ private struct PersonDetailSheet: View {
                     failed += 1
                 }
             }
+            let doneCount = updated
+            let failCount = failed
             await MainActor.run {
                 tagBatchInFlight = false
-                tagBatchStatus = "Replaced \"\(oldTag)\" → \"\(newTag)\" on \(updated) file\(updated == 1 ? "" : "s")"
-                    + (failed > 0 ? ", \(failed) failed" : "")
+                tagBatchStatus = "Replaced \"\(oldTag)\" → \"\(newTag)\" on \(doneCount) file\(doneCount == 1 ? "" : "s")"
+                    + (failCount > 0 ? ", \(failCount) failed" : "")
                 storeRef.notifyChanged()
                 BulkRenameSheet.recordPersonTag(personID: person.id, tag: newTag)
             }
@@ -1184,13 +1210,26 @@ private struct MovePhotosTargetPicker: View {
                           spacing: 12) {
                     ForEach(candidates) { p in
                         Button {
-                            let moved = store.movePersonFaces(
-                                fromPersonID: sourcePerson.id,
-                                toPersonID: p.id,
-                                fileIDs: fileIDs
-                            )
+                            // Off the main thread — movePersonFaces opens a
+                            // write connection and runs an UPDATE + two
+                            // COUNT(DISTINCT) recounts in a transaction over the
+                            // user's full multi-selection; on big clusters this
+                            // blocks for seconds. Mirror the merge paths.
+                            let storeRef = store
+                            let sourceID = sourcePerson.id
+                            let targetID = p.id
+                            let ids = fileIDs
+                            let targetName = p.displayName
+                            let completion = onMoved
                             dismiss()
-                            onMoved(moved, p.displayName)
+                            Task.detached(priority: .userInitiated) {
+                                let moved = storeRef.movePersonFaces(
+                                    fromPersonID: sourceID,
+                                    toPersonID: targetID,
+                                    fileIDs: ids
+                                )
+                                await MainActor.run { completion(moved, targetName) }
+                            }
                         } label: {
                             PersonCard(person: p, store: store)
                         }
@@ -1215,6 +1254,7 @@ private struct SuggestedMergesSheet: View {
     let candidates: [ClusterSuggestions.Candidate]
     let personByID: [Int64: ReadStore.PersonRow]
     let store: ReadStore
+    let inFlight: Bool
     let onAccept: (ClusterSuggestions.Candidate) -> Void
     let onAcceptMany: ([ClusterSuggestions.Candidate]) -> Void
     let onDismiss: () -> Void
@@ -1255,7 +1295,7 @@ private struct SuggestedMergesSheet: View {
                         .foregroundStyle(.green)
                 }
                 .buttonStyle(.plain)
-                .disabled(veryLikely.isEmpty)
+                .disabled(veryLikely.isEmpty || inFlight)
                 .help("Bulk-merge every pair with cosine similarity ≥ 0.55 (the strongest 'same person' signal). The remaining pairs stay for manual review.")
                 Button {
                     onAcceptMany(candidates)
@@ -1268,7 +1308,7 @@ private struct SuggestedMergesSheet: View {
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
-                .disabled(candidates.isEmpty)
+                .disabled(candidates.isEmpty || inFlight)
                 .help("Merge every pair in the list. Use carefully — pairs near the lower end of the borderline band may not actually be the same person.")
                 Spacer()
             }
@@ -1326,6 +1366,7 @@ private struct SuggestedMergesSheet: View {
                     Button("Merge") { onAccept(cand) }
                         .buttonStyle(.borderedProminent)
                         .tint(Theme.gold)
+                        .disabled(inFlight)
                 }
             }
             .padding(10)

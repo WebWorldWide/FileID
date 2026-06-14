@@ -198,6 +198,11 @@ struct MainWindow: View {
                 var isDir: ObjCBool = false
                 let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
                 await MainActor.run {
+                    // A folder picked while the bookmark was resolving
+                    // (slow NAS) is the user's live choice — don't let a
+                    // stale restore clobber it, nor delete the bookmark it
+                    // just persisted.
+                    guard self.pickedURL == nil else { return }
                     if exists {
                         self.pickedURL = url
                     } else {
@@ -206,6 +211,7 @@ struct MainWindow: View {
                 }
             } catch {
                 await MainActor.run {
+                    guard self.pickedURL == nil else { return }
                     UserDefaults.standard.removeObject(forKey: key)
                 }
             }

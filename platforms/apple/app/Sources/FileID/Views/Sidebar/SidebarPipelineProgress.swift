@@ -49,8 +49,7 @@ struct PipelineProgress: View {
         return .done
     }
 
-    private func state(for s: Stage) -> (filled: Bool, active: Bool) {
-        let c = current
+    private func state(for s: Stage, _ c: Stage) -> (filled: Bool, active: Bool) {
         // Done is "filled" only when current = done (everything's complete).
         // Otherwise every stage strictly before the current one is filled,
         // and the current stage itself is active.
@@ -65,10 +64,14 @@ struct PipelineProgress: View {
         // in the same column as the dot — left half + right half — so
         // they meet between adjacent dots without offsetting them.
         let stages = Stage.allCases
+        // Compute `current` once per render — it can run synchronous COUNT(*)
+        // queries (at-rest DB branch), so the 9 per-stage state() calls below
+        // must not each recompute it.
+        let cur = current
         HStack(spacing: 0) {
             ForEach(Array(stages.enumerated()), id: \.element.id) { idx, s in
-                let st = state(for: s)
-                let prevFilled = idx > 0 ? state(for: stages[idx - 1]).filled : false
+                let st = state(for: s, cur)
+                let prevFilled = idx > 0 ? state(for: stages[idx - 1], cur).filled : false
                 VStack(spacing: 4) {
                     ZStack {
                         // Left connector — only when not the first dot.

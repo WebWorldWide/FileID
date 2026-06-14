@@ -34,6 +34,18 @@ struct ProcessingControl: View {
                 startRequested = false
             }
         }
+        // A scan the engine dropped (Start clicked during the respawn window)
+        // or a crash before the first phase event never produces the phase
+        // transition above — clear the optimistic flag on the engine's error/
+        // reset signals too, or Start wedges on "Starting…". Safe to clear
+        // unconditionally: on a normal scan the first phase event already
+        // cleared it, so these are no-ops there.
+        .onChange(of: engine.lastErrorSignal) { _, _ in
+            startRequested = false
+        }
+        .onChange(of: engine.engineResetSignal) { _, _ in
+            startRequested = false
+        }
     }
 
     // MARK: Pre-scan
