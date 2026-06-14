@@ -137,4 +137,24 @@ struct ScanCancellationTests {
         }
     }
 
+    // F-C6-013 wiring: cancelScan → coordinator.requestCancel() must cancel a
+    // registered restructure-apply task (Restructure.apply polls Task.isCancelled
+    // per move). Before the wiring the apply ran in a discarded detached task no
+    // signal could reach, so a long apply was unstoppable.
+    @Test("requestCancel cancels a registered restructure-apply task")
+    func requestCancelCancelsRestructureTask() async {
+        let coord = ScanCoordinator()
+        let task = Task.detached {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+        }
+        await coord.setActiveRestructure(task)
+        await coord.requestCancel()
+        // `await task.value` returns ONLY after the loop observed cancellation
+        // and exited — proving requestCancel propagated to the registered task.
+        await task.value
+        #expect(task.isCancelled, "requestCancel must cancel the registered apply task")
+    }
+
 }

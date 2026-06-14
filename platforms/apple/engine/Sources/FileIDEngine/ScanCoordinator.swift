@@ -56,6 +56,7 @@ public actor ScanCoordinator {
     private var cancelled = false
     private var paused = false
     private var activeScanTask: Task<Void, Never>?
+    private var activeRestructureTask: Task<Void, Never>?
 
     private var lastEmitAt: Date = .distantPast
     private var lastProcessedSnapshot: Int = 0
@@ -141,12 +142,33 @@ public actor ScanCoordinator {
         // so cancelling the task unblocks the suspended producer and lets the
         // group finish and emit scanComplete(.cancelled).
         activeScanTask?.cancel()
+        // F-C6-013 wiring: cancelScan is the app's single "stop the current long
+        // op" signal — also stop an in-flight restructure apply. The apply task
+        // polls `Task.isCancelled` per move (Restructure.apply's default), so
+        // cancelling the registered handle breaks its loop at the next boundary.
+        // No stale-cancel risk: a fresh apply registers a new (un-cancelled)
+        // handle, and only a subsequent requestCancel cancels it.
+        activeRestructureTask?.cancel()
     }
 
     /// Track the in-flight scan task so the engine can await it on shutdown
     /// and not kill it mid-flight. Setting a new task replaces any stale one.
     public func setActiveScan(_ task: Task<Void, Never>) {
         activeScanTask = task
+    }
+
+    /// Track the in-flight restructure-apply task so `requestCancel` can stop it
+    /// and the engine can await its terminal `restructureApplyResult` on
+    /// shutdown rather than `_exit`-ing over it. Pass nil to clear on completion.
+    public func setActiveRestructure(_ task: Task<Void, Never>?) {
+        activeRestructureTask = task
+    }
+
+    /// Block until the active restructure apply (if any) completes — so a
+    /// shutdown mid-apply still flushes the terminal result event.
+    public func awaitActiveRestructure() async {
+        await activeRestructureTask?.value
+        activeRestructureTask = nil
     }
 
     /// True iff a scan task is currently registered AND not yet finished.
