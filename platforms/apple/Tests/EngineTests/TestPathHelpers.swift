@@ -11,23 +11,33 @@ import Foundation
 /// appends to a lock-guarded buffer in arrival order (the handler fires serially
 /// per handle), so no actor `await` and no thread parking.
 final class WireCapture: @unchecked Sendable {
+    /// Lock-guarded byte buffer captured BY the readability handler. The handler
+    /// must be `@Sendable`, so it captures this Sendable box — NOT `self` (a
+    /// `[weak self]` capture trips "non-sendable function value" on the CI Swift
+    /// toolchain even though `WireCapture` is @unchecked Sendable).
+    private final class Box: @unchecked Sendable {
+        private let lock = NSLock()
+        private var buffer = Data()
+        func append(_ d: Data) { lock.lock(); buffer.append(d); lock.unlock() }
+        func bytes() -> Data { lock.lock(); defer { lock.unlock() }; return buffer }
+    }
+
     let sink: IPCSink
     private let pipe = Pipe()
-    private let lock = NSLock()
-    private var buffer = Data()
+    private let box = Box()
 
     init() {
         sink = IPCSink(wire: pipe.fileHandleForWriting)
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        let box = self.box   // capture the Sendable box, not self
+        pipe.fileHandleForReading.readabilityHandler = { handle in
             let chunk = handle.availableData
             guard !chunk.isEmpty else { handle.readabilityHandler = nil; return }
-            guard let self else { return }
-            self.lock.lock(); self.buffer.append(chunk); self.lock.unlock()
+            box.append(chunk)
         }
     }
 
     /// All bytes received so far (synchronous; poll this in a deadline loop).
-    func bytes() -> Data { lock.lock(); defer { lock.unlock() }; return buffer }
+    func bytes() -> Data { box.bytes() }
 
     /// Close the sink and the write end so the reader sees EOF and deregisters.
     func finish() async {
