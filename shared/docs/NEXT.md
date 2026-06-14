@@ -109,6 +109,15 @@ corpus. What remains are the write-path and threshold items that need the owner'
   actually-bound EP, not a fresh independent probe (runtime/hardware). *Acceptance:* on the RTX 2060,
   `hardwareReprobed` reflects the EP the engine actually bound (DirectML/CUDA/CPU), verified against
   `engine.jsonl`.
+- **People-tab face-embedding backfill is incremental (UX papercut, by design).** Verified on-hardware
+  2026-06-13: each clustering run backfills exactly `maxExtractionsPerRun` (5000) ArcFace/SFace
+  embeddings then clusters, so a large library (the test DB has 46,079 detected faces) needs ~10
+  clustering passes before People shows everyone. This is deliberate (memory + responsiveness caps) and
+  already noted in `FaceClustering.swift` as "tracked separately", but for a polished People tab,
+  consider either (a) auto-continuing extraction across runs until `face_print_no_pending` with a
+  visible "embedding faces N/M" progress, or (b) surfacing "X faces pending — run again" in the UI so
+  the incremental behavior isn't mistaken for missing faces. *Acceptance:* a user with a 40k+-face
+  library either sees all faces after one People visit, or is clearly told more passes remain.
 - **Per-vendor Windows GPU UAT** (carried from before): RTX 2060 throughput re-baseline; DirectML +
   CUDA paths. *Recipe:* `platforms/windows/build/iterate.ps1` full corpus + `scan_assertions.py`.
 
