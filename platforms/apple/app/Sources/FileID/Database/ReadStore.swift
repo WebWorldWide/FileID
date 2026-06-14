@@ -849,6 +849,37 @@ public final class ReadStore: @unchecked Sendable {
         }
     }
 
+    /// R5-02: bulk mark-as-unknown for the People multi-select action. ONE write
+    /// connection + ONE transaction for the whole selection (chunked IN),
+    /// mirroring the Windows engine's single markPersonsAsUnknown command. The
+    /// previous per-id updatePerson loop opened N connections + ran N transactions
+    /// on the main thread and beach-balled the UI for crowd-sized selections.
+    /// Touches only is_unknown (the old loop re-wrote name columns from possibly-
+    /// stale in-memory rows — this is strictly safer).
+    public func markUnknownBatch(ids: [Int64]) -> Int {
+        guard !ids.isEmpty else { return 0 }
+        do {
+            let queue = try writeQueue()
+            let updated = try queue.write { db -> Int in
+                var total = 0
+                for chunk in stride(from: 0, to: ids.count, by: 500) {
+                    let slice = ids[chunk..<min(chunk + 500, ids.count)]
+                    let placeholders = slice.map { _ in "?" }.joined(separator: ", ")
+                    try db.execute(
+                        sql: "UPDATE persons SET is_unknown = 1 WHERE id IN (\(placeholders))",
+                        arguments: StatementArguments(slice))
+                    total += db.changesCount
+                }
+                return total
+            }
+            self.notifyChanged()
+            return updated
+        } catch {
+            reportError("Mark-unknown batch failed: \(error)")
+            return 0
+        }
+    }
+
     private func nilIfBlank(_ s: String?) -> String? {
         guard let s, !s.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
         return s.trimmingCharacters(in: .whitespaces)
@@ -975,6 +1006,52 @@ public final class ReadStore: @unchecked Sendable {
     public func mergePersonsBatch(_ pairs: [(target: Int64, source: Int64)]) -> Int {
         guard !pairs.isEmpty else { return 0 }
 
+        // R5-01: name-state + size for every touched cluster, so the union
+        // survivor respects name priority ACROSS CHAINS. Per-pair preferredTarget
+        // does NOT compose transitively — a chain of borderline pairs linking a
+        // named and an unnamed cluster could otherwise reparent the named root
+        // onto an unnamed one and DELETE the user's typed name.
+        var touched = Set<Int64>()
+        for (t, s) in pairs { touched.insert(t); touched.insert(s) }
+        var isNamed: [Int64: Bool] = [:]
+        var fileCount: [Int64: Int] = [:]
+        if let rq = queue {
+            let ids = Array(touched)
+            for chunk in stride(from: 0, to: ids.count, by: 500).map({
+                Array(ids[$0..<min($0 + 500, ids.count)])
+            }) {
+                let ph = chunk.map { _ in "?" }.joined(separator: ",")
+                let rows = (try? rq.read { db in
+                    try Row.fetchAll(db, sql: """
+                        SELECT id, name, title, first_name, middle_name,
+                               last_name, suffix, is_unknown, file_count
+                        FROM persons WHERE id IN (\(ph))
+                        """, arguments: StatementArguments(chunk.map { Int($0) }))
+                }) ?? []
+                for r in rows {
+                    let id: Int64 = r["id"] ?? 0
+                    fileCount[id] = r["file_count"] ?? 0
+                    if (r["is_unknown"] as Int? ?? 0) != 0 {
+                        isNamed[id] = true
+                    } else {
+                        let cols = ["name", "title", "first_name",
+                                    "middle_name", "last_name", "suffix"]
+                        isNamed[id] = cols.contains {
+                            (r[$0] as String?)?.trimmingCharacters(in: .whitespaces).isEmpty == false
+                        }
+                    }
+                }
+            }
+        }
+        // Survivor priority: named > larger file_count > lower id.
+        func preferredRoot(_ a: Int64, _ b: Int64) -> Int64 {
+            let an = isNamed[a] ?? false, bn = isNamed[b] ?? false
+            if an != bn { return an ? a : b }
+            let ac = fileCount[a] ?? 0, bc = fileCount[b] ?? 0
+            if ac != bc { return ac > bc ? a : b }
+            return a < b ? a : b
+        }
+
         // Union-find over every person id touched.
         var parent: [Int64: Int64] = [:]
         func find(_ x: Int64) -> Int64 {
@@ -991,9 +1068,13 @@ public final class ReadStore: @unchecked Sendable {
         func union(target: Int64, source: Int64) {
             let rt = find(target), rs = find(source)
             if rt == rs { return }
-            // Always point the source root at the target root so the
-            // caller's preferred target wins (named cluster, etc.).
-            parent[rs] = rt
+            // R5-01: keep the higher-priority root (named > larger file_count >
+            // lower id) so a typed name is never deleted when a chain of
+            // borderline pairs links a named and an unnamed cluster — per-pair
+            // preferredTarget does not compose transitively, so union order alone
+            // would pick the wrong (possibly unnamed) root.
+            let keep = preferredRoot(rt, rs)
+            parent[keep == rt ? rs : rt] = keep
         }
         for (t, s) in pairs where t != s {
             if parent[t] == nil { parent[t] = t }
@@ -1216,6 +1297,9 @@ public final class ReadStore: @unchecked Sendable {
                 if firstError == nil { firstError = lastErrorSnapshot() }
             }
         }
+        // R5-03: one observation invalidation + counter refresh for the whole
+        // batch (the per-file notifyChanged was removed from applyProposedName).
+        if !renamed.isEmpty { self.notifyChanged() }
         return BulkRenameResult(renamed: renamed, failed: failed, firstError: firstError)
     }
 
@@ -1285,7 +1369,11 @@ public final class ReadStore: @unchecked Sendable {
     /// DB row. Returns the new path or nil on failure.
     public func applyProposedName(file: FileRow) -> URL? {
         do {
-            return applyProposedName(file: file, on: try writeQueue())
+            // R5-03: the private overload no longer fires notifyChanged per call;
+            // fire it once here for the single-file path.
+            let result = applyProposedName(file: file, on: try writeQueue())
+            if result != nil { self.notifyChanged() }
+            return result
         } catch {
             reportError("DB open for rename failed: \(error)")
             return nil
@@ -1303,6 +1391,21 @@ public final class ReadStore: @unchecked Sendable {
         return try DatabaseQueue(path: dbURL.path, configuration: config)
     }
 
+    /// True when both URLs resolve to the same on-disk file. Uses the file
+    /// resource identifier (inode), not a string compare, so a case-only rename
+    /// on a case-insensitive volume is recognized as the file's own slot while
+    /// two genuinely distinct files on a case-sensitive volume are not. Only
+    /// consulted when fileExists(target) is already true (oldURL always exists as
+    /// the move source), so resourceValues won't be missing. (R5-08)
+    private func sameFileOnDisk(_ a: URL, _ b: URL) -> Bool {
+        if a == b { return true }
+        guard
+            let ia = (try? a.resourceValues(forKeys: [.fileResourceIdentifierKey]))?.fileResourceIdentifier,
+            let ib = (try? b.resourceValues(forKeys: [.fileResourceIdentifierKey]))?.fileResourceIdentifier
+        else { return false }
+        return ia.isEqual(ib)
+    }
+
     private func applyProposedName(file: FileRow, on queue: DatabaseQueue) -> URL? {
         guard let proposed = file.vlmProposedName, !proposed.isEmpty else { return nil }
         let oldURL = file.url
@@ -1311,7 +1414,14 @@ public final class ReadStore: @unchecked Sendable {
         let baseName = ext.isEmpty ? proposed : "\(proposed).\(ext)"
         var target = dir.appendingPathComponent(baseName)
         var bump = 2
-        while FileManager.default.fileExists(atPath: target.path) && target != oldURL {
+        // R5-08: identity (inode) check, NOT `target != oldURL` — on a
+        // case-insensitive volume a case-only rename (the engine sanitizer always
+        // lowercases) makes fileExists(target) true while the case-sensitive
+        // `target != oldURL` is also true, so the loop wrongly bumped the file's
+        // own slot to `_2`. A genuine two-distinct-files collision on a
+        // case-sensitive volume still bumps (different inode). The line-1370 guard
+        // below stays a case-sensitive compare so the case-only rename proceeds.
+        while FileManager.default.fileExists(atPath: target.path) && !sameFileOnDisk(target, oldURL) {
             let bumped = ext.isEmpty ? "\(proposed)_\(bump)" : "\(proposed)_\(bump).\(ext)"
             target = dir.appendingPathComponent(bumped)
             bump += 1
@@ -1337,7 +1447,9 @@ public final class ReadStore: @unchecked Sendable {
                                 file.id]
                 )
             }
-            self.notifyChanged()
+            // R5-03: notifyChanged() is fired ONCE by the caller (per batch in
+            // applyProposedNamesBulk, or in the single-file public wrapper) — not
+            // per file, which flooded the MainActor with N invalidations.
             return target
         } catch {
             // DB update failed after the on-disk move — roll the file back so

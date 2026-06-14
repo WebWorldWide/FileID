@@ -104,6 +104,12 @@ public final class EngineClient {
     private static let respawnDelays: [UInt64] = [1, 4, 16]
     private static let respawnWindow: TimeInterval = 60
     private var respawnAttempts: [Date] = []
+    // R5-07: when the engine last reached Ready. The respawn budget is cleared
+    // only after it has been continuously Ready for `stabilitySettle` (a real
+    // recovery) — not on every Ready, which would let a Ready→crash flap reset
+    // the budget forever.
+    private var lastReadyAt: Date = .distantPast
+    private static let stabilitySettle: TimeInterval = 30
     private var pendingRespawn: Task<Void, Never>?
 
     /// Set on shutdown() or after a "work complete" signal. Suppresses
@@ -432,7 +438,12 @@ public final class EngineClient {
         switch event.payload {
         case .ready(let info):
             state = .ready(info)
-            respawnAttempts.removeAll()   // reset budget on a clean handshake
+            // R5-07: do NOT clear the respawn budget merely on reaching Ready — a
+            // Ready→immediate-crash flap would reset it every cycle and never trip
+            // the 3-in-60s cap (unbounded ~1s respawn loop). Just record when we
+            // became Ready; handleEngineExit clears the budget only if the engine
+            // stayed Ready for `stabilitySettle` (a genuine recovery).
+            lastReadyAt = Date()
             // If we just came back from a wipe-and-rescan, auto-start
             // the scan against the user's chosen root.
             if let root = pendingWipeAndRescanRoot {
@@ -667,6 +678,13 @@ public final class EngineClient {
         }
 
         let now = Date()
+        // R5-07: a genuine recovery (engine stayed Ready for ≥ stabilitySettle)
+        // clears the budget; a Ready→immediate-crash flap does not, so it keeps
+        // ticking toward the 3-in-60s terminal cap instead of resetting forever.
+        if lastReadyAt != .distantPast, now.timeIntervalSince(lastReadyAt) >= Self.stabilitySettle {
+            respawnAttempts.removeAll()
+        }
+        lastReadyAt = .distantPast
         respawnAttempts = respawnAttempts.filter {
             now.timeIntervalSince($0) < Self.respawnWindow
         }

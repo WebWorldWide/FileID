@@ -287,18 +287,21 @@ struct PeopleView: View {
     }
 
     private func bulkMarkUnknown() {
+        // R5-02: one batched transaction off the main thread (the per-id
+        // updatePerson loop opened N connections + ran N main-thread transactions,
+        // freezing the UI for crowd-sized selections), mirroring the merge paths.
         let ids = Array(unknownChecked)
-        for id in ids {
-            guard let p = personByID[id] else { continue }
-            store.updatePerson(id: p.id,
-                                title: p.title, firstName: p.firstName,
-                                middleName: p.middleName, lastName: p.lastName,
-                                suffix: p.suffix, isUnknown: true)
-        }
-        mergeStatus = "Marked \(ids.count) cluster\(ids.count == 1 ? "" : "s") as unknown."
+        guard !ids.isEmpty else { return }
+        let storeRef = store
         unknownMode = false
         unknownChecked.removeAll()
-        reload()
+        Task.detached(priority: .userInitiated) {
+            let n = storeRef.markUnknownBatch(ids: ids)
+            await MainActor.run {
+                mergeStatus = "Marked \(n) cluster\(n == 1 ? "" : "s") as unknown."
+                reload()
+            }
+        }
     }
 
     @ViewBuilder

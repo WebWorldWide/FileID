@@ -61,7 +61,10 @@ struct LibraryView: View {
 
     // Multi-select tag mode (P4).
     @State private var selectMode: Bool = false
-    @State private var checkedFileIDs: Set<Int64> = []
+    // R5-04: id→FileRow (not a Set) so a selected file survives a `rows` reload
+    // (live-scan throttle / filter change re-fetches only the top-200 window);
+    // bulk-tag then targets every checked file, not just those still on screen.
+    @State private var checkedFiles: [Int64: FileRow] = [:]
     @State private var bulkTagSheetOpen: Bool = false
 
     private let columns = [
@@ -472,11 +475,11 @@ struct LibraryView: View {
             // boxes; "Tag selected" + "Done" appear in place of the
             // normal action set.
             if selectMode {
-                Text("\(checkedFileIDs.count) selected")
+                Text("\(checkedFiles.count) selected")
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
                 Button {
-                    if !checkedFileIDs.isEmpty { bulkTagSheetOpen = true }
+                    if !checkedFiles.isEmpty { bulkTagSheetOpen = true }
                 } label: {
                     Label("Tag selected", systemImage: "tag.fill")
                         .font(.caption.bold())
@@ -485,10 +488,10 @@ struct LibraryView: View {
                         .foregroundStyle(.black)
                 }
                 .buttonStyle(.plain)
-                .disabled(checkedFileIDs.isEmpty)
+                .disabled(checkedFiles.isEmpty)
                 Button("Done") {
                     selectMode = false
-                    checkedFileIDs.removeAll()
+                    checkedFiles.removeAll()
                 }
                 .buttonStyle(.bordered)
                 .keyboardShortcut(.escape, modifiers: [])
@@ -541,11 +544,11 @@ struct LibraryView: View {
         }
         .sheet(isPresented: $bulkTagSheetOpen) {
             BulkTagSheet(
-                files: rows.filter { checkedFileIDs.contains($0.id) },
+                files: Array(checkedFiles.values),
                 store: store,
                 onComplete: {
                     selectMode = false
-                    checkedFileIDs.removeAll()
+                    checkedFiles.removeAll()
                     editEpoch += 1   // refresh tile dots even mid-scan
                 }
             )
@@ -637,15 +640,15 @@ struct LibraryView: View {
                 ForEach(rows) { row in
                     FileTile(row: row, store: store,
                              selectMode: selectMode,
-                             isChecked: checkedFileIDs.contains(row.id),
+                             isChecked: checkedFiles[row.id] != nil,
                              topTags: tagsByFile[row.id] ?? [],
                              refreshToken: tileRefreshToken)
                         .onTapGesture {
                             if selectMode {
-                                if checkedFileIDs.contains(row.id) {
-                                    checkedFileIDs.remove(row.id)
+                                if checkedFiles[row.id] != nil {
+                                    checkedFiles[row.id] = nil
                                 } else {
-                                    checkedFileIDs.insert(row.id)
+                                    checkedFiles[row.id] = row
                                 }
                             } else {
                                 previewSiblings = rows
@@ -911,7 +914,13 @@ struct FileTile: View {
             // Off-main like FinderTagsEditor — xattr reads can stall on
             // slow / network volumes.
             let url = row.url
-            finderTags = await Task.detached { TagWriter.readTags(at: url) }.value
+            let tags = await Task.detached { TagWriter.readTags(at: url) }.value
+            // R5-10: the detached read doesn't inherit `.task` cancellation; if the
+            // refresh token changed mid-read (a tag edit bumps editEpoch), a slow
+            // stale read could land after the newer one and overwrite it. Drop it
+            // once superseded.
+            guard !Task.isCancelled else { return }
+            finderTags = tags
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityDescription)
@@ -1382,25 +1391,40 @@ private struct FinderTagsEditor: View {
     private func addDraft() {
         let trimmed = draft.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
-        do {
-            tags = try TagWriter.addTags([trimmed], at: file.url)
-            draft = ""
-            error = nil
-            store.notifyChanged()  // refresh Library tile tag-count
-            onEdit()
-        } catch {
-            self.error = error.localizedDescription
+        let url = file.url
+        // R5-11: write xattr off the main thread — like reload()'s read, the
+        // setResourceValue write can stall the preview sheet on slow / network
+        // volumes. Assign + notify on the main actor.
+        Task.detached {
+            do {
+                let updated = try TagWriter.addTags([trimmed], at: url)
+                await MainActor.run {
+                    tags = updated
+                    draft = ""
+                    error = nil
+                    store.notifyChanged()  // refresh Library tile tag-count
+                    onEdit()
+                }
+            } catch {
+                await MainActor.run { self.error = error.localizedDescription }
+            }
         }
     }
 
     private func remove(_ tag: String) {
-        do {
-            tags = try TagWriter.removeTags([tag], at: file.url)
-            error = nil
-            store.notifyChanged()
-            onEdit()
-        } catch {
-            self.error = error.localizedDescription
+        let url = file.url
+        Task.detached {  // R5-11: off-main xattr write (see addDraft)
+            do {
+                let updated = try TagWriter.removeTags([tag], at: url)
+                await MainActor.run {
+                    tags = updated
+                    error = nil
+                    store.notifyChanged()
+                    onEdit()
+                }
+            } catch {
+                await MainActor.run { self.error = error.localizedDescription }
+            }
         }
     }
 
