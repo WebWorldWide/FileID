@@ -59,14 +59,15 @@ workflows green, and a clean **read-only** on-hardware macOS scan of the 62,746-
 corpus. What remains are the write-path and threshold items that need the owner's Mac or labeled data.
 
 **Mac-UAT (owner's Mac, on an isolated/throwaway library — these touch the move path):**
-- **Restructure apply/move on-Mac** — the one write-path NOT exercised on hardware. After a plan,
-  convert to real moves on an isolated copy library and verify: engine-side moves get filesystem
-  permission; the in-batch `claimed` set ∪ on-disk lstat collision check fires; **D-7 auto-rename**
-  produces `name (2).ext`; the **B4 stale-plan guard** fails a move whose live `path_text` no longer
-  matches; the DB row's **`path_hash`** is refreshed (not just `path_text`/`path_search`).
-  *Recipe:* `platforms/apple/scripts/iterate.sh` + `test_assertions.py` against a copy library —
-  never the real corpus. *Acceptance:* N planned moves apply, colliding names get ` (2)`, no file
-  escapes the root, DB paths + `path_hash` updated per move, zero overwrites.
+- ~~**Restructure apply/move on-Mac**~~ — **DONE 2026-06-13 (on-hardware, isolated sandbox).** The real
+  engine applied crafted moves against a throwaway DB + synthetic `/tmp` library: **D-7 auto-rename**
+  produces `name (2).ext`, the in-batch `claimed`∪lstat collision check fires, the **B4 stale-plan
+  guard** fails a move whose live `path_text` no longer matches (file untouched), **SEC-7** rejects a
+  `../` escape, and **`path_hash`** (not just `path_text`/`path_search`) is refreshed per move. Found +
+  fixed a containment bug en route (PR #13, `b927031`: `/private`-resolved roots wrongly rejected valid
+  in-root moves). Driver: `/tmp/fileid-apply-test.sh`. STILL OPEN: the privileged-denial path
+  (permission error → `privilegeError` populated) needs a real permission-denied destination — low
+  priority. Any real-corpus apply must run on an isolated COPY, never the live corpus.
 - **Restructure apply-bar relabel + Tidy/Keep tier split.** The two-step symlink-preview→copy apply
   bar is stale now that the engine performs direct real moves — relabel it to one real-move step.
   And the engine plan must populate per-move `tier` + `folderClassifications` so the UI shows
