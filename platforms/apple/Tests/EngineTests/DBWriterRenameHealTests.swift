@@ -181,4 +181,78 @@ struct DBWriterRenameHealTests {
             #expect(idA != idB, "the two rows are distinct (no heal-collapse)")
         }
     }
+
+    /// audit F-A2: st_ino carries no generation number, so APFS/HFS reuse a
+    /// deleted file's inode freely. Without a second signal a reused inode would
+    /// re-bind the deleted row onto an UNRELATED new file and hand it the prior
+    /// file's tags / named person / OCR. The heal candidate now also requires a
+    /// matching size_bytes — a genuine move preserves size, inode reuse generally
+    /// does not — so a same-inode/different-size file inserts fresh instead of
+    /// false-healing.
+    @Test("Inode reuse with a DIFFERENT size does NOT false-heal (size corroboration)")
+    func reusedInodeDifferentSizeDoesNotHeal() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDHealTest-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let db = try Database(at: tmp.appendingPathComponent("test.sqlite"))
+
+        func newWriter() -> DBWriter {
+            DBWriter(db: db, sink: IPCSink(), coordinator: ScanCoordinator(),
+                     sessionID: UUID().uuidString)
+        }
+
+        // Original file: inode X, size S1, with a named person + a user tag.
+        let oldURL = tmp.appendingPathComponent("ORIGINAL.jpg")
+        let oldPayload = Data(repeating: 0xAB, count: 1024)
+        try oldPayload.write(to: oldURL)
+        let inode = try #require(Discovery.inode(of: oldURL))
+        let oldSize = Int64(oldPayload.count)
+
+        await drain(newWriter(), scan(url: oldURL, fileRef: inode, size: oldSize))
+
+        let (id1, faceID): (Int64, Int64) = try await db.pool.read { db in
+            let id = try Int64.fetchOne(db, sql:
+                "SELECT id FROM files WHERE path_text = ?", arguments: [oldURL.path])
+            let fid = try Int64.fetchOne(db, sql:
+                "SELECT id FROM face_prints WHERE file_id = ?", arguments: [id])
+            return (try #require(id), try #require(fid))
+        }
+        try await db.pool.write { db in
+            try db.execute(sql:
+                "INSERT INTO persons (name, file_count, created_at) VALUES ('Mom', 1, ?)",
+                arguments: [Date().timeIntervalSince1970])
+            let personID = db.lastInsertedRowID
+            try db.execute(sql: "UPDATE face_prints SET person_id = ? WHERE id = ?",
+                           arguments: [personID, faceID])
+            try db.execute(sql: "INSERT INTO tags (file_id, tag, source) VALUES (?, 'keepme', 'user')",
+                           arguments: [id1])
+        }
+
+        // The original is deleted (old path gone) and its inode is REUSED by a
+        // brand-new, unrelated file at a new path — but with a DIFFERENT size.
+        try FileManager.default.removeItem(at: oldURL)
+        let newURL = tmp.appendingPathComponent("UNRELATED.jpg")
+        let newPayload = Data(repeating: 0x77, count: 4096)
+        try newPayload.write(to: newURL)
+        let newSize = Int64(newPayload.count)
+        #expect(newSize != oldSize, "the reused-inode file differs in size")
+
+        await drain(newWriter(), scan(url: newURL, fileRef: inode, size: newSize))
+
+        try await db.pool.read { db in
+            let newRow = try #require(try Row.fetchOne(db, sql:
+                "SELECT id FROM files WHERE path_text = ?", arguments: [newURL.path]))
+            let newID = newRow["id"] as Int64
+            #expect(newID != id1, "size mismatch blocks the heal — a fresh row, not a re-bind")
+
+            let inheritedPerson = try Int64.fetchOne(db, sql:
+                "SELECT person_id FROM face_prints WHERE file_id = ? AND person_id IS NOT NULL",
+                arguments: [newID])
+            #expect(inheritedPerson == nil, "reused-inode file must not inherit a named person")
+            let inheritedTags = try String.fetchAll(db, sql:
+                "SELECT tag FROM tags WHERE file_id = ? AND source = 'user'", arguments: [newID])
+            #expect(inheritedTags.isEmpty, "reused-inode file must not inherit user tags")
+        }
+    }
 }
