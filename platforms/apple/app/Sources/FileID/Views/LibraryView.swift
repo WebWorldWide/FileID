@@ -1304,7 +1304,13 @@ private struct FilePreviewSheet: View {
             // would load only the first file. Clear first so the spinner shows
             // and the prior file's poster never bleeds into the new image.
             preview = nil
-            preview = await ThumbnailService.shared.thumbnail(for: file.url, size: 640)
+            let image = await ThumbnailService.shared.thumbnail(for: file.url, size: 640)
+            // ThumbnailService doesn't honor Task cancellation, so a slow load for
+            // the prior file (network volume) can resolve AFTER the user arrowed on;
+            // drop it once `.task(id:)` superseded us, else it overwrites the current
+            // file's image. Mirrors the FinderTagsEditor read guard (R7).
+            guard !Task.isCancelled else { return }
+            preview = image
         }
     }
 

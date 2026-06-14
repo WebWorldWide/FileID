@@ -94,24 +94,34 @@ public final class CLIPModelInstaller {
     }
 
     public func refreshStatus() {
-        let files = Self.requiredFiles
-        var present: Set<String> = []
+        recomputePresentFiles()
         var totalSize: Int64 = 0
         var firstMissing: String?
-        for f in files {
-            if FileManager.default.fileExists(atPath: f.path) {
-                present.insert(f.path)
+        for f in Self.requiredFiles {
+            if presentFilePaths.contains(f.path) {
                 totalSize += directorySize(f)
             } else if firstMissing == nil {
                 firstMissing = f.lastPathComponent
             }
         }
-        presentFilePaths = present
         if let missing = firstMissing {
             status = .missing(reason: "Missing: \(missing)")
         } else {
             status = .installed(sizeBytes: totalSize)
         }
+    }
+
+    /// Refresh on-disk presence WITHOUT touching `status`. The partial-install
+    /// failure paths (promote / verify / extract) leave some required files in
+    /// the live tree but must keep their `.installFailed` status — calling
+    /// refreshStatus() there would overwrite it with .missing/.installed, so they
+    /// call this instead to keep the per-file Settings rows accurate. (R7 delta)
+    private func recomputePresentFiles() {
+        var present: Set<String> = []
+        for f in Self.requiredFiles where FileManager.default.fileExists(atPath: f.path) {
+            present.insert(f.path)
+        }
+        presentFilePaths = present
     }
 
     // MARK: - Install paths
@@ -220,12 +230,14 @@ public final class CLIPModelInstaller {
             }
         } catch {
             status = .installFailed("Couldn't promote staged files: \(error.localizedDescription)")
+            recomputePresentFiles()  // promote may have moved some files into the live tree
             return
         }
 
         for f in Self.requiredFiles {
             if !FileManager.default.fileExists(atPath: f.path) {
                 status = .installFailed("Missing after install: \(f.lastPathComponent).")
+                recomputePresentFiles()
                 return
             }
         }
@@ -456,12 +468,14 @@ public final class CLIPModelInstaller {
             let errData: Data = ((try? stderr.fileHandleForReading.readToEnd()) ?? nil) ?? Data()
             let errStr = String(data: errData, encoding: .utf8) ?? ""
             status = .installFailed("Extract failed (\(proc.terminationStatus)): \(errStr.trimmingCharacters(in: .whitespacesAndNewlines))")
+            recomputePresentFiles()  // unzip extracts straight into the live tree — may be partial
             return
         }
 
         for f in Self.requiredFiles {
             if !FileManager.default.fileExists(atPath: f.path) {
                 status = .installFailed("Zip didn't contain \(f.lastPathComponent).")
+                recomputePresentFiles()
                 return
             }
         }
