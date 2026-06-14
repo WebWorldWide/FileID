@@ -32,6 +32,14 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
     /// on a thread-pool thread unwinds before the view's connection state
     /// is torn down.</summary>
     private readonly CancellationTokenSource _disposalCts = new();
+    // Refresh coordination (mirrors LibraryViewModel A4/A5): every RefreshAsync
+    // bumps _refreshGen and captures it; ApplyOnUi discards a result a newer
+    // refresh has superseded, so a slow earlier load (e.g. a pre-merge DB read
+    // enqueued by a faceClusteringComplete event) can't apply last and re-add a
+    // merged-away cluster. _activeLoads keeps the spinner on until the LAST load
+    // finishes, so an earlier finally no longer clears it prematurely.
+    private long _refreshGen;
+    private int _activeLoads;
 
     public PeopleViewModel(string dbPath, DispatcherQueue ui)
     {
@@ -117,6 +125,8 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
     public async Task RefreshAsync(CancellationToken ct)
     {
         if (_disposed) return;
+        long myGen = Interlocked.Increment(ref _refreshGen);
+        Interlocked.Increment(ref _activeLoads);
         try
         {
             // Linked token created inside the try: a Dispose() race after the
@@ -127,7 +137,7 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
             OnUi(() => { IsLoading = true; ErrorMessage = null; });
             var clusters = await Task.Run(() => LoadClusters(token), token).ConfigureAwait(false);
             if (_disposed || token.IsCancellationRequested) return;
-            ApplyOnUi(clusters);
+            ApplyOnUi(clusters, myGen);
         }
         catch (OperationCanceledException) { /* expected */ }
         catch (ObjectDisposedException) { /* expected during teardown */ }
@@ -142,7 +152,8 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
         }
         finally
         {
-            OnUi(() => { if (!_disposed) IsLoading = false; });
+            Interlocked.Decrement(ref _activeLoads);
+            OnUi(() => { if (!_disposed) IsLoading = Volatile.Read(ref _activeLoads) > 0; });
         }
     }
 
@@ -199,15 +210,23 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
         return rows;
     }
 
-    private void ApplyOnUi(IReadOnlyList<PersonCluster> rows)
+    private void ApplyOnUi(IReadOnlyList<PersonCluster> rows, long gen)
     {
+        // Drop results from a refresh a newer one has already superseded — checked
+        // on the UI thread right before the swap so it also catches a refresh that
+        // started during the dispatch gap. Mirrors LibraryViewModel.ApplyOnUi (audit A4).
+        void Apply()
+        {
+            if (Interlocked.Read(ref _refreshGen) != gen) return;
+            Replace(rows);
+        }
         if (_ui.HasThreadAccess)
         {
-            Replace(rows);
+            Apply();
         }
         else
         {
-            _ui.TryEnqueue(() => Replace(rows));
+            _ui.TryEnqueue(Apply);
         }
     }
 
@@ -468,7 +487,23 @@ internal sealed class MergeSuggestionVm : INotifyPropertyChanged
         }
     }
     public double RowOpacity => _isResolved ? 0.4 : 1.0;
-    public bool ActionsEnabled => !_isResolved;
+    public bool ActionsEnabled => !_isResolved && !_isBusy;
+
+    private bool _isBusy;
+    /// <summary>True while an engine merge/different action is in flight for
+    /// this pair; disables both action buttons so a second click can't
+    /// double-apply during the up-to-30s engine await.</summary>
+    public bool IsBusy
+    {
+        get => _isBusy;
+        set
+        {
+            if (_isBusy == value) return;
+            _isBusy = value;
+            OnChanged(nameof(IsBusy));
+            OnChanged(nameof(ActionsEnabled));
+        }
+    }
 
     public event PropertyChangedEventHandler? PropertyChanged;
     private void OnChanged(string name)

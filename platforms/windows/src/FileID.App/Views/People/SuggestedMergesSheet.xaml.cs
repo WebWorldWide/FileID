@@ -97,6 +97,8 @@ public sealed partial class SuggestedMergesSheet : UserControl
     private async void OnMergeClicked(object sender, RoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.DataContext is not MergeSuggestionVm vm) return;
+        if (vm.IsResolved || vm.IsBusy) return;
+        vm.IsBusy = true;
         try
         {
             // Await the engine's bulkActionResult BEFORE dimming the row.
@@ -130,6 +132,10 @@ public sealed partial class SuggestedMergesSheet : UserControl
         {
             StatusText.Text = $"Merge failed: {ex.Message}";
         }
+        finally
+        {
+            vm.IsBusy = false;
+        }
     }
 
     private static string? FirstFailureMessage(FileID.IpcSchema.BulkActionResult r)
@@ -147,7 +153,16 @@ public sealed partial class SuggestedMergesSheet : UserControl
     private async void OnDifferentClicked(object sender, RoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.DataContext is not MergeSuggestionVm vm) return;
-        await MarkDifferentAsync(vm);
+        if (vm.IsResolved || vm.IsBusy) return;
+        vm.IsBusy = true;
+        try
+        {
+            await MarkDifferentAsync(vm);
+        }
+        finally
+        {
+            vm.IsBusy = false;
+        }
     }
 
     private async Task MarkDifferentAsync(MergeSuggestionVm vm)

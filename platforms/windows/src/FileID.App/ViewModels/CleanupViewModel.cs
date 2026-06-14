@@ -31,6 +31,15 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
     /// <summary>Cancelled in <see cref="Dispose"/> so a Refresh running on a
     /// thread-pool thread unwinds before the view is gone.</summary>
     private readonly CancellationTokenSource _disposalCts = new();
+    // Refresh coordination (mirrors LibraryViewModel A4/A5): RefreshAsync bumps
+    // _refreshGen and captures it; the UI-marshaled apply discards a result whose
+    // generation is no longer current, so a slow earlier Load (e.g. a pre-trash
+    // scan snapshot) can't clobber the latest Groups. _activeLoads counts in-flight
+    // refreshes so the spinner stays on until the LAST one finishes — an earlier
+    // finally no longer clears IsLoading while a later overlapping RefreshAsync is
+    // still loading.
+    private long _refreshGen;
+    private int _activeLoads;
 
     public CleanupViewModel(string dbPath, DispatcherQueue ui)
     {
@@ -63,6 +72,8 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
     public async Task RefreshAsync(CancellationToken ct)
     {
         if (_disposed) return;
+        long myGen = Interlocked.Increment(ref _refreshGen);
+        Interlocked.Increment(ref _activeLoads);
         try
         {
             // Linked token created inside the try: a Dispose() race after the
@@ -73,7 +84,7 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
             OnUi(() => { IsLoading = true; ErrorMessage = null; });
             var groups = await Task.Run(() => Load(token), token).ConfigureAwait(false);
             if (_disposed || token.IsCancellationRequested) return;
-            ApplyOnUi(groups);
+            ApplyOnUi(groups, myGen);
         }
         catch (OperationCanceledException) { /* expected */ }
         catch (ObjectDisposedException) { /* expected during teardown */ }
@@ -87,7 +98,11 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         catch (SqliteException ex) { OnUi(() => { if (!_disposed) ErrorMessage = SqliteErrorTranslator.Humanize(ex); }); }
         catch (IOException ex) { OnUi(() => { if (!_disposed) ErrorMessage = SqliteErrorTranslator.Humanize(ex); }); }
         catch (Exception ex) { OnUi(() => { if (!_disposed) ErrorMessage = ex.Message; }); }
-        finally { OnUi(() => { if (!_disposed) IsLoading = false; }); }
+        finally
+        {
+            Interlocked.Decrement(ref _activeLoads);
+            OnUi(() => { if (!_disposed) IsLoading = Volatile.Read(ref _activeLoads) > 0; });
+        }
     }
 
     /// Marshal a UI-affined mutation onto the captured dispatcher. RefreshAsync's
@@ -207,10 +222,18 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         return groups;
     }
 
-    private void ApplyOnUi(IReadOnlyList<DuplicateGroup> rows)
+    private void ApplyOnUi(IReadOnlyList<DuplicateGroup> rows, long gen)
     {
-        if (_ui.HasThreadAccess) Replace(rows);
-        else _ui.TryEnqueue(() => Replace(rows));
+        // Drop results from a refresh a newer one has already superseded — checked
+        // on the UI thread right before the swap so it also catches a refresh that
+        // started during the dispatch gap. (mirrors LibraryViewModel A4)
+        void Apply()
+        {
+            if (Interlocked.Read(ref _refreshGen) != gen) return;
+            Replace(rows);
+        }
+        if (_ui.HasThreadAccess) Apply();
+        else _ui.TryEnqueue(Apply);
     }
 
     private void Replace(IReadOnlyList<DuplicateGroup> rows)

@@ -26,18 +26,7 @@ internal sealed partial class EngineClient
 
     public Task SendCommandAsync(CommandPayload payload, CancellationToken ct = default)
     {
-        var cmd = IpcCommand.New(payload);
-        var bytes = IpcCoder.EncodeLine(cmd);
         var commandKind = payload.GetType().Name.Replace("Command", "");
-        DebugLog.Info($"[IPC OUT] {commandKind} ({bytes.Length} bytes)");
-
-        // F.3: refuse to write a frame that risks pipe-buffer deadlock.
-        if (bytes.Length > MaxIpcFrameBytes)
-        {
-            var msg = $"IPC frame too large: {commandKind} is {bytes.Length:N0} bytes (max {MaxIpcFrameBytes:N0}). Chunk the request into smaller batches.";
-            DebugLog.Warn("[IPC OUT] " + msg);
-            return Task.FromException(new InvalidOperationException(msg));
-        }
 
         // F.2: precondition — engine must be Ready. Without this, callers
         // get the generic "Engine not running" later and have no clue if
@@ -53,9 +42,24 @@ internal sealed partial class EngineClient
         // The engine's stdin reader handles concurrent writers because
         // our writes are atomic per-line, but we still serialize through a
         // lock to make the byte order deterministic for log correlation.
+        // Encode inside Task.Run so a large applyRestructure frame (multi-MB
+        // JSON serialize + array copy) runs on the thread pool, not the UI
+        // thread that called us.
         return Task.Run(() =>
         {
             ct.ThrowIfCancellationRequested();
+
+            var cmd = IpcCommand.New(payload);
+            var bytes = IpcCoder.EncodeLine(cmd);
+            DebugLog.Info($"[IPC OUT] {commandKind} ({bytes.Length} bytes)");
+
+            // F.3: refuse to write a frame that risks pipe-buffer deadlock.
+            if (bytes.Length > MaxIpcFrameBytes)
+            {
+                var msg = $"IPC frame too large: {commandKind} is {bytes.Length:N0} bytes (max {MaxIpcFrameBytes:N0}). Chunk the request into smaller batches.";
+                DebugLog.Warn("[IPC OUT] " + msg);
+                throw new InvalidOperationException(msg);
+            }
             try
             {
                 lock (_writeLock)
@@ -349,6 +353,17 @@ internal sealed partial class EngineClient
         }
     }
 
+    // R7: BulkActionResult replies are correlated only by `actionPrefix` against
+    // the single shared LastBulkAction slot — the engine echoes no per-request id
+    // (only trashFiles carries an undo-batch suffix, which the StartsWith match
+    // ignores). Two concurrent same-prefix waits would both subscribe a handler
+    // against that one slot and both resolve off whichever reply lands first, so
+    // the later op silently reports the earlier op's Succeeded/Failed and its own
+    // reply is dropped. Serialize per prefix so at most one same-prefix wait (one
+    // handler, one in-flight command) is live at a time; the per-request-id fix is
+    // a deferred cross-platform IPC-schema change.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> _bulkWaitGates = new();
+
     /// <summary>Run a bulk command and await its <c>BulkActionResult</c> reply,
     /// matched by the action prefix the engine tags replies with
     /// (e.g. "trashFiles", "applyTags", "renameFiles", "restoreFromTrash"). Mirrors
@@ -360,6 +375,12 @@ internal sealed partial class EngineClient
     public async Task<BulkActionResult> WaitForBulkActionResultAsync(
         string actionPrefix, Func<Task> send, TimeSpan timeout, CancellationToken ct = default)
     {
+        // Serialize same-prefix waits so only one handler + one in-flight command
+        // exists per prefix at a time — otherwise two concurrent same-prefix ops
+        // cross-resolve off whichever reply lands first (see _bulkWaitGates). The
+        // gate is released in the finally below.
+        var gate = _bulkWaitGates.GetOrAdd(actionPrefix, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(ct).ConfigureAwait(false);
         var tcs = new TaskCompletionSource<BulkActionResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         PropertyChangedEventHandler? handler = null;
         handler = (_, e) =>
@@ -373,11 +394,13 @@ internal sealed partial class EngineClient
                 tcs.TrySetResult(r);
             }
         };
-        // Reset first so a value-equal reply still re-fires PropertyChanged.
-        LastBulkAction = null;
-        PropertyChanged += handler;
         try
         {
+            // Reset first so a value-equal reply still re-fires PropertyChanged.
+            // Inside the try so the finally always releases the gate even if a
+            // PropertyChanged subscriber throws during the reset.
+            LastBulkAction = null;
+            PropertyChanged += handler;
             await send().ConfigureAwait(false);
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(timeout);
@@ -392,6 +415,7 @@ internal sealed partial class EngineClient
         finally
         {
             PropertyChanged -= handler;
+            gate.Release();
         }
     }
 

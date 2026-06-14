@@ -37,6 +37,21 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     // OnClustersCollectionChanged re-project selection onto the new instances.
     private readonly System.Collections.Generic.HashSet<int> _selectedClusterIds = new();
 
+    // Bulk merge / mark-unknown are async void: on the first await the UI pump can
+    // dispatch a second click on the still-enabled button, re-entering with the same
+    // SelectedClusterIds snapshot. Two concurrent waiters then share the single
+    // LastBulkAction correlation slot and both fire on the FIRST matching reply, so
+    // one op is credited with the other's result and the loser times out; a re-fired
+    // merge also hits already-deleted source rows. One flag covers BOTH handlers —
+    // they mutate the same person rows. Mirrors SidebarFolderHeader._wipeInFlight.
+    private int _bulkOpInFlight; // 0 = idle, 1 = a bulk op running
+
+    // Coalesces post-refresh select-mode maintenance (reproject + checkbox sweep)
+    // to one deferred pass. MergeByClusterId raises CollectionChanged per
+    // RemoveAt/Insert, so without this a mid-selection re-cluster would run the
+    // O(N) maintenance AND a whole-subtree visual walk once per delta (O(N^2)).
+    private bool _selectMaintenancePending;
+
     private bool _unloaded;
     public PeopleView()
     {
@@ -197,25 +212,29 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             }
         }
 
-        // Re-wire + re-project selection across the CURRENT instances. The merge
-        // reuses unchanged clusters (keeping their IsSelected), but replaces the
-        // instance of any cluster whose anchor/count/name changed; the
-        // replacement arrives with IsSelected=false. Restore selection by stable
-        // ClusterId so a mid-selection re-cluster never silently drops the user's
-        // multi-select. Detach-then-attach makes the restore non-re-entrant and
-        // guards against double-subscription. Covers Add / Replace / Reset alike.
-        foreach (var c in ViewModel.Clusters) c.PropertyChanged -= OnClusterIsSelectedChanged;
-        ReprojectSelection(ViewModel.Clusters, _selectedClusterIds);
-        foreach (var c in ViewModel.Clusters) c.PropertyChanged += OnClusterIsSelectedChanged;
-
-        // Newly-added cards may not be realized yet on this synchronous event;
-        // defer the visual-tree checkbox sweep so it sees them.
+        // MergeByClusterId fires this handler once per RemoveAt/Insert, so one
+        // Refresh that restructures the list raises it M times. The settled
+        // selection projection, checkbox visibility, and count depend only on the
+        // FINAL collection, so coalesce them to a single deferred pass guarded by
+        // a pending flag instead of O(N) work + a whole-subtree walk per delta
+        // (O(N^2) when a re-cluster replaces most instances mid-selection). The
+        // defer also lets the checkbox sweep see newly-realized cards.
+        if (_selectMaintenancePending) return;
+        _selectMaintenancePending = true;
         DispatcherQueue.TryEnqueue(() =>
         {
+            _selectMaintenancePending = false;
             if (_unloaded || !ViewModel.IsSelectMode) return;
+            // Detach-then-attach makes the reproject non-re-entrant and guards
+            // against double-subscription; restores selection by stable ClusterId
+            // so a mid-selection re-cluster never silently drops the user's
+            // multi-select. Covers Add / Replace / Reset alike.
+            foreach (var c in ViewModel.Clusters) c.PropertyChanged -= OnClusterIsSelectedChanged;
+            ReprojectSelection(ViewModel.Clusters, _selectedClusterIds);
+            foreach (var c in ViewModel.Clusters) c.PropertyChanged += OnClusterIsSelectedChanged;
             UpdateCheckboxVisibility();
+            UpdateSelectionCountText();
         });
-        UpdateSelectionCountText();
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
@@ -361,9 +380,15 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         // never appears (or a recycled card keeps a stale Visible). Apply the
         // CURRENT mode to this freshly-prepared card. Deferred to Low priority
         // so the card template (incl. the tagged CheckBox) is realized first.
-        var selectVisible = ViewModel.IsSelectMode ? Visibility.Visible : Visibility.Collapsed;
         el.DispatcherQueue?.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
         {
+            // Read the live mode at drain time, not a prepare-time snapshot: a
+            // Select toggle can land between this card's prepare and the Low
+            // queue draining, and OnToggleSelectMode's sweep may miss this card
+            // (its CheckBox isn't realized yet). A snapshot would then write the
+            // stale visibility as the final state.
+            if (_unloaded) return;
+            var selectVisible = ViewModel.IsSelectMode ? Visibility.Visible : Visibility.Collapsed;
             foreach (var d in EnumerateDescendants(el))
             {
                 if (FindCheckBoxInTree(d) is { } cb) cb.Visibility = selectVisible;
@@ -625,100 +650,116 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
 
     private async void OnBulkMergeClicked(object sender, RoutedEventArgs e)
     {
-        var ids = ViewModel.SelectedClusterIds;
-        if (ids.Count < 2) return;
-        // Merge cluster ids[1..N] into ids[0] (the first selected).
-        // Engine `mergeClusters` is 1:1; loop the call N-1 times.
-        var dest = ids[0];
-        int merged = 0;
-        int failed = 0;
-        string? firstFailure = null;
-        for (int i = 1; i < ids.Count; i++)
+        if (System.Threading.Interlocked.CompareExchange(ref _bulkOpInFlight, 1, 0) != 0) return;
+        try
         {
-            try
+            var ids = ViewModel.SelectedClusterIds;
+            if (ids.Count < 2) return;
+            // Merge cluster ids[1..N] into ids[0] (the first selected).
+            // Engine `mergeClusters` is 1:1; loop the call N-1 times.
+            var dest = ids[0];
+            int merged = 0;
+            int failed = 0;
+            string? firstFailure = null;
+            for (int i = 1; i < ids.Count; i++)
             {
-                // Await each merge's bulkActionResult so a swallowed failure
-                // can't masquerade as success (the refresh would then re-show
-                // the unmerged clusters with no explanation).
-                var r = await EngineClient.Instance.WaitForBulkActionResultAsync(
-                    "mergeClusters",
-                    () => EngineClient.Instance.MergeClustersAsync(ids[i], dest),
-                    TimeSpan.FromSeconds(30));
-                if (r.Failed > 0 || r.Succeeded == 0)
+                try
                 {
+                    // Await each merge's bulkActionResult so a swallowed failure
+                    // can't masquerade as success (the refresh would then re-show
+                    // the unmerged clusters with no explanation).
+                    var r = await EngineClient.Instance.WaitForBulkActionResultAsync(
+                        "mergeClusters",
+                        () => EngineClient.Instance.MergeClustersAsync(ids[i], dest),
+                        TimeSpan.FromSeconds(30));
+                    if (r.Failed > 0 || r.Succeeded == 0)
+                    {
+                        failed++;
+                        firstFailure ??= r.Messages.FirstOrDefault(m => m is not null && !m.Ok)?.Message
+                                         ?? (r.Messages.Count > 0 ? r.Messages[0] : null)?.Message
+                                         ?? $"#{ids[i]} could not be merged.";
+                    }
+                    else
+                    {
+                        merged++;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    DebugLog.Warn("BulkMerge IPC failed: " + ex.Message);
                     failed++;
-                    firstFailure ??= r.Messages.FirstOrDefault(m => m is not null && !m.Ok)?.Message
-                                     ?? (r.Messages.Count > 0 ? r.Messages[0] : null)?.Message
-                                     ?? $"#{ids[i]} could not be merged.";
-                }
-                else
-                {
-                    merged++;
+                    firstFailure ??= SqliteErrorTranslator.Humanize(ex);
                 }
             }
-            catch (Exception ex)
+            DebugLog.Info($"Bulk-merged {merged} clusters into {dest}; {failed} failed");
+            if (failed > 0)
             {
-                DebugLog.Warn("BulkMerge IPC failed: " + ex.Message);
-                failed++;
-                firstFailure ??= SqliteErrorTranslator.Humanize(ex);
+                await ShowAlertAsync("Some merges failed",
+                    $"Merged {merged} into #{dest}; {failed} failed — {firstFailure}");
             }
+            // Exit select mode + refresh.
+            ViewModel.IsSelectMode = false;
+            _selectedClusterIds.Clear();
+            BulkActionBar.Visibility = Visibility.Collapsed;
+            SelectButtonText.Text = "Select";
+            UpdateCheckboxVisibility();
+            await ViewModel.RefreshAsync(CancellationToken.None);
         }
-        DebugLog.Info($"Bulk-merged {merged} clusters into {dest}; {failed} failed");
-        if (failed > 0)
+        finally
         {
-            await ShowAlertAsync("Some merges failed",
-                $"Merged {merged} into #{dest}; {failed} failed — {firstFailure}");
+            System.Threading.Interlocked.Exchange(ref _bulkOpInFlight, 0);
         }
-        // Exit select mode + refresh.
-        ViewModel.IsSelectMode = false;
-        _selectedClusterIds.Clear();
-        BulkActionBar.Visibility = Visibility.Collapsed;
-        SelectButtonText.Text = "Select";
-        UpdateCheckboxVisibility();
-        await ViewModel.RefreshAsync(CancellationToken.None);
     }
 
     private async void OnBulkMarkUnknownClicked(object sender, RoutedEventArgs e)
     {
-        var ids = ViewModel.SelectedClusterIds;
-        if (ids.Count == 0) return;
-        // PersonCluster.ClusterId is int; engine wants long.
-        var longIds = new System.Collections.Generic.List<long>(ids.Count);
-        foreach (var id in ids) longIds.Add(id);
+        if (System.Threading.Interlocked.CompareExchange(ref _bulkOpInFlight, 1, 0) != 0) return;
         try
         {
-            // Await the engine's bulkActionResult instead of fire-and-forget:
-            // a swallowed mark-as-unknown made the user think it happened, then
-            // the refresh re-showed the old state. Surface any failure and do
-            // NOT exit select mode / refresh so the user can retry.
-            var r = await EngineClient.Instance.WaitForBulkActionResultAsync(
-                "markPersonsAsUnknown",
-                () => EngineClient.Instance.MarkPersonsAsUnknownAsync(longIds),
-                TimeSpan.FromSeconds(30));
-            if (r.Failed > 0 || r.Succeeded == 0)
+            var ids = ViewModel.SelectedClusterIds;
+            if (ids.Count == 0) return;
+            // PersonCluster.ClusterId is int; engine wants long.
+            var longIds = new System.Collections.Generic.List<long>(ids.Count);
+            foreach (var id in ids) longIds.Add(id);
+            try
             {
-                var detail = r.Messages.FirstOrDefault(m => m is not null && !m.Ok)?.Message
-                             ?? (r.Messages.Count > 0 ? r.Messages[0] : null)?.Message
-                             ?? "The engine did not confirm the change.";
+                // Await the engine's bulkActionResult instead of fire-and-forget:
+                // a swallowed mark-as-unknown made the user think it happened, then
+                // the refresh re-showed the old state. Surface any failure and do
+                // NOT exit select mode / refresh so the user can retry.
+                var r = await EngineClient.Instance.WaitForBulkActionResultAsync(
+                    "markPersonsAsUnknown",
+                    () => EngineClient.Instance.MarkPersonsAsUnknownAsync(longIds),
+                    TimeSpan.FromSeconds(30));
+                if (r.Failed > 0 || r.Succeeded == 0)
+                {
+                    var detail = r.Messages.FirstOrDefault(m => m is not null && !m.Ok)?.Message
+                                 ?? (r.Messages.Count > 0 ? r.Messages[0] : null)?.Message
+                                 ?? "The engine did not confirm the change.";
+                    await ShowAlertAsync("Mark as unknown failed",
+                        $"Couldn't mark {ids.Count} cluster{(ids.Count == 1 ? "" : "s")} as unknown — {detail}");
+                    return;
+                }
+                DebugLog.Info($"Marked {ids.Count} clusters as unknown");
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn("BulkMarkUnknown IPC failed: " + ex.Message);
                 await ShowAlertAsync("Mark as unknown failed",
-                    $"Couldn't mark {ids.Count} cluster{(ids.Count == 1 ? "" : "s")} as unknown — {detail}");
+                    $"Couldn't mark {ids.Count} cluster{(ids.Count == 1 ? "" : "s")} as unknown — {SqliteErrorTranslator.Humanize(ex)}");
                 return;
             }
-            DebugLog.Info($"Marked {ids.Count} clusters as unknown");
+            ViewModel.IsSelectMode = false;
+            _selectedClusterIds.Clear();
+            BulkActionBar.Visibility = Visibility.Collapsed;
+            SelectButtonText.Text = "Select";
+            UpdateCheckboxVisibility();
+            await ViewModel.RefreshAsync(CancellationToken.None);
         }
-        catch (Exception ex)
+        finally
         {
-            DebugLog.Warn("BulkMarkUnknown IPC failed: " + ex.Message);
-            await ShowAlertAsync("Mark as unknown failed",
-                $"Couldn't mark {ids.Count} cluster{(ids.Count == 1 ? "" : "s")} as unknown — {SqliteErrorTranslator.Humanize(ex)}");
-            return;
+            System.Threading.Interlocked.Exchange(ref _bulkOpInFlight, 0);
         }
-        ViewModel.IsSelectMode = false;
-        _selectedClusterIds.Clear();
-        BulkActionBar.Visibility = Visibility.Collapsed;
-        SelectButtonText.Text = "Select";
-        UpdateCheckboxVisibility();
-        await ViewModel.RefreshAsync(CancellationToken.None);
     }
 
     // Mirrors SidebarProcessingControl.ShowAlertAsync: a dismissible
