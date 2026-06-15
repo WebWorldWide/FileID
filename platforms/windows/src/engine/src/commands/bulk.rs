@@ -771,11 +771,27 @@ pub(crate) async fn handle_mark_persons_different(
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
         let conn = db.lock();
+        // R3-15: resolve the churn-stable (file_id, bbox) key for each anchor face
+        // so the verdict survives a faces_evaluated re-scan that DELETE+re-INSERTs
+        // face_print ids. NULL when the face row is somehow already gone — the
+        // apply path then falls back to the legacy face_a/face_b id.
+        let stable_key = |id: i64| -> (Option<i64>, Option<String>) {
+            conn.query_row(
+                "SELECT file_id, bbox FROM face_prints WHERE id = ?1",
+                [id],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+            )
+            .map(|(f, b)| (Some(f), Some(b)))
+            .unwrap_or((None, None))
+        };
+        let (file_a, bbox_a) = stable_key(fa);
+        let (file_b, bbox_b) = stable_key(fb);
         conn.execute(
             "INSERT OR REPLACE INTO face_verifications
-                (person_a, person_b, same_person, confidence, vlm_model, verified_at, face_a, face_b)
-             VALUES (?1, ?2, 0, 1.0, 'user-verified', ?3, ?4, ?5)",
-            rusqlite::params![pa, pb, now, fa, fb],
+                (person_a, person_b, same_person, confidence, vlm_model, verified_at,
+                 face_a, face_b, file_a, bbox_a, file_b, bbox_b)
+             VALUES (?1, ?2, 0, 1.0, 'user-verified', ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![pa, pb, now, fa, fb, file_a, bbox_a, file_b, bbox_b],
         )?;
         Ok(())
     })
