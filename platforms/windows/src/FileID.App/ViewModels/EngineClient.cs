@@ -56,12 +56,13 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     // emits a newline can't grow an unbounded read buffer and OOM the UI process.
     // The 1 MiB cap this once used silently DROPPED the restructurePlan event (one
     // move per file × ~300 B) above ~3.5k moves, leaving the Restructure tab empty
-    // on a real "tens of thousands of files" library. The engine's MAX_FRAME_BYTES
-    // guard only bounds INBOUND commands, so outbound plan events are unbounded on
-    // the wire; size this cap to hold a full plan for the product target (~200k
-    // moves) while still bounding a runaway line. An oversize drop is now also
-    // surfaced as a visible error (see StdoutLoopAsync), never silent.
-    private const int MaxFrameChars = 32 * 1024 * 1024;
+    // on a real "tens of thousands of files" library. The engine caps OUTBOUND
+    // frames too (sink.rs MAX_FRAME_BYTES) — over-cap it substitutes a structured
+    // ipc_frame_too_large error rather than emitting a frame this reader would drop
+    // — so all four caps are kept symmetric. Bumped 32→64 MiB (R3-07B/R5-12) to hold
+    // a full ~200k-move whole-library plan while still bounding a runaway line. An
+    // oversize drop is also surfaced as a visible error (see StdoutLoopAsync), never silent.
+    private const int MaxFrameChars = 64 * 1024 * 1024;
 
     /// <summary>Per-loop stdout framing state (#22). Owned by a single
     /// StdoutLoopAsync invocation — never shared across loops, so an overlapping
