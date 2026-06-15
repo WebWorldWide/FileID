@@ -8,7 +8,37 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
-## 2026-06-14 (latest) — round 7: the last-uncovered UI surface — 39 defects fixed + 4 delta regressions (PRs #40–#41); audit converged
+## 2026-06-14 (latest) — post-audit: IPC cap (R3-07B) + macOS model-stack lockstep underway (PRs #43–#46)
+
+After the audit converged (round 7), turned to the remaining-work survey's real
+code items — closing the last deferred IPC item and starting the macOS lockstep
+(bringing the macOS engine onto the known-good Windows commercial-clean stack).
+All merged green on `main`; macOS edits are build-verified (swift build debug+
+release + unit tests) but their ML *behavior* still needs a Mac + labeled photos.
+
+- **#43 R3-07B/R5-12 — IPC frame cap 32→64 MiB + O(n²)→O(n) macOS frame scan.** Bumped
+  all 5 symmetric cap sites (incl. the macOS engine's stdin LineBuffer, a tighter
+  16 MiB cap the survey missed). Both macOS framers now carry a scanned-prefix offset
+  so a large frame isn't re-scanned every readability tick; LineBuffer made testable
+  + 10 SharedTests. Two survey items debunked as already-fixed false positives
+  (IpcSchema.Tests runs directly in CI; rename-heal exact-dup is guarded on both
+  engines via the round-3 old-path-gone gate).
+- **#44 RAM++ primary tagger (engine).** 4585-class RAM++ (RamPlusService, faithful
+  port of ram_plus.rs) replaces the weaker Apple Vision classifier; per-tag scores →
+  tags.score. Degrades gracefully to Vision tags when the model isn't installed.
+- **#45 VLM searchable tags (source='vlm').** Second VLM pass in Deep Analyze mirrors
+  the Windows Both-mode; parseVLMTags byte-identical + 4 ported unit tests.
+- **#46 RAM++ install UI.** RamPlusModelInstaller + Settings card download the 3 RAM++
+  files from the project HF mirror — activates the engine-side tagger.
+
+**Remaining lockstep (NOT yet landed — see NEXT.md):** 5-point FaceAlign (⚠ Vision
+landmark order is undocumented → Mac-only-determinable; wrong order = orthogonal
+embeddings), bbox pixel/JSON parity (coupled + a prior swap broke clustering →
+needs a threshold retune), and R3-15 durable face-verification keys (both-engine
+additive migration + verdict write/resolve — a real data-loss fix). These need a
+Mac / labeled data / focused care and are the next priorities.
+
+## 2026-06-14 — round 7: the last-uncovered UI surface — 39 defects fixed + 4 delta regressions (PRs #40–#41); audit converged
 
 Swept the surface rounds 1–6 never reached: the big action-bearing **C# Views +
 ViewModels** (Library/People/Cleanup/DeepAnalyze + their VMs, EngineClient command
