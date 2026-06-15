@@ -18,11 +18,12 @@ internal sealed partial class EngineClient
     /// drained its half. 1 MB is generous for every legitimate command
     /// today (each fits comfortably under 100 KB) — beyond that the
     /// caller should chunk explicitly.</summary>
-    // 32 MiB, symmetric with the engine's command-read cap (main.rs MAX_FRAME_BYTES)
+    // 64 MiB, symmetric with the engine's command-read cap (main.rs MAX_FRAME_BYTES)
     // and the inbound read cap (MaxFrameChars). The old 1 MiB cap rejected a large
     // applyRestructure (>~3.5k moves) — the same move set the engine just sent in
-    // restructurePlan — leaving a big reorganize unappliable. (audit E10)
-    private const int MaxIpcFrameBytes = 32 * 1024 * 1024;
+    // restructurePlan — leaving a big reorganize unappliable. Bumped 32→64 MiB
+    // (R3-07B/R5-12) to carry a ~200k-move whole-library apply. (audit E10)
+    private const int MaxIpcFrameBytes = 64 * 1024 * 1024;
 
     public Task SendCommandAsync(CommandPayload payload, CancellationToken ct = default)
     {
