@@ -8,7 +8,41 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
-## 2026-06-14 (latest) — post-audit: IPC cap (R3-07B) + macOS model-stack lockstep underway (PRs #43–#46)
+## 2026-06-15 (latest) — R3-15 data-loss fix + lockstep delta follow-ups landed (PRs #48–#49); only FaceAlign/bbox remain (Mac-gated)
+
+Closed the last deferred FIX and the delta-re-audit follow-ups. Both engines build-
+green; the new code was delta-re-audited by 5 agents (the macOS frame-scan even
+survived a 200k-trial differential fuzz, 0 mismatches) and a delta-2 confirmed dry.
+
+- **#48 R3-15 — durable face-verification keys (both engines, the last data-loss fix).**
+  v13's face_a/face_b are face_print ids that churn on every faces_evaluated re-scan,
+  so a user "different people" verdict silently stopped blocking the merge. Fix =
+  churn-stable (file_id, bbox) keys via coordinated migration **v17** (identical
+  identifier both engines; both canonical parity arrays updated + asserted equal),
+  verdict-write populates them (Windows; macOS write is app-side/not_implemented),
+  apply re-resolves (file,bbox)→current face id with legacy fallback. Additive
+  migration + graceful-degrade = bounded blast radius. Churn-survival regression test
+  on both engines. Windows 342 tests; macOS MigrationParityTests green.
+- **#49 delta follow-ups.** The delta re-audit found: R3-15 was half-closed —
+  `handle_find_merge_suggestions` still re-prompted rejected pairs via the churning
+  ids (now resolves via the stable key too); RAM++ `FILEID_RAMPLUS_THRESHOLD` was a
+  no-op with the per-class sidecar present + env knobs lacked a [0,1] guard; the RAM++
+  downloads weren't SHA-256-pinned (now in ModelManifest, with the correct 925 MB size
+  + a pre-preflight staging sweep); the VLM tag pass now uses 40-token greedy (Windows
+  parity) and parseVLMTags trims/splits on all whitespace. (A ModelManifest parity test
+  caught the JSON platform tag — fixed: RAM++ entries are now macos+windows.)
+
+**macOS model-stack lockstep status:** RAM++ tagger (engine + install UI), VLM tags,
+SFace/CLIP swap, and now the IPC cap + R3-15 are all MERGED. The only remaining
+lockstep pieces are **FaceAlign** (Vision landmark order is undocumented →
+Mac-only-determinable) and **bbox pixel/JSON parity** (coordinate-space change +
+cluster-threshold retune → needs labeled data). Both are the user's-own-principles
+"verify on Mac / tune against real data" items — full recipes in NEXT.md. Everything
+mergeable + verifiable-here is on `main` and green. Behavioral validation of the
+merged lockstep (install RAM++, scan, confirm tags/scores; Deep Analyze → vlm tags)
+is the Mac UAT.
+
+## 2026-06-14 — post-audit: IPC cap (R3-07B) + macOS model-stack lockstep underway (PRs #43–#46)
 
 After the audit converged (round 7), turned to the remaining-work survey's real
 code items — closing the last deferred IPC item and starting the macOS lockstep
