@@ -1248,7 +1248,9 @@ public enum FaceClustering {
                     for row in rows {
                         var crop: CGImage?
                         if FaceAlign.enabled,
-                           let pts = matchLandmarks(forBBox: row.bbox, in: detected),
+                           let pts = matchLandmarks(forBBox: row.bbox,
+                                                    imageWidth: cg.width, imageHeight: cg.height,
+                                                    in: detected),
                            let acrop = FaceAlign.align112(source: cg, landmarks: pts) {
                             crop = acrop
                             aligned += 1
@@ -1345,13 +1347,14 @@ public enum FaceClustering {
     /// (else nil → caller falls back to the bbox crop, never mis-aligns).
     private static func matchLandmarks(
         forBBox bboxString: String,
+        imageWidth: Int, imageHeight: Int,
         in detected: [(center: CGPoint, points: [(Float, Float)])]
     ) -> [(Float, Float)]? {
-        guard !detected.isEmpty else { return nil }
-        let parts = bboxString.split(separator: ",").compactMap { Double($0) }
-        guard parts.count == 4 else { return nil }
-        let cx = CGFloat(parts[0] + parts[2] / 2)
-        let cy = CGFloat(parts[1] + parts[3] / 2)
+        guard !detected.isEmpty,
+              let b = FaceBBox.parseNormalized(bboxString, imageWidth: imageWidth, imageHeight: imageHeight)
+        else { return nil }
+        let cx = CGFloat(b.x + b.w / 2)
+        let cy = CGFloat(b.y + b.h / 2)
         var best: (dist: CGFloat, pts: [(Float, Float)])?
         for d in detected {
             let dist = hypot(d.center.x - cx, d.center.y - cy)
@@ -1364,7 +1367,7 @@ public enum FaceClustering {
     }
 
     static func cropFaceCGImage(cgImage: CGImage, bboxString: String) -> CGImage? {
-        guard let roi = parseBBox(bboxString) else { return nil }
+        guard let roi = parseBBox(bboxString, imageWidth: cgImage.width, imageHeight: cgImage.height) else { return nil }
         let imgW = CGFloat(cgImage.width)
         let imgH = CGFloat(cgImage.height)
         let pixelRect = CGRect(
@@ -1401,14 +1404,15 @@ public enum FaceClustering {
             .appendingPathComponent("\(faceID).jpg")
     }
 
-    /// Parse "x,y,w,h" normalized → CGRect with 15% padding (matches the
-    /// historical v1 padding for face prints).
-    private static func parseBBox(_ s: String) -> CGRect? {
-        let parts = s.split(separator: ",").compactMap { Double($0) }
-        guard parts.count == 4 else { return nil }
+    /// Parse a face bbox (macOS CSV normalized OR Windows JSON pixels — see
+    /// FaceBBox) → normalized bottom-left CGRect with 15% padding (matches the
+    /// historical v1 padding). Image dims convert the Windows pixel/top-left form;
+    /// the CSV branch is unchanged, so a macOS-native library is byte-identical.
+    private static func parseBBox(_ s: String, imageWidth: Int, imageHeight: Int) -> CGRect? {
+        guard let b = FaceBBox.parseNormalized(s, imageWidth: imageWidth, imageHeight: imageHeight) else { return nil }
         let pad: CGFloat = 0.15
-        let bx = CGFloat(parts[0]); let by = CGFloat(parts[1])
-        let bw = CGFloat(parts[2]); let bh = CGFloat(parts[3])
+        let bx = CGFloat(b.x); let by = CGFloat(b.y)
+        let bw = CGFloat(b.w); let bh = CGFloat(b.h)
         let x = max(0, bx - bw * pad)
         let y = max(0, by - bh * pad)
         let w = min(1 - x, bw * (1 + 2 * pad))

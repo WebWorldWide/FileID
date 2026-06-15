@@ -1,11 +1,12 @@
 # NEXT — resume here
 
-## 2026-06-15 (lockstep) — macOS model-stack lockstep: only bbox parity remains (cross-platform, deferred)
+## 2026-06-15 (lockstep) — macOS model-stack lockstep COMPLETE; remaining work is UAT + release
 
 DONE + merged green: IPC cap (R3-07B #43), RAM++ tagger (engine #44 + install UI #46),
 VLM tags (#45), **R3-15 durable face-verification keys (#48)**, delta-re-audit follow-ups
-(#49), **5-point FaceAlign (#51)** — now **ON by default (#54)** — and the **face-detection
-recall fix (#53, 512→1536 px)**. All build-verified + delta-audited.
+(#49), **5-point FaceAlign (#51, ON by default #54)**, **face-detection recall (#53,
+512→1536 px)**, and **bbox cross-platform parity (#55, macOS read-tolerance via FaceBBox)**.
+All build-verified + delta-audited + unit-tested. **No lockstep code remains.**
 
 **Mac validation of the merged lockstep (the remaining work is mostly THIS, not code):**
 1. Install RAM++: Settings → AI Models → "image tagging" → Install (~925 MB). Scan a
@@ -20,24 +21,18 @@ recall fix (#53, 512→1536 px)**. All build-verified + delta-audited.
    `FILEID_SCAN_MAX_PIXELS` (1536). When the owner reports the sweet-spot values, bake them
    as the new defaults (one-line each). Disable alignment for an A/B with `FILEID_FACE_ALIGN=0`.
 
-**Only remaining code piece — bbox pixel/JSON parity (DEFERRED, cross-platform only):**
-macOS stores normalized "x,y,w,h" CSV; Windows stores pixels in JSON. The SAFE fix is
-mutual READ-tolerance (each engine parses both, writes its own) — NOT a format switch
-(a prior switch broke clustering: bboxArea→0 → all faces excluded). It needs a
-coordinate-space conversion (pixels↔normalized, requiring image dims) threaded through
-EVERY consumer: macOS parseBBox / cropFaceCGImage / matchLandmarks (FaceClustering) +
-PeopleView.cropFace; Windows the JSON bbox parser → also accept CSV. Within-platform
-behavior must stay byte-identical. It ONLY matters when a library is scanned on one OS
-and opened on the other (single-platform users unaffected), so it needs a real
-cross-platform DB + both-platform validation — do it then, not blind.
-_(R3-15 durable face-verification keys — DONE, #48/#49, migration v17 on both engines.)_
+**bbox parity — DONE (#55), macOS-side read-tolerance.** `FaceBBox.parseNormalized`
+parses both macOS CSV (normalized, bottom-left) and Windows JSON (pixels, top-left) →
+normalized bottom-left, used by the 3 macOS bbox readers. Windows needed no change (it
+never reads bbox back for cropping — saves face-crop JPEGs at scan + clusters from
+embeddings). CSV path byte-identical; FaceBBoxTests cover the conversion. Only matters
+cross-platform (Windows-scanned library opened on a Mac); single-platform unaffected.
 
-**FaceAlign + bbox are coupled** (do them together on a Mac): wire FaceAlign behind
-`FILEID_FACE_ALIGN`, switch bbox to pixels+JSON atomically across all consumers,
-confirm the Vision landmark order, then retune the cluster threshold against the
-now-aligned embeddings on a labeled subset and flip the flag default. Until then the
-macOS face pipeline keeps its current (unaligned, normalized-CSV) behavior, which is
-internally consistent and unregressed.
+**Face-threshold calibration (optional, owner-driven, env knobs, no recompile):** if
+different people still merge after a fresh scan, raise `FILEID_FACE_PASS1_COS` (0.66) /
+`FILEID_FACE_TIGHT_COS` (0.65) / `FILEID_FACE_SMALL_COS` (0.55) + wipe+rescan; if faces
+still missed, raise `FILEID_SCAN_MAX_PIXELS` (1536); `FILEID_FACE_ALIGN=0` for an A/B.
+Report the sweet-spot values → bake as defaults (one line each).
 
 ## 2026-06-14 (round 7) — audit CONVERGED; the only code-side work left is the two deferred coordinated changes below
 
