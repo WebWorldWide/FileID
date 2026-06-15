@@ -459,6 +459,30 @@ public final class Database: @unchecked Sendable {
             }
         }
 
+        // v17 (R3-15): churn-stable face-verification keys. v13's face_a/face_b are
+        // face_print ids, which a faces_evaluated re-scan DELETE+re-INSERTs with fresh
+        // ids — after which a stored "different people" verdict's faces no longer
+        // resolve and the anti-merge guard silently no-ops. Add (file_id, bbox) keys
+        // (a face at a given file+bbox is the same face across re-scans) + backfill
+        // from face_a/face_b where they still resolve. Byte-equivalent to the Windows
+        // v17_face_verification_stable_keys migration. macOS has no verdict WRITE path
+        // (markPersonsDifferent is not_implemented here) — this is for cross-platform
+        // schema parity + so the apply side (FaceClustering) resolves churn-stably.
+        m.registerMigration("v17_face_verification_stable_keys") { db in
+            try db.execute(sql: "ALTER TABLE face_verifications ADD COLUMN file_a INTEGER")
+            try db.execute(sql: "ALTER TABLE face_verifications ADD COLUMN bbox_a TEXT")
+            try db.execute(sql: "ALTER TABLE face_verifications ADD COLUMN file_b INTEGER")
+            try db.execute(sql: "ALTER TABLE face_verifications ADD COLUMN bbox_b TEXT")
+            try db.execute(sql: """
+                UPDATE face_verifications SET
+                    file_a = (SELECT file_id FROM face_prints WHERE id = face_a),
+                    bbox_a = (SELECT bbox    FROM face_prints WHERE id = face_a),
+                    file_b = (SELECT file_id FROM face_prints WHERE id = face_b),
+                    bbox_b = (SELECT bbox    FROM face_prints WHERE id = face_b)
+                WHERE face_a IS NOT NULL AND face_b IS NOT NULL
+                """)
+        }
+
         return m
     }
 
