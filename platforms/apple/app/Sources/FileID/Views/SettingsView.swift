@@ -39,6 +39,7 @@ struct SettingsTab: View {
                 // AI Models — visible because users genuinely care about
                 // which models are installed and download status.
                 CLIPSemanticSearchCard()
+                RamPlusTaggerCard()
 
                 DeepAnalyzeModelPickerCard(engine: engine)
                 FaceEmbedderCard(engine: engine, store: store)
@@ -411,6 +412,93 @@ struct CLIPSemanticSearchCard: View {
 /// Settings card for the face-recognition tier. Per-variant install
 /// state with Download/Uninstall buttons. The engine picks up whichever
 /// .mlpackage is on disk the next time face clustering runs.
+// AI Models — RAM++ tagger (macOS lockstep). Single-model card; the engine's
+// RamPlusService reads whatever this installs and falls back to Vision tags if
+// absent, so installing is purely an upgrade.
+struct RamPlusTaggerCard: View {
+    @State private var installer = RamPlusModelInstaller.shared
+    @State private var confirmUninstall = false
+
+    private var modelPath: String {
+        RamPlusModelInstaller.modelsRoot.appendingPathComponent("ram_plus/ram_plus.onnx").path
+    }
+
+    var body: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("AI Models — image tagging").font(.headline)
+                Text("RAM++ recognizes 4585 everyday tags on-device (richer than the built-in classifier). Apache-2.0; install with one click, no Python required. Without it, tagging uses the lighter built-in classifier.")
+                    .font(.callout).foregroundStyle(.secondary)
+                Divider().opacity(0.3)
+                HStack(alignment: .top, spacing: 8) {
+                    statusIcon.padding(.top, 2)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("RAM++ (Recognize Anything Plus)").font(.callout.bold())
+                        Text("Swin-Large @384 · 4585-tag English vocabulary").font(.caption).foregroundStyle(.secondary)
+                        Text(modelPath)
+                            .font(.caption2.monospaced()).foregroundStyle(.tertiary)
+                            .lineLimit(1).truncationMode(.middle)
+                    }
+                    Spacer()
+                }
+                footer.padding(.leading, 24)
+            }
+        }
+        .onAppear { installer.refreshStatus() }
+        .confirmationDialog(
+            "Remove RAM++ tagger?",
+            isPresented: $confirmUninstall,
+            titleVisibility: .visible
+        ) {
+            Button("Remove", role: .destructive) { installer.uninstall(); confirmUninstall = false }
+            Button("Keep", role: .cancel) { confirmUninstall = false }
+        } message: {
+            Text("Frees ~450 MB. Tagging falls back to the lighter built-in classifier.")
+        }
+    }
+
+    @ViewBuilder private var statusIcon: some View {
+        switch installer.status {
+        case .installed: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+        case .downloading: Image(systemName: "arrow.down.circle.fill").foregroundStyle(Theme.gold)
+        case .installFailed: Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+        default: Image(systemName: "xmark.circle").foregroundStyle(.orange)
+        }
+    }
+
+    @ViewBuilder private var footer: some View {
+        switch installer.status {
+        case .unknown:
+            EmptyView()
+        case .missing:
+            Button { installer.install() } label: {
+                Label("Install (~450 MB)", systemImage: "arrow.down.circle.fill")
+            }
+            .buttonStyle(.borderedProminent)
+        case .downloading(let fraction, let message, _, _):
+            VStack(alignment: .leading, spacing: 4) {
+                ProgressView(value: fraction).frame(maxWidth: 280)
+                HStack {
+                    Text(message).font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Cancel") { installer.cancel() }.font(.caption)
+                }
+            }
+        case .installed(let sizeBytes):
+            HStack(spacing: 8) {
+                Text("Installed · \(sizeBytes / 1_048_576) MB").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Remove", role: .destructive) { confirmUninstall = true }.font(.caption)
+            }
+        case .installFailed(let msg):
+            VStack(alignment: .leading, spacing: 4) {
+                Text(msg).font(.caption).foregroundStyle(.red)
+                Button("Retry") { installer.install() }.buttonStyle(.bordered)
+            }
+        }
+    }
+}
+
 struct FaceEmbedderCard: View {
     let engine: EngineClient
     let store: ReadStore
