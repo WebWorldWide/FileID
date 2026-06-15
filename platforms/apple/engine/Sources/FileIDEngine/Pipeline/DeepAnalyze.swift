@@ -55,6 +55,16 @@ public actor DeepAnalyze {
         topP: 0.9
     )
 
+    // Tag pass: short greedy decode — mirrors the Windows tag call (max_tokens 40,
+    // greedy). parseVLMTags caps at 2 tags regardless, so a 320-token sample is
+    // wasted work; greedy (temperature 0) also makes the tags deterministic across
+    // runs like Windows. (macOS lockstep delta fix)
+    private let tagGenerateParams = MLXLMCommon.GenerateParameters(
+        maxTokens: 40,
+        temperature: 0,
+        topP: 1.0
+    )
+
     private init() {}
 
     // MARK: - Cancellation
@@ -341,15 +351,18 @@ public actor DeepAnalyze {
     static func parseVLMTags(_ raw: String) -> [String] {
         let maxTags = 2
         var out: [String] = []
-        let leadingMarkers = CharacterSet(charactersIn: "0123456789.)-*• ").union(.whitespaces)
-        let trimChars = CharacterSet(charactersIn: "\"'. ").union(.whitespaces)
+        // .whitespacesAndNewlines (not .whitespaces) so a stray \r/\n inside a CRLF
+        // reply doesn't survive into a tag; word split on ANY whitespace (tabs too)
+        // to match the Rust split_whitespace(). (macOS lockstep delta fix)
+        let leadingMarkers = CharacterSet(charactersIn: "0123456789.)-*•").union(.whitespacesAndNewlines)
+        let trimChars = CharacterSet(charactersIn: "\"'.").union(.whitespacesAndNewlines)
         for piece in raw.split(whereSeparator: { $0 == "," || $0 == "\n" || $0 == ";" }) {
-            let lowered = piece.trimmingCharacters(in: .whitespaces).lowercased()
+            let lowered = piece.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             // Strip leading list markers, then surrounding quotes/punctuation.
             let noLead = String(lowered.unicodeScalars.drop(while: { leadingMarkers.contains($0) }))
             let stripped = noLead.trimmingCharacters(in: trimChars)
             if stripped.isEmpty || stripped.count > 40 { continue }
-            let words = stripped.split(separator: " ")
+            let words = stripped.split(whereSeparator: { $0.isWhitespace })
             if words.count > 2 { continue }
             if words.contains(where: { vlmTagStopwords.contains(String($0)) }) { continue }
             if !out.contains(stripped) { out.append(stripped) }
@@ -600,7 +613,7 @@ public actor DeepAnalyze {
         // same cost Windows pays for vlm tags).
         var vlmTags: [String] = []
         let tagCollector = TokenCollector()
-        let tagParams = generateParams
+        let tagParams = tagGenerateParams
         do {
             try await container.perform { (context: ModelContext) -> Void in
                 let chat: [Chat.Message] = [
