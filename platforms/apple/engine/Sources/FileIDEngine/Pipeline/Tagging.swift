@@ -386,14 +386,20 @@ public enum Tagging {
         //     present (every modern camera + iPhone photo embeds one). ~5-10x
         //     faster read on photos-with-thumbs; ImageIO falls back to decoding
         //     the full image only when the file lacks an embedded preview.
-        //   - 512 px (was 1024 px): MobileCLIP downscales to 256 internally and
-        //     Vision face/OCR work fine at 512. Half the pixels = half the
-        //     decode + resample cost for files without an embedded preview.
+        //   - Resolution: CLIP (256) / RAM++ (384) / phash / OCR all downsample
+        //     internally, so they're unaffected by the source size — but face
+        //     DETECTION is NOT: at 512 px a face that's ~10% of a 4000 px frame is
+        //     only ~50 px, right at Vision's limit, so medium / group / background
+        //     faces get missed. 1536 catches them (the prior 512 was the dominant
+        //     "faces aren't detected" cause). Tunable via FILEID_SCAN_MAX_PIXELS —
+        //     lower = faster scan + fewer faces, higher = slower + more faces.
+        let maxPixels = ProcessInfo.processInfo.environment["FILEID_SCAN_MAX_PIXELS"]
+            .flatMap { Int($0) }.map { max(256, min(4096, $0)) } ?? 1536
         let opts: [CFString: Any] = [
             kCGImageSourceShouldCacheImmediately: true,
             kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: 512
+            kCGImageSourceThumbnailMaxPixelSize: maxPixels
         ]
         guard let img = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else {
             return nil
