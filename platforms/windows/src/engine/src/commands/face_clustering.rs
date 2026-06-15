@@ -83,21 +83,64 @@ pub(crate) async fn handle_run_face_clustering(
                 }
             }
 
-            // (b) Raw "different people" verdict pairs (face-anchored). Re-projected
-            // onto the faces' CURRENT clusters in phase 2. Precise, but the link
-            // rides face_prints.id, which a faces_evaluated re-scan churns
-            // (DELETE+INSERT) — after which a stored verdict's faces no longer
-            // resolve. Guard (c) backstops that.
+            // (b) Raw "different people" verdict pairs. Re-projected onto the faces'
+            // CURRENT clusters in phase 2. R3-15: resolve each anchor by its
+            // churn-stable (file_id, bbox) key — which a faces_evaluated re-scan
+            // preserves — to the face id that CURRENTLY occupies that slot, instead
+            // of the legacy face_a/face_b id that the re-scan's DELETE+INSERT churns.
+            // Falls back to the legacy id for pre-v17 rows / unresolvable keys; if
+            // neither resolves, the pair is dropped (guard (c) still backstops).
             verdict_pairs = {
                 let mut vstmt = conn.prepare(
-                    "SELECT face_a, face_b FROM face_verifications \
-                     WHERE same_person = 0 AND face_a IS NOT NULL AND face_b IS NOT NULL",
+                    "SELECT face_a, face_b, file_a, bbox_a, file_b, bbox_b \
+                     FROM face_verifications \
+                     WHERE same_person = 0 \
+                       AND ((face_a IS NOT NULL AND face_b IS NOT NULL) \
+                            OR (file_a IS NOT NULL AND bbox_a IS NOT NULL \
+                                AND file_b IS NOT NULL AND bbox_b IS NOT NULL))",
                 )?;
-                let rows = vstmt
-                    .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?
+                let raw = vstmt
+                    .query_map([], |r| {
+                        Ok((
+                            r.get::<_, Option<i64>>(0)?,
+                            r.get::<_, Option<i64>>(1)?,
+                            r.get::<_, Option<i64>>(2)?,
+                            r.get::<_, Option<String>>(3)?,
+                            r.get::<_, Option<i64>>(4)?,
+                            r.get::<_, Option<String>>(5)?,
+                        ))
+                    })?
                     .filter_map(|r| r.ok())
-                    .collect::<Vec<(i64, i64)>>();
-                rows
+                    .collect::<Vec<_>>();
+                let resolve = |legacy: Option<i64>, file: Option<i64>, bbox: Option<String>| -> Option<i64> {
+                    if let (Some(f), Some(b)) = (file, bbox) {
+                        if let Ok(id) = conn.query_row(
+                            "SELECT id FROM face_prints WHERE file_id = ?1 AND bbox = ?2 LIMIT 1",
+                            rusqlite::params![f, b],
+                            |r| r.get::<_, i64>(0),
+                        ) {
+                            return Some(id);
+                        }
+                    }
+                    match legacy {
+                        Some(l)
+                            if conn
+                                .query_row("SELECT 1 FROM face_prints WHERE id = ?1", [l], |_| Ok(()))
+                                .is_ok() =>
+                        {
+                            Some(l)
+                        }
+                        _ => None,
+                    }
+                };
+                raw.into_iter()
+                    .filter_map(|(fa, fb, file_a, bbox_a, file_b, bbox_b)| {
+                        match (resolve(fa, file_a, bbox_a), resolve(fb, file_b, bbox_b)) {
+                            (Some(a), Some(b)) => Some((a, b)),
+                            _ => None,
+                        }
+                    })
+                    .collect::<Vec<(i64, i64)>>()
             };
 
             // (c) The user-identity snapshot (prior names/title/is_unknown + the

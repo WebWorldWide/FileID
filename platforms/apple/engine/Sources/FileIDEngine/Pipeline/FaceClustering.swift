@@ -543,19 +543,41 @@ public enum FaceClustering {
                                             fileCount: $0["fc"] ?? 0,
                                             named: ($0["named"] ?? 0) != 0) }
 
-                // "Different people" verdicts are stored face-anchored (face_a/
-                // face_b, the cross-platform v13 form the Windows engine reads).
-                // Re-project each onto the persons that own those faces now.
+                // "Different people" verdicts. R3-15: resolve each anchor by its
+                // churn-stable (file_id, bbox) key to the face id that CURRENTLY
+                // occupies that slot — surviving a faces_evaluated re-scan that
+                // DELETE+re-INSERTs face_print ids — falling back to the legacy
+                // face_a/face_b id for pre-v17 / unresolvable rows. Then re-project
+                // onto the persons that own those faces now. (macOS has no verdict
+                // WRITE path; these arrive via a cross-platform / round-tripped DB.)
                 let vrows = try GRDB.Row.fetchAll(db, sql: """
-                    SELECT face_a, face_b FROM face_verifications
-                    WHERE same_person = 0 AND face_a IS NOT NULL AND face_b IS NOT NULL
+                    SELECT face_a, face_b, file_a, bbox_a, file_b, bbox_b FROM face_verifications
+                    WHERE same_person = 0
+                      AND ((face_a IS NOT NULL AND face_b IS NOT NULL)
+                           OR (file_a IS NOT NULL AND bbox_a IS NOT NULL
+                               AND file_b IS NOT NULL AND bbox_b IS NOT NULL))
                     """)
+                func resolveAnchor(legacy: Int64?, file: Int64?, bbox: String?) -> Int64? {
+                    if let f = file, let b = bbox,
+                       let id = ((try? Int64.fetchOne(db, sql:
+                           "SELECT id FROM face_prints WHERE file_id = ? AND bbox = ? LIMIT 1",
+                           arguments: [f, b])) ?? nil) {
+                        return id
+                    }
+                    if let l = legacy, l != 0,
+                       ((try? Int.fetchOne(db, sql:
+                           "SELECT EXISTS(SELECT 1 FROM face_prints WHERE id = ?)",
+                           arguments: [l])) ?? nil) == 1 {
+                        return l
+                    }
+                    return nil
+                }
                 var rawPairs: [(Int64, Int64)] = []
                 var verdictFaces = Set<Int64>()
                 for vr in vrows {
-                    let a: Int64 = vr["face_a"] ?? 0
-                    let b: Int64 = vr["face_b"] ?? 0
-                    if a != 0, b != 0 { rawPairs.append((a, b)); verdictFaces.insert(a); verdictFaces.insert(b) }
+                    let a = resolveAnchor(legacy: vr["face_a"], file: vr["file_a"], bbox: vr["bbox_a"])
+                    let b = resolveAnchor(legacy: vr["face_b"], file: vr["file_b"], bbox: vr["bbox_b"])
+                    if let a, let b { rawPairs.append((a, b)); verdictFaces.insert(a); verdictFaces.insert(b) }
                 }
                 var facePerson: [Int64: Int64] = [:]
                 if !verdictFaces.isEmpty {

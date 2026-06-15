@@ -9,7 +9,8 @@
 //!   v6_arcface_embeddings, v7_identity_anchors, v8_content_identity,
 //!   v9_usn_state, v10_doc_text, v11_text_embeddings, v12_face_model_reset,
 //!   v13_face_verification_anchors, v14_files_kind_scanned_index,
-//!   v15_fts_sync_triggers, v16_path_search
+//!   v15_fts_sync_triggers, v16_path_search,
+//!   v17_face_verification_stable_keys
 //!
 //! Migrations are append-only. NEVER edit a registered migration once
 //! committed; add a new vN+1 migration instead.
@@ -43,6 +44,7 @@ fn registry() -> Vec<(&'static str, &'static str)> {
         ("v14_files_kind_scanned_index", V14_FILES_KIND_SCANNED_INDEX),
         ("v15_fts_sync_triggers",        V15_FTS_SYNC_TRIGGERS),
         ("v16_path_search",              V16_PATH_SEARCH),
+        ("v17_face_verification_stable_keys", V17_FACE_VERIFICATION_STABLE_KEYS),
     ]
 }
 
@@ -138,6 +140,30 @@ END;
 const V16_PATH_SEARCH: &str = "
 ALTER TABLE files ADD COLUMN path_search TEXT;
 UPDATE files SET path_search = path_text;
+";
+
+/// v17: churn-stable face-verification keys (R3-15). v13's face_a/face_b are
+/// face_print ids, which a faces_evaluated re-scan DELETE+re-INSERTs with fresh
+/// ids — after which a stored "different people" verdict's faces no longer
+/// resolve and the anti-merge guard silently no-ops (data loss). Add (file_id,
+/// bbox) keys, which survive re-clustering: a face at a given (file, bbox) is the
+/// same physical face across re-scans. Backfill from face_a/face_b where they
+/// still resolve; the write path populates these going forward and the apply path
+/// re-resolves (file,bbox)→current face id, falling back to the legacy face id for
+/// pre-v17 / unresolvable rows.
+/// NOTE: macOS must register an identical `v17_face_verification_stable_keys`
+/// identifier with equivalent SQL for cross-platform DB parity.
+const V17_FACE_VERIFICATION_STABLE_KEYS: &str = "
+ALTER TABLE face_verifications ADD COLUMN file_a INTEGER;
+ALTER TABLE face_verifications ADD COLUMN bbox_a TEXT;
+ALTER TABLE face_verifications ADD COLUMN file_b INTEGER;
+ALTER TABLE face_verifications ADD COLUMN bbox_b TEXT;
+UPDATE face_verifications SET
+    file_a = (SELECT file_id FROM face_prints WHERE id = face_a),
+    bbox_a = (SELECT bbox    FROM face_prints WHERE id = face_a),
+    file_b = (SELECT file_id FROM face_prints WHERE id = face_b),
+    bbox_b = (SELECT bbox    FROM face_prints WHERE id = face_b)
+WHERE face_a IS NOT NULL AND face_b IS NOT NULL;
 ";
 
 /// Apply every registered migration that hasn't been applied yet, in
@@ -430,7 +456,7 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 16, "expected 16 applied migrations");
+        assert_eq!(n, 17, "expected 17 applied migrations");
 
         // v13 added face_a + face_b to face_verifications (stable anchor keys).
         let verify_cols: i64 = conn
@@ -441,6 +467,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(verify_cols, 2, "v13 must add face_a + face_b columns");
+
+        // v17 (R3-15) added the churn-stable (file_id, bbox) keys.
+        let stable_cols: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('face_verifications') \
+                 WHERE name IN ('file_a', 'bbox_a', 'file_b', 'bbox_b')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stable_cols, 4, "v17 must add file_a/bbox_a/file_b/bbox_b columns");
 
         // Spot-check schema cardinals: files has 23 columns including v3
         // additions (vlm_*) and v8 additions (content_hash, file_ref);
@@ -488,7 +525,71 @@ mod tests {
         apply(&conn).unwrap();
         apply(&conn).unwrap(); // second run is a no-op
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 16);
+        assert_eq!(n, 17);
+    }
+
+    /// R3-15 regression: a "different people" verdict's churn-stable (file_id, bbox)
+    /// key must still resolve to the CURRENT face after a faces_evaluated re-scan
+    /// DELETE+re-INSERTs face_prints with fresh ids (the legacy face_a/face_b id is
+    /// then dangling). macOS mirror: MigrationParityTests.verdictSurvivesFaceChurn.
+    #[test]
+    fn verdict_stable_key_survives_face_print_churn() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, kind, extension) VALUES \
+             (1, '/a.jpg', 1, 100, 0, 'image', 'jpg'), \
+             (2, '/b.jpg', 2, 100, 0, 'image', 'jpg')",
+            [],
+        ).unwrap();
+        // Two faces (one per file) — the verdict says they are different people.
+        conn.execute(
+            "INSERT INTO face_prints (id, file_id, print_data, bbox) VALUES \
+             (10, 1, x'00', '0.1,0.1,0.2,0.2'), (20, 2, x'00', '0.3,0.3,0.2,0.2')",
+            [],
+        ).unwrap();
+        // Verdict written with both the legacy face ids AND the stable keys (the
+        // write path populates both).
+        conn.execute(
+            "INSERT INTO face_verifications \
+                (person_a, person_b, same_person, confidence, vlm_model, verified_at, \
+                 face_a, face_b, file_a, bbox_a, file_b, bbox_b) \
+             VALUES (1, 2, 0, 1.0, 'user-verified', 0, 10, 20, 1, '0.1,0.1,0.2,0.2', 2, '0.3,0.3,0.2,0.2')",
+            [],
+        ).unwrap();
+        // CHURN: re-scan drops + re-inserts the faces with FRESH ids (same file+bbox).
+        conn.execute("DELETE FROM face_prints", []).unwrap();
+        conn.execute(
+            "INSERT INTO face_prints (id, file_id, print_data, bbox) VALUES \
+             (101, 1, x'00', '0.1,0.1,0.2,0.2'), (202, 2, x'00', '0.3,0.3,0.2,0.2')",
+            [],
+        ).unwrap();
+        // The legacy face id is now dangling (the pre-R3-15 failure mode)…
+        let legacy_resolves: i64 = conn
+            .query_row("SELECT COUNT(*) FROM face_prints WHERE id IN (10, 20)", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(legacy_resolves, 0, "churn must invalidate the legacy face ids");
+        // …but the stable (file_id, bbox) key resolves to the NEW face ids (the fix).
+        let new_a: i64 = conn
+            .query_row(
+                "SELECT id FROM face_prints WHERE file_id = \
+                   (SELECT file_a FROM face_verifications) \
+                 AND bbox = (SELECT bbox_a FROM face_verifications) LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let new_b: i64 = conn
+            .query_row(
+                "SELECT id FROM face_prints WHERE file_id = \
+                   (SELECT file_b FROM face_verifications) \
+                 AND bbox = (SELECT bbox_b FROM face_verifications) LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(new_a, 101, "stable key A must resolve to the re-scanned face");
+        assert_eq!(new_b, 202, "stable key B must resolve to the re-scanned face");
     }
 
     /// L7 regression: a DB stamped by a newer engine must refuse to open
@@ -517,7 +618,7 @@ mod tests {
     /// BOTH or the chains fork again.
     #[test]
     fn migration_identifiers_match_canonical_list() {
-        const CANONICAL: [&str; 16] = [
+        const CANONICAL: [&str; 17] = [
             "v1_core_tables",
             "v2_clip_embeddings",
             "v3_deep_analyze",
@@ -534,6 +635,7 @@ mod tests {
             "v14_files_kind_scanned_index",
             "v15_fts_sync_triggers",
             "v16_path_search",
+            "v17_face_verification_stable_keys",
         ];
         let ids: Vec<&str> = registry().iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, CANONICAL, "migration identifiers must match the canonical cross-platform list");
