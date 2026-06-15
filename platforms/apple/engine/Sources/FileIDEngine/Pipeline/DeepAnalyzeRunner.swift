@@ -281,6 +281,7 @@ public enum DeepAnalyzeRunner {
                                       fileID: target.id,
                                       description: result.description,
                                       proposedName: result.proposedName,
+                                      tags: result.tags,
                                       modelKey: modelKey)
                     processed += 1
                     await sink.emit(.deepAnalyzeFileDone(DeepAnalyzeFileDone(
@@ -311,6 +312,7 @@ public enum DeepAnalyzeRunner {
         fileID: Int64,
         description: String?,
         proposedName: String?,
+        tags: [String] = [],
         modelKey: String
     ) async throws {
         // R3-01 defense-in-depth: COALESCE only guards NULL, so an empty-but-
@@ -320,6 +322,10 @@ public enum DeepAnalyzeRunner {
         // upstream; this closes the persist layer regardless of caller.)
         let safeDesc = (description?.isEmpty == true) ? nil : description
         let safeName = (proposedName?.isEmpty == true) ? nil : proposedName
+        // Clean tags once outside the txn (cheap, keeps the write tight).
+        let cleanTags = tags
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
         try await database.pool.write { db in
             // F-C3-044: COALESCE so a NULL result (model returned no caption or
             // no proposed name on this pass) preserves a prior good value rather
@@ -338,6 +344,20 @@ public enum DeepAnalyzeRunner {
                     Date().timeIntervalSince1970,
                     fileID
                 ])
+            // VLM searchable tags (source='vlm'). Replace this file's prior vlm
+            // tags only when the pass produced some — an empty result leaves prior
+            // tags intact (mirrors the Windows DELETE+INSERT, deep_analyze.rs; the
+            // DELETE there runs in the same "Both"-mode path that produced tags).
+            // user/auto tags (other sources) are untouched.
+            if !cleanTags.isEmpty {
+                try db.execute(sql: "DELETE FROM tags WHERE file_id = ? AND source = 'vlm'",
+                               arguments: [fileID])
+                for tag in cleanTags {
+                    try db.execute(sql: """
+                        INSERT OR IGNORE INTO tags (file_id, tag, source, score) VALUES (?, ?, 'vlm', NULL)
+                        """, arguments: [fileID, tag])
+                }
+            }
         }
     }
 

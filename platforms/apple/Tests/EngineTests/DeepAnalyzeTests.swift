@@ -73,6 +73,28 @@ struct DeepAnalyzePureLogicTests {
         #expect(conflict.sameClass == false)
     }
 
+    // macOS lockstep: parseVLMTags mirrors Windows parse_vlm_tags 1:1.
+    @Test("parseVLMTags: splits, lowercases, strips punctuation")
+    func vlmTagsSplitLowerStrip() {
+        #expect(DeepAnalyze.parseVLMTags("Dog, beach.") == ["dog", "beach"])
+    }
+
+    @Test("parseVLMTags: strips list numbering and dedupes")
+    func vlmTagsNumberingAndDedupe() {
+        #expect(DeepAnalyze.parseVLMTags("1. dog\n2. dog\n3. ocean") == ["dog", "ocean"])
+    }
+
+    @Test("parseVLMTags: drops sentence fragments (>2 words), keeps short tags")
+    func vlmTagsDropsFragments() {
+        #expect(DeepAnalyze.parseVLMTags("a dog running on the beach at sunset, beach") == ["beach"])
+    }
+
+    @Test("parseVLMTags: filters generic stopwords and caps at 2")
+    func vlmTagsStopwordsAndCap() {
+        #expect(DeepAnalyze.parseVLMTags("photo, image, sushi platter, mountain lake, extra tag")
+                == ["sushi platter", "mountain lake"])
+    }
+
     // R-11 — the shared single-flight load must be cancelled only when its LAST
     // joined waiter bails, so cancelling a prewarm can't abort a run joined to
     // the same download (and vice-versa). The load lifecycle needs a live MLX

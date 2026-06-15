@@ -319,6 +319,43 @@ public actor DeepAnalyze {
     public struct AnalysisResult: Sendable {
         public let description: String
         public let proposedName: String?
+        /// VLM searchable scene tags (source='vlm'), 0-2 short nouns from a second
+        /// VLM pass. Empty on the failure/early-return paths and when the tag pass
+        /// yields nothing. (macOS lockstep, mirrors Windows deep_analyze.rs)
+        public var tags: [String] = []
+    }
+
+    // VLM tag pass — byte-identical to the Windows engine (models/vlm.rs
+    // TAG_PROMPT + deep_analyze.rs parse_vlm_tags / VLM_TAG_STOPWORDS).
+    static let tagPrompt = "Give 1 or 2 specific lowercase tags naming the main subject of this image (for example: golden retriever, mountain lake, birthday cake, sushi platter). Use concrete nouns. Do not use generic words like photo, image, picture, object, thing, scene, background, location, or text. Comma-separated, no sentences, no numbering."
+
+    private static let vlmTagStopwords: Set<String> = [
+        "photo", "photos", "image", "images", "picture", "pictures", "object",
+        "objects", "thing", "things", "scene", "background", "foreground",
+        "location", "text", "item", "items", "stuff", "view", "misc", "unknown",
+        "none",
+    ]
+
+    /// Parse a VLM tag-pass reply into 0-2 short, deduped, stopword-filtered tags.
+    /// 1:1 port of Windows parse_vlm_tags.
+    static func parseVLMTags(_ raw: String) -> [String] {
+        let maxTags = 2
+        var out: [String] = []
+        let leadingMarkers = CharacterSet(charactersIn: "0123456789.)-*• ").union(.whitespaces)
+        let trimChars = CharacterSet(charactersIn: "\"'. ").union(.whitespaces)
+        for piece in raw.split(whereSeparator: { $0 == "," || $0 == "\n" || $0 == ";" }) {
+            let lowered = piece.trimmingCharacters(in: .whitespaces).lowercased()
+            // Strip leading list markers, then surrounding quotes/punctuation.
+            let noLead = String(lowered.unicodeScalars.drop(while: { leadingMarkers.contains($0) }))
+            let stripped = noLead.trimmingCharacters(in: trimChars)
+            if stripped.isEmpty || stripped.count > 40 { continue }
+            let words = stripped.split(separator: " ")
+            if words.count > 2 { continue }
+            if words.contains(where: { vlmTagStopwords.contains(String($0)) }) { continue }
+            if !out.contains(stripped) { out.append(stripped) }
+            if out.count >= maxTags { break }
+        }
+        return out
     }
 
     public struct FaceComparison: Sendable {
@@ -556,10 +593,40 @@ public actor DeepAnalyze {
             return AnalysisResult(description: "Inference failed: empty parsed description",
                                    proposedName: nil)
         }
+        // Second VLM pass — searchable scene tags (source='vlm'). Mirrors the
+        // Windows "Both" mode (deep_analyze.rs): a separate short tag prompt, then
+        // parse_vlm_tags. Best-effort — a failed/empty tag pass yields no tags and
+        // never demotes the successful caption. Adds one inference per file (the
+        // same cost Windows pays for vlm tags).
+        var vlmTags: [String] = []
+        let tagCollector = TokenCollector()
+        let tagParams = generateParams
+        do {
+            try await container.perform { (context: ModelContext) -> Void in
+                let chat: [Chat.Message] = [
+                    .user(Self.tagPrompt, images: [.ciImage(ciImage)], videos: [])
+                ]
+                var tagInput = UserInput(chat: chat)
+                tagInput.processing.resize = .init(width: 448, height: 448)
+                let lmInput = try await context.processor.prepare(input: tagInput)
+                let stream = try MLXLMCommon.generate(
+                    input: lmInput, parameters: tagParams, context: context
+                )
+                for await item in stream {
+                    if let chunk = item.chunk { tagCollector.append(chunk) }
+                }
+            }
+            vlmTags = Self.parseVLMTags(tagCollector.snapshot())
+        } catch {
+            JSONLog.shared.warn(ev: "deep_analyze_tags_failed", error: "\(error)")
+        }
+
         // Drain MLX scratch periodically — keeps weights resident, drops
-        // per-image temporary tensors.
+        // per-image temporary tensors. After BOTH passes (caption + tags).
         MLX.GPU.clearCache()
-        return parsed
+        return AnalysisResult(description: parsed.description,
+                              proposedName: parsed.proposedName,
+                              tags: vlmTags)
     }
 
     /// Parse the strict-format VLM output into description + filename.
