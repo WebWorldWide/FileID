@@ -15,6 +15,7 @@ import GRDB
 import ImageIO
 import CoreGraphics
 import FileIDShared
+import Vision
 
 public enum FaceClustering {
 
@@ -1219,14 +1220,38 @@ public enum FaceClustering {
                 let result = autoreleasepool { () -> [PendingExtract] in
                     let url = URL(fileURLWithPath: path)
                     guard let cg = loadCGImage(url: url) else { return [] }
+                    // FaceAlign (opt-in): detect 5-point landmarks ONCE per image so
+                    // each face can be similarity-ALIGNED to the SFace template
+                    // (matching the Windows YuNet+align pipeline the thresholds assume)
+                    // instead of a raw bbox crop. Default off → falls back to the bbox
+                    // crop, behavior identical to before. (macOS lockstep)
+                    let detected = FaceAlign.enabled ? detectFaceLandmarks(in: cg) : []
+                    var aligned = 0
                     var out: [PendingExtract] = []
                     out.reserveCapacity(rows.count)
                     for row in rows {
-                        guard let crop = cropFaceCGImage(cgImage: cg, bboxString: row.bbox) else { continue }
+                        var crop: CGImage?
+                        if FaceAlign.enabled,
+                           let pts = matchLandmarks(forBBox: row.bbox, in: detected),
+                           let acrop = FaceAlign.align112(source: cg, landmarks: pts) {
+                            crop = acrop
+                            aligned += 1
+                        } else {
+                            crop = cropFaceCGImage(cgImage: cg, bboxString: row.bbox)
+                        }
+                        guard let crop else { continue }
                         saveFaceCrop(faceID: row.id, croppedCGImage: crop)
                         guard let vec = ArcFaceService.shared.embed(crop) else { continue }
                         out.append(PendingExtract(id: row.id,
                                                   arcFace: ArcFaceService.embeddingToBlob(vec)))
+                    }
+                    if FaceAlign.enabled {
+                        JSONLog.shared.info(ev: "face_align_applied",
+                                            extra: ["path": AnyCodable(redactPathForLog(path)),
+                                                    "faces": AnyCodable(rows.count),
+                                                    "detected": AnyCodable(detected.count),
+                                                    "aligned": AnyCodable(aligned),
+                                                    "bbox_fallback": AnyCodable(rows.count - aligned)])
                     }
                     return out
                 }
@@ -1249,6 +1274,79 @@ public enum FaceClustering {
     /// The bbox-area filter at insertion time already drops obvious
     /// background extras; this is the catch-net for low-res source
     /// images where 0.5% area = ~30px on a 400px frame.
+    /// Detect 5-point face landmarks (FaceAlign opt-in). One
+    /// VNDetectFaceLandmarksRequest on the full image → per detected face, its
+    /// normalized (bottom-left) bbox center + the 5 landmarks in SOURCE-PIXEL
+    /// top-left coords, FileID template order [hi-x eye, lo-x eye, nose, hi-x
+    /// mouth corner, lo-x mouth corner]. Eye/mouth points are assigned to template
+    /// slots by IMAGE-X (not Vision's subject/viewer naming) so they line up with
+    /// the template's x-layout regardless of naming convention.
+    private static func detectFaceLandmarks(
+        in cg: CGImage
+    ) -> [(center: CGPoint, points: [(Float, Float)])] {
+        let req = VNDetectFaceLandmarksRequest()
+        let handler = VNImageRequestHandler(cgImage: cg, options: [:])
+        do {
+            try handler.perform([req])
+        } catch {
+            JSONLog.shared.warn(ev: "face_align_detect_failed", error: "\(error)")
+            return []
+        }
+        let size = CGSize(width: cg.width, height: cg.height)
+        let imgH = Float(cg.height)
+        func centroid(_ pts: [(Float, Float)]) -> (Float, Float)? {
+            guard !pts.isEmpty else { return nil }
+            var sx: Float = 0, sy: Float = 0
+            for p in pts { sx += p.0; sy += p.1 }
+            return (sx / Float(pts.count), sy / Float(pts.count))
+        }
+        var result: [(CGPoint, [(Float, Float)])] = []
+        for obs in (req.results ?? []) {
+            guard let lm = obs.landmarks,
+                  let le = lm.leftEye, let re = lm.rightEye,
+                  let nose = lm.nose, let lips = lm.outerLips else { continue }
+            // pointsInImage → pixel coords, Vision bottom-left origin → flip Y to
+            // top-left (consistent with cropFaceCGImage's `1 - y - h` flip).
+            func tl(_ region: VNFaceLandmarkRegion2D) -> [(Float, Float)] {
+                region.pointsInImage(imageSize: size).map { (Float($0.x), imgH - Float($0.y)) }
+            }
+            let lipsP = tl(lips)
+            guard let eyeA = centroid(tl(le)),
+                  let eyeB = centroid(tl(re)),
+                  let noseC = centroid(tl(nose)),
+                  let mouthHi = lipsP.max(by: { $0.0 < $1.0 }),
+                  let mouthLo = lipsP.min(by: { $0.0 < $1.0 }) else { continue }
+            let hiEye = eyeA.0 >= eyeB.0 ? eyeA : eyeB
+            let loEye = eyeA.0 >= eyeB.0 ? eyeB : eyeA
+            let five: [(Float, Float)] = [hiEye, loEye, noseC, mouthHi, mouthLo]
+            result.append((CGPoint(x: obs.boundingBox.midX, y: obs.boundingBox.midY), five))
+        }
+        return result
+    }
+
+    /// Match a stored normalized (bottom-left) "x,y,w,h" bbox to the nearest
+    /// detected face by center; returns its 5 landmarks only on a confident match
+    /// (else nil → caller falls back to the bbox crop, never mis-aligns).
+    private static func matchLandmarks(
+        forBBox bboxString: String,
+        in detected: [(center: CGPoint, points: [(Float, Float)])]
+    ) -> [(Float, Float)]? {
+        guard !detected.isEmpty else { return nil }
+        let parts = bboxString.split(separator: ",").compactMap { Double($0) }
+        guard parts.count == 4 else { return nil }
+        let cx = CGFloat(parts[0] + parts[2] / 2)
+        let cy = CGFloat(parts[1] + parts[3] / 2)
+        var best: (dist: CGFloat, pts: [(Float, Float)])?
+        for d in detected {
+            let dist = hypot(d.center.x - cx, d.center.y - cy)
+            if best == nil || dist < best!.dist { best = (dist, d.points) }
+        }
+        // Centers within ~8% of the frame — a looser match risks aligning to the
+        // wrong face in a group photo.
+        if let b = best, b.dist < 0.08 { return b.pts }
+        return nil
+    }
+
     static func cropFaceCGImage(cgImage: CGImage, bboxString: String) -> CGImage? {
         guard let roi = parseBBox(bboxString) else { return nil }
         let imgW = CGFloat(cgImage.width)
