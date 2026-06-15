@@ -1,12 +1,14 @@
 # NEXT — resume here
 
-## 2026-06-14 (lockstep) — macOS model-stack lockstep: 3 pieces remain (FaceAlign, bbox, R3-15)
+## 2026-06-15 (lockstep) — macOS model-stack lockstep: only 2 pieces remain (FaceAlign, bbox) — both Mac-gated
 
-The IPC cap (R3-07B, #43) is DONE. RAM++ tagger (engine #44 + install UI #46) and VLM
-tags (#45) are merged green — build-verified, behavior Mac-gated (install the RAM++
-model on a Mac, scan, confirm tags come from RAM++ with populated tags.score; run a
-Deep Analyze, confirm source='vlm' tags appear). The 3 remaining lockstep pieces — each
-needs a Mac / labeled data / focused care, so they were deliberately NOT rushed onto main:
+DONE + merged green: IPC cap (R3-07B #43), RAM++ tagger (engine #44 + install UI #46),
+VLM tags (#45), **R3-15 durable face-verification keys (#48)**, and the delta-re-audit
+follow-ups (#49, incl. the R3-15 re-prompt completion + RAM++/VLM faithfulness). All
+build-verified + delta-audited; behavior Mac-gated (install the RAM++ model on a Mac,
+scan, confirm tags come from RAM++ with populated tags.score; Deep Analyze → source='vlm'
+tags). The **2 remaining lockstep pieces** each need a Mac / labeled data, so they were
+deliberately NOT merged blind (they'd add unvalidated code, not remove bugs):
 
 - **5-point FaceAlign wiring.** Add VNDetectFaceLandmarksRequest to VisionWorker.runPrimaryPass,
   extract 5 landmarks per face (parallel to faceBBoxes), convert Vision normalized/bottom-left
@@ -20,18 +22,14 @@ needs a Mac / labeled data / focused care, so they were deliberately NOT rushed 
   stores pixels in JSON. Switch to pixels+JSON updating ALL consumers ATOMICALLY (DBWriter write,
   FaceClustering.cropFaceCGImage parse, bboxArea, PeopleView.cropFace) — a prior partial swap broke
   clustering (bboxArea→0 → all faces excluded). Couple with FaceAlign + the threshold retune.
-- **R3-15 durable face-verification keys (real data-loss fix, BOTH engines).** v13's face_a/face_b
-  are face_print ids that DELETE+re-INSERT on every faces_evaluated re-scan, so after id churn the
-  "different people" anti-merge guard silently no-ops (face_clustering.rs:93 / FaceClustering.swift:550
-  read face_a/face_b → cluster). Fix = additive migration **v17_face_verification_stable_keys**
-  (IDENTICAL name both engines; update BOTH CANONICAL arrays — migrations.rs:520 + macOS
-  MigrationParityTests) adding file_a/bbox_a/file_b/bbox_b keyed on churn-stable (file_id, bbox);
-  populate on verdict write (Win handle_mark_persons_different / mac markPersonsDifferent — LOCATE the
-  write site, not yet found), resolve on apply via (file,bbox)→current face id→cluster_of with legacy
-  face_a/face_b fallback; one-time backfill; both-engine re-scan regression test. Migration is additive
-  (low corruption risk) + the resolve degrades to current behavior if imperfect, but it's a large
-  cross-platform change — do it with focused care, Windows-first, build-verify both (cargo + swift +
-  both parity tests).
+_(R3-15 durable face-verification keys — DONE, #48/#49, migration v17 on both engines.)_
+
+**FaceAlign + bbox are coupled** (do them together on a Mac): wire FaceAlign behind
+`FILEID_FACE_ALIGN`, switch bbox to pixels+JSON atomically across all consumers,
+confirm the Vision landmark order, then retune the cluster threshold against the
+now-aligned embeddings on a labeled subset and flip the flag default. Until then the
+macOS face pipeline keeps its current (unaligned, normalized-CSV) behavior, which is
+internally consistent and unregressed.
 
 ## 2026-06-14 (round 7) — audit CONVERGED; the only code-side work left is the two deferred coordinated changes below
 

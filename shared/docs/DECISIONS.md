@@ -7,6 +7,35 @@
 
 ---
 
+## 2026-06-15 — macOS lockstep: merge what's verifiable-here; gate FaceAlign/bbox to a Mac (don't blind-merge ML behavior)
+
+Completing the macOS model-stack lockstep, the dividing line we held: a piece lands on
+`main` only if it can be made green AND its correctness verified here (build + unit
+tests + delta re-audit) OR it degrades gracefully so an unvalidated path can't regress
+existing behavior. RAM++ (engine + install — falls back to Vision when the model is
+absent), VLM tags (additive, opt-in Deep Analyze), the IPC cap, and R3-15 all clear that
+bar and are merged. **FaceAlign and bbox parity do NOT** — Vision's 5-point landmark
+ORDER is undocumented (only a Mac can confirm it; a wrong order makes embeddings
+orthogonal) and the bbox CSV→pixel/JSON switch needs a cluster-threshold retune against
+labeled data (a prior swap broke clustering). Merging those blind — even "green" —
+would add unvalidated ML behavior that could silently regress face clustering, which is
+the opposite of the goal and violates the project's own "verify, don't assume / tune ML
+against real data" principles. They stay on NEXT.md with full recipes for a Mac session.
+
+**R3-15 shape (the last data-loss fix):** an ADDITIVE cross-platform migration (v17,
+identical identifier on both engines, both canonical parity arrays asserted equal) +
+write/resolve logic that DEGRADES to the prior behavior when a key is absent — so the
+blast radius is bounded even though the Windows write path can't be runtime-verified
+here. Additive-migration + graceful-degrade is the pattern for a high-stakes
+cross-platform schema change that must ship without on-hardware confirmation.
+
+**Delta re-audit via subagents (not just Workflow):** with ultracode off, a fan-out of
+read-only review agents over the new code is the right tool for a "no bugs" pass — it
+caught R3-15's half-closed re-prompt path + RAM++ env/pin gaps, and a follow-up delta-2
+confirmed dry. The macOS frame-scan resume even survived a 200k-trial differential fuzz.
+Lesson reinforced: run the FULL `swift test` suite locally before pushing, not filtered
+subsets — a filtered run missed the ModelManifest parity test that the full CI caught.
+
 ## 2026-06-14 — The bug-hunt audit is converged at round 7; UI fixers fan out per-file, but only on disjoint files
 
 After round 7 the find→verify→expert→read→delta method has covered the engine, the data paths, and
