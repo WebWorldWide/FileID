@@ -631,6 +631,9 @@ struct FileIDEngineMain {
         // simultaneously. Each is a no-op if the model isn't installed.
         await Task.detached(priority: .userInitiated) {
             MobileCLIPService.shared.preWarm()
+            // RAM++ primary tagger (macOS lockstep) — no-op if not installed, in
+            // which case Tagging falls back to the Vision scene classifier.
+            RamPlusService.shared.preWarm()
             // Pick whichever ArcFace variant the user has on disk —
             // iResNet50 takes precedence when both are present.
             for kind in FaceEmbedderKind.installedKinds() {
