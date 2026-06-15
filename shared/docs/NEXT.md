@@ -4,19 +4,21 @@
 
 DONE + merged green: IPC cap (R3-07B #43), RAM++ tagger (engine #44 + install UI #46),
 VLM tags (#45), **R3-15 durable face-verification keys (#48)**, delta-re-audit follow-ups
-(#49), and **5-point FaceAlign (#51, opt-in FILEID_FACE_ALIGN, default off)**. All
-build-verified + delta-audited.
+(#49), **5-point FaceAlign (#51)** — now **ON by default (#54)** — and the **face-detection
+recall fix (#53, 512→1536 px)**. All build-verified + delta-audited.
 
 **Mac validation of the merged lockstep (the remaining work is mostly THIS, not code):**
 1. Install RAM++: Settings → AI Models → "image tagging" → Install (~925 MB). Scan a
-   folder; confirm Library tags are richer than before + `tags.score` is populated
-   (NULL only for EXIF/derived tags). Spot-check a few against the Windows engine.
-2. Deep Analyze a few files; confirm `source='vlm'` tags appear (searchable in Library).
-3. FaceAlign A/B: scan once normally, note People clustering; then
-   `FILEID_FACE_ALIGN=1` in the engine's env, wipe+rescan, compare People. The
-   `face_align_applied` log shows detected/aligned/fallback counts. Thresholds already
-   assume aligned input → expect tighter clusters / fewer split identities. If good,
-   flip the FaceAlign.enabled default to on in a one-line follow-up.
+   folder; confirm Library tags are richer + `tags.score` populated (NULL only for
+   EXIF/derived). Deep Analyze a few files; confirm `source='vlm'` tags appear.
+2. Faces (FaceAlign now default-on + 1536 px detection): scan, open People — expect more
+   faces found + fewer different-people merges. The `face_align_applied` log shows
+   detected/aligned/fallback per image.
+3. **Face threshold calibration (in progress, owner-driven, env knobs, no recompile):**
+   if different people still merge, raise `FILEID_FACE_PASS1_COS` (0.66) / `FILEID_FACE_TIGHT_COS`
+   (0.65) / `FILEID_FACE_SMALL_COS` (0.55) and wipe+rescan; if faces still missed, raise
+   `FILEID_SCAN_MAX_PIXELS` (1536). When the owner reports the sweet-spot values, bake them
+   as the new defaults (one-line each). Disable alignment for an A/B with `FILEID_FACE_ALIGN=0`.
 
 **Only remaining code piece — bbox pixel/JSON parity (DEFERRED, cross-platform only):**
 macOS stores normalized "x,y,w,h" CSV; Windows stores pixels in JSON. The SAFE fix is
