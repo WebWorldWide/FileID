@@ -36,7 +36,7 @@ public final class RamPlusModelInstaller {
     private var installing = false
 
     private static let repoBase = "https://huggingface.co/Web-World-Wide/ram-plus-onnx/resolve/main"
-    private static let approxOnnxBytes: Int64 = 450 * 1024 * 1024  // Swin-L @384, preflight estimate
+    private static let approxOnnxBytes: Int64 = 925_600_000  // Swin-L @384 ONNX, per manifest.json
 
     private init() {}
 
@@ -83,6 +83,12 @@ public final class RamPlusModelInstaller {
 
     private func runInstall() async {
         try? FileManager.default.createDirectory(at: Self.dir, withIntermediateDirectories: true)
+
+        // Reclaim parts orphaned by a kill mid-download BEFORE the free-space
+        // preflight, so ~900 MB of stale staging can't false-fail it (mirrors
+        // ArcFaceModelInstaller). Staging lives under the ram_plus subdir.
+        sweepStaleStagingEntries(
+            in: Self.dir.appendingPathComponent(".fileid-staging", isDirectory: true))
 
         if let free = freeDiskBytes(at: Self.dir), free < Self.approxOnnxBytes * 2 {
             status = .installFailed("Not enough free space.")
