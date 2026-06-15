@@ -32,7 +32,11 @@ public struct TaggedFile: Sendable {
     public var fileRef: UInt64?
 
     // Tagging output — empty arrays for files we couldn't process.
-    public var visionTags: [String]          // raw Vision classifier labels
+    public var visionTags: [String]          // primary auto-tags (RAM++ when installed, else Vision scene tags)
+    /// Per-tag confidence (0..1) for `visionTags` that carry one — RAM++ sigmoid
+    /// probabilities → tags.score. nil/absent for EXIF-derived + Vision-fallback
+    /// tags (no score). DBWriter writes a NULL score for any tag not present here.
+    public var tagScores: [String: Double]?
     public var phash: UInt64?                // dHash (0 = none / failed)
     public var aestheticScore: Double?       // 0..1
     public var hasFaces: Bool
@@ -74,7 +78,7 @@ public struct TaggedFile: Sendable {
         url: URL, kind: String, extension ext: String, sizeBytes: Int64,
         createdAt: Date?, modifiedAt: Date?,
         fileRef: UInt64? = nil,
-        visionTags: [String] = [], phash: UInt64? = nil,
+        visionTags: [String] = [], tagScores: [String: Double]? = nil, phash: UInt64? = nil,
         aestheticScore: Double? = nil, hasFaces: Bool = false,
         facePrints: [Data] = [], faceBBoxes: [String] = [],
         faceQualities: [Double] = [],
@@ -96,6 +100,7 @@ public struct TaggedFile: Sendable {
         self.modifiedAt = modifiedAt
         self.fileRef = fileRef
         self.visionTags = visionTags
+        self.tagScores = tagScores
         self.phash = phash
         self.aestheticScore = aestheticScore
         self.hasFaces = hasFaces
@@ -620,9 +625,13 @@ public actor DBWriter {
             for tag in file.visionTags {
                 let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
                 if trimmed.isEmpty { continue }
+                // RAM++ carries a per-tag confidence → tags.score; EXIF/derived +
+                // Vision-fallback tags have none (NULL). Mirrors the Windows
+                // dbwriter.rs score write (cast f32→f64). (macOS lockstep)
+                let score = file.tagScores?[trimmed]
                 try db.cachedStatement(sql: """
-                    INSERT OR REPLACE INTO tags (file_id, tag, source) VALUES (?, ?, ?)
-                    """).execute(arguments: [fileID, trimmed, "auto"])
+                    INSERT OR REPLACE INTO tags (file_id, tag, source, score) VALUES (?, ?, ?, ?)
+                    """).execute(arguments: [fileID, trimmed, "auto", score])
             }
         }
 

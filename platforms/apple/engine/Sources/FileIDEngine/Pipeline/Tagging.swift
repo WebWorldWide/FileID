@@ -151,11 +151,29 @@ public enum Tagging {
                         .map { MobileCLIPService.embeddingToBlob($0) }
                     let clipMs = (CFAbsoluteTimeGetCurrent() - clipStart) * 1000
 
-                    // Enrich Vision-classified tags with EXIF + dimension
-                    // signals we already have for free. Cheap, sync,
-                    // gives the Library tile chips real value beyond
-                    // the Vision classifier's narrow vocabulary.
-                    var enrichedTags = pass.classifyTags
+                    // RAM++ primary tagger (4585-class, Apache-2.0) — the macOS
+                    // lockstep mirror of the Windows stack. Falls back to the
+                    // Vision classifier's narrow scene vocabulary when the RAM++
+                    // ONNX isn't installed (tag() returns [] until load() succeeds),
+                    // so tagging always works. RAM++ carries per-tag confidences →
+                    // tags.score; the Vision fallback has none. The OCR doc-hint
+                    // above keeps using pass.classifyTags (its heuristic was tuned
+                    // for the Vision vocab).
+                    let ramTags = RamPlusService.shared.tag(cgImage)
+                    var tagScores: [String: Double]? = nil
+                    var primaryTags: [String]
+                    if !ramTags.isEmpty {
+                        primaryTags = ramTags.map { $0.tag }
+                        tagScores = Dictionary(ramTags.map { ($0.tag, Double($0.score)) },
+                                               uniquingKeysWith: { first, _ in first })
+                    } else {
+                        primaryTags = pass.classifyTags
+                    }
+
+                    // Enrich the primary tags with EXIF + dimension signals we
+                    // already have for free. Cheap, sync, gives the Library tile
+                    // chips real value. EXIF/derived tags carry no score.
+                    var enrichedTags = primaryTags
                     enrichedTags.append(contentsOf: extraTags(
                         cgImage: cgImage,
                         cameraModel: exif.cameraModel,
@@ -171,6 +189,7 @@ public enum Tagging {
                         createdAt: discovered.creationDate,
                         modifiedAt: discovered.modificationDate,
                         visionTags: enrichedTags,
+                        tagScores: tagScores,
                         phash: phash,
                         aestheticScore: aesthetic,
                         hasFaces: pass.faceCount > 0,
