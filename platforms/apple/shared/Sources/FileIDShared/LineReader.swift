@@ -9,7 +9,9 @@
 import Foundation
 
 public struct LineOverflowError: Error, CustomStringConvertible {
-    public let description = "IPC line exceeded 16 MiB cap"
+    public let capBytes: Int
+    public init(capBytes: Int) { self.capBytes = capBytes }
+    public var description: String { "IPC line exceeded \(capBytes / (1024 * 1024)) MiB cap" }
 }
 
 public enum LineReader {
@@ -111,33 +113,54 @@ public enum LineReader {
 }
 
 /// Lock-protected line buffer (readabilityHandler can fire on any thread).
-private final class LineBuffer: @unchecked Sendable {
-    /// Cap a single in-flight line to 16 MiB. A peer that fails to send
-    /// '\n' would otherwise grow the buffer without bound and OOM us.
-    private static let maxLineBytes = 16 * 1024 * 1024
+/// `internal` (not `private`) only so SharedTests can exercise the framing /
+/// resume-offset logic directly via `@testable import`.
+final class LineBuffer: @unchecked Sendable {
+    /// Cap a single in-flight line to 64 MiB. A peer that fails to send
+    /// '\n' would otherwise grow the buffer without bound and OOM us. 64 MiB
+    /// (R3-07B/R5-12) is symmetric with the IPC frame caps elsewhere so a
+    /// whole-library applyRestructure command (~200k moves) isn't rejected
+    /// here on the engine's stdin command-read path (FileIDEngineMain).
+    static let maxLineBytes = 64 * 1024 * 1024
 
     private let lock = NSLock()
     private var buffer = Data()
+    /// Count of leading buffer bytes already known to contain no newline.
+    /// Lets `append` resume the newline search from where it left off so a
+    /// large un-terminated frame arriving across many reads is scanned once
+    /// (O(total)) instead of re-scanned from the front every read (the old
+    /// O(n²)). (R3-07B)
+    private var scannedPrefix = 0
 
     init() { buffer.reserveCapacity(64 * 1024) }
 
     /// Append a chunk, return whole lines (newline-terminated, '\n' stripped).
     /// Throws `LineOverflowError` if a single un-terminated line exceeds
-    /// the 16 MiB cap; the caller is expected to finish the stream with
+    /// `maxLineBytes`; the caller is expected to finish the stream with
     /// that error so the parent process can decide to respawn.
     func append(_ chunk: Data) throws -> [Data] {
         lock.lock()
         defer { lock.unlock() }
         buffer.append(chunk)
         var lines: [Data] = []
-        while let nl = buffer.firstIndex(of: 0x0A) {
+        while true {
+            let searchStart = buffer.startIndex + scannedPrefix
+            guard searchStart < buffer.endIndex else { break }
+            guard let nl = buffer[searchStart...].firstIndex(of: 0x0A) else {
+                // No newline in the unscanned tail: the whole current buffer is
+                // newline-free, so the next chunk resumes the search from the end.
+                scannedPrefix = buffer.count
+                break
+            }
             let line = buffer.subdata(in: buffer.startIndex..<nl)
             buffer.removeSubrange(buffer.startIndex...nl)
+            scannedPrefix = 0
             if !line.isEmpty { lines.append(line) }
         }
         if buffer.count > Self.maxLineBytes {
             buffer.removeAll(keepingCapacity: false)
-            throw LineOverflowError()
+            scannedPrefix = 0
+            throw LineOverflowError(capBytes: Self.maxLineBytes)
         }
         return lines
     }
@@ -149,6 +172,7 @@ private final class LineBuffer: @unchecked Sendable {
         guard !buffer.isEmpty else { return nil }
         let out = buffer
         buffer = Data()
+        scannedPrefix = 0
         return out
     }
 }

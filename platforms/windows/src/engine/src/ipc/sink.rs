@@ -24,8 +24,9 @@ const CHANNEL_CAPACITY: usize = 16384;
 // app's bounded reader (it resyncs to the next newline), which hangs the UI
 // that was awaiting the reply (e.g. a huge restructurePlan). Rather than emit
 // the oversize frame, the sink substitutes a small structured
-// `ipc_frame_too_large` error the app can surface.
-const MAX_FRAME_BYTES: usize = 32 * 1024 * 1024;
+// `ipc_frame_too_large` error the app can surface. Bumped 32→64 MiB
+// (R3-07B/R5-12), symmetric with the inbound caps, to carry a whole-library plan.
+const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct Sink {

@@ -312,16 +312,21 @@ public final class EngineClient {
                 handle.readabilityHandler = nil
             }
         }
-        let stderrBuffer = MutexBox(Data())
-        // 32 MiB inbound frame cap — matches the Windows app's inbound cap.
-        // The engine emits whole event lines with no per-frame size limit
-        // (IPCSink.emit), and a butler restructurePlan (~3.5k+ moves) blows
-        // past the old 1 MiB guard, which silently dropped the frame and left
-        // the UI wedged with no plan and no error. Still bounded so a wedged
-        // engine that never emits a newline can't grow this buffer without
-        // limit and OOM the app — but an oversize frame now surfaces a visible
-        // error instead of vanishing.
-        let maxFrameBytes = 32 * 1024 * 1024
+        // `scanned` = count of leading buffer bytes already known newline-free,
+        // so the drain resumes the newline search from where it left off instead
+        // of re-scanning the whole buffer every readability tick (the old O(n²)
+        // when a large frame accumulates across ticks). (R3-07B)
+        let stderrBuffer = MutexBox((data: Data(), scanned: 0))
+        // 64 MiB inbound frame cap — matches the Windows app's inbound cap and the
+        // engine's command-read cap. The engine emits whole event lines (IPCSink
+        // caps OUTBOUND too and substitutes ipc_frame_too_large), and a butler
+        // restructurePlan (~3.5k+ moves) blows past the old 1 MiB guard, which
+        // silently dropped the frame and left the UI wedged with no plan and no
+        // error. Bumped 32→64 MiB (R3-07B/R5-12) for a whole-library plan. Still
+        // bounded so a wedged engine that never emits a newline can't grow this
+        // buffer without limit and OOM the app — an oversize frame surfaces a
+        // visible error instead of vanishing.
+        let maxFrameBytes = 64 * 1024 * 1024
         // R3-08: hand decoded events to the serial pump (Sendable continuation
         // captured as a local) instead of spawning an unordered Task per event.
         let continuation = self.eventContinuation
@@ -336,21 +341,31 @@ public final class EngineClient {
             }
             // Append + drain whole lines under the lock.
             var oversizeBytes: Int? = nil
-            let lines: [Data] = stderrBuffer.withLock { buf in
-                buf.append(data)
+            let lines: [Data] = stderrBuffer.withLock { state in
+                state.data.append(data)
                 var out: [Data] = []
-                while let nl = buf.firstIndex(of: 0x0A) {
-                    let line = buf.subdata(in: buf.startIndex..<nl)
-                    buf.removeSubrange(buf.startIndex...nl)
+                while true {
+                    let searchStart = state.data.startIndex + state.scanned
+                    guard searchStart < state.data.endIndex else { break }
+                    guard let nl = state.data[searchStart...].firstIndex(of: 0x0A) else {
+                        // No newline in the unscanned tail: the whole buffer is
+                        // newline-free, so the next tick resumes from the end.
+                        state.scanned = state.data.count
+                        break
+                    }
+                    let line = state.data.subdata(in: state.data.startIndex..<nl)
+                    state.data.removeSubrange(state.data.startIndex...nl)
+                    state.scanned = 0
                     if !line.isEmpty { out.append(line) }
                 }
                 // A partial frame past the cap (no newline yet) means the engine
                 // is emitting garbage or a frame larger than the shared limit —
                 // drop it and resync to the next newline rather than buffering
                 // unbounded. Reported below instead of dropped silently.
-                if buf.count > maxFrameBytes {
-                    oversizeBytes = buf.count
-                    buf.removeAll(keepingCapacity: false)
+                if state.data.count > maxFrameBytes {
+                    oversizeBytes = state.data.count
+                    state.data.removeAll(keepingCapacity: false)
+                    state.scanned = 0
                 }
                 return out
             }

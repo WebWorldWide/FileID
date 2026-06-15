@@ -41,13 +41,14 @@ use ipc::{
 
 const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Max inbound IPC frame size. 32 MiB, symmetric with the app's outbound
+/// Max inbound IPC frame size. 64 MiB, symmetric with the app's outbound
 /// command cap (MaxIpcFrameBytes) and its inbound read cap (MaxFrameChars).
 /// A large applyRestructure carries the same multi-MB move set the engine
 /// emitted in restructurePlan; the old 1 MiB cap silently rejected + drained
-/// it. Still bounded vs a runaway line; the engine already holds the whole
+/// it. Bumped 32→64 MiB (R3-07B/R5-12) to hold a ~200k-move whole-library
+/// plan. Still bounded vs a runaway line; the engine already holds the whole
 /// plan in memory. (audit E10)
-const MAX_FRAME_BYTES: usize = 32 * 1024 * 1024;
+const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
 /// Human-readable rejection message for an oversized inbound frame. Derives the
 /// cap from MAX_FRAME_BYTES so the text can never drift from the real limit
@@ -1094,7 +1095,7 @@ mod tests {
         let msg = oversized_frame_message(99_999);
 
         let expected_mib = MAX_FRAME_BYTES / (1024 * 1024);
-        assert_eq!(expected_mib, 32, "cap is 32 MiB");
+        assert_eq!(expected_mib, 64, "cap is 64 MiB (R3-07B/R5-12)");
 
         assert!(
             msg.contains(&format!("{expected_mib} MiB")),
