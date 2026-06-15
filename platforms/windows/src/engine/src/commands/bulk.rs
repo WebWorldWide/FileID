@@ -906,24 +906,57 @@ pub(crate) async fn handle_find_merge_suggestions(
             // correctness loss. Failing visibly is correct: a broken verdicts
             // read means the suggestion set can't be trusted. (audit F-A2)
             let mut vstmt = conn.prepare(
-                "SELECT person_a, person_b, face_a, face_b FROM face_verifications WHERE same_person = 0",
+                "SELECT person_a, person_b, face_a, face_b, file_a, bbox_a, file_b, bbox_b \
+                 FROM face_verifications WHERE same_person = 0",
             )?;
-            let rows = vstmt.query_map([], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, Option<i64>>(2)?,
-                    r.get::<_, Option<i64>>(3)?,
-                ))
-            })?;
-            for row in rows {
-                let (pa, pb, fa, fb) = row?;
+            let verdicts = vstmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, Option<i64>>(2)?,
+                        r.get::<_, Option<i64>>(3)?,
+                        r.get::<_, Option<i64>>(4)?,
+                        r.get::<_, Option<String>>(5)?,
+                        r.get::<_, Option<i64>>(6)?,
+                        r.get::<_, Option<String>>(7)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            // R3-15: resolve each anchor by its churn-stable (file_id, bbox) key to
+            // the face id that CURRENTLY occupies that slot (legacy face-id fallback),
+            // so a verdict still suppresses the re-prompt after a faces_evaluated
+            // re-scan churns face_print ids — mirroring the clustering-apply path.
+            let resolve = |legacy: Option<i64>, file: Option<i64>, bbox: Option<String>| -> Option<i64> {
+                if let (Some(f), Some(b)) = (file, bbox) {
+                    if let Ok(id) = conn.query_row(
+                        "SELECT id FROM face_prints WHERE file_id = ?1 AND bbox = ?2 LIMIT 1",
+                        rusqlite::params![f, b],
+                        |r| r.get::<_, i64>(0),
+                    ) {
+                        return Some(id);
+                    }
+                }
+                match legacy {
+                    Some(l)
+                        if conn
+                            .query_row("SELECT 1 FROM face_prints WHERE id = ?1", [l], |_| Ok(()))
+                            .is_ok() =>
+                    {
+                        Some(l)
+                    }
+                    _ => None,
+                }
+            };
+            for (pa, pb, fa, fb, file_a, bbox_a, file_b, bbox_b) in verdicts {
                 let pk = if pa < pb { (pa, pb) } else { (pb, pa) };
                 verified_persons.insert(pk);
-                if let (Some(fa), Some(fb)) = (fa, fb) {
-                    let fk = if fa < fb { (fa, fb) } else { (fb, fa) };
+                if let (Some(rfa), Some(rfb)) =
+                    (resolve(fa, file_a, bbox_a), resolve(fb, file_b, bbox_b))
+                {
+                    let fk = if rfa < rfb { (rfa, rfb) } else { (rfb, rfa) };
                     verified_faces.insert(fk);
-                    verified_face_pairs.push((fa, fb));
+                    verified_face_pairs.push((rfa, rfb));
                 }
             }
         }

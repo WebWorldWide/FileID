@@ -61,6 +61,24 @@ public enum ModelManifest {
             url: "https://huggingface.co/openai/clip-vit-base-patch32/resolve/main/merges.txt",
             sha256: "f526393189112391ce6f9795d4695f704121ce452c3aad1f5335cc41337eba85",
             approxBytes: 525_000),
+        // RAM++ tagger (macOS lockstep) — pins mirror shared/models/manifest.json so
+        // RamPlusModelInstaller's downloads are SHA-256-verified like every other
+        // weight (commercial-clean posture).
+        ModelArtifact(
+            id: "ram_plus_model",
+            url: "https://huggingface.co/Web-World-Wide/ram-plus-onnx/resolve/main/ram_plus.onnx",
+            sha256: "86058ac8881128540084d29f2b83cd1c4b4214350a8658addad35a877634f7d9",
+            approxBytes: 925_600_000),
+        ModelArtifact(
+            id: "ram_plus_tags",
+            url: "https://huggingface.co/Web-World-Wide/ram-plus-onnx/resolve/main/ram_plus_tags.txt",
+            sha256: "78c9db7838690addaddcb7b3f7dc724b6798f0d6eff7d67c106e8ad8f3f3e69e",
+            approxBytes: 47_000),
+        ModelArtifact(
+            id: "ram_plus_thresholds",
+            url: "https://huggingface.co/Web-World-Wide/ram-plus-onnx/resolve/main/ram_plus_thresholds.txt",
+            sha256: "7a69cbf2875161aefbc7db174f726a74eb1cebbd2e4538cef2e20fdc7eabb4e2",
+            approxBytes: 46_000),
     ]
 
     public static let vlmRepos: [VLMRepoPin] = [

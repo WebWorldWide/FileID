@@ -110,9 +110,24 @@ public final class RamPlusService: @unchecked Sendable {
                 return false
             }
 
-            // Optional per-class thresholds sidecar; must match tag count or it's ignored.
+            // Env overrides (match ram_plus.rs FILEID_RAMPLUS_* knobs for sweeps).
+            // Out-of-[0,1] values are rejected (fall back to the default), mirroring
+            // the Rust `.filter(|t| (0.0..=1.0).contains(t))` guard so a fat-fingered
+            // FILEID_RAMPLUS_PRECISION_FLOOR=1.5 can't silently emit zero tags.
+            let env = ProcessInfo.processInfo.environment
+            func envCut(_ key: String) -> Float? {
+                env[key].flatMap { Float($0) }.flatMap { (0.0...1.0).contains($0) ? $0 : nil }
+            }
+            let envThreshold = envCut("FILEID_RAMPLUS_THRESHOLD")
+            let globalT = envThreshold ?? Self.defaultThreshold
+            let floor = envCut("FILEID_RAMPLUS_PRECISION_FLOOR") ?? Self.defaultPrecisionFloor
+
+            // Per-class thresholds sidecar — IGNORED when FILEID_RAMPLUS_THRESHOLD is
+            // set, so the env override forces a single global cut for EVERY class
+            // (mirrors ram_plus.rs, where per_class is None when the env threshold is
+            // present). Otherwise loaded if it matches the tag count.
             var perClass: [Float]?
-            if let tText = try? String(contentsOf: Self.thresholdsURL, encoding: .utf8) {
+            if envThreshold == nil, let tText = try? String(contentsOf: Self.thresholdsURL, encoding: .utf8) {
                 let vals = tText.split(separator: "\n").compactMap { Float($0.trimmingCharacters(in: .whitespaces)) }
                 if vals.count == trimmedTags.count {
                     perClass = vals
@@ -130,11 +145,6 @@ public final class RamPlusService: @unchecked Sendable {
                     if !t.isEmpty, !t.hasPrefix("#") { extra.insert(t) }
                 }
             }
-
-            // Env overrides (match ram_plus.rs FILEID_RAMPLUS_* knobs for sweeps).
-            let env = ProcessInfo.processInfo.environment
-            let globalT = env["FILEID_RAMPLUS_THRESHOLD"].flatMap { Float($0) } ?? Self.defaultThreshold
-            let floor = env["FILEID_RAMPLUS_PRECISION_FLOOR"].flatMap { Float($0) } ?? Self.defaultPrecisionFloor
 
             let ortEnv: ORTEnv
             if let existing = self.env { ortEnv = existing }
