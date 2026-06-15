@@ -763,13 +763,17 @@ private struct PersonCard: View {
 
     /// Crop an NSImage to a Vision normalized "x,y,w,h" bbox, padded 20%.
     static func cropFace(in img: NSImage, bbox: String) -> NSImage? {
-        let parts = bbox.split(separator: ",").compactMap { Double($0) }
-        guard parts.count == 4 else { return nil }
+        // Format-tolerant (FaceBBox): macOS CSV-normalized OR a Windows-scanned
+        // library's JSON pixel bbox → normalized bottom-left. Pixel dims (not the
+        // points `img.size`) are needed to normalize the Windows pixel form.
+        let pw = img.representations.first?.pixelsWide ?? Int(img.size.width)
+        let ph = img.representations.first?.pixelsHigh ?? Int(img.size.height)
+        guard let b = FaceBBox.parseNormalized(bbox, imageWidth: pw, imageHeight: ph) else { return nil }
         let pad: CGFloat = 0.20
-        let x = max(0, parts[0] - parts[2] * pad)
-        let y = max(0, parts[1] - parts[3] * pad)
-        let w = min(1 - x, parts[2] * (1 + 2 * pad))
-        let h = min(1 - y, parts[3] * (1 + 2 * pad))
+        let x = max(0, CGFloat(b.x) - CGFloat(b.w) * pad)
+        let y = max(0, CGFloat(b.y) - CGFloat(b.h) * pad)
+        let w = min(1 - x, CGFloat(b.w) * (1 + 2 * pad))
+        let h = min(1 - y, CGFloat(b.h) * (1 + 2 * pad))
         let imgSize = img.size
         let pixelRect = NSRect(
             x: x * imgSize.width,
