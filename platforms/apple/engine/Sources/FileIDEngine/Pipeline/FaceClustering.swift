@@ -23,13 +23,24 @@ public enum FaceClustering {
     /// size — same person with very high confidence. Compare to ArcFace
     /// verification literature: 0.40 is the FAR=10⁻⁴ threshold for
     /// individual face pairs; centroid-to-centroid is denoised, so we
-    /// can pull this stricter without losing recall.
-    public static let tightAutoMergeCos: Float = 0.65
+    /// can pull this stricter without losing recall. RAISE it (e.g. 0.70)
+    /// via FILEID_FACE_TIGHT_COS to reduce different-people over-merging.
+    public static var tightAutoMergeCos: Float { envCos("FILEID_FACE_TIGHT_COS", 0.65) }
 
     /// Looser cosine threshold used only when at least one cluster is
     /// a single face — those are almost always fragments of an existing
-    /// person, not a distinct identity.
-    public static let smallClusterAutoMergeCos: Float = 0.55
+    /// person, not a distinct identity. RAISE via FILEID_FACE_SMALL_COS to
+    /// reduce over-merging of singletons into the wrong person.
+    public static var smallClusterAutoMergeCos: Float { envCos("FILEID_FACE_SMALL_COS", 0.55) }
+
+    /// Read a cosine threshold override from the environment, clamped to a sane
+    /// [0,1] band; falls back to `dflt`. Lets the thresholds be swept against a
+    /// real corpus (the right way to tune face clustering — never trained/guessed).
+    static func envCos(_ key: String, _ dflt: Float) -> Float {
+        ProcessInfo.processInfo.environment[key]
+            .flatMap { Float($0) }
+            .flatMap { (0.0...1.0).contains($0) ? $0 : nil } ?? dflt
+    }
 
     /// Cap so a corrupt DB can't spawn arbitrarily many person rows.
     public static let maxPersons: Int = 8000
@@ -220,7 +231,12 @@ public enum FaceClustering {
                                         durationSeconds: Date().timeIntervalSince(started))
         }
 
-        let icParams = IdentityClustering.Hyperparameters()
+        // pass1Cosine is the tightest "same person" gate; RAISE it via
+        // FILEID_FACE_PASS1_COS (e.g. 0.70) to split different people apart more
+        // aggressively when over-merging. Default preserved.
+        let icParams = IdentityClustering.Hyperparameters(
+            pass1Cosine: envCos("FILEID_FACE_PASS1_COS", 0.66)
+        )
         let icResult = IdentityClustering.cluster(
             embeddings: vecsByDense,
             searcher: { idx -> [(neighbor: Int, similarity: Float)] in
