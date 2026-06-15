@@ -8,7 +8,23 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
-## 2026-06-15 (latest) — 5-point FaceAlign landed opt-in (#51); only bbox parity remains (cross-platform, deferred)
+## 2026-06-15 (latest) — face quality: detection recall fix + FaceAlign ON by default (#53, #54)
+
+Two face-quality fixes after on-Mac feedback ("faces not detected + different people merged"):
+- **Detection recall (#53):** the image fed to Vision face detection was downscaled to
+  512 px, so faces <~10% of a 4000 px frame (~50 px) fell at/below Vision's limit and were
+  missed. Bumped to 1536 px (CLIP/RAM++/phash/OCR downsample internally → unaffected),
+  tunable via `FILEID_SCAN_MAX_PIXELS`. Cluster auto-merge + pass-1 cosines made env-tunable
+  (`FILEID_FACE_TIGHT_COS`/`SMALL_COS`/`PASS1_COS`, defaults preserved) for corpus calibration.
+- **FaceAlign ON by default (#54):** flipped `FaceAlign.enabled` to default-on (escape hatch
+  `FILEID_FACE_ALIGN=0`). Aligned SFace crops are discriminative, so the thresholds (which
+  assume aligned input) stop over-merging different people.
+
+The fix for face quality was alignment + detection-resolution + threshold calibration —
+NOT retraining the embedder (which would overfit + fork the cross-platform 128-d space +
+break licensing). Full macOS suite 213 green; build debug+release clean.
+
+## 2026-06-15 — 5-point FaceAlign landed opt-in (#51); only bbox parity remains (cross-platform, deferred)
 
 FaceAlign (#51) wires `align112` into the macOS face-embed backfill behind
 `FILEID_FACE_ALIGN` (default off): one `VNDetectFaceLandmarksRequest` per image →

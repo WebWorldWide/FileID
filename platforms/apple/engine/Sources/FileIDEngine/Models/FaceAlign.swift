@@ -20,13 +20,13 @@ import Foundation
 enum FaceAlign {
     static let out = 112
 
-    /// Opt-in 5-point alignment (default OFF). Set FILEID_FACE_ALIGN=1 to feed
-    /// SFace similarity-ALIGNED crops (matching the Windows YuNet+align pipeline,
-    /// which the cluster thresholds assume) instead of raw bbox crops. Default-off
-    /// so a fresh `main` keeps the prior (unaligned) behavior until validated on a
-    /// Mac; flip the default once confirmed. (macOS lockstep)
+    /// 5-point alignment — now ON by default (validated on a Mac). Feeds SFace
+    /// similarity-ALIGNED crops (matching the Windows YuNet+align pipeline the
+    /// cluster thresholds assume) instead of raw bbox crops, so different people
+    /// stop over-merging. Escape hatch: set FILEID_FACE_ALIGN=0 to fall back to
+    /// the raw bbox crop (e.g. to A/B or if a regression surfaces). (macOS lockstep)
     static var enabled: Bool {
-        ProcessInfo.processInfo.environment["FILEID_FACE_ALIGN"] == "1"
+        ProcessInfo.processInfo.environment["FILEID_FACE_ALIGN"] != "0"
     }
 
     /// Template in FileID landmark order [left_eye, right_eye, nose,
