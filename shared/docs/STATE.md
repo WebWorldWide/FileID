@@ -8,7 +8,25 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
-## 2026-06-15 (latest) — face quality: detection recall fix + FaceAlign ON by default (#53, #54)
+## 2026-06-15 (latest) — bbox cross-platform parity landed (#55) — macOS lockstep COMPLETE
+
+bbox parity was the last lockstep item. Root cause: macOS stores face bbox as "x,y,w,h"
+NORMALIZED bottom-left (Vision); Windows stores JSON {x,y,w,h,…} in PIXELS top-left
+(SCRFD). A library scanned on one OS + opened on the other had its faces fail to crop
+(foreign parser → nil → excluded/blank). Fix is **macOS-side read-tolerance only** —
+new `FaceBBox.parseNormalized` (FileIDShared) parses BOTH formats → normalized bottom-left,
+threaded through the 3 macOS bbox readers (parseBBox/cropFaceCGImage, FaceAlign
+matchLandmarks, PeopleView.cropFace). Windows needs NO change: it never reads bbox back
+for cropping (saves face-crop JPEGs at scan time, clusters from embeddings; its only bbox
+reads are R3-15 string-equality matches). The CSV branch is byte-identical → within-platform
+behavior unchanged (safe). FaceBBoxTests verify CSV passthrough + the JSON pixel→normalized
++ origin-flip conversion; full macOS suite 216 green.
+
+**macOS model-stack lockstep is now COMPLETE** — SFace/CLIP swap, RAM++ tagger (+ install),
+VLM tags, R3-15, IPC cap, FaceAlign (on by default), detection-recall, and bbox parity all
+merged + green. Remaining work is purely on-hardware/GUI UAT + release signing (NEXT.md).
+
+## 2026-06-15 — face quality: detection recall fix + FaceAlign ON by default (#53, #54)
 
 Two face-quality fixes after on-Mac feedback ("faces not detected + different people merged"):
 - **Detection recall (#53):** the image fed to Vision face detection was downscaled to
