@@ -1,27 +1,33 @@
 # NEXT — resume here
 
-## 2026-06-15 (lockstep) — macOS model-stack lockstep: only 2 pieces remain (FaceAlign, bbox) — both Mac-gated
+## 2026-06-15 (lockstep) — macOS model-stack lockstep: only bbox parity remains (cross-platform, deferred)
 
 DONE + merged green: IPC cap (R3-07B #43), RAM++ tagger (engine #44 + install UI #46),
-VLM tags (#45), **R3-15 durable face-verification keys (#48)**, and the delta-re-audit
-follow-ups (#49, incl. the R3-15 re-prompt completion + RAM++/VLM faithfulness). All
-build-verified + delta-audited; behavior Mac-gated (install the RAM++ model on a Mac,
-scan, confirm tags come from RAM++ with populated tags.score; Deep Analyze → source='vlm'
-tags). The **2 remaining lockstep pieces** each need a Mac / labeled data, so they were
-deliberately NOT merged blind (they'd add unvalidated code, not remove bugs):
+VLM tags (#45), **R3-15 durable face-verification keys (#48)**, delta-re-audit follow-ups
+(#49), and **5-point FaceAlign (#51, opt-in FILEID_FACE_ALIGN, default off)**. All
+build-verified + delta-audited.
 
-- **5-point FaceAlign wiring.** Add VNDetectFaceLandmarksRequest to VisionWorker.runPrimaryPass,
-  extract 5 landmarks per face (parallel to faceBBoxes), convert Vision normalized/bottom-left
-  → absolute top-left, reorder to [Leye,Reye,nose,mouthL,mouthR], call FaceAlign.align112 before
-  ArcFaceService.embed in FaceClustering.cropFaceCGImage's caller (~line 1203). ⚠ **Vision's
-  landmark ORDER is undocumented** — verify it on a Mac (print landmark positions; eyes should be
-  symmetric) before trusting the mapping; a wrong order makes embeddings orthogonal. Land it behind
-  an env flag (FILEID_FACE_ALIGN) default-off until the order is confirmed, then flip the default.
-  Retune the cluster threshold against the now-aligned (Windows-parity) embeddings.
-- **bbox pixel/JSON parity.** macOS stores normalized "x,y,w,h" CSV (DBWriter.swift:40/857); Windows
-  stores pixels in JSON. Switch to pixels+JSON updating ALL consumers ATOMICALLY (DBWriter write,
-  FaceClustering.cropFaceCGImage parse, bboxArea, PeopleView.cropFace) — a prior partial swap broke
-  clustering (bboxArea→0 → all faces excluded). Couple with FaceAlign + the threshold retune.
+**Mac validation of the merged lockstep (the remaining work is mostly THIS, not code):**
+1. Install RAM++: Settings → AI Models → "image tagging" → Install (~925 MB). Scan a
+   folder; confirm Library tags are richer than before + `tags.score` is populated
+   (NULL only for EXIF/derived tags). Spot-check a few against the Windows engine.
+2. Deep Analyze a few files; confirm `source='vlm'` tags appear (searchable in Library).
+3. FaceAlign A/B: scan once normally, note People clustering; then
+   `FILEID_FACE_ALIGN=1` in the engine's env, wipe+rescan, compare People. The
+   `face_align_applied` log shows detected/aligned/fallback counts. Thresholds already
+   assume aligned input → expect tighter clusters / fewer split identities. If good,
+   flip the FaceAlign.enabled default to on in a one-line follow-up.
+
+**Only remaining code piece — bbox pixel/JSON parity (DEFERRED, cross-platform only):**
+macOS stores normalized "x,y,w,h" CSV; Windows stores pixels in JSON. The SAFE fix is
+mutual READ-tolerance (each engine parses both, writes its own) — NOT a format switch
+(a prior switch broke clustering: bboxArea→0 → all faces excluded). It needs a
+coordinate-space conversion (pixels↔normalized, requiring image dims) threaded through
+EVERY consumer: macOS parseBBox / cropFaceCGImage / matchLandmarks (FaceClustering) +
+PeopleView.cropFace; Windows the JSON bbox parser → also accept CSV. Within-platform
+behavior must stay byte-identical. It ONLY matters when a library is scanned on one OS
+and opened on the other (single-platform users unaffected), so it needs a real
+cross-platform DB + both-platform validation — do it then, not blind.
 _(R3-15 durable face-verification keys — DONE, #48/#49, migration v17 on both engines.)_
 
 **FaceAlign + bbox are coupled** (do them together on a Mac): wire FaceAlign behind

@@ -8,7 +8,29 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
-## 2026-06-15 (latest) — R3-15 data-loss fix + lockstep delta follow-ups landed (PRs #48–#49); only FaceAlign/bbox remain (Mac-gated)
+## 2026-06-15 (latest) — 5-point FaceAlign landed opt-in (#51); only bbox parity remains (cross-platform, deferred)
+
+FaceAlign (#51) wires `align112` into the macOS face-embed backfill behind
+`FILEID_FACE_ALIGN` (default off): one `VNDetectFaceLandmarksRequest` per image →
+5 NAMED landmark regions (leftEye/rightEye/nose/outerLips), assigned to template
+slots by image-x (so no subject/viewer naming ambiguity), matched to the stored
+bbox by center, aligned; falls back to the bbox crop on no match. Deterministic
+(no landmark-order guessing), no schema change (landmarks re-derived at embed),
+diagnostic `face_align_applied` log. FaceAlignTests verify the similarity fit;
+full macOS suite 213 green. **Mac validation:** scan with the flag unset vs `=1`,
+compare People clustering (the thresholds already assume aligned input, so it
+should tighten, not regress); flip the default once confirmed.
+
+**Only bbox pixel/JSON parity remains** — and it's deliberately deferred, not
+merged blind. macOS stores normalized bbox, Windows stores pixels in JSON; safe
+cross-platform read-tolerance needs a coordinate-space conversion threaded through
+every consumer (parseBBox / cropFaceCGImage / matchLandmarks / PeopleView.cropFace
+/ bboxArea), the exact multi-consumer change a prior swap broke clustering on. It
+only matters for a library scanned on one OS and opened on the other (single-platform
+users are unaffected), so it needs a real cross-platform DB + both-platform
+validation — recipe in NEXT.md. Everything else in the lockstep is merged + green.
+
+## 2026-06-15 — R3-15 data-loss fix + lockstep delta follow-ups landed (PRs #48–#49); only FaceAlign/bbox remain (Mac-gated)
 
 Closed the last deferred FIX and the delta-re-audit follow-ups. Both engines build-
 green; the new code was delta-re-audited by 5 agents (the macOS frame-scan even
