@@ -687,10 +687,20 @@ internal sealed partial class EngineClient
     /// <summary>Reverse the most recent applyRestructure — the engine replays its
     /// on-disk undo journal. Reply lands on LastRestructureApplyResult and clears
     /// CanUndoRestructure. (R2)</summary>
-    public Task UndoRestructureAsync(string libraryRoot)
+    public async Task UndoRestructureAsync(string libraryRoot)
     {
+        // Clear the flag if the send faults (engine not Ready) — else it latches and
+        // mis-attributes the next apply's result as the undo's. (audit R2-app)
         UndoRestructureInFlight = true;
-        return SendCommandAsync(new UndoRestructureCommand(libraryRoot));
+        try
+        {
+            await SendCommandAsync(new UndoRestructureCommand(libraryRoot)).ConfigureAwait(false);
+        }
+        catch
+        {
+            UndoRestructureInFlight = false;
+            throw;
+        }
     }
 
     public Task ApplyTagsAsync(IReadOnlyList<long> fileIds, IReadOnlyList<string> tags, string mode = "add") =>

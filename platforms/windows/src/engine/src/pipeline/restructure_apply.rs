@@ -82,6 +82,14 @@ impl RestructureApply {
     /// applied + failed counts. A privilege error in symlink mode short-
     /// circuits with a friendly message instead of partial writes.
     pub fn apply(&self, moves: &[RestructureMove]) -> Result<RestructureApplyResult> {
+        self.apply_with(moves, true)
+    }
+
+    fn apply_with(
+        &self,
+        moves: &[RestructureMove],
+        record_undo: bool,
+    ) -> Result<RestructureApplyResult> {
         let canonical_root = canonicalize_safely(&self.library_root)
             .with_context(|| format!("library root {}", self.library_root.display()))?;
 
@@ -256,9 +264,12 @@ impl RestructureApply {
         }
 
         // Persist the inverse-move journal (truncating → last run only) so the app
-        // can offer a one-click "Undo last run". Best-effort: an unwritable journal
-        // just means undo is unavailable, never a failed apply. (R2)
-        Self::write_undo_journal(&undo_entries);
+        // can offer a one-click "Undo last run". Best-effort. Skipped during an undo
+        // run (record_undo=false) so a CANCELLED undo leaves the ORIGINAL journal
+        // intact — the user can re-run undo to finish the remainder. (R2)
+        if record_undo {
+            Self::write_undo_journal(&undo_entries);
+        }
         Ok(RestructureApplyResult { applied, failed, privilege_error: None })
     }
 
@@ -327,11 +338,15 @@ impl RestructureApply {
                 reason: None,
             })
             .collect();
-        // apply rewrites the journal with the redo set; drop it afterward so the
-        // button can't toggle apply→undo→apply by accident.
-        let result = self.apply(&inverse)?;
-        if let Some(path) = Self::undo_journal_path() {
-            let _ = std::fs::remove_file(path);
+        // record_undo:false so the undo's own moves DON'T overwrite the journal — a
+        // cancelled undo must leave the original intact so the user can re-run it and
+        // put the REMAINING files back (already-restored ones stale-skip on the
+        // retry). Only a fully-completed (non-cancelled) undo clears it.
+        let result = self.apply_with(&inverse, false)?;
+        if !self.cancel.load(Ordering::Relaxed) {
+            if let Some(path) = Self::undo_journal_path() {
+                let _ = std::fs::remove_file(path);
+            }
         }
         Ok(result)
     }

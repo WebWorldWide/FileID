@@ -320,4 +320,44 @@ struct RestructureApplyTests {
             database: db, libraryRoot: root, undoJournal: journal)
         #expect(again.moved == 0)
     }
+
+    /// Audit R2 fix: a CANCELLED undo must NOT clear the journal, so the user can
+    /// re-run it and finish — otherwise a mistimed Stop orphans the un-restored
+    /// files with no recovery path. Worst case: cancel before any move.
+    @Test("A cancelled undo preserves the journal for a re-run")
+    func undoCancelPreservesJournal() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDUndoCancel-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let root = tmp.appendingPathComponent("Library")
+        let downloads = root.appendingPathComponent("downloads")
+        try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
+        let src = downloads.appendingPathComponent("invoice.pdf")
+        try Data("PDF".utf8).write(to: src)
+
+        let db = try makeDB(tmp)
+        try await insertRow(db, id: 1, path: src.path)
+        let journal = tmp.appendingPathComponent("undo.ndjson")
+        let dest = root.appendingPathComponent("Documents").appendingPathComponent("invoice.pdf")
+
+        _ = await Restructure.apply(
+            proposals: [RestructureProposal(
+                fileID: 1, oldPath: src.path, newPath: dest.path, bucket: "document")],
+            database: db, libraryRoot: root, undoJournal: journal)
+        #expect(Restructure.hasUndoableRun(undoJournal: journal))
+
+        // Cancel the undo before it moves anything.
+        let cancelled = await Restructure.undoLast(
+            database: db, libraryRoot: root, isCancelled: { true }, undoJournal: journal)
+        #expect(cancelled.moved == 0)
+        #expect(Restructure.hasUndoableRun(undoJournal: journal), "journal preserved on cancel")
+        #expect(FileManager.default.fileExists(atPath: dest.path), "file still at restructured loc")
+
+        // Re-run undo (not cancelled) → restores and only NOW clears the journal.
+        let done = await Restructure.undoLast(
+            database: db, libraryRoot: root, undoJournal: journal)
+        #expect(done.moved == 1)
+        #expect(FileManager.default.fileExists(atPath: src.path), "restored on re-run")
+        #expect(!Restructure.hasUndoableRun(undoJournal: journal), "journal cleared after completion")
+    }
 }

@@ -959,6 +959,10 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         // in-flight job is moot here. (Mirrors macOS handleEngineExit.)
         Interlocked.Exchange(ref _faceClusterAutoInFlight, 0);
         Interlocked.Exchange(ref _autoDeepAnalyzeInFlight, 0);
+        // Same for the undo affordance: a crash mid-undo never emits the terminal
+        // restructureApplyResult that clears this, so the next apply's result would
+        // be mis-attributed as the dead undo's. (audit R2-app)
+        UndoRestructureInFlight = false;
     }
 
     public void Dispose()

@@ -21,7 +21,7 @@ use super::{
     PrewarmModelPayload, QueueState, QueuedJob, RenameEntry, RenameFilesPayload,
     RenamePersonPayload, RestoreFromTrashPayload, RestructureApplyResult, RestructureCategoryCount,
     RestructureMove, RestructurePlan, RevertMergePayload, ScanComplete, ScanPhase, ScanProgress,
-    StartScanPayload, TagMode, ThumbnailGenerated, TrashFilesPayload, Wrap,
+    StartScanPayload, TagMode, ThumbnailGenerated, TrashFilesPayload, UndoRestructurePayload, Wrap,
 };
 
 /// Schema tags with no Windows implementation. Empty today: the schema's
@@ -323,6 +323,9 @@ fn command_exemplars() -> Vec<CommandPayload> {
             model_kind: Some("arcface".into()),
         }),
         CommandPayload::PlanRestructure(PlanRestructurePayload {
+            library_root: r"C:\Users\adam\Pictures".into(),
+        }),
+        CommandPayload::UndoRestructure(UndoRestructurePayload {
             library_root: r"C:\Users\adam\Pictures".into(),
         }),
         CommandPayload::ApplyRestructure(ApplyRestructurePayload {

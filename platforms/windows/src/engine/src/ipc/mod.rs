@@ -86,6 +86,7 @@ pub enum CommandPayload {
     /// Reverse the most recent applyRestructure: move every file the last run
     /// relocated back (the engine replays its on-disk undo journal). Reply is a
     /// RestructureApplyResult (applied = files moved back). (RESTRUCTURE.md §6)
+    #[serde(rename = "undoRestructure")]
     UndoRestructure(UndoRestructurePayload),
 
     /// Bulk-tag a set of files. Tags persist via shell::tags sidecar +
@@ -1159,6 +1160,9 @@ mod tests {
             }),
             CommandPayload::CancelPrewarm(CancelPrewarmPayload { model_kind: None }),
             CommandPayload::PlanRestructure(PlanRestructurePayload {
+                library_root: r"C:\Users\adam\Pictures".into(),
+            }),
+            CommandPayload::UndoRestructure(UndoRestructurePayload {
                 library_root: r"C:\Users\adam\Pictures".into(),
             }),
             CommandPayload::ApplyRestructure(ApplyRestructurePayload {
