@@ -380,6 +380,49 @@ pub(crate) async fn handle_plan_restructure(
 /// Apply a previously-planned set of moves on disk + update DB rows.
 /// Path-traversal safe (every destination must canonicalize to inside the
 /// library root); supports symlink mode for non-destructive preview.
+pub(crate) async fn handle_undo_restructure(
+    sink: Sink,
+    db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    payload: ipc::UndoRestructurePayload,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    let result = tokio::task::spawn_blocking(
+        move || -> anyhow::Result<ipc::RestructureApplyResult> {
+            let apply = RestructureApply::new(db, PathBuf::from(payload.library_root), false)
+                .with_cancel(cancel);
+            apply.undo_last()
+        },
+    )
+    .await;
+
+    match result {
+        Ok(Ok(r)) => {
+            sink.send(IpcEvent::now(EventPayload::RestructureApplyResult(Wrap::new(r))))
+                .await;
+        }
+        Ok(Err(err)) => {
+            tracing::warn!(?err, "undoRestructure failed");
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "undo_restructure".into(),
+                message: format!("Undo failed: {err}"),
+                path: None,
+                model_kind: None,
+            }))))
+            .await;
+        }
+        Err(err) => {
+            tracing::warn!(?err, "undoRestructure spawn_blocking failed");
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "undo_restructure".into(),
+                message: format!("Undo did not complete: {err}"),
+                path: None,
+                model_kind: None,
+            }))))
+            .await;
+        }
+    }
+}
+
 pub(crate) async fn handle_apply_restructure(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,

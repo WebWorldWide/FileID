@@ -495,6 +495,27 @@ struct FileIDEngineMain {
             // shutdown awaits the terminal result instead of _exit-ing over it.
             await coordinator.setActiveRestructure(applyTask)
 
+        case .undoRestructure(let libraryRoot):
+            // Reverse the last apply by replaying the engine's on-disk undo
+            // journal. Same machinery as apply (real moves, cancellable, terminal
+            // restructureApplyResult), so register it the same way. (R2)
+            guard let database else {
+                await sink.emit(.error(EngineError(
+                    kind: "db_unavailable",
+                    message: "Database failed to open at engine startup; cannot undo a restructure."
+                )))
+                return
+            }
+            let undoRoot = URL(fileURLWithPath: libraryRoot)
+            let undoTask = Task.detached(priority: .userInitiated) {
+                JSONLog.shared.info(ev: "undo_restructure_requested")
+                let result = await Restructure.undoLast(database: database, libraryRoot: undoRoot)
+                await sink.emit(.restructureApplyResult(RestructureApplyResult(
+                    applied: result.moved, failed: result.failed, privilegeError: nil)))
+                await coordinator.setActiveRestructure(nil)
+            }
+            await coordinator.setActiveRestructure(undoTask)
+
         // ── Windows-originated commands ──────────────────────────
         // The schema keeps these symmetric across platforms. Mac
         // exposes equivalent flows through per-tab UI actions, not

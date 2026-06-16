@@ -92,6 +92,10 @@ public final class EngineClient {
     public private(set) var restructureApplyResult: RestructureApplyResult?
     public private(set) var restructurePlanSignal: Int = 0
     public private(set) var restructureApplyResultSignal: Int = 0
+    /// True once an applyRestructure has moved files and they haven't been undone
+    /// yet — drives the "Undo last run" affordance. (R2)
+    public private(set) var canUndoRestructure = false
+    private var undoRestructureInFlight = false
 
     private var process: Process?
     private var stdinPipe: Pipe?
@@ -626,6 +630,14 @@ public final class EngineClient {
         case .restructureApplyResult(let result):
             restructureApplyResult = result
             restructureApplyResultSignal &+= 1
+            // Toggle the "Undo last run" affordance: an apply that moved files
+            // makes the run undoable; the undo's own reply clears it. (R2)
+            if undoRestructureInFlight {
+                undoRestructureInFlight = false
+                canUndoRestructure = false
+            } else {
+                canUndoRestructure = result.applied > 0
+            }
         // ── Remaining Windows-originated reply events. The mac app's
         //    equivalent flows are synchronous (per-tab actions), so these
         //    aren't consumed here yet; they're decoded so a shared/
@@ -958,6 +970,16 @@ public final class EngineClient {
     public func applyRestructure(libraryRoot: String, moves: [RestructureMove],
                                  useSymlinks: Bool = false) -> Bool {
         send(.applyRestructure(libraryRoot: libraryRoot, moves: moves, useSymlinks: useSymlinks))
+    }
+
+    /// Reverse the most recent applyRestructure — the engine replays its on-disk
+    /// undo journal, moving every relocated file back. The reply lands on
+    /// `restructureApplyResult` (applied = files moved back) and clears
+    /// `canUndoRestructure`. (RESTRUCTURE.md §6 reversibility)
+    @discardableResult
+    public func undoRestructure(libraryRoot: String) -> Bool {
+        undoRestructureInFlight = true
+        return send(.undoRestructure(libraryRoot: libraryRoot))
     }
 
     /// Pre-fetch a VLM's weights without running inference. Used by the

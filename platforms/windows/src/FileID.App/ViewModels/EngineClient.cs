@@ -299,6 +299,18 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         private set => Set(ref _lastRestructureApplyResult, value);
     }
 
+    private bool _canUndoRestructure;
+    /// <summary>True once an applyRestructure moved files and they haven't been
+    /// undone yet — drives the "Undo last run" button. (R2)</summary>
+    public bool CanUndoRestructure
+    {
+        get => _canUndoRestructure;
+        private set => Set(ref _canUndoRestructure, value);
+    }
+    /// Set by UndoRestructureAsync so the next RestructureApplyResult is read as
+    /// the undo's reply (clears CanUndoRestructure) rather than a fresh apply.
+    internal bool UndoRestructureInFlight { get; set; }
+
     private BulkActionResult? _lastBulkAction;
     public BulkActionResult? LastBulkAction
     {
@@ -1299,6 +1311,18 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         break;
                     case RestructureApplyResultEvent rar:
                         LastRestructureApplyResult = rar.Result;
+                        // Toggle the "Undo last run" affordance: an apply that
+                        // moved files makes the run undoable; the undo's own reply
+                        // clears it. (R2)
+                        if (UndoRestructureInFlight)
+                        {
+                            UndoRestructureInFlight = false;
+                            CanUndoRestructure = false;
+                        }
+                        else
+                        {
+                            CanUndoRestructure = rar.Result.Applied > 0;
+                        }
                         break;
                     case BulkActionResultEvent bar:
                         LastBulkAction = bar.Result;

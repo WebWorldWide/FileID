@@ -1,5 +1,22 @@
 # NEXT — resume here
 
+## 2026-06-16 — Restructure R1 validated + R2 undo landed; only the Windows undo button + R3 remain
+
+R1 is validated on the owner's real library (and tuned — stopwords + junk-prefix detection). R2's
+**one-click "Undo last run" is done** end-to-end on macOS (engine round-trip-tested, IPC, app
+button) and across the whole engine/IPC contract (Rust `undo_last` + dispatch + C# command/VM).
+**VLM cluster naming is cut** — real-data c-TF-IDF names ("Nolle Resume", "Copyright Limited") are
+already good, so it's not worth the slow background VLM pass for v1.
+
+**Remaining restructure work:**
+- **Windows app "Undo" button (CI parity, small):** the C# `EngineClient.CanUndoRestructure` flag +
+  `UndoRestructureAsync` are in place; add the XAML button in `Views/Restructure/RestructureView.xaml`
+  bound to `CanUndoRestructure` → `UndoRestructureAsync(libraryRoot)`. (macOS already has it.)
+- **R3 polish:** per-destination-bucket approval + before/after tree preview; fix Deep-Analyze
+  re-planning mid-review + skipped-outcomes reset (`RestructureView.swift:48-58`); measured
+  confidence-band calibration; optional BGE dedicated document embedder (the no-new-model CLIP-text
+  reuse is the cheaper interim) for higher-ceiling document clustering.
+
 ## 2026-06-16 — Restructure overhaul: R1 landed (both engines, verified); R2 + owner calibration next
 
 **R1 DONE + verified** (macOS swift test 218/218, Rust cargo test 343/343 + clippy clean): the

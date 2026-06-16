@@ -220,11 +220,35 @@ struct RestructureView: View {
                     }
                     Button("Cancel", role: .cancel) { }
                 } message: {
-                    Text("FileID will move the selected files into the new structure on disk and update its library. This runs through the engine and isn't reversible inside the app — review the structure first.")
+                    Text("FileID will move the selected files into the new structure on disk and update its library. You can reverse the whole run with “Undo last run” right afterward — but review the structure first.")
                 }
+            }
+            // R2: after an apply that moved files, offer a one-click reversal. The
+            // engine replays its on-disk undo journal to put every file back.
+            if engine.canUndoRestructure {
+                HStack(spacing: 10) {
+                    Image(systemName: "arrow.uturn.backward.circle.fill")
+                        .foregroundStyle(Theme.gold)
+                    Text("Files were moved on disk — you can put them back.")
+                        .font(.callout).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Undo last run") {
+                        guard let root = libraryRoot, !applying else { return }
+                        applying = true
+                        status = "Undoing the last restructure…"
+                        engine.undoRestructure(libraryRoot: root.path)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Theme.gold)
+                    .disabled(applying)
+                }
+                .padding(.horizontal, 18)
+                .padding(.bottom, 14)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
         .animation(.spring(response: 0.4, dampingFraction: 0.8), value: applyBarVisible)
+        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: engine.canUndoRestructure)
         .sheet(item: $drillDown) { scope in
             drillDownSheet(scope)
         }

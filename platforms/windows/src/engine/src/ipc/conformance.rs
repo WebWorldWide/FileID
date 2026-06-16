@@ -201,6 +201,7 @@ fn command_tag(payload: &CommandPayload) -> &'static str {
         CommandPayload::CancelPrewarm(_) => "cancelPrewarm",
         CommandPayload::PlanRestructure(_) => "planRestructure",
         CommandPayload::ApplyRestructure(_) => "applyRestructure",
+        CommandPayload::UndoRestructure(_) => "undoRestructure",
         CommandPayload::ApplyTags(_) => "applyTags",
         CommandPayload::RenameFiles(_) => "renameFiles",
         CommandPayload::TrashFiles(_) => "trashFiles",

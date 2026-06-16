@@ -272,4 +272,52 @@ struct RestructureApplyTests {
         let d3 = Restructure.uniqueDestination(dest, claimed: [], fm: fm)
         #expect(d3 == tmp.appendingPathComponent("audio (2).mp3"))
     }
+
+    /// R2 reversibility: apply relocates a file, undoLast moves it back to its
+    /// original path + updates the DB + clears the journal (so it can't be undone
+    /// twice). Uses a temp journal so the real one is never touched.
+    @Test("Undo last run restores files to their original locations")
+    func undoLastRoundTrip() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDUndo-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let root = tmp.appendingPathComponent("Library")
+        let downloads = root.appendingPathComponent("downloads")
+        try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
+        let src = downloads.appendingPathComponent("invoice.pdf")
+        try Data("PDF".utf8).write(to: src)
+
+        let db = try makeDB(tmp)
+        try await insertRow(db, id: 1, path: src.path)
+
+        let journal = tmp.appendingPathComponent("undo.ndjson")
+        let dest = root.appendingPathComponent("Documents").appendingPathComponent("invoice.pdf")
+
+        let applied = await Restructure.apply(
+            proposals: [RestructureProposal(
+                fileID: 1, oldPath: src.path, newPath: dest.path, bucket: "document")],
+            database: db, libraryRoot: root, undoJournal: journal)
+        #expect(applied.moved == 1)
+        #expect(FileManager.default.fileExists(atPath: dest.path))
+        #expect(!FileManager.default.fileExists(atPath: src.path))
+        #expect(Restructure.hasUndoableRun(undoJournal: journal))
+
+        let undone = await Restructure.undoLast(
+            database: db, libraryRoot: root, undoJournal: journal)
+        #expect(undone.moved == 1)
+        #expect(undone.failed == 0)
+        #expect(FileManager.default.fileExists(atPath: src.path), "restored to original path")
+        #expect(!FileManager.default.fileExists(atPath: dest.path), "new path vacated")
+
+        let livePath: String? = try await db.pool.read { d in
+            try String.fetchOne(d, sql: "SELECT path_text FROM files WHERE id = 1")
+        }
+        #expect(livePath == src.path, "DB points back at the original path")
+
+        // Journal cleared → a second undo is a no-op (no accidental redo).
+        #expect(!Restructure.hasUndoableRun(undoJournal: journal))
+        let again = await Restructure.undoLast(
+            database: db, libraryRoot: root, undoJournal: journal)
+        #expect(again.moved == 0)
+    }
 }

@@ -8,7 +8,30 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
-## 2026-06-16 (latest) — Restructure R1: butler now organizes ALL file types, not just photos (both engines)
+## 2026-06-16 (latest) — Restructure R2: one-click "Undo last run" (reversibility) + R1 validated on a real library
+
+**R1 validated on the owner's TrueNAS library** and tuned: real data exposed three naming bugs —
+extension tokens leaking on double extensions (`E14.jpg.lps`→"jpg"), English connectors ("Boys
+The"), and versioned junk folders (`Desktop 1.0` not caught) — all fixed (filename stopwords +
+token-prefix junk detection, both engines). Result is good + conservative: résumés pulled out of
+`Desktop 1.0` into a "Nolle Resume" group, copyright docs grouped, diverse docs left in place.
+
+**R2 undo landed.** Apply was one-way. Now `apply` writes an inverse-move journal (each file's
+new→original path; truncating → last-run-only) and `undoLast` replays the inverse moves THROUGH
+`apply` itself — reusing every safety check (stale-guard, containment, no-clobber, DB update)
+rather than duplicating them — then clears the journal so a run can't be undone twice. New IPC
+command `undoRestructure`; the macOS app shows an "Undo last run" button after any apply that moved
+files (+ corrected "you can reverse this" confirmation copy).
+
+Both engines + the full contract: macOS (`Restructure.undoLast` + dispatch + EngineClient +
+RestructureView), Rust (`RestructureApply::undo_last` + `handle_undo_restructure` +
+`UndoRestructure` IPC), schema + C# command + C# VM (`CanUndoRestructure`). **macOS swift test
+220/220** incl. a real apply→undo round-trip (file relocated → restored → DB + journal correct);
+**Rust cargo test 343/343 + clippy -D warnings clean.** Remaining: the Windows app's XAML "Undo"
+button (GUI parity, CI). **VLM cluster naming (P2) is CUT to R3** — real-data c-TF-IDF names are
+already good, so it's marginal polish, not a ship blocker.
+
+## 2026-06-16 — Restructure R1: butler now organizes ALL file types, not just photos (both engines)
 
 **The fix for "Restructure just sucks."** Root cause: the semantic butler only ran on images
 with a CLIP embedding (`Restructure.swift` guard `kind == "image"`); every document, PDF,

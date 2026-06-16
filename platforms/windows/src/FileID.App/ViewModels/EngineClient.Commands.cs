@@ -684,6 +684,14 @@ internal sealed partial class EngineClient
         SendCommandAsync(new PlanRestructureCommand(libraryRoot));
     public Task ApplyRestructureAsync(string libraryRoot, IReadOnlyList<RestructureMove> moves, bool useSymlinks) =>
         SendCommandAsync(new ApplyRestructureCommand(libraryRoot, moves, useSymlinks));
+    /// <summary>Reverse the most recent applyRestructure — the engine replays its
+    /// on-disk undo journal. Reply lands on LastRestructureApplyResult and clears
+    /// CanUndoRestructure. (R2)</summary>
+    public Task UndoRestructureAsync(string libraryRoot)
+    {
+        UndoRestructureInFlight = true;
+        return SendCommandAsync(new UndoRestructureCommand(libraryRoot));
+    }
 
     public Task ApplyTagsAsync(IReadOnlyList<long> fileIds, IReadOnlyList<string> tags, string mode = "add") =>
         SendCommandAsync(new ApplyTagsCommand(fileIds, tags, mode));
