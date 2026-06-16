@@ -329,8 +329,15 @@ pub(crate) async fn handle_rename_files(
             // content_hash/file_ref).
             let dest_hash = crate::util::path_safety::stable_path_hash(&dest_text);
             match tx.execute(
-                "UPDATE files SET path_text = ?1, path_hash = ?2, path_search = ?1 WHERE id = ?3",
-                rusqlite::params![dest_text, dest_hash, entry.file_id],
+                // path_search NFC-normalized (not verbatim ?1) so an NFD-accented
+                // renamed/moved file stays findable by its accented name. (audit parity)
+                "UPDATE files SET path_text = ?1, path_hash = ?2, path_search = ?4 WHERE id = ?3",
+                rusqlite::params![
+                    dest_text,
+                    dest_hash,
+                    entry.file_id,
+                    crate::pipeline::dbwriter::nfc_path_search(&dest_text)
+                ],
             ) {
                 Ok(_) => {
                     succeeded += 1;

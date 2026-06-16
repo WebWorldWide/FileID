@@ -1,5 +1,27 @@
 # NEXT — resume here
 
+## 2026-06-16 — Whole-codebase audit done; Windows undo button landed; only cosmetic P2s + R3 remain
+
+A 6-agent adversarial audit swept the whole codebase. Security + ML + data-integrity slices are
+clean; the real bugs (Swift UPSERT metadata clobber, Restructure apply/undo wedge, Rust path_search
+NFC ×3, tag-drain, engine-exit progress/auto-pilot reset, Cleanup double-tap) are fixed + verified
+(macOS 222, Rust 343 + clippy). The Windows "Undo last run" button is implemented (CI-pending).
+
+**Tracked cosmetic / low-priority P2s (no user impact — fix opportunistically):**
+- **C# (unverifiable without a local WinUI build, so left for a Windows session):** drop the dead
+  `"stages_skipped_missing_models"` arm in `EngineClient.Commands.cs IsNonFatalWarningKind` (no engine
+  emits it); `PeopleView.xaml.cs` drag/drop `g.Tag is long` never matches the boxed `int` ClusterId
+  (works via the DataContext fallback) — change to `is int` or bind a `long`; `ClipSearchService.Dispose`
+  insert race is self-limiting (5 s timeout) — optional `_disposed` recheck.
+- **Swift:** `ScanCoordinator.bumpProcessed(by:)` loops single bumps (perf, on-actor, no race) — one
+  `+= n` would do.
+- **Deferred by design:** the `face_verifications` v17 verdict key can't match cross-platform (macOS
+  CSV vs Windows JSON bbox); macOS has no verdict-write path and bbox parity (#55) was read-tolerance
+  only. No fix unless full bbox round-trip parity becomes a goal.
+
+**Still open:** R3 restructure polish (per-bucket approval, before/after tree, confidence calibration);
+owner threshold calibration of the non-image pass on a real library.
+
 ## 2026-06-16 — Restructure R1 validated + R2 undo landed; only the Windows undo button + R3 remain
 
 R1 is validated on the owner's real library (and tuned — stopwords + junk-prefix detection). R2's

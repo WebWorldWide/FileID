@@ -183,4 +183,61 @@ struct DBWriterStageGateTests {
                     "the previously-timed-out file is re-tagged on rescan, not stranded")
         }
     }
+
+    /// Audit P1 parity: the `files` UPSERT must COALESCE phash/camera/GPS and gate
+    /// has_faces/has_text by the stage-ran flags, so a CHANGED-file rescan that
+    /// this pass found no phash/GPS/camera for (or that didn't run the face stage)
+    /// does NOT clobber the previously-stored values. Mirrors the Rust engine's
+    /// `stage_skipped_rescan_preserves_prior_metadata` (dbwriter.rs) — the macOS
+    /// UPSERT used to overwrite all of these unconditionally.
+    @Test("A stage-skipped rescan preserves prior phash / GPS / camera / has_faces")
+    func upsertPreservesMetadataOnStageSkip() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDUpsertMeta-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let db = try Database(at: tmp.appendingPathComponent("test.sqlite"))
+        let fileURL = tmp.appendingPathComponent("IMG_META.jpg")
+        func newWriter() -> DBWriter {
+            DBWriter(db: db, sink: IPCSink(), coordinator: ScanCoordinator(),
+                     sessionID: UUID().uuidString)
+        }
+
+        // First scan: a photo with a phash, a camera, GPS, and a detected face.
+        var first = successScan(url: fileURL)
+        first.phash = 0xDEAD_BEEF
+        first.cameraModel = "Pixel 8"
+        first.locationLat = 37.7749
+        first.locationLon = -122.4194
+        await drain(newWriter(), first)
+
+        let fileID: Int64 = try await db.pool.read { db in
+            try #require(try Int64.fetchOne(
+                db, sql: "SELECT id FROM files WHERE path_text = ?", arguments: [fileURL.path]))
+        }
+
+        // Rescan: the file CHANGED (new mtime, so it's not unchanged-skipped), but
+        // this pass found NO phash / camera / GPS and the face stage returned 0
+        // faces with facesEvaluated=false (a swallowed Vision timeout). The UPSERT
+        // must PRESERVE the prior metadata, not overwrite it with NULL/0.
+        let rescan = TaggedFile(
+            url: fileURL, kind: "image", extension: "jpg", sizeBytes: 4,
+            createdAt: Date(timeIntervalSince1970: 1_600_000_000),
+            modifiedAt: Self.mtime.addingTimeInterval(60),
+            failed: false
+            // phash nil, hasFaces false, camera/GPS nil, all stage-ran flags false
+        )
+        await drain(newWriter(), rescan)
+
+        try await db.pool.read { db in
+            let row = try #require(try Row.fetchOne(db, sql: """
+                SELECT phash, has_faces, camera_model, location_lat, location_lon
+                FROM files WHERE id = ?
+                """, arguments: [fileID]))
+            #expect((row["phash"] as Int64?) != nil, "phash preserved (COALESCE) across a NULL-phash rescan")
+            #expect((row["has_faces"] as Int64) == 1, "has_faces preserved (CASE-WHEN) when the face stage didn't run")
+            #expect(row["camera_model"] as String? == "Pixel 8", "camera_model preserved (COALESCE)")
+            #expect((row["location_lat"] as Double?) != nil, "GPS lat preserved (COALESCE)")
+            #expect((row["location_lon"] as Double?) != nil, "GPS lon preserved (COALESCE)")
+        }
+    }
 }

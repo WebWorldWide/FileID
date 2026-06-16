@@ -12,6 +12,10 @@ struct CleanupView: View {
     @State private var groups: [DuplicateGroup] = []
     @State private var lastSeenBatchIndex: Int = -1
     @State private var status: String?
+    /// Single-flight guard: the per-group/header "Delete" buttons have no
+    /// confirmation, so a rapid double-tap would otherwise trash the same files
+    /// twice (the 2nd fails "already in Trash" → a confusing "1 failed"). (audit P2)
+    @State private var deleting = false
     @State private var confirmDelete: Bool = false
 
     /// Initialized lazily on first reload to non-keepers per group.
@@ -261,6 +265,9 @@ struct CleanupView: View {
     }
 
     private func trashSelected(across groupsToScan: [DuplicateGroup]) async {
+        guard !deleting else { return }   // re-entrancy guard (audit P2)
+        deleting = true
+        defer { deleting = false }
         // Build the parallel work list first: every (id, url, size) we
         // intend to trash. Doing this on the main actor up front keeps
         // SwiftUI selection/state reads off the concurrent path.

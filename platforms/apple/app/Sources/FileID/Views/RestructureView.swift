@@ -332,7 +332,17 @@ struct RestructureView: View {
         // inbound IPC cap (`ipc_frame_too_large`) is a terminal plan failure
         // here too — otherwise the tab wedges on a very large library's plan.
         .onChange(of: engine.lastErrorSignal) { _, _ in
-            guard loading, let kind = engine.lastError?.kind else { return }
+            guard let kind = engine.lastError?.kind else { return }
+            // An apply/undo the engine rejected with a bare error (db_unavailable:
+            // the engine stays alive, so NO restructureApplyResult and NO reset
+            // event arrives) would wedge `applying` true forever — the apply bar +
+            // Undo button stay disabled and re-entry-guarded. Release it here,
+            // mirroring the engineResetSignal handler above. (audit P1)
+            if applying, kind == "db_unavailable" {
+                applying = false
+                status = "The engine isn't ready — try again in a moment."
+            }
+            guard loading else { return }
             switch kind {
             case "plan_restructure_failed", "db_unavailable":
                 loading = false

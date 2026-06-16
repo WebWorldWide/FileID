@@ -222,7 +222,13 @@ pub(crate) async fn handle_plan_restructure(
                 file_id: f.file_id,
                 source: f.source.clone(),
                 clip,
-                tags: tags_map.remove(&f.file_id).unwrap_or_default(),
+                // Read tags non-destructively (NOT remove): an image the CLIP pass
+                // examined but didn't cluster (a density-noise singleton) falls
+                // through to the non-image pass below, which must still see its
+                // content tags. Tags are short strings, so keeping them in the map
+                // is cheap — only the heavy CLIP blob is drained (above). Matches
+                // macOS, which reads tags via a non-consuming lookup. (audit parity)
+                tags: tags_map.get(&f.file_id).cloned().unwrap_or_default(),
                 time_unix: f.created_unix.unwrap_or(f.modified_unix),
             })
         })
