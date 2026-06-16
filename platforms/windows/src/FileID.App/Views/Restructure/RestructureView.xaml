@@ -649,15 +649,37 @@
                     </StackPanel>
                 </StackPanel>
 
-                <TextBlock Grid.Column="3"
-                           x:Name="ApplyStatusText"
-                           Text=""
-                           VerticalAlignment="Center"
-                           TextAlignment="Right"
-                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                           Margin="12,0,12,0"
-                           TextWrapping="NoWrap"
-                           TextTrimming="CharacterEllipsis" />
+                <StackPanel Grid.Column="3"
+                            Orientation="Horizontal"
+                            HorizontalAlignment="Right"
+                            VerticalAlignment="Center"
+                            Spacing="10"
+                            Margin="12,0,12,0">
+                    <!-- R2: one-click reversal of the last apply; shown when the
+                         engine reports an undoable run (EngineClient.CanUndoRestructure). -->
+                    <Button x:Name="UndoButton"
+                            Visibility="Collapsed"
+                            Click="OnUndoClicked"
+                            Background="Transparent"
+                            BorderBrush="{ThemeResource GoldDimBrush}"
+                            BorderThickness="1"
+                            Padding="14,8"
+                            CornerRadius="10"
+                            ToolTipService.ToolTip="Move every file from the last apply back to where it came from."
+                            AutomationProperties.Name="Undo last restructure run">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <FontIcon Glyph="&#xE7A7;" FontSize="13" Foreground="{ThemeResource GoldBrush}" />
+                            <TextBlock Text="Undo last run" Foreground="{ThemeResource GoldBrush}" />
+                        </StackPanel>
+                    </Button>
+                    <TextBlock x:Name="ApplyStatusText"
+                               Text=""
+                               VerticalAlignment="Center"
+                               TextAlignment="Right"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               TextWrapping="NoWrap"
+                               TextTrimming="CharacterEllipsis" />
+                </StackPanel>
 
                 <Button x:Name="ApplyMovesButton"
                         Grid.Column="4"
