@@ -195,12 +195,12 @@ pub(crate) async fn handle_plan_restructure(
                 tstmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?;
             for r in trows {
                 let (id, tag) = r?;
-                // Only retain tags for files we actually loaded an embedding for;
-                // the semantic path consults tags solely for those, so bounding
-                // here keeps the tags map bounded under the same tier cap.
-                if embeddings.contains_key(&id) {
-                    tags.entry(id).or_default().push(tag);
-                }
+                // Load tags for ALL files, not just embedded images: the R1
+                // non-image semantic pass consults them for documents/video/audio
+                // too (matching the macOS engine, which loads tags unfiltered).
+                // Tags are short strings, so this stays cheap even when the
+                // embedding cap bounds the heavier image set. (RESTRUCTURE.md R1)
+                tags.entry(id).or_default().push(tag);
             }
             Ok((embeddings, tags))
         },
@@ -234,23 +234,55 @@ pub(crate) async fn handle_plan_restructure(
     // from the anchor strip so their highest-confidence moves survive. (F-C1-004)
     let mut semantic_source_folders: std::collections::HashSet<PathBuf> =
         std::collections::HashSet::new();
-    let proposed = if semantic_files.len() >= 2 {
+    let mut proposed = Vec::new();
+    let mut moved: std::collections::HashSet<i64> = std::collections::HashSet::new();
+
+    // Butler P1: image semantic pass (CLIP-embedding content clusters).
+    if semantic_files.len() >= 2 {
         let protos = restructure_semantic::folder_prototypes(&semantic_files, 4);
         let moves = restructure_semantic::semantic_classify(&semantic_files, &protos, library_root_path);
-        let moved: std::collections::HashSet<i64> = moves.iter().map(|m| m.file_id).collect();
         for m in &moves {
+            moved.insert(m.file_id);
             if let Some(parent) = m.source.parent() {
                 semantic_source_folders.insert(parent.to_path_buf());
             }
         }
-        let rule_files: Vec<FileForClassify> =
-            files.iter().filter(|f| !moved.contains(&f.file_id)).cloned().collect();
-        let mut out = moves;
-        out.extend(classify(&rule_files, library_root_path));
-        out
-    } else {
-        classify(&files, library_root_path)
-    };
+        proposed.extend(moves);
+    }
+
+    // Butler R1: non-image semantic pass. Cluster everything the image pass didn't
+    // claim (documents, video, audio, and any embedding-less file) by a
+    // filename+tag bag-of-words signature, so a mixed library groups by content
+    // instead of dumping every doc into Documents/<Year>. Additive + separately
+    // tuned (non_image_profile); the rule cascade below still catches the
+    // remainder. Owner kill-switch: FILEID_RESTRUCTURE_NONIMAGE=0.
+    if restructure_semantic::non_image_enabled() {
+        let non_image_files: Vec<restructure_semantic::SemanticFile> = files
+            .iter()
+            .filter(|f| !moved.contains(&f.file_id))
+            .map(|f| restructure_semantic::SemanticFile {
+                file_id: f.file_id,
+                source: f.source.clone(),
+                clip: Vec::new(),
+                tags: tags_map.remove(&f.file_id).unwrap_or_default(),
+                time_unix: f.created_unix.unwrap_or(f.modified_unix),
+            })
+            .collect();
+        let ni_moves =
+            restructure_semantic::classify_non_image(&non_image_files, library_root_path);
+        for m in &ni_moves {
+            moved.insert(m.file_id);
+            if let Some(parent) = m.source.parent() {
+                semantic_source_folders.insert(parent.to_path_buf());
+            }
+        }
+        proposed.extend(ni_moves);
+    }
+
+    // Rule cascade for everything neither semantic pass claimed.
+    let rule_files: Vec<FileForClassify> =
+        files.iter().filter(|f| !moved.contains(&f.file_id)).cloned().collect();
+    proposed.extend(classify(&rule_files, library_root_path));
     // Engine-authoritative folder classification, computed on the FULL proposal
     // set so the Keep/Tidy/Reorganize tile counts stay accurate.
     let folder_class = restructure::classify_folders(&proposed);

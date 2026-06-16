@@ -1088,8 +1088,8 @@ mod tests {
     use super::*;
 
     // F-C1-010: the oversize-frame rejection text must report the REAL cap
-    // (MAX_FRAME_BYTES = 32 MiB), not the stale hardcoded "1 MB". Pre-fix this
-    // said "exceeded 1 MB cap"; post-fix it is derived from MAX_FRAME_BYTES.
+    // (MAX_FRAME_BYTES, now 64 MiB — R3-07B), not the stale hardcoded "1 MB".
+    // Pre-fix this said "exceeded 1 MB cap"; post-fix it derives from MAX_FRAME_BYTES.
     #[test]
     fn oversize_frame_error_text_matches_max_frame_bytes() {
         let msg = oversized_frame_message(99_999);

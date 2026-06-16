@@ -7,6 +7,66 @@
 
 ---
 
+## 2026-06-16 — Restructure R1: extend the butler to non-image files as an ADDITIVE pass with its own profile; bag-of-words, no new model
+
+Restructure "sucked" because the semantic butler only ran on images with a CLIP embedding —
+every document/video/audio/download fell to a flat date cascade. Three deliberate calls fixing it:
+
+**1. Additive non-image pass, never a refactor of the working image path.** The image clustering
+is calibrated and correct; the project's own rule (DECISIONS 2026-06-15) is *don't blind-merge ML
+behavior that could regress a working path*. So instead of generalizing the one `classify`/`fuse`
+in place, we extracted a `Profile` (weights + thresholds) whose `IMAGE_PROFILE` holds the EXACT
+prior constants — the image path is byte-identical — and added a SECOND pass (`classify_non_image`)
+with a separate, tighter `nonImageProfile` over the files the image pass didn't claim. Worst case,
+the new pass misbehaves on documents; it cannot touch photo results. Gated by
+`FILEID_RESTRUCTURE_NONIMAGE` + env-tunable thresholds so the owner calibrates on a real library
+before defaults change — same discipline as the face thresholds.
+
+**2. Representative = filename+tag bag-of-words, NOT a new text-embedding model.** A PDF/video has
+no CLIP image vector. We could have added a BGE document embedder, but that means a new model in
+the stack + a cross-platform DB migration + a re-scan — heavy, and unverifiable headlessly. Instead
+the non-image "embedding" is an L2-normalized multi-hot over (filename tokens ∪ content tags),
+which the SAME density clusterer + Nearest-Class-Mean folder matching consume unchanged. Documents
+cluster by filename semantics (invoice/resume/taxes), folders learn from their filename signatures.
+Ships now, verified on the Mac, no migration. BGE stays a tracked post-1.0 ceiling-raise.
+
+**3. Junk folders are barred from being learn-your-style prototypes.** A library's files often all
+sit in one Downloads/Desktop dump; left unchecked, that folder becomes a prototype whose mixed
+centroid matches every cluster, so the butler routes everything back where it already is and
+proposes nothing — the exact opposite of the goal. The non-image pass filters generic dumping-ground
+names (`JUNK_FOLDER_NAMES`) out of the prototype set, so real user folders ("Taxes", "Invoices")
+still anchor but junk dirs never swallow the plan. (Found by a regression test, not in the field.)
+
+Cross-platform: both engines stay byte-faithful — the Rust mirror is identical, and the Windows tag
+load was un-gated (it had loaded tags only for embedded images) so documents get their tags on both.
+
+## 2026-06-16 — Welcome re-show gates on CORE models (CLIP+RAM+++face), not the VLM; cross-platform parity = behavior, not identical files
+
+Bringing RAM++ into the macOS first-run modal forced a decision about what re-triggers the
+Welcome sheet on later launches. Windows gated re-show on `AllInstalled` — which *included*
+the 3.5 GB Deep Analyze VLM — so a user who installed the core models but skipped the VLM got
+the sheet re-popped on every launch (nagging for a multi-GB optional download). We split the
+two concerns on both platforms: a **core-models gate** (CLIP + RAM++ + face, all sub-1 GB)
+drives the RE-SHOW decision, while **all-models** (core + VLM) still drives the in-sheet
+auto-dismiss + "Done" label. macOS already had this shape implicitly (`shouldShowWelcome` ≠
+`allInstalled`); Windows gained `ModelInstallerService.CoreModelsInstalled` and switched only
+`MaybeShowWelcomeSheetAsync` to it (every other `AllInstalled` call site — auto-dismiss, Done,
+Settings refresh — deliberately unchanged). Rationale: the modal should insist on the cheap
+models needed for a good first scan, but never repeatedly interrupt a user who consciously
+deferred the heavy opt-in VLM. RAM++ joins the insisted-on set because it's <1 GB and the
+primary tagger; without it tagging silently degrades to the weaker CLIP/Vision fallback.
+
+Same session, a parity audit flagged the Deep-Analyze VLM and CLIP as possible drift; both
+were cleared, and the reasoning is the durable call: **cross-platform model parity means same
+model FAMILY + same hardware-tier selection + (where an embedding space is shared) byte-identical
+weights — NOT identical files.** The VLM is intentionally MLX-4bit on Apple / GGUF on Windows
+(different runtimes: MLX+Metal vs llama.cpp) while resolving to the same family at the same RAM
+thresholds (Qwen2.5-VL-7B ≥16 GB / Gemma-3-4B <16 GB) — forcing one file format would be wrong.
+CLIP is the opposite: because CLIP embeddings are persisted and a library round-trips Mac↔Windows,
+the image/text encoders MUST be the exact same export — and they are (`Xenova/clip-vit-base-patch32`,
+SHA-256-identical on both). Don't "fix" a format difference that's a runtime necessity; do guard
+byte-identity wherever vectors cross the platform boundary.
+
 ## 2026-06-15 — macOS lockstep: merge what's verifiable-here; gate FaceAlign/bbox to a Mac (don't blind-merge ML behavior)
 
 Completing the macOS model-stack lockstep, the dividing line we held: a piece lands on

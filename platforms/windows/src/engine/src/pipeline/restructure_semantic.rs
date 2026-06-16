@@ -28,32 +28,102 @@ pub struct SemanticFile {
     pub time_unix: f64,
 }
 
-/// Fusion weights (RESTRUCTURE.md): content embedding dominates; tags refine;
-/// time nudges. Each block is L2-normalized before weighting, so the weight —
-/// not the block's dimensionality — controls its contribution.
-const W_CLIP: f32 = 0.70;
-const W_TAGS: f32 = 0.22;
-const W_TIME: f32 = 0.08;
+/// A fusion-weight + confidence-threshold profile. The image pass keeps the
+/// calibrated CLIP values; the non-image pass (filename+tag bag-of-words
+/// representative — a PDF/video has no CLIP image vector) runs a separate,
+/// deliberately tighter profile so a sparser signature can't over-move. Stays
+/// byte-faithful with the Swift engine. (RESTRUCTURE.md §2/R1)
+#[derive(Clone, Copy)]
+pub struct Profile {
+    pub w_clip: f32,
+    pub w_tags: f32,
+    pub w_time: f32,
+    pub folder_match_cos: f32,
+    pub auto_folder_cos: f32,
+    pub auto_cohesion: f32,
+    pub review_cohesion: f32,
+    pub min_margin: f32,
+    pub auto_min_members: usize,
+}
+
+/// Image pass — representative is the L2-normalized 512-d CLIP image embedding.
+/// Values are unchanged from the original calibrated constants.
+pub const IMAGE_PROFILE: Profile = Profile {
+    w_clip: 0.70,
+    w_tags: 0.22,
+    w_time: 0.08,
+    folder_match_cos: 0.55,
+    auto_folder_cos: 0.72,
+    auto_cohesion: 0.62,
+    review_cohesion: 0.50,
+    min_margin: 0.05,
+    auto_min_members: 4,
+};
 
 /// Cap the tag vocabulary to the most common tags. Frequent tags carry the
 /// grouping signal; rare ones are noise and would bloat the fused vector.
 const TAG_VOCAB_CAP: usize = 256;
 
-/// Minimum cosine from a cluster's content centroid to an existing folder's
-/// prototype centroid to route the cluster there (learn-your-style). Below
-/// this, propose a new group. Provisional — calibrate on a labeled library.
-const FOLDER_MATCH_COS: f32 = 0.55;
+/// Filenames tokenize into many one-off terms, so the non-image bag-of-words
+/// needs a wider vocab than the image tag block.
+const NON_IMAGE_VOCAB_CAP: usize = 512;
 
-/// Confidence-band thresholds (RESTRUCTURE.md §6). A cluster auto-files only
-/// when it matches an existing folder strongly *and* unambiguously, or forms a
-/// tight, substantial new group. Provisional — calibrate to measured
-/// per-category accuracy on a labeled library before promoting any category to
-/// standing auto-file.
-const AUTO_FOLDER_COS: f32 = 0.72;
-const AUTO_COHESION: f32 = 0.62;
-const REVIEW_COHESION: f32 = 0.50;
-const MIN_MARGIN: f32 = 0.05;
-const AUTO_MIN_MEMBERS: usize = 4;
+/// Owner kill-switch for the non-image semantic pass
+/// (`FILEID_RESTRUCTURE_NONIMAGE=0` → off, falls back to the rule cascade).
+pub fn non_image_enabled() -> bool {
+    std::env::var("FILEID_RESTRUCTURE_NONIMAGE")
+        .map(|v| v != "0")
+        .unwrap_or(true)
+}
+
+/// Non-image pass profile — representative is a filename+tag bag-of-words
+/// (sparser than CLIP), so demand a cleaner cluster + a tighter folder match.
+/// `w_tags` is 0: tags already live inside the representative and naming reads
+/// them directly, so re-adding the block would double-count. Thresholds are
+/// env-overridable (`FILEID_RESTRUCTURE_NI_*`) for owner calibration on a real
+/// library before the defaults are promoted. (RESTRUCTURE.md R1)
+fn non_image_profile() -> Profile {
+    Profile {
+        w_clip: 0.74,
+        w_tags: 0.0,
+        w_time: 0.08,
+        folder_match_cos: env_f32("FILEID_RESTRUCTURE_NI_FOLDER_COS", 0.60),
+        auto_folder_cos: env_f32("FILEID_RESTRUCTURE_NI_AUTO_FOLDER_COS", 0.80),
+        auto_cohesion: env_f32("FILEID_RESTRUCTURE_NI_AUTO_COH", 0.70),
+        review_cohesion: env_f32("FILEID_RESTRUCTURE_NI_REVIEW_COH", 0.55),
+        min_margin: 0.08,
+        auto_min_members: 4,
+    }
+}
+
+fn env_f32(key: &str, dflt: f32) -> f32 {
+    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(dflt)
+}
+
+/// Folder basenames that must never act as a learn-your-style prototype —
+/// generic dumping grounds the butler should organize files *out of*.
+const JUNK_FOLDER_NAMES: &[&str] = &[
+    "downloads", "downloaded", "desktop", "new folder", "untitled", "temp", "tmp",
+    "misc", "other", "stuff", "things", "files", "unsorted", "inbox",
+];
+
+/// Filename tokens that carry no grouping signal: camera/scan boilerplate, common
+/// English connectors (so "boys at the zoo" doesn't name a "Boys The" folder), and
+/// file-extension tokens that leak in on double-extension names like `E14.jpg.lps`
+/// → `E14.jpg` → spurious "jpg". Lowercase.
+const FILENAME_STOPWORDS: &[&str] = &[
+    // camera / scan / boilerplate
+    "img", "image", "dsc", "dscn", "dscf", "photo", "pic", "picture", "screenshot",
+    "screen", "shot", "untitled", "new", "copy", "final", "draft", "version", "scan",
+    "document", "file", "video", "vid", "clip",
+    // English connectors (no grouping signal)
+    "the", "and", "for", "with", "from", "was", "are", "this", "that", "your", "our",
+    "his", "her", "its", "out", "all", "has",
+    // extension tokens that leak in on double-extension names
+    "jpg", "jpeg", "png", "gif", "bmp", "heic", "heif", "tiff", "webp", "pdf", "doc",
+    "docx", "xls", "xlsx", "ppt", "pptx", "txt", "rtf", "mov", "mp4", "avi", "mkv",
+    "mp3", "wav", "zip", "rar", "lps",
+];
 
 /// Density-clustering hyperparameters for *files* (looser than faces: a
 /// semantic group is broader than one identity). Provisional.
@@ -113,12 +183,21 @@ pub fn semantic_classify(
     prototypes: &[FolderPrototype],
     library_root: &Path,
 ) -> Vec<ProposedMove> {
+    semantic_classify_profiled(files, prototypes, library_root, IMAGE_PROFILE)
+}
+
+fn semantic_classify_profiled(
+    files: &[SemanticFile],
+    prototypes: &[FolderPrototype],
+    library_root: &Path,
+    profile: Profile,
+) -> Vec<ProposedMove> {
     if files.is_empty() {
         return Vec::new();
     }
     let global_freq = tag_frequencies(files);
     let vocab = vocab_from_freq(&global_freq, TAG_VOCAB_CAP);
-    let fused: Vec<Vec<f32>> = files.iter().map(|f| fuse(f, &vocab)).collect();
+    let fused: Vec<Vec<f32>> = files.iter().map(|f| fuse(f, &vocab, profile)).collect();
     let cluster_ids = cluster(&fused);
 
     // Group file indices by cluster id.
@@ -167,12 +246,12 @@ pub fn semantic_classify(
                 // outside root), so such a match falls through to a new in-root
                 // group instead. (audit E12)
                 Some((proto, sim, runner_up))
-                    if sim >= FOLDER_MATCH_COS && proto.path.starts_with(library_root) =>
+                    if sim >= profile.folder_match_cos && proto.path.starts_with(library_root) =>
                 {
                     let name = folder_display_name(&proto.path);
-                    let confidence = if sim >= AUTO_FOLDER_COS
-                        && coh >= REVIEW_COHESION
-                        && (sim - runner_up) >= MIN_MARGIN
+                    let confidence = if sim >= profile.auto_folder_cos
+                        && coh >= profile.review_cohesion
+                        && (sim - runner_up) >= profile.min_margin
                     {
                         Confidence::Auto
                     } else {
@@ -223,9 +302,11 @@ pub fn semantic_classify(
                         n += 1;
                     }
                     used_group_names.insert(safe.clone());
-                    let confidence = if coh >= AUTO_COHESION && members.len() >= AUTO_MIN_MEMBERS {
+                    let confidence = if coh >= profile.auto_cohesion
+                        && members.len() >= profile.auto_min_members
+                    {
                         Confidence::Auto
-                    } else if coh >= REVIEW_COHESION {
+                    } else if coh >= profile.review_cohesion {
                         Confidence::Review
                     } else {
                         Confidence::Ask
@@ -263,6 +344,132 @@ pub fn semantic_classify(
     moves
 }
 
+// ── Non-image semantic pass (RESTRUCTURE.md R1) ─────────────────────────────
+
+/// Cluster non-image files (documents, video, audio — anything without a CLIP
+/// image embedding) by a filename-token + content-tag bag-of-words signature, so
+/// a mixed library groups invoices/manuals/clips by *content* instead of dumping
+/// them all into `Documents/<Year>`. Additive: the image pass claims its files
+/// first, this handles the remainder, and the rule cascade still catches whatever
+/// neither clusters. The bag-of-words IS the representative vector (there is no
+/// image embedding), so the same density clusterer + learn-your-style folder
+/// matching apply unchanged under the tighter non-image profile.
+pub fn classify_non_image(files: &[SemanticFile], library_root: &Path) -> Vec<ProposedMove> {
+    let sigs = non_image_signatures(files);
+    if sigs.len() < 2 {
+        return Vec::new();
+    }
+    // Learn-your-style targets, but NEVER generic dumping grounds (Downloads,
+    // Desktop, Temp, …): the whole point is to organize files OUT of those, so
+    // they must not become a prototype that routes everything back where it
+    // already is. Real user folders ("Taxes", "Invoices") still anchor.
+    let protos: Vec<FolderPrototype> = folder_prototypes(&sigs, 4)
+        .into_iter()
+        .filter(|p| !is_junk_prototype_folder(&p.path))
+        .collect();
+    semantic_classify_profiled(&sigs, &protos, library_root, non_image_profile())
+}
+
+/// A folder that must never act as a learn-your-style prototype — a generic
+/// dumping ground the butler should organize files *out of*, not route them back
+/// into. Matches the exact junk names AND any folder whose first word is a
+/// dumping-ground word, so versioned/suffixed variants ("Desktop 1.0",
+/// "Downloads (2)", "Temp files") are caught too.
+fn is_junk_prototype_folder(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if JUNK_FOLDER_NAMES.contains(&name.as_str()) {
+        return true;
+    }
+    let first_word = name.split(|c: char| !c.is_alphabetic()).find(|w| !w.is_empty());
+    matches!(
+        first_word,
+        Some("desktop" | "downloads" | "download" | "downloaded" | "temp" | "tmp"
+            | "unsorted" | "inbox" | "misc")
+    )
+}
+
+/// Build bag-of-words representatives for the non-image pass. Each file's `clip`
+/// slot becomes an L2-normalized multi-hot over a shared, frequency-capped vocab
+/// of (filename tokens ∪ content tags); `tags` keeps the same token set so the
+/// distinctive-term namer can still label the group. The input `clip` is ignored
+/// (non-image files have none). A file with no in-vocab token is dropped (no
+/// grouping signal) and falls through to the rule cascade.
+fn non_image_signatures(files: &[SemanticFile]) -> Vec<SemanticFile> {
+    // BTreeSet → deterministic sorted token order across runs.
+    let token_sets: Vec<Vec<String>> = files
+        .iter()
+        .map(|f| {
+            let mut set: std::collections::BTreeSet<String> =
+                filename_tokens(&f.source).into_iter().collect();
+            for t in &f.tags {
+                let lt = t.to_lowercase();
+                if !lt.is_empty() {
+                    set.insert(lt);
+                }
+            }
+            set.into_iter().collect()
+        })
+        .collect();
+
+    let mut freq: HashMap<String, usize> = HashMap::new();
+    for toks in &token_sets {
+        for t in toks {
+            *freq.entry(t.clone()).or_insert(0) += 1;
+        }
+    }
+    let vocab = vocab_from_freq(&freq, NON_IMAGE_VOCAB_CAP);
+    if vocab.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::with_capacity(files.len());
+    for (i, f) in files.iter().enumerate() {
+        let mut vec = vec![0f32; vocab.len()];
+        let mut any = false;
+        for t in &token_sets[i] {
+            if let Some(&idx) = vocab.get(t) {
+                vec[idx] = 1.0;
+                any = true;
+            }
+        }
+        if !any {
+            continue;
+        }
+        out.push(SemanticFile {
+            file_id: f.file_id,
+            source: f.source.clone(),
+            clip: l2_normalized(&vec),
+            tags: token_sets[i].clone(),
+            time_unix: f.time_unix,
+        });
+    }
+    out
+}
+
+/// Lowercase alphanumeric filename tokens, extension dropped, split on any
+/// non-alphanumeric. Drops pure-numeric, very short, and generic camera/scan
+/// tokens — so `IMG_4821.heic` yields nothing while `acme_invoice_2023.pdf`
+/// yields `acme` + `invoice`.
+fn filename_tokens(path: &Path) -> Vec<String> {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    stem.split(|c: char| !c.is_alphanumeric())
+        .filter(|t| {
+            t.chars().count() >= 3
+                && t.chars().any(|c| c.is_alphabetic())
+                && !FILENAME_STOPWORDS.contains(t)
+        })
+        .map(|t| t.to_string())
+        .collect()
+}
+
 // ── Fusion ────────────────────────────────────────────────────────────────
 
 /// Global tag frequency across all files — drives both the vocab cap and the
@@ -297,12 +504,12 @@ fn build_tag_vocab(files: &[SemanticFile], cap: usize) -> HashMap<String, usize>
 
 /// Fuse one file: per-block L2-normalize, scale by weight, concatenate, then
 /// L2-normalize the whole so the clusterer's cosine is meaningful.
-fn fuse(file: &SemanticFile, vocab: &HashMap<String, usize>) -> Vec<f32> {
+fn fuse(file: &SemanticFile, vocab: &HashMap<String, usize>, profile: Profile) -> Vec<f32> {
     let mut out = Vec::with_capacity(file.clip.len() + vocab.len() + 2);
 
     // CLIP block (already unit; re-normalize defensively).
     let clip = l2_normalized(&file.clip);
-    out.extend(clip.iter().map(|x| x * W_CLIP));
+    out.extend(clip.iter().map(|x| x * profile.w_clip));
 
     // Tag multi-hot block.
     let mut tags = vec![0f32; vocab.len()];
@@ -312,12 +519,12 @@ fn fuse(file: &SemanticFile, vocab: &HashMap<String, usize>) -> Vec<f32> {
         }
     }
     let tags = l2_normalized(&tags);
-    out.extend(tags.iter().map(|x| x * W_TAGS));
+    out.extend(tags.iter().map(|x| x * profile.w_tags));
 
     // Time block: cyclical day-of-year (captures seasonality without raw epoch).
     let (s, c) = day_of_year_cyclical(file.time_unix);
-    out.push(s * W_TIME);
-    out.push(c * W_TIME);
+    out.push(s * profile.w_time);
+    out.push(c * profile.w_time);
 
     l2_normalized(&out)
 }
@@ -544,7 +751,7 @@ mod tests {
     #[test]
     fn fuse_is_unit_norm() {
         let vocab = build_tag_vocab(&[file(1, "a.jpg", vec![1.0, 0.0, 0.0], &["beach"])], 16);
-        let f = fuse(&file(1, "a.jpg", vec![1.0, 0.0, 0.0], &["beach"]), &vocab);
+        let f = fuse(&file(1, "a.jpg", vec![1.0, 0.0, 0.0], &["beach"]), &vocab, IMAGE_PROFILE);
         let n: f32 = f.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!((n - 1.0).abs() < 1e-4, "fused norm = {n}");
     }
@@ -653,5 +860,42 @@ mod tests {
         assert!(!moves.is_empty());
         assert!(moves.iter().all(|m| m.confidence == Confidence::Auto), "exact match should auto-file");
         assert!(moves.iter().all(|m| m.reason.as_deref().unwrap_or("").contains("Dogs")));
+    }
+
+    // ── Non-image pass (RESTRUCTURE.md R1) ─────────────────────────────────
+
+    #[test]
+    fn filename_tokens_keep_content_drop_generic() {
+        assert_eq!(
+            filename_tokens(Path::new("/a/acme_invoice_2023.pdf")),
+            vec!["acme".to_string(), "invoice".to_string()]
+        );
+        assert!(filename_tokens(Path::new("/a/IMG_4821.heic")).is_empty());
+        assert!(filename_tokens(Path::new("/a/Screenshot 2024-01-02.png")).is_empty());
+    }
+
+    /// The R1 fix: non-image files (no CLIP embedding — `clip` is empty) cluster
+    /// by their filename+tag bag-of-words, so a mixed download dir groups invoices
+    /// and trip clips into two content folders instead of one Documents/<Year>
+    /// dump. A filename sharing no token (singleton) is left for the rule cascade.
+    #[test]
+    fn non_image_pass_groups_by_filename_content() {
+        let mut files = Vec::new();
+        for i in 0..5 {
+            files.push(file(i, &format!("/lib/downloads/acme_invoice_{i}.pdf"), vec![], &[]));
+        }
+        for i in 0..5 {
+            files.push(file(100 + i, &format!("/lib/downloads/trip_hawaii_{i}.mp4"), vec![], &[]));
+        }
+        files.push(file(999, "/lib/downloads/zzqq_widget.txt", vec![], &[]));
+
+        let moves = classify_non_image(&files, Path::new("/lib"));
+        assert_eq!(moves.len(), 10, "the singleton is excluded: {moves:?}");
+        let cats: std::collections::HashSet<_> = moves.iter().map(|m| m.category.clone()).collect();
+        assert_eq!(cats.len(), 2, "got {cats:?}");
+        assert!(!moves.iter().any(|m| m.file_id == 999));
+        let dirs: std::collections::HashSet<_> =
+            moves.iter().filter_map(|m| m.destination.parent().map(|p| p.to_path_buf())).collect();
+        assert_eq!(dirs.len(), 2, "two content groups → two folders: {dirs:?}");
     }
 }

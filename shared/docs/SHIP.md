@@ -90,8 +90,9 @@ the rest, always previewable and reversible. Full design in
 
 | Phase | Scope | Status |
 |---|---|---|
-| **P1** | Engine: semantic + learn-your-style classify — fuse CLIP + tags + time, density-cluster (reuses `identity_clustering`), route each cluster to the nearest existing folder prototype or propose a new group; rule cascade is the fallback | **Landed (engine)** |
-| **P2** | VLM cluster naming (label-then-reason, constrained decoding) + label-then-group hierarchy | Planned |
+| **P1** | Engine: semantic + learn-your-style classify — fuse CLIP + tags + time, density-cluster (reuses `identity_clustering`), route each cluster to the nearest existing folder prototype or propose a new group; rule cascade is the fallback | **Landed (both engines)** |
+| **R1** | Extend the butler to **all file types** — additive filename+tag bag-of-words pass for documents/video/audio (separate `nonImageProfile`, junk folders barred as prototypes); image path byte-identical | **Landed (both engines)** — owner threshold calibration pending |
+| **P2** | VLM cluster naming (label-then-reason, constrained decoding) + label-then-group hierarchy | Planned (next) |
 | **P3** | Confidence tiers (auto ≥ 0.95 / suggest 0.70–0.95 / ask < 0.70) gated by action risk + reversible command journal + learn-from-corrections | Planned |
 | **P4** | Win2D Sankey upgrade (barycentre ordering, destination-color links, Okabe-Ito palette, hover path-highlight, drill-down) + before/after tree + weight sliders | Planned |
 

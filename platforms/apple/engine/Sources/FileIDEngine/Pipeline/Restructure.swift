@@ -169,6 +169,33 @@ public enum Restructure {
             }
         }
 
+        // Butler R1: non-image semantic pass. Cluster everything the image pass
+        // didn't claim (documents, video, audio, and any embedding-less file) by a
+        // filename+tag bag-of-words signature, so a mixed library groups by content
+        // instead of dumping every doc into Documents/<Year>. Additive + separately
+        // tuned (nonImageProfile); the rule cascade below still catches the
+        // remainder. Owner kill-switch: FILEID_RESTRUCTURE_NONIMAGE=0.
+        if RestructureSemantic.nonImageEnabled {
+            let nonImageInput: [RestructureSemantic.SemanticFile] = rows.compactMap { s in
+                guard !movedIDs.contains(s.id) else { return nil }
+                let timeUnix = (s.createdAt ?? s.modifiedAt) ?? 0
+                return RestructureSemantic.SemanticFile(
+                    fileID: s.id, source: s.path, clip: [],
+                    tags: loaded.tags[s.id] ?? [], timeUnix: timeUnix)
+            }
+            let niMoves = RestructureSemantic.classifyNonImage(
+                files: nonImageInput, libraryRoot: libraryRoot.path)
+            for m in niMoves {
+                let name = (m.source as NSString).lastPathComponent
+                let newPath = (m.destinationDir as NSString).appendingPathComponent(name)
+                proposals.append(RestructureProposal(
+                    fileID: m.fileID, oldPath: m.source, newPath: newPath,
+                    bucket: m.category, confidence: m.confidence.rawValue, reason: m.reason))
+                movedIDs.insert(m.fileID)
+                semanticSourceFolders.insert((m.source as NSString).deletingLastPathComponent)
+            }
+        }
+
         // Rule cascade for everything the semantic butler didn't claim.
         let ruleFiles: [FileForClassify] = rows.compactMap { s in
             guard !movedIDs.contains(s.id) else { return nil }
