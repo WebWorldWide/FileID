@@ -176,13 +176,16 @@ pub(crate) async fn handle_restore_from_trash(
                     "INSERT OR IGNORE INTO files \
                      (path_text, path_hash, path_search, size_bytes, scanned_at, kind, extension, \
                       has_faces, has_text, failed) \
-                     VALUES (?1, ?2, ?1, 0, ?3, ?4, ?5, 0, 0, 0)",
+                     VALUES (?1, ?2, ?6, 0, ?3, ?4, ?5, 0, 0, 0)",
                     rusqlite::params![
                         item.original_path,
                         crate::util::path_safety::stable_path_hash(&item.original_path),
                         now,
                         kind.as_str(),
                         extension,
+                        // path_search NFC-normalized (not verbatim ?1) so a restored
+                        // NFD-accented file stays findable by name. (audit parity)
+                        crate::pipeline::dbwriter::nfc_path_search(&item.original_path),
                     ],
                 );
                 succeeded += 1;

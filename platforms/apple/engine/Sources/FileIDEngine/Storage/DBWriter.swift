@@ -545,12 +545,12 @@ public actor DBWriter {
                 scanned_at    = excluded.scanned_at,
                 kind          = excluded.kind,
                 extension     = excluded.extension,
-                phash         = excluded.phash,
-                has_faces     = excluded.has_faces,
-                has_text      = excluded.has_text,
-                camera_model  = excluded.camera_model,
-                location_lat  = excluded.location_lat,
-                location_lon  = excluded.location_lon,
+                phash         = COALESCE(excluded.phash, phash),
+                has_faces     = CASE WHEN ? THEN excluded.has_faces ELSE has_faces END,
+                has_text      = CASE WHEN ? THEN excluded.has_text ELSE has_text END,
+                camera_model  = COALESCE(excluded.camera_model, camera_model),
+                location_lat  = COALESCE(excluded.location_lat, location_lat),
+                location_lon  = COALESCE(excluded.location_lon, location_lon),
                 failed        = excluded.failed,
                 error_message = excluded.error_message,
                 content_hash  = COALESCE(excluded.content_hash, content_hash),
@@ -575,7 +575,15 @@ public actor DBWriter {
                 file.failed ? 1 : 0,
                 file.errorMessage,
                 nil,
-                file.fileRef.map { Int64(bitPattern: $0) }
+                file.fileRef.map { Int64(bitPattern: $0) },
+                // ?21/?22: stage-ran gates for the has_faces/has_text CASE-WHEN. A
+                // rescan that didn't run the face/text stage this pass must NOT
+                // clobber the prior value with this pass's default 0 (e.g. a forced
+                // rescan where Vision returns 0 faces, or EXIF GPS reads back nil).
+                // Plus COALESCE on phash/camera/GPS above. Mirrors the Rust engine's
+                // R3-04 hardening — was never ported to Swift. (audit P1 parity fix)
+                file.facesEvaluated ? 1 : 0,
+                file.ocrStageRan ? 1 : 0
             ])
         // last_insert_rowid() is NOT updated on the UPDATE branch of an upsert,
         // so resolve the id from the existing row when there was one. This

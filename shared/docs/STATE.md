@@ -8,7 +8,34 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
-## 2026-06-16 (latest) — Restructure R2: one-click "Undo last run" (reversibility) + R1 validated on a real library
+## 2026-06-16 (latest) — Whole-codebase adversarial audit (6 parallel agents) + Windows undo button
+
+Windows "Undo last run" button landed (WinUI `RestructureView` — `CanUndoRestructure`-driven, in the
+ApplyBar; CI-pending, no local WinUI build). Then a 6-agent parallel audit swept the ENTIRE codebase
+(Rust engine ×3 slices, Swift engine, Swift app, C# app). The **security-critical slice**
+(IPC/shell/downloader) and the **ML slice** came back CLEAN — no-telemetry single-egress invariant
+confirmed holding, all 32 default models SHA-pinned, file-op/traversal/IPC-framing/watchdog/WAL all
+defended. Real bugs found + FIXED, all verified green:
+- **P1 (Swift, data-loss + parity):** the macOS `files` UPSERT clobbered phash/GPS/camera/has_faces on
+  a stage-skipped rescan — the Rust engine's R3-04 COALESCE/CASE-WHEN hardening was never ported.
+  Ported verbatim + added the missing regression test.
+- **P1 (Swift app, wedge):** Restructure apply/undo wedged `applying` forever if the engine replied
+  with a bare error (db_unavailable: engine alive, no result, no reset) — the `lastErrorSignal`
+  handler only cleared `loading`. Now clears `applying` too.
+- **P2 (Rust, parity):** `path_search` stored verbatim (not NFC-normalized) at restructure-apply /
+  bulk-rename / trash-restore → NFD-accented names unfindable until rescan. Normalized at all three
+  (macOS already did). **P2 (Rust, parity):** image-pass *drained* tags so unclustered images lost
+  content-tag grouping in the non-image pass — read non-destructively now (matches macOS).
+- **P2 (Swift app):** `modelDownloadProgress`/`autoPilotActive` never reset on engine-exit (stale
+  download bar + defeated watchdog after a crash); Cleanup per-group delete lacked a double-tap guard.
+  Both fixed.
+
+Verified: macOS swift test **222/222**, Rust cargo test **343/343** + clippy -D warnings clean.
+Cosmetic/self-limiting P2s (C# dead error-kind, vestigial Tag-is-int drag branch, ClipSearchService
+dispose race, ScanCoordinator bumpProcessed perf, the known-deferred bbox-verdict cross-platform key)
+tracked in NEXT.md — no user impact; the C# ones are unverifiable without a local WinUI build.
+
+## 2026-06-16 — Restructure R2: one-click "Undo last run" (reversibility) + R1 validated on a real library
 
 **R1 validated on the owner's TrueNAS library** and tuned: real data exposed three naming bugs —
 extension tokens leaking on double extensions (`E14.jpg.lps`→"jpg"), English connectors ("Boys

@@ -678,6 +678,13 @@ public final class EngineClient {
         // restructureApplyResult that clears this, so without the reset the NEXT
         // apply's result is mis-attributed as the (dead) undo's. (audit R2-app)
         undoRestructureInFlight = false
+        // A crash mid-download leaves a stale sub-1.0 progress that defeats the
+        // WelcomeSheet VLM "no response" watchdog and shows a phantom Deep-Analyze
+        // download bar; and auto-pilot would sit at a stale stage. Clear both so the
+        // respawned (jobless) engine starts clean. (audit P2 — the comment on the
+        // modelDownloadProgress declaration finally holds true.)
+        modelDownloadProgress = nil
+        autoPilotActive = false
         isPaused = false
         queueState = QueueState(running: nil, pending: [], totalEtaSeconds: nil)
         // Signal views that own their in-flight UI (e.g. Deep Analyze's
