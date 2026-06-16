@@ -477,9 +477,14 @@ public enum Restructure {
         proposals: [RestructureProposal],
         database: Database,
         libraryRoot: URL,
-        isCancelled: @Sendable () -> Bool = { Task.isCancelled }
+        isCancelled: @Sendable () -> Bool = { Task.isCancelled },
+        undoJournal: URL? = nil
     ) async -> ApplyResult {
         let fm = FileManager.default
+        let journalURL = undoJournal ?? Self.defaultUndoJournalURL
+        // Inverse of every successful move (current → original), flushed to the
+        // undo journal at the end so "Undo last run" can reverse this batch. (R2)
+        var undoEntries: [UndoEntry] = []
         var moved = 0
         var skipped = 0
         var failed = 0
@@ -603,6 +608,10 @@ public enum Restructure {
             // NOT also count it failed (no double-count); it's recorded for
             // recovery (and self-heals on the next scan). (F-C3-012)
             moved += 1
+            // Record the inverse (final → original) for undo. Captured after the
+            // on-disk move succeeded but BEFORE (and regardless of) the DB update
+            // below, so undo can always move the bytes back. (R2)
+            undoEntries.append(UndoEntry(fileID: p.fileID, from: finalURL.path, to: oldURL.path))
             if finalURL.path != plannedURL.path { conflicts.append(plannedURL.path) }
             do {
                 let finalPath = finalURL.path
@@ -627,11 +636,98 @@ public enum Restructure {
                     fileID: p.fileID, src: oldURL.path, dst: finalURL.path)
             }
         }
+        // Persist the inverse-move journal (truncating → last run only) so the app
+        // can offer a one-click "Undo last run". Best-effort: an unwritable journal
+        // just means undo is unavailable, never a failed apply. (R2)
+        Self.writeUndoJournal(undoEntries, to: journalURL)
         JSONLog.shared.info(ev: "restructure_applied",
                             extra: ["moved": AnyCodable(moved),
                                     "skipped": AnyCodable(skipped),
                                     "failed": AnyCodable(failed)])
         return ApplyResult(moved: moved, skipped: skipped, failed: failed, conflicts: conflicts)
+    }
+
+    // MARK: - Undo (R2 — reversible "Undo last run")
+
+    /// One reversal: move the file currently at `from` back to `to`.
+    struct UndoEntry: Sendable {
+        let fileID: Int64
+        let from: String
+        let to: String
+    }
+
+    /// `~/Library/Application Support/FileID/restructure_undo.ndjson` — the last
+    /// apply run's inverse moves. nil only if Application Support is unresolvable
+    /// (then undo is silently unavailable).
+    static var defaultUndoJournalURL: URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("FileID/restructure_undo.ndjson")
+    }
+
+    static func writeUndoJournal(_ entries: [UndoEntry], to url: URL?) {
+        guard let url else { return }
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        var data = Data()
+        for e in entries {
+            let obj: [String: Any] = ["file_id": e.fileID, "from": e.from, "to": e.to]
+            if let line = try? JSONSerialization.data(withJSONObject: obj) {
+                data.append(line)
+                data.append(0x0A)
+            }
+        }
+        try? data.write(to: url, options: .atomic)
+    }
+
+    static func readUndoJournal(from url: URL?) -> [UndoEntry] {
+        guard let url, let data = try? Data(contentsOf: url) else { return [] }
+        var out: [UndoEntry] = []
+        for slice in data.split(separator: 0x0A) where !slice.isEmpty {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(slice)) as? [String: Any],
+                  let fid = (obj["file_id"] as? NSNumber)?.int64Value,
+                  let from = obj["from"] as? String, let to = obj["to"] as? String else { continue }
+            out.append(UndoEntry(fileID: fid, from: from, to: to))
+        }
+        return out
+    }
+
+    static func clearUndoJournal(_ url: URL?) {
+        guard let url else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    /// True when the last apply left a reversible journal — drives the app's
+    /// "Undo last run" affordance.
+    public static func hasUndoableRun(undoJournal: URL? = nil) -> Bool {
+        !readUndoJournal(from: undoJournal ?? defaultUndoJournalURL).isEmpty
+    }
+
+    /// Undo the most recent `apply`: move every file the last run relocated back to
+    /// where it came from, replaying the inverse moves through `apply` itself (so
+    /// the identical stale-check / containment / no-clobber / DB-update safety
+    /// applies), then clear the journal so a run can't be undone twice.
+    /// (RESTRUCTURE.md §6 reversibility)
+    public static func undoLast(
+        database: Database,
+        libraryRoot: URL,
+        isCancelled: @Sendable () -> Bool = { Task.isCancelled },
+        undoJournal: URL? = nil
+    ) async -> ApplyResult {
+        let journalURL = undoJournal ?? Self.defaultUndoJournalURL
+        let entries = readUndoJournal(from: journalURL)
+        guard !entries.isEmpty else {
+            return ApplyResult(moved: 0, skipped: 0, failed: 0, conflicts: [])
+        }
+        let inverse = entries.map {
+            RestructureProposal(fileID: $0.fileID, oldPath: $0.from, newPath: $0.to, bucket: "")
+        }
+        // Pass the SAME journal so apply overwrites it with the redo set; then drop
+        // it, so the button can't toggle apply→undo→apply by accident.
+        let result = await apply(proposals: inverse, database: database,
+                                 libraryRoot: libraryRoot, isCancelled: isCancelled,
+                                 undoJournal: journalURL)
+        clearUndoJournal(journalURL)
+        return result
     }
 
     /// Apply-progress throttle: log on the first move, on the last, and once per

@@ -7,6 +7,27 @@
 
 ---
 
+## 2026-06-16 — Restructure undo replays the inverse moves THROUGH apply, not a parallel reverse loop
+
+The "Undo last run" feature moves the user's files on disk, so correctness is paramount. The apply
+path is battle-tested (a dozen F-C3-xxx guards: stale-plan, containment, no-clobber, atomic-rename,
+DB-update-failure recovery). Rather than write a second move loop for undo — which would have to
+re-derive every one of those guards and could drift — `apply` records an **inverse-move journal**
+(each successful move's final→original path, written truncating so the journal only ever holds the
+LAST run), and `undoLast` reads it, builds inverse `RestructureProposal`s/`RestructureMove`s, and
+calls **`apply` itself** on them. Undo therefore inherits every safety check for free; the only
+undo-specific logic is "read journal → invert → clear journal after." We pass the SAME journal path
+into the nested apply (so it rewrites it with the redo set) and then delete it, so the button can't
+accidentally toggle apply→undo→apply. The journal lives beside the recovery sidecar / trash log
+(app-data dir), not in the library, and is best-effort: an unwritable journal means undo is
+unavailable, never a failed apply. Both engines mirror this; macOS has a real apply→undo round-trip
+test (the Rust apply move is `#[cfg(windows)]`, so the byte-faithful macOS test is authoritative).
+
+**VLM cluster naming (design P2) was cut to R3** on real-data evidence: filename/tag c-TF-IDF names
+on the owner's library came out genuinely good ("Nolle Resume", "Copyright Limited"), so a slow
+per-call local-VLM naming pass is marginal polish, not a ship blocker — reversibility (undo) was the
+higher-value R2 investment.
+
 ## 2026-06-16 — Restructure R1: extend the butler to non-image files as an ADDITIVE pass with its own profile; bag-of-words, no new model
 
 Restructure "sucked" because the semantic butler only ran on images with a CLIP embedding —

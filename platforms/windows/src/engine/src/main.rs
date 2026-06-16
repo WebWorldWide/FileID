@@ -777,6 +777,22 @@ async fn handle_line(
                     .await;
             });
         }
+        CommandPayload::UndoRestructure(payload) => {
+            let Some(db) = db else {
+                emit_db_unavailable(sink, "undoRestructure").await;
+                return;
+            };
+            let sink_c = sink.clone();
+            let db_c = db.clone();
+            // Same cancellable, fresh-flag treatment as apply — undo does real
+            // on-disk moves too. (R2)
+            restructure_apply_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+            let cancel_c = restructure_apply_cancel.clone();
+            tokio::spawn(async move {
+                commands::restructure::handle_undo_restructure(sink_c, db_c, payload, cancel_c)
+                    .await;
+            });
+        }
         CommandPayload::StartScan(payload) => {
             let Some(db) = db else {
                 emit_db_unavailable(sink, "startScan").await;

@@ -83,6 +83,10 @@ pub enum CommandPayload {
     PlanRestructure(PlanRestructurePayload),
     #[serde(rename = "applyRestructure")]
     ApplyRestructure(ApplyRestructurePayload),
+    /// Reverse the most recent applyRestructure: move every file the last run
+    /// relocated back (the engine replays its on-disk undo journal). Reply is a
+    /// RestructureApplyResult (applied = files moved back). (RESTRUCTURE.md §6)
+    UndoRestructure(UndoRestructurePayload),
 
     /// Bulk-tag a set of files. Tags persist via shell::tags sidecar +
     /// the DB `tags` table.
@@ -268,6 +272,14 @@ pub struct ApplyRestructurePayload {
     /// user can preview the layout without touching their files.
     #[serde(default)]
     pub use_symlinks: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoRestructurePayload {
+    /// Same library root the apply used — the destinations the undo writes back
+    /// to are containment-checked against it. (R2)
+    pub library_root: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

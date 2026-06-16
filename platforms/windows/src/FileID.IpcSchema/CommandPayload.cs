@@ -64,6 +64,11 @@ public sealed record ApplyRestructureCommand(
     System.Collections.Generic.IReadOnlyList<RestructureMove> Moves,
     bool UseSymlinks = false) : CommandPayload;
 
+/// <summary>Reverse the most recent applyRestructure — the engine replays its
+/// on-disk undo journal to move every relocated file back. Reply is a
+/// RestructureApplyResult (Applied = files moved back). (RESTRUCTURE.md §6)</summary>
+public sealed record UndoRestructureCommand(string LibraryRoot) : CommandPayload;
+
 public sealed record RestructureMove(
     [property: JsonPropertyName("fileID")] long FileId,
     string Source,
@@ -179,6 +184,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             "prewarmModel" => JsonSerializer.Deserialize<PrewarmModelCommand>(ref reader, options) ?? throw new JsonException("prewarmModel: null body"),
             "planRestructure" => JsonSerializer.Deserialize<PlanRestructureCommand>(ref reader, options) ?? throw new JsonException("planRestructure: null body"),
             "applyRestructure" => JsonSerializer.Deserialize<ApplyRestructureCommand>(ref reader, options) ?? throw new JsonException("applyRestructure: null body"),
+            "undoRestructure" => JsonSerializer.Deserialize<UndoRestructureCommand>(ref reader, options) ?? throw new JsonException("undoRestructure: null body"),
             "applyTags" => JsonSerializer.Deserialize<ApplyTagsCommand>(ref reader, options) ?? throw new JsonException("applyTags: null body"),
             "renameFiles" => JsonSerializer.Deserialize<RenameFilesCommand>(ref reader, options) ?? throw new JsonException("renameFiles: null body"),
             "trashFiles" => JsonSerializer.Deserialize<TrashFilesCommand>(ref reader, options) ?? throw new JsonException("trashFiles: null body"),
@@ -237,6 +243,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             case CancelPrewarmCommand c: WriteVariant(writer, "cancelPrewarm", c, options); break;
             case PlanRestructureCommand c: WriteVariant(writer, "planRestructure", c, options); break;
             case ApplyRestructureCommand c: WriteVariant(writer, "applyRestructure", c, options); break;
+            case UndoRestructureCommand c: WriteVariant(writer, "undoRestructure", c, options); break;
             case ApplyTagsCommand c: WriteVariant(writer, "applyTags", c, options); break;
             case RenameFilesCommand c: WriteVariant(writer, "renameFiles", c, options); break;
             case TrashFilesCommand c: WriteVariant(writer, "trashFiles", c, options); break;

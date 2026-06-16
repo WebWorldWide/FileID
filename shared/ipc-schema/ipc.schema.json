@@ -147,6 +147,11 @@
               "useSymlinks": { "type": "boolean" }
             } } } },
 
+        { "type": "object", "required": ["undoRestructure"], "additionalProperties": false,
+          "properties": { "undoRestructure": { "type": "object", "additionalProperties": false,
+            "required": ["libraryRoot"],
+            "properties": { "libraryRoot": { "type": "string" } } } } },
+
         { "type": "object", "required": ["applyTags"], "additionalProperties": false,
           "properties": { "applyTags": { "type": "object", "additionalProperties": false,
             "required": ["fileIDs", "tags", "mode"],

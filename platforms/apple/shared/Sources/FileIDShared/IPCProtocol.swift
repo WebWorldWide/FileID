@@ -63,6 +63,11 @@ public struct IPCCommand: Codable, Sendable {
         // pre-existing per-tab actions.
         case planRestructure(libraryRoot: String)
         case applyRestructure(libraryRoot: String, moves: [RestructureMove], useSymlinks: Bool)
+        /// Reverse the most recent applyRestructure: move every file the last run
+        /// relocated back to its original location (the engine replays its on-disk
+        /// undo journal). Reply lands on `restructureApplyResult`, where `applied`
+        /// is the count of files moved back. (RESTRUCTURE.md §6 reversibility)
+        case undoRestructure(libraryRoot: String)
         case applyTags(fileIDs: [Int64], tags: [String], mode: String)
         case renameFiles(renames: [RenameEntry])
         case trashFiles(fileIDs: [Int64])

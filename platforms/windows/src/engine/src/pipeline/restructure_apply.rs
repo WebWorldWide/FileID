@@ -87,6 +87,9 @@ impl RestructureApply {
 
         let mut applied = 0u32;
         let mut failed = 0u32;
+        // Inverse of every successful real move (current → original), flushed to
+        // the undo journal at the end so "Undo last run" can reverse this batch. (R2)
+        let mut undo_entries: Vec<(i64, String, String)> = Vec::new();
         // B3: destinations claimed earlier in THIS batch, so two distinct
         // sources that map to the same basename don't collide before either
         // touches disk.
@@ -223,6 +226,13 @@ impl RestructureApply {
                             std::path::Path::new(&m.source),
                             &final_dest,
                         );
+                        // Record the inverse (final → original) for undo. Real
+                        // moves only — symlink mode doesn't relocate the file. (R2)
+                        undo_entries.push((
+                            m.file_id,
+                            final_dest.to_string_lossy().to_string(),
+                            m.source.clone(),
+                        ));
                     }
                     applied += 1;
                 }
@@ -245,7 +255,85 @@ impl RestructureApply {
             }
         }
 
+        // Persist the inverse-move journal (truncating → last run only) so the app
+        // can offer a one-click "Undo last run". Best-effort: an unwritable journal
+        // just means undo is unavailable, never a failed apply. (R2)
+        Self::write_undo_journal(&undo_entries);
         Ok(RestructureApplyResult { applied, failed, privilege_error: None })
+    }
+
+    // ── Undo (R2 — reversible "Undo last run") ──────────────────────────────
+
+    fn undo_journal_path() -> Option<PathBuf> {
+        crate::paths::trash_log_path()
+            .ok()
+            .and_then(|t| t.parent().map(|d| d.join("restructure_undo.ndjson")))
+    }
+
+    fn write_undo_journal(entries: &[(i64, String, String)]) {
+        let Some(path) = Self::undo_journal_path() else {
+            return;
+        };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let mut out = String::new();
+        for (file_id, from, to) in entries {
+            out.push_str(
+                &serde_json::json!({ "file_id": file_id, "from": from, "to": to }).to_string(),
+            );
+            out.push('\n');
+        }
+        let _ = std::fs::write(&path, out);
+    }
+
+    fn read_undo_journal() -> Vec<(i64, String, String)> {
+        let Some(path) = Self::undo_journal_path() else {
+            return Vec::new();
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Vec::new();
+        };
+        text.lines()
+            .filter_map(|line| {
+                let v: serde_json::Value = serde_json::from_str(line).ok()?;
+                Some((
+                    v.get("file_id")?.as_i64()?,
+                    v.get("from")?.as_str()?.to_string(),
+                    v.get("to")?.as_str()?.to_string(),
+                ))
+            })
+            .collect()
+    }
+
+    /// Undo the most recent `apply`: replay the inverse moves through `apply`
+    /// itself (so the identical stale-check / containment / no-clobber / DB-update
+    /// safety applies), then clear the journal so a run can't be undone twice.
+    /// (RESTRUCTURE.md §6 reversibility)
+    pub fn undo_last(&self) -> Result<RestructureApplyResult> {
+        let entries = Self::read_undo_journal();
+        if entries.is_empty() {
+            return Ok(RestructureApplyResult { applied: 0, failed: 0, privilege_error: None });
+        }
+        let inverse: Vec<RestructureMove> = entries
+            .iter()
+            .map(|(file_id, from, to)| RestructureMove {
+                file_id: *file_id,
+                source: from.clone(),
+                destination: to.clone(),
+                category: String::new(),
+                tier: None,
+                confidence: String::new(),
+                reason: None,
+            })
+            .collect();
+        // apply rewrites the journal with the redo set; drop it afterward so the
+        // button can't toggle apply→undo→apply by accident.
+        let result = self.apply(&inverse)?;
+        if let Some(path) = Self::undo_journal_path() {
+            let _ = std::fs::remove_file(path);
+        }
+        Ok(result)
     }
 }
 
