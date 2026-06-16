@@ -35,6 +35,52 @@
                            Text="Run a local vision-language model on every image to write captions and propose smart filenames. Works across your whole library." />
             </StackPanel>
 
+            <!-- Item 4: plain-language explainer distinguishing automatic
+                 in-scan Tagging from the opt-in Deep Analyze pass. Dismissible;
+                 the close button persists HideDeepAnalyzeExplainer. Mirror of
+                 the macOS DeepAnalyzeView explainerCard. -->
+            <Border x:Name="ExplainerBanner"
+                    CornerRadius="10"
+                    Padding="14,12"
+                    Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                    BorderBrush="{ThemeResource AiBrush}"
+                    BorderThickness="1"
+                    Visibility="Collapsed">
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <FontIcon Grid.Column="0"
+                              Glyph="&#xE946;"
+                              FontSize="16"
+                              Foreground="{ThemeResource AiBrush}"
+                              VerticalAlignment="Top"
+                              Margin="0,2,0,0"
+                              AutomationProperties.AccessibilityView="Raw" />
+                    <StackPanel Grid.Column="1" Spacing="4">
+                        <TextBlock Text="Tagging vs. Deep Analyze"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <TextBlock TextWrapping="Wrap"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   Text="Tagging runs automatically as you scan — it adds quick keyword tags (like sunset, beach, dog) so search works. Deep Analyze is an optional, heavier step: it reads each photo, writes a full sentence describing it, and suggests a smart filename — using the people you've named." />
+                    </StackPanel>
+                    <Button Grid.Column="2"
+                            x:Name="DismissExplainerButton"
+                            Click="OnDismissExplainerClicked"
+                            Background="Transparent"
+                            BorderThickness="0"
+                            Padding="6"
+                            VerticalAlignment="Top"
+                            AutomationProperties.Name="Hide this explanation"
+                            ToolTipService.ToolTip="Hide this explanation">
+                        <FontIcon Glyph="&#xE711;" FontSize="12" />
+                    </Button>
+                </Grid>
+            </Border>
+
             <!-- RuntimeBanner + CudnnInfoBanner were removed.
                  Both are now auto-installed at engine-ready time:
                  LlamaRuntimeAutoInstaller fires the Vulkan runtime fetch
@@ -364,6 +410,61 @@
                                Style="{StaticResource CaptionTextBlockStyle}" />
                 </StackPanel>
             </Button>
+
+            <!-- Item 5: write tags / people / smart names onto the actual files.
+                 Tags + people are added as file tags (sidecar + IPropertyStore)
+                 so Windows Search finds the photos; Apply all also routes the
+                 pending smart-name renames through the review sheet. Mirror of
+                 the macOS DeepAnalyzeView applyActionsCard. -->
+            <Border x:Name="ApplyActionsCard"
+                    CornerRadius="12"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    Padding="20">
+                <StackPanel Spacing="12">
+                    <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                        <FontIcon Glyph="&#xE74E;" FontSize="16" Foreground="{ThemeResource AiBrush}" AutomationProperties.AccessibilityView="Raw" />
+                        <TextBlock Text="Apply to your files" Style="{StaticResource SubtitleTextBlockStyle}" AutomationProperties.HeadingLevel="Level2" />
+                        <ProgressRing x:Name="ApplyProgressRing" Width="16" Height="16" IsActive="False" Visibility="Collapsed" />
+                    </StackPanel>
+                    <TextBlock TextWrapping="Wrap"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Text="Write what FileID found onto the files themselves. Tags and people are added as file tags so Windows Search finds your photos; Apply all also applies the smart names." />
+                    <StackPanel Orientation="Horizontal" Spacing="10">
+                        <Button x:Name="ApplyTagsButton" Click="OnApplyTagsClicked"
+                                AutomationProperties.Name="Apply tags"
+                                AutomationProperties.HelpText="Write the keyword tags onto the files so Windows Search finds them.">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <FontIcon FontSize="13" Glyph="&#xE8EC;" />
+                                <TextBlock Text="Apply tags" />
+                            </StackPanel>
+                        </Button>
+                        <Button x:Name="ApplyPeopleButton" Click="OnApplyPeopleClicked"
+                                AutomationProperties.Name="Apply people as tags"
+                                AutomationProperties.HelpText="Write each named person onto their photos as a file tag.">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <FontIcon FontSize="13" Glyph="&#xE77B;" />
+                                <TextBlock Text="Apply people as tags" />
+                            </StackPanel>
+                        </Button>
+                        <Button x:Name="ApplyAllButton" Click="OnApplyAllClicked"
+                                Style="{StaticResource AccentButtonStyle}"
+                                AutomationProperties.Name="Apply all"
+                                AutomationProperties.HelpText="Apply smart names, tags, and people all at once.">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <FontIcon FontSize="13" Glyph="&#xE73E;" />
+                                <TextBlock Text="Apply all" />
+                            </StackPanel>
+                        </Button>
+                    </StackPanel>
+                    <TextBlock x:Name="ApplyStatusText"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Visibility="Collapsed" />
+                </StackPanel>
+            </Border>
 
             <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
                        Foreground="{ThemeResource TextFillColorTertiaryBrush}"

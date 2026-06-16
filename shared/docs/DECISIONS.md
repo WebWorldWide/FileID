@@ -7,6 +7,61 @@
 
 ---
 
+## 2026-06-16 — Restructure undo journal is appended per-move (crash-safe), not written once after the loop
+
+The deep-research sweep flagged crash-safe transactional undo as the least-evidenced sub-problem in the field
+(shipping local organizers offer only "best-effort undo, no durability"). FileID already had a journal-backed
+undo, but it buffered the inverse moves in memory and wrote the journal ONCE after the apply loop — so a crash
+mid-apply (after N moves) left those N moves done-on-disk but un-undoable. Changed both engines to open the
+journal truncating at the START of the batch and APPEND each completed move's inverse immediately (+ fsync
+every 500 moves and once at the end). "Last run only" semantics now hold via the start-of-batch truncate
+instead of the end-of-batch overwrite; undo runs (`recordUndo=false`) still leave the prior journal intact for
+a re-run. Cost: one buffered write + a periodic fsync per move (negligible vs. the move itself). This makes
+reversibility genuinely best-in-class — beyond any surveyed tool. Same change verified by the existing undo
+round-trip + cancelled-undo tests.
+
+## 2026-06-16 — One "folder granularity" knob instead of many opaque cluster thresholds
+
+The research's clearest clustering finding: HDBSCAN exposes folder granularity through ONE intuitive lever
+(`min_cluster_size`), and the specific magic-number defaults people cite were REFUTED — so per-user threshold
+tuning is the anti-pattern. FileID had several hand-tuned cosines (`pass1/pass2_cosine`, `pass3_min_mean`).
+Added `FILEID_RESTRUCTURE_GRANULARITY` ∈ {loose,normal,tight} that shifts those cosines by a single delta
+(±0.05; loose = lower bar = broader/fewer folders, tight = higher = more), applied identically on both engines
+so the chosen granularity round-trips cross-platform. This gives owner calibration a single lever and matches
+the SOTA "no per-user tuning" ideal. The image profile's other constants stay (they're marked calibrated);
+this is the one user/owner-facing knob.
+
+Process note: the codebase audit (run by a smaller model) produced several confident findings that direct code
+verification REFUTED — the image profile is calibrated (not "a guess"), `proto.path.starts_with(library_root)`
+is `Path::starts_with` (component-aware, so no `/Library2` false-positive), Windows already surfaces
+confidence+reason and already ships the Undo button. Lesson reinforced: verify audit claims against the code
+before acting — the deep-research adversarial-verification discipline applies to internal audits too.
+
+## 2026-06-16 — macOS byte-exact dedup uses SHA-256 (CryptoKit), not a BLAKE3 dependency
+
+The user wanted macOS Cleanup to treat only byte-for-byte identical photos as duplicates (stricter than the prior
+perceptual phash), "lockstep with Windows." Windows' `content_hash` is BLAKE3, which has no permissively-licensed
+pure-Swift implementation in our locked dependency set — true hash-value parity would mean a new SwiftPM
+dependency (gated by "no new deps without asking"). Chosen (user explicitly picked option "B"): SHA-256 via
+CryptoKit (ships with macOS, zero new deps). `ContentHash.swift` ports the Windows `content_hash` STRUCTURE
+byte-for-byte (full hash ≤16 MB; `head ‖ 4×64 KB interior ‖ tail ‖ size_le` composite above) and only swaps the
+primitive. Result: identical dedup BEHAVIOR (byte-identical files group), but the stored `content_hash` VALUES
+differ from Windows (SHA-256 ≠ BLAKE3). The only cost is cross-platform exact-dup detection on a COPIED DB without
+a rescan — an edge case, since `content_hash` is derived and recomputed per scan. Alternative rejected: add a
+blake3 Swift package (true value-parity, but a new dependency for an edge-case benefit).
+
+## 2026-06-16 — "Apply to files" reuses applyTags/renameFiles instead of a new IPC command
+
+The new apply actions (write keyword tags + named people onto the files) need a per-file tag write. Rather than add
+an `applyDbTags` IPC command (schema + 3 DTOs + 3 conformance exemplars + a macOS not_implemented handler), each app
+reads the (file_id → tag) and (file_id → person) maps from its read-only DB connection, groups by tag/person, and
+calls the EXISTING `applyTags` once per distinct tag/person — call count bounded by distinct tags/people, not file
+count, so it stays efficient. macOS does it fully app-side (`TagWriter` Finder tags). No IPC contract change, no
+conformance churn, reuses the battle-tested write path. Person names land on files for the first time (DB-only
+before); writes are additive (never clobber a user's own tags) and reversible by removing the tag. Windows "Apply
+all" routes smart-name renames through the existing review sheet rather than a blind bulk rename (correct extension
++ uniqueness handling, safer for a destructive op).
+
 ## 2026-06-16 — Restructure undo replays the inverse moves THROUGH apply, not a parallel reverse loop
 
 The "Undo last run" feature moves the user's files on disk, so correctness is paramount. The apply

@@ -232,20 +232,20 @@ public final class ReadStore: @unchecked Sendable {
                 // the displayed keeper whenever aesthetic decided it.
                 let dupRow = try Row.fetchOne(db, sql: """
                     WITH ranked AS (
-                        SELECT phash, size_bytes,
+                        SELECT content_hash, size_bytes,
                                ROW_NUMBER() OVER (
-                                   PARTITION BY phash
+                                   PARTITION BY content_hash
                                    ORDER BY COALESCE(aesthetic, 0) DESC,
                                             size_bytes DESC,
                                             COALESCE(created_at, 1e18) ASC,
                                             LENGTH(path_text) ASC
                                ) AS rk,
-                               COUNT(*) OVER (PARTITION BY phash) AS n
+                               COUNT(*) OVER (PARTITION BY content_hash) AS n
                         FROM files
-                        WHERE phash IS NOT NULL AND phash != 0 AND failed = 0
+                        WHERE content_hash IS NOT NULL AND failed = 0
                     )
                     SELECT
-                        (SELECT COUNT(DISTINCT phash) FROM ranked WHERE n > 1) AS groups,
+                        (SELECT COUNT(DISTINCT content_hash) FROM ranked WHERE n > 1) AS groups,
                         COALESCE((SELECT SUM(size_bytes) FROM ranked WHERE n > 1 AND rk > 1), 0) AS reclaimable
                     """)
                 let groups: Int = dupRow?["groups"] ?? 0
@@ -553,6 +553,17 @@ public final class ReadStore: @unchecked Sendable {
     // MARK: - Cleanup queries
 
     /// Duplicate groups. Files within each group are sorted keeper-first.
+    /// Stable Int64 id for a duplicate group keyed by content_hash — the first
+    /// 8 bytes of the 32-byte SHA-256, little-endian. Used only as the SwiftUI
+    /// Identifiable id; collisions across distinct 256-bit hashes are infeasible.
+    private static func dupGroupID(_ hash: Data) -> Int64 {
+        var v: UInt64 = 0
+        for (i, byte) in hash.prefix(8).enumerated() {
+            v |= UInt64(byte) << (8 * i)
+        }
+        return Int64(bitPattern: v)
+    }
+
     public func duplicateGroups() -> [DuplicateGroup] {
         guard let q = queue else { return [] }
         do {
@@ -562,45 +573,51 @@ public final class ReadStore: @unchecked Sendable {
                 // 50K library with thousands of duplicate groups, the
                 // old shape was ~5K reads each holding a read lock —
                 // 10–50 s of UI lag. Now it's two reads total.
+                // Byte-exact dedup (item 1): two files are duplicates only when
+                // their content_hash (SHA-256 of the bytes) is identical — i.e.
+                // literally byte-for-byte the same file, not just perceptually
+                // similar (the prior phash grouping). Non-images have a NULL
+                // content_hash and are excluded, as before. Single-pass: GROUP BY
+                // then one chunked SELECT, same shape as the prior phash query.
                 let groupCounts = try Row.fetchAll(db, sql: """
-                    SELECT phash, COUNT(*) AS n
+                    SELECT content_hash, COUNT(*) AS n
                     FROM files
-                    WHERE phash IS NOT NULL AND phash != 0 AND failed = 0
-                    GROUP BY phash
+                    WHERE content_hash IS NOT NULL AND failed = 0
+                    GROUP BY content_hash
                     HAVING n > 1
                     ORDER BY n DESC
                     """)
                 guard !groupCounts.isEmpty else { return [] }
 
-                // Order-preserving phash list + lookup-by-phash.
-                let orderedPhashes: [Int64] = groupCounts.compactMap { $0["phash"] }
+                // Order-preserving content_hash list + lookup-by-hash.
+                let orderedHashes: [Data] = groupCounts.compactMap { $0["content_hash"] }
 
                 // Chunked reads — SQLite's default SQLITE_MAX_VARIABLE_NUMBER
                 // is 999 per query. A library with 1000+ duplicate groups
                 // would silently fail without chunking.
-                var byPhash: [Int64: [FileRow]] = [:]
-                byPhash.reserveCapacity(orderedPhashes.count)
+                var byHash: [Data: [FileRow]] = [:]
+                byHash.reserveCapacity(orderedHashes.count)
                 let chunkSize = 500
                 var idx = 0
-                while idx < orderedPhashes.count {
-                    let end = min(idx + chunkSize, orderedPhashes.count)
-                    let chunk = Array(orderedPhashes[idx..<end])
+                while idx < orderedHashes.count {
+                    let end = min(idx + chunkSize, orderedHashes.count)
+                    let chunk = Array(orderedHashes[idx..<end])
                     let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
                     let chunkFiles = try Row.fetchAll(db, sql: """
                         SELECT * FROM files
-                        WHERE phash IN (\(placeholders)) AND failed = 0
+                        WHERE content_hash IN (\(placeholders)) AND failed = 0
                         """, arguments: StatementArguments(chunk))
                     for r in chunkFiles {
-                        let p: Int64 = r["phash"] ?? 0
-                        byPhash[p, default: []].append(Self.toFileRow(r))
+                        guard let h: Data = r["content_hash"] else { continue }
+                        byHash[h, default: []].append(Self.toFileRow(r))
                     }
                     idx = end
                 }
 
                 var groups: [DuplicateGroup] = []
-                groups.reserveCapacity(orderedPhashes.count)
-                for phash in orderedPhashes {
-                    guard var files = byPhash[phash], files.count > 1 else { continue }
+                groups.reserveCapacity(orderedHashes.count)
+                for hash in orderedHashes {
+                    guard var files = byHash[hash], files.count > 1 else { continue }
                     // Keeper rank: aesthetic ↓, size ↓, earliest createdAt ↑, path depth ↑.
                     files.sort { a, b in
                         if (a.aesthetic ?? 0) != (b.aesthetic ?? 0) {
@@ -612,7 +629,7 @@ public final class ReadStore: @unchecked Sendable {
                         if ad != bd { return ad < bd }
                         return a.pathText.count < b.pathText.count
                     }
-                    groups.append(DuplicateGroup(id: phash, files: files))
+                    groups.append(DuplicateGroup(id: Self.dupGroupID(hash), files: files))
                 }
                 return groups
             }
@@ -1199,6 +1216,71 @@ public final class ReadStore: @unchecked Sendable {
 
     /// All non-failed image files that have a non-empty
     /// `vlm_proposed_name`. Used by the bulk-rename UI.
+    /// Item 5: (url, tags) for every file carrying ≥1 keyword tag, so the
+    /// "Apply tags" action can write them onto the files as Finder tags (making
+    /// Spotlight + Finder search work). Aggregated per file — one FS write each.
+    public func filesWithKeywordTags() -> [(url: URL, tags: [String])] {
+        guard let q = queue else { return [] }
+        do {
+            return try q.read { db in
+                let rows = try Row.fetchAll(db, sql: """
+                    SELECT files.path_text AS path, tags.tag AS tag
+                    FROM tags
+                    INNER JOIN files ON files.id = tags.file_id
+                    WHERE files.failed = 0 AND tags.tag IS NOT NULL AND tags.tag != ''
+                    ORDER BY files.id, tags.rowid
+                    """)
+                var byPath: [String: [String]] = [:]
+                var order: [String] = []
+                for r in rows {
+                    guard let path: String = r["path"], let tag: String = r["tag"] else { continue }
+                    if byPath[path] == nil { order.append(path) }
+                    byPath[path, default: []].append(tag)
+                }
+                return order.map { (url: URL(fileURLWithPath: $0), tags: byPath[$0] ?? []) }
+            }
+        } catch {
+            reportError("filesWithKeywordTags failed: \(error)")
+            return []
+        }
+    }
+
+    /// Item 5: the person's name for file tagging — the non-empty
+    /// [title, first, middle, last, suffix] joined by single spaces, else the
+    /// legacy `name`. Byte-faithful with the Windows `ReadStore.FormatPersonTagName`
+    /// so a person is tagged IDENTICALLY on both platforms. (Deliberately NOT
+    /// `PersonRow.displayName`, which has a suffix double-space quirk and a
+    /// "Person N" fallback that must never become a file tag.)
+    static func personTagName(_ p: PersonRow) -> String {
+        let parts = [p.title, p.firstName, p.middleName, p.lastName, p.suffix]
+            .compactMap { $0?.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        if !parts.isEmpty { return parts.joined(separator: " ") }
+        return (p.name ?? "").trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Item 5: (url, names) for every file containing ≥1 NAMED person, so the
+    /// "Apply people as tags" action can write the person names onto the files.
+    /// Skips Unknown / unnamed clusters. Aggregated per file.
+    public func filesWithPersonTags() -> [(url: URL, names: [String])] {
+        let named = persons(includeUnknown: false).filter { $0.hasAnyName && !$0.isUnknown }
+        guard !named.isEmpty else { return [] }
+        var byPath: [String: [String]] = [:]
+        var order: [String] = []
+        for person in named {
+            let name = Self.personTagName(person)
+            guard !name.isEmpty else { continue }
+            for file in files(forPersonID: person.id, limit: 1_000_000) {
+                let path = file.pathText
+                if byPath[path] == nil { order.append(path) }
+                if !(byPath[path]?.contains(name) ?? false) {
+                    byPath[path, default: []].append(name)
+                }
+            }
+        }
+        return order.map { (url: URL(fileURLWithPath: $0), names: byPath[$0] ?? []) }
+    }
+
     public func filesWithProposedNames(limit: Int = 1000) -> [FileRow] {
         guard let q = queue else { return [] }
         do {

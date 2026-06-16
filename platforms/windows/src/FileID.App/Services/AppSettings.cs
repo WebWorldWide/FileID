@@ -71,6 +71,11 @@ internal sealed class AppSettings
     /// on subsequent launches if any required model is missing.</summary>
     public bool WelcomeSheetSeen { get; set; } = false;
 
+    /// <summary>Item 4: the lay-person "Tagging vs. Deep Analyze" explainer
+    /// banner has been dismissed. Mirrors macOS @AppStorage("hideDeepAnalyzeExplainer").
+    /// Once true the banner stays hidden across launches.</summary>
+    public bool HideDeepAnalyzeExplainer { get; set; } = false;
+
     /// <summary>Opt out of the silent CUDA llama.cpp install that fires
     /// when the engine reports an NVIDIA GPU. False (the default) means
     /// auto-install is enabled — Deep Analyze gets the 15-25% faster

@@ -215,6 +215,15 @@ struct PeopleView: View {
         return !persons.contains { $0.hasAnyName }
     }
 
+    /// Item 2: true once at least one cluster is named (and nothing's running).
+    /// Gates the positive "Continue to Deep Analyze" forward affordance — the
+    /// counterpart to canSkipNaming. Mutually exclusive with it in the header.
+    private var canContinueToDeepAnalyze: Bool {
+        guard !persons.isEmpty else { return false }
+        guard !engine.deepAnalyzeInFlight else { return false }
+        return persons.contains { $0.hasAnyName }
+    }
+
     @ViewBuilder
     private var headerActions: some View {
         if mergeMode || unknownMode {
@@ -339,6 +348,8 @@ struct PeopleView: View {
             // visible enough that it's discoverable.
             if canSkipNaming {
                 skipNamingRow
+            } else if canContinueToDeepAnalyze {
+                continueToDeepAnalyzeRow
             }
         }
         .padding(.horizontal, 20)
@@ -377,6 +388,40 @@ struct PeopleView: View {
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.20), lineWidth: 0.5))
+    }
+
+    /// Item 2: positive "keep moving" affordance — once at least one person is
+    /// named, advance straight to Deep Analyze (which uses those names in its
+    /// captions + smart filenames). The forward counterpart to skipNamingRow:
+    /// "if they have named someone, switch it to continue."
+    @ViewBuilder
+    private var continueToDeepAnalyzeRow: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "checkmark.seal.fill")
+                .foregroundStyle(Theme.gold)
+                .font(.callout)
+            Text("Names set — keep going.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Button {
+                let modelKind = DeepAnalyzeSettings.shared.activeKind.rawValue
+                engine.deepAnalyzeAll(modelKind: modelKind, skipExisting: true)
+                onSwitchTab(.deep)
+            } label: {
+                Label("Continue to Deep Analyze", systemImage: "arrow.forward.circle.fill")
+                    .font(.caption.bold())
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .background(Capsule().fill(Theme.gold))
+                    .foregroundStyle(.black)
+            }
+            .buttonStyle(.plain)
+            .disabled(engine.deepAnalyzeInFlight || !engine.deepAnalyzeAvailable)
+            .help("Generate captions and smart filenames using the names you've set.")
+            Spacer()
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.gold.opacity(0.10)))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.gold.opacity(0.30), lineWidth: 0.5))
     }
 
     private var headerSubtitle: String {

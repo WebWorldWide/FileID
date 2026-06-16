@@ -143,6 +143,12 @@ public enum Tagging {
                     }
 
                     let phash = computeDHash(cgImage)
+                    // Byte-exact identity for Cleanup's literal-duplicate detection
+                    // (item 1) — computed from the file bytes, lockstep in structure
+                    // with the Windows engine's content_hash. nil on read error, in
+                    // which case the file simply won't participate in dedup.
+                    let contentHash = ContentHash.compute(
+                        url: url, size: UInt64(max(0, discovered.sizeBytes)))
                     let aesthetic = lightweightAesthetic(cgImage: cgImage, fileSizeMB: sizeMB)
 
                     // CLIP image embedding — internally bounded by inferenceSem.
@@ -191,6 +197,7 @@ public enum Tagging {
                         visionTags: enrichedTags,
                         tagScores: tagScores,
                         phash: phash,
+                        contentHash: contentHash,
                         aestheticScore: aesthetic,
                         hasFaces: pass.faceCount > 0,
                         facePrints: pass.facePrints,

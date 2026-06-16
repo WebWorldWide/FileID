@@ -114,6 +114,13 @@ struct RestructureView: View {
         let bucket: String        // destination bucket (e.g. "People/Marie Curie")
         let sourceFolder: String  // current parent folder (for "from X" display)
         let kind: ProposalKind
+        // Butler confidence band ("auto"/"review"/"ask", "" when unstamped) + the
+        // engine's plain-language "why filed here". Surfaced per the deep-research
+        // finding that showing confidence + reason is the #1 trust signal. (item D1)
+        var confidence: String = ""
+        var reason: String? = nil
+        /// True for the top "auto" band — drives the "Select confident" helper.
+        var isHighConfidence: Bool { confidence.lowercased() == "auto" }
     }
 
     struct Group: Identifiable {
@@ -857,8 +864,16 @@ struct RestructureView: View {
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1).truncationMode(.head)
+                // Item D1: the engine's plain-language "why filed here".
+                if let reason = p.reason, !reason.isEmpty {
+                    Text(reason)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.tail)
+                }
             }
             Spacer()
+            confidenceBadge(p.confidence)
         }
         .contentShape(Rectangle())
         .onTapGesture {
@@ -868,6 +883,36 @@ struct RestructureView: View {
         .accessibilityLabel("Move \(filename) from \(p.sourceFolder) to \(p.bucket)")
         .accessibilityAddTraits([.isButton, on ? .isSelected : []])
         .accessibilityHint(on ? "Selected. Tap to skip." : "Tap to include in the next apply.")
+    }
+
+    /// Item D1: at-a-glance confidence badge for a proposed move. The research's
+    /// #1 UX pattern — tier auto/review/ask so the user trusts the sure ones and
+    /// scrutinizes the unsure. Nothing shown when the engine didn't stamp a band
+    /// (rule-cascade moves), so it never adds noise.
+    @ViewBuilder
+    private func confidenceBadge(_ confidence: String) -> some View {
+        switch confidence.lowercased() {
+        case "auto":
+            Image(systemName: "checkmark.seal.fill")
+                .foregroundStyle(Theme.gold)
+                .font(.caption)
+                .help("High confidence — safe to apply.")
+                .accessibilityLabel("High confidence")
+        case "review":
+            Image(systemName: "questionmark.circle")
+                .foregroundStyle(.orange)
+                .font(.caption)
+                .help("Medium confidence — worth a look.")
+                .accessibilityLabel("Medium confidence — review")
+        case "ask":
+            Image(systemName: "hand.raised")
+                .foregroundStyle(.secondary)
+                .font(.caption)
+                .help("Low confidence — review before applying.")
+                .accessibilityLabel("Low confidence — ask")
+        default:
+            EmptyView()
+        }
     }
 
     /// SF Symbol for a filename based on its extension. Helps the user
@@ -1028,7 +1073,9 @@ struct RestructureView: View {
                 bucket: bucketLabel(destination: m.destination,
                                     root: plan.libraryRoot, fallback: m.category),
                 sourceFolder: (m.source as NSString).deletingLastPathComponent,
-                kind: kind(forTier: m.tier))
+                kind: kind(forTier: m.tier),
+                confidence: m.confidence,
+                reason: m.reason)
         }
     }
 

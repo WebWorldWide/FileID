@@ -70,9 +70,9 @@ public struct FileRow: Sendable, Hashable, Identifiable, Codable {
     public var isVideo: Bool { kind == "video" }
 }
 
-/// Duplicate group — files sharing the same phash.
+/// Duplicate group — files sharing the same byte-exact content_hash (item 1).
 public struct DuplicateGroup: Sendable, Identifiable, Hashable {
-    public let id: Int64           // phash
+    public let id: Int64           // first 8 bytes of the group's content_hash
     public let files: [FileRow]    // sorted by keeperRank descending (best first)
     public init(id: Int64, files: [FileRow]) {
         self.id = id

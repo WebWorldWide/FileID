@@ -114,11 +114,25 @@ public enum RestructureSemantic {
         return v
     }
 
+    /// SOTA single-knob (HDBSCAN `min_cluster_size` philosophy, deep-research
+    /// 2026-06-16): one `FILEID_RESTRUCTURE_GRANULARITY` ∈ {loose, normal, tight}
+    /// shifts the cluster cosines so the owner tunes folder count with ONE lever.
+    /// Loose = lower bar = broader / fewer folders; tight = higher = more. Applied
+    /// identically on both engines so the chosen granularity round-trips.
+    static func granularityDelta() -> Float {
+        switch ProcessInfo.processInfo.environment["FILEID_RESTRUCTURE_GRANULARITY"] {
+        case "loose": return -0.05
+        case "tight": return 0.05
+        default: return 0.0   // "normal" / unset
+        }
+    }
+
     private static func fileHyperparams() -> IdentityClustering.Hyperparameters {
         // Looser than faces: a semantic group is broader than one identity.
-        IdentityClustering.Hyperparameters(
-            pass1Cosine: 0.50, pass2Cosine: 0.40, pass2Margin: 0.08,
-            pass3VarianceThreshold: 0.06, pass3MinMeanCosine: 0.42,
+        let d = granularityDelta()
+        return IdentityClustering.Hyperparameters(
+            pass1Cosine: 0.50 + d, pass2Cosine: 0.40 + d, pass2Margin: 0.08,
+            pass3VarianceThreshold: 0.06, pass3MinMeanCosine: 0.42 + d,
             pass3MaxSplits: 5, kNN: 12)
     }
 

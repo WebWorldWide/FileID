@@ -30,6 +30,8 @@
 // inside `library_root`. We refuse to write outside the user's chosen
 // library — even if the planner is buggy or someone forges a payload.
 
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -95,9 +97,18 @@ impl RestructureApply {
 
         let mut applied = 0u32;
         let mut failed = 0u32;
-        // Inverse of every successful real move (current → original), flushed to
-        // the undo journal at the end so "Undo last run" can reverse this batch. (R2)
-        let mut undo_entries: Vec<(i64, String, String)> = Vec::new();
+        // Inverse of every successful real move (current → original), appended to
+        // the undo journal AS IT HAPPENS so "Undo last run" can reverse this batch —
+        // and so a crash mid-apply still leaves every COMPLETED move undoable. (The
+        // prior design buffered in memory and wrote once after the loop, losing the
+        // whole batch's undo on a crash.) Best-effort: a journal that won't open
+        // just disables undo, exactly as before. (R2 → crash-safe)
+        let mut journal = if record_undo {
+            Self::open_undo_journal_truncating()
+        } else {
+            None
+        };
+        let mut undo_count = 0usize;
         // B3: destinations claimed earlier in THIS batch, so two distinct
         // sources that map to the same basename don't collide before either
         // touches disk.
@@ -234,13 +245,23 @@ impl RestructureApply {
                             std::path::Path::new(&m.source),
                             &final_dest,
                         );
-                        // Record the inverse (final → original) for undo. Real
-                        // moves only — symlink mode doesn't relocate the file. (R2)
-                        undo_entries.push((
-                            m.file_id,
-                            final_dest.to_string_lossy().to_string(),
-                            m.source.clone(),
-                        ));
+                        // Record the inverse (final → original) for undo, durably.
+                        // Real moves only — symlink mode doesn't relocate the file.
+                        // Appended + periodically fsync'd so a crash on a later move
+                        // can't lose this one's undoability. (R2 → crash-safe)
+                        if let Some(j) = journal.as_mut() {
+                            Self::append_undo_entry(
+                                j,
+                                m.file_id,
+                                &final_dest.to_string_lossy(),
+                                &m.source,
+                            );
+                            undo_count += 1;
+                            if undo_count % APPLY_PROGRESS_INTERVAL == 0 {
+                                let _ = j.flush();
+                                let _ = j.get_ref().sync_all();
+                            }
+                        }
                     }
                     applied += 1;
                 }
@@ -263,12 +284,13 @@ impl RestructureApply {
             }
         }
 
-        // Persist the inverse-move journal (truncating → last run only) so the app
-        // can offer a one-click "Undo last run". Best-effort. Skipped during an undo
-        // run (record_undo=false) so a CANCELLED undo leaves the ORIGINAL journal
-        // intact — the user can re-run undo to finish the remainder. (R2)
-        if record_undo {
-            Self::write_undo_journal(&undo_entries);
+        // Final durability barrier — flush + fsync the remaining buffered entries
+        // so the journal is complete on a clean finish. (None during an undo run,
+        // record_undo=false, so a CANCELLED undo leaves the ORIGINAL journal intact
+        // and the user can re-run undo to finish the remainder.) (R2 → crash-safe)
+        if let Some(mut j) = journal {
+            let _ = j.flush();
+            let _ = j.get_ref().sync_all();
         }
         Ok(RestructureApplyResult { applied, failed, privilege_error: None })
     }
@@ -281,21 +303,28 @@ impl RestructureApply {
             .and_then(|t| t.parent().map(|d| d.join("restructure_undo.ndjson")))
     }
 
-    fn write_undo_journal(entries: &[(i64, String, String)]) {
-        let Some(path) = Self::undo_journal_path() else {
-            return;
-        };
+    /// Open the undo journal truncating (fresh batch). Returns a buffered writer
+    /// each completed move's inverse is appended to, so the journal is durable
+    /// incrementally rather than written once after the loop. (R2 → crash-safe)
+    fn open_undo_journal_truncating() -> Option<BufWriter<File>> {
+        let path = Self::undo_journal_path()?;
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let mut out = String::new();
-        for (file_id, from, to) in entries {
-            out.push_str(
-                &serde_json::json!({ "file_id": file_id, "from": from, "to": to }).to_string(),
-            );
-            out.push('\n');
-        }
-        let _ = std::fs::write(&path, out);
+        let f = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .ok()?;
+        Some(BufWriter::new(f))
+    }
+
+    /// Append one inverse-move entry (NDJSON) to the open journal — the same
+    /// on-disk format `read_undo_journal` parses: `{file_id, from, to}` per line.
+    fn append_undo_entry(j: &mut BufWriter<File>, file_id: i64, from: &str, to: &str) {
+        let line = serde_json::json!({ "file_id": file_id, "from": from, "to": to }).to_string();
+        let _ = writeln!(j, "{line}");
     }
 
     fn read_undo_journal() -> Vec<(i64, String, String)> {
@@ -347,8 +376,37 @@ impl RestructureApply {
             if let Some(path) = Self::undo_journal_path() {
                 let _ = std::fs::remove_file(path);
             }
+            // Reversibility completeness: undo shouldn't leave the orphan empty group
+            // folders apply created. Best-effort, deepest-first.
+            Self::cleanup_empty_dirs(&entries, &self.library_root);
         }
         Ok(result)
+    }
+
+    /// Remove the empty group folders an apply created, after its undo restored the
+    /// files. `std::fs::remove_dir` only succeeds on an EMPTY dir, so user files are
+    /// never at risk; we additionally stay strictly inside the library root and never
+    /// touch the root itself. Deepest-first so nested empties fully collapse.
+    /// Best-effort. (R2 → reversibility completeness)
+    fn cleanup_empty_dirs(entries: &[(i64, String, String)], root: &Path) {
+        let mut dirs: Vec<&Path> = entries
+            .iter()
+            .filter_map(|(_, from, _)| Path::new(from).parent())
+            .collect();
+        dirs.sort_unstable();
+        dirs.dedup();
+        // Deepest path first so a nested chain collapses bottom-up.
+        dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
+        for dir in dirs {
+            let mut cur = dir.to_path_buf();
+            while cur.as_path() != root && cur.starts_with(root) && std::fs::remove_dir(&cur).is_ok()
+            {
+                match cur.parent() {
+                    Some(p) => cur = p.to_path_buf(),
+                    None => break,
+                }
+            }
+        }
     }
 }
 

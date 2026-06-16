@@ -111,6 +111,7 @@ pub async fn analyze_file(
     model_kind: &str,
     mode: AnalyzeMode,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    face_names: &[String],
     mut on_token: impl FnMut(&str),
 ) -> anyhow::Result<AnalyzeOutcome> {
     use crate::models::vlm::{self, CaptionRequest};
@@ -138,7 +139,7 @@ pub async fn analyze_file(
             gguf_path: gguf.clone(),
             mmproj_path: mmproj.clone(),
             image_path: rasterized.clone(),
-            prompt: vlm::CAPTION_PROMPT.to_string(),
+            prompt: vlm::caption_prompt_with_faces(face_names),
             max_tokens: 80,
             greedy: true,
         };
@@ -174,12 +175,12 @@ pub async fn analyze_file(
             gguf_path: gguf,
             mmproj_path: mmproj,
             image_path: rasterized,
-            prompt: vlm::RENAME_PROMPT.to_string(),
+            prompt: vlm::rename_prompt_with_faces(face_names),
             max_tokens: 30,
             greedy: true,
         };
         let result = vlm::caption(runner, &req, cancel.clone(), |_| {}).await?;
-        proposed_name = Some(sanitize_proposed_name(&result.text));
+        proposed_name = Some(apply_person_prefix(&sanitize_proposed_name(&result.text), face_names));
     }
 
     // Persist caption + proposed name (v3 `files` columns) + VLM tags.
@@ -408,6 +409,7 @@ pub(crate) async fn analyze_file_via_server(
     model_kind: &str,
     mode: AnalyzeMode,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    face_names: &[String],
     mut on_token: impl FnMut(&str),
 ) -> anyhow::Result<AnalyzeOutcome> {
     use crate::models::vlm;
@@ -425,7 +427,8 @@ pub(crate) async fn analyze_file_via_server(
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
-        let d = complete_cancellable(server, &rasterized, vlm::CAPTION_PROMPT, 80, &cancel).await?;
+        let cap_prompt = vlm::caption_prompt_with_faces(face_names);
+        let d = complete_cancellable(server, &rasterized, &cap_prompt, 80, &cancel).await?;
         on_token(&d);
         description = Some(d);
     }
@@ -447,8 +450,12 @@ pub(crate) async fn analyze_file_via_server(
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
-        proposed_name = Some(sanitize_proposed_name(
-            &complete_cancellable(server, &rasterized, vlm::RENAME_PROMPT, 30, &cancel).await?,
+        let ren_prompt = vlm::rename_prompt_with_faces(face_names);
+        proposed_name = Some(apply_person_prefix(
+            &sanitize_proposed_name(
+                &complete_cancellable(server, &rasterized, &ren_prompt, 30, &cancel).await?,
+            ),
+            face_names,
         ));
     }
 
@@ -556,6 +563,44 @@ async fn rasterize_pdf_page(_path: &std::path::Path) -> anyhow::Result<std::path
 /// Clean up a VLM-proposed filename: lowercase, hyphen-separated, strip
 /// quotes / extension / extra punctuation. The model usually obeys the
 /// prompt but defensive normalization saves a round-trip.
+/// Deterministically prefix the named people onto the VLM proposed filename so
+/// they ALWAYS land (the model treats the prompt hint as optional, so names often
+/// never reach the FILENAME). Each person's first-name token — lowercase
+/// ASCII-alphanumeric, ≥2 chars, deduped against words already in the name and
+/// against each other, capped at 3 sorted alphabetically — is prefixed, then the
+/// whole thing is re-sanitized. Byte-faithful with the Swift engine's
+/// `applyPersonPrefix`. (item 3)
+pub(crate) fn apply_person_prefix(name: &str, person_names: &[String]) -> String {
+    if name.is_empty() {
+        return name.to_string();
+    }
+    let existing: std::collections::HashSet<String> = name
+        .to_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_string())
+        .collect();
+    let mut tokens: Vec<String> = Vec::new();
+    for display in person_names {
+        let first_word = display.split_whitespace().next().unwrap_or("");
+        let token: String = first_word
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect();
+        if token.chars().count() < 2 || existing.contains(&token) || tokens.contains(&token) {
+            continue;
+        }
+        tokens.push(token);
+    }
+    if tokens.is_empty() {
+        return name.to_string();
+    }
+    tokens.sort();
+    tokens.truncate(3);
+    sanitize_proposed_name(&format!("{} {}", tokens.join(" "), name))
+}
+
 fn sanitize_proposed_name(raw: &str) -> String {
     let trimmed = raw.trim().trim_matches('"').trim_matches('\'').trim();
     let lowered = trimmed.to_lowercase();

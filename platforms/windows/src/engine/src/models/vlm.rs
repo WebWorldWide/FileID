@@ -34,6 +34,36 @@ pub const RENAME_PROMPT: &str = "Suggest a 3 to 5 word lowercase filename that n
 /// otherwise drift toward vague labels like "photo" / "object".
 pub const TAG_PROMPT: &str = "Give 1 or 2 specific lowercase tags naming the main subject of this image (for example: golden retriever, mountain lake, birthday cake, sushi platter). Use concrete nouns. Do not use generic words like photo, image, picture, object, thing, scene, background, location, or text. Comma-separated, no sentences, no numbering.";
 
+/// Caption prompt with the named people in the image injected so the VLM refers
+/// to them by name. Plain prompt when no one is named. Mirrors the macOS
+/// `nameContext` injection. (item 3)
+pub fn caption_prompt_with_faces(face_names: &[String]) -> String {
+    if face_names.is_empty() {
+        CAPTION_PROMPT.to_string()
+    } else {
+        format!(
+            "{} The known people in this image are: {}. Refer to them by these names.",
+            CAPTION_PROMPT,
+            face_names.join(", ")
+        )
+    }
+}
+
+/// Rename prompt with the named people injected. A deterministic prefix is also
+/// applied after generation (`apply_person_prefix`), so the names land even when
+/// the model ignores this hint. (item 3)
+pub fn rename_prompt_with_faces(face_names: &[String]) -> String {
+    if face_names.is_empty() {
+        RENAME_PROMPT.to_string()
+    } else {
+        format!(
+            "{} If any of these people are present, include their names: {}.",
+            RENAME_PROMPT,
+            face_names.join(", ")
+        )
+    }
+}
+
 #[derive(Debug)]
 pub struct VlmRunner {
     pub binary: PathBuf,

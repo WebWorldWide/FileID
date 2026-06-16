@@ -126,14 +126,30 @@ const FILENAME_STOPWORDS: &[&str] = &[
 ];
 
 /// Density-clustering hyperparameters for *files* (looser than faces: a
-/// semantic group is broader than one identity). Provisional.
+/// semantic group is broader than one identity).
+///
+/// SOTA single-knob (HDBSCAN `min_cluster_size` philosophy, deep-research 2026-06-16):
+/// one `FILEID_RESTRUCTURE_GRANULARITY` ∈ {loose, normal, tight} shifts the cluster
+/// cosines so the owner tunes folder count with ONE lever instead of many opaque
+/// thresholds. Loose = lower cosine bar = broader / fewer folders; tight = higher
+/// bar = narrower / more folders. Applied identically on both engines so the
+/// chosen granularity round-trips cross-platform.
+pub fn granularity_delta() -> f32 {
+    match std::env::var("FILEID_RESTRUCTURE_GRANULARITY").as_deref() {
+        Ok("loose") => -0.05,
+        Ok("tight") => 0.05,
+        _ => 0.0, // "normal" / unset
+    }
+}
+
 fn file_hyperparams() -> Hyperparameters {
+    let d = granularity_delta();
     Hyperparameters {
-        pass1_cosine: 0.50,
-        pass2_cosine: 0.40,
+        pass1_cosine: 0.50 + d,
+        pass2_cosine: 0.40 + d,
         pass2_margin: 0.08,
         pass3_variance_threshold: 0.06,
-        pass3_min_mean_cosine: 0.42,
+        pass3_min_mean_cosine: 0.42 + d,
         pass3_max_splits: 5,
         k_nn: 12,
     }
