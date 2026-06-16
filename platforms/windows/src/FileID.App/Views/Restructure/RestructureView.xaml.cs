@@ -112,6 +112,7 @@ public sealed partial class RestructureView : UserControl
         {
             _ = RefreshDeepAnalyzeHintAsync();
             if (_unloaded) return;
+            SyncUndoAffordance();   // R2: reflect any pending undoable run on open
             if (EngineClient.Instance.LastRestructurePlan is not null)
             {
                 SyncPlan();
@@ -153,6 +154,10 @@ public sealed partial class RestructureView : UserControl
                 case nameof(EngineClient.LastRestructureApplyResult):
                     DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
                     DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncApplyResult(); });
+                    break;
+                case nameof(EngineClient.CanUndoRestructure):
+                    DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
+                    DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncUndoAffordance(); });
                     break;
                 case nameof(EngineClient.LastError):
                     DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
@@ -676,6 +681,38 @@ public sealed partial class RestructureView : UserControl
                 "Your files were not touched. Try restarting the app, then apply again.");
         }
     }
+
+    // R2 reversibility: show/hide the "Undo last run" button from the engine's
+    // CanUndoRestructure flag (set after an apply that moved files, cleared once
+    // undone). Mirrors macOS RestructureView's canUndoRestructure affordance.
+    private void SyncUndoAffordance()
+    {
+        var canUndo = EngineClient.Instance.CanUndoRestructure;
+        UndoButton.Visibility = canUndo ? Visibility.Visible : Visibility.Collapsed;
+        UndoButton.IsEnabled = canUndo;
+    }
+
+    private async void OnUndoClicked(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnUndoClicked), async () =>
+        {
+            var root = EngineClient.Instance.LastRestructurePlan?.LibraryRoot
+                       ?? AppViewModel.Instance.FolderPath;
+            if (string.IsNullOrEmpty(root)) return;
+            UndoButton.IsEnabled = false;
+            ApplyStatusText.Text = "Undoing the last restructure…";
+            try
+            {
+                await EngineClient.Instance.UndoRestructureAsync(root!);
+            }
+            catch (Exception ex)
+            {
+                // A faulted send (engine respawning) — re-enable so the button
+                // isn't stuck, mirroring the apply path's fault handling.
+                DebugLog.Warn("Undo restructure send failed: " + ex.Message);
+                ApplyStatusText.Text = "Engine is unavailable — try again in a moment.";
+                UndoButton.IsEnabled = true;
+            }
+        });
 
     private void SyncApplyResult()
     {
