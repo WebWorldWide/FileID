@@ -195,6 +195,15 @@ struct DeepAnalyzeView: View {
     @State private var bulkRenameSheetOpen = false
     @State private var pendingRenameCount: Int = 0
 
+    // Item 4: lay-person explainer distinguishing automatic in-scan Tagging
+    // from the opt-in Deep Analyze pass. Dismissible; stays hidden once read.
+    @AppStorage("hideDeepAnalyzeExplainer") private var hideExplainer = false
+
+    // Item 5: "Apply to your files" — write tags / people / smart names onto the
+    // actual files. Single in-flight gate + a short result line.
+    @State private var applyInFlight = false
+    @State private var applyStatus: String? = nil
+
     // R6-02: cached. body re-evaluates at the 4 Hz deepAnalyzeProgress rate during
     // a run, and these fed synchronous SQLite COUNT(*) on the main thread on every
     // pass (multi-hour overnight runs). Refreshed on the same coarse triggers as
@@ -224,6 +233,9 @@ struct DeepAnalyzeView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 header
+                if !hideExplainer {
+                    explainerCard
+                }
                 if !engine.deepAnalyzeAvailable {
                     unavailableCard
                 }
@@ -235,6 +247,9 @@ struct DeepAnalyzeView: View {
                 // bulk-rename trigger anywhere else split the workflow.
                 if pendingRenameCount > 0 {
                     smartNamesCard
+                }
+                if pendingTotals.total > 0 || pendingRenameCount > 0 || hasNamedAnyone {
+                    applyActionsCard
                 }
                 // Show a "Starting…" card the instant Deep Analyze is
                 // requested, even before the first progress event lands.
@@ -288,6 +303,142 @@ struct DeepAnalyzeView: View {
     private func refreshStatusCounts() {
         pendingTotals = store.deepAnalyzePending(modelKey: settings.activeKind.rawValue)
         hasNamedAnyone = store.namedPersonCount() > 0
+    }
+
+    // Item 4: plain-language explanation of the two AI passes so non-technical
+    // users don't conflate automatic in-scan tagging with the heavier, opt-in
+    // Deep Analyze step. Dismissible.
+    private var explainerCard: some View {
+        GlassCard {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "sparkles")
+                    .font(.title3)
+                    .foregroundStyle(Theme.gold)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Tagging vs. Deep Analyze")
+                        .font(.headline)
+                    Text("Tagging runs automatically as you scan — it adds quick keyword tags (like sunset, beach, dog) so search works. Deep Analyze is an optional, heavier step: it reads each photo, writes a full sentence describing it, and suggests a smart filename — using the people you've named.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                Button {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                        hideExplainer = true
+                    }
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .help("Hide this explanation")
+            }
+        }
+    }
+
+    // Item 5: write Deep Analyze + tagging output onto the actual files —
+    // separate actions for keyword tags and named people, plus Apply all (which
+    // also renames to the smart names). Smart-name review lives in
+    // smartNamesCard above. Tag writes are additive (never clobber the user's
+    // own Finder tags) and reversible by removing the tag.
+    private var applyActionsCard: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    Image(systemName: "square.and.arrow.down.on.square")
+                        .foregroundStyle(Theme.gold)
+                    Text("Apply to your files").font(.headline)
+                    Spacer()
+                    if applyInFlight { ProgressView().controlSize(.small) }
+                }
+                Text("Write what FileID found onto the files themselves. Tags and people are added as Finder tags so Spotlight and Finder search find your photos; Apply all also renames to the smart names.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 10) {
+                    secondaryApplyButton("Apply tags", systemImage: "tag",
+                                         disabled: applyInFlight) { runApply(.tags) }
+                    secondaryApplyButton("Apply people as tags", systemImage: "person.crop.square",
+                                         disabled: applyInFlight || !hasNamedAnyone) { runApply(.people) }
+                }
+                Button { runApply(.all) } label: {
+                    Label("Apply all", systemImage: "checkmark.circle.fill")
+                        .font(.callout.bold())
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.gold))
+                        .foregroundStyle(.black)
+                }
+                .buttonStyle(.plain)
+                .disabled(applyInFlight)
+                if let applyStatus {
+                    Text(applyStatus).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func secondaryApplyButton(_ title: String, systemImage: String,
+                                      disabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .font(.caption.bold())
+                .padding(.horizontal, 12).padding(.vertical, 7)
+                .frame(maxWidth: .infinity)
+                .background(RoundedRectangle(cornerRadius: 8).stroke(Theme.gold.opacity(0.6), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+    }
+
+    enum ApplyScope { case tags, people, all }
+
+    /// Runs the requested apply off the main thread (DB read + FS writes) and
+    /// reports a short summary. `.all` renames to smart names, then writes
+    /// keyword tags + people tags.
+    private func runApply(_ scope: ApplyScope) {
+        guard !applyInFlight else { return }
+        applyInFlight = true
+        applyStatus = "Applying…"
+        let store = self.store
+        Task { @MainActor in
+            var summary: [String] = []
+            if scope == .all {
+                let renamed = await Task.detached(priority: .userInitiated) {
+                    let pending = store.filesWithProposedNames()
+                    return pending.isEmpty ? 0 : store.applyProposedNamesBulk(pending).renamed.count
+                }.value
+                if renamed > 0 { summary.append("\(renamed) renamed") }
+            }
+            if scope == .tags || scope == .all {
+                let n = await Task.detached(priority: .userInitiated) {
+                    Self.writeTags(store.filesWithKeywordTags())
+                }.value
+                if n > 0 { summary.append("\(n) tagged") }
+            }
+            if scope == .people || scope == .all {
+                let n = await Task.detached(priority: .userInitiated) {
+                    Self.writeTags(store.filesWithPersonTags().map { (url: $0.url, tags: $0.names) })
+                }.value
+                if n > 0 { summary.append("\(n) people-tagged") }
+            }
+            applyInFlight = false
+            applyStatus = summary.isEmpty
+                ? "Nothing to apply yet."
+                : "Done — " + summary.joined(separator: ", ") + "."
+            refreshPendingRenameCount()
+            refreshStatusCounts()
+        }
+    }
+
+    /// Additively write each file's tags as Finder tags. Returns the number of
+    /// files that ended up modified. Runs on a detached task (FS writes).
+    private static func writeTags(_ items: [(url: URL, tags: [String])]) -> Int {
+        var changed = 0
+        for item in items where !item.tags.isEmpty {
+            if (try? TagWriter.addTags(item.tags, at: item.url)) != nil { changed += 1 }
+        }
+        return changed
     }
 
     private var smartNamesCard: some View {

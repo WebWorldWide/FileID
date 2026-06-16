@@ -38,6 +38,7 @@ public struct TaggedFile: Sendable {
     /// tags (no score). DBWriter writes a NULL score for any tag not present here.
     public var tagScores: [String: Double]?
     public var phash: UInt64?                // dHash (0 = none / failed)
+    public var contentHash: Data?            // SHA-256 byte-exact identity (item 1); nil for non-images / read error
     public var aestheticScore: Double?       // 0..1
     public var hasFaces: Bool
     public var facePrints: [Data]            // archived VNFaceObservation feature prints
@@ -79,6 +80,7 @@ public struct TaggedFile: Sendable {
         createdAt: Date?, modifiedAt: Date?,
         fileRef: UInt64? = nil,
         visionTags: [String] = [], tagScores: [String: Double]? = nil, phash: UInt64? = nil,
+        contentHash: Data? = nil,
         aestheticScore: Double? = nil, hasFaces: Bool = false,
         facePrints: [Data] = [], faceBBoxes: [String] = [],
         faceQualities: [Double] = [],
@@ -102,6 +104,7 @@ public struct TaggedFile: Sendable {
         self.visionTags = visionTags
         self.tagScores = tagScores
         self.phash = phash
+        self.contentHash = contentHash
         self.aestheticScore = aestheticScore
         self.hasFaces = hasFaces
         self.facePrints = facePrints
@@ -527,9 +530,11 @@ public actor DBWriter {
         //   originally-recorded creation time, and aesthetic is scored elsewhere.
         //   file_ref binds the volume-local inode (st_ino) computed at discovery,
         //   stored bit-for-bit as the Windows `r as i64` (Int64(bitPattern:)) for
-        //   cross-platform byte-parity; content_hash stays NULL (no BLAKE3 on the
-        //   macOS scan path — a separate deferred decision). COALESCE preserves a
-        //   previously-stored identity when the incoming value is NULL.
+        //   cross-platform byte-parity; content_hash is SHA-256 (item 1) — the
+        //   structure matches Windows (full ≤16 MB; composite above) but the
+        //   primitive is SHA-256 not BLAKE3, so the values are macOS-local while
+        //   the dedup behavior matches. COALESCE preserves a previously-stored
+        //   identity when the incoming value is NULL.
         try db.cachedStatement(sql: """
             INSERT INTO files
               (path_text, path_hash, path_search, size_bytes, created_at,
@@ -574,7 +579,7 @@ public actor DBWriter {
                 file.locationLon,
                 file.failed ? 1 : 0,
                 file.errorMessage,
-                nil,
+                file.contentHash,
                 file.fileRef.map { Int64(bitPattern: $0) },
                 // ?21/?22: stage-ran gates for the has_faces/has_text CASE-WHEN. A
                 // rescan that didn't run the face/text stage this pass must NOT

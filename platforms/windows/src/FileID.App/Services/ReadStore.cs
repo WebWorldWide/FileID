@@ -514,6 +514,99 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         finally { _gate.Release(); }
     }
 
+    /// <summary>Item 5: keyword tag → file ids carrying it, for the "Apply
+    /// tags" action. Grouped by tag so each distinct tag is written once across
+    /// all its files via a single applyTags command (call count bounded by the
+    /// number of distinct tags, not files).</summary>
+    public async Task<IReadOnlyDictionary<string, List<long>>> KeywordTagFileIdsAsync(CancellationToken ct)
+    {
+        var map = new Dictionary<string, List<long>>(StringComparer.Ordinal);
+        if (_connection == null) return map;
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_connection == null) return map;
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = """
+                SELECT tags.file_id, tags.tag
+                FROM tags
+                INNER JOIN files ON files.id = tags.file_id
+                WHERE files.failed = 0 AND tags.tag IS NOT NULL AND tags.tag != ''
+                """;
+            using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            {
+                long fileId = reader.GetInt64(0);
+                string tag = reader.GetString(1);
+                if (!map.TryGetValue(tag, out var ids)) { ids = new List<long>(); map[tag] = ids; }
+                ids.Add(fileId);
+            }
+            return map;
+        }
+        finally { _gate.Release(); }
+    }
+
+    /// <summary>Item 5: named-person display name → file ids containing them,
+    /// for the "Apply people as tags" action. Skips Unknown / unnamed clusters.
+    /// Display name mirrors the engine's format_person_ref (title+first, else
+    /// first, else title, else legacy name).</summary>
+    public async Task<IReadOnlyDictionary<string, List<long>>> NamedPersonFileIdsAsync(CancellationToken ct)
+    {
+        var map = new Dictionary<string, List<long>>(StringComparer.Ordinal);
+        if (_connection == null) return map;
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_connection == null) return map;
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = """
+                SELECT face_prints.file_id, persons.title, persons.first_name,
+                       persons.middle_name, persons.last_name, persons.suffix, persons.name
+                FROM persons
+                INNER JOIN face_prints ON face_prints.person_id = persons.id
+                INNER JOIN files ON files.id = face_prints.file_id
+                WHERE IFNULL(persons.is_unknown, 0) = 0
+                  AND (persons.name IS NOT NULL OR persons.first_name IS NOT NULL
+                       OR persons.title IS NOT NULL OR persons.last_name IS NOT NULL)
+                  AND files.failed = 0
+                """;
+            using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            {
+                long fileId = reader.GetInt64(0);
+                string name = FormatPersonTagName(
+                    reader.IsDBNull(1) ? null : reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3),
+                    reader.IsDBNull(4) ? null : reader.GetString(4),
+                    reader.IsDBNull(5) ? null : reader.GetString(5),
+                    reader.IsDBNull(6) ? null : reader.GetString(6));
+                if (name.Length == 0) continue;
+                if (!map.TryGetValue(name, out var ids)) { ids = new List<long>(); map[name] = ids; }
+                if (!ids.Contains(fileId)) ids.Add(fileId);
+            }
+            return map;
+        }
+        finally { _gate.Release(); }
+    }
+
+    /// <summary>Item 5: the person's name for file tagging — the non-empty
+    /// [title, first, middle, last, suffix] joined by single spaces, else the legacy
+    /// `name`. Byte-faithful with the macOS `ReadStore.personTagName` so a person is
+    /// tagged identically on both platforms.</summary>
+    private static string FormatPersonTagName(string? title, string? first, string? middle,
+                                              string? last, string? suffix, string? legacy)
+    {
+        var parts = new List<string>(5);
+        foreach (var s in new[] { title, first, middle, last, suffix })
+        {
+            var t = (s ?? "").Trim();
+            if (t.Length > 0) parts.Add(t);
+        }
+        if (parts.Count > 0) return string.Join(" ", parts);
+        return (legacy ?? "").Trim();
+    }
+
     /// <summary>count of files with a VLM-proposed name pending.
     /// Cheap (COUNT(*) on indexed/sparse column); polled by the Deep
     /// Analyze pill to know whether to show it.</summary>

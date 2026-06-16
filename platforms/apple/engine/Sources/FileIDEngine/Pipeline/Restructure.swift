@@ -483,9 +483,16 @@ public enum Restructure {
     ) async -> ApplyResult {
         let fm = FileManager.default
         let journalURL = undoJournal ?? Self.defaultUndoJournalURL
-        // Inverse of every successful move (current → original), flushed to the
-        // undo journal at the end so "Undo last run" can reverse this batch. (R2)
-        var undoEntries: [UndoEntry] = []
+        // Inverse of every successful move (current → original), appended to the
+        // undo journal AS IT HAPPENS so "Undo last run" can reverse this batch — and
+        // so a crash mid-apply still leaves every COMPLETED move undoable (the prior
+        // design buffered in memory and wrote once after the loop, losing the whole
+        // batch's undo on a crash). nil disables undo, best-effort as before.
+        // (R2 → crash-safe)
+        let undoHandle: FileHandle? = recordUndo
+            ? Self.openUndoJournalTruncating(at: journalURL) : nil
+        defer { try? undoHandle?.close() }
+        var undoCount = 0
         var moved = 0
         var skipped = 0
         var failed = 0
@@ -609,10 +616,17 @@ public enum Restructure {
             // NOT also count it failed (no double-count); it's recorded for
             // recovery (and self-heals on the next scan). (F-C3-012)
             moved += 1
-            // Record the inverse (final → original) for undo. Captured after the
-            // on-disk move succeeded but BEFORE (and regardless of) the DB update
-            // below, so undo can always move the bytes back. (R2)
-            undoEntries.append(UndoEntry(fileID: p.fileID, from: finalURL.path, to: oldURL.path))
+            // Record the inverse (final → original) for undo, durably. Captured after
+            // the on-disk move succeeded but BEFORE (and regardless of) the DB update
+            // below, so undo can always move the bytes back — appended + periodically
+            // fsync'd so a crash on a later move can't lose this one's undoability.
+            // (R2 → crash-safe)
+            if let h = undoHandle {
+                Self.appendUndoEntry(
+                    UndoEntry(fileID: p.fileID, from: finalURL.path, to: oldURL.path), to: h)
+                undoCount += 1
+                if undoCount % Self.applyProgressInterval == 0 { try? h.synchronize() }
+            }
             if finalURL.path != plannedURL.path { conflicts.append(plannedURL.path) }
             do {
                 let finalPath = finalURL.path
@@ -637,14 +651,11 @@ public enum Restructure {
                     fileID: p.fileID, src: oldURL.path, dst: finalURL.path)
             }
         }
-        // Persist the inverse-move journal (truncating → last run only) so the app
-        // can offer a one-click "Undo last run". Best-effort: an unwritable journal
-        // just means undo is unavailable, never a failed apply. Skipped during an
-        // undo run (recordUndo=false) so a CANCELLED undo leaves the ORIGINAL
-        // journal intact — the user can re-run undo to finish the remainder. (R2)
-        if recordUndo {
-            Self.writeUndoJournal(undoEntries, to: journalURL)
-        }
+        // Final durability barrier — fsync the journal so it's complete on a clean
+        // finish. (nil during an undo run, recordUndo=false, so a CANCELLED undo
+        // leaves the ORIGINAL journal intact and the user can re-run it.)
+        // (R2 → crash-safe)
+        try? undoHandle?.synchronize()
         JSONLog.shared.info(ev: "restructure_applied",
                             extra: ["moved": AnyCodable(moved),
                                     "skipped": AnyCodable(skipped),
@@ -669,19 +680,28 @@ public enum Restructure {
             .appendingPathComponent("FileID/restructure_undo.ndjson")
     }
 
-    static func writeUndoJournal(_ entries: [UndoEntry], to url: URL?) {
-        guard let url else { return }
+    /// Open the undo journal truncating (fresh batch) for incremental append, so the
+    /// journal is durable as each move completes rather than written once after the
+    /// loop. nil disables undo (best-effort). "Last run only" semantics are now
+    /// established at the START of the batch (truncate) instead of the end.
+    /// (R2 → crash-safe)
+    static func openUndoJournalTruncating(at url: URL?) -> FileHandle? {
+        guard let url else { return nil }
         try? FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        var data = Data()
-        for e in entries {
-            let obj: [String: Any] = ["file_id": e.fileID, "from": e.from, "to": e.to]
-            if let line = try? JSONSerialization.data(withJSONObject: obj) {
-                data.append(line)
-                data.append(0x0A)
-            }
-        }
-        try? data.write(to: url, options: .atomic)
+        // createFile truncates any prior run's journal to empty; the handle then
+        // opens at offset 0 (= end of the empty file), so writes append in order.
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        return try? FileHandle(forWritingTo: url)
+    }
+
+    /// Append one inverse-move entry (NDJSON) to the open journal — the same on-disk
+    /// format `readUndoJournal` parses: `{file_id, from, to}` per line.
+    static func appendUndoEntry(_ e: UndoEntry, to handle: FileHandle) {
+        let obj: [String: Any] = ["file_id": e.fileID, "from": e.from, "to": e.to]
+        guard var line = try? JSONSerialization.data(withJSONObject: obj) else { return }
+        line.append(0x0A)
+        try? handle.write(contentsOf: line)
     }
 
     static func readUndoJournal(from url: URL?) -> [UndoEntry] {
@@ -699,6 +719,31 @@ public enum Restructure {
     static func clearUndoJournal(_ url: URL?) {
         guard let url else { return }
         try? FileManager.default.removeItem(at: url)
+    }
+
+    /// Remove the empty group folders an apply created, after its undo restored the
+    /// files. Removes a dir ONLY when it has no entries (we never delete a non-empty
+    /// folder), stays strictly inside the resolved root, and never touches the root.
+    /// Deepest-first so nested empties fully collapse. Best-effort.
+    /// (R2 → reversibility completeness)
+    static func cleanupEmptyDirs(_ entries: [UndoEntry], root: URL) {
+        let fm = FileManager.default
+        let resolvedRoot = root.resolvingSymlinksInPath().standardizedFileURL.path
+        let dirs = Set(entries.map {
+            URL(fileURLWithPath: $0.from).deletingLastPathComponent().path
+        })
+        // Longer paths first ≈ deepest first, so a nested chain collapses bottom-up.
+        for d in dirs.sorted(by: { $0.count > $1.count }) {
+            var cur = URL(fileURLWithPath: d)
+            while true {
+                let curPath = cur.resolvingSymlinksInPath().standardizedFileURL.path
+                guard curPath != resolvedRoot, curPath.hasPrefix(resolvedRoot + "/") else { break }
+                let contents = (try? fm.contentsOfDirectory(atPath: cur.path)) ?? ["x"]
+                guard contents.isEmpty else { break }
+                if (try? fm.removeItem(at: cur)) == nil { break }
+                cur = cur.deletingLastPathComponent()
+            }
+        }
     }
 
     /// True when the last apply left a reversible journal — drives the app's
@@ -734,7 +779,12 @@ public enum Restructure {
         let result = await apply(proposals: inverse, database: database,
                                  libraryRoot: libraryRoot, isCancelled: isCancelled,
                                  undoJournal: journalURL, recordUndo: false)
-        if !isCancelled() { clearUndoJournal(journalURL) }
+        if !isCancelled() {
+            clearUndoJournal(journalURL)
+            // Reversibility completeness: remove the orphan empty group folders the
+            // apply created, now that undo emptied them.
+            Self.cleanupEmptyDirs(entries, root: libraryRoot)
+        }
         return result
     }
 

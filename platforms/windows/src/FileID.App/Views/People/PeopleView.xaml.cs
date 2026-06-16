@@ -95,6 +95,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         try { await ViewModel.RefreshAsync(CancellationToken.None); }
         catch (Exception ex) { DebugLog.Warn("PeopleView.OnLoaded refresh threw: " + ex.Message); }
         UpdateHiddenUnknownsFooter();
+        RefreshContinueToDeepAnalyzeBanner();
     }
 
     // ───── Hidden-unknowns footer ─────────────────────────────────────
@@ -158,6 +159,66 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         }
     }
 
+    // ───── Item 2: Continue-to-Deep-Analyze CTA ───────────────────────
+    // Shows once at least one cluster is named (and not flagged unknown) so
+    // the user is nudged forward into Deep Analyze, which uses those names in
+    // its captions + smart filenames. Mirrors macOS PeopleView's
+    // continueToDeepAnalyzeRow.
+
+    private async void RefreshContinueToDeepAnalyzeBanner()
+    {
+        if (_unloaded) return;
+        int named = 0;
+        try
+        {
+            named = await Task.Run(() =>
+            {
+                try
+                {
+                    if (!System.IO.File.Exists(AppPaths.DbPath)) return 0;
+                    using var conn = new Microsoft.Data.Sqlite.SqliteConnection(
+                        new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+                        {
+                            DataSource = AppPaths.DbPath,
+                            Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
+                        }.ToString());
+                    conn.Open();
+                    using var cmd = conn.CreateCommand();
+                    // A cluster is "named" when either `name` (legacy) or
+                    // `first_name` (v5) is set, excluding ones the user
+                    // explicitly marked unknown.
+                    cmd.CommandText =
+                        "SELECT COUNT(*) FROM persons WHERE (name IS NOT NULL OR first_name IS NOT NULL) AND IFNULL(is_unknown, 0) = 0";
+                    var v = cmd.ExecuteScalar();
+                    return v is null ? 0 : Convert.ToInt32(v);
+                }
+                catch { return 0; }
+            }).ConfigureAwait(true);
+        }
+        catch { named = 0; }
+
+        if (_unloaded) return;
+        try
+        {
+            ContinueToDeepAnalyzeBanner.Visibility =
+                named > 0 ? Visibility.Visible : Visibility.Collapsed;
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("RefreshContinueToDeepAnalyzeBanner UI update threw (view unloaded?): " + ex.Message);
+        }
+    }
+
+    private void OnContinueToDeepAnalyzeClicked(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun("PeopleView.OnContinueToDeepAnalyzeClicked", () =>
+        {
+            string model = "qwen2_5_vl_7b";
+            try { model = AppViewModel.Instance.Settings.SelectedVlmModelKind; }
+            catch { /* fall back to default model */ }
+            _ = EngineClient.Instance.DeepAnalyzeAllAsync(model, skipExisting: true);
+            AppViewModel.Instance.ActiveTab = SidebarTab.DeepAnalyze;
+        });
+
     // One-tap reveal: flips the global PeopleHideUnknown setting off and
     // refreshes. The Settings tab's toggle re-syncs to the new value next
     // time the user opens Settings. Mirrors macOS's "Show hidden" link in
@@ -192,6 +253,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         if (_unloaded) return;
         OnPropertyChanged(nameof(StatusText));
         OnPropertyChanged(nameof(FooterVisibility));
+        RefreshContinueToDeepAnalyzeBanner();
 
         // Keep select-mode wiring consistent across refreshes. The
         // identity-stable merge (PeopleViewModel.MergeByClusterId) preserves

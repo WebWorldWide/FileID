@@ -1,5 +1,51 @@
 # NEXT — resume here
 
+## 2026-06-16 — Restructure deep-research sweep: 4 verified wins landed; research-backed roadmap for the rest
+
+A `/deep-research` sweep (27 web sources → 21 verified claims) + a 3-agent codebase audit graded Restructure
+against best-in-class. **Encouraging headline: the architecture already matches or beats the documented field**
+— density clustering (HDBSCAN family), c-TF-IDF distinctive naming, a journal-backed reversible apply, and a
+barycentre Sankey are all SOTA-aligned or ahead. Several audit findings were **false positives caught by
+verification** (the image profile IS calibrated; `Path::starts_with` containment is already component-aware;
+Windows already surfaces confidence+reason in `DrillDownSheet` and already has the Undo button).
+
+**Landed + verified this session (both engines unless noted; Rust 343 + clippy, macOS build + 226):**
+- **Incremental crash-safe undo journal** — `restructure_apply.rs` / `Restructure.swift` now append each
+  inverse move to the journal as it happens (+ periodic fsync) instead of once after the loop, so a crash
+  mid-apply still leaves every completed move undoable. Directly answers the research's #1 open question
+  (the field only ships "best-effort, no crash-safety").
+- **Single folder-granularity knob** — `FILEID_RESTRUCTURE_GRANULARITY` ∈ {loose,normal,tight} shifts the
+  cluster cosines (HDBSCAN `min_cluster_size` philosophy) so the owner tunes folder count with ONE lever.
+  `granularity_delta()` / `granularityDelta()`, lockstep.
+- **Empty-dir cleanup on undo** — undo now removes the orphan empty group folders apply created
+  (`cleanup_empty_dirs` / `cleanupEmptyDirs`; `remove_dir` is empty-only, root-contained).
+- **Confidence + reason surfaced on macOS** — `RestructureView` proposal rows now show the band badge +
+  the engine's "why filed here" (Windows already did this in `DrillDownSheet`). The data was always in the
+  IPC; macOS `mapProposals` was dropping it.
+
+**Remaining restructure roadmap (priority-ordered), all research-backed:**
+- **Surface-tier the main list + "apply only high-confidence"** (both apps, polish) — the badges exist now;
+  add list ordering by band + a one-tap "select confident" so the user can apply the sure ones. SOTA: top
+  band prominent, low band hidden, never silently auto-file (reconsider the silent `Auto` tier accordingly).
+- **Name-based routing signal** (both engines) — Dropbox Smart Move's A/B showed folder + **sibling-filename**
+  similarity beats content embeddings (94% vs 90%) and a simple heuristic beat a learned model. Add a
+  name-overlap bonus to image routing in `semantic_classify` (additive; keep the calibrated content path).
+  **Needs real-data validation before defaults change.**
+- **Learn-from-corrections** (both engines, new migration vN+1) — persist approved cluster→folder decisions
+  to a `restructure_feedback` table and reuse as routing hints next plan (instance-based, SOTA-validated; NOT
+  retraining). Record-on-apply is safe/additive; hint-application is behavior-changing.
+- **Per-bucket approval + before/after tree preview** (both apps, large) — approve per destination bucket, and
+  a side-by-side resulting-structure tree as the pre-apply confirmation (R3, design in RESTRUCTURE.md).
+- **Granularity Settings slider** — wire the env knob above to a Settings "folder granularity" picker
+  (engine reads the env at spawn; the knob itself is done + verifiable today).
+- **Deep-Analyze mid-review re-plan fix** (macOS) — re-apply prior deselections by file-id to the fresh plan
+  (`RestructureView.swift:48-58`).
+- **file_ref stale-move guard** (both, narrow) — the apply stale-check is path-only; add an inode/NTFS-id
+  compare so a same-path file swap in the plan→apply window can't move the wrong bytes. Platform-specific;
+  low-frequency edge.
+- **Owner threshold calibration** — non-image thresholds are explicit placeholders; tune on the real library
+  (now via the single granularity knob). Needs the owner's hardware.
+
 ## 2026-06-16 — Whole-codebase audit done; Windows undo button landed; only cosmetic P2s + R3 remain
 
 A 6-agent adversarial audit swept the whole codebase. Security + ML + data-integrity slices are

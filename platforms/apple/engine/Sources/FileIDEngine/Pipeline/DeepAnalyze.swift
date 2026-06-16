@@ -638,7 +638,7 @@ public actor DeepAnalyze {
         // per-image temporary tensors. After BOTH passes (caption + tags).
         MLX.GPU.clearCache()
         return AnalysisResult(description: parsed.description,
-                              proposedName: parsed.proposedName,
+                              proposedName: Self.applyPersonPrefix(parsed.proposedName, faceNames: faceNames),
                               tags: vlmTags)
     }
 
@@ -708,6 +708,31 @@ public actor DeepAnalyze {
         // 6. Empty → literal "untitled" (NOT nil); callers flatMap over a
         //    non-nil value so the signature stays String?.
         return out.isEmpty ? "untitled" : out
+    }
+
+    /// Deterministically prefix the named people onto the VLM's proposed filename
+    /// so they ALWAYS land. The model treats the "use these names" hint as
+    /// optional, so the names often never reach the FILENAME even when injected
+    /// into the prompt. Each person's first-name token — lowercase
+    /// ASCII-alphanumeric, ≥2 chars, deduped against words already in the name and
+    /// against each other, capped at 3 sorted alphabetically — is prefixed, then
+    /// the whole thing is re-sanitized. Byte-faithful with the Rust engine's
+    /// `apply_person_prefix`. (item 3)
+    static func applyPersonPrefix(_ name: String?, faceNames: [String]) -> String? {
+        guard let name, !name.isEmpty else { return name }
+        let existing = Set(
+            name.lowercased().split { !($0.isASCII && ($0.isLetter || $0.isNumber)) }.map(String.init))
+        var tokens: [String] = []
+        for display in faceNames {
+            guard let firstWord = display.split(separator: " ").first else { continue }
+            let token = String(firstWord).lowercased()
+                .filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
+            guard token.count >= 2, !existing.contains(token), !tokens.contains(token) else { continue }
+            tokens.append(token)
+        }
+        guard !tokens.isEmpty else { return name }
+        let prefix = tokens.sorted().prefix(3).joined(separator: " ")
+        return sanitize(filename: "\(prefix) \(name)") ?? name
     }
 
     // MARK: - Self-heal old model dirs

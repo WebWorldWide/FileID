@@ -217,6 +217,49 @@
         </ScrollViewer>
 
         <StackPanel Grid.Row="3" Spacing="6">
+            <!-- Item 2: positive "keep moving" affordance — once at least one
+                 cluster is named, advance to Deep Analyze (which uses those
+                 names in captions + smart filenames). Mirror of the macOS
+                 PeopleView continueToDeepAnalyzeRow. The "skip" counterpart is
+                 the Deep Analyze tab's non-blocking Analyze All + gate banner. -->
+            <Border x:Name="ContinueToDeepAnalyzeBanner"
+                    Visibility="Collapsed"
+                    Padding="14,12"
+                    CornerRadius="10"
+                    Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                    BorderBrush="{ThemeResource AiBrush}"
+                    BorderThickness="1">
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <FontIcon Grid.Column="0"
+                              Glyph="&#xE10B;"
+                              FontSize="16"
+                              Foreground="{ThemeResource AiBrush}"
+                              VerticalAlignment="Center"
+                              AutomationProperties.AccessibilityView="Raw" />
+                    <TextBlock Grid.Column="1"
+                               VerticalAlignment="Center"
+                               TextWrapping="Wrap"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Text="Names set — keep going. Generate captions and smart filenames using the people you've named." />
+                    <Button Grid.Column="2"
+                            x:Name="ContinueToDeepAnalyzeButton"
+                            Click="OnContinueToDeepAnalyzeClicked"
+                            Style="{StaticResource AccentButtonStyle}"
+                            VerticalAlignment="Center"
+                            AutomationProperties.Name="Continue to Deep Analyze"
+                            AutomationProperties.HelpText="Run Deep Analyze using the names you've set.">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <TextBlock Text="Continue to Deep Analyze" />
+                            <FontIcon FontSize="12" Glyph="&#xE72A;" />
+                        </StackPanel>
+                    </Button>
+                </Grid>
+            </Border>
             <!-- "N hidden unknowns" footer with show/hide toggle. Mirrors
                  macOS PeopleView's bottom strip: when the global Hide-
                  unknowns toggle is on, an unobtrusive count + one-tap

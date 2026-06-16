@@ -8,7 +8,63 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
-## 2026-06-16 (latest) — Whole-codebase adversarial audit (6 parallel agents) + Windows undo button
+## 2026-06-16 (latest) — Restructure deep-research sweep + 4 verified best-in-class wins
+
+`/deep-research` (27 web sources → 21 verified claims) + a 3-agent codebase audit graded Restructure against
+the state of the art. Headline: the architecture already matches or beats the documented field (density
+clustering, c-TF-IDF naming, journal-backed reversible apply, barycentre Sankey). Verification caught several
+**audit false positives** (image profile IS calibrated; `Path::starts_with` is component-aware so the
+"/Library2" containment bug is unreal; Windows already surfaces confidence+reason and already has the Undo
+button). Landed + verified (Rust 343 + clippy, macOS build + 226):
+- **Incremental crash-safe undo journal** (both engines) — append each inverse move as it happens + periodic
+  fsync, instead of one write after the loop, so a crash mid-apply still leaves completed moves undoable.
+  This is the research's #1 open question (the field only ships best-effort undo).
+- **Single folder-granularity knob** (both engines) — `FILEID_RESTRUCTURE_GRANULARITY` ∈ {loose,normal,tight}
+  shifts the cluster cosines (HDBSCAN `min_cluster_size` philosophy); one lever for owner calibration.
+- **Empty-dir cleanup on undo** (both engines) — undo removes the orphan empty group folders apply created
+  (`remove_dir` empty-only, root-contained).
+- **Confidence + reason surfaced on macOS** — `RestructureView` rows now show the band badge + the engine's
+  "why filed here" (the IPC always carried them; `mapProposals` was dropping them). Windows already had it.
+
+Then a 3-agent **lockstep parity sweep** (instructed to verify values against code, since the prior audit had
+false positives): **engine constants/algorithms = zero divergences**; **DB migrations (17) + IPC (31 cmds / 24
+events) + conformance = perfect sync** (a library round-trips cleanly). One real bug found + fixed: the new
+**person-as-tag name diverged** (macOS used `PersonRow.displayName`, full; Windows used title+first only) —
+both now build an identical `personTagName` / `FormatPersonTagName` (title+first+middle+last+suffix joined,
+else legacy name). Two agent claims were misses (Windows DOES have the Restructure confidence badge in
+`DrillDownSheet` + the Undo button). macOS verified (build + 226); Windows person-tag change is CI-pending.
+
+Remaining (research-backed, in NEXT.md): list-tier + "apply only high-confidence"; name-based routing signal
+(Dropbox finding, needs real-data validation); learn-from-corrections (new migration); per-bucket approval +
+before/after tree (large UI); granularity Settings slider; mid-review re-plan fix; file_ref stale guard;
+owner threshold calibration. Pixel-level app parity + a full no-bug sweep need on-hardware runs + CI.
+
+## 2026-06-16 — 5-item UX batch: byte-exact dedup, person-name filenames, apply buttons, explainer, auto-advance
+
+Five user-requested changes, all lockstep on both platforms. macOS + both engines verified locally; the Windows
+app slices (C#/XAML) are CI-pending (no local WinUI build).
+- **Item 3 — person names → Deep Analyze filenames** (the reported bug). Named people are now prepended (deduped,
+  ≤3, sanitized) onto the VLM proposed filename + injected into the caption/rename prompts. Byte-faithful
+  `apply_person_prefix`/`applyPersonPrefix` + `fetch_face_names`/`format_person_ref` on both engines. Rust
+  clippy + 343 tests; Swift build + 222 tests.
+- **Item 1 — macOS byte-exact dedup.** Cleanup groups by `content_hash` (SHA-256, CryptoKit, **no new dep**)
+  instead of perceptual phash, so only literally byte-identical photos count as duplicates. `ContentHash.swift`
+  ports the Windows `content_hash` STRUCTURE (full ≤16 MB; head+4×interior+tail+size composite above), computed
+  at scan into the existing `content_hash` BLOB; dedup + counter queries switched to GROUP BY content_hash.
+  4 new tests + 226 total green. Values are macOS-local (SHA-256 ≠ Windows BLAKE3) — see DECISIONS.
+- **Item 5 — apply buttons.** Deep Analyze tab now has separate **Apply tags / Apply people-as-tags / Apply all**
+  (smart-name review path unchanged). New capability: person names written onto files as Finder/Explorer tags
+  (DB-only before). macOS app-side via `TagWriter`; Windows reuses `applyTags`/`renameFiles` grouped by tag/person
+  — no IPC contract change.
+- **Item 2 — auto-advance.** People tab shows a gold "Continue to Deep Analyze →" CTA once ≥1 person is named
+  (starts analysis + switches tab); the skip path stays. Both platforms.
+- **Item 4 — explainer.** Dismissible, persisted "Tagging vs. Deep Analyze" banner on the Deep Analyze tab. Both
+  platforms.
+
+Verified: macOS `swift build` + 226 tests; Windows engine `cargo clippy -D warnings` + 343 tests. Windows app
+(items 2/4/5 C#/XAML) is CI-pending.
+
+## 2026-06-16 — Whole-codebase adversarial audit (6 parallel agents) + Windows undo button
 
 Windows "Undo last run" button landed (WinUI `RestructureView` — `CanUndoRestructure`-driven, in the
 ApplyBar; CI-pending, no local WinUI build). Then a 6-agent parallel audit swept the ENTIRE codebase

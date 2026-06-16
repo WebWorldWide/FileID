@@ -113,6 +113,29 @@ public sealed partial class DeepAnalyzeView : UserControl
         // view loads; also refreshed in OnEngineChanged when face
         // clustering finishes.
         _ = RefreshNamePeopleGateAsync();
+        SyncExplainerBanner();
+    }
+
+    // Item 4: show the Tagging-vs-Deep-Analyze explainer unless the user has
+    // dismissed it (persisted in AppSettings, lockstep with macOS).
+    private void SyncExplainerBanner()
+    {
+        bool hidden = false;
+        try { hidden = AppViewModel.Instance.Settings.HideDeepAnalyzeExplainer; }
+        catch (Exception ex) { DebugLog.Warn("SyncExplainerBanner read failed: " + ex.Message); }
+        ExplainerBanner.Visibility = hidden ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private void OnDismissExplainerClicked(object sender, RoutedEventArgs e)
+    {
+        ExplainerBanner.Visibility = Visibility.Collapsed;
+        try
+        {
+            var s = AppViewModel.Instance.Settings;
+            s.HideDeepAnalyzeExplainer = true;
+            s.Save();
+        }
+        catch (Exception ex) { DebugLog.Warn("Persist explainer dismiss failed: " + ex.Message); }
     }
 
     private void OnSelectionRegistryChanged(object? sender, PropertyChangedEventArgs e)
@@ -781,6 +804,95 @@ public sealed partial class DeepAnalyzeView : UserControl
                 "Deep Analyze couldn't be started: " + ex.Message +
                 "\n\nMake sure the model is installed and the engine is running, then try again.");
         }
+    }
+
+    // ───── Item 5: "Apply to your files" ──────────────────────────────
+    // Write keyword tags / named people / smart names onto the actual files.
+    // Tags + people go through the engine's applyTags (sidecar + IPropertyStore),
+    // grouped by tag/person so the call count is bounded. Smart names route
+    // through the proven BulkRenameSheet (correct extension + uniqueness).
+    private int _applyInFlight; // 0 = idle, 1 = an apply running
+
+    private async void OnApplyTagsClicked(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnApplyTagsClicked),
+            () => RunApplyAsync(keywords: true, people: false, names: false));
+
+    private async void OnApplyPeopleClicked(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnApplyPeopleClicked),
+            () => RunApplyAsync(keywords: false, people: true, names: false));
+
+    private async void OnApplyAllClicked(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnApplyAllClicked),
+            () => RunApplyAsync(keywords: true, people: true, names: true));
+
+    private async System.Threading.Tasks.Task RunApplyAsync(bool keywords, bool people, bool names)
+    {
+        if (System.Threading.Interlocked.CompareExchange(ref _applyInFlight, 1, 0) != 0) return;
+        SetApplyBusy(true, "Applying…");
+        int tagged = 0, peopled = 0;
+        bool openRenameSheet = false;
+        try
+        {
+            using var store = new Services.ReadStore(Services.AppPaths.DbPath);
+            var ct = System.Threading.CancellationToken.None;
+            if (keywords)
+            {
+                var map = await store.KeywordTagFileIdsAsync(ct);
+                foreach (var kv in map)
+                {
+                    if (kv.Value.Count == 0) continue;
+                    await EngineClient.Instance.ApplyTagsAsync(kv.Value, new[] { kv.Key }, "add");
+                    tagged += kv.Value.Count;
+                }
+            }
+            if (people)
+            {
+                var map = await store.NamedPersonFileIdsAsync(ct);
+                foreach (var kv in map)
+                {
+                    if (kv.Value.Count == 0) continue;
+                    await EngineClient.Instance.ApplyTagsAsync(kv.Value, new[] { kv.Key }, "add");
+                    peopled += kv.Value.Count;
+                }
+            }
+            if (names)
+            {
+                var pending = await store.PendingProposedRenamesAsync(5000, ct);
+                openRenameSheet = pending.Count > 0;
+            }
+        }
+        finally
+        {
+            System.Threading.Interlocked.Exchange(ref _applyInFlight, 0);
+        }
+
+        var parts = new System.Collections.Generic.List<string>();
+        if (keywords) parts.Add($"{tagged} tagged");
+        if (people) parts.Add($"{peopled} people-tagged");
+        SetApplyBusy(false, parts.Count == 0
+            ? "Nothing to apply yet."
+            : "Applied — " + string.Join(", ", parts) + ".");
+
+        // Smart names go through the review sheet (correct extension + uniqueness
+        // handling) rather than a blind bulk rename — safer for a destructive op,
+        // and reuses the same path as the pill.
+        if (openRenameSheet) OnProposedNamesPillClicked(this, new RoutedEventArgs());
+    }
+
+    private void SetApplyBusy(bool busy, string status)
+    {
+        if (_unloaded) return;
+        try
+        {
+            ApplyTagsButton.IsEnabled = !busy;
+            ApplyPeopleButton.IsEnabled = !busy;
+            ApplyAllButton.IsEnabled = !busy;
+            ApplyProgressRing.IsActive = busy;
+            ApplyProgressRing.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
+            ApplyStatusText.Text = status;
+            ApplyStatusText.Visibility = string.IsNullOrEmpty(status) ? Visibility.Collapsed : Visibility.Visible;
+        }
+        catch (Exception ex) { DebugLog.Warn("SetApplyBusy UI update threw: " + ex.Message); }
     }
 
     // Analyzes every file currently selected in the Library view. We send
