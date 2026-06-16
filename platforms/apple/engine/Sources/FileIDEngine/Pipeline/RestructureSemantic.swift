@@ -348,6 +348,15 @@ public enum RestructureSemantic {
         var out: [SemanticFile] = []
         out.reserveCapacity(files.count)
         for (i, f) in files.enumerated() {
+            // A file whose every token is unique to it (each token freq 1) shares
+            // NO signal with any other file, so it's orthogonal to all of them and
+            // can never cluster — leave it for the rule cascade. Excluding it up
+            // front (instead of trusting the density clusterer to noise-reject an
+            // orthogonal point) keeps the result deterministic across architectures:
+            // with k_nn >= n and all-tied zero similarities, the clusterer's kNN
+            // tie order is arch-sensitive, which made a degenerate lone file
+            // group-or-not by luck. (CI determinism / lockstep)
+            guard tokenSets[i].contains(where: { (freq[$0] ?? 0) >= 2 }) else { continue }
             var vec = [Float](repeating: 0, count: vocab.count)
             var any = false
             for t in tokenSets[i] where vocab[t] != nil { vec[vocab[t]!] = 1; any = true }
@@ -439,8 +448,10 @@ public enum RestructureSemantic {
 
     private static func cluster(_ fused: [[Float]]) -> [Int] {
         let params = fileHyperparams()
-        let k = params.kNN
         let n = fused.count
+        // Can't request more neighbors than other points exist; k_nn >= n made the
+        // kNN over an all-tied set arch-sensitive (see nonImageSignatures). (lockstep)
+        let k = min(params.kNN, max(1, n - 1))
         // R3-12: brute-force cosine kNN below HNSW_MIN; an approximate HNSW index
         // above it, so the O(n²) searcher can't stall the Restructure tab at the
         // documented "tens of thousands of files" scale. Mirrors the Windows

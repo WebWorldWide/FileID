@@ -444,6 +444,17 @@ fn non_image_signatures(files: &[SemanticFile]) -> Vec<SemanticFile> {
 
     let mut out = Vec::with_capacity(files.len());
     for (i, f) in files.iter().enumerate() {
+        // A file whose every token is unique to it (each token freq 1) shares NO
+        // signal with any other file, so it's orthogonal to all of them and can
+        // never cluster — leave it for the rule cascade. Excluding it up front
+        // (instead of trusting the density clusterer to noise-reject an orthogonal
+        // point) keeps the result deterministic across architectures: with
+        // k_nn >= n and all-tied zero similarities, the clusterer's kNN tie order
+        // is arch-sensitive, which made a degenerate lone file group-or-not by
+        // luck. (CI determinism / lockstep with the Swift engine)
+        if !token_sets[i].iter().any(|t| freq.get(t).copied().unwrap_or(0) >= 2) {
+            continue;
+        }
         let mut vec = vec![0f32; vocab.len()];
         let mut any = false;
         for t in &token_sets[i] {
@@ -562,8 +573,10 @@ fn day_of_year_cyclical(time_unix: f64) -> (f32, f32) {
 fn cluster(fused: &[Vec<f32>]) -> Vec<usize> {
     const HNSW_MIN: usize = 5_000;
     let params = file_hyperparams();
-    let k = params.k_nn;
     let n = fused.len();
+    // Can't request more neighbors than other points exist; k_nn >= n made the kNN
+    // over an all-tied set arch-sensitive (see non_image_signatures). (lockstep)
+    let k = params.k_nn.min(n.saturating_sub(1).max(1));
 
     let hnsw = (n >= HNSW_MIN).then(|| {
         let points: Vec<(Vec<f32>, usize)> =
