@@ -674,6 +674,10 @@ public final class EngineClient {
         deepAnalyzeStarting = nil
         deepAnalyzeProgress = nil
         faceClusteringInFlight = false
+        // Same for the undo affordance: a crash mid-undo never emits the terminal
+        // restructureApplyResult that clears this, so without the reset the NEXT
+        // apply's result is mis-attributed as the (dead) undo's. (audit R2-app)
+        undoRestructureInFlight = false
         isPaused = false
         queueState = QueueState(running: nil, pending: [], totalEtaSeconds: nil)
         // Signal views that own their in-flight UI (e.g. Deep Analyze's
@@ -978,8 +982,13 @@ public final class EngineClient {
     /// `canUndoRestructure`. (RESTRUCTURE.md §6 reversibility)
     @discardableResult
     public func undoRestructure(libraryRoot: String) -> Bool {
-        undoRestructureInFlight = true
-        return send(.undoRestructure(libraryRoot: libraryRoot))
+        // Arm the in-flight flag ONLY on a successful send. A failed send (engine
+        // respawning) would otherwise latch the flag and mis-attribute the NEXT
+        // apply's result as the undo's — leaving canUndoRestructure false while the
+        // on-disk journal is still undoable. (audit R2-app)
+        let sent = send(.undoRestructure(libraryRoot: libraryRoot))
+        if sent { undoRestructureInFlight = true }
+        return sent
     }
 
     /// Pre-fetch a VLM's weights without running inference. Used by the

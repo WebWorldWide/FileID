@@ -236,7 +236,13 @@ struct RestructureView: View {
                         guard let root = libraryRoot, !applying else { return }
                         applying = true
                         status = "Undoing the last restructure…"
-                        engine.undoRestructure(libraryRoot: root.path)
+                        // A failed send (engine respawning) would otherwise wedge
+                        // `applying` true forever — no result event ever arrives to
+                        // clear it, leaving the button permanently disabled. (audit R2-app)
+                        if !engine.undoRestructure(libraryRoot: root.path) {
+                            applying = false
+                            status = "Engine is unavailable — try again in a moment."
+                        }
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(Theme.gold)

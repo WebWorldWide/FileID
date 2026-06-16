@@ -150,6 +150,7 @@ public class SchemaConformanceTests
         new PrewarmModelCommand("clip_text"),
         new CancelPrewarmCommand("clip_text"),
         new PlanRestructureCommand(@"C:\Users\adam\Pictures"),
+        new UndoRestructureCommand(@"C:\Users\adam\Pictures"),
         new ApplyRestructureCommand(
             @"C:\Users\adam\Pictures",
             new[] { ExampleMove() },

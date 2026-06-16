@@ -124,7 +124,7 @@ public enum Restructure {
             // Content tags for distinctive-term naming + fusion.
             var tags: [Int64: [String]] = [:]
             let trows = try GRDB.Row.fetchAll(
-                db, sql: "SELECT file_id, tag FROM tags WHERE source IN ('auto','vlm','user')")
+                db, sql: "SELECT DISTINCT file_id, tag FROM tags WHERE source IN ('auto','vlm','user')")
             for row in trows {
                 let id: Int64 = row["file_id"] ?? 0
                 if let t: String = row["tag"] { tags[id, default: []].append(t) }
@@ -478,7 +478,8 @@ public enum Restructure {
         database: Database,
         libraryRoot: URL,
         isCancelled: @Sendable () -> Bool = { Task.isCancelled },
-        undoJournal: URL? = nil
+        undoJournal: URL? = nil,
+        recordUndo: Bool = true
     ) async -> ApplyResult {
         let fm = FileManager.default
         let journalURL = undoJournal ?? Self.defaultUndoJournalURL
@@ -638,8 +639,12 @@ public enum Restructure {
         }
         // Persist the inverse-move journal (truncating → last run only) so the app
         // can offer a one-click "Undo last run". Best-effort: an unwritable journal
-        // just means undo is unavailable, never a failed apply. (R2)
-        Self.writeUndoJournal(undoEntries, to: journalURL)
+        // just means undo is unavailable, never a failed apply. Skipped during an
+        // undo run (recordUndo=false) so a CANCELLED undo leaves the ORIGINAL
+        // journal intact — the user can re-run undo to finish the remainder. (R2)
+        if recordUndo {
+            Self.writeUndoJournal(undoEntries, to: journalURL)
+        }
         JSONLog.shared.info(ev: "restructure_applied",
                             extra: ["moved": AnyCodable(moved),
                                     "skipped": AnyCodable(skipped),
@@ -721,12 +726,15 @@ public enum Restructure {
         let inverse = entries.map {
             RestructureProposal(fileID: $0.fileID, oldPath: $0.from, newPath: $0.to, bucket: "")
         }
-        // Pass the SAME journal so apply overwrites it with the redo set; then drop
-        // it, so the button can't toggle apply→undo→apply by accident.
+        // recordUndo:false so the undo's own moves DON'T overwrite the journal — a
+        // cancelled undo must leave the original intact so the user can re-run it
+        // and put the REMAINING files back (the already-restored ones stale-skip on
+        // the retry). Only a fully-completed (non-cancelled) undo clears it, so the
+        // button can't toggle apply→undo→apply by accident.
         let result = await apply(proposals: inverse, database: database,
                                  libraryRoot: libraryRoot, isCancelled: isCancelled,
-                                 undoJournal: journalURL)
-        clearUndoJournal(journalURL)
+                                 undoJournal: journalURL, recordUndo: false)
+        if !isCancelled() { clearUndoJournal(journalURL) }
         return result
     }
 
