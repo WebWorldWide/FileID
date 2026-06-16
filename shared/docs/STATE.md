@@ -8,7 +8,59 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
-## 2026-06-15 (latest) — bbox cross-platform parity landed (#55) — macOS lockstep COMPLETE
+## 2026-06-16 (latest) — Restructure R1: butler now organizes ALL file types, not just photos (both engines)
+
+**The fix for "Restructure just sucks."** Root cause: the semantic butler only ran on images
+with a CLIP embedding (`Restructure.swift` guard `kind == "image"`); every document, PDF,
+video, and download fell through to a 7-bucket date cascade — so a real mixed library dumped
+all docs into `Documents/<Year>/` with zero content awareness. R1 adds an **additive non-image
+semantic pass**: cluster everything the image pass didn't claim by a **filename-token + tag
+bag-of-words** signature (the bag-of-words IS the representative vector — no model needed),
+reusing the exact same density clusterer + learn-your-style folder matching under a separate,
+tighter `nonImageProfile`. The image path is byte-identical (a `Profile` was extracted with the
+old constants), so it cannot regress. Generic dumping grounds (Downloads/Desktop/Temp…) are
+barred from being learn-your-style prototypes — the whole point is to move files OUT of them.
+
+Both engines, byte-faithful + lockstep: macOS `RestructureSemantic.swift` + `Restructure.swift`;
+Rust `restructure_semantic.rs` + `commands/restructure.rs` (also un-gated tag loading so docs get
+their tags too, matching macOS). Owner kill-switch `FILEID_RESTRUCTURE_NONIMAGE=0`; thresholds
+env-tunable (`FILEID_RESTRUCTURE_NI_*`) for calibration on a real library before defaults promote.
+
+Verified here: macOS `swift build` + **swift test 218/218** (2 new non-image tests); Rust
+**cargo test 343/343** (2 mirrored) + **clippy -D warnings clean**. R3-07B (IPC 64 MiB cap +
+macOS newline-scan resume) was already landed in a prior session — verified end-to-end, so
+whole-library plans render; only a stale comment needed fixing. **Remaining: R2** (VLM cluster
+naming + one-click "Undo last run") and **owner UAT** to calibrate the non-image thresholds on a
+real library (NEXT.md). macOS restructure builds + tests green — `RESTRUCTURE.md`'s "written,
+unverified" line is now stale.
+
+## 2026-06-16 — RAM++ in the first-run modal (macOS) + Welcome re-show parity (both platforms)
+
+RAM++ was installable only from Settings on macOS — the first-run WelcomeSheet offered
+CLIP / Face / Deep Analyze but not the tagger, so a new user silently got the weaker
+CLIP/Vision tag fallback unless they hunted for it. Brought macOS to Windows parity:
+RAM++ is now a gating row in `WelcomeSheet.swift` (row 2: CLIP → RAM++ → Face → Deep
+Analyze), included in "Install all", the `.onAppear` refresh, `allInstalled`, and
+`anyInProgress`; `FileIDApp.shouldShowWelcome()` now re-shows the sheet when RAM++ is
+missing too. Pure wiring — `RamPlusModelInstaller` (download / SHA-256 / 12-part) already
+existed and is identically shaped to the CLIP/ArcFace installers already in the sheet.
+
+**Welcome re-show gating split (both platforms):** the re-show gate is now the three core
+sub-1 GB models (CLIP + RAM++ + face); the multi-GB Deep Analyze VLM is install-once /
+skippable and no longer re-nags every launch. macOS already had this split implicitly
+(`shouldShowWelcome` ⊂ `allInstalled`); Windows now mirrors it via a new
+`ModelInstallerService.CoreModelsInstalled` (CLIP+RAM+++ArcFace) consumed by
+`MaybeShowWelcomeSheetAsync`, leaving `AllInstalled` (incl. VLM) for auto-dismiss + Done.
+
+Parity audit of the onboarding/model surface also **cleared two suspected drifts**: the
+Deep-Analyze VLM is already family+tier-aligned (Qwen2.5-VL-7B ≥16 GB / Gemma-3-4B <16 GB
+on both; MLX vs GGUF formats differ by necessity, not drift), and CLIP is byte-identical
+(same `Xenova/clip-vit-base-patch32` ONNX, same SHA-256s → embeddings round-trip safely).
+
+macOS verified here: `swift build` clean, full suite **216/216 green**. Windows C# (the
+`CoreModelsInstalled` split) is build-pending on CI — no local C# toolchain in this env.
+
+## 2026-06-15 — bbox cross-platform parity landed (#55) — macOS lockstep COMPLETE
 
 bbox parity was the last lockstep item. Root cause: macOS stores face bbox as "x,y,w,h"
 NORMALIZED bottom-left (Vision); Windows stores JSON {x,y,w,h,…} in PIXELS top-left

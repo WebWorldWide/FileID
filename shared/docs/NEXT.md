@@ -1,5 +1,68 @@
 # NEXT — resume here
 
+## 2026-06-16 — Restructure overhaul: R1 landed (both engines, verified); R2 + owner calibration next
+
+**R1 DONE + verified** (macOS swift test 218/218, Rust cargo test 343/343 + clippy clean): the
+butler now clusters **all file types**, not just photos. Non-image files (docs/video/audio/
+downloads) group by a filename-token + tag bag-of-words signature via an additive pass with its
+own `nonImageProfile`; the image path is byte-identical and cannot regress. Junk folders
+(Downloads/Desktop/Temp…) are barred as prototypes. R3-07B (64 MiB IPC cap + macOS newline
+resume) confirmed already-landed — whole-library plans render.
+
+**R1 owner UAT + calibration (the real proof — needs your Mac + a real library):** copy a messy
+folder to a scratch path, `bash run.sh`, scan it, open Restructure. Confirm documents/downloads/
+videos now land in **content-based groups, not one `Documents/<Year>` dump**. The non-image
+thresholds are provisional — tune against what you see, no recompile:
+- Over-grouping (unrelated files merged)? raise `FILEID_RESTRUCTURE_NI_AUTO_COH` (0.70) /
+  `FILEID_RESTRUCTURE_NI_REVIEW_COH` (0.55) and re-plan.
+- Under-grouping (too many singletons left in place)? lower them.
+- Wrong files pulled into an existing folder? raise `FILEID_RESTRUCTURE_NI_FOLDER_COS` (0.60) /
+  `FILEID_RESTRUCTURE_NI_AUTO_FOLDER_COS` (0.80).
+- Kill-switch: `FILEID_RESTRUCTURE_NONIMAGE=0`. Report the sweet-spot values → bake as defaults
+  (one line each in `restructure_semantic.{rs,swift}`).
+
+**R2 — butler-quality naming + reversibility (next build, both engines/app):**
+1. **VLM cluster naming** (design P2): reuse the installed Deep-Analyze VLM; per cluster feed the
+   already-computed profile (distinctive c-TF-IDF terms + 3-5 representatives + EXIF/GPS), a
+   constrained label-then-reason call (`{name,reason}`, 2-4 word Title-Case, forbid generic),
+   cache by representative-ID hash, run as a deferred background job. Destination adopts the VLM
+   name; no IPC schema change. *Acceptance:* new groups get semantic names ("Golden Retriever",
+   not "Dog Golden") on an installed VLM. (Needs on-Mac validation — not headless-verifiable.)
+2. **Command-journal undo** (design P3): the apply loop already does safe per-file moves +
+   recovery sidecar; add an inverse-move journal per run + an **"Undo last run"** action (one
+   macro, compensate on partial failure) in `RestructureApplyBar`; drop the "not reversible"
+   copy. Cross-platform (Swift + Rust + C# + an undo IPC command). *Acceptance:* a completed run
+   fully reverses in-app.
+
+**R3 — finish-line polish (after R1 calibration + R2):** per-destination-bucket approval +
+before/after tree preview (design P4); fix Deep-Analyze re-planning mid-review + skipped-outcomes
+reset (`RestructureView.swift:48-58`); measured confidence-band calibration; optional **BGE
+dedicated document embedder** (new model + migration + re-scan) for max document clustering —
+the no-new-model CLIP-text reuse is the cheaper interim, also deferred.
+
+## 2026-06-16 — RAM++ first-run modal + Welcome re-show parity landed (macOS verified, Windows CI-pending)
+
+DONE (macOS verified, `swift build` + 216/216): RAM++ is now a gating row in the macOS
+WelcomeSheet ("Install all" pulls it; re-show gate includes it). Re-show gate on BOTH
+platforms is now the core sub-1 GB trio (CLIP+RAM+++face); the VLM no longer re-nags.
+
+**Confirm on CI:** the Windows change is C#-only (`ModelInstallerService.CoreModelsInstalled`
++ `MaybeShowWelcomeSheetAsync` switch) — `dotnet build`/`test`/`format` must go green on the
+app workflow before merge. No local C# toolchain here.
+
+**Mac UAT (to actually see the new row as "missing"):** `run.sh` preserves model weights, so
+first `rm -rf "$HOME/Library/Application Support/FileID/Models/ram_plus"`, then `bash run.sh`.
+Expect 4 rows → "Install all" downloads RAM++ → sheet auto-dismisses ~800 ms after all four
+land → relaunch does NOT re-pop once CLIP+RAM+++face are present (even with the VLM skipped).
+
+**Audit cleared (no work):** Deep-Analyze VLM already family+tier-aligned across platforms;
+CLIP byte-identical (same SHA-256s). See DECISIONS.md 2026-06-16.
+
+**Offered, not yet run — full 6-tab cross-platform parity sweep.** This pass covered only the
+onboarding / model-download surface. A systematic Library · People · Cleanup · Deep Analyze ·
+Restructure · Settings Win↔Mac behavior diff is the remaining "parity in general" ask — run on
+owner's word (parallel per-tab agents → drift table).
+
 ## 2026-06-15 (lockstep) — macOS model-stack lockstep COMPLETE; remaining work is UAT + release
 
 DONE + merged green: IPC cap (R3-07B #43), RAM++ tagger (engine #44 + install UI #46),

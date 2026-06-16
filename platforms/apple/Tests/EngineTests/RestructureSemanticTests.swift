@@ -94,4 +94,75 @@ struct RestructureSemanticTests {
         #expect(moves.allSatisfy { !$0.destinationDir.hasPrefix("/other") })
         #expect(moves.allSatisfy { RestructureSemantic.pathContained($0.destinationDir, in: "/lib") })
     }
+
+    // MARK: - Non-image pass (RESTRUCTURE.md R1)
+
+    /// Filename tokenizer keeps content words and drops numeric / very-short /
+    /// generic camera-scan tokens, so a doc filename carries grouping signal while
+    /// "IMG_4821" / "Screenshot …" don't.
+    @Test("filenameTokens keeps content words, drops numeric/generic/short")
+    func filenameTokenization() {
+        #expect(RestructureSemantic.filenameTokens("/a/acme_invoice_2023.pdf") == ["acme", "invoice"])
+        #expect(RestructureSemantic.filenameTokens("/a/IMG_4821.heic").isEmpty)
+        #expect(RestructureSemantic.filenameTokens("/a/Screenshot 2024-01-02.png").isEmpty)
+    }
+
+    /// The R1 fix: non-image files (no CLIP embedding — `clip` is empty) cluster by
+    /// their filename+tag bag-of-words, so a mixed download dir groups invoices and
+    /// trip clips into two content folders instead of one Documents/<Year> dump. A
+    /// filename with no shared token (singleton) is left for the rule cascade.
+    @Test("Non-image pass groups files by filename content")
+    func nonImageGroupsByFilename() {
+        var files: [RestructureSemantic.SemanticFile] = []
+        for i in 0..<5 { files.append(file(Int64(i), "/lib/downloads/acme_invoice_\(i).pdf", [], [])) }
+        for i in 0..<5 { files.append(file(Int64(100 + i), "/lib/downloads/trip_hawaii_\(i).mp4", [], [])) }
+        // A lone file sharing no token with either group — must NOT be grouped.
+        files.append(file(999, "/lib/downloads/zzqq_widget.txt", [], []))
+
+        let moves = RestructureSemantic.classifyNonImage(files: files, libraryRoot: "/lib")
+        #expect(moves.count == 10)                       // the singleton is excluded
+        #expect(Set(moves.map { $0.category }).count == 2)
+        #expect(!moves.contains { $0.fileID == 999 })
+        // Distinct destination folders for the two content groups.
+        #expect(Set(moves.map { $0.destinationDir }).count == 2)
+    }
+
+    /// Opt-in calibration harness (skipped unless FILEID_REAL_DIR is set, so it
+    /// never runs in CI): point it at a real folder and it prints how the R1
+    /// non-image pass would reorganize it — the tool for tuning the
+    /// `FILEID_RESTRUCTURE_NI_*` thresholds against a real library. (RESTRUCTURE.md R1)
+    @Test("REAL-DATA non-image grouping (opt-in)",
+          .enabled(if: ProcessInfo.processInfo.environment["FILEID_REAL_DIR"] != nil))
+    func realDataNonImage() {
+        let root = ProcessInfo.processInfo.environment["FILEID_REAL_DIR"]!
+        let fm = FileManager.default
+        // Production runs the image (CLIP) pass FIRST and claims images, so the
+        // non-image pass only ever sees non-image files. Mirror that by skipping
+        // image extensions here, else the harness over-represents photo filenames.
+        let imageExts: Set<String> = ["jpg", "jpeg", "png", "heic", "heif", "gif",
+                                      "bmp", "tiff", "tif", "webp"]
+        var sems: [RestructureSemantic.SemanticFile] = []
+        var id: Int64 = 0
+        let en = fm.enumerator(at: URL(fileURLWithPath: root),
+                               includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey])
+        while let url = en?.nextObject() as? URL {
+            guard (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
+            else { continue }
+            if imageExts.contains(url.pathExtension.lowercased()) { continue }
+            id += 1
+            let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate?.timeIntervalSince1970 ?? 0
+            sems.append(.init(fileID: id, source: url.path, clip: [], tags: [], timeUnix: mtime))
+        }
+        let moves = RestructureSemantic.classifyNonImage(files: sems, libraryRoot: root)
+        var byCat: [String: [String]] = [:]
+        for m in moves {
+            byCat[m.category, default: []].append((m.source as NSString).lastPathComponent)
+        }
+        print("=== REAL-DATA: \(sems.count) files → \(moves.count) grouped into \(byCat.count) folders (\(sems.count - moves.count) left in place) ===")
+        for k in byCat.keys.sorted(by: { byCat[$0]!.count > byCat[$1]!.count }) {
+            let f = byCat[k]!
+            print("• \(k)  (\(f.count))  e.g. \(f.prefix(4).joined(separator: " | "))")
+        }
+    }
 }

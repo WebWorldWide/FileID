@@ -58,22 +58,61 @@ public enum RestructureSemantic {
         public let centroid: [Float]
     }
 
-    // Fusion weights (RESTRUCTURE.md §2): content embedding dominates; tags
-    // refine; time nudges. Each block is L2-normalized before weighting.
-    private static let wClip: Float = 0.70
-    private static let wTags: Float = 0.22
-    private static let wTime: Float = 0.08
-    private static let tagVocabCap = 256
+    /// A fusion-weight + confidence-threshold profile. The image pass keeps the
+    /// calibrated CLIP-embedding values; the non-image pass (filename+tag
+    /// bag-of-words representative — there is no CLIP image vector for a PDF or a
+    /// video) runs a separate, deliberately tighter profile so a sparser signature
+    /// can't over-move. Both stay byte-faithful with the Rust engine. (RESTRUCTURE.md §2/R1)
+    public struct Profile: Sendable {
+        public let wClip: Float        // weight on the representative content vector
+        public let wTags: Float        // weight on the content-tag multi-hot block
+        public let wTime: Float        // weight on the cyclical-time block
+        public let folderMatchCos: Float
+        public let autoFolderCos: Float
+        public let autoCohesion: Float
+        public let reviewCohesion: Float
+        public let minMargin: Float
+        public let autoMinMembers: Int
+    }
 
-    // Route a cluster into an existing folder above this cosine; below, a new
-    // group. Confidence-band thresholds match the Rust engine (provisional —
-    // calibrate to measured per-category accuracy before standing auto-file).
-    private static let folderMatchCos: Float = 0.55
-    private static let autoFolderCos: Float = 0.72
-    private static let autoCohesion: Float = 0.62
-    private static let reviewCohesion: Float = 0.50
-    private static let minMargin: Float = 0.05
-    private static let autoMinMembers = 4
+    // Image pass — representative is the L2-normalized 512-d CLIP image embedding.
+    // Values are unchanged from the original calibrated constants.
+    public static let imageProfile = Profile(
+        wClip: 0.70, wTags: 0.22, wTime: 0.08,
+        folderMatchCos: 0.55, autoFolderCos: 0.72, autoCohesion: 0.62,
+        reviewCohesion: 0.50, minMargin: 0.05, autoMinMembers: 4)
+
+    private static let tagVocabCap = 256
+    // Filenames tokenize into many one-off terms, so the non-image bag-of-words
+    // needs a wider vocab than the image tag block.
+    static let nonImageVocabCap = 512
+
+    /// Owner kill-switch for the non-image semantic pass (`FILEID_RESTRUCTURE_NONIMAGE=0`
+    /// → off, falls back to the rule cascade). Default on. (RESTRUCTURE.md R1)
+    static var nonImageEnabled: Bool {
+        ProcessInfo.processInfo.environment["FILEID_RESTRUCTURE_NONIMAGE"] != "0"
+    }
+
+    /// Non-image pass — representative is a filename+tag bag-of-words (sparser than
+    /// CLIP), so demand a cleaner cluster + a tighter folder match. `wTags` is 0:
+    /// tags already live inside the representative, and naming reads them directly,
+    /// so re-adding the block would double-count. Thresholds are env-overridable
+    /// (`FILEID_RESTRUCTURE_NI_*`) for owner calibration on a real library before
+    /// the defaults are promoted. (RESTRUCTURE.md R1)
+    static var nonImageProfile: Profile {
+        Profile(
+            wClip: 0.74, wTags: 0.0, wTime: 0.08,
+            folderMatchCos: envFloat("FILEID_RESTRUCTURE_NI_FOLDER_COS", 0.60),
+            autoFolderCos: envFloat("FILEID_RESTRUCTURE_NI_AUTO_FOLDER_COS", 0.80),
+            autoCohesion: envFloat("FILEID_RESTRUCTURE_NI_AUTO_COH", 0.70),
+            reviewCohesion: envFloat("FILEID_RESTRUCTURE_NI_REVIEW_COH", 0.55),
+            minMargin: 0.08, autoMinMembers: 4)
+    }
+
+    private static func envFloat(_ key: String, _ dflt: Float) -> Float {
+        guard let s = ProcessInfo.processInfo.environment[key], let v = Float(s) else { return dflt }
+        return v
+    }
 
     private static func fileHyperparams() -> IdentityClustering.Hyperparameters {
         // Looser than faces: a semantic group is broader than one identity.
@@ -111,12 +150,13 @@ public enum RestructureSemantic {
     public static func classify(
         files: [SemanticFile],
         prototypes: [FolderPrototype],
-        libraryRoot: String
+        libraryRoot: String,
+        profile: Profile = imageProfile
     ) -> [Move] {
         guard !files.isEmpty else { return [] }
         let globalFreq = tagFrequencies(files)
         let vocab = vocabFromFreq(globalFreq, cap: tagVocabCap)
-        let fused = files.map { fuse($0, vocab: vocab) }
+        let fused = files.map { fuse($0, vocab: vocab, profile: profile) }
         let clusterIDs = cluster(fused)
 
         var clusters: [Int: [Int]] = [:]
@@ -150,13 +190,13 @@ public enum RestructureSemantic {
             // rejected by the apply layer (canonicalizes outside root), so such
             // a match falls through to a new in-root group instead. (E12, F-C3-015)
             if let (proto, sim, runnerUp) = nearestTwoFolders(centroid, prototypes),
-               sim >= folderMatchCos, Self.pathContained(proto.path, in: libraryRoot) {
+               sim >= profile.folderMatchCos, Self.pathContained(proto.path, in: libraryRoot) {
                 // Learn-your-style: route to the nearest confident existing
                 // folder. Auto only when strong AND unambiguous on a tight cluster.
                 let name = (proto.path as NSString).lastPathComponent
                 category = name.isEmpty ? "Folder" : name
                 destDir = proto.path
-                confidence = (sim >= autoFolderCos && coh >= reviewCohesion && (sim - runnerUp) >= minMargin)
+                confidence = (sim >= profile.autoFolderCos && coh >= profile.reviewCohesion && (sim - runnerUp) >= profile.minMargin)
                     ? .auto : .review
                 reason = String(format: "Matches your '%@' folder (%.0f%% alike)", category, Double(sim * 100))
             } else {
@@ -196,8 +236,8 @@ public enum RestructureSemantic {
                 usedGroupNames.insert(safe)
                 category = pretty
                 destDir = (libraryRoot as NSString).appendingPathComponent(safe)
-                confidence = (coh >= autoCohesion && members.count >= autoMinMembers)
-                    ? .auto : (coh >= reviewCohesion ? .review : .ask)
+                confidence = (coh >= profile.autoCohesion && members.count >= profile.autoMinMembers)
+                    ? .auto : (coh >= profile.reviewCohesion ? .review : .ask)
                 if terms.isEmpty {
                     reason = "\(members.count) files that look alike"
                 } else {
@@ -219,6 +259,123 @@ public enum RestructureSemantic {
         return moves
     }
 
+    // MARK: - Non-image semantic pass (RESTRUCTURE.md R1)
+
+    /// Cluster non-image files (documents, video, audio — anything without a CLIP
+    /// image embedding) by a filename-token + content-tag bag-of-words signature,
+    /// so a mixed library groups invoices/manuals/clips by *content* instead of
+    /// dumping them all into `Documents/<Year>`. Additive: the image pass runs
+    /// first and claims its files, this handles the remainder, and the rule
+    /// cascade still catches whatever neither clusters. The bag-of-words IS the
+    /// representative vector (there is no image embedding), so the same density
+    /// clusterer + learn-your-style folder matching apply unchanged under the
+    /// tighter `nonImageProfile`.
+    public static func classifyNonImage(
+        files: [SemanticFile],
+        libraryRoot: String
+    ) -> [Move] {
+        let sigs = nonImageSignatures(files)
+        guard sigs.count >= 2 else { return [] }
+        // Learn-your-style targets, but NOT generic dumping grounds (Downloads,
+        // Desktop, Temp, …): the whole point is to organize files OUT of those, so
+        // they must never become a prototype that routes everything back where it
+        // already is. Real user folders ("Taxes", "Invoices") still anchor.
+        // (RESTRUCTURE.md R1)
+        let protos = folderPrototypes(sigs, minFiles: 4).filter { !isJunkPrototypeFolder($0.path) }
+        return classify(files: sigs, prototypes: protos,
+                        libraryRoot: libraryRoot, profile: nonImageProfile)
+    }
+
+    /// A folder that must never act as a learn-your-style prototype — a generic
+    /// dumping ground the butler should organize files *out of*, not route them
+    /// back into. Matches the exact junk names AND any folder whose first word is
+    /// a dumping-ground word, so versioned/suffixed variants ("Desktop 1.0",
+    /// "Downloads (2)", "Temp files") are caught too. (RESTRUCTURE.md R1)
+    static func isJunkPrototypeFolder(_ path: String) -> Bool {
+        let name = (path as NSString).lastPathComponent.lowercased()
+        if junkFolderNames.contains(name) { return true }
+        let firstWord = name.split { !$0.isLetter }.first.map(String.init) ?? name
+        return junkPrototypePrefixes.contains(firstWord)
+    }
+
+    /// Generic dumping grounds — exact basenames the butler never anchors to.
+    static let junkFolderNames: Set<String> = [
+        "downloads", "downloaded", "desktop", "new folder", "untitled", "temp",
+        "tmp", "misc", "other", "stuff", "things", "files", "unsorted", "inbox",
+    ]
+
+    /// First-word matches that bar a folder even when suffixed/versioned.
+    private static let junkPrototypePrefixes: Set<String> = [
+        "desktop", "downloads", "download", "downloaded", "temp", "tmp",
+        "unsorted", "inbox", "misc",
+    ]
+
+    /// Build bag-of-words representatives for the non-image pass. Each file's
+    /// `clip` slot becomes an L2-normalized multi-hot over a shared, frequency-
+    /// capped vocab of (filename tokens ∪ content tags); `tags` keeps the same
+    /// token set so the distinctive-term namer can still label the group. The
+    /// input `clip` is ignored (non-image files have none) — only
+    /// `source`/`tags`/`timeUnix` are read. A file with no in-vocab token is
+    /// dropped (it has no grouping signal) and falls through to the rule cascade.
+    static func nonImageSignatures(_ files: [SemanticFile]) -> [SemanticFile] {
+        let tokenSets: [[String]] = files.map { f in
+            var set = Set(filenameTokens(f.source))
+            for t in f.tags {
+                let lt = t.lowercased()
+                if !lt.isEmpty { set.insert(lt) }
+            }
+            return Array(set).sorted()   // deterministic order across runs
+        }
+        var freq: [String: Int] = [:]
+        for toks in tokenSets { for t in toks { freq[t, default: 0] += 1 } }
+        let vocab = vocabFromFreq(freq, cap: nonImageVocabCap)
+        guard !vocab.isEmpty else { return [] }
+
+        var out: [SemanticFile] = []
+        out.reserveCapacity(files.count)
+        for (i, f) in files.enumerated() {
+            var vec = [Float](repeating: 0, count: vocab.count)
+            var any = false
+            for t in tokenSets[i] where vocab[t] != nil { vec[vocab[t]!] = 1; any = true }
+            guard any else { continue }
+            out.append(SemanticFile(fileID: f.fileID, source: f.source,
+                                    clip: l2Normalized(vec), tags: tokenSets[i],
+                                    timeUnix: f.timeUnix))
+        }
+        return out
+    }
+
+    /// Lowercase alphanumeric filename tokens, extension dropped, split on any
+    /// non-alphanumeric. Drops pure-numeric, very short, and generic
+    /// camera/scan tokens (no grouping signal): "IMG_4821.heic" → [], but
+    /// "acme_invoice_2023.pdf" → ["acme","invoice"]. (RESTRUCTURE.md R1)
+    static func filenameTokens(_ path: String) -> [String] {
+        let base = (path as NSString).lastPathComponent
+        let stem = (base as NSString).deletingPathExtension.lowercased()
+        return stem.split { !$0.isLetter && !$0.isNumber }
+            .map(String.init)
+            .filter { $0.count >= 3 && $0.contains(where: { $0.isLetter })
+                && !filenameStopwords.contains($0) }
+    }
+
+    /// Filename tokens that carry no grouping signal: camera/scan boilerplate,
+    /// common English connectors (so "boys at the zoo" doesn't name a "Boys The"
+    /// folder), and file-extension tokens that leak in on double-extension names
+    /// like `E14.jpg.lps` → `E14.jpg` → spurious "jpg". Lowercase. (RESTRUCTURE.md R1)
+    private static let filenameStopwords: Set<String> = [
+        // camera / scan / boilerplate
+        "img", "image", "dsc", "dscn", "dscf", "photo", "pic", "picture",
+        "screenshot", "screen", "shot", "untitled", "new", "copy", "final",
+        "draft", "version", "scan", "document", "file", "video", "vid", "clip",
+        // English connectors (no grouping signal)
+        "the", "and", "for", "with", "from", "was", "are", "this", "that",
+        "your", "our", "his", "her", "its", "out", "all", "has",
+        // extension tokens that leak in on double-extension names
+        "jpg", "jpeg", "png", "gif", "bmp", "heic", "heif", "tiff", "webp",
+        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "rtf",
+        "mov", "mp4", "avi", "mkv", "mp3", "wav", "zip", "rar", "lps",
+    ]
+
     // MARK: - Fusion
 
     private static func tagFrequencies(_ files: [SemanticFile]) -> [String: Int] {
@@ -237,21 +394,21 @@ public enum RestructureSemantic {
 
     /// Fuse one file: per-block L2-normalize, scale by weight, concatenate, then
     /// L2-normalize the whole so the clusterer's cosine is meaningful.
-    private static func fuse(_ file: SemanticFile, vocab: [String: Int]) -> [Float] {
+    private static func fuse(_ file: SemanticFile, vocab: [String: Int], profile: Profile) -> [Float] {
         var out: [Float] = []
         out.reserveCapacity(file.clip.count + vocab.count + 2)
 
         let clip = l2Normalized(file.clip)
-        out.append(contentsOf: clip.map { $0 * wClip })
+        out.append(contentsOf: clip.map { $0 * profile.wClip })
 
         var tags = [Float](repeating: 0, count: vocab.count)
         for t in file.tags { if let idx = vocab[t] { tags[idx] = 1 } }
         let tagsN = l2Normalized(tags)
-        out.append(contentsOf: tagsN.map { $0 * wTags })
+        out.append(contentsOf: tagsN.map { $0 * profile.wTags })
 
         let (s, c) = dayOfYearCyclical(file.timeUnix)
-        out.append(s * wTime)
-        out.append(c * wTime)
+        out.append(s * profile.wTime)
+        out.append(c * profile.wTime)
 
         return l2Normalized(out)
     }
