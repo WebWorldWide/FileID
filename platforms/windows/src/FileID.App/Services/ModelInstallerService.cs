@@ -549,6 +549,19 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         private set => Set(ref _allInstalled, value);
     }
 
+    private bool _coreModelsInstalled;
+    /// <summary>Core sub-1 GB models (CLIP + RAM++ + ArcFace) — gates the
+    /// Welcome sheet RE-SHOW decision only. The multi-GB Deep Analyze VLM is
+    /// install-once/skippable and must NOT re-nag on every launch, so it's
+    /// excluded here (mirrors macOS shouldShowWelcome()). AllInstalled —
+    /// which DOES include the VLM — still drives auto-dismiss + the Done
+    /// button inside the sheet.</summary>
+    public bool CoreModelsInstalled
+    {
+        get => _coreModelsInstalled;
+        private set => Set(ref _coreModelsInstalled, value);
+    }
+
     private bool _isBusy;
     public bool IsBusy
     {
@@ -562,10 +575,12 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         // Web-World-Wide/ram-plus-onnx (WS5 upload landed), so it gates
         // onboarding completion alongside CLIP/ArcFace/DeepVlm. (If RAM++ is
         // ever missing at runtime, tagging still degrades to CLIP scene-tags.)
-        AllInstalled =
+        CoreModelsInstalled =
             Clip.Status == ModelInstallStatus.Installed
             && Arcface.Status == ModelInstallStatus.Installed
-            && RamPlus.Status == ModelInstallStatus.Installed
+            && RamPlus.Status == ModelInstallStatus.Installed;
+        AllInstalled =
+            CoreModelsInstalled
             && DeepVlm.Status == ModelInstallStatus.Installed;
         IsBusy =
             Clip.Status == ModelInstallStatus.Downloading

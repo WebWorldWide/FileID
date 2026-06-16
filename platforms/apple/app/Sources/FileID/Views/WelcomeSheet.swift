@@ -9,6 +9,7 @@ struct WelcomeSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var clip = CLIPModelInstaller.shared
+    @State private var ramplus = RamPlusModelInstaller.shared
     @State private var arcface = ArcFaceModelInstaller.shared
 
     private let recommendedFace: FaceEmbedderKind
@@ -51,6 +52,18 @@ struct WelcomeSheet: View {
                 cancel: { clip.cancel() }
             )
             modelRow(
+                title: "Auto-tagging (RAM++)",
+                detail: "Recognizes 4,585 objects, scenes & attributes for richer tags and search. Without it, tagging uses the lighter built-in classifier.",
+                size: "~926 MB",
+                installed: ramplusInstalled,
+                inProgress: ramplusInProgress,
+                progressLabel: ramplusProgressLabel,
+                progressFrac: ramplusProgressFrac,
+                rateETA: ramplusRateETA,
+                action: { ramplus.install() },
+                cancel: { ramplus.cancel() }
+            )
+            modelRow(
                 title: "Face recognition (\(recommendedFace.displayName))",
                 detail: recommendedFace.subtitle,
                 size: "~\(recommendedFace.approxBytes / 1_048_576) MB",
@@ -91,6 +104,7 @@ struct WelcomeSheet: View {
         .frame(width: 600)
         .onAppear {
             clip.refreshStatus()
+            ramplus.refreshStatus()
             arcface.refreshStatus()
         }
         .onDisappear { installAllRequested = false }
@@ -163,6 +177,7 @@ struct WelcomeSheet: View {
             Button("Install all") {
                 installAllRequested = true
                 if !clipInstalled, !clipInProgress { clip.install() }
+                if !ramplusInstalled, !ramplusInProgress { ramplus.install() }
                 if !arcfaceInstalled, !arcfaceInProgress { arcface.install(recommendedFace) }
                 if !vlmInstalled, !vlmInProgress { triggerVLMInstall() }
             }
@@ -295,6 +310,34 @@ struct WelcomeSheet: View {
     }
     private var clipRateETA: String? {
         if case .downloading(_, _, let bps, let eta) = clip.status {
+            return DownloadFormat.rateAndETA(DownloadTick(written: 0, total: 0,
+                                                           bytesPerSecond: bps,
+                                                           etaSeconds: eta))
+        }
+        return nil
+    }
+
+    private var ramplusInstalled: Bool {
+        if case .installed = ramplus.status { return true }
+        return false
+    }
+    private var ramplusInProgress: Bool {
+        if case .downloading = ramplus.status { return true }
+        return false
+    }
+    private var ramplusProgressFrac: Double? {
+        if case .downloading(let frac, _, _, _) = ramplus.status { return frac }
+        return nil
+    }
+    private var ramplusProgressLabel: String? {
+        switch ramplus.status {
+        case .downloading(_, let msg, _, _): return msg
+        case .installFailed(let why):        return "Failed: \(why)"
+        default:                             return nil
+        }
+    }
+    private var ramplusRateETA: String? {
+        if case .downloading(_, _, let bps, let eta) = ramplus.status {
             return DownloadFormat.rateAndETA(DownloadTick(written: 0, total: 0,
                                                            bytesPerSecond: bps,
                                                            etaSeconds: eta))
@@ -443,13 +486,13 @@ struct WelcomeSheet: View {
     }
 
     private var allInstalled: Bool {
-        clipInstalled && arcfaceInstalled && vlmInstalled
+        clipInstalled && ramplusInstalled && arcfaceInstalled && vlmInstalled
     }
 
     /// True while any of the three onboarding downloads is still running.
     /// Drives "Install all" re-enablement once a cancel/failure settles
     /// everything back to idle. (F-C4-017)
     private var anyInProgress: Bool {
-        clipInProgress || arcfaceInProgress || vlmInProgress
+        clipInProgress || ramplusInProgress || arcfaceInProgress || vlmInProgress
     }
 }

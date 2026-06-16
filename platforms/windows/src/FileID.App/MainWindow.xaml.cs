@@ -147,11 +147,13 @@ public sealed partial class MainWindow : Window
         DebugLog.Info("[INSTALL] MaybeShowWelcomeSheetAsync called.");
         ModelInstallerService.Instance.Refresh();
         var svc = ModelInstallerService.Instance;
-        DebugLog.Info($"[INSTALL] sentinel state: clip={svc.Clip.Status} arcface={svc.Arcface.Status} deep_vlm={svc.DeepVlm.Status}");
+        DebugLog.Info($"[INSTALL] sentinel state: clip={svc.Clip.Status} ramplus={svc.RamPlus.Status} arcface={svc.Arcface.Status} deep_vlm={svc.DeepVlm.Status}");
 
-        // Mirror macOS shouldShowWelcome() (FileIDApp.swift:64-72): show
-        // the sheet on first launch (welcomeSheetSeen == false) OR any
-        // time a required model is missing on a subsequent launch.
+        // Mirror macOS shouldShowWelcome() (FileIDApp.swift): show the sheet
+        // on first launch (welcomeSheetSeen == false) OR any time a CORE
+        // model (CLIP/RAM++/face) is missing on a subsequent launch. The
+        // opt-in multi-GB Deep Analyze VLM is excluded from the re-show gate
+        // (CoreModelsInstalled, not AllInstalled) so it can't re-nag.
         // The second early-return (AllInstalled alone) used to suppress
         // the sheet on first launch when models happened to already be
         // present — e.g. after a partial wipe that left %LOCALAPPDATA%
@@ -160,9 +162,9 @@ public sealed partial class MainWindow : Window
         var seen = false;
         try { seen = AppViewModel.Instance.Settings.WelcomeSheetSeen; }
         catch (Exception ex) { DebugLog.Warn("MaybeShowWelcomeSheet: read WelcomeSheetSeen threw: " + ex.Message); }
-        if (seen && svc.AllInstalled)
+        if (seen && svc.CoreModelsInstalled)
         {
-            DebugLog.Info("[INSTALL] welcomeSheetSeen=true and all models installed; skipping.");
+            DebugLog.Info("[INSTALL] welcomeSheetSeen=true and core models installed; skipping. (Deep Analyze VLM is opt-in; it does not re-trigger Welcome.)");
             return;
         }
 

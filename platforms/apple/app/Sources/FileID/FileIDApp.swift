@@ -34,6 +34,7 @@ struct FileIDApp: App {
                         }
                     }
                     CLIPModelInstaller.shared.refreshStatus()
+                    RamPlusModelInstaller.shared.refreshStatus()
                     ArcFaceModelInstaller.shared.refreshStatus()
                     if shouldShowWelcome() { showWelcome = true }
                 }
@@ -63,16 +64,24 @@ struct FileIDApp: App {
         }
     }
 
-    /// First launch, or any subsequent launch where a recommended
-    /// model is missing — the sheet doubles as the install surface.
+    /// First launch, or any subsequent launch where a core sub-1 GB model
+    /// (CLIP · RAM++ · face) is missing — the sheet doubles as the install
+    /// surface. The multi-GB Deep Analyze VLM is install-once/skippable and
+    /// deliberately does NOT re-trigger the sheet (mirrors the Windows
+    /// CoreModelsInstalled re-show gate; AllInstalled incl. the VLM still
+    /// drives auto-dismiss inside the sheet).
     private func shouldShowWelcome() -> Bool {
         if !welcomeSheetSeen { return true }
         let clipMissing: Bool = {
             if case .installed = CLIPModelInstaller.shared.status { return false }
             return true
         }()
+        let ramplusMissing: Bool = {
+            if case .installed = RamPlusModelInstaller.shared.status { return false }
+            return true
+        }()
         let faceMissing = FaceEmbedderKind.installedKinds().isEmpty
-        return clipMissing || faceMissing
+        return clipMissing || ramplusMissing || faceMissing
     }
 }
 
