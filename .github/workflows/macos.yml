@@ -39,14 +39,18 @@ jobs:
         run: swift --version
 
       - name: Cache SwiftPM
-        # MLX + GRDB + onnxruntime are the long-tail deps. Keyed on
-        # Package.resolved so any dep bump invalidates cleanly.
+        # Cache only the dependency DOWNLOAD cache (resolved package sources +
+        # binary artifacts), NOT the project build products. Caching
+        # `platforms/apple/.build` (compiled .o/.swiftmodule) keyed only on
+        # Package.resolved + a broad restore-keys fallback restored STALE compiled
+        # objects whenever engine SOURCE changed but deps didn't — so `swift test`
+        # silently ran pre-change code (a non-deterministic CI that passed/failed
+        # by which objects survived). org.swift.swiftpm keeps dep downloads cached
+        # (no re-fetch); everything compiles fresh, so the test always reflects HEAD.
         uses: actions/cache@v4
         with:
           path: |
             ~/Library/Caches/org.swift.swiftpm
-            ~/Library/Developer/Xcode/DerivedData
-            platforms/apple/.build
           key: spm-${{ runner.os }}-${{ hashFiles('platforms/apple/Package.resolved') }}
           restore-keys: |
             spm-${{ runner.os }}-
