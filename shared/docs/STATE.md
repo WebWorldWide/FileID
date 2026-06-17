@@ -24,6 +24,32 @@ EMBEDDED metadata (no VLM, no new model; video already works via keyframe→VLM)
 Pure name-builders are byte-faithful across engines, pinned by matching unit tests (Rust 4 + macOS 5).
 **Verified:** Rust **354** lib tests + clippy clean; macOS build + **240** tests. No IPC/schema/C# change.
 Deferred (needs a MODELS.md/license decision + owner OK): *true* AI audio (Whisper/YAMNet) + 3D (render→VLM).
+## 2026-06-17 — Folder-granularity picker (both apps) + app-side audit → 2 more fixes; roadmap reconciled
+
+Closed the last real restructure gap and audited the least-covered area (the apps).
+
+- **Folder-granularity Settings picker (both apps, merged #61, CI-green):** the engine has long read
+  `FILEID_RESTRUCTURE_GRANULARITY` but no app surfaced it. Added a segmented Picker (macOS) / ComboBox (Windows)
+  in Settings ▸ Restructure; each EngineClient forwards a validated non-default value at spawn (applies on the
+  next engine start). Kept on the env mechanism — NO IPC/schema/engine change (the calibrated `granularity_delta`
+  hot path is untouched), so zero conformance impact and no regression risk to default users.
+- **App-side audit (2 verification-first agents over SwiftUI + WinUI — the engines were audited 4× but the apps
+  were not):** the granularity picker audited clean on both. Two real bugs found + fixed: a **C# WinUI native-
+  crash class** (`RestartAsync`'s `ConfigureAwait(false)` made `StartAsync`'s State writes raise PropertyChanged
+  off-thread; `SettingsView`'s handler mutated `{x:Bind}` TextBlocks directly — the V15.2/V15.4 fast-fail shape;
+  fixed by marshaling the batch through `DispatcherQueue.TryEnqueue` like every sibling view), and a **macOS
+  People drag-merge data-loss** (dragging a named card onto an unnamed one deleted the typed name; fixed at the
+  DB layer — `mergePersons` keeps the typed-named survivor, fail-safe + defense-in-depth). Two engine-lifecycle
+  findings deferred with rationale (DECISIONS): "Stop Engine" respawns (crash-recovery-FSM, needs a new state +
+  Mac verification) + exit-not-ordered-vs-pump (invasive, self-heals).
+- **Roadmap reconciled:** several "remaining" NEXT.md items were already done (mid-review re-plan fix via
+  `priorDeselectedIDs`; before/after tree via `TreeDiffView`; per-destination-bucket approval via the
+  `.destBucket` drill-down) — corrected to reflect reality.
+
+**Verification:** macOS `swift build` clean (the merge fix is build-verified; ReadStore is app-side, not in the
+`swift test` engine suite); Windows app CI-verified. The implementable + headlessly-verifiable work is now
+complete; what remains is owner-hardware-gated (threshold calibration on a real library — now a one-tap
+experiment via the granularity picker; per-vendor on-hardware UAT; Authenticode/notarization signing).
 
 ## 2026-06-17 — Deep whole-codebase audit → 9 verified fixes landed (3 PRs, all CI-green) + a file_ref swap guard
 
