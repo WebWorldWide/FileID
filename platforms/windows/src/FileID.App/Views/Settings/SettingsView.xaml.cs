@@ -718,6 +718,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             "arcface_buffalo" => Svc.Arcface,
             "mobileclip_s2" => Svc.Clip,
             "ram_plus" => Svc.RamPlus,
+            "whisper" => Svc.Whisper,
             _ => null,
         };
         if (slot is null) return;

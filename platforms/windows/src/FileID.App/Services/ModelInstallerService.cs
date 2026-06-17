@@ -47,6 +47,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     private static readonly string[] DeepVlmSentinelIds = { "qwen2_5_vl_7b", "gemma_3_4b", "mistral_small_3_2" };
     // RAM++ — the in-scan multi-label tagger. Single-sentinel "any-of".
     private static readonly string[] RamPlusSentinelIds = { "ram_plus" };
+    private static readonly string[] WhisperSentinelIds = { "whisper" };
     // one-button GPU acceleration pack on the welcome sheet.
     // NVIDIA gets the full CUDA EP: ort_cuda_x64 (the ONNX Runtime CUDA
     // provider DLL — the thing that actually flips inference off DirectML) plus
@@ -86,6 +87,11 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     /// / Mistral-Small 3.2. Installing persists AppSettings.SelectedVlmModelKind
     /// so the Deep Analyze tab picks the freshly-installed model by default.</summary>
     public ModelSlot DeepVlm { get; }
+    /// <summary>Whisper speech transcription for Deep Analyze (whisper.cpp CPU pack +
+    /// the multilingual ggml-base model — MIT). Optional: when absent, audio with no
+    /// descriptive metadata title keeps its original name instead of a transcript-based
+    /// one, so it is NOT a gate on <see cref="AllInstalled"/>.</summary>
+    public ModelSlot Whisper { get; }
     /// <summary> one-button GPU acceleration pack. On NVIDIA the
     /// Install action downloads cuDNN; on AMD/Intel/Qualcomm/CPU the slot
     /// is pre-marked Installed with an explanatory Message (DirectML is
@@ -163,6 +169,15 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             {
                 ClearCancelMarks("ram_plus");
                 return PrewarmAsync("ram_plus");
+            });
+        Whisper = new ModelSlot(
+            displayLabel: "Speech transcription (Whisper)",
+            // ~5 MB whisper.cpp CPU pack + ~148 MB ggml-base model.
+            approxBytes: 154UL * 1024 * 1024,
+            installAction: () =>
+            {
+                ClearCancelMarks("whisper");
+                return PrewarmAsync("whisper");
             });
         DeepVlm = new ModelSlot(
             displayLabel: "Qwen2.5-VL 7B",
@@ -463,6 +478,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         if (ReferenceEquals(slot, Clip)) return "mobileclip_s2";
         if (ReferenceEquals(slot, Arcface)) return "arcface_default";
         if (ReferenceEquals(slot, RamPlus)) return "ram_plus";
+        if (ReferenceEquals(slot, Whisper)) return "whisper";
         if (ReferenceEquals(slot, DeepVlm)) return _deepVlmModelKind;
         if (ReferenceEquals(slot, Accelerator)) return "cudnn_runtime_x64";
         return null;
@@ -606,6 +622,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         SeedSlot(Clip, ClipSentinelIds, requireAll: true);
         SeedSlot(Arcface, ArcfaceSentinelIds);
         SeedSlot(RamPlus, RamPlusSentinelIds);
+        SeedSlot(Whisper, WhisperSentinelIds);
         SeedSlot(DeepVlm, DeepVlmSentinelIds);
         // Accelerator slot — only flip to Installed if the
         // sentinel exists. Otherwise leave it as
@@ -1028,6 +1045,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         if (ReferenceEquals(slot, Instance.Clip)) return ClipSentinelIds;
         if (ReferenceEquals(slot, Instance.Arcface)) return ArcfaceSentinelIds;
         if (ReferenceEquals(slot, Instance.RamPlus)) return RamPlusSentinelIds;
+        if (ReferenceEquals(slot, Instance.Whisper)) return WhisperSentinelIds;
         if (ReferenceEquals(slot, Instance.DeepVlm)) return DeepVlmSentinelIds;
         if (ReferenceEquals(slot, Instance.Accelerator)) return AcceleratorSentinelIds;
         return Array.Empty<string>();
