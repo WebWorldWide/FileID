@@ -56,7 +56,7 @@ public enum Tagging {
             tagged = await processVideo(discovered: discovered, worker: worker, started: started)
         case .pdf:
             tagged = await processPDF(discovered: discovered, worker: worker, started: started)
-        case .doc, .audio, .other:
+        case .doc, .audio, .model, .other:
             tagged = TaggedFile(
                 url: url, kind: kind, extension: ext, sizeBytes: discovered.sizeBytes,
                 createdAt: discovered.creationDate, modifiedAt: discovered.modificationDate,

@@ -7,6 +7,22 @@
 
 ---
 
+## 2026-06-17 — Deep Analyze names audio + 3D models from EMBEDDED metadata (no new model); true AI parsing deferred
+
+Deep Analyze's smart-rename was image/video/pdf only (the VLM needs a raster). Extended it to audio + 3D
+models, but deliberately on a **metadata, not new-model** basis: audio is named from its embedded title/artist
+tags (reusing `audio_meta`'s `symphonia` probe on Windows / AVFoundation common-metadata on macOS); a `.obj` is
+named from the modeler's embedded object/group/material labels (a small `.obj`/`.mtl` text parser). This gives a
+genuinely descriptive name ("The Beatles - Hey Jude", "Spaceship") with ZERO new dependencies or models. Two
+mechanism choices: (1) a non-VLM branch (`analyze_metadata_named_file` / `DeepAnalyzeNaming.metadataResult`) runs
+BEFORE the VLM weights resolve, so it works even without a VLM installed, and ALWAYS handles a matched kind (a
+metadata-less file is an empty success, never a VLM-rasterize bail). (2) `.obj` needed a new scanned file-kind —
+`FileKind::Model` ("model"), lockstep both engines — because discovery DROPS `Other` (so `.obj` was never even
+scanned); audio was already a scanned kind. The pure name-builders are byte-faithful across engines (matching
+unit tests). Deferred — needs its own MODELS.md/license vetting + the owner's OK, so NOT added here: *true* AI
+content understanding of audio (Whisper transcription / YAMNet sound-ID — `audio_meta` already flags these as
+future) and 3D (render→VLM, or a 3D model). Video already gets true AI parsing via the existing keyframe→VLM path.
+
 ## 2026-06-17 — Restructure apply file_ref swap guard is POSITIVE-EVIDENCE-ONLY (skip only on a both-known mismatch)
 
 The apply stale-check was path-only: it proved the DB row still NAMED the planned source, not that the file now
