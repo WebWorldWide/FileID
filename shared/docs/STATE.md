@@ -8,7 +8,40 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
-## 2026-06-16 (latest) — Learn-from-corrections: instance-based folder memory (both engines, lockstep)
+## 2026-06-17 (latest) — Deep whole-codebase audit → 9 verified fixes landed (3 PRs, all CI-green) + a file_ref swap guard
+
+A 4-agent verification-first audit (every finding re-checked against code — this repo has a ~40% audit
+false-positive history) swept the restructure pipeline, the cross-platform DB/IPC contract, and the broad
+Rust + Swift engines. The freshly-landed learn-from-corrections code audited **clean**. Findings triaged and
+landed across three CI-green PRs on `main`:
+
+- **#58 restructure lockstep (6 verified divergences):** macOS computed the Keep/Tidy/Junk tile counts + per-move
+  tier on the ALREADY-STRIPPED proposals without the F-C1-004 semantic-claim exemption → the "Keep" tile
+  undercounted folders left alone; now computed in `proposeAll` on the full pre-strip set (new tested
+  `folderTiersAndCounts` + `PlanResult`). Rust `category_counts` sorted over a HashMap with no tie-break
+  (nondeterministic on Windows + diverged from macOS) → count-desc-then-category-asc. `filename_tokens` counted
+  graphemes vs Rust scalars → aligned. idf `ln` in f32 (libm-dependent) → f64. `FileDoneEvent.skippedStages`
+  non-optional decode → tolerant. + a root-dest guard + a stale migration comment.
+- **#59 engine robustness (2 fixed, 1 deferred):** `heic.rs` did WinRT activations with NO COM apartment on the
+  apartment-less decoder-pool threads → **every HEIC/HEIF (the default iPhone format) silently failed on Windows**
+  with a misleading "codec not installed" message; fixed via the `video.rs::ComScope` MTA pattern (confirmed
+  compiling on `windows-engine` CI). `ArcFaceService` lacked the empty-output `baseAddress!` guard its sibling
+  `MobileCLIPService` has → crash on a corrupt model; added. The `IPCSink` drainer's actor-held blocking write
+  was DEFERRED with rationale (bounded self-healing backpressure; cancellation is independent; the clean fix
+  fights Swift 6 `FileHandle` non-Sendability).
+- **file_ref swap guard (follow-on PR):** the apply stale-check was path-only — it proved the DB row still
+  NAMED the source, not that the file now AT that path was the planned one. Added a positive-evidence-only
+  file_ref (NTFS ref / inode) comparison: skip ONLY when both the stored and on-disk refs are known and differ,
+  so a same-path swap in the plan→apply window can't move the wrong bytes, and no missing-data case ever
+  false-skips. Lockstep `file_ref_swapped` / `fileRefSwapped`, pinned by a pure unit test on both engines + a
+  real same-path-swap integration test (real inodes on macOS, `cfg(windows)` NTFS ref on Rust).
+
+**Verification:** Rust **350** lib tests + `clippy --all-targets -D warnings` clean; macOS build + **235** tests.
+Both #58 + #59 merged green (incl. the Windows-only HEIC fix on `windows-engine`). The restructure butler is now
+best-in-class AND audited; what remains is owner-hardware polish (per-bucket approval UI, granularity slider,
+threshold calibration) + ship (signing, per-vendor UAT).
+
+## 2026-06-16 — Learn-from-corrections: instance-based folder memory (both engines, lockstep)
 
 The consuming logic for the v18 `restructure_feedback` table landed, completing the SOTA instance-based
 "learn-your-style" loop (no model retraining). A new `restructure_feedback` module on each engine
