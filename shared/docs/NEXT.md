@@ -51,6 +51,11 @@ Windows already surfaces confidence+reason in `DrillDownSheet` and already has t
 - **file_ref stale-move guard** (both, narrow) — the apply stale-check is path-only; add an inode/NTFS-id
   compare so a same-path file swap in the plan→apply window can't move the wrong bytes. Platform-specific;
   low-frequency edge.
+- **IPCSink drainer off-actor write** (macOS, deferred — see DECISIONS 2026-06-17) — the drainer's blocking
+  `wire.write` holds actor isolation, so a parent that stalls reading fd 2 backpressures `emit()`. Bounded +
+  self-healing + cancellation is independent (AtomicBool), so it's NOT a wedge; the clean fix fights Swift 6
+  (`FileHandle` non-`Sendable`) and risks frame ordering. Revisit only if a real stall is observed; would need a
+  Sendable fd wrapper + a single-writer off-actor queue that preserves order.
 - **Owner threshold calibration** — non-image thresholds are explicit placeholders; tune on the real library
   (now via the single granularity knob). Needs the owner's hardware.
 - **macOS CI green — the "non-image clustering anomaly" was a TEST bug, not an engine bug (RESOLVED).**

@@ -175,6 +175,17 @@ public final class ArcFaceService: @unchecked Sendable {
             guard let first = outputs.values.first else { return nil }
             let outData = try first.tensorData() as Data
             let count = outData.count / MemoryLayout<Float>.stride
+            // A zero-length output tensor makes `withUnsafeBytes` yield a nil
+            // baseAddress, so the `baseAddress!` below would trap and crash the engine
+            // mid-clustering — reachable via a corrupt/substituted .onnx whose output is
+            // empty (load() only checks file existence, not shape). Bail to a clean
+            // failure instead, exactly as the sibling MobileCLIPService.embedImage does
+            // before its identical unsafe read. (audit — empty-output guard)
+            guard count > 0 else {
+                JSONLog.shared.error(ev: "arcface_inference_failed",
+                                     error: "SFace produced an empty (0-length) output tensor")
+                return nil
+            }
             var floats = [Float](repeating: 0, count: count)
             outData.withUnsafeBytes { raw in
                 let src = raw.baseAddress!.assumingMemoryBound(to: Float.self)

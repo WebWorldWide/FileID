@@ -7,7 +7,11 @@
 
 ---
 
-## 2026-06-17 — Learn-from-corrections is instance-based + ADDITIVE, and records ALONGSIDE the undo journal
+## 2026-06-17 — Deep-audit triage: fixed HEIC-COM + ArcFace-guard; DEFERRED the IPCSink drainer with rationale
+
+A 4-agent whole-codebase audit (every finding independently verified — this repo has a ~40% audit false-positive history, so verification is mandatory) surfaced, beyond the 6 restructure-lockstep fixes, three engine-robustness items. Two were fixed (clear bugs with an established sibling pattern): (1) `shell/heic.rs` did WinRT activations with no COM apartment on the apartment-less decoder-pool threads, so EVERY HEIC/HEIF — the default iPhone photo format — failed `CO_E_NOTINITIALIZED` and was mis-reported to the user as "HEIF codec not installed" (silently dropping those files from tagging/faces/CLIP/thumbnails); fixed by mirroring `shell::video::ComScope` (MTA RAII guard, the correct model for blocking WinRT `.get()` on pumpless worker threads). (2) `ArcFaceService.embed` force-unwrapped `withUnsafeBytes` `baseAddress!` with no `count > 0` guard, unlike its sibling `MobileCLIPService.embedImage` — a corrupt/empty SFace `.onnx` output would trap the engine; added the same guard.
+
+The third — the `IPCSink` actor's drainer performs a blocking `wire.write` while holding actor isolation (so `emit()` blocks behind it, contrary to the method's comment) — was **deliberately NOT changed**. On analysis it is bounded backpressure, not a wedge: the buffer absorbs slack, it self-heals when the parent resumes reading, cancellation is independent (the engine polls an `AtomicBool` mirror, never the sink), and the parent-PID watchdog bounds parent-death. The "correct" off-actor-write fix fights Swift 6 strict concurrency (`FileHandle` is non-`Sendable`, so the write can't simply move to a `nonisolated` context) and risks IPC frame-ordering bugs — strictly worse than a rare, recoverable, already-mitigated stall. Same high-integrity principle as the prior deferrals: don't ship an unverifiable concurrency change that could regress a working path. Tracked in NEXT.md.
 
 The SOTA "learn-your-style" finding was instance-based personalization (store accepted placements, weight future
 proposals by them — no model retraining, which would be infeasible on-device and non-deterministic across the two
