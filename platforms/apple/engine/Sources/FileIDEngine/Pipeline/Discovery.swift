@@ -36,7 +36,10 @@ public struct DiscoveredFile: Sendable {
     public let fileRef: UInt64?
 
     public enum Kind: String, Sendable {
-        case image, video, pdf, doc, audio, other
+        // `model` = 3D models (scanned, not dropped like `other`) so Deep Analyze can
+        // name them from their embedded object/material labels. Lockstep with the Rust
+        // engine's FileKind::Model ("model"). Wavefront `.obj` only for now.
+        case image, video, pdf, doc, audio, model, other
     }
 }
 
@@ -56,6 +59,9 @@ public enum FileTypes {
     public static let audio: Set<String> = [
         "mp3", "m4a", "aac", "wav", "flac", "ogg", "opus", "aiff"
     ]
+    /// 3D models whose embedded names Deep Analyze can parse. Wavefront `.obj` only
+    /// for now (lockstep with the Rust engine's FileKind::from_extension).
+    public static let models: Set<String> = ["obj"]
 
     public static func kind(forExtension ext: String) -> DiscoveredFile.Kind {
         let e = ext.lowercased()
@@ -64,12 +70,14 @@ public enum FileTypes {
         if pdfs.contains(e)      { return .pdf }
         if documents.contains(e) { return .doc }
         if audio.contains(e)     { return .audio }
+        if models.contains(e)    { return .model }
         return .other
     }
 
     public static func isTaggable(_ ext: String) -> Bool {
         let e = ext.lowercased()
-        return images.contains(e) || videos.contains(e) || documents.contains(e) || audio.contains(e)
+        return images.contains(e) || videos.contains(e) || documents.contains(e)
+            || audio.contains(e) || models.contains(e)
     }
 }
 
