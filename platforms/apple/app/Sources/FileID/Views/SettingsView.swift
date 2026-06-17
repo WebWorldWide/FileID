@@ -10,6 +10,7 @@ struct SettingsTab: View {
     let engine: EngineClient
     let store: ReadStore
     @AppStorage(AppSettings.cleanupAutoTagKey) private var cleanupAutoTag: Bool = AppSettings.cleanupAutoTagDefault
+    @AppStorage(AppSettings.restructureGranularityKey) private var restructureGranularity: String = AppSettings.restructureGranularityDefault
     @State private var showAdvanced = false
     @State private var sessions: [ReadStore.ScanSessionRow] = []
 
@@ -33,6 +34,21 @@ struct SettingsTab: View {
                             }
                         }
                         .toggleStyle(.switch)
+                    }
+                }
+
+                GlassCard {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Restructure").font(.headline)
+                        Picker("Folder granularity", selection: $restructureGranularity) {
+                            Text("Looser").tag("loose")
+                            Text("Balanced").tag("normal")
+                            Text("Tighter").tag("tight")
+                        }
+                        .pickerStyle(.segmented)
+                        Text("How finely Restructure splits your files into folders — Looser groups broadly into fewer folders, Tighter makes more, smaller ones. Takes effect the next time the engine starts (relaunch FileID, or Settings ▸ Advanced ▸ Restart Engine).")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
                 }
 
