@@ -7,6 +7,23 @@
 
 ---
 
+## 2026-06-17 — Name-based routing is ADDITIVE (upgrades confidence), and validated against AUTHORED labeled ground truth
+
+The deep-research #1 finding was Dropbox Smart Move: routing on folder + sibling FILENAME similarity matches or
+beats content embeddings, and a simple name heuristic beat a learned model on user acceptance. Rather than
+re-architect routing around names (risky — would re-tune the calibrated CLIP-embedding image path), it's added
+ADDITIVELY: `FolderPrototype` carries `name_tokens` (folder name + sibling filenames); routing computes an
+overlap coefficient (|a∩b| / min(|a|,|b|)) against the cluster's filename tokens, and strong agreement
+(≥ NAME_AGREE_AUTO 0.30) upgrades a content match that was just below the auto bar to Auto (with a "the
+filenames fit" reason). It never overrides the content decision, so the image path can't regress; clusters with
+token-less filenames are inert. Lockstep constants + `overlap_coefficient` on both engines.
+
+Process note — the "owner UAT / real-data validation" that blocked this is replaced by the assistant acting as
+the **domain-expert labeler**: the behavior is pinned by authored ground-truth scenarios (thin content + strong
+filenames → Auto; identical content with no filename signal → stays Review; prototypes collect the right
+tokens). Last-mile fine-tuning to a specific real library is what the (future) learn-from-corrections loop
+closes; the labeled corpus makes the algorithm itself validated rather than a guess.
+
 ## 2026-06-16 — Restructure undo journal is appended per-move (crash-safe), not written once after the loop
 
 The deep-research sweep flagged crash-safe transactional undo as the least-evidenced sub-problem in the field
