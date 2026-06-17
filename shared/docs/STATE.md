@@ -34,6 +34,14 @@ both now build an identical `personTagName` / `FormatPersonTagName` (title+first
 else legacy name). Two agent claims were misses (Windows DOES have the Restructure confidence badge in
 `DrillDownSheet` + the Undo button). macOS verified (build + 226); Windows person-tag change is CI-pending.
 
+**All three CI workflows are green on `main`** (macOS app `0f61a04`, Windows engine `6cc3291`, Windows app
+`fa40dfb`). Getting macOS green surfaced a real find: the long-standing `nonImageGroupsByFilename` CI failure was
+NOT an engine bug — on-runner diagnostics proved the lone no-signal file is excluded before clustering and the
+moves never contained it; the failure was the test's `#expect(!moves.contains { $0.fileID == 999 })`
+negated-trailing-closure mis-evaluating on the runner's Xcode 16 swift-testing macro (not on local Xcode 26.5).
+Fixed by materializing the ids + closure-free `contains`. Also hardened `macos.yml` to stop caching build
+products (stale-object hazard) and kept the engine determinism improvements (singleton pre-exclusion + kNN clamp).
+
 Remaining (research-backed, in NEXT.md): list-tier + "apply only high-confidence"; name-based routing signal
 (Dropbox finding, needs real-data validation); learn-from-corrections (new migration); per-bucket approval +
 before/after tree (large UI); granularity Settings slider; mid-review re-plan fix; file_ref stale guard;
