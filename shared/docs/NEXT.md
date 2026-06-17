@@ -48,9 +48,12 @@ Windows already surfaces confidence+reason in `DrillDownSheet` and already has t
   (engine reads the env at spawn; the knob itself is done + verifiable today).
 - **Deep-Analyze mid-review re-plan fix** (macOS) — re-apply prior deselections by file-id to the fresh plan
   (`RestructureView.swift:48-58`).
-- **file_ref stale-move guard** (both, narrow) — the apply stale-check is path-only; add an inode/NTFS-id
-  compare so a same-path file swap in the plan→apply window can't move the wrong bytes. Platform-specific;
-  low-frequency edge.
+- **file_ref stale-move guard** (both, narrow) — ✅ DONE + green. The apply stale-check now compares the
+  planned file's stored `file_ref` (NTFS MFT ref / APFS-HFS inode) against the one on disk and skips on a
+  positive mismatch, so a same-path file swap in the plan→apply window can't move the wrong bytes.
+  `file_ref_swapped` / `fileRefSwapped` is positive-evidence-only (both refs known AND differ → skip; any
+  missing input proceeds — no false skips), lockstep, pinned by a pure unit test on both engines + a real
+  same-path-swap integration test (real inodes on macOS; `cfg(windows)` NTFS ref on the Rust side).
 - **IPCSink drainer off-actor write** (macOS, deferred — see DECISIONS 2026-06-17) — the drainer's blocking
   `wire.write` holds actor isolation, so a parent that stalls reading fd 2 backpressures `emit()`. Bounded +
   self-healing + cancellation is independent (AtomicBool), so it's NOT a wedge; the clean fix fights Swift 6

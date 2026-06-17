@@ -143,8 +143,8 @@ impl RestructureApply {
             // source. A stale plan (file renamed/moved/replaced since
             // planning) is skipped so we never move the wrong bytes or stamp
             // the row with a path that never held this file.
-            match current_path_in_db(&self.db_conn, m.file_id) {
-                Ok(Some(db_path)) if paths_equal(&db_path, &m.source) => {}
+            let db_file_ref = match current_identity_in_db(&self.db_conn, m.file_id) {
+                Ok(Some((db_path, db_ref))) if paths_equal(&db_path, &m.source) => db_ref,
                 _ => {
                     tracing::warn!(
                         file_id = m.file_id,
@@ -153,6 +153,24 @@ impl RestructureApply {
                     failed += 1;
                     continue;
                 }
+            };
+
+            // R-#14 same-path SWAP guard: the path check above only proves the DB row
+            // still NAMES this source — not that the file currently AT that path is the
+            // one we planned to move. If a different file was dropped at the same path
+            // in the plan→apply window (a sync client re-downloading, an app re-saving),
+            // moving it would relocate the wrong bytes and stamp this file_id onto an
+            // unrelated file. Compare the planned file's stored file_ref to the one on
+            // disk now; skip on positive mismatch. Conservative — a NULL stored ref or a
+            // platform/file with no readable ref (non-NTFS, or the non-Windows stub)
+            // leaves the move to proceed, so a legitimate move is never falsely skipped.
+            if file_ref_swapped(db_file_ref, crate::platform::file_ref(Path::new(&m.source))) {
+                tracing::warn!(
+                    file_id = m.file_id,
+                    "[RESTRUCTURE] skipping swapped move: a different file now occupies the planned source path"
+                );
+                failed += 1;
+                continue;
             }
 
             let dest = PathBuf::from(&m.destination);
@@ -567,14 +585,37 @@ fn update_path_in_db(conn: &Arc<Mutex<Connection>>, file_id: i64, new_path: &Pat
     Ok(())
 }
 
-/// B4: the current `path_text` the DB holds for `file_id`, or None if the row
-/// is gone. The single authoritative source for what `file_id` actually names.
-fn current_path_in_db(conn: &Arc<Mutex<Connection>>, file_id: i64) -> Result<Option<String>> {
+/// B4 + R-#14: the current `(path_text, file_ref)` the DB holds for `file_id`, or None
+/// if the row is gone. `path_text` is the authoritative name; `file_ref` (NTFS MFT
+/// reference, stored `u64 as i64`) is the planned-file identity the swap guard checks
+/// against the on-disk ref. `file_ref` is None for a row scanned before v8 or on a
+/// volume with no readable ref.
+fn current_identity_in_db(
+    conn: &Arc<Mutex<Connection>>,
+    file_id: i64,
+) -> Result<Option<(String, Option<i64>)>> {
     let conn = conn.lock();
-    let mut stmt = conn.prepare_cached("SELECT path_text FROM files WHERE id = ?1")?;
-    stmt.query_row(params![file_id], |row| row.get::<_, String>(0))
-        .optional()
-        .context("DB SELECT files.path_text")
+    let mut stmt = conn.prepare_cached("SELECT path_text, file_ref FROM files WHERE id = ?1")?;
+    stmt.query_row(params![file_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+    })
+    .optional()
+    .context("DB SELECT files.path_text,file_ref")
+}
+
+/// R-#14 positive-evidence swap detector. True ONLY when both the DB's stored file_ref
+/// and the on-disk file_ref are known AND differ — a different file now occupies the
+/// planned source path. Any missing input (NULL stored ref; a file/volume/platform with
+/// no readable ref, incl. the non-Windows stub) returns false so a legitimate move is
+/// never wrongly skipped. The stored ref is read back `i64 as u64` to undo the
+/// dbwriter's `u64 as i64` cast. NTFS file_ref carries a sequence number so even an MFT
+/// entry reuse is caught; an APFS/HFS inode can false-MATCH on reuse (rare), which only
+/// ever fails OPEN (the move proceeds), never closed.
+fn file_ref_swapped(db_ref: Option<i64>, current_ref: Option<u64>) -> bool {
+    match (db_ref, current_ref) {
+        (Some(d), Some(c)) => (d as u64) != c,
+        _ => false,
+    }
 }
 
 /// Path equality that tolerates separator/case differences. Fast path is a
@@ -997,6 +1038,62 @@ mod tests {
         assert_eq!(res.failed, 1);
         assert!(real.exists(), "the real file must be untouched");
         assert!(!root.join("Sorted").join("x.jpg").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// R-#14: the swap detector fires ONLY on a both-known mismatch — any missing
+    /// input must leave the move to proceed (no false skips). Pins the i64<->u64
+    /// bit-cast round-trip too (a high-bit NTFS ref stored as a negative i64).
+    #[test]
+    fn file_ref_swapped_only_on_positive_mismatch() {
+        assert!(file_ref_swapped(Some(100), Some(200)), "both known + differ → swapped");
+        assert!(!file_ref_swapped(Some(100), Some(100)), "both known + equal → not swapped");
+        assert!(!file_ref_swapped(Some(-1), Some(u64::MAX)), "-1i64 as u64 == u64::MAX → equal");
+        assert!(!file_ref_swapped(None, Some(200)), "no stored ref → proceed");
+        assert!(!file_ref_swapped(Some(100), None), "no on-disk ref → proceed");
+        assert!(!file_ref_swapped(None, None), "neither known → proceed");
+    }
+
+    /// R-#14: a real same-path swap — the DB recorded one file_ref for the planned
+    /// file, but a DIFFERENT file now occupies that exact path — must be skipped, not
+    /// moved. Windows-only: needs a live NTFS file_ref (the non-Windows
+    /// `platform::file_ref` stub returns None, leaving the guard inert — the macOS
+    /// engine's inode-based mirror has its own integration test).
+    #[test]
+    #[cfg(windows)]
+    fn apply_skips_move_when_file_ref_swapped() {
+        let root = std::env::temp_dir().join(format!("fileid-apply-swap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let src = root.join("doc.pdf");
+        std::fs::write(&src, b"SWAPPED-IN").unwrap();
+        // The file actually on disk now. If the volume has no readable ref the guard
+        // can't engage — skip the assertion rather than fail spuriously.
+        let Some(real_ref) = crate::platform::file_ref(&src) else {
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        };
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        // DB row names the SAME path but a DIFFERENT file_ref — the file we planned to
+        // move, since replaced on disk by another. `real_ref ^ 1` is guaranteed != real.
+        conn.execute(
+            "INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, kind, extension, failed, file_ref) \
+             VALUES (1, ?1, 0, 10, 0.0, 'doc', 'pdf', 0, ?2)",
+            params![src.to_string_lossy(), (real_ref ^ 1) as i64],
+        )
+        .unwrap();
+        let db = Arc::new(Mutex::new(conn));
+
+        let apply = RestructureApply::new(db, root.clone(), false);
+        let dest = root.join("Sorted").join("doc.pdf").to_string_lossy().into_owned();
+        let res = apply.apply(&[move_fixture(1, &src.to_string_lossy(), &dest)]).unwrap();
+
+        assert_eq!(res.applied, 0, "a swapped file must not be moved");
+        assert_eq!(res.failed, 1);
+        assert!(src.exists(), "the swapped-in file must be left untouched");
+        assert!(!root.join("Sorted").join("doc.pdf").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

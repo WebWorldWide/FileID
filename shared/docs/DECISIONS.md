@@ -7,6 +7,24 @@
 
 ---
 
+## 2026-06-17 — Restructure apply file_ref swap guard is POSITIVE-EVIDENCE-ONLY (skip only on a both-known mismatch)
+
+The apply stale-check was path-only: it proved the DB row still NAMED the planned source, not that the file now
+AT that path was the one planned. A same-path swap in the plan→apply window (a sync client re-downloading, an
+app re-saving) could move the wrong bytes and stamp the file_id onto an unrelated file. Added a file_ref
+(NTFS MFT ref / APFS-HFS inode) comparison. The key design call: it skips ONLY when both the stored ref and the
+on-disk ref are known AND differ — any missing input (NULL stored ref, an unreadable inode, the non-Windows
+`platform::file_ref` stub that returns None) leaves the move to proceed. Rationale: (1) a swap produces a
+*mismatch*, which the guard catches; the only gap is APFS/HFS inode REUSE, where a replacement file coincidentally
+gets the deleted file's inode — a false MATCH that the guard can't catch, but that fails OPEN (proceeds, exactly
+as today) rather than closed, so the guard is a strict improvement with no new false-skip risk. The NTFS file_ref
+has a generation/sequence number so even MFT-entry reuse is a mismatch (Windows catches the reuse case macOS
+can't). (2) Treating missing data as "proceed" means a pre-v8 row, a non-NTFS volume, or the Rust engine running
+on macOS-dev never wrongly refuses a legitimate move. The detector is a pure function (`file_ref_swapped` /
+`fileRefSwapped`) unit-tested on both engines, plus a real same-path-swap integration test (real inodes on macOS;
+`cfg(windows)` NTFS ref on Rust). Considered and rejected: trusting file_ref equality to RE-BIND identity (the
+DBWriter rename-heal already learned not to, re-audit R-10) — here it only ADDS a skip, never re-routes.
+
 ## 2026-06-17 — Deep-audit triage: fixed HEIC-COM + ArcFace-guard; DEFERRED the IPCSink drainer with rationale
 
 A 4-agent whole-codebase audit (every finding independently verified — this repo has a ~40% audit false-positive history, so verification is mandatory) surfaced, beyond the 6 restructure-lockstep fixes, three engine-robustness items. Two were fixed (clear bugs with an established sibling pattern): (1) `shell/heic.rs` did WinRT activations with no COM apartment on the apartment-less decoder-pool threads, so EVERY HEIC/HEIF — the default iPhone photo format — failed `CO_E_NOTINITIALIZED` and was mis-reported to the user as "HEIF codec not installed" (silently dropping those files from tagging/faces/CLIP/thumbnails); fixed by mirroring `shell::video::ComScope` (MTA RAII guard, the correct model for blocking WinRT `.get()` on pumpless worker threads). (2) `ArcFaceService.embed` force-unwrapped `withUnsafeBytes` `baseAddress!` with no `count > 0` guard, unlike its sibling `MobileCLIPService.embedImage` — a corrupt/empty SFace `.onnx` output would trap the engine; added the same guard.
