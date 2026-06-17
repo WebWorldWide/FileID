@@ -21,6 +21,28 @@ struct DeepAnalyzeNamingTests {
             == "Band - AC_DC_ Live")
     }
 
+    @Test("nameFromTranscript: leading words → name, lead → caption (lockstep with Rust)")
+    func transcriptName() {
+        let r = DeepAnalyzeNaming.nameFromTranscript(
+            "  This is a quick meeting about the Q3 budget and headcount  ")
+        #expect(r?.name == "This is a quick meeting about the Q3")
+        #expect(r?.description.hasPrefix("Audio transcript: This is a quick meeting") == true)
+        #expect(DeepAnalyzeNaming.nameFromTranscript("   \n  ") == nil)
+        #expect(DeepAnalyzeNaming.nameFromTranscript("") == nil)
+    }
+
+    @Test("nameFromSoundLabel: humanizes events, drops generic labels")
+    func soundLabel() {
+        #expect(DeepAnalyzeNaming.nameFromSoundLabel("dog_bark")?.name == "Dog Bark")
+        #expect(DeepAnalyzeNaming.nameFromSoundLabel("rain")?.name == "Rain")
+        #expect(DeepAnalyzeNaming.nameFromSoundLabel("dog_bark")?.description
+            == "Detected sound: Dog Bark")
+        // Generic / content-free labels keep the original name (nil).
+        #expect(DeepAnalyzeNaming.nameFromSoundLabel("speech") == nil)
+        #expect(DeepAnalyzeNaming.nameFromSoundLabel("music") == nil)
+        #expect(DeepAnalyzeNaming.nameFromSoundLabel("") == nil)
+    }
+
     @Test("buildObjName: meaningful object, else material, else nil")
     func objName() {
         #expect(DeepAnalyzeNaming.buildObjName(objects: ["default", "Spaceship"], materials: [])

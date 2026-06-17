@@ -1,5 +1,29 @@
 # NEXT — resume here
 
+## 2026-06-17 — Audio + 3D AI naming for Deep Analyze: 3 of 4 paths shipped both platforms; Windows YAMNet tracked
+
+Deep Analyze now does *AI content understanding* of audio + 3D (not just embedded-metadata naming):
+**Whisper speech transcription** (Windows whisper.cpp pack/model + a Settings install card; macOS Apple
+Speech), **3D `.obj` → render → VLM** (Windows hand-rolled software rasterizer; macOS OS QuickLook 3D
+generator → MLX VLM), and **macOS sound-event naming** (Apple SoundAnalysis). All commercial-clean
+(MIT / Apache / OS frameworks), all with graceful metadata fallback. Engines build-verified
+(Rust 364 lib tests + clippy clean; swift build + 241 tests). See MODELS.md for the per-path status table.
+
+**Remaining audio/3D item — Windows YAMNet (non-speech sound classification):**
+- *Why deferred, not shipped:* the common YAMNet ONNX exports take a `(64,96,1)` **log-mel patch**, not a
+  waveform, so Windows needs a hand-rolled STFT/log-mel frontend (no FFT crate in the locked set). That DSP
+  **can't be verified without on-hardware labeled audio** — shipping it blind risks confidently-wrong names.
+  macOS already ships the feature via Apple SoundAnalysis (correct-by-construction framework).
+- *Acceptance when built:* (a) a license-vetted YAMNet ONNX self-hosted under `Web-World-Wide/*` + sha256-pinned
+  in `registry.rs`; (b) a unit-tested log-mel frontend (STFT 25 ms/10 ms hop, 64 mel bins, 125–7500 Hz) matching
+  the model's expected input; (c) the 521-class AudioSet label map; (d) wired as a third tier in
+  `metadata_naming_blocking` (after Whisper, before "keep original"); (e) on-RTX-2060 validation that real
+  sound-effect files get sensible names. Mirror macOS `nameFromSoundLabel`'s generic-label drop + humanize.
+- *On-device verification still owed (runtime-gated, like every model):* confirm on the owner's Mac that the
+  engine's Apple Speech transcription + SoundAnalysis actually run in the CLI engine process (the TCC grant for
+  `NSSpeechRecognitionUsageDescription` is attributed to FileID.app); confirm Windows whisper.cpp transcribes
+  after the Settings install, and that `.obj` render→VLM produces good names on both platforms.
+
 ## 2026-06-16 — Restructure deep-research sweep: 4 verified wins landed; research-backed roadmap for the rest
 
 A `/deep-research` sweep (27 web sources → 21 verified claims) + a 3-agent codebase audit graded Restructure

@@ -36,6 +36,7 @@ pub mod variants;
 pub mod yunet;
 pub mod vlm;
 pub mod vlm_server;
+pub mod whisper;
 pub mod wordpiece_tokenizer;
 
 pub use clip_tokenizer::ClipTokenizer;

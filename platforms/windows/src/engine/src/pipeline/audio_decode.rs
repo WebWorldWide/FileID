@@ -1,8 +1,3 @@
-// Phase-1 foundation for the audio-AI pipeline: the consumer (the whisper.cpp runtime
-// module) lands in the next step on top of #63, so these are not wired yet. The pure
-// resample + WAV writer are unit-tested now. Remove this allow when the runtime calls
-// `decode_to_wav16_mono`.
-#![allow(dead_code)]
 //! Audio → 16 kHz mono PCM, the shared input both Whisper (transcription) and YAMNet
 //! (sound classification) require. Decodes any `symphonia`-supported container (mp3,
 //! flac, ogg/vorbis, wav, m4a/aac — the formats already enabled for `audio_meta`),

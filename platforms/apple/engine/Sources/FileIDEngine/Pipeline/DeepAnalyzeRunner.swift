@@ -263,21 +263,27 @@ public enum DeepAnalyzeRunner {
             }
 
             let url = URL(fileURLWithPath: target.path)
-            // Audio + 3D models aren't rasterizable for the VLM — name them from their
-            // EMBEDDED metadata (no VLM, no new model). Everything else takes the VLM
-            // path. Mirrors the Windows engine's analyze_metadata_named_file.
+            // Audio is named from EMBEDDED metadata / on-device transcription (no VLM).
+            // 3D models render via the OS QuickLook 3D generator → the VLM (visual
+            // understanding), falling back to their embedded object/material names if the
+            // render or inference fails. Everything else (image/video/pdf) takes the VLM
+            // path. Mirrors the Windows engine (analyze_metadata_named_file + the .obj
+            // software rasterizer in rasterize_for_vlm).
             let kind = FileTypes.kind(forExtension: (target.path as NSString).pathExtension)
-            let result: DeepAnalyze.AnalysisResult
-            if kind == .audio || kind == .model {
+            var result: DeepAnalyze.AnalysisResult
+            if kind == .audio {
                 result = await DeepAnalyzeNaming.metadataResult(url: url, kind: kind)
             } else {
                 // Pull face cluster names (if any) to inject into the prompt.
                 let faceNames = (try? await fetchFaceNames(database: database, fileID: target.id)) ?? []
                 result = await DeepAnalyze.shared.analyze(imageURL: url, faceNames: faceNames, onToken: onToken)
+                // A 3D model the OS couldn't render (no QuickLook generator) or the VLM
+                // couldn't caption → its embedded-name metadata, so it still gets a name.
+                if kind == .model, Self.isAnalysisFailure(result.description) {
+                    result = await DeepAnalyzeNaming.metadataResult(url: url, kind: kind)
+                }
             }
-            let isFailure = result.description.hasPrefix("Inference failed")
-                || result.description.hasPrefix("Could not decode")
-                || result.description == "Model not loaded."
+            let isFailure = Self.isAnalysisFailure(result.description)
             if isFailure {
                 failed += 1
             } else {
@@ -314,6 +320,14 @@ public enum DeepAnalyzeRunner {
                                     "cancelled": AnyCodable(cancelled),
                                     "seconds": AnyCodable(dur)])
         await finish(processed: processed, failed: failed, cancelled: cancelled)
+    }
+
+    /// A `DeepAnalyze.analyze` description that signals the file wasn't usefully analyzed
+    /// (no decodable raster, no loaded model, or an inference error) — not a real caption.
+    static func isAnalysisFailure(_ description: String) -> Bool {
+        description.hasPrefix("Inference failed")
+            || description.hasPrefix("Could not decode")
+            || description == "Model not loaded."
     }
 
     static func persist(

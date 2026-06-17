@@ -20,5 +20,6 @@ pub mod restructure_semantic;
 pub mod cluster_suggestions;
 pub mod audio_decode;
 pub mod audio_meta;
+pub mod obj_render;
 pub mod doc_extract;
 pub mod usn;
