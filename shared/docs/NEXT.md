@@ -27,10 +27,11 @@ Windows already surfaces confidence+reason in `DrillDownSheet` and already has t
 - **Surface-tier the main list + "apply only high-confidence"** (both apps, polish) — the badges exist now;
   add list ordering by band + a one-tap "select confident" so the user can apply the sure ones. SOTA: top
   band prominent, low band hidden, never silently auto-file (reconsider the silent `Auto` tier accordingly).
-- **Name-based routing signal** (both engines) — Dropbox Smart Move's A/B showed folder + **sibling-filename**
-  similarity beats content embeddings (94% vs 90%) and a simple heuristic beat a learned model. Add a
-  name-overlap bonus to image routing in `semantic_classify` (additive; keep the calibrated content path).
-  **Needs real-data validation before defaults change.**
+- **Name-based routing signal** (both engines) — ✅ DONE + CI-green. `FolderPrototype.name_tokens` (folder +
+  sibling filenames); routing computes an overlap coefficient vs the cluster's filename tokens and upgrades a
+  thin-margin content match to Auto when names agree strongly (Dropbox Smart Move). Additive — never overrides
+  the calibrated content path. Validated against authored labeled ground-truth scenarios (the assistant acting
+  as the domain-expert labeler in lieu of real-data UAT).
 - **Learn-from-corrections** (both engines, new migration vN+1) — persist approved cluster→folder decisions
   to a `restructure_feedback` table and reuse as routing hints next plan (instance-based, SOTA-validated; NOT
   retraining). Record-on-apply is safe/additive; hint-application is behavior-changing.
