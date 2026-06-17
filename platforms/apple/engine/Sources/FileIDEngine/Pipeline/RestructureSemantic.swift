@@ -102,11 +102,23 @@ public enum RestructureSemantic {
     }
 
     // Image pass — representative is the L2-normalized 512-d CLIP image embedding.
-    // Values are unchanged from the original calibrated constants.
-    public static let imageProfile = Profile(
-        wClip: 0.70, wTags: 0.22, wTime: 0.08,
-        folderMatchCos: 0.55, autoFolderCos: 0.72, autoCohesion: 0.62,
-        reviewCohesion: 0.50, minMargin: 0.05, autoMinMembers: 4)
+    // Thresholds calibrated 2026-06-17 against a real ~3.3k-image personal-photo library
+    // (the "Adlon" corpus). Finding: CLIP cosines for personal photos compress into a HIGH
+    // band — intra-folder cohesion median ≈ 0.80, inter-folder centroid p90 ≈ 0.84 — so the
+    // original folderMatchCos 0.55 / autoFolderCos 0.72 sat BELOW the entire distribution
+    // and auto-routed every photo into the nearest catch-all folder (109 event folders →
+    // one "Camera Roll"). The new bar sits between the inter-folder p90 (don't merge across
+    // events) and the intra-folder median (still group a real event). Env-overridable for
+    // further owner tuning, mirroring the non-image knobs. (RESTRUCTURE.md R3 calibration)
+    public static var imageProfile: Profile {
+        Profile(
+            wClip: 0.70, wTags: 0.22, wTime: 0.08,
+            folderMatchCos: envFloat("FILEID_RESTRUCTURE_IMG_FOLDER_COS", 0.80),
+            autoFolderCos: envFloat("FILEID_RESTRUCTURE_IMG_AUTO_FOLDER_COS", 0.86),
+            autoCohesion: envFloat("FILEID_RESTRUCTURE_IMG_AUTO_COH", 0.78),
+            reviewCohesion: envFloat("FILEID_RESTRUCTURE_IMG_REVIEW_COH", 0.70),
+            minMargin: 0.05, autoMinMembers: 4)
+    }
 
     private static let tagVocabCap = 256
     // Filenames tokenize into many one-off terms, so the non-image bag-of-words
@@ -154,11 +166,20 @@ public enum RestructureSemantic {
     }
 
     private static func fileHyperparams() -> IdentityClustering.Hyperparameters {
-        // Looser than faces: a semantic group is broader than one identity.
+        // Cluster-merge cosines calibrated 2026-06-17 on the real ~3.3k-image Adlon
+        // corpus. The original 0.50/0.40/0.42 were tuned for DIVERSE images; CLIP cosines
+        // for a coherent personal library compress into a high band (typical pair ≈ 0.71+,
+        // within-event ≈ 0.80), so those low bars merged the ENTIRE photo set into one
+        // cluster that then routed to a single catch-all folder. The new bars sit at the
+        // within-event cohesion so a cluster ≈ one event. Env-overridable for owner tuning;
+        // the single-knob GRANULARITY delta still shifts all three together.
         let d = granularityDelta()
         return IdentityClustering.Hyperparameters(
-            pass1Cosine: 0.50 + d, pass2Cosine: 0.40 + d, pass2Margin: 0.08,
-            pass3VarianceThreshold: 0.06, pass3MinMeanCosine: 0.42 + d,
+            pass1Cosine: envFloat("FILEID_RESTRUCTURE_CLUSTER_P1", 0.84) + d,
+            pass2Cosine: envFloat("FILEID_RESTRUCTURE_CLUSTER_P2", 0.76) + d,
+            pass2Margin: 0.08,
+            pass3VarianceThreshold: 0.06,
+            pass3MinMeanCosine: envFloat("FILEID_RESTRUCTURE_CLUSTER_P3", 0.76) + d,
             pass3MaxSplits: 5, kNN: 12)
     }
 
