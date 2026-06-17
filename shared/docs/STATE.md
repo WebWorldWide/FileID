@@ -8,7 +8,23 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
-## 2026-06-17 (latest) — Folder-granularity picker (both apps) + app-side audit → 2 more fixes; roadmap reconciled
+## 2026-06-17 (latest) — Deep Analyze: descriptive names for audio + 3D models (both engines, lockstep)
+
+Deep Analyze's smart-rename now covers audio + `.obj` 3D models, not just image/video/pdf — named from their
+EMBEDDED metadata (no VLM, no new model; video already works via keyframe→VLM):
+- **Audio** (`.mp3`/`.ogg`/…) → "Artist - Title" from embedded tags (Windows: `audio_meta` `symphonia` probe via
+  a new `extract_structured`; macOS: AVFoundation common-metadata in a new `DeepAnalyzeNaming`).
+- **3D** (`.obj`) → a descriptive name from the modeler's embedded object/group/material labels (a small
+  `.obj`/`.mtl` parser). Needed a new scanned file-kind `FileKind::Model` ("model") on both engines, because
+  discovery DROPS `Other` (so `.obj` was never even scanned); audio was already a scanned kind.
+- The metadata branch (`analyze_metadata_named_file` / `DeepAnalyzeNaming.metadataResult`) runs BEFORE the VLM
+  weights resolve (works without a VLM) and always-handles a matched kind (a metadata-less file is an empty
+  success, not a VLM-rasterize bail). Deep Analyze target filters now include `audio` + `model`.
+
+Pure name-builders are byte-faithful across engines, pinned by matching unit tests (Rust 4 + macOS 5).
+**Verified:** Rust **354** lib tests + clippy clean; macOS build + **240** tests. No IPC/schema/C# change.
+Deferred (needs a MODELS.md/license decision + owner OK): *true* AI audio (Whisper/YAMNet) + 3D (render→VLM).
+## 2026-06-17 — Folder-granularity picker (both apps) + app-side audit → 2 more fixes; roadmap reconciled
 
 Closed the last real restructure gap and audited the least-covered area (the apps).
 

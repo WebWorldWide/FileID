@@ -118,6 +118,17 @@ pub async fn analyze_file(
 
     let started = std::time::Instant::now();
 
+    // Audio + 3D models aren't rasterizable for the VLM, but they carry their OWN
+    // descriptive metadata: audio embeds title/artist/album tags; a .obj embeds the
+    // modeler's object/group/material names. Name them from that — no VLM, no new
+    // model — BEFORE resolving VLM weights (so it works even without a VLM installed).
+    // Rasterizable kinds (image/video/pdf) return None here and take the VLM path.
+    // (True AI audio/3D content understanding needs Whisper/YAMNet/a 3D renderer →
+    // future MODELS.md items.)
+    if let Some(outcome) = analyze_metadata_named_file(&db, file_id, model_kind, mode, started)? {
+        return Ok(outcome);
+    }
+
     // Resolve weights for this model_kind.
     let (gguf, mmproj) = vlm::find_weights(model_kind)
         .ok_or_else(|| anyhow::anyhow!("VLM weights for '{}' not installed", model_kind))?;
@@ -205,6 +216,265 @@ pub async fn analyze_file(
         model: model_kind.to_string(),
         elapsed_ms: started.elapsed().as_millis() as u64,
     })
+}
+
+// ── Metadata-based naming for non-rasterizable kinds (audio, 3D models) ──────────
+//
+// Deep Analyze's VLM path needs a raster image. Audio + .obj have none, but they
+// carry their OWN descriptive metadata, so we name them from that — no VLM, no new
+// model. The name-builders are PURE + unit-tested + kept lockstep with the Swift
+// engine's DeepAnalyze (so the same file gets the same name on either platform).
+
+/// True for 3D-model extensions whose embedded names we can parse. Wavefront `.obj`
+/// only for now (its `o`/`g`/`usemtl` directives are a simple text format); other
+/// formats (stl/ply/gltf/fbx) need their own parsers — future.
+fn is_3d_model_ext(ext: &str) -> bool {
+    ext == "obj"
+}
+
+/// Build a descriptive filename stem for an audio file from its embedded tags:
+/// "Artist - Title" when both are present, else the title alone, else None (no usable
+/// metadata — keep the original name; artist-only isn't descriptive enough). Case-
+/// preserving + filesystem-safe. Pure + lockstep with the Swift `buildAudioName`.
+pub(crate) fn build_audio_name(title: Option<&str>, artist: Option<&str>) -> Option<String> {
+    let title = title.map(str::trim).filter(|s| !s.is_empty());
+    let artist = artist.map(str::trim).filter(|s| !s.is_empty());
+    let raw = match (artist, title) {
+        (Some(a), Some(t)) => format!("{a} - {t}"),
+        (None, Some(t)) => t.to_string(),
+        _ => return None,
+    };
+    let safe = crate::util::path_safety::safe_filename_component(&raw);
+    if safe.is_empty() || safe == "_" { None } else { Some(safe) }
+}
+
+/// Build a descriptive name for a 3D model from its embedded object/group names (the
+/// modeler's labels for the thing), falling back to material names. Skips generic
+/// placeholder names ("default", "object", "mesh", pure numbers, …) that carry no
+/// content signal. None when nothing usable. Pure + lockstep with `buildObjName`.
+pub(crate) fn build_obj_name(objects: &[String], materials: &[String]) -> Option<String> {
+    let pick = |names: &[String]| -> Option<String> {
+        names
+            .iter()
+            .map(|s| s.trim().to_string())
+            .find(|s| is_meaningful_model_name(s))
+    };
+    let raw = pick(objects).or_else(|| pick(materials))?;
+    let safe = crate::util::path_safety::safe_filename_component(&raw);
+    if safe.is_empty() || safe == "_" { None } else { Some(safe) }
+}
+
+/// A 3D object/material name that carries content signal — not a tool's placeholder.
+/// Rejects pure-numeric/punctuation tokens and the common generic names (exact, or
+/// generic + a numeric suffix like "object1"/"mesh.001"), but keeps real words.
+fn is_meaningful_model_name(s: &str) -> bool {
+    let s = s.trim();
+    if s.chars().count() < 2 {
+        return false;
+    }
+    if s.chars().all(|c| !c.is_alphabetic()) {
+        return false; // pure numbers/punctuation ("001", "_", "1.2")
+    }
+    const GENERIC: &[&str] = &[
+        "default", "defaultobject", "none", "object", "obj", "mesh", "group",
+        "model", "polysurface", "material", "untitled", "cube", "plane", "scene",
+        "sphere", "cylinder", "node", "geometry", "shape",
+    ];
+    let lower = s.to_lowercase();
+    !GENERIC.iter().any(|g| {
+        lower == *g
+            || (lower.starts_with(g) && lower[g.len()..].chars().all(|c| !c.is_alphabetic()))
+    })
+}
+
+fn push_unique(v: &mut Vec<String>, s: &str) {
+    let s = s.trim();
+    if !s.is_empty() && !v.iter().any(|x| x == s) {
+        v.push(s.to_string());
+    }
+}
+
+/// Scan a Wavefront `.obj` (and its referenced `.mtl`) for the modeler's semantic
+/// labels: object (`o`) + group (`g`) names, and material (`usemtl`/`newmtl`) names.
+/// Bounded — reads at most `MAX_OBJ_SCAN_LINES` so a multi-GB mesh can't stall the
+/// rename pass; we only need the distinct name set, which is tiny. Dedup,
+/// order-preserving.
+fn parse_obj_names(path: &std::path::Path) -> (Vec<String>, Vec<String>) {
+    use std::io::BufRead;
+    const MAX_OBJ_SCAN_LINES: usize = 200_000;
+    let mut objects: Vec<String> = Vec::new();
+    let mut materials: Vec<String> = Vec::new();
+    let mut mtllib: Option<String> = None;
+
+    let p = crate::util::path_safety::to_extended_length(path);
+    if let Ok(f) = std::fs::File::open(&p) {
+        for (i, line) in std::io::BufReader::new(f).lines().enumerate() {
+            if i >= MAX_OBJ_SCAN_LINES {
+                break;
+            }
+            let Ok(line) = line else { break };
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("o ").or_else(|| line.strip_prefix("g ")) {
+                push_unique(&mut objects, rest);
+            } else if let Some(rest) = line.strip_prefix("usemtl ") {
+                push_unique(&mut materials, rest);
+            } else if let Some(rest) = line.strip_prefix("mtllib ") {
+                if mtllib.is_none() {
+                    mtllib = Some(rest.trim().to_string());
+                }
+            }
+        }
+    }
+    // Pull `newmtl` names from the referenced .mtl too (often richer than the
+    // `usemtl` refs). Resolved relative to the .obj's folder; bounded read.
+    if let (Some(mtl), Some(parent)) = (mtllib, path.parent()) {
+        let mtl_path = parent.join(&mtl);
+        let mp = crate::util::path_safety::to_extended_length(&mtl_path);
+        if let Ok(f) = std::fs::File::open(&mp) {
+            for line in std::io::BufReader::new(f).lines().take(50_000).map_while(Result::ok) {
+                if let Some(rest) = line.trim().strip_prefix("newmtl ") {
+                    push_unique(&mut materials, rest);
+                }
+            }
+        }
+    }
+    (objects, materials)
+}
+
+/// Human-readable caption for an audio file's metadata (Deep Analyze "description").
+fn audio_description(m: &crate::pipeline::audio_meta::AudioTags) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(t) = m.title.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        parts.push(format!("\u{201C}{t}\u{201D}"));
+    }
+    if let Some(a) = m.artist.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        parts.push(format!("by {a}"));
+    }
+    if let Some(al) = m.album.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        parts.push(format!("from \u{201C}{al}\u{201D}"));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("Audio: {}", parts.join(" ")))
+    }
+}
+
+/// Human-readable caption for a 3D model's embedded names.
+fn obj_description(objects: &[String], materials: &[String]) -> Option<String> {
+    if objects.is_empty() && materials.is_empty() {
+        return None;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if !objects.is_empty() {
+        let shown: Vec<&str> = objects.iter().take(4).map(String::as_str).collect();
+        parts.push(format!("objects: {}", shown.join(", ")));
+    }
+    if !materials.is_empty() {
+        let shown: Vec<&str> = materials.iter().take(4).map(String::as_str).collect();
+        parts.push(format!("materials: {}", shown.join(", ")));
+    }
+    Some(format!("3D model \u{2014} {}", parts.join("; ")))
+}
+
+/// Name + caption + tags a non-rasterizable kind (audio, 3D model) from its embedded
+/// metadata. Returns None for rasterizable kinds (image/video/pdf), which fall through
+/// to the VLM path. Mode-gated like the VLM path (caption modes keep the description,
+/// rename modes keep the name, tag modes keep tags). Persists + returns the outcome.
+fn analyze_metadata_named_file(
+    db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    file_id: i64,
+    model_kind: &str,
+    mode: AnalyzeMode,
+    started: std::time::Instant,
+) -> anyhow::Result<Option<AnalyzeOutcome>> {
+    let (path_text, kind): (String, String) = {
+        let conn = db.lock();
+        conn.query_row(
+            "SELECT path_text, kind FROM files WHERE id = ?1",
+            [file_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?
+    };
+    let path = std::path::Path::new(&path_text);
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_lowercase)
+        .unwrap_or_default();
+
+    // Only audio + 3D models are metadata-named here; everything else (image/video/pdf)
+    // returns None and takes the VLM path. NOTE: once a kind matches, it is ALWAYS
+    // handled here (even with no usable metadata → an empty success), so a tag-less
+    // audio file is never dropped into the VLM rasterize path, which would bail.
+    let (description, proposed_name, tags): (Option<String>, Option<String>, Vec<String>) =
+        if kind == "audio" {
+            let m = crate::pipeline::audio_meta::extract_structured(path);
+            let name = build_audio_name(m.title.as_deref(), m.artist.as_deref());
+            let desc = audio_description(&m);
+            let mut tags: Vec<String> = Vec::new();
+            if let Some(a) = &m.artist {
+                push_unique(&mut tags, a);
+            }
+            if let Some(al) = &m.album {
+                push_unique(&mut tags, al);
+            }
+            (desc, name, tags)
+        } else if is_3d_model_ext(&ext) {
+            let (objects, materials) = parse_obj_names(path);
+            let name = build_obj_name(&objects, &materials);
+            let desc = obj_description(&objects, &materials);
+            let mut tags: Vec<String> = Vec::new();
+            for t in objects.iter().chain(materials.iter()) {
+                push_unique(&mut tags, t);
+            }
+            tags.truncate(6);
+            (desc, name, tags)
+        } else {
+            return Ok(None);
+        };
+
+    // Mode-gate (mirror the VLM path's per-mode outputs).
+    let description = if matches!(
+        mode,
+        AnalyzeMode::CaptionOnly | AnalyzeMode::Both | AnalyzeMode::CaptionAndTags
+    ) {
+        description
+    } else {
+        None
+    };
+    let proposed_name = if matches!(mode, AnalyzeMode::RenameOnly | AnalyzeMode::Both) {
+        proposed_name
+    } else {
+        None
+    };
+    let tags = if matches!(
+        mode,
+        AnalyzeMode::Both | AnalyzeMode::TagsOnly | AnalyzeMode::CaptionAndTags
+    ) {
+        tags
+    } else {
+        Vec::new()
+    };
+
+    {
+        let conn = db.lock();
+        persist_vlm_results(
+            &conn,
+            file_id,
+            model_kind,
+            description.as_deref(),
+            proposed_name.as_deref(),
+            &tags,
+        )?;
+    }
+    Ok(Some(AnalyzeOutcome {
+        file_id,
+        description,
+        proposed_name,
+        model: model_kind.to_string(),
+        elapsed_ms: started.elapsed().as_millis() as u64,
+    }))
 }
 
 /// Resolve a file's on-disk path and rasterize it to an image the VLM can read:
@@ -802,5 +1072,83 @@ mod tests {
         assert!(result.is_err(), "expected feature-gate Err");
         let err = format!("{:#}", result.unwrap_err());
         assert!(err.contains("pdf-analyze"), "err should mention feature flag: {err}");
+    }
+
+    // ── Metadata naming (audio + 3D models) ──────────────────────────────────
+
+    #[test]
+    fn build_audio_name_artist_and_title() {
+        assert_eq!(
+            build_audio_name(Some("Hey Jude"), Some("The Beatles")).as_deref(),
+            Some("The Beatles - Hey Jude")
+        );
+        // Title-only → the title (case preserved).
+        assert_eq!(build_audio_name(Some("Clair de Lune"), None).as_deref(), Some("Clair de Lune"));
+        // Artist-only or nothing → not descriptive enough.
+        assert_eq!(build_audio_name(None, Some("The Beatles")), None);
+        assert_eq!(build_audio_name(None, None), None);
+        // Illegal path chars are sanitized, case preserved.
+        assert_eq!(
+            build_audio_name(Some("AC/DC: Live"), Some("Band")).as_deref(),
+            Some("Band - AC_DC_ Live")
+        );
+    }
+
+    #[test]
+    fn build_obj_name_prefers_meaningful_object_then_material() {
+        // The real object name wins over a leading generic placeholder.
+        assert_eq!(
+            build_obj_name(&["default".into(), "Spaceship".into()], &[]).as_deref(),
+            Some("Spaceship")
+        );
+        // No usable object name → fall back to a material name.
+        assert_eq!(
+            build_obj_name(&["Object".into(), "mesh.001".into()], &["BrushedSteel".into()]).as_deref(),
+            Some("BrushedSteel")
+        );
+        // Nothing meaningful → None (keep the original filename).
+        assert_eq!(build_obj_name(&["Cube".into(), "001".into()], &["default".into()]), None);
+        assert_eq!(build_obj_name(&[], &[]), None);
+    }
+
+    #[test]
+    fn is_meaningful_model_name_filters_placeholders() {
+        assert!(is_meaningful_model_name("Spaceship"));
+        assert!(is_meaningful_model_name("Brushed Steel"));
+        assert!(is_meaningful_model_name("Cubey")); // not the generic "Cube"
+        assert!(!is_meaningful_model_name("default"));
+        assert!(!is_meaningful_model_name("Object"));
+        assert!(!is_meaningful_model_name("object1")); // generic + numeric suffix
+        assert!(!is_meaningful_model_name("mesh.001"));
+        assert!(!is_meaningful_model_name("001"));
+        assert!(!is_meaningful_model_name("x"));
+    }
+
+    #[test]
+    fn parse_obj_names_reads_objects_materials_and_mtl() {
+        let dir = std::env::temp_dir().join(format!("fileid-obj-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("ship.mtl"),
+            "newmtl Hull\nKd 0.5 0.5 0.5\nnewmtl Cockpit\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("ship.obj"),
+            "# a tiny ship\nmtllib ship.mtl\no Spaceship\nv 0 0 0\nusemtl Hull\nf 1 1 1\ng Wing\nusemtl Hull\n",
+        )
+        .unwrap();
+
+        let (objects, materials) = parse_obj_names(&dir.join("ship.obj"));
+        assert_eq!(objects, vec!["Spaceship".to_string(), "Wing".to_string()]);
+        // usemtl "Hull" deduped; newmtl adds "Cockpit".
+        assert!(materials.contains(&"Hull".to_string()));
+        assert!(materials.contains(&"Cockpit".to_string()));
+        assert_eq!(materials.iter().filter(|m| *m == "Hull").count(), 1);
+
+        // End-to-end name: the first meaningful object wins.
+        assert_eq!(build_obj_name(&objects, &materials).as_deref(), Some("Spaceship"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

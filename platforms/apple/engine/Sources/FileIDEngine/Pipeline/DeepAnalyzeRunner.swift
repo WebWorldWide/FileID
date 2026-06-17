@@ -33,7 +33,7 @@ public enum DeepAnalyzeRunner {
             case .singleFile(let id):
                 let r = try GRDB.Row.fetchOne(db, sql: """
                     SELECT id, path_text FROM files
-                    WHERE id = ? AND kind IN ('image', 'pdf', 'video', 'doc') AND failed = 0
+                    WHERE id = ? AND kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0
                     """, arguments: [id])
                 if let r { return [Target(id: r["id"] ?? 0, path: r["path_text"] ?? "")] }
                 return []
@@ -45,7 +45,7 @@ public enum DeepAnalyzeRunner {
                 // VLM pass. ESCAPE '\' pairs with escapeLike's backslashing.
                 let r = try GRDB.Row.fetchAll(db, sql: """
                     SELECT id, path_text FROM files
-                    WHERE kind IN ('image', 'pdf', 'video', 'doc') AND failed = 0
+                    WHERE kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0
                       AND (path_text = ? OR path_text LIKE ? ESCAPE '\\')
                     ORDER BY scanned_at ASC
                     """, arguments: [prefix, Self.escapeLike(p) + "%"])
@@ -56,7 +56,7 @@ public enum DeepAnalyzeRunner {
                 if skipExisting {
                     sql = """
                         SELECT id, path_text FROM files
-                        WHERE kind IN ('image', 'pdf', 'video', 'doc') AND failed = 0
+                        WHERE kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0
                           AND (vlm_model IS NULL OR vlm_model != ?)
                         ORDER BY scanned_at ASC
                         """
@@ -64,7 +64,7 @@ public enum DeepAnalyzeRunner {
                 } else {
                     sql = """
                         SELECT id, path_text FROM files
-                        WHERE kind IN ('image', 'pdf', 'video', 'doc') AND failed = 0
+                        WHERE kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0
                         ORDER BY scanned_at ASC
                         """
                     args = []
@@ -262,10 +262,19 @@ public enum DeepAnalyzeRunner {
                 )))
             }
 
-            // Pull face cluster names (if any) to inject into the prompt.
-            let faceNames = (try? await fetchFaceNames(database: database, fileID: target.id)) ?? []
             let url = URL(fileURLWithPath: target.path)
-            let result = await DeepAnalyze.shared.analyze(imageURL: url, faceNames: faceNames, onToken: onToken)
+            // Audio + 3D models aren't rasterizable for the VLM — name them from their
+            // EMBEDDED metadata (no VLM, no new model). Everything else takes the VLM
+            // path. Mirrors the Windows engine's analyze_metadata_named_file.
+            let kind = FileTypes.kind(forExtension: (target.path as NSString).pathExtension)
+            let result: DeepAnalyze.AnalysisResult
+            if kind == .audio || kind == .model {
+                result = await DeepAnalyzeNaming.metadataResult(url: url, kind: kind)
+            } else {
+                // Pull face cluster names (if any) to inject into the prompt.
+                let faceNames = (try? await fetchFaceNames(database: database, fileID: target.id)) ?? []
+                result = await DeepAnalyze.shared.analyze(imageURL: url, faceNames: faceNames, onToken: onToken)
+            }
             let isFailure = result.description.hasPrefix("Inference failed")
                 || result.description.hasPrefix("Could not decode")
                 || result.description == "Model not loaded."
