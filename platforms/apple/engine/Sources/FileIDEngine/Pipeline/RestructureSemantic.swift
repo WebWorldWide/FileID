@@ -56,6 +56,32 @@ public enum RestructureSemantic {
     public struct FolderPrototype: Sendable {
         public let path: String
         public let centroid: [Float]
+        /// Distinctive filename/folder-name tokens of this folder + its current
+        /// contents — the Dropbox "Smart Move" signal that names route as well as
+        /// (or better than) content. Used ADDITIVELY: strong name agreement upgrades
+        /// a thin-margin content match's confidence, never overrides content routing.
+        public let nameTokens: Set<String>
+        public init(path: String, centroid: [Float], nameTokens: Set<String> = []) {
+            self.path = path
+            self.centroid = centroid
+            self.nameTokens = nameTokens
+        }
+    }
+
+    /// Name-routing thresholds (overlap coefficient = |a∩b| / min(|a|,|b|)). At/above
+    /// auto, the cluster's filenames agree strongly enough with the target folder to
+    /// upgrade a thin-margin content match to Auto; at/above reason the "filenames
+    /// fit" note is added. Lockstep with the Rust engine's NAME_AGREE_* constants.
+    static let nameAgreeAuto: Float = 0.30
+    static let nameAgreeReason: Float = 0.20
+
+    /// Overlap coefficient of two token sets: |a∩b| / min(|a|,|b|), 0 when either is
+    /// empty. Less penalized by union size than Jaccard — a cluster that shares a
+    /// folder's few distinctive tokens scores high even when each side has extras.
+    static func overlapCoefficient(_ a: Set<String>, _ b: Set<String>) -> Float {
+        let m = min(a.count, b.count)
+        if m == 0 { return 0 }
+        return Float(a.intersection(b).count) / Float(m)
     }
 
     /// A fusion-weight + confidence-threshold profile. The image pass keeps the
@@ -141,15 +167,18 @@ public enum RestructureSemantic {
     /// of its contents (Nearest-Class-Mean / Dropbox "Smart Move"). Zero user
     /// effort — the existing tree is the labeled ground truth.
     public static func folderPrototypes(_ files: [SemanticFile], minFiles: Int) -> [FolderPrototype] {
-        var byFolder: [String: [[Float]]] = [:]
+        var byFolder: [String: [SemanticFile]] = [:]
         for f in files {
             let parent = (f.source as NSString).deletingLastPathComponent
-            byFolder[parent, default: []].append(f.clip)
+            byFolder[parent, default: []].append(f)
         }
         var out: [FolderPrototype] = []
-        for (path, vecs) in byFolder where vecs.count >= minFiles {
-            if let centroid = meanUnit(vecs) {
-                out.append(FolderPrototype(path: path, centroid: centroid))
+        for (path, fs) in byFolder where fs.count >= minFiles {
+            if let centroid = meanUnit(fs.map { $0.clip }) {
+                // Folder's own name tokens + every sibling filename's tokens.
+                var nameTokens = Set(filenameTokens(path))
+                for f in fs { nameTokens.formUnion(filenameTokens(f.source)) }
+                out.append(FolderPrototype(path: path, centroid: centroid, nameTokens: nameTokens))
             }
         }
         // Deterministic order (path) so proposals are stable across runs.
@@ -193,6 +222,11 @@ public enum RestructureSemantic {
             let memberClip = members.map { files[$0].clip }
             guard let centroid = meanUnit(memberClip) else { continue }
             let coh = cohesion(memberClip, centroid)
+            // Distinctive filename tokens shared by this cluster — the name-routing
+            // signal matched against each candidate folder below.
+            let clusterNameTokens = members.reduce(into: Set<String>()) {
+                $0.formUnion(filenameTokens(files[$1].source))
+            }
 
             let destDir: String
             let category: String
@@ -210,9 +244,16 @@ public enum RestructureSemantic {
                 let name = (proto.path as NSString).lastPathComponent
                 category = name.isEmpty ? "Folder" : name
                 destDir = proto.path
-                confidence = (sim >= profile.autoFolderCos && coh >= profile.reviewCohesion && (sim - runnerUp) >= profile.minMargin)
-                    ? .auto : .review
-                reason = String(format: "Matches your '%@' folder (%.0f%% alike)", category, Double(sim * 100))
+                // Name-routing (Dropbox Smart Move): additive — strong filename
+                // agreement upgrades a thin-margin content match to Auto, but never
+                // overrides the content routing decision itself.
+                let nameSim = Self.overlapCoefficient(clusterNameTokens, proto.nameTokens)
+                let contentAuto = sim >= profile.autoFolderCos && coh >= profile.reviewCohesion && (sim - runnerUp) >= profile.minMargin
+                let nameAuto = nameSim >= Self.nameAgreeAuto && sim >= profile.folderMatchCos && coh >= profile.reviewCohesion
+                confidence = (contentAuto || nameAuto) ? .auto : .review
+                reason = nameSim >= Self.nameAgreeReason
+                    ? String(format: "Matches your '%@' folder (%.0f%% alike; the filenames fit too)", category, Double(sim * 100))
+                    : String(format: "Matches your '%@' folder (%.0f%% alike)", category, Double(sim * 100))
             } else {
                 // New group named from the cluster's most distinctive tags.
                 let terms = distinctiveTerms(members, files: files, globalFreq: globalFreq)

@@ -160,6 +160,33 @@ fn file_hyperparams() -> Hyperparameters {
 pub struct FolderPrototype {
     pub path: PathBuf,
     pub centroid: Vec<f32>,
+    /// Distinctive filename/folder-name tokens of this folder + its current
+    /// contents — the Dropbox "Smart Move" signal that names route as well as (or
+    /// better than) content. Used ADDITIVELY: strong name agreement can upgrade a
+    /// thin-margin content match's confidence, never override the content routing.
+    pub name_tokens: std::collections::HashSet<String>,
+}
+
+/// Name-routing thresholds, overlap coefficient = |a∩b| / min(|a|,|b|). At/above
+/// AUTO, the cluster's filenames agree strongly enough with the target folder to
+/// upgrade a thin-margin content match to Auto; at/above REASON the "filenames fit"
+/// note is added. Tuned against the labeled name-routing scenarios in the tests.
+const NAME_AGREE_AUTO: f32 = 0.30;
+const NAME_AGREE_REASON: f32 = 0.20;
+
+/// Overlap coefficient of two token sets: |a∩b| / min(|a|,|b|), 0 when either is
+/// empty. Less penalized by union size than Jaccard — a cluster that shares a
+/// folder's few distinctive tokens scores high even when each side has extra terms.
+fn overlap_coefficient(
+    a: &std::collections::HashSet<String>,
+    b: &std::collections::HashSet<String>,
+) -> f32 {
+    let m = a.len().min(b.len());
+    if m == 0 {
+        return 0.0;
+    }
+    let inter = a.iter().filter(|t| b.contains(*t)).count();
+    inter as f32 / m as f32
 }
 
 /// Build prototypes from the files' *current* locations: each parent folder
@@ -167,22 +194,28 @@ pub struct FolderPrototype {
 /// its contents (Nearest-Class-Mean / Dropbox "Smart Move"). Zero user effort —
 /// the existing tree is the labeled ground truth.
 pub fn folder_prototypes(files: &[SemanticFile], min_files: usize) -> Vec<FolderPrototype> {
-    let mut by_folder: HashMap<PathBuf, Vec<&[f32]>> = HashMap::new();
+    let mut by_folder: HashMap<PathBuf, Vec<&SemanticFile>> = HashMap::new();
     for f in files {
         if let Some(parent) = f.source.parent() {
-            by_folder
-                .entry(parent.to_path_buf())
-                .or_default()
-                .push(&f.clip);
+            by_folder.entry(parent.to_path_buf()).or_default().push(f);
         }
     }
     let mut out = Vec::new();
-    for (path, vecs) in by_folder {
-        if vecs.len() < min_files {
+    for (path, fs) in by_folder {
+        if fs.len() < min_files {
             continue;
         }
-        if let Some(centroid) = mean_unit(&vecs) {
-            out.push(FolderPrototype { path, centroid });
+        let clips: Vec<&[f32]> = fs.iter().map(|f| f.clip.as_slice()).collect();
+        if let Some(centroid) = mean_unit(&clips) {
+            // Folder's own name tokens + every sibling filename's tokens.
+            let mut name_tokens: std::collections::HashSet<String> =
+                filename_tokens(&path).into_iter().collect();
+            for f in &fs {
+                for t in filename_tokens(&f.source) {
+                    name_tokens.insert(t);
+                }
+            }
+            out.push(FolderPrototype { path, centroid, name_tokens });
         }
     }
     // Deterministic order (path) so proposals are stable across runs.
@@ -249,6 +282,12 @@ fn semantic_classify_profiled(
         // How tightly the cluster's members hug their centroid (mean cosine) —
         // the core "are these really alike?" confidence signal.
         let coh = cohesion(&member_clip, &centroid);
+        // Distinctive filename tokens shared by this cluster — the name-routing
+        // signal matched against each candidate folder's tokens below.
+        let cluster_name_tokens: std::collections::HashSet<String> = members
+            .iter()
+            .flat_map(|&i| filename_tokens(&files[i].source))
+            .collect();
 
         let (dest_dir, category, confidence, reason) =
             match nearest_two_folders(&centroid, prototypes) {
@@ -265,16 +304,30 @@ fn semantic_classify_profiled(
                     if sim >= profile.folder_match_cos && proto.path.starts_with(library_root) =>
                 {
                     let name = folder_display_name(&proto.path);
-                    let confidence = if sim >= profile.auto_folder_cos
+                    // Name-routing (Dropbox Smart Move): how much this cluster's
+                    // filenames overlap the folder's name/sibling tokens. Additive —
+                    // strong agreement upgrades a thin-margin content match to Auto,
+                    // but never overrides the content routing decision itself.
+                    let name_sim = overlap_coefficient(&cluster_name_tokens, &proto.name_tokens);
+                    let content_auto = sim >= profile.auto_folder_cos
                         && coh >= profile.review_cohesion
-                        && (sim - runner_up) >= profile.min_margin
-                    {
+                        && (sim - runner_up) >= profile.min_margin;
+                    let name_auto = name_sim >= NAME_AGREE_AUTO
+                        && sim >= profile.folder_match_cos
+                        && coh >= profile.review_cohesion;
+                    let confidence = if content_auto || name_auto {
                         Confidence::Auto
                     } else {
                         Confidence::Review
                     };
-                    let reason =
-                        format!("Matches your '{name}' folder ({:.0}% alike)", sim * 100.0);
+                    let reason = if name_sim >= NAME_AGREE_REASON {
+                        format!(
+                            "Matches your '{name}' folder ({:.0}% alike; the filenames fit too)",
+                            sim * 100.0
+                        )
+                    } else {
+                        format!("Matches your '{name}' folder ({:.0}% alike)", sim * 100.0)
+                    };
                     (proto.path.clone(), name, confidence, reason)
                 }
                 // Otherwise a new group, named from the cluster's most
@@ -836,6 +889,7 @@ mod tests {
         let protos = vec![FolderPrototype {
             path: PathBuf::from("/lib/Dogs"),
             centroid: unit(vec![1.0, 0.0, 0.0]),
+            name_tokens: std::collections::HashSet::default(),
         }];
         let moves = semantic_classify(&files, &protos, Path::new("/lib"));
         assert!(!moves.is_empty());
@@ -884,11 +938,77 @@ mod tests {
         let protos = vec![FolderPrototype {
             path: PathBuf::from("/lib/Dogs"),
             centroid: unit(vec![1.0, 0.0, 0.0]),
+            name_tokens: std::collections::HashSet::default(),
         }];
         let moves = semantic_classify(&files, &protos, Path::new("/lib"));
         assert!(!moves.is_empty());
         assert!(moves.iter().all(|m| m.confidence == Confidence::Auto), "exact match should auto-file");
         assert!(moves.iter().all(|m| m.reason.as_deref().unwrap_or("").contains("Dogs")));
+    }
+
+    // ── Name-based routing (Dropbox Smart Move; deep-research 2026-06-16) ───
+    // Labeled ground truth: filename agreement with a target folder is a strong
+    // routing signal that can decide a thin-margin content match. These encode the
+    // expert call on what SHOULD happen and pin the additive behavior.
+
+    #[test]
+    fn folder_prototypes_collect_name_tokens() {
+        let files = vec![
+            file(1, "/lib/Taxes/return_2022.pdf", vec![1.0, 0.0], &[]),
+            file(2, "/lib/Taxes/return_2023.pdf", vec![1.0, 0.0], &[]),
+        ];
+        let protos = folder_prototypes(&files, 2);
+        assert_eq!(protos.len(), 1);
+        assert!(protos[0].name_tokens.contains("taxes"), "folder name token");
+        assert!(protos[0].name_tokens.contains("return"), "sibling filename token");
+    }
+
+    #[test]
+    fn name_agreement_upgrades_a_thin_content_match_to_auto() {
+        // CONTENT only weakly matches (cosine ~0.6, below the 0.72 auto bar) but the
+        // FILENAMES clearly belong in the folder → auto-file on the name evidence.
+        let files: Vec<SemanticFile> = (0..3)
+            .map(|i| file(i, &format!("inbox/acme_invoice_part{i}.pdf"), vec![0.6, 0.8, 0.0], &[]))
+            .collect();
+        let protos = vec![FolderPrototype {
+            path: PathBuf::from("/lib/Acme Invoices"),
+            centroid: unit(vec![1.0, 0.0, 0.0]), // ~0.6 cosine from the cluster
+            name_tokens: std::collections::HashSet::from(["acme".to_string(), "invoice".to_string()]),
+        }];
+        let moves = semantic_classify(&files, &protos, Path::new("/lib"));
+        assert!(!moves.is_empty());
+        assert!(
+            moves.iter().all(|m| m.destination.starts_with("/lib/Acme Invoices")),
+            "should route to the name-matching folder"
+        );
+        assert!(
+            moves.iter().all(|m| m.confidence == Confidence::Auto),
+            "strong filename agreement should upgrade the thin content match to Auto"
+        );
+        assert!(
+            moves.iter().any(|m| m.reason.as_deref().unwrap_or("").contains("filenames fit")),
+            "the reason should note the filename agreement"
+        );
+    }
+
+    #[test]
+    fn thin_content_match_without_name_agreement_stays_review() {
+        // The control: same thin content match, filenames carry NO signal → the
+        // confidence must stay Review. Name-routing is additive, never fabricated.
+        let files: Vec<SemanticFile> = (0..3)
+            .map(|i| file(i, &format!("inbox/d{i}.jpg"), vec![0.6, 0.8, 0.0], &[]))
+            .collect();
+        let protos = vec![FolderPrototype {
+            path: PathBuf::from("/lib/Dogs"),
+            centroid: unit(vec![1.0, 0.0, 0.0]),
+            name_tokens: std::collections::HashSet::from(["dog".to_string(), "puppy".to_string()]),
+        }];
+        let moves = semantic_classify(&files, &protos, Path::new("/lib"));
+        assert!(!moves.is_empty());
+        assert!(
+            moves.iter().all(|m| m.confidence == Confidence::Review),
+            "no filename signal → thin content match stays Review"
+        );
     }
 
     // ── Non-image pass (RESTRUCTURE.md R1) ─────────────────────────────────

@@ -95,6 +95,58 @@ struct RestructureSemanticTests {
         #expect(moves.allSatisfy { RestructureSemantic.pathContained($0.destinationDir, in: "/lib") })
     }
 
+    // MARK: - Name-based routing (Dropbox Smart Move; deep-research 2026-06-16)
+    // Labeled ground truth: filename agreement with a target folder is a strong
+    // routing signal that can decide a thin-margin content match. Lockstep with the
+    // Rust engine's name-routing tests. Booleans are materialized before #expect to
+    // dodge the runner's Xcode-16 swift-testing closure-in-expect mis-eval.
+
+    @Test("folderPrototypes collect folder + sibling filename tokens")
+    func folderPrototypeNameTokens() {
+        let files = [
+            file(1, "/lib/Taxes/return_2022.pdf", [1, 0], []),
+            file(2, "/lib/Taxes/return_2023.pdf", [1, 0], []),
+        ]
+        let protos = RestructureSemantic.folderPrototypes(files, minFiles: 2)
+        #expect(protos.count == 1)
+        let hasFolderTok = protos.first?.nameTokens.contains("taxes") ?? false
+        let hasSiblingTok = protos.first?.nameTokens.contains("return") ?? false
+        #expect(hasFolderTok)
+        #expect(hasSiblingTok)
+    }
+
+    @Test("Filename agreement upgrades a thin content match to Auto")
+    func nameAgreementUpgradesToAuto() {
+        // Content only weakly matches (~0.6 cosine, below the 0.72 auto bar) but the
+        // filenames clearly belong in the folder → auto-file on the name evidence.
+        let files = (0..<3).map {
+            file(Int64($0), "inbox/acme_invoice_part\($0).pdf", [0.6, 0.8, 0], [])
+        }
+        let protos = [RestructureSemantic.FolderPrototype(
+            path: "/lib/Acme Invoices", centroid: unit([1, 0, 0]),
+            nameTokens: ["acme", "invoice"])]
+        let moves = RestructureSemantic.classify(files: files, prototypes: protos, libraryRoot: "/lib")
+        let allToFolder = moves.allSatisfy { $0.destinationDir.hasPrefix("/lib/Acme Invoices") }
+        let allAuto = moves.allSatisfy { $0.confidence == .auto }
+        let hasNote = moves.contains { $0.reason.contains("filenames fit") }
+        #expect(!moves.isEmpty)
+        #expect(allToFolder)
+        #expect(allAuto)
+        #expect(hasNote)
+    }
+
+    @Test("Thin content match without filename signal stays Review")
+    func thinMatchWithoutNamesStaysReview() {
+        // Control: identical thin content match, filenames carry no signal → Review.
+        let files = (0..<3).map { file(Int64($0), "inbox/d\($0).jpg", [0.6, 0.8, 0], []) }
+        let protos = [RestructureSemantic.FolderPrototype(
+            path: "/lib/Dogs", centroid: unit([1, 0, 0]), nameTokens: ["dog", "puppy"])]
+        let moves = RestructureSemantic.classify(files: files, prototypes: protos, libraryRoot: "/lib")
+        let allReview = moves.allSatisfy { $0.confidence == .review }
+        #expect(!moves.isEmpty)
+        #expect(allReview)
+    }
+
     // MARK: - Non-image pass (RESTRUCTURE.md R1)
 
     /// Filename tokenizer keeps content words and drops numeric / very-short /
