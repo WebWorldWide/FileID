@@ -19,10 +19,30 @@ generator → MLX VLM), and **macOS sound-event naming** (Apple SoundAnalysis). 
   the model's expected input; (c) the 521-class AudioSet label map; (d) wired as a third tier in
   `metadata_naming_blocking` (after Whisper, before "keep original"); (e) on-RTX-2060 validation that real
   sound-effect files get sensible names. Mirror macOS `nameFromSoundLabel`'s generic-label drop + humanize.
-- *On-device verification still owed (runtime-gated, like every model):* confirm on the owner's Mac that the
-  engine's Apple Speech transcription + SoundAnalysis actually run in the CLI engine process (the TCC grant for
-  `NSSpeechRecognitionUsageDescription` is attributed to FileID.app); confirm Windows whisper.cpp transcribes
-  after the Settings install, and that `.obj` render→VLM produces good names on both platforms.
+**On-hardware verification owed — Windows (CI only compiles; none of this runs without the RTX 2060 box + real files):**
+- [ ] **Whisper install** — Settings → "Speech transcription (Whisper)" → Install. Confirm the engine downloads
+      the whisper.cpp v1.9.0 pack + `ggml-base` (~154 MB), the `.zip` extracts in place, the `whisper.installed`
+      sentinel lands, and the card flips to ✓ Installed (+ per-row Cancel works mid-download).
+- [ ] **`WhisperRunner::find()` against the REAL extracted layout** — *highest risk.* I assumed the pack ships
+      `Release\main.exe` and probe `["", "Release", "bin"]` × `["whisper-cli", "main"]`. Verify the actual
+      extracted tree matches and `find()` locates the binary (if it misses, transcription silently no-ops to
+      metadata naming — no error). Confirm the binary's DLL deps resolve so it actually launches.
+- [ ] **Transcription end-to-end** — Deep Analyze a voice memo / podcast (`.mp3`/`.m4a`/`.wav`/`.ogg`). Confirm
+      `audio_decode` → 16 kHz mono WAV → the CLI's `-m -f -nt -np -l auto` invocation → `collapse_transcript`
+      parses the stdout cleanly (verify the `-nt` output format matches; `main.exe` vs `whisper-cli` flag parity)
+      → a sensible `name_from_transcript` name. Music still uses the metadata title (no transcription).
+- [ ] **3D `.obj` → render → VLM** — with a Deep Analyze VLM installed, analyze several real `.obj` (with +
+      without `.mtl`, with + without meaningful object names). Confirm `obj_render` produces a recognizable
+      3/4-view PNG (not blank/garbage), the VLM names it sensibly, the `model_to_vlm` gate routes correctly, an
+      unrenderable `.obj` falls back to metadata (no crash, never "no name"), and the temp PNG is cleaned.
+- [ ] **Privacy/perf sanity** — confirm no new network egress beyond the two pinned whisper URLs; the whisper
+      subprocess respects the `MAX_SECONDS` cap and doesn't stall the Deep Analyze batch.
+
+**On-hardware verification owed — macOS:** confirm Apple Speech transcription + SoundAnalysis actually run in the
+CLI *engine* process (the `NSSpeechRecognitionUsageDescription` TCC grant is attributed to FileID.app, and the
+first audio Deep Analyze should surface the system Speech-recognition permission prompt); confirm `.obj` →
+QuickLook 3D → MLX VLM produces good names; spot-check that `.ogg`/`.flac` (which Apple Speech/SoundAnalysis may
+not decode) degrade cleanly to metadata naming rather than erroring.
 
 ## 2026-06-16 — Restructure deep-research sweep: 4 verified wins landed; research-backed roadmap for the rest
 
