@@ -10,6 +10,7 @@
 import Foundation
 import AVFoundation
 import Speech
+import SoundAnalysis
 import FileIDShared
 
 enum DeepAnalyzeNaming {
@@ -174,6 +175,15 @@ enum DeepAnalyzeNaming {
                 name = named.name
                 if desc == nil { desc = named.description }
             }
+            // Still unnamed (no metadata title, no speech) → classify the dominant SOUND
+            // on-device (Apple SoundAnalysis — the macOS analogue of YAMNet) and name from
+            // it: a field recording of rain → "Rain", a dog bark → "Dog Bark". Best-effort;
+            // generic labels (speech/music/noise) and weak guesses keep the original name.
+            if name == nil, let sound = await classifySound(url: url) {
+                name = sound.name
+                if desc == nil { desc = sound.description }
+                pushUnique(&tags, sound.name)
+            }
             return DeepAnalyze.AnalysisResult(
                 description: desc ?? "",
                 proposedName: name,
@@ -238,6 +248,83 @@ enum DeepAnalyzeNaming {
         if SFSpeechRecognizer.authorizationStatus() == .authorized { return true }
         return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
             SFSpeechRecognizer.requestAuthorization { cont.resume(returning: $0 == .authorized) }
+        }
+    }
+
+    // MARK: - Sound-event classification (Apple SoundAnalysis — the macOS analogue of YAMNet)
+
+    /// Lowercased SoundAnalysis class identifiers that carry no useful filename signal:
+    /// speech/music are already handled by transcription + embedded tags, and the rest are
+    /// non-descriptive. A file landing on one of these keeps its original name.
+    private static let genericSoundLabels: Set<String> = [
+        "speech", "music", "silence", "noise", "white_noise", "background_noise",
+        "ambient_noise", "sound", "audio", "static", "humming",
+    ]
+
+    /// Humanize a SoundAnalysis class identifier ("dog_bark") into a descriptive,
+    /// filesystem-safe name ("Dog Bark") + a caption, or nil for a generic/empty label.
+    /// Pure + unit-tested (the framework call is runtime-verified on-device).
+    static func nameFromSoundLabel(_ identifier: String) -> (name: String, description: String)? {
+        let id = identifier.lowercased()
+        if genericSoundLabels.contains(id) { return nil }
+        let humanized = id
+            .split(whereSeparator: { $0 == "_" || $0 == "-" || $0 == "." })
+            .map { $0.prefix(1).uppercased() + $0.dropFirst() }
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespaces)
+        if humanized.isEmpty { return nil }
+        let safe = FilesystemNameSafe.componentSafe(humanized)
+        if safe.isEmpty || safe == "_" { return nil }
+        return (safe, "Detected sound: \(humanized)")
+    }
+
+    /// Classify the dominant sound in an audio file on-device (no model download, no
+    /// cloud) and name from it. Best-effort: nil on an unsupported container, an
+    /// unavailable classifier, or a low-confidence / generic result → metadata fallback.
+    static func classifySound(url: URL) async -> (name: String, description: String)? {
+        guard let label = await dominantSoundIdentifier(url: url) else { return nil }
+        return nameFromSoundLabel(label)
+    }
+
+    /// Run SoundAnalysis' built-in classifier over the file and return the highest-
+    /// confidence class identifier seen across the clip (≥ a minimum confidence), or nil.
+    private static func dominantSoundIdentifier(url: URL) async -> String? {
+        await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in
+            // SNAudioFileAnalyzer.analyze() is synchronous (delivers results to the
+            // observer on the calling thread), so run it off the executor.
+            DispatchQueue.global(qos: .userInitiated).async {
+                guard let analyzer = try? SNAudioFileAnalyzer(url: url),
+                      let request = try? SNClassifySoundRequest(classifierIdentifier: .version1) else {
+                    cont.resume(returning: nil)
+                    return
+                }
+                let observer = SoundObserver()
+                guard (try? analyzer.add(request, withObserver: observer)) != nil else {
+                    cont.resume(returning: nil)
+                    return
+                }
+                analyzer.analyze()
+                // Require real confidence so a file is never named off a weak guess.
+                if let best = observer.best, best.confidence >= 0.45 {
+                    cont.resume(returning: best.label)
+                } else {
+                    cont.resume(returning: nil)
+                }
+            }
+        }
+    }
+}
+
+/// Collects the highest-confidence classification across an audio file's time windows.
+/// Used only within the single synchronous `analyze()` call on one thread, so its mutable
+/// state needs no lock (it never crosses an isolation boundary).
+private final class SoundObserver: NSObject, SNResultsObserving, @unchecked Sendable {
+    var best: (label: String, confidence: Double)?
+    func request(_ request: SNRequest, didProduce result: SNResult) {
+        guard let classification = result as? SNClassificationResult,
+              let top = classification.classifications.first else { return }
+        if best == nil || top.confidence > best!.confidence {
+            best = (top.identifier, top.confidence)
         }
     }
 }
