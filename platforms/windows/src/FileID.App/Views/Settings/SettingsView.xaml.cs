@@ -268,21 +268,33 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
                 or nameof(EngineClient.State))
             {
                 Services.DebugLog.Debug($"[ENGINE-SUB:SettingsView] {e.PropertyName}");
-                OnPropertyChanged(nameof(EngineVersionText));
-                OnPropertyChanged(nameof(WorkerCapText));
-                OnPropertyChanged(nameof(GpuSummaryText));
-                OnPropertyChanged(nameof(ExecutionProviderText));
-                OnPropertyChanged(nameof(RecommendationText));
-                OnPropertyChanged(nameof(RecommendationVisibility));
-                OnPropertyChanged(nameof(CpuTopologyText));
-                OnPropertyChanged(nameof(MemoryDiagnosticsText));
-                OnPropertyChanged(nameof(GpuDiagnosticsText));
-                OnPropertyChanged(nameof(PowerDiagnosticsText));
-                OnPropertyChanged(nameof(ThumbnailDiagnosticsText));
-                // SyncReprobeUi reads the live session's bound EP from Info, so
-                // refresh the cuDNN pill here too — after a restart re-binds CUDA
-                // the pill flips from "restart to switch" to "active".
-                DispatcherQueue.TryEnqueue(() => { if (!_unloaded) { SyncNvidiaSection(); SyncReprobeUi(); } });
+                // PropertyChanged can arrive OFF the UI thread: RestartAsync spawns via
+                // ConfigureAwait(false), so StartAsync's synchronous State/CrashReason
+                // writes raise PropertyChanged on a thread-pool thread. These updates
+                // drive {x:Bind} TextBlocks (EngineVersionText, … — DispatcherObjects),
+                // so running OnPropertyChanged here directly mutated a DispatcherObject
+                // off-thread — the native fast-fail class (V15.2/V15.2.1/V15.4). Marshal
+                // to the UI thread like every other view's engine handler. (audit)
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (_unloaded) return;
+                    OnPropertyChanged(nameof(EngineVersionText));
+                    OnPropertyChanged(nameof(WorkerCapText));
+                    OnPropertyChanged(nameof(GpuSummaryText));
+                    OnPropertyChanged(nameof(ExecutionProviderText));
+                    OnPropertyChanged(nameof(RecommendationText));
+                    OnPropertyChanged(nameof(RecommendationVisibility));
+                    OnPropertyChanged(nameof(CpuTopologyText));
+                    OnPropertyChanged(nameof(MemoryDiagnosticsText));
+                    OnPropertyChanged(nameof(GpuDiagnosticsText));
+                    OnPropertyChanged(nameof(PowerDiagnosticsText));
+                    OnPropertyChanged(nameof(ThumbnailDiagnosticsText));
+                    // SyncReprobeUi reads the live session's bound EP from Info, so
+                    // refresh the cuDNN pill here too — after a restart re-binds CUDA
+                    // the pill flips from "restart to switch" to "active".
+                    SyncNvidiaSection();
+                    SyncReprobeUi();
+                });
             }
             else if (e.PropertyName == nameof(EngineClient.LastHardwareReprobe))
             {

@@ -982,18 +982,39 @@ public final class ReadStore: @unchecked Sendable {
         do {
             let queue = try writeQueue()
             let newCount: Int = try queue.write { db in
-                let placeholders = validSources.map { _ in "?" }.joined(separator: ",")
-                // 1. Reassign every face_print from the source persons to
-                //    the target.
-                var args: [DatabaseValueConvertible] = [target]
-                args.append(contentsOf: validSources.map { Int($0) })
+                // R5-01 name preservation: the People drag-merge passes the DROP TARGET
+                // as `target` regardless of names, so dragging a NAMED card onto an
+                // UNNAMED one would delete the typed name (persons row deleted, no undo).
+                // If `target` has no typed name but exactly one entity in the merge set
+                // does, that named one becomes the survivor instead. Every other caller
+                // already passes the named cluster as `target`, so this is a no-op for
+                // them. (audit — People drag-merge name loss)
+                let allIDs = [target] + validSources
+                let hasTypedName = "(COALESCE(TRIM(name),'')<>'' OR COALESCE(TRIM(title),'')<>'' OR COALESCE(TRIM(first_name),'')<>'' OR COALESCE(TRIM(middle_name),'')<>'' OR COALESCE(TRIM(last_name),'')<>'' OR COALESCE(TRIM(suffix),'')<>'')"
+                let idPlaceholders = allIDs.map { _ in "?" }.joined(separator: ",")
+                let named: Set<Int64> = Set(try Int64.fetchAll(db, sql:
+                    "SELECT id FROM persons WHERE id IN (\(idPlaceholders)) AND is_unknown = 0 AND \(hasTypedName)",
+                    arguments: StatementArguments(allIDs.map { Int($0) })))
+                let survivor: Int64
+                if named.contains(target) {
+                    survivor = target
+                } else {
+                    let namedSources = validSources.filter { named.contains($0) }
+                    survivor = namedSources.count == 1 ? namedSources[0] : target
+                }
+                let losers = allIDs.filter { $0 != survivor }
+                let placeholders = losers.map { _ in "?" }.joined(separator: ",")
+                // Reassign every face_print from the loser persons to the survivor,
+                // then delete the losers.
+                var args: [DatabaseValueConvertible] = [survivor]
+                args.append(contentsOf: losers.map { Int($0) })
                 try db.execute(
                     sql: "UPDATE face_prints SET person_id = ? WHERE person_id IN (\(placeholders))",
                     arguments: StatementArguments(args)
                 )
                 try db.execute(
                     sql: "DELETE FROM persons WHERE id IN (\(placeholders))",
-                    arguments: StatementArguments(validSources.map { Int($0) })
+                    arguments: StatementArguments(losers.map { Int($0) })
                 )
                 try db.execute(sql: """
                     UPDATE persons SET file_count = (
@@ -1002,10 +1023,10 @@ public final class ReadStore: @unchecked Sendable {
                         WHERE person_id = ?
                     )
                     WHERE id = ?
-                    """, arguments: [target, target])
+                    """, arguments: [survivor, survivor])
                 let n = try Int.fetchOne(db, sql:
                     "SELECT file_count FROM persons WHERE id = ?",
-                    arguments: [target]) ?? 0
+                    arguments: [survivor]) ?? 0
                 return n
             }
             self.notifyChanged()
