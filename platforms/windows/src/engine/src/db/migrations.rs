@@ -45,6 +45,7 @@ fn registry() -> Vec<(&'static str, &'static str)> {
         ("v15_fts_sync_triggers",        V15_FTS_SYNC_TRIGGERS),
         ("v16_path_search",              V16_PATH_SEARCH),
         ("v17_face_verification_stable_keys", V17_FACE_VERIFICATION_STABLE_KEYS),
+        ("v18_restructure_feedback",     V18_RESTRUCTURE_FEEDBACK),
     ]
 }
 
@@ -164,6 +165,24 @@ UPDATE face_verifications SET
     file_b = (SELECT file_id FROM face_prints WHERE id = face_b),
     bbox_b = (SELECT bbox    FROM face_prints WHERE id = face_b)
 WHERE face_a IS NOT NULL AND face_b IS NOT NULL;
+";
+
+/// v18: learn-from-corrections — a token→folder co-occurrence memory. Every move a
+/// user APPLIES in a restructure is, by definition, approved; each moved file's
+/// filename tokens are credited toward its destination folder's basename. The next
+/// plan reads these weights as an additive routing/confidence hint, so the butler
+/// learns the user's filing habits over time (instance-based, no model retraining —
+/// the SOTA pattern). Identifier + SQL must match the Swift `v18_restructure_feedback`
+/// migration exactly for cross-platform DB parity. (RESTRUCTURE.md P3 / deep-research)
+const V18_RESTRUCTURE_FEEDBACK: &str = "
+CREATE TABLE IF NOT EXISTS restructure_feedback (
+    token      TEXT    NOT NULL,
+    folder     TEXT    NOT NULL,
+    weight     INTEGER NOT NULL DEFAULT 1,
+    updated_at DOUBLE  NOT NULL DEFAULT 0,
+    PRIMARY KEY (token, folder)
+);
+CREATE INDEX IF NOT EXISTS idx_restructure_feedback_token ON restructure_feedback(token);
 ";
 
 /// Apply every registered migration that hasn't been applied yet, in
@@ -456,7 +475,7 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 17, "expected 17 applied migrations");
+        assert_eq!(n, 18, "expected 18 applied migrations");
 
         // v13 added face_a + face_b to face_verifications (stable anchor keys).
         let verify_cols: i64 = conn
@@ -525,7 +544,7 @@ mod tests {
         apply(&conn).unwrap();
         apply(&conn).unwrap(); // second run is a no-op
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 17);
+        assert_eq!(n, 18);
     }
 
     /// R3-15 regression: a "different people" verdict's churn-stable (file_id, bbox)
@@ -618,7 +637,7 @@ mod tests {
     /// BOTH or the chains fork again.
     #[test]
     fn migration_identifiers_match_canonical_list() {
-        const CANONICAL: [&str; 17] = [
+        const CANONICAL: [&str; 18] = [
             "v1_core_tables",
             "v2_clip_embeddings",
             "v3_deep_analyze",
@@ -636,6 +655,7 @@ mod tests {
             "v15_fts_sync_triggers",
             "v16_path_search",
             "v17_face_verification_stable_keys",
+            "v18_restructure_feedback",
         ];
         let ids: Vec<&str> = registry().iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, CANONICAL, "migration identifiers must match the canonical cross-platform list");

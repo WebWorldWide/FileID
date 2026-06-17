@@ -483,6 +483,24 @@ public final class Database: @unchecked Sendable {
                 """)
         }
 
+        // v18: learn-from-corrections — a token→folder co-occurrence memory. Every
+        // applied restructure move credits the moved file's filename tokens toward
+        // its destination folder; the next plan reads these weights as an additive
+        // routing/confidence hint. Identifier + resulting schema match the Rust
+        // v18_restructure_feedback migration for cross-platform DB parity.
+        m.registerMigration("v18_restructure_feedback") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS restructure_feedback (
+                    token      TEXT    NOT NULL,
+                    folder     TEXT    NOT NULL,
+                    weight     INTEGER NOT NULL DEFAULT 1,
+                    updated_at DOUBLE  NOT NULL DEFAULT 0,
+                    PRIMARY KEY (token, folder)
+                )
+                """)
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_restructure_feedback_token ON restructure_feedback(token)")
+        }
+
         return m
     }
 
