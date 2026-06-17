@@ -93,7 +93,14 @@ struct DispatchHandlersTests {
                                 newPath: "/lib/Documents/3.pdf", bucket: "Documents",
                                 confidence: "review", reason: "Document"),
         ]
-        let plan = FileIDEngineMain.restructurePlan(from: proposals, libraryRoot: "/lib")
+        // Build the PlanResult the way proposeAll does — classify on the full set,
+        // derive tiers + counts (no exemption here) — so the mapper sees real tiers.
+        let folderClass = Restructure.classifyFolders(proposals)
+        let tiers = Restructure.folderTiersAndCounts(classified: folderClass, exempt: [])
+        let planResult = Restructure.PlanResult(
+            proposals: proposals, tierByFolder: tiers.tierByFolder,
+            anchorFolders: tiers.anchor, mixedFolders: tiers.mixed, junkFolders: tiers.junk)
+        let plan = FileIDEngineMain.restructurePlan(from: planResult, libraryRoot: "/lib")
 
         #expect(plan.libraryRoot == "/lib")
         #expect(plan.moves.count == 3)
@@ -113,5 +120,31 @@ struct DispatchHandlersTests {
         #expect(plan.folderClassifications?.mixedFolders == 1)
         #expect(plan.folderClassifications?.anchorFolders == 0)
         #expect(plan.folderClassifications?.junkFolders == 0)
+    }
+
+    // F-C1-004 lockstep: a homogeneous source folder the semantic butler actively
+    // relocated classifies Anchor, but because it is being EMPTIED (not kept) it must
+    // be remapped to Mixed when exempt — so it neither inflates the "Keep" tile nor
+    // badges its surviving moves Anchor. Mirrors the Windows engine's
+    // handle_plan_restructure exemption loop. (audit)
+    @Test("folderTiersAndCounts remaps an exempt (semantic-claimed) Anchor folder to Mixed")
+    func exemptAnchorFolderBecomesMixed() {
+        // 5 files in /inbox/dogs all routed into one content group → the source folder
+        // classifies Anchor (100% homogeneity, >2 files, non-generic name).
+        let moves = (1...5).map { i in
+            RestructureProposal(
+                fileID: Int64(i), oldPath: "/inbox/dogs/\(i).jpg",
+                newPath: "/lib/Dogs/\(i).jpg", bucket: "Dogs", confidence: "auto", reason: nil)
+        }
+        let classified = Restructure.classifyFolders(moves)
+        // Not exempt → Anchor (would wrongly inflate the Keep tile + badge moves Anchor).
+        let plain = Restructure.folderTiersAndCounts(classified: classified, exempt: [])
+        #expect(plain.anchor == 1 && plain.mixed == 0)
+        #expect(plain.tierByFolder["/inbox/dogs"] == "Anchor")
+        // Exempt (the butler is relocating these, not keeping them) → Mixed.
+        let exempt = Restructure.folderTiersAndCounts(
+            classified: classified, exempt: ["/inbox/dogs"])
+        #expect(exempt.anchor == 0 && exempt.mixed == 1)
+        #expect(exempt.tierByFolder["/inbox/dogs"] == "Mixed")
     }
 }

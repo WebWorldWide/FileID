@@ -738,7 +738,12 @@ fn distinctive_terms<'a>(
         .map(|(t, c)| {
             let tf = c as f32 / size;
             let df = *global_freq.get(t).unwrap_or(&1) as f32;
-            (t, tf * (total / df).ln().max(0.0))
+            // Compute the idf's ln in f64 then narrow — f32 `logf` is libm-dependent
+            // (can differ Windows↔macOS by ~1 ULP), which could flip the tie order of
+            // two near-equal-score terms and pick a DIFFERENT group folder name across
+            // platforms. f64 `ln` is consistently correctly-rounded, matching the macOS
+            // engine's `Float(log(Double(...)))`. (audit — lockstep)
+            (t, tf * (((total / df) as f64).ln().max(0.0) as f32))
         })
         .collect();
     // Score desc, then name for determinism; drop zero-score (ubiquitous) tags.
