@@ -23,12 +23,49 @@ use std::path::Path;
 use windows::core::HSTRING;
 use windows::Graphics::Imaging::BitmapDecoder;
 use windows::Storage::{FileAccessMode, StorageFile};
+use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
+
+/// Balances a successful `CoInitializeEx` with `CoUninitialize` on drop so the COM
+/// apartment is scoped to a single `decode` call. HEIC decode runs on the raw
+/// decoder-pool OS threads (and the Deep-Analyze tokio blocking pool) — both RECYCLED
+/// across tasks — and `decode_image_sync` reaches here with NO prior COM init, so the
+/// first WinRT activation (`StorageFile::GetFileFromPathAsync`) was failing
+/// CO_E_NOTINITIALIZED; the caller then mis-reported it as "HEIF codec not installed",
+/// silently dropping every HEIC/HEIF (the default iPhone format) from tagging/faces/
+/// CLIP/thumbnails even with the codec present. Every other WinRT shell module inits a
+/// COM apartment; heic.rs was the lone exception. MTA because these threads pump no
+/// message loop and the blocking `.get()` waits below would risk an STA deadlock;
+/// `did_init` is true only when WE init'd (S_OK/S_FALSE) — on RPC_E_CHANGED_MODE an
+/// outer caller owns the apartment so we must NOT uninit. Mirrors `shell::video::ComScope`.
+/// (audit — HEIC COM init)
+struct ComScope {
+    did_init: bool,
+}
+
+impl ComScope {
+    fn enter() -> Self {
+        let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        ComScope { did_init: hr.is_ok() }
+    }
+}
+
+impl Drop for ComScope {
+    fn drop(&mut self) {
+        if self.did_init {
+            unsafe { CoUninitialize() };
+        }
+    }
+}
 
 /// Decode a HEIC / HEIF file off disk into tightly packed RGB8 + (w,h).
 /// Returns `Err` when the HEIF Image Extensions codec isn't installed.
 /// Caller is expected to upgrade that error message to "install HEIF
 /// Image Extensions from the Microsoft Store" for the user.
 pub fn decode(path: &Path) -> Result<(Vec<u8>, u32, u32)> {
+    // Scoped COM apartment for the WinRT activations below — held for the whole
+    // function (the decoder + pixel-data async ops all need it live). Without it every
+    // HEIC failed CO_E_NOTINITIALIZED on the apartment-less decoder-pool threads.
+    let _com = ComScope::enter();
     // StorageFile::GetFileFromPathAsync wants an absolute, normalized,
     // wide-char path. encode_wide handles UTF-16 conversion.
     let wide: Vec<u16> = path.as_os_str().encode_wide().collect();
