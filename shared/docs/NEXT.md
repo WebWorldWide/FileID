@@ -45,14 +45,16 @@ Windows already surfaces confidence+reason in `DrillDownSheet` and already has t
   low-frequency edge.
 - **Owner threshold calibration** — non-image thresholds are explicit placeholders; tune on the real library
   (now via the single granularity knob). Needs the owner's hardware.
-- **macOS CI test anomaly (tracked, disabled on the runner):** `RestructureSemanticTests.nonImageGroupsByFilename`
-  is `.enabled(if: GITHUB_ACTIONS == nil)`. On the GitHub macOS runner it DETERMINISTICALLY clusters a different
-  10-file set (the orthogonal lone file in, one real file out), which contradicts the engine code — a file whose
-  every token is unique to it is excluded before clustering by integer frequency counting, which is
-  architecture-independent. NOT reproducible locally (hash seeds / arm64 / a fresh from-source CI build all pass;
-  stale-cache ruled out by removing `.build` from the macos.yml cache). Production path verified correct locally.
-  Needs diagnosis ON the runner arch (suspect an x86_64 Foundation/float divergence in `filenameTokens` split or
-  the density clusterer). Until then the engine code stands and the test runs everywhere except that runner.
+- **macOS CI green — the "non-image clustering anomaly" was a TEST bug, not an engine bug (RESOLVED).**
+  On-runner diagnostics proved the engine is correct on the GitHub runner: the lone no-signal file IS excluded by
+  `nonImageSignatures`' integer-frequency guard before clustering, and the resulting `moves` provably did NOT
+  contain it. The failure was the test's `#expect(!moves.contains { $0.fileID == 999 })` — a negated
+  trailing-closure that the runner's Xcode 16 swift-testing macro mis-evaluated (reported the id present when it
+  wasn't); it does not reproduce on local Xcode 26.5. Fixed by materializing the ids once and asserting with
+  closure-free `contains(Element)` (`RestructureSemanticTests.swift`). The engine determinism hardening landed
+  anyway (singleton pre-exclusion + `k = min(k_nn, n-1)` clamp, both engines) and `macos.yml` now caches only the
+  SwiftPM dependency download cache, not build products (a separate stale-object hazard). All three CI workflows
+  are green on HEAD.
 
 ## 2026-06-16 — Whole-codebase audit done; Windows undo button landed; only cosmetic P2s + R3 remain
 
