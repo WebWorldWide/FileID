@@ -118,15 +118,13 @@ pub async fn analyze_file(
 
     let started = std::time::Instant::now();
 
-    // Audio + 3D models aren't rasterizable for the VLM, but they carry their OWN
-    // descriptive metadata: audio embeds title/artist/album tags; a .obj embeds the
-    // modeler's object/group/material names. Name them from that — no VLM, no new
-    // model — BEFORE resolving VLM weights (so it works even without a VLM installed).
+    // Non-rasterizable-or-specially-handled kinds are named WITHOUT the standard VLM
+    // raster path here, BEFORE resolving weights (so they work without a VLM installed):
+    //   • audio  → embedded title/artist tags, else Whisper transcription (no VLM ever).
+    //   • 3D .obj→ embedded object/material names — UNLESS a VLM is installed, in which
+    //              case it renders → VLM (visual understanding); `model_to_vlm` makes the
+    //              metadata branch return None so we fall through to rasterize below.
     // Rasterizable kinds (image/video/pdf) return None here and take the VLM path.
-    // (True AI audio/3D content understanding needs Whisper/YAMNet/a 3D renderer →
-    // future MODELS.md items.)
-    // 3D models prefer the VLM (render → visual understanding) when one is installed;
-    // audio + VLM-less models are named from metadata here and return early.
     let weights = vlm::find_weights(model_kind);
     if let Some(outcome) =
         analyze_metadata_named_file(&db, file_id, model_kind, mode, started, weights.is_some()).await?
