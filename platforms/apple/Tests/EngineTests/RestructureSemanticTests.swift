@@ -120,20 +120,21 @@ struct RestructureSemanticTests {
         files.append(file(999, "/lib/downloads/zzqq_widget.txt", [], []))
 
         let moves = RestructureSemantic.classifyNonImage(files: files, libraryRoot: "/lib")
-        // TEMP DIAGNOSTIC (removed once the runner anomaly is understood): print the
-        // runner's actual intermediate values so the CI log reveals the divergence.
-        var diagFreq: [String: Int] = [:]
-        for f in files { for t in RestructureSemantic.filenameTokens(f.source) { diagFreq[t, default: 0] += 1 } }
-        let sigs = RestructureSemantic.nonImageSignatures(files)
-        print("DIAG-WTOK [" + RestructureSemantic.filenameTokens("/lib/downloads/zzqq_widget.txt").joined(separator: ",") + "]")
-        print("DIAG-FREQ widget=\(diagFreq["widget"] ?? -1) zzqq=\(diagFreq["zzqq"] ?? -1) invoice=\(diagFreq["invoice"] ?? -1) trip=\(diagFreq["trip"] ?? -1)")
-        print("DIAG-SIGS " + sigs.map { "\($0.fileID):\($0.tags.joined(separator: ","))" }.joined(separator: " | "))
-        print("DIAG-MOVES " + moves.map { "\($0.fileID)->\($0.category)" }.joined(separator: " | "))
-        #expect(moves.count == 10)                       // the singleton is excluded
-        #expect(Set(moves.map { $0.category }).count == 2)
-        #expect(!moves.contains { $0.fileID == 999 })
+        // Materialize the ids ONCE, then assert membership without a trailing
+        // closure. The original `moves.contains { $0.fileID == 999 }` false-failed
+        // ONLY on the GitHub runner's Swift toolchain (Xcode 16): it reported 999
+        // present even though the materialized `moves` provably did NOT contain it
+        // (confirmed by on-runner diagnostics — the lone no-signal file is excluded
+        // by nonImageSignatures' integer-frequency guard before clustering). The
+        // engine was always correct; only the closure-form `contains` mis-evaluated
+        // on that toolchain. The materialized-array + `contains(Element)` form
+        // evaluates identically on every toolchain.
+        let movedIDs = moves.map(\.fileID)
+        #expect(movedIDs.count == 10)                    // the lone no-signal file is excluded
+        #expect(Set(moves.map(\.category)).count == 2)
+        #expect(!movedIDs.contains(999))
         // Distinct destination folders for the two content groups.
-        #expect(Set(moves.map { $0.destinationDir }).count == 2)
+        #expect(Set(moves.map(\.destinationDir)).count == 2)
     }
 
     /// Opt-in calibration harness (skipped unless FILEID_REAL_DIR is set, so it
