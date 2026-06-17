@@ -311,6 +311,42 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
             })
         }
 
+        // ── Whisper (audio transcription, Deep Analyze). MIT (OpenAI Whisper +
+        // whisper.cpp). One install fetches the CPU runtime pack (extracted in place
+        // by the .zip suffix; ships `Release\main.exe` + ggml dlls) + the multilingual
+        // ggml-base model. The engine's `WhisperRunner` probes `Models\whisper.cpp\`
+        // for the CLI and `Models\whisper\` for the .bin.
+        "whisper" => {
+            let pack_dir = models_root.join("whisper.cpp");
+            let model_dir = models_root.join("whisper");
+            LookupResult::Found(Model {
+                id: "whisper",
+                display_name: "Whisper (audio transcription)",
+                files: vec![
+                    FileEntry {
+                        // whisper.cpp v1.9.0 CPU x64 pack (universal — no GPU runtime).
+                        url: "https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.0/whisper-bin-x64.zip"
+                            .to_string(),
+                        dest: pack_dir.join("whisper-runtime.zip"),
+                        sha256: Some(
+                            "00c4304b6be363a224a4b69829df49009f74131df8c3ce6a5878b89a11cd26ef".into(),
+                        ),
+                        approx_bytes: 5_410_599,
+                    },
+                    FileEntry {
+                        // ggml-base multilingual (so `-l auto` works for non-English).
+                        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
+                            .to_string(),
+                        dest: model_dir.join("ggml-base.bin"),
+                        sha256: Some(
+                            "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe".into(),
+                        ),
+                        approx_bytes: 147_951_465,
+                    },
+                ],
+            })
+        }
+
         // ── cuDNN for Windows (CUDA 12 line). Public NVIDIA-hosted CDN —
         // same channel NVIDIA's own developer site points at and the
         // redistributable URL the cuDNN docs publish. Installed ON DEMAND
