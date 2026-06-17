@@ -534,7 +534,7 @@ fn non_image_signatures(files: &[SemanticFile]) -> Vec<SemanticFile> {
 /// non-alphanumeric. Drops pure-numeric, very short, and generic camera/scan
 /// tokens — so `IMG_4821.heic` yields nothing while `acme_invoice_2023.pdf`
 /// yields `acme` + `invoice`.
-fn filename_tokens(path: &Path) -> Vec<String> {
+pub(crate) fn filename_tokens(path: &Path) -> Vec<String> {
     let stem = path
         .file_stem()
         .and_then(|s| s.to_str())
