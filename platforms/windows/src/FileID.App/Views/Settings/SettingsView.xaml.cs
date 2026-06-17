@@ -331,6 +331,17 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
                     break;
                 }
             }
+
+            // Hydrate the Restructure granularity picker.
+            string g = s.RestructureGranularity;
+            for (int i = 0; i < GranularityCombo.Items.Count; i++)
+            {
+                if (GranularityCombo.Items[i] is ComboBoxItem gi && gi.Tag is string gtag && gtag == g)
+                {
+                    GranularityCombo.SelectedIndex = i;
+                    break;
+                }
+            }
         }
         finally
         {
@@ -386,6 +397,21 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             // read_user_ep_override(); to apply a change live, the user
             // must restart the engine (the Restart button in this view, or
             // the prompt shown after installing a Performance Pack).
+        });
+
+    private void OnGranularityChanged(object sender, SelectionChangedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnGranularityChanged), () =>
+        {
+            // Same init-guard rationale as OnProviderOverrideChanged: the ComboBox
+            // raises SelectionChanged while HydrateToggles seeds the saved value.
+            // Bail until the view is live so we don't clobber the saved choice.
+            if (!IsLoaded || _initializingToggles) return;
+            if (GranularityCombo.SelectedItem is not ComboBoxItem item || item.Tag is not string tag) return;
+            var s = AppViewModel.Instance.Settings;
+            s.RestructureGranularity = tag;
+            s.Save();
+            // The engine reads FILEID_RESTRUCTURE_GRANULARITY at spawn; to apply a
+            // change live the user restarts the engine (the Restart button in this view).
         });
 
     public string EngineVersionText

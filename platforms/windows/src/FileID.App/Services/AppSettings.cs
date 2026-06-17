@@ -49,6 +49,13 @@ internal sealed class AppSettings
     /// <summary>Restructure view mode: false = cards, true = tree-diff.</summary>
     public bool RestructureTreeMode { get; set; } = false;
 
+    /// <summary>Restructure folder-granularity: "loose" | "normal" | "tight". The engine
+    /// reads FILEID_RESTRUCTURE_GRANULARITY (one knob shifting the cluster cosines —
+    /// HDBSCAN min_cluster_size philosophy); EngineClient forwards a non-default value
+    /// at spawn, so it applies on the next engine start. Mirrors the macOS
+    /// @AppStorage("restructure.granularity"). Sanitize() coerces any other value.</summary>
+    public string RestructureGranularity { get; set; } = "normal";
+
     /// <summary>Library kind filter (image / video / pdf / document / audio / all).</summary>
     public string LibraryKindFilter { get; set; } = "all";
 
@@ -137,6 +144,11 @@ internal sealed class AppSettings
         new(StringComparer.OrdinalIgnoreCase)
         { "qwen2_5_vl_7b", "gemma_3_4b", "mistral_small_3_2" };
 
+    /// <summary>Restructure granularity values the engine accepts (anything else is the
+    /// calibrated default). Mirrors the macOS AppSettings.restructureGranularityValues.</summary>
+    private static readonly HashSet<string> AllowedGranularities =
+        new(StringComparer.Ordinal) { "loose", "normal", "tight" };
+
     /// <summary>True if <paramref name="kind"/> is a VLM model_kind the engine
     /// can install. The Deep Analyze card guards use this to reject removed /
     /// non-commercial models (e.g. the dropped qwen2_5_vl_3b).</summary>
@@ -187,6 +199,11 @@ internal sealed class AppSettings
         {
             DebugLog.Warn($"AppSettings: GpuExecutionProviderOverride '{v}' is not a recognized value; coercing to null (auto-detect).");
             s.GpuExecutionProviderOverride = null;
+        }
+        if (!AllowedGranularities.Contains(s.RestructureGranularity))
+        {
+            DebugLog.Warn($"AppSettings: RestructureGranularity '{s.RestructureGranularity}' is not a recognized value; coercing to 'normal'.");
+            s.RestructureGranularity = "normal";
         }
         // One-time migration: SmolVLM was removed in v4. Any stored "smolvlm"
         // is now an invalid model_kind; migrate straight to the current default

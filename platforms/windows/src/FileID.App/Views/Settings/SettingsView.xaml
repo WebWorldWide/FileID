@@ -607,6 +607,39 @@
                 </StackPanel>
             </Border>
 
+            <!-- Restructure folder-granularity. Mirrors macOS Settings' Restructure
+                 picker; the engine reads FILEID_RESTRUCTURE_GRANULARITY at spawn. -->
+            <Border CornerRadius="12"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    Padding="20">
+                <StackPanel Spacing="14">
+                    <TextBlock Text="Restructure" Style="{StaticResource SubtitleTextBlockStyle}"
+                               AutomationProperties.HeadingLevel="Level2"/>
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="Folder granularity"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   FontWeight="SemiBold"
+                                   CharacterSpacing="40" />
+                        <ComboBox x:Name="GranularityCombo"
+                                  Width="280"
+                                  SelectionChanged="OnGranularityChanged"
+                                  AutomationProperties.Name="Restructure folder granularity"
+                                  AutomationProperties.HelpText="Persisted across launches. Takes effect on the next engine start.">
+                            <ComboBoxItem Content="Looser — broader, fewer folders" Tag="loose"/>
+                            <ComboBoxItem Content="Balanced (default)" Tag="normal"/>
+                            <ComboBoxItem Content="Tighter — more, smaller folders" Tag="tight"/>
+                        </ComboBox>
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   TextWrapping="Wrap"
+                                   Text="How finely Restructure splits your files into folders. Takes effect the next time the engine starts (Restart Engine below, or relaunch FileID)." />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
             <!-- Storage. Shows where every on-disk artifact lives — DB,
                  thumbnail cache, model cache — so users know exactly what
                  to back up + can clear caches when needed. Mirrors macOS

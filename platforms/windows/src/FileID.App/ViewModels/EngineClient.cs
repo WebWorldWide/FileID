@@ -575,6 +575,17 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 // (debug in dev profiles, info in release).
                 psi.Environment["FILEID_LOG"] = Environment.GetEnvironmentVariable("FILEID_LOG") ?? "info";
 
+                // Restructure folder-granularity (Settings ▸ Restructure). The engine
+                // reads FILEID_RESTRUCTURE_GRANULARITY at plan time; forward the user's
+                // saved choice at spawn so it applies on the next engine start.
+                // "normal"/unset is the calibrated default, so only a validated
+                // non-default value is forwarded. Mirrors macOS EngineClient.spawn.
+                var granularity = AppSettings.Load().RestructureGranularity;
+                if (granularity is "loose" or "tight")
+                {
+                    psi.Environment["FILEID_RESTRUCTURE_GRANULARITY"] = granularity;
+                }
+
                 var p = Process.Start(psi)
                         ?? throw new InvalidOperationException("Process.Start returned null");
                 _process = p;
