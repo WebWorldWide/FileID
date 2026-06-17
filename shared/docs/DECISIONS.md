@@ -7,6 +7,36 @@
 
 ---
 
+## 2026-06-17 — True AI audio/3D understanding for Deep Analyze: Apple frameworks on macOS, models/rasterizer on Windows; Windows YAMNet deferred for verifiability
+
+Followed up the metadata-naming entry below with *real* AI content understanding, owner-approved ("use other
+models as long as they follow the licenses"; "Will MIT work with our apache license"). Three calls:
+
+**(1) Same split as faces (Vision vs ONNX): an Apple framework on macOS, a downloaded model / hand-rolled code
+on Windows — not byte-lockstep backends, but a shared, byte-faithful naming layer.** Speech: macOS
+`SFSpeechRecognizer` (on-device, no download) vs Windows whisper.cpp subprocess (MIT pack + ggml-base, sha256-
+pinned, Settings install card). 3D: macOS OS QuickLook 3D generator (the VLM loader's existing fallback) vs a
+Windows hand-rolled software rasterizer (`obj_render`, NO new dep — rejected the `tobj`+`euc` crates the plan
+floated once I saw a ~200-line flat-shaded z-buffer rasterizer using the `image` crate we already ship was
+enough for VLM recognition). Both feed the **already-installed** Deep Analyze VLM, so 3D adds no model. The
+*name-from-output* logic (`name_from_transcript`, the obj parse) stays byte-faithful with matching unit tests;
+the classifier/renderer backend differing per-OS is the established project pattern (the on-device result was
+never going to be byte-identical anyway — MLX≠llama.cpp, Vision≠ONNX).
+
+**(2) MIT is compatible with the project's Apache-2.0** (permissive; only requires preserving the MIT notice) —
+so Whisper (MIT) ships as a default-installable model, same tier as the Apache weights.
+
+**(3) Windows YAMNet (non-speech sound classification) is DEFERRED, not shipped — a verifiability call.** macOS
+ships sound-event naming via Apple `SNClassifySoundRequest` (correct-by-construction, build-verifiable, file
+analysis needs no mic permission). Windows YAMNet would need a hand-rolled log-mel (STFT) frontend — the common
+ONNX exports take a `(64,96,1)` log-mel patch, not a waveform, and there's no FFT crate in the locked set. That
+DSP can't be verified without on-hardware labeled audio, and a subtly-wrong frontend produces confidently-wrong
+names — worse than the metadata fallback. Chose NOT to ship unverifiable DSP blind; tracked in NEXT.md/MODELS.md
+with full acceptance criteria. Phase 1 Whisper already covers the speech case on Windows, so the gap is only the
+narrow non-speech tail. A documented macOS-leads asymmetry, symmetric to how Windows currently leads the model
+stack. The control-flow that makes 3D prefer the VLM (`analyze_metadata_named_file`'s `model_to_vlm` gate +
+a render-failure fallback to metadata) keeps audio always-metadata and never regresses a file to "no name".
+
 ## 2026-06-17 — Deep Analyze names audio + 3D models from EMBEDDED metadata (no new model); true AI parsing deferred
 
 Deep Analyze's smart-rename was image/video/pdf only (the VLM needs a raster). Extended it to audio + 3D

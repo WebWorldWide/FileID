@@ -151,44 +151,43 @@ VLMs cache to:
 - macOS: `~/Documents/huggingface/models/<repo>/` (MLX / swift-transformers convention)
 - Windows: `%LOCALAPPDATA%\FileID\Models\HuggingFace\<repo>\` (FileID's own download path; outside Documents to avoid surprising users with several GB in there)
 
-## Audio + 3D understanding — Deep Analyze (license-vetted; phased build)
+## Audio + 3D understanding — Deep Analyze (license-vetted)
 
 Deep Analyze already names audio + `.obj` from EMBEDDED metadata (tags / object names) with no model.
-*True* on-device AI understanding of those types adds the models below — all commercial-clean
-(Apache-2.0 / MIT), download-from-`huggingface.co` only, opt-in like the VLMs. Owner-approved 2026-06-17
-("use other models as long as they follow the licenses").
+*True* on-device AI understanding of those types is layered on top — all commercial-clean (Apache-2.0 / MIT),
+download-from-`huggingface.co` only (or built-in OS frameworks on macOS), opt-in like the VLMs. Owner-approved
+2026-06-17 ("use other models as long as they follow the licenses"). **Status as of 2026-06-17 below.**
 
-### Whisper — speech transcription (audio) — **MIT**
-
-| Aspect | Value |
-|---|---|
-| Use | Transcribe spoken audio (voice memos, podcasts, lectures) → a descriptive name + caption. Music keeps the metadata path (title/artist); speech gets content. |
-| Source | [`ggerganov/whisper.cpp`](https://huggingface.co/ggerganov/whisper.cpp) — ggml `.bin` (default `ggml-base.en` ~142 MB, or `-q5_1` quant ~57 MB; multilingual `ggml-base` for non-English). |
-| License | **MIT** (OpenAI Whisper code + weights; whisper.cpp port also MIT) — unrestricted commercial use. |
-| Runtime | **whisper.cpp** — same ggml/GGUF ecosystem as the engine's llama.cpp (Windows); MLX-Whisper or whisper.cpp on macOS. Audio decoded to 16 kHz mono PCM via the `symphonia` we already ship. |
-| Storage | Windows `%LOCALAPPDATA%\FileID\Models\whisper\`; macOS `~/Library/Application Support/FileID/Models/whisper/`. |
-
-### YAMNet — sound-event classification (audio) — **Apache-2.0**
+### Whisper — speech transcription (audio) — **MIT** — ✅ SHIPPED (both platforms)
 
 | Aspect | Value |
 |---|---|
-| Use | Classify the dominant sound (521 AudioSet classes: Music, Speech, Piano, Dog, Rain, …) → tags + a name hint for NON-speech audio (sound effects, ambience) where Whisper has nothing to transcribe. |
-| Source | TF-Hub YAMNet (`tensorflow/models`, Apache-2.0) converted to ONNX (`tf2onnx`); self-hosted ONNX under a `Web-World-Wide/*` HF repo (same as the RAM++ export). |
-| License | **Apache-2.0** (model + code). |
-| Runtime | The engine's **existing ONNX Runtime** (no new runtime) — input is a 16 kHz mono waveform (same PCM the Whisper path produces), MobileNet_v1 backbone, ~4 MB. |
+| Use | Transcribe spoken audio (voice memos, podcasts, lectures) → a descriptive name + caption. Music keeps the metadata path (title/artist); speech gets content. The `name_from_transcript` logic (first ~8 words → name) is byte-faithful across engines. |
+| Windows | **whisper.cpp** subprocess (`WhisperRunner`, mirrors the llama.cpp VLM pattern) — the CPU pack ([`ggml-org/whisper.cpp` v1.9.0 release](https://github.com/ggml-org/whisper.cpp)) + the multilingual `ggml-base` model ([`ggerganov/whisper.cpp`](https://huggingface.co/ggerganov/whisper.cpp), ~148 MB), both sha256-pinned in `registry.rs` as `"whisper"`. Audio → 16 kHz mono WAV via the `symphonia` we already ship (`pipeline::audio_decode`). Installed from Settings → its "Speech transcription (Whisper)" card. |
+| macOS | **Apple Speech** (`SFSpeechRecognizer`, `requiresOnDeviceRecognition`) — the built-in-framework analogue, no model download. Needs `NSSpeechRecognitionUsageDescription` (added to the app Info.plist; the engine's `Bundle.main` resolves to the enclosing app). |
+| License | **MIT** (OpenAI Whisper code + weights; whisper.cpp port also MIT). Apple Speech is OS-provided. |
 
-### 3D models (`.obj`) — render → existing VLM (NO new model)
+### Sound-event classification (non-speech audio) — macOS ✅ SHIPPED · Windows ⏳ DEFERRED
 
 | Aspect | Value |
 |---|---|
-| Use | Render the `.obj` to a thumbnail image → feed the **already-installed VLM** (Qwen2.5-VL / Gemma 3) → caption + name. The AI literally "looks at" the model; no new *model* is added. |
-| Renderer | macOS: **SceneKit + Model I/O** (Apple built-in, no dep). Windows: a headless software rasterizer — `tobj` (MIT, `.obj` loader) + `euc`/hand-rolled (MIT) — a new *dependency* (DECISIONS.md justification), not a model/weight. |
-| License | No new weights. Renderer crates MIT. |
+| Use | For audio with no metadata title AND no speech (field recordings, sound effects, ambience): classify the dominant sound → a descriptive name (rain → "Rain", a dog bark → "Dog Bark"). The cascade is metadata title → speech transcript → sound event → original name. |
+| macOS | **Apple SoundAnalysis** (`SNClassifySoundRequest .version1`) — built-in classifier, no model, no microphone permission (file analysis). `nameFromSoundLabel` humanizes + drops generic labels (speech/music/noise). Shipped. |
+| Windows (YAMNet) | **Deferred, tracked.** YAMNet (TF-Hub, Apache-2.0) → ONNX would reuse the existing ONNX Runtime, BUT needs (a) a license-vetted self-hosted ONNX *and* (b) a hand-rolled log-mel (STFT) frontend — the common ONNX exports take a `(64,96,1)` log-mel patch, not a waveform, and there's no FFT crate in the locked set. That DSP **can't be verified without on-hardware labeled audio**, so it isn't shipped blind. Phase 1 Whisper already covers the speech case on Windows; this only adds the narrow non-speech tail. See NEXT.md. |
+| License | YAMNet **Apache-2.0**; Apple SoundAnalysis is OS-provided. |
 
-**Phasing:** (1) Whisper audio transcription — highest value, MIT, reuses the ggml/llama.cpp pattern. (2) YAMNet
-sound-class — Apache, reuses the existing ONNX Runtime. (3) 3D render→VLM — reuses the VLM, adds a renderer dep.
-All build-verifiable in the dev env; inference is on-hardware-verified (owner's RTX 2060 / Mac), like every other
-model. The metadata paths already shipped stay as the no-model fallback + the music/named-object fast path.
+### 3D models (`.obj`) — render → existing VLM (NO new model) — ✅ SHIPPED (both platforms)
+
+| Aspect | Value |
+|---|---|
+| Use | Render the `.obj` to an image → feed the **already-installed Deep Analyze VLM** (Qwen2.5-VL / Gemma 3) → caption + name. The AI literally "looks at" the model. Falls back to embedded object/material names (no VLM, an unrenderable `.obj`, or a VLM failure). |
+| Windows | A **hand-rolled software rasterizer** (`pipeline::obj_render`, NO new dependency) — parses `.obj`/`.mtl`, fixed 3/4 camera, z-buffered flat-shaded triangles (per-face `.mtl` Kd + one Lambert light), 512² PNG via the `image` crate. Wired as the `"model"` arm of `rasterize_for_vlm`. |
+| macOS | The **OS QuickLook 3D generator** (`DeepAnalyze.quickLookThumbnail`, already the loader's fallback) renders the `.obj` → the MLX VLM. No new code, no new dep. |
+| License | No new weights. No new dependency on either platform. |
+
+All build-verifiable in the dev env; on-device inference (VLM/Speech/SoundAnalysis quality) is hardware-verified
+(owner's RTX 2060 / Mac), like every other model. The metadata paths stay as the no-model fallback + the
+music/named-object fast path.
 
 ## Performance Packs (Windows GPU runtimes)
 

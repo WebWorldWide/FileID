@@ -8,7 +8,30 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
-## 2026-06-17 (latest) — Deep Analyze: descriptive names for audio + 3D models (both engines, lockstep)
+## 2026-06-17 (latest) — Deep Analyze: TRUE AI understanding of audio + 3D (Whisper, 3D→VLM, macOS sound-ID)
+
+Followed the metadata-naming entry below with *real* AI content understanding (owner: "the AI should parse these
+things from 3D models to sound and movie files"; "use other models as long as they follow the licenses"). The
+audio cascade is now **metadata title → speech transcript → sound event → original name**, and 3D models are
+*looked at* by the VLM:
+- **Speech (audio)** — Windows: a **whisper.cpp** subprocess (`WhisperRunner`, mirrors the llama.cpp VLM pattern)
+  over the 16 kHz mono WAV from the new `audio_decode`; the CPU pack + `ggml-base` model (MIT, sha256-pinned
+  `"whisper"` registry entry) install from a new **Settings card**. macOS: **Apple Speech** (`SFSpeechRecognizer`,
+  on-device, no download; `NSSpeechRecognitionUsageDescription` added). `name_from_transcript` byte-faithful.
+- **3D `.obj` → render → VLM** — Windows: a **hand-rolled software rasterizer** (`obj_render`, no new dep —
+  parses `.obj`/`.mtl`, 3/4 camera, z-buffered flat-shaded triangles, 512² PNG via `image`), wired as the
+  `"model"` arm of `rasterize_for_vlm`. macOS: the **OS QuickLook 3D generator** (the VLM loader's existing
+  fallback) → MLX VLM. Reuses the installed VLM (no new model); falls back to embedded-name metadata on failure.
+- **Sound events (non-speech audio)** — macOS: **Apple SoundAnalysis** (`SNClassifySoundRequest`) names field
+  recordings / sound effects (rain → "Rain"). Windows YAMNet **deferred** (needs an unverifiable hand-rolled
+  log-mel frontend — see NEXT.md/MODELS.md/DECISIONS.md).
+
+All commercial-clean (MIT / Apache / OS frameworks), graceful metadata fallback everywhere. **Verified:** Rust
+**364** lib tests + clippy `--all-targets -D warnings` clean; macOS `swift build` + **241** tests. New unit tests:
+`collapse_transcript`, `name_from_transcript`, 3× `obj_render`, macOS `transcriptName`/`soundLabel`. No IPC/schema
+change. On-device inference quality (VLM/Speech/SoundAnalysis, Windows whisper after install) is hardware-verified.
+
+## 2026-06-17 — Deep Analyze: descriptive names for audio + 3D models (both engines, lockstep)
 
 Deep Analyze's smart-rename now covers audio + `.obj` 3D models, not just image/video/pdf — named from their
 EMBEDDED metadata (no VLM, no new model; video already works via keyframe→VLM):
