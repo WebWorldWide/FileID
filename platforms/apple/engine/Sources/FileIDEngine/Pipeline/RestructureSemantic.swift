@@ -418,7 +418,12 @@ public enum RestructureSemantic {
         let stem = (base as NSString).deletingPathExtension.lowercased()
         return stem.split { !$0.isLetter && !$0.isNumber }
             .map(String.init)
-            .filter { $0.count >= 3 && $0.contains(where: { $0.isLetter })
+            // Length is measured in Unicode SCALARS, not grapheme clusters, to match
+            // the Rust engine's `chars().count()` — a String's `.count` counts
+            // graphemes, so an NFD multi-scalar single-grapheme token (e.g. a decomposed
+            // Hangul syllable) would pass the ≥3 gate on Windows but fail it on macOS,
+            // diverging the token set used for feedback + name-routing. (audit — lockstep)
+            .filter { $0.unicodeScalars.count >= 3 && $0.contains(where: { $0.isLetter })
                 && !filenameStopwords.contains($0) }
     }
 
