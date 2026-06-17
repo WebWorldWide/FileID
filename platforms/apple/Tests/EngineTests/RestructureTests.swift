@@ -218,6 +218,58 @@ struct RestructureApplyTests {
         #expect(!FileManager.default.fileExists(atPath: dest.path))
     }
 
+    /// R-#14: a real same-path SWAP — the DB recorded one file_ref (inode) for the
+    /// planned file, but a DIFFERENT file now occupies that exact path — must be
+    /// skipped, not moved. Real inodes (runs on the dev Mac); mirrors the Windows
+    /// engine's apply_skips_move_when_file_ref_swapped.
+    @Test("A same-path file swap (file_ref mismatch) is failed, not executed")
+    func applySwapGuard() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDRestructure-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let root = tmp.appendingPathComponent("Library")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let doc = root.appendingPathComponent("doc.pdf")
+        try Data("SWAPPED-IN".utf8).write(to: doc)
+        // The real inode of the file now on disk; if unreadable the guard is inert.
+        guard let realInode = Discovery.inode(of: doc) else { return }
+
+        let db = try makeDB(tmp)
+        // The DB names the SAME path but a DIFFERENT file_ref — the file we planned to
+        // move, since replaced on disk by another. realInode &+ 1 is guaranteed differ.
+        try await db.pool.write { d in
+            try d.execute(
+                sql: "INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, kind, extension, file_ref) VALUES (?,?,?,10,0,'doc','pdf',?)",
+                arguments: [1, doc.path, StablePathHash.hash(doc.path),
+                            Int64(bitPattern: realInode &+ 1)])
+        }
+
+        let dest = root.appendingPathComponent("Sorted/doc.pdf")
+        let result = await Restructure.apply(
+            proposals: [RestructureProposal(
+                fileID: 1, oldPath: doc.path, newPath: dest.path, bucket: "document")],
+            database: db, libraryRoot: root)
+
+        #expect(result.moved == 0, "a swapped file must not be moved")
+        #expect(result.failed == 1)
+        #expect(FileManager.default.fileExists(atPath: doc.path), "the swapped-in file is untouched")
+        #expect(!FileManager.default.fileExists(atPath: dest.path))
+    }
+
+    /// R-#14 pure: the swap detector fires ONLY on a both-known mismatch — any missing
+    /// input leaves the move to proceed (no false skips). Pins the Int64↔UInt64
+    /// bit-cast round-trip; mirrors the Rust file_ref_swapped_only_on_positive_mismatch.
+    @Test("fileRefSwapped is true only on a both-known mismatch")
+    func fileRefSwappedPredicate() {
+        #expect(Restructure.fileRefSwapped(dbRef: 100, currentRef: 200))
+        #expect(!Restructure.fileRefSwapped(dbRef: 100, currentRef: 100))
+        #expect(!Restructure.fileRefSwapped(dbRef: -1, currentRef: UInt64.max),
+                "-1 as Int64 bit-casts to UInt64.max — the high-bit round-trip matches")
+        #expect(!Restructure.fileRefSwapped(dbRef: nil, currentRef: 200))
+        #expect(!Restructure.fileRefSwapped(dbRef: 100, currentRef: nil))
+        #expect(!Restructure.fileRefSwapped(dbRef: nil, currentRef: nil))
+    }
+
     /// F-C3-012: when the on-disk move succeeds but the DB UPDATE fails, the move
     /// is counted ONCE (moved), never double-counted as moved+failed; the file is
     /// at its new path and a recovery record is written (best-effort sidecar).

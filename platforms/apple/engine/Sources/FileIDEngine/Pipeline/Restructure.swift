@@ -612,13 +612,31 @@ public enum Restructure {
             // require it still names `oldPath`, so a plan that went stale (the
             // file was renamed/moved/replaced since planning) can't move the
             // wrong bytes. (F-C3-010)
-            let live: String? = try? await database.pool.read { db in
-                try String.fetchOne(
-                    db, sql: "SELECT path_text FROM files WHERE id = ?", arguments: [p.fileID])
-            }
-            guard let livePath = live, Self.pathsEqual(livePath, p.oldPath) else {
+            let live: (path: String, fileRef: Int64?)? =
+                try? await database.pool.read { db -> (path: String, fileRef: Int64?)? in
+                    guard let row = try GRDB.Row.fetchOne(
+                        db, sql: "SELECT path_text, file_ref FROM files WHERE id = ?",
+                        arguments: [p.fileID]) else { return nil }
+                    return (row["path_text"], row["file_ref"])
+                }
+            guard let live, Self.pathsEqual(live.path, p.oldPath) else {
                 failed += 1
                 JSONLog.shared.warn(ev: "restructure_stale_plan",
+                                    path: redactPathForLog(p.oldPath))
+                continue
+            }
+            // R-#14 same-path SWAP guard: the path check above only proves the DB row
+            // still NAMES this source — not that the file currently AT that path is the
+            // one we planned to move. If a different file was dropped at the same path in
+            // the plan→apply window (a sync client re-downloading, an app re-saving),
+            // moving it would relocate the wrong bytes and stamp this fileID onto an
+            // unrelated file. Compare the planned file's stored file_ref (inode) to the
+            // one on disk now; skip on a positive mismatch. Conservative — a NULL stored
+            // ref or an unreadable inode leaves the move to proceed (no false skips).
+            // Mirrors the Windows engine's file_ref_swapped guard. (R-#14)
+            if Self.fileRefSwapped(dbRef: live.fileRef, currentRef: Discovery.inode(of: oldURL)) {
+                failed += 1
+                JSONLog.shared.warn(ev: "restructure_swapped_source",
                                     path: redactPathForLog(p.oldPath))
                 continue
             }
@@ -912,6 +930,19 @@ public enum Restructure {
         if a == b { return true }
         return URL(fileURLWithPath: a).resolvingSymlinksInPath().path
             == URL(fileURLWithPath: b).resolvingSymlinksInPath().path
+    }
+
+    /// R-#14 positive-evidence swap detector — mirrors the Windows engine's
+    /// `file_ref_swapped`. True ONLY when both the DB's stored file_ref and the on-disk
+    /// inode are known AND differ — a different file now occupies the planned source
+    /// path. Any missing input (NULL stored ref; an unreadable inode) returns false so a
+    /// legitimate move is never wrongly skipped. The stored ref is read back
+    /// `Int64 → UInt64(bitPattern:)` to undo DBWriter's `Int64(bitPattern:)` cast.
+    /// (APFS/HFS st_ino can false-MATCH on inode reuse — rare — which only ever fails
+    /// OPEN, never closed; the Windows NTFS file_ref's sequence number has no such gap.)
+    static func fileRefSwapped(dbRef: Int64?, currentRef: UInt64?) -> Bool {
+        guard let dbRef, let currentRef else { return false }
+        return UInt64(bitPattern: dbRef) != currentRef
     }
 
     /// B5: best-effort durable record of a successful on-disk move whose DB
