@@ -8,7 +8,34 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
-## 2026-06-16 (latest) — Restructure deep-research sweep + 4 verified best-in-class wins
+## 2026-06-16 (latest) — Learn-from-corrections: instance-based folder memory (both engines, lockstep)
+
+The consuming logic for the v18 `restructure_feedback` table landed, completing the SOTA instance-based
+"learn-your-style" loop (no model retraining). A new `restructure_feedback` module on each engine
+(`pipeline/restructure_feedback.rs` / `Pipeline/RestructureFeedback.swift`):
+- **`record(applied moves, now)`** — every move the user APPLIES is an approved example, so each moved file's
+  `filename_tokens` are credited (+1 weight, UPSERT) toward its destination folder's basename. Wired into the
+  apply loop (`restructure_apply.rs` / `Restructure.swift`) **alongside the undo journal**, so it shares the
+  forward-only gate (stays empty on an undo run) and runs as ONE batched write after the loop. Best-effort —
+  a feedback write never fails an apply.
+- **`boost(&mut moves)` / `boost(proposals) -> proposals`** — the plan command sums each proposed move's
+  (filename tokens → destination folder) feedback weight; at/above `FEEDBACK_AUTO_WEIGHT = 3` it upgrades the
+  move to Auto with a "you've filed files like this here before" note. **Additive** — only raises confidence on
+  moves the planner already produced, never re-routes — so it can't regress the calibrated image/non-image
+  passes. Wired into `commands/restructure.rs` (new `db_for_boost` Arc clone) / `Restructure.proposeAll` on the
+  full proposal set, before the anchor strip preserves the upgraded confidence into the emitted plan.
+
+Validated against **authored labeled scenarios** (assistant-as-domain-expert, in lieu of real-data UAT): record
+3 "acme invoice" files → /Invoices, then a NEW acme-invoice the planner marked Review is upgraded to Auto; an
+unrelated move with no history stays Review; re-recording the same token→folder accumulates weight. Lockstep
+parity tests on both engines (Rust 3, macOS 3).
+
+**Both engines fully green:** Rust **349** lib tests + `clippy --all-targets -D warnings` clean; macOS build +
+**232** tests (incl. the restructure apply-guard + round-trip suites). `filename_tokens` made `pub(crate)` (Rust)
+for reuse; the Swift mirror's `filenameTokens` was already module-internal. Windows app C# is CI-only as always.
+Next: commit on a branch → confirm both CI workflows → deep whole-codebase audit.
+
+## 2026-06-16 — Restructure deep-research sweep + 4 verified best-in-class wins
 
 `/deep-research` (27 web sources → 21 verified claims) + a 3-agent codebase audit graded Restructure against
 the state of the art. Headline: the architecture already matches or beats the documented field (density

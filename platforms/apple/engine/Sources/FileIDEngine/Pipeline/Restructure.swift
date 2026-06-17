@@ -207,6 +207,15 @@ public enum Restructure {
         }
         proposals.append(contentsOf: ruleClassify(ruleFiles, libraryRoot: libraryRoot))
 
+        // Learn-from-corrections: upgrade any planned move toward a folder the user
+        // has previously filed similar files into (the v18 restructure_feedback
+        // memory, written on each apply). Additive — only raises confidence on moves
+        // the planner already produced, never re-routes — so it can't regress the
+        // calibrated passes. Runs on the full proposal set, before the anchor strip
+        // preserves the upgraded confidence into the emitted plan. Mirrors the
+        // Windows engine (commands/restructure.rs). (R3 → learn-your-style)
+        proposals = await RestructureFeedback.boost(database: database, proposals: proposals)
+
         // Engine-authoritative folder classification on the FULL proposal set
         // (Windows A1/A3): classify each source folder, then strip every move out
         // of an Anchor folder so files the UI promised would "stay put" are never
@@ -493,6 +502,12 @@ public enum Restructure {
             ? Self.openUndoJournalTruncating(at: journalURL) : nil
         defer { try? undoHandle?.close() }
         var undoCount = 0
+        // (source, final destination) of every successful move, fed to the
+        // learn-from-corrections memory in ONE write after the loop so a future plan
+        // can boost a move toward a folder the user has filed here before. Populated
+        // alongside the undo journal, so it is forward-applies-only (stays empty on an
+        // undo run, recordUndo=false). (R3 → learn-your-style)
+        var appliedPairs: [(source: String, destination: String)] = []
         var moved = 0
         var skipped = 0
         var failed = 0
@@ -626,6 +641,9 @@ public enum Restructure {
                     UndoEntry(fileID: p.fileID, from: finalURL.path, to: oldURL.path), to: h)
                 undoCount += 1
                 if undoCount % Self.applyProgressInterval == 0 { try? h.synchronize() }
+                // Same forward-only gate as the journal: this move was approved by the
+                // user, so credit it to the feedback memory.
+                appliedPairs.append((source: oldURL.path, destination: finalURL.path))
             }
             if finalURL.path != plannedURL.path { conflicts.append(plannedURL.path) }
             do {
@@ -656,6 +674,15 @@ public enum Restructure {
         // leaves the ORIGINAL journal intact and the user can re-run it.)
         // (R2 → crash-safe)
         try? undoHandle?.synchronize()
+        // Learn-from-corrections: each applied move is an approved example, so credit
+        // its filename tokens toward its destination folder for future plans. One write
+        // for the whole batch; best-effort, never fails an apply. Forward applies only
+        // — `appliedPairs` is empty on an undo run (recordUndo=false). Mirrors the
+        // Windows engine (restructure_apply.rs).
+        if recordUndo && !appliedPairs.isEmpty {
+            await RestructureFeedback.record(
+                database: database, moves: appliedPairs, now: Date().timeIntervalSince1970)
+        }
         JSONLog.shared.info(ev: "restructure_applied",
                             extra: ["moved": AnyCodable(moved),
                                     "skipped": AnyCodable(skipped),

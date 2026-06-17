@@ -42,6 +42,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::ipc::{RestructureApplyResult, RestructureMove};
+use crate::pipeline::restructure_feedback;
 
 #[cfg(windows)]
 use windows::core::PCWSTR;
@@ -109,6 +110,12 @@ impl RestructureApply {
             None
         };
         let mut undo_count = 0usize;
+        // (source, final destination) of every successful real move, fed to the
+        // learn-from-corrections memory in ONE lock acquisition after the loop so a
+        // future plan can boost a move toward a folder the user has filed here
+        // before. Populated alongside the undo journal, so it is forward-applies-only
+        // (empty on an undo run, record_undo=false). (R3 → learn-your-style)
+        let mut applied_pairs: Vec<(String, PathBuf)> = Vec::new();
         // B3: destinations claimed earlier in THIS batch, so two distinct
         // sources that map to the same basename don't collide before either
         // touches disk.
@@ -261,6 +268,9 @@ impl RestructureApply {
                                 let _ = j.flush();
                                 let _ = j.get_ref().sync_all();
                             }
+                            // Same forward-only gate as the journal: this move was
+                            // approved by the user, so credit it to the feedback memory.
+                            applied_pairs.push((m.source.clone(), final_dest.clone()));
                         }
                     }
                     applied += 1;
@@ -291,6 +301,22 @@ impl RestructureApply {
         if let Some(mut j) = journal {
             let _ = j.flush();
             let _ = j.get_ref().sync_all();
+        }
+
+        // Learn-from-corrections: each applied move is an approved example, so credit
+        // its filename tokens toward its destination folder for future plans. One lock
+        // acquisition for the whole batch; best-effort, never fails an apply. Forward
+        // applies only — `applied_pairs` is empty on an undo run (record_undo=false).
+        if record_undo && !applied_pairs.is_empty() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            restructure_feedback::record(
+                &self.db_conn,
+                applied_pairs.iter().map(|(s, d)| (Path::new(s), d.as_path())),
+                now,
+            );
         }
         Ok(RestructureApplyResult { applied, failed, privilege_error: None })
     }

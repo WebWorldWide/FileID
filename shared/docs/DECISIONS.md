@@ -7,6 +7,26 @@
 
 ---
 
+## 2026-06-17 — Learn-from-corrections is instance-based + ADDITIVE, and records ALONGSIDE the undo journal
+
+The SOTA "learn-your-style" finding was instance-based personalization (store accepted placements, weight future
+proposals by them — no model retraining, which would be infeasible on-device and non-deterministic across the two
+engines). Implemented as a token→folder weight table (v18 `restructure_feedback`): on each APPLY, every moved
+file's `filename_tokens` get +1 toward the destination folder's basename; on each PLAN, a move's summed
+(tokens → its dest folder) weight, at/above `FEEDBACK_AUTO_WEIGHT = 3`, upgrades it to Auto. Three deliberate
+choices: (1) **additive, never re-routes** — `boost` only raises confidence on moves the planner already
+produced, so a noisy feedback table can't send files somewhere new and can't regress the calibrated image/
+non-image passes (same containment discipline as name-routing). (2) **record is gated with the undo journal**,
+not on raw move success — the journal is already the exact set of forward, user-approved, real (non-symlink)
+moves, and is already forward-only (empty on undo), so reusing its gate means feedback can never learn from an
+undo putting files back, and never from a preview symlink. One batched write after the loop keeps it off the
+per-move hot path. (3) **destination folder = the basename of the move's parent**, the same key
+`folder_prototypes` learns from, so a future plan's name-routing and the feedback memory reinforce the same
+"folder you file this kind of thing into" rather than two different notions of a folder. Threshold 3 (not 1) so a
+single accident doesn't auto-file; tuned conservatively because the dev box can't UAT against a real library —
+the labeled parity tests encode the intended behavior, and the owner's real corrections are the last-mile tuning.
+Lockstep: identical SQL/threshold/token logic on both engines, behavior pinned by 3 parity tests each.
+
 ## 2026-06-17 — Name-based routing is ADDITIVE (upgrades confidence), and validated against AUTHORED labeled ground truth
 
 The deep-research #1 finding was Dropbox Smart Move: routing on folder + sibling FILENAME similarity matches or
