@@ -52,7 +52,7 @@ public enum Restructure {
     public static func proposeAll(
         database: Database,
         libraryRoot: URL
-    ) async throws -> [RestructureProposal] {
+    ) async throws -> PlanResult {
         struct Source: Sendable {
             let id: Int64
             let path: String
@@ -221,9 +221,64 @@ public enum Restructure {
         // of an Anchor folder so files the UI promised would "stay put" are never
         // silently relocated. Semantic-claimed folders are exempt — their
         // homogeneity is a real relocation, not an in-place anchor. (F-C3-016)
+        //
+        // The tiers + Keep/Tidy/Junk counts are computed HERE, on the full PRE-strip
+        // set with the same exemption — NOT later on the stripped set. The strip
+        // removes every move out of a (non-exempt) Anchor folder, so a post-strip
+        // recompute can't see those folders at all and the "Keep" tile would silently
+        // undercount the folders actually being left alone. Mirrors the Windows engine,
+        // which computes folder_class on the full proposed set before stripping. (audit)
         let folderClass = classifyFolders(proposals)
-        return stripAnchorFolderMovesExcept(
+        let tiers = folderTiersAndCounts(classified: folderClass, exempt: semanticSourceFolders)
+        let stripped = stripAnchorFolderMovesExcept(
             proposals, classified: folderClass, exempt: semanticSourceFolders)
+        return PlanResult(
+            proposals: stripped, tierByFolder: tiers.tierByFolder,
+            anchorFolders: tiers.anchor, mixedFolders: tiers.mixed, junkFolders: tiers.junk)
+    }
+
+    /// The engine-authoritative plan: the anchor-stripped moves to apply, plus the
+    /// folder classification computed on the FULL pre-strip set (with the semantic-
+    /// claim exemption) so the Keep/Tidy/Junk tile counts + per-move tier badges match
+    /// the Windows engine's `handle_plan_restructure`.
+    public struct PlanResult: Sendable {
+        public let proposals: [RestructureProposal]
+        public let tierByFolder: [String: String]
+        public let anchorFolders: Int
+        public let mixedFolders: Int
+        public let junkFolders: Int
+        public init(proposals: [RestructureProposal], tierByFolder: [String: String],
+                    anchorFolders: Int, mixedFolders: Int, junkFolders: Int) {
+            self.proposals = proposals
+            self.tierByFolder = tierByFolder
+            self.anchorFolders = anchorFolders
+            self.mixedFolders = mixedFolders
+            self.junkFolders = junkFolders
+        }
+    }
+
+    /// Per-source-folder tier labels + rolled-up Anchor/Mixed/Junk counts from the
+    /// FULL pre-strip classification. A folder that classified Anchor but is in
+    /// `exempt` (the semantic butler actively relocating its files into a content
+    /// group — NOT kept in place) is remapped to Mixed so it neither inflates the
+    /// "Keep" tile nor labels its surviving moves Anchor. Byte-faithful with the
+    /// Windows engine's handle_plan_restructure loop (F-C1-004). (audit — lockstep)
+    static func folderTiersAndCounts(
+        classified: [ClassifiedFolder], exempt: Set<String>
+    ) -> (tierByFolder: [String: String], anchor: Int, mixed: Int, junk: Int) {
+        var tierByFolder: [String: String] = [:]
+        var anchor = 0, mixed = 0, junk = 0
+        for f in classified {
+            let effective: FolderClassification =
+                (f.classification == .anchor && exempt.contains(f.sourceFolder))
+                ? .mixed : f.classification
+            switch effective {
+            case .anchor: tierByFolder[f.sourceFolder] = "Anchor"; anchor += 1
+            case .mixed:  tierByFolder[f.sourceFolder] = "Mixed";  mixed += 1
+            case .junk:   tierByFolder[f.sourceFolder] = "Junk";   junk += 1
+            }
+        }
+        return (tierByFolder, anchor, mixed, junk)
     }
 
     // MARK: - Rule cascade (faithful port of Windows restructure::classify)

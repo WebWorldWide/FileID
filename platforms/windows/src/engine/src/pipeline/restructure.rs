@@ -304,7 +304,12 @@ pub fn category_counts(moves: &[ProposedMove]) -> Vec<CategorySummary> {
         .into_iter()
         .map(|(category, count)| CategorySummary { category, count })
         .collect();
-    out.sort_by_key(|s| std::cmp::Reverse(s.count));
+    // Count desc, then category asc. The secondary key is load-bearing: the source is
+    // a HashMap (arbitrary, run-to-run-randomized iteration), so a count-only sort left
+    // equal-count categories in nondeterministic order — both unstable across runs on
+    // Windows AND divergent from the macOS engine, which tie-breaks on category. The
+    // Sankey ribbon order is now deterministic and lockstep. (audit)
+    out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.category.cmp(&b.category)));
     out
 }
 

@@ -446,9 +446,9 @@ struct FileIDEngineMain {
                 JSONLog.shared.info(ev: "plan_restructure_requested",
                                     path: redactPathForLog(libraryRoot))
                 do {
-                    let proposals = try await Restructure.proposeAll(
+                    let planResult = try await Restructure.proposeAll(
                         database: database, libraryRoot: planRoot)
-                    let plan = Self.restructurePlan(from: proposals, libraryRoot: libraryRoot)
+                    let plan = Self.restructurePlan(from: planResult, libraryRoot: libraryRoot)
                     await sink.emit(.restructurePlan(plan))
                     JSONLog.shared.info(ev: "plan_restructure_done",
                                         extra: ["moves": AnyCodable(plan.moves.count)])
@@ -968,27 +968,23 @@ struct FileIDEngineMain {
     /// engine-authoritative Tidy/Keep tiles instead of its local heuristic
     /// fallback (the "null on older engines" path). (F-C3-035 wiring)
     static func restructurePlan(
-        from proposals: [RestructureProposal], libraryRoot: String
+        from plan: Restructure.PlanResult, libraryRoot: String
     ) -> RestructurePlan {
-        // Per-source-folder classification → a tier string per move's parent.
-        var tierByFolder: [String: String] = [:]
-        var anchor = 0, mixed = 0, junk = 0
-        for f in Restructure.classifyFolders(proposals) {
-            switch f.classification {
-            case .anchor: tierByFolder[f.sourceFolder] = "Anchor"; anchor += 1
-            case .mixed:  tierByFolder[f.sourceFolder] = "Mixed";  mixed += 1
-            case .junk:   tierByFolder[f.sourceFolder] = "Junk";   junk += 1
-            }
-        }
-        let moves = proposals.map { p in
+        // The tier map + Keep/Tidy/Junk counts are engine-authoritative and already
+        // computed by `proposeAll` on the FULL pre-strip set with the semantic-claim
+        // exemption (F-C1-004) — recomputing them here on the stripped `proposals`
+        // would undercount the "Keep" tile (the stripped anchor folders are gone) and
+        // diverge from the Windows engine. This mapper just stamps each surviving
+        // move's tier by its source-folder parent. (audit — lockstep)
+        let moves = plan.proposals.map { p in
             let parent = (p.oldPath as NSString).deletingLastPathComponent
             return RestructureMove(
                 fileID: p.fileID, source: p.oldPath, destination: p.newPath,
-                category: p.bucket, tier: tierByFolder[parent],
+                category: p.bucket, tier: plan.tierByFolder[parent],
                 confidence: p.confidence, reason: p.reason)
         }
         var counts: [String: Int] = [:]
-        for p in proposals { counts[p.bucket, default: 0] += 1 }
+        for p in plan.proposals { counts[p.bucket, default: 0] += 1 }
         let categoryCounts = counts
             .map { RestructureCategoryCount(category: $0.key, count: $0.value) }
             .sorted { $0.count != $1.count ? $0.count > $1.count : $0.category < $1.category }
@@ -996,7 +992,8 @@ struct FileIDEngineMain {
             libraryRoot: libraryRoot, moves: moves,
             categoryCounts: categoryCounts,
             folderClassifications: FolderClassificationCounts(
-                anchorFolders: anchor, mixedFolders: mixed, junkFolders: junk))
+                anchorFolders: plan.anchorFolders, mixedFolders: plan.mixedFolders,
+                junkFolders: plan.junkFolders))
     }
 
     /// Mark the session completed/cancelled in the DB + emit terminal events.

@@ -22,7 +22,11 @@ public enum RestructureFeedback {
     static func destFolder(_ dest: String) -> String? {
         let parent = (dest as NSString).deletingLastPathComponent
         let name = (parent as NSString).lastPathComponent
-        return name.isEmpty ? nil : name
+        // "/" (a root-level destination's parent basename) is not a real folder key —
+        // Rust's `dest.parent().file_name()` yields None there, so treat it as nil for
+        // lockstep. Unreachable in production (destinations are always under the
+        // library root), defensive only. (audit — lockstep)
+        return (name.isEmpty || name == "/") ? nil : name
     }
 
     /// Credit each applied move's filename tokens toward its destination folder.

@@ -381,6 +381,23 @@ public struct FileDoneEvent: Codable, Sendable {
         self.errorMessage = errorMessage
         self.skippedStages = skippedStages
     }
+
+    /// Custom decode so a `fileDone` frame that OMITS `skippedStages` still decodes —
+    /// the IPC schema marks it optional (`"default": []`) and the Rust engine elides it
+    /// when empty (`skip_serializing_if = "Vec::is_empty"`), so the synthesized
+    /// `Decodable` (which requires the key) would throw `keyNotFound` on such a frame.
+    /// Defaults to `[]` when absent, matching the schema + the C# DTO. Mirrors the
+    /// `RestructureMove.confidence` pattern; `encode(to:)` stays auto-synthesized.
+    /// (audit — cross-platform IPC drift)
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        path = try c.decode(String.self, forKey: .path)
+        kind = try c.decode(String.self, forKey: .kind)
+        totalMs = try c.decode(Double.self, forKey: .totalMs)
+        failed = try c.decode(Bool.self, forKey: .failed)
+        errorMessage = try c.decodeIfPresent(String.self, forKey: .errorMessage)
+        skippedStages = try c.decodeIfPresent([String].self, forKey: .skippedStages) ?? []
+    }
 }
 
 public struct BatchSummary: Codable, Sendable {
