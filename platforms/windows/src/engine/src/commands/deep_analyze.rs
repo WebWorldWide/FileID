@@ -343,16 +343,17 @@ pub(crate) async fn handle_deep_analyze_all(
 /// shares. `'pdf'` is included only when the `pdf-analyze` render path is
 /// compiled in (default-on) — without it `rasterize_for_vlm` returns a
 /// feature-gate error for every PDF, so queuing them would only manufacture
-/// failures (F-C1-005). `failed = 0` excludes rows a prior GPU death marked
-/// failed, parity with the macOS reference (F-C1-022).
+/// failures (F-C1-005). `'audio'` is named from its embedded title/artist tags
+/// (no VLM — `analyze_metadata_named_file`), not rasterized. `failed = 0`
+/// excludes rows a prior GPU death marked failed, parity with macOS (F-C1-022).
 pub(crate) fn deep_analyze_target_filter() -> &'static str {
     #[cfg(feature = "pdf-analyze")]
     {
-        "kind IN ('image','video','pdf') AND failed = 0"
+        "kind IN ('image','video','pdf','audio','model') AND failed = 0"
     }
     #[cfg(not(feature = "pdf-analyze"))]
     {
-        "kind IN ('image','video') AND failed = 0"
+        "kind IN ('image','video','audio','model') AND failed = 0"
     }
 }
 
@@ -855,8 +856,10 @@ mod tests {
         let pdf = insert_file(&db, r"C:\lib\c.pdf", "pdf", 0, None, None);
         // failed=1 image (GPU-death-marked) must NOT be a target.
         let dead = insert_file(&db, r"C:\lib\d.jpg", "image", 1, None, None);
-        // A non-renderable kind is never a Deep Analyze target.
+        // A non-renderable, non-metadata-nameable kind (doc) is never a target.
         let _doc = insert_file(&db, r"C:\lib\e.docx", "doc", 0, None, None);
+        // Audio IS a target now — named from embedded tags (no VLM).
+        let aud = insert_file(&db, r"C:\lib\f.mp3", "audio", 0, None, None);
 
         let ids = super::collect_file_ids(
             &db,
@@ -867,6 +870,7 @@ mod tests {
 
         assert!(ids.contains(&img), "image must be a target");
         assert!(ids.contains(&vid), "video must be a target");
+        assert!(ids.contains(&aud), "audio must be a target (metadata-named)");
         #[cfg(feature = "pdf-analyze")]
         assert!(ids.contains(&pdf), "pdf must be a target when render ships");
         #[cfg(not(feature = "pdf-analyze"))]

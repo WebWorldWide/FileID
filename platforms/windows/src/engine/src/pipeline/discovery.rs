@@ -55,6 +55,9 @@ pub enum FileKind {
     Pdf,
     Doc,
     Audio,
+    /// 3D models. Scanned (not dropped like Other) so Deep Analyze can name them
+    /// from their embedded object/material labels. Wavefront `.obj` only for now.
+    Model,
     Other,
 }
 
@@ -66,6 +69,7 @@ impl FileKind {
             FileKind::Pdf => "pdf",
             FileKind::Doc => "doc",
             FileKind::Audio => "audio",
+            FileKind::Model => "model",
             FileKind::Other => "other",
         }
     }
@@ -81,6 +85,7 @@ impl FileKind {
             "docx" | "doc" | "odt" | "rtf" | "txt" | "md" | "pages" | "key" | "numbers"
             | "xlsx" | "pptx" => FileKind::Doc,
             "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" | "opus" => FileKind::Audio,
+            "obj" => FileKind::Model,
             _ => FileKind::Other,
         }
     }
@@ -556,6 +561,18 @@ mod tests {
     #[test]
     fn kind_from_extension_unknown_is_other() {
         assert_eq!(FileKind::from_extension("xyz"), FileKind::Other);
+    }
+
+    #[test]
+    fn kind_from_extension_audio_and_model() {
+        // Audio files (named from embedded tags by Deep Analyze).
+        assert_eq!(FileKind::from_extension("mp3"), FileKind::Audio);
+        assert_eq!(FileKind::from_extension("OGG"), FileKind::Audio);
+        // 3D models get their own scanned kind (not dropped like Other), so Deep
+        // Analyze can name them from embedded object/material labels.
+        assert_eq!(FileKind::from_extension("obj"), FileKind::Model);
+        assert_eq!(FileKind::from_extension("OBJ"), FileKind::Model);
+        assert_eq!(FileKind::Model.as_str(), "model");
     }
 
     #[test]
