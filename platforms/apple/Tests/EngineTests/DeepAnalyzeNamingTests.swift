@@ -21,6 +21,16 @@ struct DeepAnalyzeNamingTests {
             == "Band - AC_DC_ Live")
     }
 
+    @Test("nameFromTranscript: leading words → name, lead → caption (lockstep with Rust)")
+    func transcriptName() {
+        let r = DeepAnalyzeNaming.nameFromTranscript(
+            "  This is a quick meeting about the Q3 budget and headcount  ")
+        #expect(r?.name == "This is a quick meeting about the Q3")
+        #expect(r?.description.hasPrefix("Audio transcript: This is a quick meeting") == true)
+        #expect(DeepAnalyzeNaming.nameFromTranscript("   \n  ") == nil)
+        #expect(DeepAnalyzeNaming.nameFromTranscript("") == nil)
+    }
+
     @Test("buildObjName: meaningful object, else material, else nil")
     func objName() {
         #expect(DeepAnalyzeNaming.buildObjName(objects: ["default", "Spaceship"], materials: [])

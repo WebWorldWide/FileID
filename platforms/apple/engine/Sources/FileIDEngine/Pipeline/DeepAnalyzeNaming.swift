@@ -9,6 +9,7 @@
 // renderer→VLM — needs a new model, a future MODELS.md decision.)
 import Foundation
 import AVFoundation
+import Speech
 import FileIDShared
 
 enum DeepAnalyzeNaming {
@@ -162,9 +163,20 @@ enum DeepAnalyzeNaming {
             var tags: [String] = []
             if let a = artist { pushUnique(&tags, a) }
             if let al = album { pushUnique(&tags, al) }
+            var name = buildAudioName(title: title, artist: artist)
+            var desc = audioDescription(title: title, artist: artist, album: album)
+            // No descriptive title (a voice memo / podcast / lecture) → transcribe the
+            // speech on-device (Apple Speech) and name from the spoken content. Mirrors
+            // the Windows whisper.cpp path. Best-effort — any failure keeps the metadata
+            // result (so audio naming never regresses).
+            if name == nil, let transcript = await transcribeAudio(url: url),
+               let named = nameFromTranscript(transcript) {
+                name = named.name
+                if desc == nil { desc = named.description }
+            }
             return DeepAnalyze.AnalysisResult(
-                description: audioDescription(title: title, artist: artist, album: album) ?? "",
-                proposedName: buildAudioName(title: title, artist: artist),
+                description: desc ?? "",
+                proposedName: name,
                 tags: tags)
         case .model:
             let (objects, materials) = parseObjNames(url: url)
@@ -178,5 +190,66 @@ enum DeepAnalyzeNaming {
         default:
             return DeepAnalyze.AnalysisResult(description: "", proposedName: nil)
         }
+    }
+
+    // MARK: - Audio transcription (Apple Speech — on-device; mirrors Windows whisper.cpp)
+
+    /// First ~8 transcript words → a filesystem-safe name; the lead 200 chars → a caption.
+    /// Lockstep with the Rust `name_from_transcript`. nil for an empty/degenerate transcript.
+    static func nameFromTranscript(_ transcript: String) -> (name: String, description: String)? {
+        let t = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.isEmpty { return nil }
+        let raw = t.split(whereSeparator: { $0.isWhitespace }).prefix(8).joined(separator: " ")
+        let name = FilesystemNameSafe.componentSafe(raw)
+        if name.isEmpty || name == "_" { return nil }
+        let snippet = String(t.prefix(200))
+        return (name, "Audio transcript: \(snippet)")
+    }
+
+    /// Transcribe an audio file on-device via Apple's Speech framework — the macOS-native
+    /// mirror of the Windows whisper.cpp subprocess (no model download, no cloud).
+    /// `requiresOnDeviceRecognition` keeps the audio on the machine. Best-effort: returns
+    /// nil on no-authorization / no on-device support / unsupported container / recognition
+    /// error, so the caller falls back to metadata naming and audio naming never regresses.
+    static func transcribeAudio(url: URL) async -> String? {
+        guard await requestSpeechAuthorization() else { return nil }
+        guard let recognizer = SFSpeechRecognizer(), recognizer.isAvailable,
+              recognizer.supportsOnDeviceRecognition else { return nil }
+        let request = SFSpeechURLRecognitionRequest(url: url)
+        request.requiresOnDeviceRecognition = true
+        request.shouldReportPartialResults = false
+        let once = OnceFlag()
+        return await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in
+            recognizer.recognitionTask(with: request) { result, error in
+                // Resume exactly once — on the final transcript or on error (a checked
+                // continuation double-resume traps); partials are ignored.
+                if let result, result.isFinal {
+                    if once.claim() { cont.resume(returning: result.bestTranscription.formattedString) }
+                } else if error != nil {
+                    if once.claim() { cont.resume(returning: nil) }
+                }
+            }
+        }
+    }
+
+    /// Request Speech authorization once; true only when fully authorized (a CLI engine
+    /// with no TCC grant resolves to denied → the metadata fallback).
+    private static func requestSpeechAuthorization() async -> Bool {
+        if SFSpeechRecognizer.authorizationStatus() == .authorized { return true }
+        return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            SFSpeechRecognizer.requestAuthorization { cont.resume(returning: $0 == .authorized) }
+        }
+    }
+}
+
+/// One-shot guard so the recognition continuation is resumed at most once.
+private final class OnceFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fired = false
+    func claim() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if fired { return false }
+        fired = true
+        return true
     }
 }

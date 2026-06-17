@@ -60,6 +60,7 @@ cat > "$CONTENTS/Info.plist" <<PLIST
     <key>NSDesktopFolderUsageDescription</key><string>FileID needs to read your folders to tag, dedupe, and reorganize files.</string>
     <key>NSDocumentsFolderUsageDescription</key><string>FileID needs to read your folders to tag, dedupe, and reorganize files.</string>
     <key>NSDownloadsFolderUsageDescription</key><string>FileID needs to read your folders to tag, dedupe, and reorganize files.</string>
+    <key>NSSpeechRecognitionUsageDescription</key><string>FileID transcribes audio on-device to give voice memos and recordings descriptive names. Nothing leaves your Mac.</string>
 </dict>
 </plist>
 PLIST
