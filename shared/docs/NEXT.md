@@ -42,12 +42,26 @@ Windows already surfaces confidence+reason in `DrillDownSheet` and already has t
   tests on both engines (Rust 3, macOS 3): apply 3 similar files → a new similar file's move upgrades Auto; an
   unrelated move stays Review; weight accumulates. Instance-based, no retraining (SOTA-validated). Last-mile
   fine-tuning to the owner's real library is what this closes vs. the authored-ground-truth validation.
-- **Per-bucket approval + before/after tree preview** (both apps, large) — approve per destination bucket, and
-  a side-by-side resulting-structure tree as the pre-apply confirmation (R3, design in RESTRUCTURE.md).
-- **Granularity Settings slider** — wire the env knob above to a Settings "folder granularity" picker
-  (engine reads the env at spawn; the knob itself is done + verifiable today).
-- **Deep-Analyze mid-review re-plan fix** (macOS) — re-apply prior deselections by file-id to the fresh plan
-  (`RestructureView.swift:48-58`).
+- **Per-bucket approval + before/after tree preview** (both apps) — ✅ already done on macOS (confirmed during
+  the audit): `TreeDiffView` is wired (`RestructureView.swift:1270`) for the before/after, and the drill-down
+  supports a `.destBucket(bucket)` scope with per-group select-all (per-destination-bucket approval). Windows
+  mirror is CI-only; verify on hardware.
+- **Granularity Settings slider** — ✅ DONE (both apps). A segmented `Picker` (macOS Settings ▸ Restructure,
+  `@AppStorage("restructure.granularity")`) / `ComboBox` (Windows, `AppSettings.RestructureGranularity` +
+  `Sanitize`); each `EngineClient` forwards a validated non-default `FILEID_RESTRUCTURE_GRANULARITY` at spawn, so
+  it applies on the next engine start (the existing Restart Engine button, or relaunch). Kept on the env mechanism
+  — no IPC contract change. macOS build-verified; Windows CI-verified (`windows-app` + `dotnet format`).
+- **App-lifecycle items found by the app audit, deferred** (macOS, see DECISIONS 2026-06-17): (a) "Stop Engine"
+  respawns the engine (the `expectedExit || recentClean` branch always respawns) — the surgical `stopRequested`
+  fix needs a new `.stopped` state (≈15 `switch` sites) or a misleading `.crashed` pill, and touches the
+  crash-recovery FSM, so it waits for a Mac session; (b) the EOF/exit `Task` isn't serialized with the IPC event
+  pump, so a late `deepAnalyzeProgress` can re-arm a flag the exit handler cleared (stuck "Analyze" button across
+  a respawn) — the fix (route exit through the ordered stream) is invasive + self-heals on the next crash.
+- **Deep-Analyze mid-review re-plan fix** (macOS) — ✅ DONE. `priorDeselectedIDs` is captured at
+  `requestPlan()` (`RestructureView.swift:953`) and re-applied via `selectedIDs.subtract(priorDeselectedIDs)`
+  on each re-plan (`:981`), so a background re-plan (Deep Analyze finishing mid-review) never silently re-checks
+  rows the user unchecked; the R6-01 `pendingMoves` freeze additionally pins the apply to exactly what was
+  reviewed (TOCTOU). Confirmed wired during the audit sweep.
 - **file_ref stale-move guard** (both, narrow) — ✅ DONE + green. The apply stale-check now compares the
   planned file's stored `file_ref` (NTFS MFT ref / APFS-HFS inode) against the one on disk and skips on a
   positive mismatch, so a same-path file swap in the plan→apply window can't move the wrong bytes.
