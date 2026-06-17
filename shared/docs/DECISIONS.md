@@ -7,6 +7,34 @@
 
 ---
 
+## 2026-06-17 — App-side audit (the least-covered area): fixed a C# crash + a macOS data-loss; DEFERRED 2 engine-lifecycle items
+
+The engines were audited 4× but the apps (SwiftUI + WinUI) were not, so a 2-agent verification-first sweep ran
+over the app-side code. Two real bugs fixed: (1) **C# WinUI native-crash class** — `RestartAsync` spawns via
+`ConfigureAwait(false)`, so `StartAsync`'s synchronous `State`/`CrashReason` writes raise `PropertyChanged` on a
+thread-pool thread, and `SettingsView.OnEngineChanged`'s State arm called `OnPropertyChanged` for 11 `{x:Bind}`
+TextBlocks DIRECTLY (not marshaled) — mutating a `DispatcherObject` off-thread, the exact V15.2/V15.4 fast-fail
+class. Fixed at the subscriber (wrap the batch in `DispatcherQueue.TryEnqueue`, matching every other view's
+engine handler) — the lowest-risk fix, zero engine-FSM change. (2) **macOS People drag-merge name loss** —
+`mergePersons` kept `target` as survivor with no name-preservation; the drag handler passes the drop-target
+regardless of names, so dragging a NAMED card onto an UNNAMED one deleted the typed name (no undo). Fixed at the
+DB layer (`mergePersons` now keeps the typed-named entity as survivor when the target is unnamed and exactly one
+named entity exists) — defense-in-depth for all callers, fail-safe (a wrong predicate fails the merge cleanly via
+the existing catch, never data-loss). The granularity ComboBox/Picker audited clean on both platforms.
+
+Two findings were **deliberately deferred** (same discipline as prior deferrals — don't ship an unverifiable
+change that risks a critical shipped path): (a) **"Stop Engine" respawns the engine** — `handleEngineExit`'s
+`expectedExit || recentClean` branch always respawns, and `shutdown()` sets `expectedExit`, so the advanced "Stop
+Engine" button restarts instead of stops. The surgical fix (a `stopRequested` flag) is sound, but the resulting
+state needs either a new `.stopped` case (≈15 exhaustive `switch` sites to update + UI verification I can't do
+headlessly) or reusing `.crashed` (a misleading red pill); it touches the crash-recovery FSM, so it waits for a
+Mac session. (b) **engine-exit not ordered against the IPC event pump** — the EOF/exit `Task` isn't serialized
+with the event stream, so a late `deepAnalyzeProgress` can re-arm a flag the exit handler just cleared (stuck
+"Analyze" button across a respawn). The fix (route exit through the ordered stream) is invasive and the
+manifestation is interleaving-dependent + self-heals on the next crash. Both tracked in NEXT.md. (Two LOW notes —
+a missing `ShowAlertAsync` XamlRoot guard whose callers already try/catch, and a sub-200ms granularity
+save-debounce read race below human click latency — were judged not worth the change.)
+
 ## 2026-06-17 — Restructure apply file_ref swap guard is POSITIVE-EVIDENCE-ONLY (skip only on a both-known mismatch)
 
 The apply stale-check was path-only: it proved the DB row still NAMED the planned source, not that the file now
