@@ -32,9 +32,14 @@ Windows already surfaces confidence+reason in `DrillDownSheet` and already has t
   thin-margin content match to Auto when names agree strongly (Dropbox Smart Move). Additive — never overrides
   the calibrated content path. Validated against authored labeled ground-truth scenarios (the assistant acting
   as the domain-expert labeler in lieu of real-data UAT).
-- **Learn-from-corrections** (both engines, new migration vN+1) — persist approved cluster→folder decisions
-  to a `restructure_feedback` table and reuse as routing hints next plan (instance-based, SOTA-validated; NOT
-  retraining). Record-on-apply is safe/additive; hint-application is behavior-changing.
+- **Learn-from-corrections** (both engines) — SCHEMA LANDED + CI-green: `v18_restructure_feedback`
+  (token, folder, weight, updated_at) migrated + verified lockstep (Rust 12 migration tests, macOS 3 parity).
+  NEXT = the consuming logic (a `restructure_feedback` module): `record(conn, applied_moves)` credits each moved
+  file's `filename_tokens` toward its destination folder basename (UPSERT weight), wired into `restructure_apply`
+  apply_with under the `record_undo` forward-only gate; `boost(conn, &mut moves)` sums feedback weights for each
+  move's (tokens → dest folder) and upgrades to Auto when ≥ threshold (additive, never re-routes), wired into the
+  plan command after `semantic_classify` (`commands/restructure.rs:256`). Make `filename_tokens` pub(crate). Pin
+  with labeled tests (apply → re-plan similar files → confidence upgraded). Instance-based, SOTA-validated.
 - **Per-bucket approval + before/after tree preview** (both apps, large) — approve per destination bucket, and
   a side-by-side resulting-structure tree as the pre-apply confirmation (R3, design in RESTRUCTURE.md).
 - **Granularity Settings slider** — wire the env knob above to a Settings "folder granularity" picker
