@@ -32,14 +32,16 @@ Windows already surfaces confidence+reason in `DrillDownSheet` and already has t
   thin-margin content match to Auto when names agree strongly (Dropbox Smart Move). Additive — never overrides
   the calibrated content path. Validated against authored labeled ground-truth scenarios (the assistant acting
   as the domain-expert labeler in lieu of real-data UAT).
-- **Learn-from-corrections** (both engines) — SCHEMA LANDED + CI-green: `v18_restructure_feedback`
-  (token, folder, weight, updated_at) migrated + verified lockstep (Rust 12 migration tests, macOS 3 parity).
-  NEXT = the consuming logic (a `restructure_feedback` module): `record(conn, applied_moves)` credits each moved
-  file's `filename_tokens` toward its destination folder basename (UPSERT weight), wired into `restructure_apply`
-  apply_with under the `record_undo` forward-only gate; `boost(conn, &mut moves)` sums feedback weights for each
-  move's (tokens → dest folder) and upgrades to Auto when ≥ threshold (additive, never re-routes), wired into the
-  plan command after `semantic_classify` (`commands/restructure.rs:256`). Make `filename_tokens` pub(crate). Pin
-  with labeled tests (apply → re-plan similar files → confidence upgraded). Instance-based, SOTA-validated.
+- **Learn-from-corrections** (both engines) — ✅ DONE + green. The `restructure_feedback` module
+  (`pipeline/restructure_feedback.rs` / `Pipeline/RestructureFeedback.swift`) consumes the v18 table:
+  `record(applied_moves, now)` credits each moved file's `filename_tokens` toward its destination folder basename
+  (UPSERT +1 weight), wired into the apply loop ALONGSIDE the undo journal (shares the forward-only gate, one
+  batched write after the loop); `boost` sums each proposed move's (tokens → dest folder) feedback and upgrades to
+  Auto at/above `FEEDBACK_AUTO_WEIGHT = 3` (additive — never re-routes), wired into the plan command on the full
+  proposal set before the anchor strip. `filename_tokens` is now `pub(crate)` (Rust). Pinned with labeled parity
+  tests on both engines (Rust 3, macOS 3): apply 3 similar files → a new similar file's move upgrades Auto; an
+  unrelated move stays Review; weight accumulates. Instance-based, no retraining (SOTA-validated). Last-mile
+  fine-tuning to the owner's real library is what this closes vs. the authored-ground-truth validation.
 - **Per-bucket approval + before/after tree preview** (both apps, large) — approve per destination bucket, and
   a side-by-side resulting-structure tree as the pre-apply confirmation (R3, design in RESTRUCTURE.md).
 - **Granularity Settings slider** — wire the env knob above to a Settings "folder granularity" picker

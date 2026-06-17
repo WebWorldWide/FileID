@@ -13,6 +13,7 @@ use crate::ipc::{
 use crate::pipeline::discovery::FileKind;
 use crate::pipeline::restructure::{self, classify, FileForClassify, FolderClassification};
 use crate::pipeline::restructure_apply::RestructureApply;
+use crate::pipeline::restructure_feedback;
 use crate::pipeline::restructure_semantic;
 
 /// Files + per-file person names for restructure planning. Person names come
@@ -92,6 +93,10 @@ pub(crate) async fn handle_plan_restructure(
 ) {
     let library_root = payload.library_root.clone();
     let db_for_semantic = std::sync::Arc::clone(&db);
+    // Kept alive past the query/signals spawn_blocking closures (which move `db` and
+    // `db_for_semantic`) so the learn-from-corrections boost can read the feedback
+    // table after the proposal set is built.
+    let db_for_boost = std::sync::Arc::clone(&db);
     let files: Vec<FileForClassify> =
         match tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<FileForClassify>> {
             let conn = db.lock();
@@ -289,6 +294,15 @@ pub(crate) async fn handle_plan_restructure(
     let rule_files: Vec<FileForClassify> =
         files.iter().filter(|f| !moved.contains(&f.file_id)).cloned().collect();
     proposed.extend(classify(&rule_files, library_root_path));
+
+    // Learn-from-corrections: upgrade any planned move toward a folder the user has
+    // previously filed similar files into (the v18 restructure_feedback memory,
+    // written on each apply). Additive — only raises confidence on moves the planner
+    // already produced, never re-routes — so it can't regress the calibrated passes.
+    // Runs on the full proposal set, before the anchor strip preserves the upgraded
+    // confidence into the emitted plan. (R3 → learn-your-style)
+    restructure_feedback::boost(&db_for_boost, &mut proposed);
+
     // Engine-authoritative folder classification, computed on the FULL proposal
     // set so the Keep/Tidy/Reorganize tile counts stay accurate.
     let folder_class = restructure::classify_folders(&proposed);
