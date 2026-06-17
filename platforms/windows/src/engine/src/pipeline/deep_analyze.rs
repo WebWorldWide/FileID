@@ -125,18 +125,33 @@ pub async fn analyze_file(
     // Rasterizable kinds (image/video/pdf) return None here and take the VLM path.
     // (True AI audio/3D content understanding needs Whisper/YAMNet/a 3D renderer →
     // future MODELS.md items.)
+    // 3D models prefer the VLM (render → visual understanding) when one is installed;
+    // audio + VLM-less models are named from metadata here and return early.
+    let weights = vlm::find_weights(model_kind);
     if let Some(outcome) =
-        analyze_metadata_named_file(&db, file_id, model_kind, mode, started).await?
+        analyze_metadata_named_file(&db, file_id, model_kind, mode, started, weights.is_some()).await?
     {
         return Ok(outcome);
     }
 
     // Resolve weights for this model_kind.
-    let (gguf, mmproj) = vlm::find_weights(model_kind)
+    let (gguf, mmproj) = weights
         .ok_or_else(|| anyhow::anyhow!("VLM weights for '{}' not installed", model_kind))?;
 
-    // Resolve + rasterize the source (image as-is; video keyframe; PDF page-1).
-    let (rasterized, temp_to_clean) = rasterize_for_vlm(&db, file_id).await?;
+    // Resolve + rasterize the source (image as-is; video keyframe; PDF page-1; 3D render).
+    let (rasterized, temp_to_clean) = match rasterize_for_vlm(&db, file_id).await {
+        Ok(r) => r,
+        Err(e) => {
+            // A 3D model we couldn't render → fall back to its embedded-name metadata so
+            // the file still gets a descriptive name (other kinds propagate the error).
+            if let Some(outcome) =
+                analyze_metadata_named_file(&db, file_id, model_kind, mode, started, false).await?
+            {
+                return Ok(outcome);
+            }
+            return Err(e);
+        }
+    };
     // Guard cleans the temp frame on any exit, including the `?`/bail paths
     // below that previously leaked it (#24).
     let _temp_guard = TempFileGuard(temp_to_clean);
@@ -389,6 +404,7 @@ async fn analyze_metadata_named_file(
     model_kind: &str,
     mode: AnalyzeMode,
     started: std::time::Instant,
+    model_to_vlm: bool,
 ) -> anyhow::Result<Option<AnalyzeOutcome>> {
     let (path_text, kind): (String, String) = {
         let conn = db.lock();
@@ -408,7 +424,15 @@ async fn analyze_metadata_named_file(
     // returns None and takes the VLM path. NOTE: once a kind matches, it is ALWAYS
     // handled here (even with no usable metadata → an empty success), so a tag-less
     // audio file is never dropped into the VLM rasterize path, which would bail.
-    if kind != "audio" && !is_3d_model_ext(&ext) {
+    // 3D models prefer the VLM (render → visual understanding) when one is installed:
+    // `model_to_vlm` returns None so they fall through to `rasterize_for_vlm`, which
+    // renders the `.obj`. With no VLM (or after a render failure, called with false)
+    // they fall back to embedded-name metadata here.
+    let is_model = is_3d_model_ext(&ext);
+    if kind != "audio" && !is_model {
+        return Ok(None);
+    }
+    if is_model && model_to_vlm {
         return Ok(None);
     }
 
@@ -589,6 +613,16 @@ pub(crate) async fn rasterize_for_vlm(
             let r = rasterize_pdf_page(&source_path).await?;
             Ok((r.clone(), Some(r)))
         }
+        "model" => {
+            // 3D model → a shaded 3/4-view PNG the VLM can recognize. Blocking
+            // (CPU rasterizer) so it runs on a blocking thread.
+            let src = source_path.clone();
+            let dest = std::env::temp_dir().join(format!("fileid-obj-{}.png", uuid::Uuid::new_v4()));
+            let d2 = dest.clone();
+            tokio::task::spawn_blocking(move || crate::pipeline::obj_render::render_obj_to_png(&src, &d2))
+                .await??;
+            Ok((dest.clone(), Some(dest)))
+        }
         _ => anyhow::bail!("kind '{}' isn't VLM-analyzable yet", kind),
     }
 }
@@ -746,15 +780,26 @@ pub(crate) async fn analyze_file_via_server(
     use crate::models::vlm;
     let started = std::time::Instant::now();
 
-    // Audio + 3D models are named from metadata (no VLM) on the server path too — same
-    // branch as `analyze_file`, before rasterize (which would bail on these kinds).
+    // Audio is named from metadata; 3D models render → VLM (the server is loaded, so
+    // `model_to_vlm = true`). Same branch as `analyze_file`, before rasterize.
     if let Some(outcome) =
-        analyze_metadata_named_file(&db, file_id, model_kind, mode, started).await?
+        analyze_metadata_named_file(&db, file_id, model_kind, mode, started, true).await?
     {
         return Ok(outcome);
     }
 
-    let (rasterized, temp_to_clean) = rasterize_for_vlm(&db, file_id).await?;
+    let (rasterized, temp_to_clean) = match rasterize_for_vlm(&db, file_id).await {
+        Ok(r) => r,
+        Err(e) => {
+            // A 3D model we couldn't render → fall back to embedded-name metadata.
+            if let Some(outcome) =
+                analyze_metadata_named_file(&db, file_id, model_kind, mode, started, false).await?
+            {
+                return Ok(outcome);
+            }
+            return Err(e);
+        }
+    };
     // Guard cleans the temp frame on any exit, including the cancel-bail/`?`
     // paths below that previously leaked it (#24).
     let _temp_guard = TempFileGuard(temp_to_clean);
