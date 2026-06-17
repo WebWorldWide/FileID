@@ -125,7 +125,9 @@ pub async fn analyze_file(
     // Rasterizable kinds (image/video/pdf) return None here and take the VLM path.
     // (True AI audio/3D content understanding needs Whisper/YAMNet/a 3D renderer →
     // future MODELS.md items.)
-    if let Some(outcome) = analyze_metadata_named_file(&db, file_id, model_kind, mode, started)? {
+    if let Some(outcome) =
+        analyze_metadata_named_file(&db, file_id, model_kind, mode, started).await?
+    {
         return Ok(outcome);
     }
 
@@ -381,7 +383,7 @@ fn obj_description(objects: &[String], materials: &[String]) -> Option<String> {
 /// metadata. Returns None for rasterizable kinds (image/video/pdf), which fall through
 /// to the VLM path. Mode-gated like the VLM path (caption modes keep the description,
 /// rename modes keep the name, tag modes keep tags). Persists + returns the outcome.
-fn analyze_metadata_named_file(
+async fn analyze_metadata_named_file(
     db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
     file_id: i64,
     model_kind: &str,
@@ -396,8 +398,7 @@ fn analyze_metadata_named_file(
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?
     };
-    let path = std::path::Path::new(&path_text);
-    let ext = path
+    let ext = std::path::Path::new(&path_text)
         .extension()
         .and_then(|e| e.to_str())
         .map(str::to_lowercase)
@@ -407,32 +408,17 @@ fn analyze_metadata_named_file(
     // returns None and takes the VLM path. NOTE: once a kind matches, it is ALWAYS
     // handled here (even with no usable metadata → an empty success), so a tag-less
     // audio file is never dropped into the VLM rasterize path, which would bail.
-    let (description, proposed_name, tags): (Option<String>, Option<String>, Vec<String>) =
-        if kind == "audio" {
-            let m = crate::pipeline::audio_meta::extract_structured(path);
-            let name = build_audio_name(m.title.as_deref(), m.artist.as_deref());
-            let desc = audio_description(&m);
-            let mut tags: Vec<String> = Vec::new();
-            if let Some(a) = &m.artist {
-                push_unique(&mut tags, a);
-            }
-            if let Some(al) = &m.album {
-                push_unique(&mut tags, al);
-            }
-            (desc, name, tags)
-        } else if is_3d_model_ext(&ext) {
-            let (objects, materials) = parse_obj_names(path);
-            let name = build_obj_name(&objects, &materials);
-            let desc = obj_description(&objects, &materials);
-            let mut tags: Vec<String> = Vec::new();
-            for t in objects.iter().chain(materials.iter()) {
-                push_unique(&mut tags, t);
-            }
-            tags.truncate(6);
-            (desc, name, tags)
-        } else {
-            return Ok(None);
-        };
+    if kind != "audio" && !is_3d_model_ext(&ext) {
+        return Ok(None);
+    }
+
+    // The naming work blocks (symphonia decode, whisper subprocess, obj/mtl parse) — run
+    // it off the async executor so a multi-second transcription doesn't stall the runtime.
+    let (description, proposed_name, tags) = tokio::task::spawn_blocking(move || {
+        metadata_naming_blocking(&path_text, &kind, &ext)
+    })
+    .await
+    .unwrap_or((None, None, Vec::new()));
 
     // Mode-gate (mirror the VLM path's per-mode outputs).
     let description = if matches!(
@@ -475,6 +461,81 @@ fn analyze_metadata_named_file(
         model: model_kind.to_string(),
         elapsed_ms: started.elapsed().as_millis() as u64,
     }))
+}
+
+/// Blocking metadata naming for audio + 3D models (runs inside `spawn_blocking`).
+/// Audio: embedded tags name music; when there's no descriptive title (a voice memo /
+/// podcast / lecture), whisper transcribes the speech (if the runtime + model are
+/// installed) and names from the spoken content. 3D: embedded object/material labels.
+fn metadata_naming_blocking(
+    path_text: &str,
+    kind: &str,
+    ext: &str,
+) -> (Option<String>, Option<String>, Vec<String>) {
+    let path = std::path::Path::new(path_text);
+    if kind == "audio" {
+        let m = crate::pipeline::audio_meta::extract_structured(path);
+        let mut name = build_audio_name(m.title.as_deref(), m.artist.as_deref());
+        let mut desc = audio_description(&m);
+        let mut tags: Vec<String> = Vec::new();
+        if let Some(a) = &m.artist {
+            push_unique(&mut tags, a);
+        }
+        if let Some(al) = &m.album {
+            push_unique(&mut tags, al);
+        }
+        // No descriptive title → try whisper transcription on the speech.
+        if name.is_none() {
+            if let Some((tn, td)) = transcribe_audio_name(path) {
+                name = Some(tn);
+                if desc.is_none() {
+                    desc = Some(td);
+                }
+            }
+        }
+        (desc, name, tags)
+    } else {
+        // is_3d_model_ext(ext) — the only other kind reaching here.
+        let _ = ext;
+        let (objects, materials) = parse_obj_names(path);
+        let name = build_obj_name(&objects, &materials);
+        let desc = obj_description(&objects, &materials);
+        let mut tags: Vec<String> = Vec::new();
+        for t in objects.iter().chain(materials.iter()) {
+            push_unique(&mut tags, t);
+        }
+        tags.truncate(6);
+        (desc, name, tags)
+    }
+}
+
+/// Transcribe an audio file with whisper.cpp → (name, caption). None if the runtime or
+/// model isn't installed, the decode fails, or the transcript is empty — the caller then
+/// keeps the embedded-metadata name (or an empty success).
+fn transcribe_audio_name(path: &std::path::Path) -> Option<(String, String)> {
+    let runner = crate::models::whisper::WhisperRunner::find().ok()?;
+    let model = crate::models::whisper::WhisperRunner::find_model()?;
+    let tmp = std::env::temp_dir().join(format!("fileid-whisper-{}.wav", uuid::Uuid::new_v4()));
+    let _guard = TempFileGuard(Some(tmp.clone()));
+    crate::pipeline::audio_decode::decode_to_wav16_mono(path, &tmp).ok()?;
+    let transcript = runner.transcribe(&model, &tmp).ok()?;
+    name_from_transcript(&transcript)
+}
+
+/// First ~8 transcript words → a sanitized filename stem; the leading sentence → a
+/// caption. Pure + unit-tested. None for an empty transcript.
+pub(crate) fn name_from_transcript(transcript: &str) -> Option<(String, String)> {
+    let t = transcript.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let raw: String = t.split_whitespace().take(8).collect::<Vec<_>>().join(" ");
+    let name = crate::util::path_safety::safe_filename_component(&raw);
+    if name.is_empty() || name == "_" {
+        return None;
+    }
+    let snippet: String = t.chars().take(200).collect();
+    Some((name, format!("Audio transcript: {snippet}")))
 }
 
 /// Resolve a file's on-disk path and rasterize it to an image the VLM can read:
@@ -684,6 +745,15 @@ pub(crate) async fn analyze_file_via_server(
 ) -> anyhow::Result<AnalyzeOutcome> {
     use crate::models::vlm;
     let started = std::time::Instant::now();
+
+    // Audio + 3D models are named from metadata (no VLM) on the server path too — same
+    // branch as `analyze_file`, before rasterize (which would bail on these kinds).
+    if let Some(outcome) =
+        analyze_metadata_named_file(&db, file_id, model_kind, mode, started).await?
+    {
+        return Ok(outcome);
+    }
+
     let (rasterized, temp_to_clean) = rasterize_for_vlm(&db, file_id).await?;
     // Guard cleans the temp frame on any exit, including the cancel-bail/`?`
     // paths below that previously leaked it (#24).
@@ -1092,6 +1162,19 @@ mod tests {
             build_audio_name(Some("AC/DC: Live"), Some("Band")).as_deref(),
             Some("Band - AC_DC_ Live")
         );
+    }
+
+    #[test]
+    fn name_from_transcript_takes_leading_words() {
+        // A voice memo / podcast → first ~8 words become the name, the lead a caption.
+        let (name, desc) =
+            name_from_transcript("  This is a quick meeting about the Q3 budget and headcount  ")
+                .unwrap();
+        assert_eq!(name, "This is a quick meeting about the Q3");
+        assert!(desc.starts_with("Audio transcript: This is a quick meeting"));
+        // Empty / whitespace-only transcript → no name (keep the original).
+        assert_eq!(name_from_transcript("   \n  "), None);
+        assert_eq!(name_from_transcript(""), None);
     }
 
     #[test]
