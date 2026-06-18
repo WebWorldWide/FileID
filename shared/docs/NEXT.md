@@ -1,5 +1,41 @@
 # NEXT — resume here
 
+## 2026-06-17 — BGE document-content clustering: SHIPPED + calibrated; install UI remains
+
+Documents now cluster by BGE content (46%→53% on the real corpus), both engines, lockstep. The
+remaining work to make it reach users + perfect it:
+
+- **BGE download installer + Settings install card (BOTH platforms).** The feature only activates
+  once the BGE-small model (~135 MB, pinned in the manifest) is on disk. Wire it like the existing
+  models: macOS a `BGEModelInstaller` (mirror `RamPlusModelInstaller`/`CLIPModelInstaller`) →
+  `Models/bge_text/{bge_small.onnx,vocab.txt}` + a Settings card; Windows a Settings "Document
+  understanding (BGE)" card calling `PrewarmModel("bge_text")` (mirror the Whisper card). Until
+  then, restructure docs fall back to filename tokens (graceful).
+- **macOS scan-time storage (perf).** macOS embeds docs at PLAN time (≈3 min over USB for ~1.4k
+  docs); Windows embeds at scan + stores in `text_embeddings`. Mirror that on macOS — load
+  `BGETextService` in the scan's ModelStack, embed doc text after extraction, write the blob via a
+  `DBWriter.insertTextEmbedding` (the table + the v11 migration already exist) — so the plan is
+  instant + the embedding is cached. Correctness is unaffected (embeddings are identical); this is
+  purely latency.
+- **Further doc-threshold tuning (optional).** 53% with the biggest group at 168/65-folders is good
+  but the course folders are noisy labels; the `FILEID_RESTRUCTURE_DOC_*` env knobs allow more.
+- **Cross-pass new-group name dedup (MEDIUM, from the 2026-06-17 audit).** `used_group_names` /
+  `usedGroupNames` is per-`semantic_classify_profiled`-call, so the doc pass and the non-image pass
+  can each mint a new group with the SAME distinctive name (e.g. both "Invoices") → apply uniquifies
+  to `Invoices/` + `Invoices (2)/` instead of one folder. Not data-loss (the user reviews + it's
+  pre-existing for image-vs-non-image), but thread a SHARED name set across the three classify calls
+  (both engines, lockstep) to merge the intent. Low frequency.
+
+**2026-06-17 audit (3 adversarial agents over this session's new code):** found + FIXED 2 HIGH
+subprocess-hang bugs (whisper-cli + macOS textutil — no timeout); the MEDIUM above is tracked; the
+rest verified clean (obj_render overflow/index paths, the model_to_vlm gate + render fallback, the
+Speech/SoundAnalysis continuations, apply/undo of doc moves is content-agnostic, IPC 64 MiB frame
+cap unaffected, image+doc thresholds byte-identical across engines, env parsing panic-safe). LOWs
+(WordPiece grapheme-vs-scalar on exotic text; BGE `outputs.values.first` defended by the shape
+guard) are commented, not fixed — measure-zero / defended.
+- **On-device verification owed:** confirm the BGE doc clustering on the owner's Mac via the app
+  (not just the headless harness) once the installer lands, and that Windows produces matching docs.
+
 ## 2026-06-17 — Restructure calibration: image collapse FIXED on a real library; follow-ups remain
 
 Calibrated the image clustering/routing against the owner's real ~3.3k-photo library and fixed the

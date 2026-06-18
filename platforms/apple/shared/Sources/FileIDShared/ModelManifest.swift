@@ -79,6 +79,18 @@ public enum ModelManifest {
             url: "https://huggingface.co/Web-World-Wide/ram-plus-onnx/resolve/main/ram_plus_thresholds.txt",
             sha256: "7a69cbf2875161aefbc7db174f726a74eb1cebbd2e4538cef2e20fdc7eabb4e2",
             approxBytes: 46_000),
+        // BGE-small document text embedder — powers content-based document clustering in
+        // restructure. MIT/Apache-clean; pins mirror the Windows registry + manifest.json.
+        ModelArtifact(
+            id: "bge_model",
+            url: "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model.onnx",
+            sha256: "828e1496d7fabb79cfa4dcd84fa38625c0d3d21da474a00f08db0f559940cf35",
+            approxBytes: 135_000_000),
+        ModelArtifact(
+            id: "bge_vocab",
+            url: "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/vocab.txt",
+            sha256: "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
+            approxBytes: 232_000),
     ]
 
     public static let vlmRepos: [VLMRepoPin] = [

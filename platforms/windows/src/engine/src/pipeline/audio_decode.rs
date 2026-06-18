@@ -22,8 +22,9 @@ pub(crate) const TARGET_HZ: u32 = 16_000;
 
 /// Cap the decoded duration so a multi-hour file can't materialize an unbounded sample
 /// buffer (or a multi-minute transcription). The leading window carries the descriptive
-/// content for a filename; whisper on the first N minutes is plenty for a name.
-const MAX_SECONDS: usize = 600;
+/// content for a filename — the first couple of minutes is plenty — and bounding it here
+/// keeps the whisper subprocess comfortably under its `TRANSCRIBE_TIMEOUT`.
+const MAX_SECONDS: usize = 120;
 
 /// Decode `path` to a 16 kHz mono 16-bit PCM WAV at `out_wav`. Best-effort transcoder
 /// for the audio-AI pipeline; returns Err on an undecodable/empty stream.

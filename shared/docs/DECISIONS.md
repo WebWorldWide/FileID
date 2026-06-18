@@ -7,6 +7,29 @@
 
 ---
 
+## 2026-06-17 — Restructure clusters documents by BGE CONTENT, not filenames; calibrated to the MEAN-pooled distribution
+
+Owner asked to evaluate BGE for documents and adopt it "if it makes it more accurate". An
+A/B on 533 real docs (CLIP-text vs BGE, scored against topic folders) showed BGE wins
+(nearest-neighbour-same-folder 49%→57%), AND surfaced that both engines cluster documents by
+**filename tokens only** — they never read content. Decision: add a document-content pass
+(`classify_documents` / `classifyDocuments`) that clusters docs by their BGE-small embedding.
+Three calls: **(1) Windows already had the compute** (bge_text + doc_extract → text_embeddings
+at scan); it just wasn't consumed by restructure — small change. macOS had NONE of it, so
+built it from scratch: a Swift WordPieceTokenizer (byte-faithful port of the Rust one, parity-
+tested), a BGETextService (BGE ONNX via ORT/CoreML, mean-pooled like bge_text.rs), and
+DocText (textutil/PDFKit) — verified on-device (same-topic docs measurably closer).
+**(2) macOS embeds at PLAN time, Windows reads its SCAN-time store** — both produce identical
+embeddings (same model/tokenizer/mean-pool), so the plan is lockstep; macOS scan-time storage
+is a perf follow-up, not a correctness one. **(3) Calibration trap:** the doc thresholds were
+first set from the A/B's CLS-pooled cosines, but the engine MEAN-pools (BGE's canonical
+pooling), whose cosines compress HIGH (within-folder cohesion ≈ 0.786, inter p90 ≈ 0.80, like
+the images) — the low CLS-derived bars collapsed every doc into one folder (24%). Measured the
+mean-pooled distribution and moved the bars there (cluster 0.82; folder_match 0.78 / auto 0.84
+/ coh 0.78 / review 0.70). Validated end-to-end on the real corpus: doc folder-agreement 46%
+(filenames) → 53% (BGE content), no collapse. Lesson (third time this session): always
+calibrate thresholds against the ACTUAL embedding distribution, never assumed values.
+
 ## 2026-06-17 — Restructure thresholds were calibrated for DIVERSE images; recalibrated to real personal-photo libraries (the actual use case)
 
 Owner asked to calibrate Restructure on a real library (the 243 GB "Adlon" external drive).
