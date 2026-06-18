@@ -771,6 +771,16 @@ public actor DBWriter {
             SELECT 1 FROM text_embeddings WHERE text_embeddings.file_id = files.id))
         """
 
+    /// 3D-model analog: keep a `.obj` that still LACKS a `clip_embeddings` row OUT of the
+    /// skip set so its rendered-shape CLIP vector backfills on a rescan after the render→CLIP
+    /// feature shipped. Limited to `extension = 'obj'` (the only format both engines render)
+    /// so a non-renderable 3D format can't be re-walked forever. CLIP ships by default, so
+    /// Discovery ANDs this whenever CLIP is installed (same gate as the image carve-out).
+    static let skipSetModelClipBackfillExclusionSQL = """
+        NOT (files.kind = 'model' AND files.extension = 'obj' AND NOT EXISTS (
+            SELECT 1 FROM clip_embeddings WHERE clip_embeddings.file_id = files.id))
+        """
+
     private static func insertClipEmbedding(fileID: Int64, blob: Data, db: GRDB.Database) throws {
         // `blob` is the worker's already-finalized Data; bind it straight to the
         // cached statement (no re-copy on the writer side). The remaining

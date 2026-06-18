@@ -113,7 +113,7 @@ public enum Restructure {
             let erows = try GRDB.Row.fetchAll(db, sql: """
                 SELECT ce.file_id, ce.embedding FROM clip_embeddings ce
                 JOIN files f ON f.id = ce.file_id
-                WHERE f.failed = 0 AND f.kind IN ('image', 'video')
+                WHERE f.failed = 0 AND f.kind IN ('image', 'video', 'model')
                 """)
             for row in erows {
                 let id: Int64 = row["file_id"] ?? 0
@@ -147,12 +147,13 @@ public enum Restructure {
         }
         let rows = loaded.rows
 
-        // Butler P1: semantic + learn-your-style placement for image AND video files that
-        // have a CLIP embedding (a video's is its keyframe's — see Tagging.processVideo);
-        // everything else (and density noise) falls back to the rule cascade. Mirrors the
-        // Windows engine (commands/restructure.rs).
+        // Butler P1: semantic + learn-your-style placement for image, video AND 3D-model
+        // files that have a CLIP embedding (a video's is its keyframe's, a model's is its
+        // rendered-shape thumbnail — see Tagging.processVideo/processModel); everything else
+        // (and density noise) falls back to the rule cascade. Mirrors the Windows engine.
         let semanticFiles: [RestructureSemantic.SemanticFile] = rows.compactMap { s in
-            guard s.kind == "image" || s.kind == "video", let clip = loaded.embeddings[s.id] else { return nil }
+            guard s.kind == "image" || s.kind == "video" || s.kind == "model",
+                  let clip = loaded.embeddings[s.id] else { return nil }
             // created_at/modified_at are seconds since the Unix epoch (byte-faithful
             // with the Windows engine), so they feed day-of-year directly.
             let timeUnix = (s.createdAt ?? s.modifiedAt) ?? 0
@@ -432,6 +433,11 @@ public enum Restructure {
                 category = "audio"
                 confidence = "review"
                 reason = "Audio file"
+            } else if f.kind == "model" {
+                dir = libraryRoot.appendingPathComponent("3D Models", isDirectory: true)
+                category = "model"
+                confidence = "review"
+                reason = "3D model"
             } else {
                 dir = libraryRoot.appendingPathComponent("Misc", isDirectory: true)
                 category = "misc"

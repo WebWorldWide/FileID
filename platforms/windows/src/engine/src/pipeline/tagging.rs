@@ -1082,6 +1082,22 @@ fn run_decoder_thread(
             match file.kind {
                 FileKind::Image => Some(decode_image_sync(&file.path, file_bytes.as_deref())),
                 FileKind::Video => Some(decode_video_keyframe_sync(&file.path)),
+                // 3D `.obj` → rendered-shape RGB for CLIP (lockstep with macOS processModel).
+                // A render failure is NOT a file failure (the model still groups under 3D
+                // Models/), so map Err→None rather than letting the Some(Err) path mark the
+                // row failed. Non-obj 3D formats produce no frame (grouped, not CLIP'd).
+                FileKind::Model => {
+                    let is_obj = file
+                        .path
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(|e| e.eq_ignore_ascii_case("obj"));
+                    if is_obj {
+                        crate::pipeline::obj_render::render_obj_to_rgb(&file.path).ok().map(Ok)
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
             }
         };
@@ -1428,7 +1444,9 @@ async fn process_file_predecoded(
         // failed would wrongly hide a fully-processed file from the Library until
         // the next healthy scan. (Their optional BGE embedding is skipped, but
         // FTS keyword search still works, so leaving them failed=false is correct.)
-        let needed_gpu = matches!(file.kind, FileKind::Image | FileKind::Video);
+        // Models need the GPU for the .obj render→CLIP step; a transient retry for a
+        // non-obj model after a (rare) GPU death self-corrects on the next healthy scan.
+        let needed_gpu = matches!(file.kind, FileKind::Image | FileKind::Video | FileKind::Model);
         tagged.failed = needed_gpu;
         if needed_gpu {
             tagged.error_message = Some(
