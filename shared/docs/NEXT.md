@@ -1,5 +1,30 @@
 # NEXT — resume here
 
+## 2026-06-17 — Restructure calibration: image collapse FIXED on a real library; follow-ups remain
+
+Calibrated the image clustering/routing against the owner's real ~3.3k-photo library and fixed the
+catastrophic collapse (2 groups/38% → 457 groups/70%). The harness is now in place to finish the job
+(`/tmp/fileid_scan.sh` headless scan + `/tmp/fileid_plan.sh` planRestructure driver + the numpy distribution
+/ purity scoring shown in STATE.md). Remaining calibration follow-ups:
+
+- **BGE re-evaluation (now MEASURABLE).** The wider Adlon drive's `Personal` folder has ~1.3k real documents
+  (666 docx, 407 pdf, 65 xlsx, 57 pptx, 94 md) in topic/course folders — enough to finally A/B CLIP-text vs
+  BGE for *document* clustering. Plan: extract the doc texts, embed with both, cluster each, score against the
+  `Personal` folder structure (weak labels); switch to BGE only if it measurably wins, then wire it into both
+  engines (Windows has `bge_text`; macOS would need it mirrored). NOTE: macOS stores **no** doc text-embeddings
+  at scan time (`text_embeddings` was empty after the scan) — the doc content vector is computed at plan time;
+  confirm where, since the A/B needs the extracted text.
+- **Calibrate the NON-IMAGE thresholds on the doc corpus.** Only the image profile was recalibrated this pass;
+  re-run the planRestructure + folder-purity scoring on `Personal` to tune `FILEID_RESTRUCTURE_NI_*` the same way.
+- **Scan the family-photo `Users` tree (17k files, the bulk of the library)** for a fuller validation — image
+  scan is fast once RAM++ is given the GPU/ANE path (it was the CPU bottleneck: ~0.2 vs ~30 files/s; the headless
+  release engine fell back to CPU ONNX for RAM++ — worth checking the CoreML EP actually engages on the user's box).
+- **Auto-band precision refinement (optional).** Auto purity is ~72%; the residual is mostly good consolidation,
+  but `nameAuto` (filename agreement) can still auto-merge visually+name-similar distinct events (Ryan 9th→10th
+  birthday). If desired, raise `nameAgreeAuto` / require a date-token mismatch to demote such merges to review.
+- **Live-DB note:** the calibration scan left ~5.6k real files (Personal + iMac Desktop, no RAM++ tags) in the
+  owner's live DB. Re-scan in the app (RAM++ restored) for clean tags, or wipe + fresh-scan, when convenient.
+
 ## 2026-06-17 — Audio + 3D AI naming for Deep Analyze: 3 of 4 paths shipped both platforms; Windows YAMNet tracked
 
 Deep Analyze now does *AI content understanding* of audio + 3D (not just embedded-metadata naming):
