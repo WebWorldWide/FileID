@@ -8,7 +8,19 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
-## 2026-06-17 (latest) — Restructure file-type coverage COMPLETE: video by content + pptx/xlsx + BGE install UI
+## 2026-06-17 (latest) — macOS embeds doc vectors at SCAN (plan 3 min → 32 s); both engines read the store
+
+Perf + lockstep: macOS embedded document BGE vectors at PLAN time (≈3 min over USB, re-done
+every replan); now it embeds them at SCAN like Windows and caches them in `text_embeddings`, so
+the plan reads them instantly. Added `processDoc` + a PDF BGE path (a shared `bgeTextEmbeddingBlob`
+on visionQueue), a `textEmbeddingBlob` on the DBWriter struct + `insertTextEmbedding` (main +
+unchanged-file backfill), and the restructure doc pass now PREFERS the scan-cached embedding
+(plan-time only for docs scanned before BGE was installed). **Verified on the owner's library:
+a rescan populated text_embeddings 0 → 1076, and the plan dropped from ≈3 min to 32 s at the same
+53% doc clustering.** Both engines now read the same scan-time store (tighter lockstep). macOS
+build + 251 tests.
+
+## 2026-06-17 — Restructure file-type coverage COMPLETE: video by content + pptx/xlsx + BGE install UI
 
 Closed the last content-clustering gaps so EVERY major file type groups by content, not filename:
 - **Video** clustered the last filename-only kind. Windows already CLIP-embedded video keyframes at

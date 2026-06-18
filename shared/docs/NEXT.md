@@ -8,18 +8,11 @@ follow-ups (none block users; all graceful-degrade today):
 
 - **✅ DONE — BGE install UI (both platforms):** macOS `BGEModelInstaller` + a "Document understanding"
   Settings GlassCard; Windows a `Bge` ModelSlot + Settings card. Ships the ~135 MB model install.
-- **macOS scan-time storage (perf), now for BOTH docs AND video keyframes.** Docs embed at PLAN time
-  (≈3 min over USB for ~1.4k docs); video keyframes already embed at SCAN (stored in clip_embeddings).
-  Mirror the video approach for docs — load `BGETextService` in the scan's ModelStack, embed doc text
-  after extraction, write the blob via a `DBWriter.insertTextEmbedding` (the table + v11 migration
-  exist) — so doc plans are instant + cached. Correctness unaffected (identical embeddings); pure
-  latency.
-- **macOS scan-time storage (perf).** macOS embeds docs at PLAN time (≈3 min over USB for ~1.4k
-  docs); Windows embeds at scan + stores in `text_embeddings`. Mirror that on macOS — load
-  `BGETextService` in the scan's ModelStack, embed doc text after extraction, write the blob via a
-  `DBWriter.insertTextEmbedding` (the table + the v11 migration already exist) — so the plan is
-  instant + the embedding is cached. Correctness is unaffected (embeddings are identical); this is
-  purely latency.
+- **✅ DONE — macOS scan-time embedding storage (perf), docs AND video.** `Tagging.processDoc`/
+  `processPDF` embed doc text with BGE at SCAN (on visionQueue) → `DBWriter.insertTextEmbedding`
+  caches it; the doc pass prefers the cache (plan-time only for pre-BGE scans). Video keyframes
+  likewise embed + store at scan. Verified: doc plan 3 min → 32 s, same 53%. Both engines now read
+  the same scan-time `text_embeddings` store (tighter lockstep).
 - **Further doc-threshold tuning (optional).** 53% with the biggest group at 168/65-folders is good
   but the course folders are noisy labels; the `FILEID_RESTRUCTURE_DOC_*` env knobs allow more.
 - **Cross-pass new-group name dedup (MEDIUM, from the 2026-06-17 audit).** `used_group_names` /
