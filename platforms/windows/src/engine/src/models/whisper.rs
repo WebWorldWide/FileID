@@ -6,9 +6,16 @@
 //! `pipeline::audio_decode` produces; the transcript becomes the file's descriptive name.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+
+/// Hard ceiling on one transcription. The decoded WAV is capped at `audio_decode`'s
+/// `MAX_SECONDS`; whisper.cpp base runs ~1–2× real-time on CPU, and naming only needs the
+/// leading words, so a few minutes is ample — past it the file is pathological and we kill
+/// it rather than wedge a worker.
+const TRANSCRIBE_TIMEOUT: Duration = Duration::from_secs(180);
 
 pub struct WhisperRunner {
     binary: PathBuf,
@@ -59,10 +66,17 @@ impl WhisperRunner {
 
     /// Transcribe a 16 kHz mono WAV (what `audio_decode::decode_to_wav16_mono` writes)
     /// to plain text — no timestamps, language auto-detected. Returns the collapsed
-    /// transcript; Err on spawn/non-zero exit. Blocking (caller runs it on a blocking
-    /// thread, like the VLM subprocess).
+    /// transcript; Err on spawn/non-zero exit/timeout. Blocking (caller runs it on a
+    /// blocking thread, like the VLM subprocess).
+    ///
+    /// Hard-bounded by `TRANSCRIBE_TIMEOUT`: whisper-cli is killed if it hasn't finished,
+    /// so a pathological/garbage audio file (or a hung binary) can't pin a blocking-pool
+    /// thread forever — the caller then falls back to metadata naming. Mirrors the
+    /// kill-on-stall discipline of the VLM subprocess (`vlm::caption`). stdout is drained
+    /// on a reader thread so a chatty child never fills the pipe and blocks.
     pub fn transcribe(&self, model: &Path, wav: &Path) -> Result<String> {
-        let out = Command::new(&self.binary)
+        use std::io::Read;
+        let mut child = Command::new(&self.binary)
             .arg("-m")
             .arg(model)
             .arg("-f")
@@ -71,13 +85,34 @@ impl WhisperRunner {
             .arg("-np") // no progress prints
             .arg("-l")
             .arg("auto") // auto-detect language
-            .stdin(std::process::Stdio::null())
-            .output()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
             .with_context(|| format!("spawn {}", self.binary.display()))?;
-        if !out.status.success() {
-            bail!("whisper-cli exited with status {}", out.status);
+        let mut stdout = child.stdout.take().expect("stdout piped");
+        let reader = std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = stdout.read_to_string(&mut s);
+            s
+        });
+        let deadline = std::time::Instant::now() + TRANSCRIBE_TIMEOUT;
+        loop {
+            if let Some(status) = child.try_wait()? {
+                let text = reader.join().unwrap_or_default();
+                if !status.success() {
+                    bail!("whisper-cli exited with status {}", status);
+                }
+                return Ok(collapse_transcript(&text));
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                bail!("whisper-cli timed out after {:?}", TRANSCRIBE_TIMEOUT);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        Ok(collapse_transcript(&String::from_utf8_lossy(&out.stdout)))
     }
 }
 

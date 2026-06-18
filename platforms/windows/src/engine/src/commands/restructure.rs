@@ -82,6 +82,33 @@ fn load_capped_embeddings(
     Ok(embeddings)
 }
 
+/// Load BGE document text embeddings (file_id → 384-d vector) for the doc-content pass.
+/// Not capped: documents are a small fraction of a library and the vectors are 384-d.
+fn load_text_embeddings(
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<std::collections::HashMap<i64, Vec<f32>>> {
+    let mut out = std::collections::HashMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT te.file_id, te.embedding FROM text_embeddings te
+         JOIN files f ON f.id = te.file_id
+         WHERE f.failed = 0 AND f.kind IN ('doc', 'pdf')",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+    })?;
+    for r in rows {
+        let (id, blob) = r?;
+        if !blob.is_empty() && blob.len() % 4 == 0 {
+            let v = blob
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            out.insert(id, v);
+        }
+    }
+    Ok(out)
+}
+
 /// Walk the `files` table for the picked library root, classify each file,
 /// and emit a `restructurePlan` event with the proposed moves + per-category
 /// counts. The app's Restructure tab consumes this to render the Sankey +
@@ -186,9 +213,11 @@ pub(crate) async fn handle_plan_restructure(
         move || -> rusqlite::Result<(
             std::collections::HashMap<i64, Vec<f32>>,
             std::collections::HashMap<i64, Vec<String>>,
+            std::collections::HashMap<i64, Vec<f32>>,
         )> {
             let conn = db_for_semantic.lock();
             let embeddings = load_capped_embeddings(&conn, embedding_cap)?;
+            let text_embeddings = load_text_embeddings(&conn)?;
             let mut tags: std::collections::HashMap<i64, Vec<String>> =
                 std::collections::HashMap::new();
             // DISTINCT so a tag carried under multiple sources for the same
@@ -207,13 +236,17 @@ pub(crate) async fn handle_plan_restructure(
                 // embedding cap bounds the heavier image set. (RESTRUCTURE.md R1)
                 tags.entry(id).or_default().push(tag);
             }
-            Ok((embeddings, tags))
+            Ok((embeddings, tags, text_embeddings))
         },
     )
     .await;
-    let (mut embeddings, mut tags_map) = match signals {
+    let (mut embeddings, mut tags_map, mut text_embeddings) = match signals {
         Ok(Ok(v)) => v,
-        _ => (std::collections::HashMap::new(), std::collections::HashMap::new()),
+        _ => (
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+        ),
     };
 
     // Drain (remove) instead of clone: each file_id is a PK consumed once here,
@@ -261,10 +294,41 @@ pub(crate) async fn handle_plan_restructure(
         proposed.extend(moves);
     }
 
-    // Butler R1: non-image semantic pass. Cluster everything the image pass didn't
-    // claim (documents, video, audio, and any embedding-less file) by a
-    // filename+tag bag-of-words signature, so a mixed library groups by content
-    // instead of dumping every doc into Documents/<Year>. Additive + separately
+    // Butler R3: document-content pass. Cluster documents by their BGE text embedding
+    // (the content), which the scan stored in `text_embeddings`. Far stronger than the
+    // filename-token fallback (owner A/B: nearest-neighbour-same-folder 49%→57%). Docs
+    // WITH an embedding cluster here; docs without (no extractable text) fall through to
+    // the bag-of-words pass below. Runs before it so it claims the text-bearing docs.
+    if restructure_semantic::non_image_enabled() {
+        let doc_files: Vec<restructure_semantic::SemanticFile> = files
+            .iter()
+            .filter(|f| !moved.contains(&f.file_id))
+            .filter(|f| matches!(f.kind, FileKind::Doc | FileKind::Pdf))
+            .filter_map(|f| {
+                text_embeddings.remove(&f.file_id).map(|emb| restructure_semantic::SemanticFile {
+                    file_id: f.file_id,
+                    source: f.source.clone(),
+                    clip: emb,
+                    tags: tags_map.get(&f.file_id).cloned().unwrap_or_default(),
+                    time_unix: f.created_unix.unwrap_or(f.modified_unix),
+                })
+            })
+            .collect();
+        let doc_moves =
+            restructure_semantic::classify_documents(&doc_files, library_root_path);
+        for m in &doc_moves {
+            moved.insert(m.file_id);
+            if let Some(parent) = m.source.parent() {
+                semantic_source_folders.insert(parent.to_path_buf());
+            }
+        }
+        proposed.extend(doc_moves);
+    }
+
+    // Butler R1: non-image semantic pass. Cluster everything the doc + image passes didn't
+    // claim (video, audio, docs without an extractable-text embedding, and any
+    // embedding-less file) by a filename+tag bag-of-words signature, so a mixed library
+    // groups by content instead of dumping every file into <Year>. Additive + separately
     // tuned (non_image_profile); the rule cascade below still catches the
     // remainder. Owner kill-switch: FILEID_RESTRUCTURE_NONIMAGE=0.
     if restructure_semantic::non_image_enabled() {

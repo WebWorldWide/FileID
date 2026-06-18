@@ -247,7 +247,7 @@ pub fn semantic_classify(
     prototypes: &[FolderPrototype],
     library_root: &Path,
 ) -> Vec<ProposedMove> {
-    semantic_classify_profiled(files, prototypes, library_root, image_profile())
+    semantic_classify_profiled(files, prototypes, library_root, image_profile(), file_hyperparams())
 }
 
 fn semantic_classify_profiled(
@@ -255,6 +255,7 @@ fn semantic_classify_profiled(
     prototypes: &[FolderPrototype],
     library_root: &Path,
     profile: Profile,
+    hp: Hyperparameters,
 ) -> Vec<ProposedMove> {
     if files.is_empty() {
         return Vec::new();
@@ -262,7 +263,7 @@ fn semantic_classify_profiled(
     let global_freq = tag_frequencies(files);
     let vocab = vocab_from_freq(&global_freq, TAG_VOCAB_CAP);
     let fused: Vec<Vec<f32>> = files.iter().map(|f| fuse(f, &vocab, profile)).collect();
-    let cluster_ids = cluster(&fused);
+    let cluster_ids = cluster(&fused, hp);
 
     // Group file indices by cluster id.
     let mut clusters: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -451,7 +452,61 @@ pub fn classify_non_image(files: &[SemanticFile], library_root: &Path) -> Vec<Pr
         .into_iter()
         .filter(|p| !is_junk_prototype_folder(&p.path))
         .collect();
-    semantic_classify_profiled(&sigs, &protos, library_root, non_image_profile())
+    semantic_classify_profiled(&sigs, &protos, library_root, non_image_profile(), file_hyperparams())
+}
+
+/// Document-content pass — cluster documents by their BGE text embedding (read from
+/// `text_embeddings`, stored in each file's `clip`), which reads the *content* rather
+/// than the filename. Far stronger than the filename-token bag-of-words fallback (an
+/// owner A/B on a real 533-doc corpus: nearest-neighbour-same-folder 49%→57%). Each
+/// `file.clip` MUST be the BGE vector; docs without an extractable-text embedding are
+/// excluded by the caller and fall through to `classify_non_image`. Uses doc-specific
+/// thresholds because BGE cosines sit lower than CLIP-image cosines. (RESTRUCTURE.md R3)
+pub fn classify_documents(files: &[SemanticFile], library_root: &Path) -> Vec<ProposedMove> {
+    if files.len() < 2 {
+        return Vec::new();
+    }
+    let protos: Vec<FolderPrototype> = folder_prototypes(files, 4)
+        .into_iter()
+        .filter(|p| !is_junk_prototype_folder(&p.path))
+        .collect();
+    semantic_classify_profiled(files, &protos, library_root, doc_profile(), doc_hyperparams())
+}
+
+/// Document content-embedding profile. The representative IS the 384-d BGE vector (so
+/// `w_clip` dominates; `w_tags`/`w_time` are tiny — a document has no meaningful capture
+/// time). Thresholds CALIBRATED 2026-06-17 on the owner's real ~1.4k-doc corpus: the
+/// engine MEAN-pools BGE, whose cosines compress high (within-folder cohesion ≈ 0.786,
+/// inter-folder centroid p90 ≈ 0.80), so the bars sit there — NOT at the lower CLS-pooled
+/// A/B values, which collapsed every doc into one folder. Validated: doc folder-agreement
+/// 46% (filenames) → 53%. Env-overridable. (RESTRUCTURE.md R3)
+fn doc_profile() -> Profile {
+    Profile {
+        w_clip: 0.92,
+        w_tags: 0.06,
+        w_time: 0.02,
+        folder_match_cos: env_f32("FILEID_RESTRUCTURE_DOC_FOLDER_COS", 0.78),
+        auto_folder_cos: env_f32("FILEID_RESTRUCTURE_DOC_AUTO_FOLDER_COS", 0.84),
+        auto_cohesion: env_f32("FILEID_RESTRUCTURE_DOC_AUTO_COH", 0.78),
+        review_cohesion: env_f32("FILEID_RESTRUCTURE_DOC_REVIEW_COH", 0.70),
+        min_margin: 0.05,
+        auto_min_members: 4,
+    }
+}
+
+/// Cluster-merge cosines for the MEAN-pooled BGE document space (compresses high, like the
+/// image space — within-folder ≈ 0.786). Env-overridable; GRANULARITY still shifts all three.
+fn doc_hyperparams() -> Hyperparameters {
+    let d = granularity_delta();
+    Hyperparameters {
+        pass1_cosine: env_f32("FILEID_RESTRUCTURE_DOC_CLUSTER_P1", 0.82) + d,
+        pass2_cosine: env_f32("FILEID_RESTRUCTURE_DOC_CLUSTER_P2", 0.74) + d,
+        pass2_margin: 0.06,
+        pass3_variance_threshold: 0.06,
+        pass3_min_mean_cosine: env_f32("FILEID_RESTRUCTURE_DOC_CLUSTER_P3", 0.74) + d,
+        pass3_max_splits: 5,
+        k_nn: 12,
+    }
 }
 
 /// A folder that must never act as a learn-your-style prototype — a generic
@@ -638,9 +693,8 @@ fn day_of_year_cyclical(time_unix: f64) -> (f32, f32) {
 
 /// Cluster fused vectors via the two-pass density algorithm. Brute-force cosine
 /// kNN below `HNSW_MIN`, HNSW above (mirrors `face_clustering::cluster`).
-fn cluster(fused: &[Vec<f32>]) -> Vec<usize> {
+fn cluster(fused: &[Vec<f32>], params: Hyperparameters) -> Vec<usize> {
     const HNSW_MIN: usize = 5_000;
-    let params = file_hyperparams();
     let n = fused.len();
     // Can't request more neighbors than other points exist; k_nn >= n made the kNN
     // over an all-tied set arch-sensitive (see non_image_signatures). (lockstep)
