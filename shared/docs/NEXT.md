@@ -1,16 +1,19 @@
 # NEXT — resume here
 
-## 2026-06-17 — BGE document-content clustering: SHIPPED + calibrated; install UI remains
+## 2026-06-17 — Content clustering covers ALL file types (images/docs/video); a few perf/polish follow-ups
 
-Documents now cluster by BGE content (46%→53% on the real corpus), both engines, lockstep. The
-remaining work to make it reach users + perfect it:
+Restructure now clusters images (CLIP), documents (BGE 46%→53%), AND video (keyframe CLIP, 87%) by
+content — both engines, lockstep — and the BGE install UI shipped on both platforms. Remaining
+follow-ups (none block users; all graceful-degrade today):
 
-- **BGE download installer + Settings install card (BOTH platforms).** The feature only activates
-  once the BGE-small model (~135 MB, pinned in the manifest) is on disk. Wire it like the existing
-  models: macOS a `BGEModelInstaller` (mirror `RamPlusModelInstaller`/`CLIPModelInstaller`) →
-  `Models/bge_text/{bge_small.onnx,vocab.txt}` + a Settings card; Windows a Settings "Document
-  understanding (BGE)" card calling `PrewarmModel("bge_text")` (mirror the Whisper card). Until
-  then, restructure docs fall back to filename tokens (graceful).
+- **✅ DONE — BGE install UI (both platforms):** macOS `BGEModelInstaller` + a "Document understanding"
+  Settings GlassCard; Windows a `Bge` ModelSlot + Settings card. Ships the ~135 MB model install.
+- **macOS scan-time storage (perf), now for BOTH docs AND video keyframes.** Docs embed at PLAN time
+  (≈3 min over USB for ~1.4k docs); video keyframes already embed at SCAN (stored in clip_embeddings).
+  Mirror the video approach for docs — load `BGETextService` in the scan's ModelStack, embed doc text
+  after extraction, write the blob via a `DBWriter.insertTextEmbedding` (the table + v11 migration
+  exist) — so doc plans are instant + cached. Correctness unaffected (identical embeddings); pure
+  latency.
 - **macOS scan-time storage (perf).** macOS embeds docs at PLAN time (≈3 min over USB for ~1.4k
   docs); Windows embeds at scan + stores in `text_embeddings`. Mirror that on macOS — load
   `BGETextService` in the scan's ModelStack, embed doc text after extraction, write the blob via a
