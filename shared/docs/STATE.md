@@ -8,7 +8,30 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
-## 2026-06-17 (latest) — Deep Analyze: TRUE AI understanding of audio + 3D (Whisper, 3D→VLM, macOS sound-ID)
+## 2026-06-17 (latest) — Restructure calibrated on a REAL library: fixed the photo-collapse (2 → 457 groups)
+
+Calibrated Restructure against the owner's real photo library (the "Adlon" external drive) — and
+found a genuine latent failure, the actual reason it "sucked": on a real ~3.3k-image personal set,
+`planRestructure` auto-merged **109 distinct event folders into ONE "Camera Roll" destination** (2
+groups, 38% folder-agreement). Drove it headlessly (release `FileIDEngine` over a FIFO; scanned
+Personal + iMac Desktop into the live DB; disabled RAM++ for the scan since it's CPU-bound and the
+CLIP embeddings — the calibration input — are produced regardless; numpy distribution analysis +
+`planRestructure` scored against existing folders as weak labels).
+
+Root cause (measured on the actual CLIP embeddings): cosines for a *coherent personal library*
+compress HIGH (within-event ≈ 0.80, inter-folder centroid p90 ≈ 0.84), but the cluster cosines
+(0.50/0.40/0.42) and image-routing bars (0.55/0.72) were tuned for *diverse* images and sat below the
+whole distribution → the clusterer merged the entire photo set into one blob that routed to the
+nearest catch-all folder.
+
+Recalibrated both engines byte-faithfully (cluster 0.84/0.76/0.76; image folder_match 0.80 / auto_folder
+0.86 / auto_coh 0.78 / review_coh 0.70), all now env-overridable (`FILEID_RESTRUCTURE_IMG_*` /
+`_CLUSTER_*`). **Validated out-of-box: 2 → 457 event-sized groups, 38% → 70% folder-agreement, biggest
+cluster 3254→375.** Rust 37 restructure tests + clippy clean; swift build + 242 tests (one name-agreement
+fixture bumped 0.6→0.82 on each side for the new bar). BGE re-evaluation (the `Personal` folder has
+~1.3k real docs) + the family-photo `Users` tree are the remaining calibration follow-ups (see NEXT.md).
+
+## 2026-06-17 — Deep Analyze: TRUE AI understanding of audio + 3D (Whisper, 3D→VLM, macOS sound-ID)
 
 Followed the metadata-naming entry below with *real* AI content understanding (owner: "the AI should parse these
 things from 3D models to sound and movie files"; "use other models as long as they follow the licenses"). The

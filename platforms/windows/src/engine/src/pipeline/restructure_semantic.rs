@@ -47,18 +47,26 @@ pub struct Profile {
 }
 
 /// Image pass — representative is the L2-normalized 512-d CLIP image embedding.
-/// Values are unchanged from the original calibrated constants.
-pub const IMAGE_PROFILE: Profile = Profile {
-    w_clip: 0.70,
-    w_tags: 0.22,
-    w_time: 0.08,
-    folder_match_cos: 0.55,
-    auto_folder_cos: 0.72,
-    auto_cohesion: 0.62,
-    review_cohesion: 0.50,
-    min_margin: 0.05,
-    auto_min_members: 4,
-};
+/// Thresholds calibrated 2026-06-17 against a real ~3.3k-image personal-photo library
+/// (the "Adlon" corpus), kept byte-faithful with the Swift engine's `imageProfile`.
+/// Finding: CLIP cosines for personal photos compress into a HIGH band (intra-folder
+/// cohesion median ≈ 0.80, inter-folder centroid p90 ≈ 0.84), so the original
+/// folder_match_cos 0.55 / auto_folder_cos 0.72 sat BELOW the whole distribution and
+/// auto-routed every photo into the nearest catch-all folder. Env-overridable for owner
+/// tuning, mirroring the non-image knobs. (RESTRUCTURE.md R3 calibration)
+pub fn image_profile() -> Profile {
+    Profile {
+        w_clip: 0.70,
+        w_tags: 0.22,
+        w_time: 0.08,
+        folder_match_cos: env_f32("FILEID_RESTRUCTURE_IMG_FOLDER_COS", 0.80),
+        auto_folder_cos: env_f32("FILEID_RESTRUCTURE_IMG_AUTO_FOLDER_COS", 0.86),
+        auto_cohesion: env_f32("FILEID_RESTRUCTURE_IMG_AUTO_COH", 0.78),
+        review_cohesion: env_f32("FILEID_RESTRUCTURE_IMG_REVIEW_COH", 0.70),
+        min_margin: 0.05,
+        auto_min_members: 4,
+    }
+}
 
 /// Cap the tag vocabulary to the most common tags. Frequent tags carry the
 /// grouping signal; rare ones are noise and would bloat the fused vector.
@@ -143,13 +151,20 @@ pub fn granularity_delta() -> f32 {
 }
 
 fn file_hyperparams() -> Hyperparameters {
+    // Cluster-merge cosines calibrated 2026-06-17 on the real ~3.3k-image Adlon corpus,
+    // byte-faithful with the Swift engine. The original 0.50/0.40/0.42 were tuned for
+    // DIVERSE images; CLIP cosines for a coherent personal library compress high (typical
+    // pair ≈ 0.71+, within-event ≈ 0.80), so those low bars merged the ENTIRE photo set
+    // into one cluster that routed to a single catch-all folder. The new bars sit at the
+    // within-event cohesion so a cluster ≈ one event. Env-overridable; the single-knob
+    // GRANULARITY delta still shifts all three together.
     let d = granularity_delta();
     Hyperparameters {
-        pass1_cosine: 0.50 + d,
-        pass2_cosine: 0.40 + d,
+        pass1_cosine: env_f32("FILEID_RESTRUCTURE_CLUSTER_P1", 0.84) + d,
+        pass2_cosine: env_f32("FILEID_RESTRUCTURE_CLUSTER_P2", 0.76) + d,
         pass2_margin: 0.08,
         pass3_variance_threshold: 0.06,
-        pass3_min_mean_cosine: 0.42 + d,
+        pass3_min_mean_cosine: env_f32("FILEID_RESTRUCTURE_CLUSTER_P3", 0.76) + d,
         pass3_max_splits: 5,
         k_nn: 12,
     }
@@ -232,7 +247,7 @@ pub fn semantic_classify(
     prototypes: &[FolderPrototype],
     library_root: &Path,
 ) -> Vec<ProposedMove> {
-    semantic_classify_profiled(files, prototypes, library_root, IMAGE_PROFILE)
+    semantic_classify_profiled(files, prototypes, library_root, image_profile())
 }
 
 fn semantic_classify_profiled(
@@ -838,7 +853,7 @@ mod tests {
     #[test]
     fn fuse_is_unit_norm() {
         let vocab = build_tag_vocab(&[file(1, "a.jpg", vec![1.0, 0.0, 0.0], &["beach"])], 16);
-        let f = fuse(&file(1, "a.jpg", vec![1.0, 0.0, 0.0], &["beach"]), &vocab, IMAGE_PROFILE);
+        let f = fuse(&file(1, "a.jpg", vec![1.0, 0.0, 0.0], &["beach"]), &vocab, image_profile());
         let n: f32 = f.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!((n - 1.0).abs() < 1e-4, "fused norm = {n}");
     }
@@ -970,10 +985,11 @@ mod tests {
 
     #[test]
     fn name_agreement_upgrades_a_thin_content_match_to_auto() {
-        // CONTENT only weakly matches (cosine ~0.6, below the 0.72 auto bar) but the
-        // FILENAMES clearly belong in the folder → auto-file on the name evidence.
+        // CONTENT only weakly matches (cosine ~0.82, between the calibrated 0.80 match bar
+        // and the 0.86 content-auto bar) but the FILENAMES clearly belong in the folder →
+        // auto-file on the name evidence.
         let files: Vec<SemanticFile> = (0..3)
-            .map(|i| file(i, &format!("inbox/acme_invoice_part{i}.pdf"), vec![0.6, 0.8, 0.0], &[]))
+            .map(|i| file(i, &format!("inbox/acme_invoice_part{i}.pdf"), vec![0.82, 0.5724, 0.0], &[]))
             .collect();
         let protos = vec![FolderPrototype {
             path: PathBuf::from("/lib/Acme Invoices"),

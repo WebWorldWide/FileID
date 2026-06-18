@@ -7,6 +7,31 @@
 
 ---
 
+## 2026-06-17 — Restructure thresholds were calibrated for DIVERSE images; recalibrated to real personal-photo libraries (the actual use case)
+
+Owner asked to calibrate Restructure on a real library (the 243 GB "Adlon" external drive).
+Scanned a representative ~5.6k-file slice (Personal docs+images + iMac Desktop family events)
+into the live DB, drove `planRestructure`, and scored its moves against the existing folders
+as weak ground-truth. **Found a real, latent failure** — not a tuning nicety: on the real
+photo set, the plan auto-merged 109 distinct event folders into ONE "Camera Roll" destination
+(2 groups, 38% folder-agreement). Measuring the actual CLIP embeddings explained why: cosines
+for a *coherent personal library* compress into a high band (within-event ~0.80, inter-folder
+centroid p90 ~0.84), whereas the original cluster cosines (0.50/0.40/0.42) and image-routing
+bars (0.55/0.72) were tuned for *diverse* images and sat below the entire distribution — so the
+density clusterer merged everything into one blob that then routed to the nearest catch-all
+folder. **Decision:** recalibrate the defaults to the measured distribution (cluster
+0.84/0.76/0.76; image folder_match 0.80 / auto_folder 0.86 / auto_coh 0.78 / review_coh 0.70),
+validated by re-running the plan (2 → 457 event-sized groups, 38% → 70% agreement, biggest
+cluster 3254→375). Two judgment calls: (1) bias the default toward the *personal-library*
+case — over-splitting a diverse library (recoverable via the `loose` GRANULARITY knob) is far
+less harmful than collapsing a personal one into one folder, and personal libraries are the
+target user; (2) all thresholds are now env-overridable (`FILEID_RESTRUCTURE_IMG_*`,
+`FILEID_RESTRUCTURE_CLUSTER_*`, mirroring the NI knobs) so the values are tunable without a
+recompile. Kept byte-faithful across engines. The residual ~30% "impurity" is mostly *good*
+consolidation (e.g. Ryan's 9th+10th birthdays) that the weak folder-labels penalize but which
+is preview + per-bucket-approve + undo protected — CLIP can't separate visually-identical
+events, an inherent limit, not a bug.
+
 ## 2026-06-17 — True AI audio/3D understanding for Deep Analyze: Apple frameworks on macOS, models/rasterizer on Windows; Windows YAMNet deferred for verifiability
 
 Followed up the metadata-naming entry below with *real* AI content understanding, owner-approved ("use other
