@@ -64,6 +64,11 @@ public struct TaggedFile: Sendable {
     // non-images, files where the model isn't loaded, or inference failures.
     public var clipEmbeddingBlob: Data?
 
+    // BGE document text embedding (raw float32 LE). nil for non-documents, or when the
+    // BGE model isn't installed / extraction failed. Restructure's document pass reads it
+    // (cached at scan, so the plan doesn't re-embed) — parallel to clipEmbeddingBlob.
+    public var textEmbeddingBlob: Data?
+
     // Stage-ran gates (port of the Windows tags_evaluated / faces_evaluated /
     // ocr_stage_ran flags, dbwriter.rs). Each is TRUE only when its producing
     // stage actually ran AND returned this session — never on a Vision/ANE/OCR
@@ -90,6 +95,7 @@ public struct TaggedFile: Sendable {
         failed: Bool = false, errorMessage: String? = nil,
         perFileTotalMs: Double = 0,
         clipEmbeddingBlob: Data? = nil,
+        textEmbeddingBlob: Data? = nil,
         tagsEvaluated: Bool = false,
         facesEvaluated: Bool = false,
         ocrStageRan: Bool = false
@@ -120,6 +126,7 @@ public struct TaggedFile: Sendable {
         self.errorMessage = errorMessage
         self.perFileTotalMs = perFileTotalMs
         self.clipEmbeddingBlob = clipEmbeddingBlob
+        self.textEmbeddingBlob = textEmbeddingBlob
         self.tagsEvaluated = tagsEvaluated
         self.facesEvaluated = facesEvaluated
         self.ocrStageRan = ocrStageRan
@@ -619,6 +626,18 @@ public actor DBWriter {
                     try insertClipEmbedding(fileID: fileID, blob: blob, db: db)
                 }
             }
+            // Backfill a doc's BGE embedding too (e.g. a rescan after BGE was installed),
+            // so an unchanged doc that now has a fresh embedding gets it persisted.
+            if let blob = file.textEmbeddingBlob {
+                let hasText = try Bool.fetchOne(
+                    db.cachedStatement(sql: """
+                        SELECT EXISTS(SELECT 1 FROM text_embeddings WHERE file_id = ?)
+                        """),
+                    arguments: [fileID]) ?? false
+                if !hasText {
+                    try insertTextEmbedding(fileID: fileID, blob: blob, db: db)
+                }
+            }
             return
         }
 
@@ -711,10 +730,14 @@ public actor DBWriter {
             }
         }
 
-        // 5. CLIP embedding (M3) — only present for images where the model
+        // 5. CLIP embedding (M3) — only present for images/video where the model
         // was loaded and inference succeeded.
         if let blob = file.clipEmbeddingBlob {
             try insertClipEmbedding(fileID: fileID, blob: blob, db: db)
+        }
+        // 5b. BGE document text embedding — only present for docs where BGE is installed.
+        if let blob = file.textEmbeddingBlob {
+            try insertTextEmbedding(fileID: fileID, blob: blob, db: db)
         }
     }
 
@@ -743,6 +766,16 @@ public actor DBWriter {
             INSERT OR REPLACE INTO clip_embeddings (file_id, embedding, model)
             VALUES (?, ?, ?)
             """).execute(arguments: [fileID, blob, "mobileclip_s2"])
+    }
+
+    // BGE document text embedding → text_embeddings (parallel to clip_embeddings, a
+    // different 384-d vector space). `model` matches the Windows engine's stored value so a
+    // library round-trips. (RESTRUCTURE.md R3 — document content clustering)
+    private static func insertTextEmbedding(fileID: Int64, blob: Data, db: GRDB.Database) throws {
+        try db.cachedStatement(sql: """
+            INSERT OR REPLACE INTO text_embeddings (file_id, embedding, model)
+            VALUES (?, ?, ?)
+            """).execute(arguments: [fileID, blob, "bge_small_en_v1_5"])
     }
 
     // MARK: - Rename/move heal

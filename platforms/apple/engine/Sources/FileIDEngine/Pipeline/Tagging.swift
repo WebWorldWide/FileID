@@ -56,7 +56,9 @@ public enum Tagging {
             tagged = await processVideo(discovered: discovered, worker: worker, started: started)
         case .pdf:
             tagged = await processPDF(discovered: discovered, worker: worker, started: started)
-        case .doc, .audio, .model, .other:
+        case .doc:
+            tagged = await processDoc(discovered: discovered, worker: worker, started: started)
+        case .audio, .model, .other:
             tagged = TaggedFile(
                 url: url, kind: kind, extension: ext, sizeBytes: discovered.sizeBytes,
                 createdAt: discovered.creationDate, modifiedAt: discovered.modificationDate,
@@ -292,6 +294,46 @@ public enum Tagging {
         func get() -> CGImage? { lock.lock(); defer { lock.unlock() }; return value }
     }
 
+    // MARK: - Document pipeline
+
+    /// Document (docx/pptx/xlsx/txt/md/…) processing — metadata + a BGE content embedding
+    /// for restructure's document pass, cached at scan so the plan reads it instead of
+    /// re-embedding every run (mirrors the Windows engine). Runs on visionQueue (the
+    /// extraction subprocess + ORT inference are blocking).
+    private static func processDoc(
+        discovered: DiscoveredFile,
+        worker: VisionWorker,
+        started: CFAbsoluteTime
+    ) async -> TaggedFile {
+        _ = worker
+        return await withCheckedContinuation { (cont: CheckedContinuation<TaggedFile, Never>) in
+            visionQueue.async {
+                let url = discovered.url
+                var tagged = TaggedFile(
+                    url: url, kind: "doc", extension: url.pathExtension.lowercased(),
+                    sizeBytes: discovered.sizeBytes,
+                    createdAt: discovered.creationDate, modifiedAt: discovered.modificationDate,
+                    visionTags: ["Doc"],
+                    tagsEvaluated: true
+                )
+                tagged.textEmbeddingBlob = bgeTextEmbeddingBlob(url: url)
+                tagged.perFileTotalMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
+                cont.resume(returning: tagged)
+            }
+        }
+    }
+
+    /// Extract a document's text + embed it with BGE → a float32-LE blob for `text_embeddings`.
+    /// nil if BGE isn't installed or no text could be extracted (the doc then clusters by
+    /// filename). Bounded by DocText's readers + BGE's 256-token cap. Call ON visionQueue.
+    static func bgeTextEmbeddingBlob(url: URL) -> Data? {
+        guard BGETextService.shared.load(
+                modelDir: ArcFaceService.modelsRoot.appendingPathComponent("bge_text")),
+              let text = DocText.extract(path: url.path),
+              let emb = BGETextService.shared.embed(text) else { return nil }
+        return MobileCLIPService.embeddingToBlob(emb)
+    }
+
     // MARK: - PDF pipeline
 
     private static let maxPDFRenderPixels: CGFloat = 50_000_000
@@ -322,7 +364,7 @@ public enum Tagging {
 
         return await withCheckedContinuation { (cont: CheckedContinuation<TaggedFile, Never>) in
             visionQueue.async {
-                let result = autoreleasepool { () -> TaggedFile in
+                var result = autoreleasepool { () -> TaggedFile in
                     guard let pdf = CGPDFDocument(url as CFURL) else {
                         // R3-13: a transient open failure must be recorded as a
                         // FAILURE (not a success with tagsEvaluated:true) — mirrors
@@ -390,6 +432,11 @@ public enum Tagging {
                         tagsEvaluated: true,
                         ocrStageRan: true
                     )
+                }
+                // A PDF is a document — cache its BGE content embedding for restructure
+                // (PDFKit text, not the lossy OCR), unless the file failed to open.
+                if !result.failed {
+                    result.textEmbeddingBlob = bgeTextEmbeddingBlob(url: url)
                 }
                 cont.resume(returning: result)
             }
