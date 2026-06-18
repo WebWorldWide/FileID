@@ -3533,6 +3533,18 @@ Branch `fix/audit-2026-06-10`; full inventory in `shared/docs/audit-2026-06-10/`
   ungated carve-out would force a full re-walk of every doc on every scan forever. Self-healing: once a
   doc has its embedding it's skippable again. Verified — macOS 251 tests, Windows clippy + the new
   `text_embed_gate_reprocesses_embeddingless_docs_only` test + full suite.
+- **Known minor edge, tracked not fixed (NEXT.md): a doc with NO extractable text** (image-only PDF
+  whose PDFKit/pdfium text layer is empty, an empty .docx) can never get a `text_embeddings` row, so the
+  carve-out keeps re-walking it on every incremental rescan — a cheap text-extraction *attempt* each
+  time (no OCR; returns fast), once per scan, not a hang. The CLIP-image carve-out is immune because
+  every valid image embeds. The precise fix needs a durable "this doc has extractable text" signal to
+  gate on: Windows has one (`has_text` set true for docs + a `doc_text` store), but macOS has neither —
+  its `has_text` is OCR-specific (`ocrText`) and it discards doc text after embedding. So the clean fix
+  is gated on macOS first gaining doc-text storage (lockstep with Windows v10_doc_text — itself a
+  pre-existing parity gap), after which both carve-out predicates add `AND has_text = 1`. Net: the
+  carve-out is a large win for the dominant pre-BGE-backfill case; the un-embeddable-doc re-walk is a
+  small, bounded inefficiency deferred with a recipe rather than fixed via an unverifiable cross-cutting
+  search-path change.
 - **macOS scan-time BGE concurrency hardening (3 audit findings).** Scan-time doc embedding made
   `BGETextService` concurrent for the first time (many doc workers on `visionQueue`), so it was brought
   to parity with its ORT siblings: a `DispatchSemaphore(value: 4)` bounds concurrent CoreML inferences
