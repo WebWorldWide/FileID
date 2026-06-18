@@ -1,9 +1,16 @@
-// Minimal BERT-family WordPiece tokenizer — byte-faithful port of the Windows engine's
+// Minimal BERT-family WordPiece tokenizer — faithful port of the Windows engine's
 // `models/wordpiece_tokenizer.rs`, so the BGE-small document embeddings match across
 // platforms (lockstep). Greedy longest-match-first WordPiece over a HuggingFace-style
 // `vocab.txt`, mirroring `BertTokenizer(do_lower_case=True)` for the common English case.
 // Unlike CLIPTokenizer (BPE), BERT models need [CLS]/[SEP], an attention mask, and
 // token-type ids.
+//
+// One deliberate nuance vs. the Rust source: this iterates grapheme clusters where Rust
+// iterates Unicode scalars (`char`). They are identical for the common case; they can
+// differ only on an exotic single "word" of 100+ combining-mark SCALARS (the
+// MAX_INPUT_CHARS_PER_WORD cap counts graphemes here, scalars there). The per-platform doc
+// text extractors (textutil/PDFKit vs pdfium) already don't guarantee bit-identical input,
+// so this is within the "near-identical, not bit-identical" envelope the doc pass accepts.
 
 import Foundation
 
