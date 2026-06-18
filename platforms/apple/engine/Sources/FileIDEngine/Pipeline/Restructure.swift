@@ -191,7 +191,7 @@ public enum Restructure {
         // Docs with no extractable text fall through to the bag-of-words pass. Mirrors the
         // Windows engine's classify_documents (which always reads its scan-time store).
         if RestructureSemantic.nonImageEnabled {
-            let bgeDir = ArcFaceService.modelsRoot.appendingPathComponent("bge_text")
+            let bgeDir = BGETextService.defaultModelDir
             let docFiles: [RestructureSemantic.SemanticFile] = rows.compactMap { s in
                 guard !movedIDs.contains(s.id), s.kind == "doc" || s.kind == "pdf" else { return nil }
                 let emb: [Float]?

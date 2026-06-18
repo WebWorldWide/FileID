@@ -327,8 +327,7 @@ public enum Tagging {
     /// nil if BGE isn't installed or no text could be extracted (the doc then clusters by
     /// filename). Bounded by DocText's readers + BGE's 256-token cap. Call ON visionQueue.
     static func bgeTextEmbeddingBlob(url: URL) -> Data? {
-        guard BGETextService.shared.load(
-                modelDir: ArcFaceService.modelsRoot.appendingPathComponent("bge_text")),
+        guard BGETextService.shared.load(modelDir: BGETextService.defaultModelDir),
               let text = DocText.extract(path: url.path),
               let emb = BGETextService.shared.embed(text) else { return nil }
         return MobileCLIPService.embeddingToBlob(emb)
