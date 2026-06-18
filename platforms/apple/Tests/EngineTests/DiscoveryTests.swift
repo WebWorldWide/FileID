@@ -102,8 +102,11 @@ struct DiscoveryTests {
         // skips. (Real scan roots are /Users/.. or /Volumes/.. — no /private.)
         let root = realResolved(tmp)
 
-        // A non-image doc: skippable without a CLIP embedding (the R-14 carve-out
-        // forces only embeddingless IMAGES to stay in the pipeline).
+        // A fully-processed doc: it already HAS its BGE text_embedding (seeded below),
+        // so it's skippable regardless of whether BGE is installed. The R-14 carve-outs
+        // force only an embeddingLESS image (CLIP) or doc/pdf (BGE) to stay in the
+        // pipeline for backfill; without the embedding row this test would flake on a
+        // machine that has BGE installed (the carve-out would keep report.pdf resident).
         let doc = root.appendingPathComponent("report.pdf")
         let bytes = Data("hello".utf8)                              // 5 bytes
         try bytes.write(to: doc)
@@ -123,6 +126,14 @@ struct DiscoveryTests {
                 """, arguments: [
                     doc.path, 0, doc.path.precomposedStringWithCanonicalMapping,
                     Int(bytes.count), fixedMtime.timeIntervalSince1970, oldScannedAt
+                ])
+            // Give it a text_embeddings row so the doc carve-out treats it as fully
+            // processed → the "unchanged → skipped" path is what's exercised here.
+            try conn.execute(sql: """
+                INSERT INTO text_embeddings (file_id, embedding, model)
+                VALUES (?, ?, ?)
+                """, arguments: [
+                    conn.lastInsertedRowID, Data([0, 0, 0, 0]), "bge_small_en_v1_5"
                 ])
         }
 

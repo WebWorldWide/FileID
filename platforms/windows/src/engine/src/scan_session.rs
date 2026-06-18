@@ -228,6 +228,11 @@ impl ScanSession {
             // dehydrated→hydrated file is reprocessed; a transient hash failure
             // re-scans too, which is the skip set's documented fail-safe.
             let content_hash_gate = SKIP_SET_CONTENT_HASH_GATE;
+            // R-14 (lockstep with macOS Discovery): when BGE is installed, keep
+            // embeddingless docs/pdfs OUT of the skip set so an install-then-rescan
+            // re-emits them and the tagger backfills the BGE embedding. Empty when BGE
+            // isn't on disk (no doc could embed → don't force a perpetual re-walk).
+            let text_embed_gate = if bge_installed() { SKIP_SET_TEXT_EMBED_GATE } else { "" };
             // R4-01: drop the tautological `scanned_at >= modified_at` predicate
             // (both are stored at scan time, so it's true for every scanned file
             // and STAYS true after an edit). Fetch size+mtime instead and let
@@ -237,13 +242,13 @@ impl ScanSession {
                     "SELECT path_text, size_bytes, modified_at FROM files \
                      WHERE path_text >= ?1 AND path_text < ?2 \
                      AND failed = 0 \
-                     {content_hash_gate}"
+                     {content_hash_gate}{text_embed_gate}"
                 )
             } else {
                 format!(
                     "SELECT path_text, size_bytes, modified_at FROM files \
                      WHERE failed = 0 \
-                     {content_hash_gate}"
+                     {content_hash_gate}{text_embed_gate}"
                 )
             };
             if let Ok(mut stmt) = conn.prepare(&select_sql) {
@@ -737,6 +742,28 @@ pub(crate) const SKIP_SET_CONTENT_HASH_GATE: &str =
     "AND NOT (content_hash IS NULL \
       AND kind IN ('image', 'video', 'pdf', 'doc', 'audio'))";
 
+/// R-14 (lockstep with macOS `DBWriter.skipSetTextBackfillExclusionSQL`): keep any
+/// doc/pdf that still LACKS a `text_embeddings` row OUT of the skip set, so an
+/// install-then-rescan re-emits it and the tagger backfills its BGE embedding. BGE is
+/// opt-in, so the first scan usually predates it — without this, those docs would be
+/// stranded on the weaker filename-bag-of-words clustering forever (the doc-content
+/// pass has no plan-time fallback). Appended ONLY when BGE is on disk (see
+/// `bge_installed`); leading space because it concatenates after the content gate.
+pub(crate) const SKIP_SET_TEXT_EMBED_GATE: &str =
+    " AND NOT (kind IN ('doc', 'pdf') \
+      AND NOT EXISTS (SELECT 1 FROM text_embeddings \
+                      WHERE text_embeddings.file_id = files.id))";
+
+/// True once the BGE document embedder's weights are on disk — the same probe the
+/// tagger uses to decide whether to build the embedder (tagging.rs). Gates
+/// `SKIP_SET_TEXT_EMBED_GATE`: with no model installed no doc could embed, so forcing
+/// embeddingless docs out of the skip set would re-walk every doc on every scan.
+fn bge_installed() -> bool {
+    crate::models::bge_text::default_weights_path()
+        .map(|p| p.exists())
+        .unwrap_or(false)
+}
+
 /// Exclusive upper bound for a sargable prefix range: `prefix` with its last
 /// Unicode scalar incremented, so `path_text >= prefix AND path_text < upper`
 /// selects exactly the rows `LIKE 'prefix%'` would (BINARY collation). Returns
@@ -956,6 +983,80 @@ mod tests {
         assert!(
             skip.contains("C:\\Local\\notes.bin"),
             "a non-content kind without a content_hash must not be force-rescanned"
+        );
+    }
+
+    /// R-14 (lockstep with macOS `skipSetTextBackfillExclusionSQL`): the BGE-text gate
+    /// must keep a doc/pdf still lacking a `text_embeddings` row OUT of the skip set
+    /// (so an install-then-rescan backfills it), while leaving docs that already have
+    /// one — and non-doc kinds entirely — in the skip set.
+    #[test]
+    fn text_embed_gate_reprocesses_embeddingless_docs_only() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE files (
+                 id           INTEGER PRIMARY KEY,
+                 path_text    TEXT NOT NULL UNIQUE,
+                 kind         TEXT NOT NULL,
+                 modified_at  DOUBLE,
+                 scanned_at   DOUBLE NOT NULL,
+                 failed       INTEGER NOT NULL DEFAULT 0,
+                 content_hash BLOB
+             );
+             CREATE TABLE text_embeddings (
+                 file_id   INTEGER PRIMARY KEY,
+                 embedding BLOB,
+                 model     TEXT
+             );",
+        )
+        .unwrap();
+        // All rows carry a content_hash so the content gate keeps them all — isolating
+        // the text gate's effect.
+        conn.execute(
+            "INSERT INTO files (id, path_text, kind, modified_at, scanned_at, failed, content_hash) VALUES \
+                 (1, 'C:\\Docs\\no_embed.docx', 'doc',   100.0, 200.0, 0, X'00'), \
+                 (2, 'C:\\Docs\\embedded.docx', 'doc',   100.0, 200.0, 0, X'00'), \
+                 (3, 'C:\\Docs\\no_embed.pdf',  'pdf',   100.0, 200.0, 0, X'00'), \
+                 (4, 'C:\\Pics\\photo.jpg',     'image', 100.0, 200.0, 0, X'00')",
+            [],
+        )
+        .unwrap();
+        // Only doc id=2 has a stored embedding.
+        conn.execute(
+            "INSERT INTO text_embeddings (file_id, embedding, model) \
+             VALUES (2, X'00', 'bge_small_en_v1_5')",
+            [],
+        )
+        .unwrap();
+
+        // Production no-prefix predicate with BOTH gates appended (BGE installed).
+        let sql = format!(
+            "SELECT path_text FROM files \
+             WHERE failed = 0 \
+             {SKIP_SET_CONTENT_HASH_GATE}{SKIP_SET_TEXT_EMBED_GATE}"
+        );
+        let mut stmt = conn.prepare(&sql).unwrap();
+        let skip: std::collections::HashSet<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .flatten()
+            .collect();
+
+        assert!(
+            !skip.contains("C:\\Docs\\no_embed.docx"),
+            "an embeddingless doc must be reprocessed so its BGE embedding backfills"
+        );
+        assert!(
+            !skip.contains("C:\\Docs\\no_embed.pdf"),
+            "an embeddingless pdf must be reprocessed too"
+        );
+        assert!(
+            skip.contains("C:\\Docs\\embedded.docx"),
+            "a doc that already has a text_embeddings row stays in the skip set"
+        );
+        assert!(
+            skip.contains("C:\\Pics\\photo.jpg"),
+            "the text gate must not touch non-doc kinds (images use clip_embeddings)"
         );
     }
 }

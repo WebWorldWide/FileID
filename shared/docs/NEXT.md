@@ -8,18 +8,23 @@ follow-ups (none block users; all graceful-degrade today):
 
 - **✅ DONE — BGE install UI (both platforms):** macOS `BGEModelInstaller` + a "Document understanding"
   Settings GlassCard; Windows a `Bge` ModelSlot + Settings card. Ships the ~135 MB model install.
-- **macOS scan-time storage (perf), now for BOTH docs AND video keyframes.** Docs embed at PLAN time
-  (≈3 min over USB for ~1.4k docs); video keyframes already embed at SCAN (stored in clip_embeddings).
-  Mirror the video approach for docs — load `BGETextService` in the scan's ModelStack, embed doc text
-  after extraction, write the blob via a `DBWriter.insertTextEmbedding` (the table + v11 migration
-  exist) — so doc plans are instant + cached. Correctness unaffected (identical embeddings); pure
-  latency.
-- **macOS scan-time storage (perf).** macOS embeds docs at PLAN time (≈3 min over USB for ~1.4k
-  docs); Windows embeds at scan + stores in `text_embeddings`. Mirror that on macOS — load
-  `BGETextService` in the scan's ModelStack, embed doc text after extraction, write the blob via a
-  `DBWriter.insertTextEmbedding` (the table + the v11 migration already exist) — so the plan is
-  instant + the embedding is cached. Correctness is unaffected (embeddings are identical); this is
-  purely latency.
+- **✅ DONE — macOS scan-time embedding storage (perf), docs AND video.** `Tagging.processDoc`/
+  `processPDF` embed doc text with BGE at SCAN (on visionQueue) → `DBWriter.insertTextEmbedding`
+  caches it; the doc pass prefers the cache (plan-time only for pre-BGE scans). Video keyframes
+  likewise embed + store at scan. Verified: doc plan 3 min → 32 s, same 53%. Both engines now read
+  the same scan-time `text_embeddings` store (tighter lockstep).
+- **Un-embeddable-doc rescan inefficiency (LOW, from the 2026-06-18 audit).** The doc BGE-backfill
+  carve-out (`skipSetTextBackfillExclusionSQL` / `SKIP_SET_TEXT_EMBED_GATE`) keeps every
+  `text_embeddings`-less doc/pdf in the pipeline so an install-then-rescan backfills it. A doc with NO
+  extractable text (image-only PDF whose text layer is empty, empty .docx) never gets an embedding, so
+  it's re-walked on every incremental rescan — a cheap text-extraction *attempt* each time (no OCR;
+  returns fast), once per scan, not a hang. Fix needs a durable "doc has extractable text" signal:
+  Windows already has `has_text=true`-for-docs + a `doc_text` store; macOS has neither (its `has_text`
+  is OCR-only, and it discards doc text after embedding). Recipe: give macOS doc-text storage (lockstep
+  with Windows `v10_doc_text` — a pre-existing parity gap), then add `AND has_text = 1` to BOTH carve-out
+  predicates. Bonus: feeding a scanned PDF's OCR text to BGE (instead of the empty PDFKit layer) would
+  also CLUSTER image-only PDFs by content — but the embedding text source must stay byte-identical
+  across engines (lockstep), so design that carefully.
 - **Further doc-threshold tuning (optional).** 53% with the biggest group at 168/65-folders is good
   but the course folders are noisy labels; the `FILEID_RESTRUCTURE_DOC_*` env knobs allow more.
 - **Cross-pass new-group name dedup (MEDIUM, from the 2026-06-17 audit).** `used_group_names` /
