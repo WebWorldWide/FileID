@@ -9,10 +9,21 @@ import Foundation
 import OnnxRuntimeBindings
 import FileIDShared
 
-final class BGETextService {
+// `@unchecked Sendable`: `lock` guards all mutable state; `loadLock` serializes the
+// one-time session build; `inferenceSem` bounds concurrent ANE inferences. Mirrors
+// MobileCLIPService's posture.
+final class BGETextService: @unchecked Sendable {
     static let shared = BGETextService()
 
     private let lock = NSLock()
+    /// Serializes the heavy one-time session build (double-checked against `lock`) so
+    /// two racing first-callers don't each construct an ORTEnv+ORTSession and race the
+    /// `env` write. Mirrors MobileCLIPService.imageLoadLock.
+    private let loadLock = NSLock()
+    /// Bounds concurrent CoreML inferences so a doc-heavy scan (up to `workerCap` doc
+    /// workers all calling `embed`) can't flood the ANE. Mirrors ArcFaceService /
+    /// MobileCLIPService (value: 4).
+    private let inferenceSem = DispatchSemaphore(value: 4)
     private var env: ORTEnv?
     private var session: ORTSession?
     private var inputNames: [String] = []
@@ -21,6 +32,21 @@ final class BGETextService {
     /// BGE-small hidden size + token cap — must match bge_text.rs (HIDDEN / MAX_SEQ).
     private static let hidden = 384
     private static let maxSeq = 256
+
+    /// Models directory the installer writes `bge_small.onnx` + `vocab.txt` into. The
+    /// single source of truth for the path so discovery's "installed?" probe can't
+    /// drift from the loader (both go through here).
+    static var defaultModelDir: URL {
+        ArcFaceService.modelsRoot.appendingPathComponent("bge_text", isDirectory: true)
+    }
+
+    /// True once the BGE ONNX is on disk. Discovery keeps embeddingless docs in the
+    /// pipeline (for scan-time backfill) only when BGE can actually embed — otherwise
+    /// it would re-walk every doc on every scan forever.
+    static var isInstalledOnDisk: Bool {
+        FileManager.default.fileExists(
+            atPath: defaultModelDir.appendingPathComponent("bge_small.onnx").path)
+    }
 
     var isReady: Bool {
         lock.lock(); defer { lock.unlock() }
@@ -32,6 +58,16 @@ final class BGETextService {
     /// not-ready and document embedding is skipped (restructure falls back to filenames).
     @discardableResult
     func load(modelDir: URL) -> Bool {
+        lock.lock()
+        if session != nil, tokenizer != nil { lock.unlock(); return true }
+        lock.unlock()
+
+        // Serialize the heavy build so concurrent first-callers construct the session
+        // exactly once (double-checked under `lock`). Without this, racing doc workers
+        // each build an ORTEnv+ORTSession and race the `env`/`session` writes. Mirrors
+        // MobileCLIPService.loadImageEncoder.
+        loadLock.lock()
+        defer { loadLock.unlock() }
         lock.lock()
         if session != nil, tokenizer != nil { lock.unlock(); return true }
         lock.unlock()
@@ -106,6 +142,10 @@ final class BGETextService {
                 }
             }
             guard !inputs.isEmpty else { return nil }
+            // Bound concurrent ANE inferences (mirrors ArcFace/MobileCLIP). Acquired
+            // after the early-return guard so we never hold the slot on a nil path.
+            inferenceSem.wait()
+            defer { inferenceSem.signal() }
             let outputs = try s.run(withInputs: inputs,
                                     outputNames: Set(try s.outputNames()),
                                     runOptions: nil)

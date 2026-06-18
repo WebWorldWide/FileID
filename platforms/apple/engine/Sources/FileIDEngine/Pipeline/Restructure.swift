@@ -66,7 +66,7 @@ public enum Restructure {
             let personNames: String?     // comma-joined
         }
         let loaded = try await database.pool.read {
-            db -> (rows: [Source], embeddings: [Int64: [Float]], tags: [Int64: [String]]) in
+            db -> (rows: [Source], embeddings: [Int64: [Float]], tags: [Int64: [String]], docEmbeddings: [Int64: [Float]]) in
             // Per-file named-person strings, then split back in Swift
             // (avoids a per-file second query).
             //
@@ -129,7 +129,21 @@ public enum Restructure {
                 let id: Int64 = row["file_id"] ?? 0
                 if let t: String = row["tag"] { tags[id, default: []].append(t) }
             }
-            return (rows, embeddings, tags)
+            // BGE document text embeddings (384-d f32 LE), cached at scan. The doc pass
+            // reads these directly; a doc without one is embedded at plan time (older scan).
+            var docEmbeddings: [Int64: [Float]] = [:]
+            let drows = try GRDB.Row.fetchAll(db, sql: """
+                SELECT te.file_id, te.embedding FROM text_embeddings te
+                JOIN files f ON f.id = te.file_id
+                WHERE f.failed = 0 AND f.kind IN ('doc', 'pdf')
+                """)
+            for row in drows {
+                let id: Int64 = row["file_id"] ?? 0
+                if let data: Data = row["embedding"], !data.isEmpty, data.count % 4 == 0 {
+                    docEmbeddings[id] = Self.floatsLE(data)
+                }
+            }
+            return (rows, embeddings, tags, docEmbeddings)
         }
         let rows = loaded.rows
 
@@ -172,16 +186,24 @@ public enum Restructure {
 
         // Butler R3: document-content pass. Cluster documents by their BGE text embedding
         // (the content) — far stronger than the filename fallback (owner A/B: nearest-
-        // neighbour-same-folder 49%→57%). Embeds at plan time (the scan stores none on
-        // macOS yet); docs whose text can't be extracted/embedded fall through to the
-        // bag-of-words pass. Mirrors the Windows engine's classify_documents.
-        if RestructureSemantic.nonImageEnabled,
-           BGETextService.shared.load(
-                modelDir: ArcFaceService.modelsRoot.appendingPathComponent("bge_text")) {
+        // neighbour-same-folder 49%→57%). Prefer the embedding cached at SCAN (instant);
+        // fall back to embedding at plan time for a doc scanned before BGE was installed.
+        // Docs with no extractable text fall through to the bag-of-words pass. Mirrors the
+        // Windows engine's classify_documents (which always reads its scan-time store).
+        if RestructureSemantic.nonImageEnabled {
+            let bgeDir = BGETextService.defaultModelDir
             let docFiles: [RestructureSemantic.SemanticFile] = rows.compactMap { s in
-                guard !movedIDs.contains(s.id), s.kind == "doc" || s.kind == "pdf",
-                      let text = DocText.extract(path: s.path),
-                      let emb = BGETextService.shared.embed(text) else { return nil }
+                guard !movedIDs.contains(s.id), s.kind == "doc" || s.kind == "pdf" else { return nil }
+                let emb: [Float]?
+                if let stored = loaded.docEmbeddings[s.id] {
+                    emb = stored
+                } else if BGETextService.shared.load(modelDir: bgeDir),
+                          let text = DocText.extract(path: s.path) {
+                    emb = BGETextService.shared.embed(text)
+                } else {
+                    emb = nil
+                }
+                guard let emb else { return nil }
                 let timeUnix = (s.createdAt ?? s.modifiedAt) ?? 0
                 return RestructureSemantic.SemanticFile(
                     fileID: s.id, source: s.path, clip: emb,
