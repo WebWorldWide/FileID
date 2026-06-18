@@ -1,22 +1,19 @@
 // Document text extraction for the restructure document-content pass (feeds BGETextService).
-// macOS-native readers: `textutil` for Office/RTF/HTML, PDFKit for PDF, a bounded read for
-// plain text. Only the document's beginning matters — BGE tokenizes the first 256 tokens —
-// so every reader is BOUNDED in both time and size: a stuck file (unresponsive network
-// mount, a zip-bomb .docx, a locked file) must never hang the plan, and a pathologically
-// large document must never OOM it. The Windows engine extracts the same content via
-// `doc_extract`; the readers differ per-platform (the same class as the per-platform ML
-// EPs / its WordPiece grapheme handling), so a doc-heavy library round-trips to a near-
-// identical, not bit-identical, plan.
+// macOS-native readers: `textutil` for Word/RTF/HTML, `unzip` + tag-extraction for OOXML
+// presentations/spreadsheets (pptx/xlsx — textutil can't read those), PDFKit for PDF, a
+// bounded read for plain text. Only the document's beginning matters — BGE tokenizes the
+// first 256 tokens — so every reader is BOUNDED in time and size: a stuck file (unresponsive
+// mount, zip-bomb, locked file) must never hang the plan, and a giant document must never
+// OOM it. The Windows engine extracts the same content via `doc_extract` (which mines the
+// same `a:t`/`t` runs from pptx/xlsx); the readers differ per-platform, so a doc-heavy
+// library round-trips to a near-identical, not bit-identical, plan.
 
 import Foundation
 import PDFKit
 
 enum DocText {
-    /// Cap the bytes any reader materializes. 16 KB comfortably covers BGE's 256-token
-    /// window (the caller further trims to `maxChars`) while bounding memory.
     private static let maxBytes = 16_384
-    /// Hard wall on a single `textutil` invocation so one stuck file can't hang the plan.
-    private static let textutilTimeout: TimeInterval = 8
+    private static let procTimeout: TimeInterval = 8
 
     /// Extract up to `maxChars` of a document's text, or nil if unsupported / empty /
     /// unreadable. Bounded in time + size.
@@ -30,6 +27,10 @@ enum DocText {
             raw = pdfText(url, maxChars: maxChars)
         case "docx", "doc", "rtf", "rtfd", "html", "htm", "odt", "wordml":
             raw = textutil(url)
+        case "pptx":
+            raw = officeXML(url, member: "ppt/slides/slide*.xml", tag: "a:t")
+        case "xlsx":
+            raw = officeXML(url, member: "xl/sharedStrings.xml", tag: "t")
         default:
             raw = nil
         }
@@ -47,8 +48,7 @@ enum DocText {
         return String(data: data, encoding: .utf8)
     }
 
-    /// Extract PDF text page-by-page, stopping once `maxChars` is reached — never
-    /// materializes a whole large PDF's text.
+    /// Extract PDF text page-by-page, stopping once `maxChars` is reached.
     private static func pdfText(_ url: URL, maxChars: Int) -> String? {
         guard let pdf = PDFDocument(url: url) else { return nil }
         var acc = ""
@@ -59,34 +59,54 @@ enum DocText {
         return acc.isEmpty ? nil : acc
     }
 
-    /// Convert a rich document to plain text via the system `textutil`. Bounded by a
-    /// watchdog that terminates a stuck conversion and by a `maxBytes` read cap.
+    /// Word/RTF/HTML → plain text via the system `textutil`.
     private static func textutil(_ url: URL) -> String? {
+        guard let data = runBounded("/usr/bin/textutil", ["-convert", "txt", "-stdout", url.path]) else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// pptx/xlsx → the text inside `<tag>…</tag>` runs of a zipped OOXML member, via
+    /// `unzip -p`. Mirrors the Windows `doc_extract` (which reads the same `a:t`/`t` runs).
+    private static func officeXML(_ url: URL, member: String, tag: String) -> String? {
+        guard let data = runBounded("/usr/bin/unzip", ["-p", url.path, member]),
+              let xml = String(data: data, encoding: .utf8) else { return nil }
+        // Pull the text content of each <tag ...>…</tag>; cheap regex is fine for a snippet.
+        guard let re = try? NSRegularExpression(pattern: "<\(tag)[^>]*>([^<]*)</\(tag)>") else { return nil }
+        let ns = xml as NSString
+        var parts: [String] = []
+        for m in re.matches(in: xml, range: NSRange(location: 0, length: ns.length)) {
+            if m.numberOfRanges > 1 { parts.append(ns.substring(with: m.range(at: 1))) }
+            if parts.count > 4000 { break }
+        }
+        let joined = parts.joined(separator: " ")
+        return joined.isEmpty ? nil : joined
+    }
+
+    /// Run a converter subprocess with a watchdog (terminates a stuck child) + a `maxBytes`
+    /// read cap, so neither a hang nor a pathologically large output can wedge/OOM the plan.
+    private static func runBounded(_ exe: String, _ args: [String]) -> Data? {
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/textutil")
-        proc.arguments = ["-convert", "txt", "-stdout", url.path]
+        proc.executableURL = URL(fileURLWithPath: exe)
+        proc.arguments = args
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = FileHandle.nullDevice
         do { try proc.run() } catch { return nil }
-
-        // Watchdog: SIGTERM a textutil that hasn't finished in time, which closes the pipe
-        // and unblocks the read below.
         let killer = DispatchWorkItem { if proc.isRunning { proc.terminate() } }
-        DispatchQueue.global().asyncAfter(deadline: .now() + textutilTimeout, execute: killer)
-
+        DispatchQueue.global().asyncAfter(deadline: .now() + procTimeout, execute: killer)
         let handle = pipe.fileHandleForReading
         var data = Data()
         while data.count < maxBytes {
-            let chunk = handle.availableData  // returns empty at EOF (incl. after terminate)
+            let chunk = handle.availableData     // empty at EOF (incl. after terminate)
             if chunk.isEmpty { break }
             data.append(chunk)
         }
-        try? handle.close()      // SIGPIPE the child if it's still writing past our cap
+        try? handle.close()
         killer.cancel()
-        proc.terminate()         // no-op if already exited
+        proc.terminate()
         proc.waitUntilExit()
-        guard !data.isEmpty else { return nil }
-        return String(data: data.prefix(maxBytes), encoding: .utf8)
+        return data.isEmpty ? nil : data.prefix(maxBytes)
     }
 }

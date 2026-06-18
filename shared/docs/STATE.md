@@ -8,7 +8,27 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
-## 2026-06-17 (latest) — Restructure clusters documents by BGE CONTENT (46% → 53% on the real corpus)
+## 2026-06-17 (latest) — Restructure file-type coverage COMPLETE: video by content + pptx/xlsx + BGE install UI
+
+Closed the last content-clustering gaps so EVERY major file type groups by content, not filename:
+- **Video** clustered the last filename-only kind. Windows already CLIP-embedded video keyframes at
+  scan (just never used them — restructure filtered `kind='image'`); macOS `processVideo` was a no-op
+  (the scan skips AVFoundation to avoid NAS hangs). Now BOTH: the restructure CLIP pass selects
+  `kind IN ('image','video')`, and macOS embeds a ~25%-duration keyframe with the same CLIP model,
+  bounded by a 6 s off-thread watchdog, run on visionQueue (not the cooperative pool — audit fix).
+  **Verified on the owner's library: 364 video moves → 45 content groups at 87% folder-agreement**
+  (videos now land with their event photos). 286/295 sample videos embedded (rest timed out gracefully).
+- **macOS pptx/xlsx** text extraction (textutil can't read OOXML) via `unzip -p` + a:t/t tag mining —
+  mirrors Windows `doc_extract`; ~122 such files now cluster by content.
+- **BGE install UI both platforms** — macOS `BGEModelInstaller` + a "Document understanding" Settings
+  GlassCard (mirrors RamPlus); Windows a `Bge` ModelSlot + Settings card (mirrors Whisper). So users
+  can actually download the ~135 MB model that powers doc clustering (else it falls back to filenames).
+
+3-agent adversarial audit of all the new code: 1 perf defect found + fixed (video embed on the
+cooperative pool), rest clean (KeyframeBox lock coverage, the pptx regex, the filter interaction,
+both installers vs their proven templates). Windows clippy + 364 tests; macOS build + 251 tests.
+
+## 2026-06-17 — Restructure clusters documents by BGE CONTENT (46% → 53% on the real corpus)
 
 Both engines clustered documents by FILENAME TOKENS only — they never read content. Added a
 document-content pass (classify_documents / classifyDocuments) that clusters docs by a BGE-small

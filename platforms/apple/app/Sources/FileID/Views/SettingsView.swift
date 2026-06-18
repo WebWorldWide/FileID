@@ -56,6 +56,7 @@ struct SettingsTab: View {
                 // which models are installed and download status.
                 CLIPSemanticSearchCard()
                 RamPlusTaggerCard()
+                BGEDocCard()
 
                 DeepAnalyzeModelPickerCard(engine: engine)
                 FaceEmbedderCard(engine: engine, store: store)
@@ -489,6 +490,92 @@ struct RamPlusTaggerCard: View {
         case .missing:
             Button { installer.install() } label: {
                 Label("Install (~450 MB)", systemImage: "arrow.down.circle.fill")
+            }
+            .buttonStyle(.borderedProminent)
+        case .downloading(let fraction, let message, _, _):
+            VStack(alignment: .leading, spacing: 4) {
+                ProgressView(value: fraction).frame(maxWidth: 280)
+                HStack {
+                    Text(message).font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Cancel") { installer.cancel() }.font(.caption)
+                }
+            }
+        case .installed(let sizeBytes):
+            HStack(spacing: 8) {
+                Text("Installed · \(sizeBytes / 1_048_576) MB").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Remove", role: .destructive) { confirmUninstall = true }.font(.caption)
+            }
+        case .installFailed(let msg):
+            VStack(alignment: .leading, spacing: 4) {
+                Text(msg).font(.caption).foregroundStyle(.red)
+                Button("Retry") { installer.install() }.buttonStyle(.bordered)
+            }
+        }
+    }
+}
+
+// AI Models — BGE document embedder. The engine's restructure clusters documents by
+// content when this is installed, else by filename — so installing is purely an upgrade.
+struct BGEDocCard: View {
+    @State private var installer = BGEModelInstaller.shared
+    @State private var confirmUninstall = false
+
+    private var modelPath: String {
+        BGEModelInstaller.modelsRoot.appendingPathComponent("bge_text/bge_small.onnx").path
+    }
+
+    var body: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("AI Models — document understanding").font(.headline)
+                Text("BGE-small reads a document's content so Restructure groups files by what they say, not their filename (a physics paper joins your physics folder). MIT; one-click, no Python. Without it, documents group by filename.")
+                    .font(.callout).foregroundStyle(.secondary)
+                Divider().opacity(0.3)
+                HStack(alignment: .top, spacing: 8) {
+                    statusIcon.padding(.top, 2)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("BGE-small-en-v1.5").font(.callout.bold())
+                        Text("384-d BERT text embedder · runs on the Neural Engine").font(.caption).foregroundStyle(.secondary)
+                        Text(modelPath)
+                            .font(.caption2.monospaced()).foregroundStyle(.tertiary)
+                            .lineLimit(1).truncationMode(.middle)
+                    }
+                    Spacer()
+                }
+                footer.padding(.leading, 24)
+            }
+        }
+        .onAppear { installer.refreshStatus() }
+        .confirmationDialog(
+            "Remove document understanding?",
+            isPresented: $confirmUninstall,
+            titleVisibility: .visible
+        ) {
+            Button("Remove", role: .destructive) { installer.uninstall(); confirmUninstall = false }
+            Button("Keep", role: .cancel) { confirmUninstall = false }
+        } message: {
+            Text("Frees ~135 MB. Documents fall back to filename-based grouping in Restructure.")
+        }
+    }
+
+    @ViewBuilder private var statusIcon: some View {
+        switch installer.status {
+        case .installed: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+        case .downloading: Image(systemName: "arrow.down.circle.fill").foregroundStyle(Theme.gold)
+        case .installFailed: Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+        default: Image(systemName: "xmark.circle").foregroundStyle(.orange)
+        }
+    }
+
+    @ViewBuilder private var footer: some View {
+        switch installer.status {
+        case .unknown:
+            EmptyView()
+        case .missing:
+            Button { installer.install() } label: {
+                Label("Install (~135 MB)", systemImage: "arrow.down.circle.fill")
             }
             .buttonStyle(.borderedProminent)
         case .downloading(let fraction, let message, _, _):

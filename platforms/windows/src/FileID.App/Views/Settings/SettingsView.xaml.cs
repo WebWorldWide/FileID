@@ -719,6 +719,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             "mobileclip_s2" => Svc.Clip,
             "ram_plus" => Svc.RamPlus,
             "whisper" => Svc.Whisper,
+            "bge_text" => Svc.Bge,
             _ => null,
         };
         if (slot is null) return;
