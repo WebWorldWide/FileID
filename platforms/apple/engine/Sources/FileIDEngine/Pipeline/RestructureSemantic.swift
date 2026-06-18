@@ -217,11 +217,22 @@ public enum RestructureSemantic {
         libraryRoot: String,
         profile: Profile = imageProfile
     ) -> [Move] {
+        classifyProfiled(files: files, prototypes: prototypes, libraryRoot: libraryRoot,
+                         profile: profile, hp: fileHyperparams())
+    }
+
+    static func classifyProfiled(
+        files: [SemanticFile],
+        prototypes: [FolderPrototype],
+        libraryRoot: String,
+        profile: Profile,
+        hp: IdentityClustering.Hyperparameters
+    ) -> [Move] {
         guard !files.isEmpty else { return [] }
         let globalFreq = tagFrequencies(files)
         let vocab = vocabFromFreq(globalFreq, cap: tagVocabCap)
         let fused = files.map { fuse($0, vocab: vocab, profile: profile) }
-        let clusterIDs = cluster(fused)
+        let clusterIDs = cluster(fused, hp)
 
         var clusters: [Int: [Int]] = [:]
         for (i, cid) in clusterIDs.enumerated() { clusters[cid, default: []].append(i) }
@@ -358,8 +369,54 @@ public enum RestructureSemantic {
         // already is. Real user folders ("Taxes", "Invoices") still anchor.
         // (RESTRUCTURE.md R1)
         let protos = folderPrototypes(sigs, minFiles: 4).filter { !isJunkPrototypeFolder($0.path) }
-        return classify(files: sigs, prototypes: protos,
-                        libraryRoot: libraryRoot, profile: nonImageProfile)
+        return classifyProfiled(files: sigs, prototypes: protos,
+                                libraryRoot: libraryRoot, profile: nonImageProfile,
+                                hp: fileHyperparams())
+    }
+
+    /// Document-content pass — cluster documents by their BGE text embedding (in `clip`),
+    /// which reads the content rather than the filename. Mirrors the Windows engine's
+    /// `classify_documents`. Each `file.clip` MUST be the 384-d BGE vector; the caller
+    /// supplies only docs it could extract text for + embed. Doc-specific thresholds
+    /// because BGE cosines sit lower than CLIP-image cosines. (RESTRUCTURE.md R3)
+    public static func classifyDocuments(
+        files: [SemanticFile],
+        libraryRoot: String
+    ) -> [Move] {
+        guard files.count >= 2 else { return [] }
+        let protos = folderPrototypes(files, minFiles: 4).filter { !isJunkPrototypeFolder($0.path) }
+        return classifyProfiled(files: files, prototypes: protos,
+                                libraryRoot: libraryRoot, profile: docProfile,
+                                hp: docHyperparams())
+    }
+
+    /// Document content-embedding profile (byte-faithful with Rust `doc_profile`). The
+    /// representative IS the 384-d BGE vector (`wClip` dominates). Thresholds CALIBRATED
+    /// 2026-06-17 on the owner's real ~1.4k-doc corpus: the engine MEAN-pools BGE, whose
+    /// cosines compress high (within-folder cohesion ≈ 0.786, inter p90 ≈ 0.80), so the bars
+    /// sit there — NOT at the lower CLS-pooled A/B values, which collapsed docs into one
+    /// folder. Validated: doc folder-agreement 46%→53%. Env-overridable.
+    static var docProfile: Profile {
+        Profile(
+            wClip: 0.92, wTags: 0.06, wTime: 0.02,
+            folderMatchCos: envFloat("FILEID_RESTRUCTURE_DOC_FOLDER_COS", 0.78),
+            autoFolderCos: envFloat("FILEID_RESTRUCTURE_DOC_AUTO_FOLDER_COS", 0.84),
+            autoCohesion: envFloat("FILEID_RESTRUCTURE_DOC_AUTO_COH", 0.78),
+            reviewCohesion: envFloat("FILEID_RESTRUCTURE_DOC_REVIEW_COH", 0.70),
+            minMargin: 0.05, autoMinMembers: 4)
+    }
+
+    /// Cluster-merge cosines for the MEAN-pooled BGE document space (compresses high, like
+    /// the image space). Byte-faithful with Rust `doc_hyperparams`. Env-overridable.
+    static func docHyperparams() -> IdentityClustering.Hyperparameters {
+        let d = granularityDelta()
+        return IdentityClustering.Hyperparameters(
+            pass1Cosine: envFloat("FILEID_RESTRUCTURE_DOC_CLUSTER_P1", 0.82) + d,
+            pass2Cosine: envFloat("FILEID_RESTRUCTURE_DOC_CLUSTER_P2", 0.74) + d,
+            pass2Margin: 0.06,
+            pass3VarianceThreshold: 0.06,
+            pass3MinMeanCosine: envFloat("FILEID_RESTRUCTURE_DOC_CLUSTER_P3", 0.74) + d,
+            pass3MaxSplits: 5, kNN: 12)
     }
 
     /// A folder that must never act as a learn-your-style prototype — a generic
@@ -513,8 +570,7 @@ public enum RestructureSemantic {
 
     // MARK: - Clustering (reuse IdentityClustering)
 
-    private static func cluster(_ fused: [[Float]]) -> [Int] {
-        let params = fileHyperparams()
+    private static func cluster(_ fused: [[Float]], _ params: IdentityClustering.Hyperparameters) -> [Int] {
         let n = fused.count
         // Can't request more neighbors than other points exist; k_nn >= n made the
         // kNN over an all-tied set arch-sensitive (see nonImageSignatures). (lockstep)

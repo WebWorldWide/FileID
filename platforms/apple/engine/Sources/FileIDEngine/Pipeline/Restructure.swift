@@ -169,10 +169,40 @@ public enum Restructure {
             }
         }
 
-        // Butler R1: non-image semantic pass. Cluster everything the image pass
-        // didn't claim (documents, video, audio, and any embedding-less file) by a
-        // filename+tag bag-of-words signature, so a mixed library groups by content
-        // instead of dumping every doc into Documents/<Year>. Additive + separately
+        // Butler R3: document-content pass. Cluster documents by their BGE text embedding
+        // (the content) — far stronger than the filename fallback (owner A/B: nearest-
+        // neighbour-same-folder 49%→57%). Embeds at plan time (the scan stores none on
+        // macOS yet); docs whose text can't be extracted/embedded fall through to the
+        // bag-of-words pass. Mirrors the Windows engine's classify_documents.
+        if RestructureSemantic.nonImageEnabled,
+           BGETextService.shared.load(
+                modelDir: ArcFaceService.modelsRoot.appendingPathComponent("bge_text")) {
+            let docFiles: [RestructureSemantic.SemanticFile] = rows.compactMap { s in
+                guard !movedIDs.contains(s.id), s.kind == "doc" || s.kind == "pdf",
+                      let text = DocText.extract(path: s.path),
+                      let emb = BGETextService.shared.embed(text) else { return nil }
+                let timeUnix = (s.createdAt ?? s.modifiedAt) ?? 0
+                return RestructureSemantic.SemanticFile(
+                    fileID: s.id, source: s.path, clip: emb,
+                    tags: loaded.tags[s.id] ?? [], timeUnix: timeUnix)
+            }
+            let docMoves = RestructureSemantic.classifyDocuments(
+                files: docFiles, libraryRoot: libraryRoot.path)
+            for m in docMoves {
+                let name = (m.source as NSString).lastPathComponent
+                let newPath = (m.destinationDir as NSString).appendingPathComponent(name)
+                proposals.append(RestructureProposal(
+                    fileID: m.fileID, oldPath: m.source, newPath: newPath,
+                    bucket: m.category, confidence: m.confidence.rawValue, reason: m.reason))
+                movedIDs.insert(m.fileID)
+                semanticSourceFolders.insert((m.source as NSString).deletingLastPathComponent)
+            }
+        }
+
+        // Butler R1: non-image semantic pass. Cluster everything the doc + image passes
+        // didn't claim (video, audio, docs without extractable text, and any
+        // embedding-less file) by a filename+tag bag-of-words signature, so a mixed library
+        // groups by content instead of dumping every file into <Year>. Additive + separately
         // tuned (nonImageProfile); the rule cascade below still catches the
         // remainder. Owner kill-switch: FILEID_RESTRUCTURE_NONIMAGE=0.
         if RestructureSemantic.nonImageEnabled {

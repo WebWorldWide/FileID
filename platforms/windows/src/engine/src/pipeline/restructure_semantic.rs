@@ -475,32 +475,35 @@ pub fn classify_documents(files: &[SemanticFile], library_root: &Path) -> Vec<Pr
 
 /// Document content-embedding profile. The representative IS the 384-d BGE vector (so
 /// `w_clip` dominates; `w_tags`/`w_time` are tiny — a document has no meaningful capture
-/// time). Thresholds derive from the owner A/B distribution (within-folder BGE cosine
-/// ≈ 0.665, cross-folder ≈ 0.538): the match/auto bars sit between them. Env-overridable.
+/// time). Thresholds CALIBRATED 2026-06-17 on the owner's real ~1.4k-doc corpus: the
+/// engine MEAN-pools BGE, whose cosines compress high (within-folder cohesion ≈ 0.786,
+/// inter-folder centroid p90 ≈ 0.80), so the bars sit there — NOT at the lower CLS-pooled
+/// A/B values, which collapsed every doc into one folder. Validated: doc folder-agreement
+/// 46% (filenames) → 53%. Env-overridable. (RESTRUCTURE.md R3)
 fn doc_profile() -> Profile {
     Profile {
         w_clip: 0.92,
         w_tags: 0.06,
         w_time: 0.02,
-        folder_match_cos: env_f32("FILEID_RESTRUCTURE_DOC_FOLDER_COS", 0.60),
-        auto_folder_cos: env_f32("FILEID_RESTRUCTURE_DOC_AUTO_FOLDER_COS", 0.70),
-        auto_cohesion: env_f32("FILEID_RESTRUCTURE_DOC_AUTO_COH", 0.64),
-        review_cohesion: env_f32("FILEID_RESTRUCTURE_DOC_REVIEW_COH", 0.54),
+        folder_match_cos: env_f32("FILEID_RESTRUCTURE_DOC_FOLDER_COS", 0.78),
+        auto_folder_cos: env_f32("FILEID_RESTRUCTURE_DOC_AUTO_FOLDER_COS", 0.84),
+        auto_cohesion: env_f32("FILEID_RESTRUCTURE_DOC_AUTO_COH", 0.78),
+        review_cohesion: env_f32("FILEID_RESTRUCTURE_DOC_REVIEW_COH", 0.70),
         min_margin: 0.05,
         auto_min_members: 4,
     }
 }
 
-/// Cluster-merge cosines for the BGE document space (lower than the image space —
-/// within-folder BGE ≈ 0.665). Env-overridable; GRANULARITY still shifts all three.
+/// Cluster-merge cosines for the MEAN-pooled BGE document space (compresses high, like the
+/// image space — within-folder ≈ 0.786). Env-overridable; GRANULARITY still shifts all three.
 fn doc_hyperparams() -> Hyperparameters {
     let d = granularity_delta();
     Hyperparameters {
-        pass1_cosine: env_f32("FILEID_RESTRUCTURE_DOC_CLUSTER_P1", 0.62) + d,
-        pass2_cosine: env_f32("FILEID_RESTRUCTURE_DOC_CLUSTER_P2", 0.54) + d,
+        pass1_cosine: env_f32("FILEID_RESTRUCTURE_DOC_CLUSTER_P1", 0.82) + d,
+        pass2_cosine: env_f32("FILEID_RESTRUCTURE_DOC_CLUSTER_P2", 0.74) + d,
         pass2_margin: 0.06,
         pass3_variance_threshold: 0.06,
-        pass3_min_mean_cosine: env_f32("FILEID_RESTRUCTURE_DOC_CLUSTER_P3", 0.54) + d,
+        pass3_min_mean_cosine: env_f32("FILEID_RESTRUCTURE_DOC_CLUSTER_P3", 0.74) + d,
         pass3_max_splits: 5,
         k_nn: 12,
     }
