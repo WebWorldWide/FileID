@@ -7,13 +7,21 @@ catastrophic collapse (2 groups/38% → 457 groups/70%). The harness is now in p
 (`/tmp/fileid_scan.sh` headless scan + `/tmp/fileid_plan.sh` planRestructure driver + the numpy distribution
 / purity scoring shown in STATE.md). Remaining calibration follow-ups:
 
-- **BGE re-evaluation (now MEASURABLE).** The wider Adlon drive's `Personal` folder has ~1.3k real documents
-  (666 docx, 407 pdf, 65 xlsx, 57 pptx, 94 md) in topic/course folders — enough to finally A/B CLIP-text vs
-  BGE for *document* clustering. Plan: extract the doc texts, embed with both, cluster each, score against the
-  `Personal` folder structure (weak labels); switch to BGE only if it measurably wins, then wire it into both
-  engines (Windows has `bge_text`; macOS would need it mirrored). NOTE: macOS stores **no** doc text-embeddings
-  at scan time (`text_embeddings` was empty after the scan) — the doc content vector is computed at plan time;
-  confirm where, since the A/B needs the extracted text.
+- **BGE — A/B DONE 2026-06-17, BGE wins; implementation pending.** Extracted 533 real doc texts across 41
+  topic/course folders, embedded with both, scored against the folders as weak labels:
+  CLIP-text ViT-B/32 → NN-same-folder@1 **49.3%**, intra−inter separation **+0.086**; BGE-small-en-v1.5 →
+  **56.8%**, **+0.127** (+7.5 pts purity, +48% separation). BGE wins because CLIP's text tower truncates to
+  ~77 tokens (a caption) while BGE reads the document. **Deeper finding:** both engines build the doc
+  restructure representative from FILENAME TOKENS ONLY (`non_image_signatures`/`nonImageSignatures`) — they
+  never read document *content*. So BGE isn't a swap, it ADDS content understanding docs lack today.
+  *Implementation (a real feature, NOT a quick bake):* BGE-small ONNX via the ORT path BOTH engines already run
+  (Windows `bge_text` exists but is unused by restructure; macOS runs ORT via the CoreML EP for SFace, so the
+  path exists — needs the model registry entry + a WordPiece tokenizer, which swift-transformers can provide) →
+  embed the doc text (reuse `doc_extract`) → store in `text_embeddings` (table exists) → use it as the `clip`
+  representative in the non-image pass when present, else fall back to filename tokens. Parity is the SAME
+  situation as the existing CLIP/SFace models (both ORT, different EPs) — lockstep-acceptable, not a new hard
+  problem. Owner-hardware-gated: the macOS ORT-BGE inference + the doc gain can't be verified headlessly; build
+  + build-verify here, confirm on the Mac, then re-score the plan (docs currently 46%).
 - **Calibrate the NON-IMAGE thresholds on the doc corpus.** Only the image profile was recalibrated this pass;
   re-run the planRestructure + folder-purity scoring on `Personal` to tune `FILEID_RESTRUCTURE_NI_*` the same way.
 - **Scan the family-photo `Users` tree (17k files, the bulk of the library)** for a fuller validation — image
