@@ -1,5 +1,27 @@
 # NEXT — resume here
 
+## 2026-06-17 — BGE document-content clustering: SHIPPED + calibrated; install UI remains
+
+Documents now cluster by BGE content (46%→53% on the real corpus), both engines, lockstep. The
+remaining work to make it reach users + perfect it:
+
+- **BGE download installer + Settings install card (BOTH platforms).** The feature only activates
+  once the BGE-small model (~135 MB, pinned in the manifest) is on disk. Wire it like the existing
+  models: macOS a `BGEModelInstaller` (mirror `RamPlusModelInstaller`/`CLIPModelInstaller`) →
+  `Models/bge_text/{bge_small.onnx,vocab.txt}` + a Settings card; Windows a Settings "Document
+  understanding (BGE)" card calling `PrewarmModel("bge_text")` (mirror the Whisper card). Until
+  then, restructure docs fall back to filename tokens (graceful).
+- **macOS scan-time storage (perf).** macOS embeds docs at PLAN time (≈3 min over USB for ~1.4k
+  docs); Windows embeds at scan + stores in `text_embeddings`. Mirror that on macOS — load
+  `BGETextService` in the scan's ModelStack, embed doc text after extraction, write the blob via a
+  `DBWriter.insertTextEmbedding` (the table + the v11 migration already exist) — so the plan is
+  instant + the embedding is cached. Correctness is unaffected (embeddings are identical); this is
+  purely latency.
+- **Further doc-threshold tuning (optional).** 53% with the biggest group at 168/65-folders is good
+  but the course folders are noisy labels; the `FILEID_RESTRUCTURE_DOC_*` env knobs allow more.
+- **On-device verification owed:** confirm the BGE doc clustering on the owner's Mac via the app
+  (not just the headless harness) once the installer lands, and that Windows produces matching docs.
+
 ## 2026-06-17 — Restructure calibration: image collapse FIXED on a real library; follow-ups remain
 
 Calibrated the image clustering/routing against the owner's real ~3.3k-photo library and fixed the

@@ -8,7 +8,24 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
-## 2026-06-17 (latest) — Restructure calibrated on a REAL library: fixed the photo-collapse (2 → 457 groups)
+## 2026-06-17 (latest) — Restructure clusters documents by BGE CONTENT (46% → 53% on the real corpus)
+
+Both engines clustered documents by FILENAME TOKENS only — they never read content. Added a
+document-content pass (classify_documents / classifyDocuments) that clusters docs by a BGE-small
+embedding. **Windows** already computed + stored these (bge_text + doc_extract → text_embeddings
+at scan); it just didn't consume them — small change. **macOS had nothing**, so built it from
+scratch + verified on-device: a Swift WordPieceTokenizer (parity-tested port of the Rust one), a
+BGETextService (BGE ONNX via ORT/CoreML, mean-pooled like Windows), and DocText (textutil/PDFKit);
+embeds at plan time (identical embeddings → lockstep with Windows' scan-time store). Proven by an
+owner A/B (49%→57% NN-same-folder) then end-to-end (46%→53% folder-agreement). Calibration trap
+hit + fixed: the engine mean-pools BGE (cosines compress high ≈ 0.79), so the A/B's CLS-pooled
+thresholds collapsed docs into one folder (24%) until measured + moved to the mean-pooled range
+(cluster 0.82 / folder_match 0.78 / auto 0.84). Windows clippy + 37 tests; macOS build + 251 tests
+(8 tokenizer parity + 1 on-device BGE). BGE declared for macOS in the manifest (pinned). REMAINING:
+the BGE download installer + Settings install card (both platforms) so users get the model — same
+pattern as the RAM++ installer / Windows Whisper card (NEXT.md).
+
+## 2026-06-17 — Restructure calibrated on a REAL library: fixed the photo-collapse (2 → 457 groups)
 
 Calibrated Restructure against the owner's real photo library (the "Adlon" external drive) — and
 found a genuine latent failure, the actual reason it "sucked": on a real ~3.3k-image personal set,
