@@ -3511,3 +3511,34 @@ Branch `fix/audit-2026-06-10`; full inventory in `shared/docs/audit-2026-06-10/`
   This is the high-integrity reading of "finish everything": every item reaches a terminal state —
   landed, blocked-on-a-named-resource (with a recipe), or deferred-with-rationale — rather than shipping
   unverifiable changes that risk regressing shipped features.
+
+## 2026-06-18 — doc BGE embeddings backfill on the install-then-rescan path (both engines, lockstep)
+
+- **The dominant document path is "scan first, install BGE later" — so the embedding store must
+  backfill on rescan, not only populate for new/changed files.** BGE is an opt-in model; a user's first
+  scan almost always predates it. The doc-content restructure pass clusters only docs that HAVE a
+  `text_embeddings` row (Windows has no plan-time fallback; macOS re-embeds at plan but that's the slow
+  path this perf work removes). Without a backfill, every pre-existing doc would be stranded on the
+  weaker filename-bag-of-words clustering forever (or re-embedded at every plan on macOS). The
+  incremental skip-set drops unchanged files by size+mtime, so a pre-BGE doc never reaches the tagger
+  to get embedded.
+- **Fix is the exact shape of the existing CLIP-image backfill carve-out, mirrored for docs and kept
+  in lockstep across engines.** macOS: a new `DBWriter.skipSetTextBackfillExclusionSQL`
+  (`NOT (kind IN ('doc','pdf') AND NOT EXISTS … text_embeddings)`) that `Discovery.buildSkipSet` ANDs
+  into the skip query **only when `BGETextService.isInstalledOnDisk`** — so an embeddingless doc stays
+  in the pipeline and the unchanged-file BGE-backfill branch in `DBWriter.insertOne` (already present)
+  becomes reachable. Windows: the same predicate as `SKIP_SET_TEXT_EMBED_GATE`, appended to the
+  scan_session skip-set SELECT gated on `bge_installed()` (the same `default_weights_path().exists()`
+  probe the tagger uses). The gate MUST be install-gated: with no model on disk no doc can embed, so an
+  ungated carve-out would force a full re-walk of every doc on every scan forever. Self-healing: once a
+  doc has its embedding it's skippable again. Verified — macOS 251 tests, Windows clippy + the new
+  `text_embed_gate_reprocesses_embeddingless_docs_only` test + full suite.
+- **macOS scan-time BGE concurrency hardening (3 audit findings).** Scan-time doc embedding made
+  `BGETextService` concurrent for the first time (many doc workers on `visionQueue`), so it was brought
+  to parity with its ORT siblings: a `DispatchSemaphore(value: 4)` bounds concurrent CoreML inferences
+  (was unbounded — ANE-flood/throughput risk), and a double-checked `loadLock` serializes the one-time
+  session build (two racing first-callers no longer each construct an ORTEnv+ORTSession / race the `env`
+  write). ORT `Run` itself is thread-safe and the WordPiece tokenizer is immutable, so inference was
+  already safe — these are the perf/cold-start refinements. A flaky discovery test (asserted an
+  embeddingless pdf is skipped — now environment-dependent on BGE being installed) was made
+  deterministic by seeding the row's `text_embeddings` so it exercises the genuine skip path.

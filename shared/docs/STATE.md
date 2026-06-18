@@ -8,7 +8,29 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
-## 2026-06-17 (latest) — macOS embeds doc vectors at SCAN (plan 3 min → 32 s); both engines read the store
+## 2026-06-18 (latest) — doc-embedding backfill on install-then-rescan (both engines) + macOS BGE concurrency hardening
+
+Post-merge audit of the scan-time doc-embedding work found one real lockstep gap and three macOS
+concurrency refinements; all fixed, both engines green.
+- **Backfill on the "scan first, install BGE later" path (the common case).** BGE is opt-in, so a
+  user's first scan predates it; the incremental skip-set then drops those docs by size+mtime and they
+  never get embedded — stranding them on weak filename clustering (Windows has no plan-time fallback)
+  or re-embedding them at every plan (macOS). Fixed by mirroring the existing CLIP-image backfill
+  carve-out for docs: a `text_embeddings`-missing doc/pdf is kept in the pipeline so the rescan
+  backfills it — macOS `DBWriter.skipSetTextBackfillExclusionSQL` (gated on `BGETextService`
+  installed) ANDed into `Discovery.buildSkipSet`; Windows `SKIP_SET_TEXT_EMBED_GATE` (gated on
+  `bge_installed()`) ANDed into the scan_session skip query. Install-gated so it can't force a perpetual
+  re-walk; self-healing once embedded.
+- **macOS `BGETextService` hardened for scan-time concurrency** (now hit by many doc workers, not the
+  old serial plan loop): a `DispatchSemaphore(value: 4)` bounds concurrent ANE inferences and a
+  double-checked `loadLock` builds the ORT session exactly once — parity with ArcFace/MobileCLIP. (ORT
+  Run is already thread-safe + the tokenizer is immutable, so correctness was fine; these are perf +
+  cold-start.)
+- Verified: **macOS 251 tests, Windows clippy `-D warnings` + 366 tests** (incl. a new
+  `text_embed_gate_reprocesses_embeddingless_docs_only`). A discovery test that asserted an
+  embeddingless pdf is skipped was made BGE-install-independent by seeding its `text_embeddings` row.
+
+## 2026-06-17 — macOS embeds doc vectors at SCAN (plan 3 min → 32 s); both engines read the store
 
 Perf + lockstep: macOS embedded document BGE vectors at PLAN time (≈3 min over USB, re-done
 every replan); now it embeds them at SCAN like Windows and caches them in `text_embeddings`, so

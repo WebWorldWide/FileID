@@ -626,8 +626,10 @@ public actor DBWriter {
                     try insertClipEmbedding(fileID: fileID, blob: blob, db: db)
                 }
             }
-            // Backfill a doc's BGE embedding too (e.g. a rescan after BGE was installed),
-            // so an unchanged doc that now has a fresh embedding gets it persisted.
+            // Backfill a doc's BGE embedding too (a rescan after BGE was installed
+            // post-scan — the common case, since BGE is opt-in). Kept reachable by
+            // discovery's `skipSetTextBackfillExclusionSQL` carve-out, exactly like the
+            // CLIP branch above; without it size+mtime would skip the doc upstream.
             if let blob = file.textEmbeddingBlob {
                 let hasText = try Bool.fetchOne(
                     db.cachedStatement(sql: """
@@ -755,6 +757,18 @@ public actor DBWriter {
     static let skipSetClipBackfillExclusionSQL = """
         NOT (files.kind = 'image' AND NOT EXISTS (
             SELECT 1 FROM clip_embeddings WHERE clip_embeddings.file_id = files.id))
+        """
+
+    /// Doc/pdf analog of `skipSetClipBackfillExclusionSQL` for the BGE text embedder.
+    /// Keeps a doc/pdf that still LACKS a `text_embeddings` row OUT of the skip set so
+    /// `insertOne`'s unchanged-file BGE-backfill branch is reachable on an incremental
+    /// rescan after BGE is installed post-scan (the dominant case — BGE is opt-in, so
+    /// the first scan usually predates it). Discovery ANDs this only when BGE is on
+    /// disk (`BGETextService.isInstalledOnDisk`); otherwise no doc could ever embed and
+    /// it would force a full re-walk of every doc on every scan forever.
+    static let skipSetTextBackfillExclusionSQL = """
+        NOT (files.kind IN ('doc', 'pdf') AND NOT EXISTS (
+            SELECT 1 FROM text_embeddings WHERE text_embeddings.file_id = files.id))
         """
 
     private static func insertClipEmbedding(fileID: Int64, blob: Data, db: GRDB.Database) throws {

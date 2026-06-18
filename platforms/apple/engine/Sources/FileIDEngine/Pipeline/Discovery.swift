@@ -333,10 +333,11 @@ public actor Discovery {
     /// (a `LIKE prefix||'%'` is not) and scopes the load to THIS root's subtree,
     /// mirroring the Windows skip-set query (scan_session.rs) and the macOS
     /// orphan-sweep range. Only `failed = 0` rows are loaded, and an embeddable
-    /// image still lacking a `clip_embeddings` row is excluded (R-14) via the
-    /// shared `DBWriter.skipSetClipBackfillExclusionSQL` so the post-CLIP-install
-    /// backfill branch in DBWriter.insertOne stays reachable on an incremental
-    /// rescan instead of being filtered out here.
+    /// image still lacking a `clip_embeddings` row (or a doc/pdf lacking a
+    /// `text_embeddings` row) is excluded (R-14) via the shared
+    /// `DBWriter.skipSetClipBackfillExclusionSQL` / `…TextBackfillExclusionSQL` so the
+    /// post-install backfill branches in DBWriter.insertOne stay reachable on an
+    /// incremental rescan instead of being filtered out here.
     private static func buildSkipSet(
         root: URL, database: Database?, forceReprocess: Bool
     ) async -> [String: SkipEntry]? {
@@ -355,11 +356,16 @@ public actor Discovery {
         // when CLIP is actually installed. With no CLIP model on disk, no image
         // can ever get an embedding, so the exclusion would keep EVERY image out
         // of the skip set and re-run the full ANE/Vision pass on every scan
-        // forever. Gate it on the model file existing.
+        // forever. Gate it on the model file existing. The BGE doc-embedding
+        // exclusion has the exact same shape for docs/pdfs (gated on BGE on disk):
+        // BGE is opt-in, so the first scan usually predates it and the install-then-
+        // rescan path must keep embeddingless docs in the pipeline to backfill them.
         let clipInstalled = FileManager.default.fileExists(
             atPath: MobileCLIPService.defaultImageModelURL.path)
         let clipExclusion = clipInstalled
             ? "AND \(DBWriter.skipSetClipBackfillExclusionSQL)" : ""
+        let textExclusion = BGETextService.isInstalledOnDisk
+            ? "AND \(DBWriter.skipSetTextBackfillExclusionSQL)" : ""
         do {
             return try await database.pool.read { db -> [String: SkipEntry] in
                 var map: [String: SkipEntry] = [:]
@@ -367,6 +373,7 @@ public actor Discovery {
                     SELECT path_text, size_bytes, modified_at FROM files
                     WHERE failed = 0 AND path_text >= ? AND path_text < ?
                       \(clipExclusion)
+                      \(textExclusion)
                     """, arguments: [prefix, prefixUpper])
                 map.reserveCapacity(rows.count)
                 for row in rows {
