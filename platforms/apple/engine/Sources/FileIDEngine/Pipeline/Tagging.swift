@@ -228,42 +228,47 @@ public enum Tagging {
 
     // MARK: - Video pipeline
 
-    /// Video processing — metadata-only. Running Vision on a decoded
-    /// video frame deadlocks `VNControlledCapacityTasksQueue` on some
-    /// inputs and Vision's perform is synchronous GCD that Task
-    /// cancellation can't reach. We record kind/size/dates only;
-    /// captions are produced by Deep Analyze on demand.
+    /// Video processing — metadata + a CLIP keyframe embedding (for restructure's content
+    /// pass). We deliberately do NOT run Vision on a video frame: it deadlocks
+    /// `VNControlledCapacityTasksQueue` on some inputs and Vision's perform is synchronous
+    /// GCD that Task cancellation can't reach. CLIP/ORT has no such queue, and the keyframe
+    /// extract is hard-bounded; visual tags + captions are still produced by Deep Analyze
+    /// on demand.
     private static func processVideo(
         discovered: DiscoveredFile,
         worker: VisionWorker,
         started: CFAbsoluteTime
     ) async -> TaggedFile {
-        // No AVFoundation on the scan hot path — `AVURLAsset.load`
-        // can hang for seconds on NAS-resident files. Duration is
-        // recovered on-demand by the UI's QL preview when needed.
-        let url = discovered.url
-        var tagged = TaggedFile(
-            url: url, kind: "video", extension: url.pathExtension.lowercased(),
-            sizeBytes: discovered.sizeBytes,
-            createdAt: discovered.creationDate,
-            modifiedAt: discovered.modificationDate,
-            visionTags: ["Video"],
-            tagsEvaluated: true
-        )
         _ = worker  // unused — kept for signature parity with image/pdf paths
-        // Content-cluster videos like images: embed a ~25%-duration keyframe with the same
-        // CLIP model, so restructure's content pass groups a vacation's videos WITH its
-        // photos (it now selects kind IN ('image','video')). BOUNDED — AVFoundation's
-        // duration/decode can hang on a NAS-resident file, so the extract runs off-thread
-        // with a hard timeout; on timeout the video simply clusters by filename, as before.
-        // Mirrors the Windows engine, which CLIP-embeds the decoded video keyframe at scan.
-        if let cg = boundedVideoKeyframe(url: url, maxPixelSize: 512, timeout: 6),
-           let blob = MobileCLIPService.shared.embedImage(cg)
-                .map({ MobileCLIPService.embeddingToBlob($0) }) {
-            tagged.clipEmbeddingBlob = blob
+        // Hop onto visionQueue (a growable GCD queue) like processImage/processPDF, so the
+        // blocking keyframe wait + ORT embed run there instead of parking a narrow
+        // cooperative-pool worker (which would throttle the other workers + the DB/IPC).
+        return await withCheckedContinuation { (cont: CheckedContinuation<TaggedFile, Never>) in
+            visionQueue.async {
+                let url = discovered.url
+                var tagged = TaggedFile(
+                    url: url, kind: "video", extension: url.pathExtension.lowercased(),
+                    sizeBytes: discovered.sizeBytes,
+                    createdAt: discovered.creationDate,
+                    modifiedAt: discovered.modificationDate,
+                    visionTags: ["Video"],
+                    tagsEvaluated: true
+                )
+                // Content-cluster videos like images: embed a ~25%-duration keyframe with the
+                // same CLIP model, so restructure's content pass groups a vacation's videos
+                // WITH its photos (it selects kind IN ('image','video')). BOUNDED — the extract
+                // runs off-thread with a hard timeout, since AVFoundation duration/decode can
+                // hang on a NAS file; on timeout the video clusters by filename, as before.
+                // Mirrors the Windows engine, which CLIP-embeds the video keyframe at scan.
+                if let cg = boundedVideoKeyframe(url: url, maxPixelSize: 512, timeout: 6),
+                   let blob = MobileCLIPService.shared.embedImage(cg)
+                        .map({ MobileCLIPService.embeddingToBlob($0) }) {
+                    tagged.clipEmbeddingBlob = blob
+                }
+                tagged.perFileTotalMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
+                cont.resume(returning: tagged)
+            }
         }
-        tagged.perFileTotalMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
-        return tagged
     }
 
     /// Extract a video keyframe with a hard wall-clock bound. `extractVideoKeyframe` is
