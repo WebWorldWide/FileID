@@ -251,8 +251,40 @@ public enum Tagging {
             tagsEvaluated: true
         )
         _ = worker  // unused — kept for signature parity with image/pdf paths
+        // Content-cluster videos like images: embed a ~25%-duration keyframe with the same
+        // CLIP model, so restructure's content pass groups a vacation's videos WITH its
+        // photos (it now selects kind IN ('image','video')). BOUNDED — AVFoundation's
+        // duration/decode can hang on a NAS-resident file, so the extract runs off-thread
+        // with a hard timeout; on timeout the video simply clusters by filename, as before.
+        // Mirrors the Windows engine, which CLIP-embeds the decoded video keyframe at scan.
+        if let cg = boundedVideoKeyframe(url: url, maxPixelSize: 512, timeout: 6),
+           let blob = MobileCLIPService.shared.embedImage(cg)
+                .map({ MobileCLIPService.embeddingToBlob($0) }) {
+            tagged.clipEmbeddingBlob = blob
+        }
         tagged.perFileTotalMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
         return tagged
+    }
+
+    /// Extract a video keyframe with a hard wall-clock bound. `extractVideoKeyframe` is
+    /// synchronous AVFoundation that can hang on an unresponsive (NAS) file, so it runs on
+    /// a utility queue and we give up after `timeout` (the worker thread continues; the
+    /// orphaned extract finishes or dies with the process).
+    private static func boundedVideoKeyframe(url: URL, maxPixelSize: Int, timeout: TimeInterval) -> CGImage? {
+        let box = KeyframeBox()
+        let sema = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .utility).async {
+            box.set(DeepAnalyze.extractVideoKeyframe(url: url, maxPixelSize: maxPixelSize))
+            sema.signal()
+        }
+        return sema.wait(timeout: .now() + timeout) == .timedOut ? nil : box.get()
+    }
+
+    private final class KeyframeBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: CGImage?
+        func set(_ v: CGImage?) { lock.lock(); value = v; lock.unlock() }
+        func get() -> CGImage? { lock.lock(); defer { lock.unlock() }; return value }
     }
 
     // MARK: - PDF pipeline
