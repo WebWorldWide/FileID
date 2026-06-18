@@ -302,6 +302,68 @@
                         </Grid>
                     </Grid>
 
+                    <!-- BGE document embedder. Optional restructure enhancement — clusters
+                         documents by their content instead of their filename. Binds to Svc.Bge. -->
+                    <Grid ColumnSpacing="12" Padding="14,12" CornerRadius="10"
+                          Background="{ThemeResource SubtleFillColorTertiaryBrush}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Spacing="2">
+                            <TextBlock Text="Document understanding (BGE)"
+                                       Style="{StaticResource BodyStrongTextBlockStyle}"/>
+                            <TextBlock Text="Restructure groups documents by what they say, not their filename (MIT)"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                            <ProgressBar Maximum="1"
+                                         Value="{x:Bind Svc.Bge.Fraction, Mode=OneWay}"
+                                         IsIndeterminate="{x:Bind IsStarting(Svc.Bge.Status, Svc.Bge.HasStarted), Mode=OneWay}"
+                                         Foreground="{StaticResource GoldBrush}"
+                                         Visibility="{x:Bind VisibleIfDownloading(Svc.Bge.Status), Mode=OneWay}"
+                                         Margin="0,4,0,0"
+                                         Height="4"/>
+                            <TextBlock FontFamily="Consolas"
+                                       FontSize="11"
+                                       Text="{x:Bind ProgressLabel(Svc.Bge.Message, Svc.Bge.Fraction, Svc.Bge.BytesDone, Svc.Bge.TotalBytes), Mode=OneWay}"
+                                       Visibility="{x:Bind VisibleIfDownloading(Svc.Bge.Status), Mode=OneWay}"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                       Margin="0,2,0,0"
+                                       TextWrapping="Wrap"/>
+                            <TextBlock FontFamily="Consolas"
+                                       FontSize="11"
+                                       Text="{x:Bind RateEtaLabel(Svc.Bge.BytesPerSecond, Svc.Bge.EtaSeconds), Mode=OneWay}"
+                                       Visibility="{x:Bind ShowRateEta(Svc.Bge.Status, Svc.Bge.HasStarted), Mode=OneWay}"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                       TextWrapping="Wrap"/>
+                            <TextBlock Text="{x:Bind ErrorLabel(Svc.Bge.LastError), Mode=OneWay}"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                                       Visibility="{x:Bind VisibleIfFailed(Svc.Bge.Status), Mode=OneWay}"
+                                       TextWrapping="Wrap"/>
+                        </StackPanel>
+                        <TextBlock Grid.Column="1"
+                                   Text="~135 MB"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   VerticalAlignment="Center"
+                                   Margin="0,0,8,0"/>
+                        <Grid Grid.Column="2" VerticalAlignment="Center">
+                            <TextBlock Text="✓ Installed"
+                                       Foreground="{ThemeResource SystemFillColorSuccessBrush}"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       VerticalAlignment="Center"
+                                       Visibility="{x:Bind VisibleIfInstalled(Svc.Bge.Status), Mode=OneWay}"/>
+                            <Button Content="{x:Bind ButtonLabel(Svc.Bge.Status), Mode=OneWay}"
+                                    Tag="bge_text"
+                                    Click="OnInstallModelClicked"
+                                    MinWidth="86"
+                                    Visibility="{x:Bind ShowActionButton(Svc.Bge.Status), Mode=OneWay}"
+                                    AutomationProperties.Name="Install document understanding"/>
+                        </Grid>
+                    </Grid>
+
                     <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                TextWrapping="Wrap"

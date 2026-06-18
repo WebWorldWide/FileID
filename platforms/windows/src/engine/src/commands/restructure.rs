@@ -61,7 +61,7 @@ fn load_capped_embeddings(
     let mut stmt = conn.prepare(
         "SELECT ce.file_id, ce.embedding FROM clip_embeddings ce
          JOIN files f ON f.id = ce.file_id
-         WHERE f.failed = 0 AND f.kind = 'image'",
+         WHERE f.failed = 0 AND f.kind IN ('image', 'video')",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
@@ -254,7 +254,7 @@ pub(crate) async fn handle_plan_restructure(
     // CLIP blobs transiently on a low-RAM box.
     let semantic_files: Vec<restructure_semantic::SemanticFile> = files
         .iter()
-        .filter(|f| matches!(f.kind, FileKind::Image))
+        .filter(|f| matches!(f.kind, FileKind::Image | FileKind::Video))
         .filter_map(|f| {
             embeddings.remove(&f.file_id).map(|clip| restructure_semantic::SemanticFile {
                 file_id: f.file_id,

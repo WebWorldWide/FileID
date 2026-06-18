@@ -48,6 +48,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     // RAM++ — the in-scan multi-label tagger. Single-sentinel "any-of".
     private static readonly string[] RamPlusSentinelIds = { "ram_plus" };
     private static readonly string[] WhisperSentinelIds = { "whisper" };
+    private static readonly string[] BgeSentinelIds = { "bge_text" };
     // one-button GPU acceleration pack on the welcome sheet.
     // NVIDIA gets the full CUDA EP: ort_cuda_x64 (the ONNX Runtime CUDA
     // provider DLL — the thing that actually flips inference off DirectML) plus
@@ -92,6 +93,10 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     /// descriptive metadata title keeps its original name instead of a transcript-based
     /// one, so it is NOT a gate on <see cref="AllInstalled"/>.</summary>
     public ModelSlot Whisper { get; }
+    /// <summary>BGE-small document text embedder — powers content-based document clustering
+    /// in restructure (a doc clusters by what it SAYS, not its filename). Optional: when
+    /// absent, documents cluster by filename, so it is NOT a gate on <see cref="AllInstalled"/>.</summary>
+    public ModelSlot Bge { get; }
     /// <summary> one-button GPU acceleration pack. On NVIDIA the
     /// Install action downloads cuDNN; on AMD/Intel/Qualcomm/CPU the slot
     /// is pre-marked Installed with an explanatory Message (DirectML is
@@ -178,6 +183,15 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             {
                 ClearCancelMarks("whisper");
                 return PrewarmAsync("whisper");
+            });
+        Bge = new ModelSlot(
+            displayLabel: "Document understanding (BGE)",
+            // ~135 MB BGE-small ONNX + a small vocab.
+            approxBytes: 135UL * 1024 * 1024,
+            installAction: () =>
+            {
+                ClearCancelMarks("bge_text");
+                return PrewarmAsync("bge_text");
             });
         DeepVlm = new ModelSlot(
             displayLabel: "Qwen2.5-VL 7B",
@@ -479,6 +493,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         if (ReferenceEquals(slot, Arcface)) return "arcface_default";
         if (ReferenceEquals(slot, RamPlus)) return "ram_plus";
         if (ReferenceEquals(slot, Whisper)) return "whisper";
+        if (ReferenceEquals(slot, Bge)) return "bge_text";
         if (ReferenceEquals(slot, DeepVlm)) return _deepVlmModelKind;
         if (ReferenceEquals(slot, Accelerator)) return "cudnn_runtime_x64";
         return null;
@@ -623,6 +638,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         SeedSlot(Arcface, ArcfaceSentinelIds);
         SeedSlot(RamPlus, RamPlusSentinelIds);
         SeedSlot(Whisper, WhisperSentinelIds);
+        SeedSlot(Bge, BgeSentinelIds);
         SeedSlot(DeepVlm, DeepVlmSentinelIds);
         // Accelerator slot — only flip to Installed if the
         // sentinel exists. Otherwise leave it as
@@ -1046,6 +1062,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         if (ReferenceEquals(slot, Instance.Arcface)) return ArcfaceSentinelIds;
         if (ReferenceEquals(slot, Instance.RamPlus)) return RamPlusSentinelIds;
         if (ReferenceEquals(slot, Instance.Whisper)) return WhisperSentinelIds;
+        if (ReferenceEquals(slot, Instance.Bge)) return BgeSentinelIds;
         if (ReferenceEquals(slot, Instance.DeepVlm)) return DeepVlmSentinelIds;
         if (ReferenceEquals(slot, Instance.Accelerator)) return AcceleratorSentinelIds;
         return Array.Empty<string>();

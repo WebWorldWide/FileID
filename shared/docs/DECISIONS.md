@@ -7,6 +7,26 @@
 
 ---
 
+## 2026-06-17 — Video clusters by content (keyframe CLIP) — macOS reverses its "no AVFoundation at scan" stance, bounded
+
+Video was the last file type clustering by filename. Windows already CLIP-embeds the decoded
+video keyframe at scan (`tagging.rs` treats Image|Video the same downstream); the only gap there
+was restructure filtering `kind='image'` — widened to `kind IN ('image','video')` so a video's
+keyframe embedding clusters under the SAME calibrated image thresholds (a keyframe IS a CLIP
+image; verified 87% folder-agreement, the highest kind — event videos are very coherent).
+**The macOS call:** `processVideo` had deliberately been metadata-only because AVFoundation
+(`AVURLAsset`/`AVAssetImageGenerator`) can hang for seconds on NAS files and the scan hot path
+must stay fast. Decision: reverse that, but BOUND it — the keyframe extract runs on a utility
+queue behind a 6 s `DispatchSemaphore` deadline (a hung NAS file → nil → the video clusters by
+filename, as before), and the whole thing runs on `visionQueue` (the growable GCD queue
+processImage/processPDF already use) so it never parks a narrow cooperative-pool worker (audit
+fix). The scan is slightly slower for video-heavy libraries — accepted: video content clustering
+is the user-visible win, the timeout caps the worst case, and it matches Windows (which already
+pays the keyframe-decode cost). macOS embeds at scan (stored), so plans stay instant — unlike the
+BGE doc path, which embeds at plan time (the macOS doc scan-time cache is still a NEXT follow-up).
+Also closed the macOS pptx/xlsx gap (textutil can't read OOXML → `unzip -p` + a:t/t mining,
+mirroring Windows doc_extract) and shipped the BGE install UI on both platforms.
+
 ## 2026-06-17 — Restructure clusters documents by BGE CONTENT, not filenames; calibrated to the MEAN-pooled distribution
 
 Owner asked to evaluate BGE for documents and adopt it "if it makes it more accurate". An
