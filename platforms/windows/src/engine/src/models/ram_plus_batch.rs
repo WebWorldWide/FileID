@@ -183,7 +183,7 @@ fn run_coordinator(
             .collect();
         match tagger.tag_batch(&imgs) {
             Ok(results) if results.len() == batch.len() => {
-                for (req, tags) in batch.into_iter().zip(results.into_iter()) {
+                for (req, tags) in batch.into_iter().zip(results) {
                     let _ = req.response.send(Ok(tags));
                 }
             }
