@@ -22,13 +22,14 @@ struct DBWriterClipBackfillTests {
 
     private static let fixedMtime = Date(timeIntervalSince1970: 1_700_000_000)
 
-    private func makeFile(url: URL, kind: String, clip: Data?) -> TaggedFile {
+    private func makeFile(url: URL, kind: String, clip: Data?, textStageDone: Bool = false) -> TaggedFile {
         TaggedFile(
             url: url, kind: kind, extension: url.pathExtension, sizeBytes: 4,
             createdAt: Date(timeIntervalSince1970: 1_600_000_000),
             modifiedAt: Self.fixedMtime,
             clipEmbeddingBlob: clip,
-            tagsEvaluated: true, facesEvaluated: true, ocrStageRan: true
+            tagsEvaluated: true, facesEvaluated: true, ocrStageRan: true,
+            textStageDone: textStageDone
         )
     }
 
@@ -100,10 +101,12 @@ struct DBWriterClipBackfillTests {
         let objEmbedded    = tmp.appendingPathComponent("a_with_embedding.obj")
         let objNoEmbedding = tmp.appendingPathComponent("b_no_embedding.obj")
         let stlNoEmbedding = tmp.appendingPathComponent("c_shape.stl")
+        let objUnrenderable = tmp.appendingPathComponent("d_corrupt.obj")  // render ran (done) but failed
 
         await drain(db, makeFile(url: objEmbedded, kind: "model", clip: Data([1, 2, 3, 4])))
         await drain(db, makeFile(url: objNoEmbedding, kind: "model", clip: nil))
         await drain(db, makeFile(url: stlNoEmbedding, kind: "model", clip: nil))
+        await drain(db, makeFile(url: objUnrenderable, kind: "model", clip: nil, textStageDone: true))
 
         let skippable = try await db.pool.read { db -> [String] in
             try String.fetchAll(db, sql: """
@@ -119,6 +122,8 @@ struct DBWriterClipBackfillTests {
                 "a non-.obj 3D format isn't renderable, so it stays skippable (not re-walked)")
         #expect(!skippable.contains(objNoEmbedding.path),
                 "an .obj lacking a CLIP embedding must be EXCLUDED so it reaches the backfill branch")
+        #expect(skippable.contains(objUnrenderable.path),
+                "an un-renderable .obj whose render already ran (done=1) must NOT re-walk forever")
     }
 
     @Test("text skip-set predicate stops re-walking a text-less doc (text_stage_done=1)")

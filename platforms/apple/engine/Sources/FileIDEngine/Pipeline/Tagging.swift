@@ -154,6 +154,9 @@ public enum Tagging {
                         .map({ MobileCLIPService.embeddingToBlob($0) }) {
                     tagged.clipEmbeddingBlob = blob
                 }
+                // The content-derivation stage (render attempt) ran — stops the model
+                // CLIP-backfill carve-out re-walking an un-renderable .obj forever.
+                tagged.textStageDone = true
                 tagged.perFileTotalMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
                 cont.resume(returning: tagged)
             }

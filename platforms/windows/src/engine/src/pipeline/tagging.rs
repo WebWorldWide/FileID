@@ -1395,9 +1395,12 @@ async fn process_file_predecoded(
     // stale doc_text/doc_fts DELETE on this so a re-process that now yields
     // empty text clears phantom FTS hits (#11).
     tagged.doc_stage_ran = matches!(file.kind, FileKind::Doc | FileKind::Pdf) && !file.online_only;
-    // Same condition: the text stage ran iff we attempted extraction. Persisted to
-    // text_stage_done so the BGE backfill carve-out stops re-walking a text-less doc.
-    tagged.text_stage_done = tagged.doc_stage_ran;
+    // The content-derivation stage ran iff we attempted doc-text extraction OR a model
+    // render. Persisted to text_stage_done so BOTH the BGE doc carve-out and the model CLIP
+    // carve-out stop re-walking a file that can never produce its embedding (a text-less
+    // doc, an un-renderable .obj).
+    tagged.text_stage_done =
+        tagged.doc_stage_ran || (matches!(file.kind, FileKind::Model) && !file.online_only);
     if let Some(text) = doc_text {
         if !text.trim().is_empty() {
             for (label, score) in crate::util::keywords::extract(&text) {

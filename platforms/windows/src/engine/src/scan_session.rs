@@ -763,11 +763,12 @@ pub(crate) const SKIP_SET_TEXT_EMBED_GATE: &str =
 /// R-14 (lockstep with macOS `DBWriter.skipSetModelClipBackfillExclusionSQL`): keep a `.obj`
 /// 3D model still LACKING a `clip_embeddings` row OUT of the skip set so its rendered-shape
 /// CLIP vector backfills on a rescan after the render→CLIP feature shipped. Limited to
-/// `extension = 'obj'` (the only format `obj_render` rasterizes) so a non-renderable 3D
-/// format can't be re-walked forever. CLIP ships by default, so this is appended
-/// unconditionally; leading space because it concatenates after the content gate.
+/// `extension = 'obj'` (the only format `obj_render` rasterizes). The `text_stage_done = 0`
+/// clause stops the re-walk once a render has been ATTEMPTED but failed (a corrupt /
+/// geometry-less .obj) — otherwise that .obj would re-walk forever. CLIP ships by default,
+/// so this is appended unconditionally; leading space concatenates after the content gate.
 pub(crate) const SKIP_SET_MODEL_CLIP_GATE: &str =
-    " AND NOT (kind = 'model' AND extension = 'obj' \
+    " AND NOT (kind = 'model' AND extension = 'obj' AND text_stage_done = 0 \
       AND NOT EXISTS (SELECT 1 FROM clip_embeddings \
                       WHERE clip_embeddings.file_id = files.id))";
 
@@ -1093,14 +1094,15 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE files (
-                 id           INTEGER PRIMARY KEY,
-                 path_text    TEXT NOT NULL UNIQUE,
-                 kind         TEXT NOT NULL,
-                 extension    TEXT NOT NULL,
-                 modified_at  DOUBLE,
-                 scanned_at   DOUBLE NOT NULL,
-                 failed       INTEGER NOT NULL DEFAULT 0,
-                 content_hash BLOB
+                 id              INTEGER PRIMARY KEY,
+                 path_text       TEXT NOT NULL UNIQUE,
+                 kind            TEXT NOT NULL,
+                 extension       TEXT NOT NULL,
+                 modified_at     DOUBLE,
+                 scanned_at      DOUBLE NOT NULL,
+                 failed          INTEGER NOT NULL DEFAULT 0,
+                 content_hash    BLOB,
+                 text_stage_done INTEGER NOT NULL DEFAULT 0
              );
              CREATE TABLE clip_embeddings (
                  file_id   INTEGER PRIMARY KEY,
@@ -1110,13 +1112,15 @@ mod tests {
         )
         .unwrap();
         // All rows carry a content_hash so the content gate keeps them — isolating the
-        // model gate's effect.
+        // model gate's effect. id=5 is an un-renderable .obj whose render already ran
+        // (text_stage_done=1) — it must NOT be re-walked (no CLIP vector to ever produce).
         conn.execute(
-            "INSERT INTO files (id, path_text, kind, extension, modified_at, scanned_at, failed, content_hash) VALUES \
-                 (1, 'C:\\M\\no_embed.obj', 'model', 'obj',  100.0, 200.0, 0, X'00'), \
-                 (2, 'C:\\M\\embedded.obj', 'model', 'obj',  100.0, 200.0, 0, X'00'), \
-                 (3, 'C:\\M\\shape.stl',    'model', 'stl',  100.0, 200.0, 0, X'00'), \
-                 (4, 'C:\\P\\photo.jpg',    'image', 'jpg',  100.0, 200.0, 0, X'00')",
+            "INSERT INTO files (id, path_text, kind, extension, modified_at, scanned_at, failed, content_hash, text_stage_done) VALUES \
+                 (1, 'C:\\M\\no_embed.obj', 'model', 'obj',  100.0, 200.0, 0, X'00', 0), \
+                 (2, 'C:\\M\\embedded.obj', 'model', 'obj',  100.0, 200.0, 0, X'00', 0), \
+                 (3, 'C:\\M\\shape.stl',    'model', 'stl',  100.0, 200.0, 0, X'00', 0), \
+                 (4, 'C:\\P\\photo.jpg',    'image', 'jpg',  100.0, 200.0, 0, X'00', 0), \
+                 (5, 'C:\\M\\corrupt.obj',  'model', 'obj',  100.0, 200.0, 0, X'00', 1)",
             [],
         )
         .unwrap();
@@ -1154,6 +1158,10 @@ mod tests {
         assert!(
             skip.contains("C:\\P\\photo.jpg"),
             "the model gate must not touch images"
+        );
+        assert!(
+            skip.contains("C:\\M\\corrupt.obj"),
+            "an un-renderable .obj whose render already ran (text_stage_done=1) must NOT re-walk forever"
         );
     }
 }

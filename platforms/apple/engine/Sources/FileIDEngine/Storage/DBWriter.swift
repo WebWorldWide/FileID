@@ -79,9 +79,11 @@ public struct TaggedFile: Sendable {
     public var tagsEvaluated: Bool
     public var facesEvaluated: Bool
     public var ocrStageRan: Bool
-    /// The doc/pdf text-extraction stage ran this session (whether or not text was found).
-    /// Persisted to `files.text_stage_done` so the BGE backfill carve-out stops re-walking
-    /// a doc that yields no embeddable text.
+    /// The content-derivation stage ran this session — doc/pdf text extraction OR a 3D-model
+    /// render (whether or not it produced an embeddable result). Persisted to
+    /// `files.text_stage_done` so the BGE doc carve-out AND the model CLIP carve-out stop
+    /// re-walking a file that can never produce its embedding (a text-less doc, an
+    /// un-renderable .obj).
     public var textStageDone: Bool
 
     public init(
@@ -793,11 +795,14 @@ public actor DBWriter {
 
     /// 3D-model analog: keep a `.obj` that still LACKS a `clip_embeddings` row OUT of the
     /// skip set so its rendered-shape CLIP vector backfills on a rescan after the render→CLIP
-    /// feature shipped. Limited to `extension = 'obj'` (the only format both engines render)
-    /// so a non-renderable 3D format can't be re-walked forever. CLIP ships by default, so
-    /// Discovery ANDs this whenever CLIP is installed (same gate as the image carve-out).
+    /// feature shipped. Limited to `extension = 'obj'` (the only format both engines render).
+    /// The `text_stage_done = 0` clause stops the re-walk once a render has been ATTEMPTED but
+    /// failed (a corrupt / geometry-less .obj) — otherwise that .obj, never able to get a
+    /// `clip_embeddings` row, would re-walk forever (and a macOS QuickLook render can cost up
+    /// to 8 s each). CLIP ships by default, so Discovery ANDs this whenever CLIP is installed.
     static let skipSetModelClipBackfillExclusionSQL = """
-        NOT (files.kind = 'model' AND files.extension = 'obj' AND NOT EXISTS (
+        NOT (files.kind = 'model' AND files.extension = 'obj' AND files.text_stage_done = 0
+             AND NOT EXISTS (
             SELECT 1 FROM clip_embeddings WHERE clip_embeddings.file_id = files.id))
         """
 
