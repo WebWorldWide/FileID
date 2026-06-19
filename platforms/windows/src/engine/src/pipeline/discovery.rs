@@ -80,18 +80,22 @@ impl FileKind {
         match ext.as_str() {
             "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "heic"
             | "heif" | "raw" | "arw" | "cr2" | "nef" | "dng" => FileKind::Image,
-            "mp4" | "mov" | "m4v" | "avi" | "mkv" | "webm" | "mts" | "m2ts" => FileKind::Video,
+            "mp4" | "mov" | "m4v" | "avi" | "mkv" | "webm" | "mts" | "m2ts" | "wmv" => {
+                FileKind::Video
+            }
             "pdf" => FileKind::Pdf,
             // Office docs + e-books + source code / prose markup — all clustered by their
             // extracted text (BGE). Lockstep with the macOS FileTypes.{documents,code,ebooks}.
+            // ppt/xls (legacy binary) have no extractor on either engine → text-less docs
+            // that route to Documents/ (the text_stage_done bit stops the backfill re-walk).
             "docx" | "doc" | "odt" | "rtf" | "txt" | "md" | "pages" | "key" | "numbers"
-            | "xlsx" | "pptx" | "epub"
+            | "xlsx" | "pptx" | "xls" | "ppt" | "epub"
             | "swift" | "py" | "rb" | "js" | "jsx" | "ts" | "tsx" | "java" | "kt" | "c"
             | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh" | "cs" | "go" | "rs" | "php"
             | "sh" | "bash" | "zsh" | "sql" | "scala" | "m" | "mm" | "r" | "jl" | "lua"
             | "dart" | "vue" | "pl" | "pm" | "ps1" | "tex" | "bib" | "rst" | "org"
             | "adoc" => FileKind::Doc,
-            "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" | "opus" => FileKind::Audio,
+            "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" | "opus" | "aiff" => FileKind::Audio,
             // 3D models — `.obj` clusters by its rendered shape (CLIP); the rest are grouped
             // under 3D Models/ + named by Deep Analyze. Lockstep with macOS FileTypes.models.
             "obj" | "stl" | "ply" | "glb" | "gltf" | "fbx" | "usdz" | "usd" | "usda"
@@ -592,6 +596,12 @@ mod tests {
         assert_eq!(FileKind::from_extension("stl"), FileKind::Model);
         assert_eq!(FileKind::from_extension("glb"), FileKind::Model);
         assert_eq!(FileKind::from_extension("usdz"), FileKind::Model);
+        // Lockstep alignment with macOS (formats Windows can also handle).
+        assert_eq!(FileKind::from_extension("wmv"), FileKind::Video);
+        assert_eq!(FileKind::from_extension("aiff"), FileKind::Audio);
+        assert_eq!(FileKind::from_extension("odt"), FileKind::Doc);
+        assert_eq!(FileKind::from_extension("xls"), FileKind::Doc);
+        assert_eq!(FileKind::from_extension("ppt"), FileKind::Doc);
         // A genuinely unknown binary stays Other.
         assert_eq!(FileKind::from_extension("bin"), FileKind::Other);
     }

@@ -54,6 +54,9 @@ pub(crate) fn extract(path: &Path, bytes: Option<&[u8]>) -> Result<Option<String
             Some(read_plain(path, bytes)?)
         }
         "docx" => Some(extract_zip_xml(path, bytes, &["word/document.xml"], &["w:t"])?),
+        // OpenDocument Text: content.xml, paragraph/heading/span runs (text:p / text:h /
+        // text:span). Near-identical to the macOS textutil odt path (same words).
+        "odt" => Some(extract_zip_xml(path, bytes, &["content.xml"], &["p", "h", "span"])?),
         "pptx" => Some(extract_zip_xml_glob(path, bytes, "ppt/slides/slide", ".xml", &["a:t"])?),
         "xlsx" => Some(extract_zip_xml(path, bytes, &["xl/sharedStrings.xml"], &["t"])?),
         "epub" => Some(extract_epub(path, bytes)?),

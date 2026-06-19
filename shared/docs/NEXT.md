@@ -22,13 +22,16 @@ follow-ups (none block users; all graceful-degrade today):
   content — but the embedding text source must stay byte-identical across engines, so design carefully.)
 - **✅ DONE (2026-06-19) — content coverage for audio, code/e-books, 3D models** (both engines, lockstep):
   audio→artist/album tags (macOS parity), code/EPUB→BGE text, .obj→CLIP + other 3D→`3D Models/`. See STATE.
-- **Pre-existing extension-set divergences (LOW, lockstep-audit).** The image/video/audio/legacy-office
-  extension sets differ across engines (macOS has orf/rw2/raf/wmv/flv/mpg/aiff/xls/ppt; Windows has
-  mts/m2ts/odt). Mostly capability-driven (each engine lists formats its decoder handles) so naive
-  alignment could break the other engine; but a few are arbitrary (e.g. `.odt` is extractable by both
-  yet only Windows classifies it as `doc`; `.xls/.ppt` are doc on macOS, Other on Windows). The newly
-  added code/e-book/3D sets ARE byte-identical. Audit each format for decode capability on both engines
-  before aligning; don't add a format an engine can't process (→ failed rows).
+- **✅ DONE (2026-06-19) — extension-set divergences aligned (the decodable ones).** macOS gained
+  mts/m2ts/odt; Windows gained wmv/aiff/ppt/xls + a real odt extractor. Remaining divergence is purely
+  capability-driven: macOS-only RAW (orf/rw2/raf — the Windows `image` crate can't decode) and
+  flv/mpg/mpeg (Windows Media Foundation unreliable → would create failed/looping video rows). Those
+  stay macOS-only on purpose. (If a future Windows codec pack handles mpg/mpeg reliably, add them.)
+- **macOS RAM++ tagger (BIG lockstep gap, hardware-gated).** Windows tags images with RAM++ (Swin-L,
+  4585-tag ONNX); macOS still uses Apple Vision + CLIP zero-shot scene tags. The image restructure pass
+  weights tags at 0.22 and Library/search rely on them, so this is the largest remaining macOS↔Windows
+  divergence. Mirror Windows `models/ram_plus.rs` via ORT/CoreML on macOS + a Settings install card +
+  threshold calibration. Needs a Mac to verify ANE inference + tag quality — not doable headlessly.
 - **Further doc-threshold tuning (optional).** 53% with the biggest group at 168/65-folders is good
   but the course folders are noisy labels; the `FILEID_RESTRUCTURE_DOC_*` env knobs allow more.
 - **Cross-pass new-group name dedup (MEDIUM, from the 2026-06-17 audit).** `used_group_names` /

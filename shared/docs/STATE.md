@@ -8,7 +8,27 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
-## 2026-06-19 (latest) — content clustering for EVERY file type: audio, code/e-books, 3D models + text-less-doc loop fixed
+## 2026-06-19 (latest) — macOS↔Windows lockstep pass: extension sets aligned + restructure verified byte-faithful
+
+Brought macOS up to Windows (and vice-versa) on every front I can verify headlessly:
+- **Extension sets aligned** (the decodable ones, both directions): macOS gained `mts`/`m2ts`
+  (AVFoundation) + `odt` (textutil); Windows gained `wmv` (Media Foundation) + `aiff`
+  (symphonia) + `ppt`/`xls` (→ Documents/) + a real `odt` extractor. Left divergent only the
+  capability-driven formats (macOS-only RAW `orf/rw2/raf`; `flv/mpg/mpeg` that Windows MF
+  can't reliably decode → would create failed/looping rows).
+- **Restructure verified byte-faithful** (no code change needed): identical pass order (P1
+  visual → R3 docs → R1 non-image → rule cascade), identical profiles/thresholds, identical
+  non-image bag-of-words signature (filename ∪ whole-lowercased tags — so the new audio
+  artist/album tags cluster on both). The rule cascade gives every kind a destination ⇒ no
+  file type is un-organizable. Restructure is at production quality on the engine side.
+- **Known remaining macOS gap (big, hardware-gated): the RAM++ tagger.** Windows tags images
+  with RAM++ (Swin-L, 4585 tags); macOS uses Vision + CLIP-scene tags. Affects the image
+  pass's ~22% tag weight + search. A major model addition (ONNX via CoreML + install UI +
+  calibration), needs a Mac to verify — tracked, out of this headless pass.
+
+Verified: macOS build + 253 tests; Windows clippy -D warnings + 368 tests.
+
+## 2026-06-19 — content clustering for EVERY file type: audio, code/e-books, 3D models + text-less-doc loop fixed
 
 Restructure now groups every major file type by content, not just images/docs/video — both engines,
 lockstep. Branch `feat/content-coverage-all-types` (off main @ d257973).

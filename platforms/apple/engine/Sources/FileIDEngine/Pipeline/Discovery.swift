@@ -50,11 +50,11 @@ public enum FileTypes {
         "raw", "cr2", "nef", "arw", "dng", "orf", "rw2", "raf"
     ]
     public static let videos: Set<String> = [
-        "mp4", "mov", "m4v", "avi", "mkv", "webm", "wmv", "flv", "mpg", "mpeg"
+        "mp4", "mov", "m4v", "avi", "mkv", "webm", "wmv", "flv", "mpg", "mpeg", "mts", "m2ts"
     ]
     public static let pdfs: Set<String> = ["pdf"]
     public static let documents: Set<String> = [
-        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "rtf", "md", "pages", "numbers", "key"
+        "pdf", "doc", "docx", "odt", "xls", "xlsx", "ppt", "pptx", "txt", "rtf", "md", "pages", "numbers", "key"
     ]
     public static let audio: Set<String> = [
         "mp3", "m4a", "aac", "wav", "flac", "ogg", "opus", "aiff"
