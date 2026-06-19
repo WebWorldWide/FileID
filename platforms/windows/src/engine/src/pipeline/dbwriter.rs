@@ -275,6 +275,14 @@ impl DbWriter {
                      VALUES (?1, ?2, ?3)",
                 )
                 .context("preparing text_embeddings insert")?;
+            // Records that a doc/pdf's text stage ran so the BGE backfill carve-out stops
+            // re-walking a text-less doc. Separate idempotent UPDATE (lockstep with macOS)
+            // keeps it off the big positional file upsert.
+            let mut text_stage_stmt = tx
+                .prepare_cached(
+                    "UPDATE files SET text_stage_done = 1 WHERE id = ?1 AND text_stage_done = 0",
+                )
+                .context("preparing text_stage_done update")?;
             let mut face_delete = tx
                 .prepare_cached("DELETE FROM face_prints WHERE file_id = ?1")
                 .context("preparing face delete")?;
@@ -432,6 +440,12 @@ impl DbWriter {
                         |row| row.get(0),
                     )
                     .with_context(|| format!("insert+id for {}", crate::platform::redact_path_for_log(&f.path)))?;
+
+                if f.text_stage_done {
+                    text_stage_stmt
+                        .execute(params![file_id])
+                        .with_context(|| format!("text_stage_done for {}", crate::platform::redact_path_for_log(&f.path)))?;
+                }
 
                 if let Some(emb) = &f.clip_embedding {
                     let bytes = floats_to_le_bytes(emb);
@@ -1077,6 +1091,7 @@ mod tests {
             faces_evaluated: false,
             ocr_stage_ran: false,
             doc_stage_ran: false,
+            text_stage_done: false,
             tags_evaluated: true,
         }
     }

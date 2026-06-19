@@ -58,7 +58,11 @@ public enum Tagging {
             tagged = await processPDF(discovered: discovered, worker: worker, started: started)
         case .doc:
             tagged = await processDoc(discovered: discovered, worker: worker, started: started)
-        case .audio, .model, .other:
+        case .audio:
+            tagged = await processAudio(discovered: discovered, started: started)
+        case .model:
+            tagged = await processModel(discovered: discovered, started: started)
+        case .other:
             tagged = TaggedFile(
                 url: url, kind: kind, extension: ext, sizeBytes: discovered.sizeBytes,
                 createdAt: discovered.creationDate, modifiedAt: discovered.modificationDate,
@@ -72,6 +76,91 @@ public enum Tagging {
         // re-bind a moved file's row instead of orphaning its tags/faces/OCR.
         tagged.fileRef = discovered.fileRef
         return tagged
+    }
+
+    // MARK: - Audio pipeline
+
+    /// Read embedded ID3/Vorbis/MP4 metadata (artist/album/title) at SCAN and surface
+    /// them as auto tags, so audio clusters by artist/album in the non-image restructure
+    /// pass — lockstep with the Windows engine, which reads the same metadata (symphonia)
+    /// at scan and stores it as tags. The read re-opens the file, so it's bounded against
+    /// a stalled network volume (the same NAS caution as the video-keyframe path).
+    private static func processAudio(
+        discovered: DiscoveredFile,
+        started: CFAbsoluteTime
+    ) async -> TaggedFile {
+        let url = discovered.url
+        let ext = url.pathExtension.lowercased()
+        var tags = ["Audio"]
+        let meta = await boundedAudioTags(url: url, timeoutMs: 5_000)
+        // Artist + album are the shared tokens the clusterer groups on (tracks from one
+        // album/artist share them); title rides along to mirror the Windows tag set.
+        for value in [meta.artist, meta.album, meta.title] {
+            guard let v = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !v.isEmpty, !tags.contains(v) else { continue }
+            tags.append(v)
+        }
+        return TaggedFile(
+            url: url, kind: "audio", extension: ext, sizeBytes: discovered.sizeBytes,
+            createdAt: discovered.creationDate, modifiedAt: discovered.modificationDate,
+            visionTags: tags,
+            perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000,
+            tagsEvaluated: true
+        )
+    }
+
+    /// Race `extractAudioTags` against a timeout so a metadata read on a stalled volume
+    /// can't park a scan worker. Empties on timeout → the file just clusters by filename.
+    private static func boundedAudioTags(
+        url: URL, timeoutMs: Int
+    ) async -> (title: String?, artist: String?, album: String?) {
+        await withTaskGroup(of: (title: String?, artist: String?, album: String?)?.self) { group in
+            group.addTask { await DeepAnalyzeNaming.extractAudioTags(url: url) }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(timeoutMs) * 1_000_000)
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first ?? (nil, nil, nil)
+        }
+    }
+
+    // MARK: - 3D model pipeline
+
+    /// Render a 3D model to a thumbnail and CLIP-embed it at SCAN — so a `.obj` clusters by
+    /// its rendered shape like a photo (it joins the image/video visual pass). Restricted to
+    /// `.obj` to stay lockstep with the Windows engine, whose `obj_render` only parses
+    /// Wavefront `.obj`; the other recognized 3D formats are grouped under `3D Models/` by the
+    /// rule cascade and named by Deep Analyze (which renders them via QuickLook on demand).
+    /// `quickLookThumbnail` is itself watchdog-bounded (8 s), and runs on `visionQueue`.
+    private static func processModel(
+        discovered: DiscoveredFile,
+        started: CFAbsoluteTime
+    ) async -> TaggedFile {
+        await withCheckedContinuation { (cont: CheckedContinuation<TaggedFile, Never>) in
+            visionQueue.async {
+                let url = discovered.url
+                let ext = url.pathExtension.lowercased()
+                var tagged = TaggedFile(
+                    url: url, kind: "model", extension: ext, sizeBytes: discovered.sizeBytes,
+                    createdAt: discovered.creationDate, modifiedAt: discovered.modificationDate,
+                    visionTags: ["3D Model"],
+                    tagsEvaluated: true
+                )
+                if ext == "obj",
+                   let cg = DeepAnalyze.quickLookThumbnail(url: url, maxPixelSize: 512),
+                   let blob = MobileCLIPService.shared.embedImage(cg)
+                        .map({ MobileCLIPService.embeddingToBlob($0) }) {
+                    tagged.clipEmbeddingBlob = blob
+                }
+                // The content-derivation stage (render attempt) ran — stops the model
+                // CLIP-backfill carve-out re-walking an un-renderable .obj forever.
+                tagged.textStageDone = true
+                tagged.perFileTotalMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
+                cont.resume(returning: tagged)
+            }
+        }
     }
 
     // MARK: - Image pipeline
@@ -317,6 +406,7 @@ public enum Tagging {
                     tagsEvaluated: true
                 )
                 tagged.textEmbeddingBlob = bgeTextEmbeddingBlob(url: url)
+                tagged.textStageDone = true   // attempted — stops the backfill carve-out re-walk
                 tagged.perFileTotalMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
                 cont.resume(returning: tagged)
             }
@@ -436,6 +526,7 @@ public enum Tagging {
                 // (PDFKit text, not the lossy OCR), unless the file failed to open.
                 if !result.failed {
                     result.textEmbeddingBlob = bgeTextEmbeddingBlob(url: url)
+                    result.textStageDone = true   // attempted — stops the backfill carve-out re-walk
                 }
                 cont.resume(returning: result)
             }

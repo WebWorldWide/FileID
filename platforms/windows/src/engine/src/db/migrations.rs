@@ -46,6 +46,7 @@ fn registry() -> Vec<(&'static str, &'static str)> {
         ("v16_path_search",              V16_PATH_SEARCH),
         ("v17_face_verification_stable_keys", V17_FACE_VERIFICATION_STABLE_KEYS),
         ("v18_restructure_feedback",     V18_RESTRUCTURE_FEEDBACK),
+        ("v19_files_text_stage_done",    V19_FILES_TEXT_STAGE_DONE),
     ]
 }
 
@@ -183,6 +184,14 @@ CREATE TABLE IF NOT EXISTS restructure_feedback (
     PRIMARY KEY (token, folder)
 );
 CREATE INDEX IF NOT EXISTS idx_restructure_feedback_token ON restructure_feedback(token);
+";
+
+// v19: records that a doc/pdf's text-extraction stage has run, so the BGE backfill
+// carve-out stops re-walking a doc that yields no embeddable text (an image-only PDF,
+// an iWork package, an empty file) on every rescan. Byte-faithful with the macOS
+// v19_files_text_stage_done migration.
+const V19_FILES_TEXT_STAGE_DONE: &str = "
+ALTER TABLE files ADD COLUMN text_stage_done INTEGER NOT NULL DEFAULT 0;
 ";
 
 /// Apply every registered migration that hasn't been applied yet, in
@@ -475,7 +484,7 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 18, "expected 18 applied migrations");
+        assert_eq!(n, 19, "expected 19 applied migrations");
 
         // v13 added face_a + face_b to face_verifications (stable anchor keys).
         let verify_cols: i64 = conn
@@ -544,7 +553,7 @@ mod tests {
         apply(&conn).unwrap();
         apply(&conn).unwrap(); // second run is a no-op
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 18);
+        assert_eq!(n, 19);
     }
 
     /// R3-15 regression: a "different people" verdict's churn-stable (file_id, bbox)
@@ -637,7 +646,7 @@ mod tests {
     /// BOTH or the chains fork again.
     #[test]
     fn migration_identifiers_match_canonical_list() {
-        const CANONICAL: [&str; 18] = [
+        const CANONICAL: [&str; 19] = [
             "v1_core_tables",
             "v2_clip_embeddings",
             "v3_deep_analyze",
@@ -656,6 +665,7 @@ mod tests {
             "v16_path_search",
             "v17_face_verification_stable_keys",
             "v18_restructure_feedback",
+            "v19_files_text_stage_done",
         ];
         let ids: Vec<&str> = registry().iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, CANONICAL, "migration identifiers must match the canonical cross-platform list");

@@ -233,6 +233,9 @@ impl ScanSession {
             // re-emits them and the tagger backfills the BGE embedding. Empty when BGE
             // isn't on disk (no doc could embed → don't force a perpetual re-walk).
             let text_embed_gate = if bge_installed() { SKIP_SET_TEXT_EMBED_GATE } else { "" };
+            // CLIP ships by default, so always keep an embeddingless `.obj` in the pipeline
+            // to backfill its rendered-shape CLIP vector (lockstep with macOS).
+            let model_clip_gate = SKIP_SET_MODEL_CLIP_GATE;
             // R4-01: drop the tautological `scanned_at >= modified_at` predicate
             // (both are stored at scan time, so it's true for every scanned file
             // and STAYS true after an edit). Fetch size+mtime instead and let
@@ -242,13 +245,13 @@ impl ScanSession {
                     "SELECT path_text, size_bytes, modified_at FROM files \
                      WHERE path_text >= ?1 AND path_text < ?2 \
                      AND failed = 0 \
-                     {content_hash_gate}{text_embed_gate}"
+                     {content_hash_gate}{model_clip_gate}{text_embed_gate}"
                 )
             } else {
                 format!(
                     "SELECT path_text, size_bytes, modified_at FROM files \
                      WHERE failed = 0 \
-                     {content_hash_gate}{text_embed_gate}"
+                     {content_hash_gate}{model_clip_gate}{text_embed_gate}"
                 )
             };
             if let Ok(mut stmt) = conn.prepare(&select_sql) {
@@ -749,10 +752,25 @@ pub(crate) const SKIP_SET_CONTENT_HASH_GATE: &str =
 /// stranded on the weaker filename-bag-of-words clustering forever (the doc-content
 /// pass has no plan-time fallback). Appended ONLY when BGE is on disk (see
 /// `bge_installed`); leading space because it concatenates after the content gate.
+/// The `text_stage_done = 0` clause stops the re-walk once a doc has been text-extracted
+/// but yielded no embeddable text (image-only PDF, iWork, empty file) — otherwise such a
+/// doc, never able to get a `text_embeddings` row, would re-walk forever (v19).
 pub(crate) const SKIP_SET_TEXT_EMBED_GATE: &str =
-    " AND NOT (kind IN ('doc', 'pdf') \
+    " AND NOT (kind IN ('doc', 'pdf') AND text_stage_done = 0 \
       AND NOT EXISTS (SELECT 1 FROM text_embeddings \
                       WHERE text_embeddings.file_id = files.id))";
+
+/// R-14 (lockstep with macOS `DBWriter.skipSetModelClipBackfillExclusionSQL`): keep a `.obj`
+/// 3D model still LACKING a `clip_embeddings` row OUT of the skip set so its rendered-shape
+/// CLIP vector backfills on a rescan after the render→CLIP feature shipped. Limited to
+/// `extension = 'obj'` (the only format `obj_render` rasterizes). The `text_stage_done = 0`
+/// clause stops the re-walk once a render has been ATTEMPTED but failed (a corrupt /
+/// geometry-less .obj) — otherwise that .obj would re-walk forever. CLIP ships by default,
+/// so this is appended unconditionally; leading space concatenates after the content gate.
+pub(crate) const SKIP_SET_MODEL_CLIP_GATE: &str =
+    " AND NOT (kind = 'model' AND extension = 'obj' AND text_stage_done = 0 \
+      AND NOT EXISTS (SELECT 1 FROM clip_embeddings \
+                      WHERE clip_embeddings.file_id = files.id))";
 
 /// True once the BGE document embedder's weights are on disk — the same probe the
 /// tagger uses to decide whether to build the embedder (tagging.rs). Gates
@@ -995,13 +1013,14 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE files (
-                 id           INTEGER PRIMARY KEY,
-                 path_text    TEXT NOT NULL UNIQUE,
-                 kind         TEXT NOT NULL,
-                 modified_at  DOUBLE,
-                 scanned_at   DOUBLE NOT NULL,
-                 failed       INTEGER NOT NULL DEFAULT 0,
-                 content_hash BLOB
+                 id              INTEGER PRIMARY KEY,
+                 path_text       TEXT NOT NULL UNIQUE,
+                 kind            TEXT NOT NULL,
+                 modified_at     DOUBLE,
+                 scanned_at      DOUBLE NOT NULL,
+                 failed          INTEGER NOT NULL DEFAULT 0,
+                 content_hash    BLOB,
+                 text_stage_done INTEGER NOT NULL DEFAULT 0
              );
              CREATE TABLE text_embeddings (
                  file_id   INTEGER PRIMARY KEY,
@@ -1011,13 +1030,15 @@ mod tests {
         )
         .unwrap();
         // All rows carry a content_hash so the content gate keeps them all — isolating
-        // the text gate's effect.
+        // the text gate's effect. id=5 is a text-less doc whose text stage already ran
+        // (text_stage_done=1) — it must NOT be re-walked (no embeddable text to find).
         conn.execute(
-            "INSERT INTO files (id, path_text, kind, modified_at, scanned_at, failed, content_hash) VALUES \
-                 (1, 'C:\\Docs\\no_embed.docx', 'doc',   100.0, 200.0, 0, X'00'), \
-                 (2, 'C:\\Docs\\embedded.docx', 'doc',   100.0, 200.0, 0, X'00'), \
-                 (3, 'C:\\Docs\\no_embed.pdf',  'pdf',   100.0, 200.0, 0, X'00'), \
-                 (4, 'C:\\Pics\\photo.jpg',     'image', 100.0, 200.0, 0, X'00')",
+            "INSERT INTO files (id, path_text, kind, modified_at, scanned_at, failed, content_hash, text_stage_done) VALUES \
+                 (1, 'C:\\Docs\\no_embed.docx',  'doc',   100.0, 200.0, 0, X'00', 0), \
+                 (2, 'C:\\Docs\\embedded.docx',  'doc',   100.0, 200.0, 0, X'00', 0), \
+                 (3, 'C:\\Docs\\no_embed.pdf',   'pdf',   100.0, 200.0, 0, X'00', 0), \
+                 (4, 'C:\\Pics\\photo.jpg',      'image', 100.0, 200.0, 0, X'00', 0), \
+                 (5, 'C:\\Docs\\scanned.pdf',    'pdf',   100.0, 200.0, 0, X'00', 1)",
             [],
         )
         .unwrap();
@@ -1057,6 +1078,90 @@ mod tests {
         assert!(
             skip.contains("C:\\Pics\\photo.jpg"),
             "the text gate must not touch non-doc kinds (images use clip_embeddings)"
+        );
+        assert!(
+            skip.contains("C:\\Docs\\scanned.pdf"),
+            "a text-less doc whose text stage already ran (text_stage_done=1) must NOT re-walk forever"
+        );
+    }
+
+    /// R-14 (lockstep with macOS `skipSetModelClipBackfillExclusionSQL`): the model-CLIP
+    /// gate must keep a `.obj` still lacking a `clip_embeddings` row OUT of the skip set
+    /// (so a rescan backfills its rendered-shape vector), while leaving an embedded `.obj`,
+    /// a non-`.obj` 3D format (not renderable), and non-model kinds in the skip set.
+    #[test]
+    fn model_clip_gate_reprocesses_embeddingless_obj_only() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE files (
+                 id              INTEGER PRIMARY KEY,
+                 path_text       TEXT NOT NULL UNIQUE,
+                 kind            TEXT NOT NULL,
+                 extension       TEXT NOT NULL,
+                 modified_at     DOUBLE,
+                 scanned_at      DOUBLE NOT NULL,
+                 failed          INTEGER NOT NULL DEFAULT 0,
+                 content_hash    BLOB,
+                 text_stage_done INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE clip_embeddings (
+                 file_id   INTEGER PRIMARY KEY,
+                 embedding BLOB,
+                 model     TEXT
+             );",
+        )
+        .unwrap();
+        // All rows carry a content_hash so the content gate keeps them — isolating the
+        // model gate's effect. id=5 is an un-renderable .obj whose render already ran
+        // (text_stage_done=1) — it must NOT be re-walked (no CLIP vector to ever produce).
+        conn.execute(
+            "INSERT INTO files (id, path_text, kind, extension, modified_at, scanned_at, failed, content_hash, text_stage_done) VALUES \
+                 (1, 'C:\\M\\no_embed.obj', 'model', 'obj',  100.0, 200.0, 0, X'00', 0), \
+                 (2, 'C:\\M\\embedded.obj', 'model', 'obj',  100.0, 200.0, 0, X'00', 0), \
+                 (3, 'C:\\M\\shape.stl',    'model', 'stl',  100.0, 200.0, 0, X'00', 0), \
+                 (4, 'C:\\P\\photo.jpg',    'image', 'jpg',  100.0, 200.0, 0, X'00', 0), \
+                 (5, 'C:\\M\\corrupt.obj',  'model', 'obj',  100.0, 200.0, 0, X'00', 1)",
+            [],
+        )
+        .unwrap();
+        // Only obj id=2 has a stored CLIP embedding.
+        conn.execute(
+            "INSERT INTO clip_embeddings (file_id, embedding, model) VALUES (2, X'00', 'mobileclip_s2')",
+            [],
+        )
+        .unwrap();
+
+        let sql = format!(
+            "SELECT path_text FROM files \
+             WHERE failed = 0 \
+             {SKIP_SET_CONTENT_HASH_GATE}{SKIP_SET_MODEL_CLIP_GATE}"
+        );
+        let mut stmt = conn.prepare(&sql).unwrap();
+        let skip: std::collections::HashSet<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .flatten()
+            .collect();
+
+        assert!(
+            !skip.contains("C:\\M\\no_embed.obj"),
+            "an embeddingless .obj must be reprocessed so its rendered-shape CLIP backfills"
+        );
+        assert!(
+            skip.contains("C:\\M\\embedded.obj"),
+            "an .obj that already has a clip_embeddings row stays in the skip set"
+        );
+        assert!(
+            skip.contains("C:\\M\\shape.stl"),
+            "a non-.obj 3D format isn't renderable, so the gate must not re-walk it"
+        );
+        assert!(
+            skip.contains("C:\\P\\photo.jpg"),
+            "the model gate must not touch images"
+        );
+        assert!(
+            skip.contains("C:\\M\\corrupt.obj"),
+            "an un-renderable .obj whose render already ran (text_stage_done=1) must NOT re-walk forever"
         );
     }
 }

@@ -33,17 +33,24 @@ struct Tri {
 /// `.obj` (the caller falls back to embedded-name metadata). Blocking (CPU-bound) — the
 /// caller runs it on a blocking thread.
 pub(crate) fn render_obj_to_png(obj_path: &Path, out_png: &Path) -> Result<()> {
-    let (verts, tris) = parse_obj(obj_path)?;
-    if tris.is_empty() || verts.len() < 3 {
-        bail!("obj has no renderable geometry");
-    }
-    let pixels = rasterize(&verts, &tris);
-    let img = image::RgbImage::from_raw(SIZE, SIZE, pixels)
-        .context("assemble render buffer")?;
+    let (pixels, w, h) = render_obj_to_rgb(obj_path)?;
+    let img = image::RgbImage::from_raw(w, h, pixels).context("assemble render buffer")?;
     let p = crate::util::path_safety::to_extended_length(out_png);
     img.save_with_format(&p, image::ImageFormat::Png)
         .with_context(|| format!("encode png {}", out_png.display()))?;
     Ok(())
+}
+
+/// Render `obj_path` to a raw 512×512 RGB buffer — the shape the CLIP image encoder
+/// consumes after a resize. Err on an unreadable / geometry-less `.obj`. Blocking
+/// (CPU-bound) — the caller runs it on a blocking thread. Used by the scan to CLIP-embed
+/// a model's rendered shape, mirroring the macOS QuickLook→embedImage path.
+pub(crate) fn render_obj_to_rgb(obj_path: &Path) -> Result<(Vec<u8>, u32, u32)> {
+    let (verts, tris) = parse_obj(obj_path)?;
+    if tris.is_empty() || verts.len() < 3 {
+        bail!("obj has no renderable geometry");
+    }
+    Ok((rasterize(&verts, &tris), SIZE, SIZE))
 }
 
 /// Parse vertices + triangulated faces (with per-face Kd colour) from a `.obj`, reading

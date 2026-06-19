@@ -82,10 +82,20 @@ impl FileKind {
             | "heif" | "raw" | "arw" | "cr2" | "nef" | "dng" => FileKind::Image,
             "mp4" | "mov" | "m4v" | "avi" | "mkv" | "webm" | "mts" | "m2ts" => FileKind::Video,
             "pdf" => FileKind::Pdf,
+            // Office docs + e-books + source code / prose markup — all clustered by their
+            // extracted text (BGE). Lockstep with the macOS FileTypes.{documents,code,ebooks}.
             "docx" | "doc" | "odt" | "rtf" | "txt" | "md" | "pages" | "key" | "numbers"
-            | "xlsx" | "pptx" => FileKind::Doc,
+            | "xlsx" | "pptx" | "epub"
+            | "swift" | "py" | "rb" | "js" | "jsx" | "ts" | "tsx" | "java" | "kt" | "c"
+            | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh" | "cs" | "go" | "rs" | "php"
+            | "sh" | "bash" | "zsh" | "sql" | "scala" | "m" | "mm" | "r" | "jl" | "lua"
+            | "dart" | "vue" | "pl" | "pm" | "ps1" | "tex" | "bib" | "rst" | "org"
+            | "adoc" => FileKind::Doc,
             "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" | "opus" => FileKind::Audio,
-            "obj" => FileKind::Model,
+            // 3D models — `.obj` clusters by its rendered shape (CLIP); the rest are grouped
+            // under 3D Models/ + named by Deep Analyze. Lockstep with macOS FileTypes.models.
+            "obj" | "stl" | "ply" | "glb" | "gltf" | "fbx" | "usdz" | "usd" | "usda"
+            | "usdc" | "dae" | "3mf" | "3ds" | "off" => FileKind::Model,
             _ => FileKind::Other,
         }
     }
@@ -573,6 +583,17 @@ mod tests {
         assert_eq!(FileKind::from_extension("obj"), FileKind::Model);
         assert_eq!(FileKind::from_extension("OBJ"), FileKind::Model);
         assert_eq!(FileKind::Model.as_str(), "model");
+        // Source code + e-books cluster by their extracted text (Doc).
+        assert_eq!(FileKind::from_extension("py"), FileKind::Doc);
+        assert_eq!(FileKind::from_extension("RS"), FileKind::Doc);
+        assert_eq!(FileKind::from_extension("swift"), FileKind::Doc);
+        assert_eq!(FileKind::from_extension("epub"), FileKind::Doc);
+        // 3D formats beyond .obj are recognized so they group under 3D Models/.
+        assert_eq!(FileKind::from_extension("stl"), FileKind::Model);
+        assert_eq!(FileKind::from_extension("glb"), FileKind::Model);
+        assert_eq!(FileKind::from_extension("usdz"), FileKind::Model);
+        // A genuinely unknown binary stays Other.
+        assert_eq!(FileKind::from_extension("bin"), FileKind::Other);
     }
 
     #[test]
