@@ -8,7 +8,30 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
-## 2026-06-18 (latest) — doc-embedding backfill on install-then-rescan (both engines) + macOS BGE concurrency hardening
+## 2026-06-19 (latest) — content clustering for EVERY file type: audio, code/e-books, 3D models + text-less-doc loop fixed
+
+Restructure now groups every major file type by content, not just images/docs/video — both engines,
+lockstep. Branch `feat/content-coverage-all-types` (off main @ d257973).
+- **Audio (macOS parity):** macOS did nothing with audio at scan; now `processAudio` reads ID3/Vorbis/
+  MP4 metadata (artist/album/title) via a NAS-bounded AVFoundation read → auto tags, so audio clusters
+  by artist/album in the non-image pass — matching Windows (symphonia, already shipped).
+- **Code + e-books:** ~40 source-code/prose extensions + EPUB classified as `doc` and clustered by
+  extracted text (BGE). macOS DocText reads code as UTF-8 + a new `epubText`; Windows `doc_extract`
+  mirrors it (read_plain + `extract_epub` + a dep-free `strip_tags`). node_modules/.git already skipped.
+- **3D models:** recognize obj/stl/ply/glb/gltf/fbx/usd*/dae/3mf/3ds/off as `model`; `.obj` is
+  rendered to a thumbnail at scan and CLIP-embedded (macOS QuickLook→embedImage; Windows obj_render→
+  clip) so it clusters with photos/video; other 3D formats group under `3D Models/` + named by Deep
+  Analyze. A `.obj`-limited CLIP-backfill carve-out reprocesses existing .obj once.
+- **Text-less-doc loop fixed (the "error"):** the BGE backfill carve-out re-walked a doc that yields
+  no embeddable text (image-only PDF, iWork, empty file) on every rescan. New `v19_files_text_stage_done`
+  column (additive, byte-faithful both engines) gates the carve-out on `text_stage_done = 0`, so each
+  doc re-walks once then stops — text-less docs stay skipped, text docs keep their embedding.
+
+Verified: **macOS build + 253 tests; Windows clippy -D warnings + 368 tests** (new: extension mappings,
+model + text_stage_done skip-set parity, strip_tags, gate behavior). The added code/e-book/3D extension
+sets are byte-identical across engines; migration parity lists + counts updated (18→19) on both.
+
+## 2026-06-18 — doc-embedding backfill on install-then-rescan (both engines) + macOS BGE concurrency hardening
 
 Post-merge audit of the scan-time doc-embedding work found one real lockstep gap and three macOS
 concurrency refinements; all fixed, both engines green.

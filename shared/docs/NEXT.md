@@ -13,18 +13,22 @@ follow-ups (none block users; all graceful-degrade today):
   caches it; the doc pass prefers the cache (plan-time only for pre-BGE scans). Video keyframes
   likewise embed + store at scan. Verified: doc plan 3 min → 32 s, same 53%. Both engines now read
   the same scan-time `text_embeddings` store (tighter lockstep).
-- **Un-embeddable-doc rescan inefficiency (LOW, from the 2026-06-18 audit).** The doc BGE-backfill
-  carve-out (`skipSetTextBackfillExclusionSQL` / `SKIP_SET_TEXT_EMBED_GATE`) keeps every
-  `text_embeddings`-less doc/pdf in the pipeline so an install-then-rescan backfills it. A doc with NO
-  extractable text (image-only PDF whose text layer is empty, empty .docx) never gets an embedding, so
-  it's re-walked on every incremental rescan — a cheap text-extraction *attempt* each time (no OCR;
-  returns fast), once per scan, not a hang. Fix needs a durable "doc has extractable text" signal:
-  Windows already has `has_text=true`-for-docs + a `doc_text` store; macOS has neither (its `has_text`
-  is OCR-only, and it discards doc text after embedding). Recipe: give macOS doc-text storage (lockstep
-  with Windows `v10_doc_text` — a pre-existing parity gap), then add `AND has_text = 1` to BOTH carve-out
-  predicates. Bonus: feeding a scanned PDF's OCR text to BGE (instead of the empty PDFKit layer) would
-  also CLUSTER image-only PDFs by content — but the embedding text source must stay byte-identical
-  across engines (lockstep), so design that carefully.
+- **✅ DONE (2026-06-19) — un-embeddable-doc rescan loop fixed.** Solved with a dedicated
+  `v19_files_text_stage_done` column (cleaner than the original has_text recipe — no overloading the
+  OCR-semantic has_text, no macOS doc-text-storage prerequisite): set true whenever a doc/pdf's text
+  stage runs, and the carve-out ANDs `text_stage_done = 0`. A text-less doc re-walks once, gets marked
+  done, then stays skipped forever; a text doc still backfills. Both engines, lockstep + tested.
+  (Still tracked as a *bonus*: feeding a scanned PDF's OCR text to BGE would CLUSTER image-only PDFs by
+  content — but the embedding text source must stay byte-identical across engines, so design carefully.)
+- **✅ DONE (2026-06-19) — content coverage for audio, code/e-books, 3D models** (both engines, lockstep):
+  audio→artist/album tags (macOS parity), code/EPUB→BGE text, .obj→CLIP + other 3D→`3D Models/`. See STATE.
+- **Pre-existing extension-set divergences (LOW, lockstep-audit).** The image/video/audio/legacy-office
+  extension sets differ across engines (macOS has orf/rw2/raf/wmv/flv/mpg/aiff/xls/ppt; Windows has
+  mts/m2ts/odt). Mostly capability-driven (each engine lists formats its decoder handles) so naive
+  alignment could break the other engine; but a few are arbitrary (e.g. `.odt` is extractable by both
+  yet only Windows classifies it as `doc`; `.xls/.ppt` are doc on macOS, Other on Windows). The newly
+  added code/e-book/3D sets ARE byte-identical. Audit each format for decode capability on both engines
+  before aligning; don't add a format an engine can't process (→ failed rows).
 - **Further doc-threshold tuning (optional).** 53% with the biggest group at 168/65-folders is good
   but the course folders are noisy labels; the `FILEID_RESTRUCTURE_DOC_*` env knobs allow more.
 - **Cross-pass new-group name dedup (MEDIUM, from the 2026-06-17 audit).** `used_group_names` /
