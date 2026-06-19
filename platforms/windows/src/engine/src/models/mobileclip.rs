@@ -1,10 +1,13 @@
-// MobileCLIP-S2 image encoder. Maps a 256×256 RGB image to a 512-d
-// L2-normalized float32 embedding for scan-time clustering and
-// query-time semantic search.
+// CLIP ViT-B/32 image encoder (OpenAI/OpenCLIP, MIT). Maps a 224×224 RGB
+// image to a 512-d L2-normalized float32 embedding for scan-time clustering
+// and query-time semantic search.
 //
-// Inference order: resize-and-letterbox → ImageNet mean/std normalize
-// → CHW float32 → ORT session.run → L2 normalize. Persisted as raw
-// little-endian bytes in `clip_embeddings.embedding`.
+// Inference order: resize → CLIP mean/std normalize → CHW float32
+// → ORT session.run → L2 normalize. Persisted as raw little-endian bytes
+// in `clip_embeddings.embedding`.
+//
+// File was originally MobileCLIP-S2 (256×256, research-only license); now
+// loads the Apache-2.0 / commercial-clean ViT-B/32 export at 224×224.
 
 use std::path::{Path, PathBuf};
 
@@ -71,7 +74,7 @@ impl MobileClipImage {
         Ok(model)
     }
 
-    /// Embed a 256×256 RGB8 image. Caller pre-resizes to 256×256 via
+    /// Embed a 224×224 RGB8 image. Caller pre-resizes to 224×224 via
     /// `tagging::resize_rgb_nearest` (or bilinear when we wire that).
     /// Single-image embed. Kept for non-batched callers (e.g. interactive
     /// semantic-search query embedding) — main scan pipeline goes through
@@ -118,8 +121,8 @@ impl MobileClipImage {
         Ok(emb)
     }
 
-    /// Batched inference. Takes N pre-resized 256×256 RGB8 buffers, packs
-    /// them into a single (N, 3, 256, 256) tensor, calls `session.run` ONCE,
+    /// Batched inference. Takes N pre-resized 224×224 RGB8 buffers, packs
+    /// them into a single (N, 3, 224, 224) tensor, calls `session.run` ONCE,
     /// and returns N L2-normalized embeddings.
     ///
     /// Per-call dispatch overhead through DirectML is sizable (kernel queue

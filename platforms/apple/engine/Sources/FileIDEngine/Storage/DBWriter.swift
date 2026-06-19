@@ -982,16 +982,5 @@ public actor DBWriter {
 
 // MARK: - ScanCoordinator additions for batched bumps
 
-extension ScanCoordinator {
-    /// Bump processed by N at once. Avoids N actor-hops per file in the DB
-    /// writer's tight commit loop.
-    public func bumpProcessed(by n: Int) {
-        guard n > 0 else { return }
-        for _ in 0..<n { bumpProcessed() }
-    }
-
-    public func bumpFailed(by n: Int) {
-        guard n > 0 else { return }
-        for _ in 0..<n { bumpFailed() }
-    }
-}
+// bumpProcessed(by:) and bumpFailed(by:) are defined in ScanCoordinator.swift
+// (where they have access to the private(set) `current` property).

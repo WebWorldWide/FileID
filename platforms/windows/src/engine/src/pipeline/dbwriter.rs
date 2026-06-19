@@ -592,7 +592,7 @@ impl DbWriter {
                 clip.push(f.clip_ms);
                 let insert_ms = insert_started.elapsed().as_secs_f64() * 1000.0;
                 store.push(insert_ms);
-                if std::env::var_os("FILEID_PERF_TRACE").is_some() {
+                if std::env::var("FILEID_PERF_TRACE").is_ok_and(|v| !v.is_empty() && v != "0") {
                     tracing::debug!(
                         target: "FileIDEngine::perf",
                         stage = "db_write_done",

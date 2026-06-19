@@ -10,7 +10,8 @@
 //!   v9_usn_state, v10_doc_text, v11_text_embeddings, v12_face_model_reset,
 //!   v13_face_verification_anchors, v14_files_kind_scanned_index,
 //!   v15_fts_sync_triggers, v16_path_search,
-//!   v17_face_verification_stable_keys, v18_restructure_feedback
+//!   v17_face_verification_stable_keys, v18_restructure_feedback,
+//!   v19_files_text_stage_done
 //!
 //! Migrations are append-only. NEVER edit a registered migration once
 //! committed; add a new vN+1 migration instead.
