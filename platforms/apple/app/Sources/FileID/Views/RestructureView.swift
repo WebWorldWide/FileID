@@ -70,6 +70,12 @@ struct RestructureView: View {
     @State private var captionedFraction: Double = 0
     @State private var totalAnalyzableFiles = 0
     @State private var dismissedDeepAnalyzeHint = false
+    /// (clip, text) embedding counts at plan time. nil = not yet measured. When both are
+    /// 0 the scan ran without the CLIP/BGE models, so the plan is date/name-only — we tell
+    /// the user to install the models + rescan for content-based grouping.
+    @State private var embeddingCounts: (clip: Int, text: Int)?
+    /// Lets the missing-models banner jump the user to Settings → AI Models.
+    @AppStorage("activeTabRawValue") private var activeTabRaw: String = MainWindow.Tab.library.rawValue
     /// Per-file deselections captured at `requestPlan()` time and re-applied in
     /// `applyPlan()`, so an engine re-plan (e.g. after Deep Analyze finishes
     /// mid-review) doesn't silently re-check rows the user unchecked.
@@ -165,7 +171,9 @@ struct RestructureView: View {
                         if !proposals.isEmpty || summary.hasContent {
                             RestructureStatHero(summary: summary,
                                                   hoverBus: hoverBus)
-                            if shouldShowDeepAnalyzeHint {
+                            if shouldShowMissingContentModels {
+                                missingContentModelsBanner
+                            } else if shouldShowDeepAnalyzeHint {
                                 deepAnalyzeHintBanner
                             }
                             HStack {
@@ -380,6 +388,54 @@ struct RestructureView: View {
         guard !engine.deepAnalyzeInFlight else { return false }
         guard totalAnalyzableFiles > 0 else { return false }
         return captionedFraction < 0.4
+    }
+
+    /// The scan produced NO content embeddings (CLIP + BGE both absent / not installed),
+    /// so the plan can only sort by date + name. This is the #1 cause of a plan that
+    /// "just dumps everything into year folders" — surface it loudly with a fix.
+    private var shouldShowMissingContentModels: Bool {
+        guard let c = embeddingCounts else { return false }   // not measured yet
+        guard totalAnalyzableFiles > 0 else { return false }
+        return c.clip == 0 && c.text == 0
+    }
+
+    private var missingContentModelsBanner: some View {
+        HStack(alignment: .center, spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.orange.opacity(0.18))
+                    .frame(width: 38, height: 38)
+                Image(systemName: "wand.and.stars.inverse")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(.orange)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Organizing by date only — AI models aren't installed")
+                    .font(.callout.weight(.semibold))
+                Text("Without the image (CLIP) + document (BGE) models, the butler can't read what your files ARE, so it falls back to year/month folders. Install them in Settings → AI Models, then rescan, and photos group by what's in them and documents by their content.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            Button {
+                activeTabRaw = MainWindow.Tab.settings.rawValue
+            } label: {
+                Label("Open Settings", systemImage: "gearshape")
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    .background(Capsule().fill(Color.orange.opacity(0.85)))
+                    .foregroundStyle(.black)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.Radius.m)
+                .fill(Color.orange.opacity(0.08))
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m)
+                    .stroke(Color.orange.opacity(0.25), lineWidth: 1))
+        )
     }
 
     @ViewBuilder
@@ -1015,6 +1071,7 @@ struct RestructureView: View {
         let (total, captioned) = store.filesAnalysisStats()
         totalAnalyzableFiles = total
         captionedFraction = total > 0 ? Double(captioned) / Double(total) : 0
+        embeddingCounts = store.contentEmbeddingCounts()
 
         loading = false
     }
