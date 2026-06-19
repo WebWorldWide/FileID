@@ -501,6 +501,14 @@ public final class Database: @unchecked Sendable {
             try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_restructure_feedback_token ON restructure_feedback(token)")
         }
 
+        // v19: records that a doc/pdf's text-extraction stage has run, so the BGE
+        // backfill carve-out stops re-walking a doc that yields no embeddable text
+        // (an image-only PDF, an iWork package, an empty file) on every rescan.
+        // Byte-faithful with the Rust v19_files_text_stage_done migration.
+        m.registerMigration("v19_files_text_stage_done") { db in
+            try db.execute(sql: "ALTER TABLE files ADD COLUMN text_stage_done INTEGER NOT NULL DEFAULT 0")
+        }
+
         return m
     }
 

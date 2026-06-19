@@ -752,8 +752,11 @@ pub(crate) const SKIP_SET_CONTENT_HASH_GATE: &str =
 /// stranded on the weaker filename-bag-of-words clustering forever (the doc-content
 /// pass has no plan-time fallback). Appended ONLY when BGE is on disk (see
 /// `bge_installed`); leading space because it concatenates after the content gate.
+/// The `text_stage_done = 0` clause stops the re-walk once a doc has been text-extracted
+/// but yielded no embeddable text (image-only PDF, iWork, empty file) — otherwise such a
+/// doc, never able to get a `text_embeddings` row, would re-walk forever (v19).
 pub(crate) const SKIP_SET_TEXT_EMBED_GATE: &str =
-    " AND NOT (kind IN ('doc', 'pdf') \
+    " AND NOT (kind IN ('doc', 'pdf') AND text_stage_done = 0 \
       AND NOT EXISTS (SELECT 1 FROM text_embeddings \
                       WHERE text_embeddings.file_id = files.id))";
 
@@ -1009,13 +1012,14 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE files (
-                 id           INTEGER PRIMARY KEY,
-                 path_text    TEXT NOT NULL UNIQUE,
-                 kind         TEXT NOT NULL,
-                 modified_at  DOUBLE,
-                 scanned_at   DOUBLE NOT NULL,
-                 failed       INTEGER NOT NULL DEFAULT 0,
-                 content_hash BLOB
+                 id              INTEGER PRIMARY KEY,
+                 path_text       TEXT NOT NULL UNIQUE,
+                 kind            TEXT NOT NULL,
+                 modified_at     DOUBLE,
+                 scanned_at      DOUBLE NOT NULL,
+                 failed          INTEGER NOT NULL DEFAULT 0,
+                 content_hash    BLOB,
+                 text_stage_done INTEGER NOT NULL DEFAULT 0
              );
              CREATE TABLE text_embeddings (
                  file_id   INTEGER PRIMARY KEY,
@@ -1025,13 +1029,15 @@ mod tests {
         )
         .unwrap();
         // All rows carry a content_hash so the content gate keeps them all — isolating
-        // the text gate's effect.
+        // the text gate's effect. id=5 is a text-less doc whose text stage already ran
+        // (text_stage_done=1) — it must NOT be re-walked (no embeddable text to find).
         conn.execute(
-            "INSERT INTO files (id, path_text, kind, modified_at, scanned_at, failed, content_hash) VALUES \
-                 (1, 'C:\\Docs\\no_embed.docx', 'doc',   100.0, 200.0, 0, X'00'), \
-                 (2, 'C:\\Docs\\embedded.docx', 'doc',   100.0, 200.0, 0, X'00'), \
-                 (3, 'C:\\Docs\\no_embed.pdf',  'pdf',   100.0, 200.0, 0, X'00'), \
-                 (4, 'C:\\Pics\\photo.jpg',     'image', 100.0, 200.0, 0, X'00')",
+            "INSERT INTO files (id, path_text, kind, modified_at, scanned_at, failed, content_hash, text_stage_done) VALUES \
+                 (1, 'C:\\Docs\\no_embed.docx',  'doc',   100.0, 200.0, 0, X'00', 0), \
+                 (2, 'C:\\Docs\\embedded.docx',  'doc',   100.0, 200.0, 0, X'00', 0), \
+                 (3, 'C:\\Docs\\no_embed.pdf',   'pdf',   100.0, 200.0, 0, X'00', 0), \
+                 (4, 'C:\\Pics\\photo.jpg',      'image', 100.0, 200.0, 0, X'00', 0), \
+                 (5, 'C:\\Docs\\scanned.pdf',    'pdf',   100.0, 200.0, 0, X'00', 1)",
             [],
         )
         .unwrap();
@@ -1071,6 +1077,10 @@ mod tests {
         assert!(
             skip.contains("C:\\Pics\\photo.jpg"),
             "the text gate must not touch non-doc kinds (images use clip_embeddings)"
+        );
+        assert!(
+            skip.contains("C:\\Docs\\scanned.pdf"),
+            "a text-less doc whose text stage already ran (text_stage_done=1) must NOT re-walk forever"
         );
     }
 

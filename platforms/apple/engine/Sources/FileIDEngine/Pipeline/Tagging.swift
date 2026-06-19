@@ -403,6 +403,7 @@ public enum Tagging {
                     tagsEvaluated: true
                 )
                 tagged.textEmbeddingBlob = bgeTextEmbeddingBlob(url: url)
+                tagged.textStageDone = true   // attempted — stops the backfill carve-out re-walk
                 tagged.perFileTotalMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
                 cont.resume(returning: tagged)
             }
@@ -522,6 +523,7 @@ public enum Tagging {
                 // (PDFKit text, not the lossy OCR), unless the file failed to open.
                 if !result.failed {
                     result.textEmbeddingBlob = bgeTextEmbeddingBlob(url: url)
+                    result.textStageDone = true   // attempted — stops the backfill carve-out re-walk
                 }
                 cont.resume(returning: result)
             }
