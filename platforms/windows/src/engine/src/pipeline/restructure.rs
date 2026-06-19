@@ -239,6 +239,9 @@ pub fn classify(
         } else if matches!(f.kind, FileKind::Audio) {
             (library_root.join("Audio"), "audio".to_string(),
              Confidence::Review, "Audio file".to_string())
+        } else if matches!(f.kind, FileKind::Model) {
+            (library_root.join("3D Models"), "model".to_string(),
+             Confidence::Review, "3D model".to_string())
         } else {
             (library_root.join("Misc"), "misc".to_string(),
              Confidence::Ask, "No strong signal — left for you to decide".to_string())

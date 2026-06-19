@@ -59,16 +59,31 @@ public enum FileTypes {
     public static let audio: Set<String> = [
         "mp3", "m4a", "aac", "wav", "flac", "ogg", "opus", "aiff"
     ]
-    /// 3D models whose embedded names Deep Analyze can parse. Wavefront `.obj` only
-    /// for now (lockstep with the Rust engine's FileKind::from_extension).
-    public static let models: Set<String> = ["obj"]
+    /// Source code + prose markup — read as UTF-8 text and clustered by content (BGE),
+    /// classified as `.doc`. Lockstep with the Rust engine's FileKind::from_extension.
+    public static let code: Set<String> = [
+        "swift", "py", "rb", "js", "jsx", "ts", "tsx", "java", "kt", "c", "h", "cpp",
+        "cc", "cxx", "hpp", "hh", "cs", "go", "rs", "php", "sh", "bash", "zsh", "sql",
+        "scala", "m", "mm", "r", "jl", "lua", "dart", "vue", "pl", "pm", "ps1",
+        "tex", "bib", "rst", "org", "adoc"
+    ]
+    /// E-books — extracted to text and clustered as `.doc`. EPUB only (zip of XHTML);
+    /// MOBI is proprietary (low ROI). Lockstep with the Rust engine.
+    public static let ebooks: Set<String> = ["epub"]
+    /// 3D models — rendered to a thumbnail and (for `.obj`) clustered by CLIP like images;
+    /// every recognized format is grouped under `3D Models/` + named by Deep Analyze.
+    /// Lockstep with the Rust engine's FileKind::from_extension.
+    public static let models: Set<String> = [
+        "obj", "stl", "ply", "glb", "gltf", "fbx", "usdz", "usd", "usda", "usdc",
+        "dae", "3mf", "3ds", "off"
+    ]
 
     public static func kind(forExtension ext: String) -> DiscoveredFile.Kind {
         let e = ext.lowercased()
         if images.contains(e)    { return .image }
         if videos.contains(e)    { return .video }
         if pdfs.contains(e)      { return .pdf }
-        if documents.contains(e) { return .doc }
+        if documents.contains(e) || code.contains(e) || ebooks.contains(e) { return .doc }
         if audio.contains(e)     { return .audio }
         if models.contains(e)    { return .model }
         return .other
@@ -77,6 +92,7 @@ public enum FileTypes {
     public static func isTaggable(_ ext: String) -> Bool {
         let e = ext.lowercased()
         return images.contains(e) || videos.contains(e) || documents.contains(e)
+            || code.contains(e) || ebooks.contains(e)
             || audio.contains(e) || models.contains(e)
     }
 }
@@ -364,6 +380,9 @@ public actor Discovery {
             atPath: MobileCLIPService.defaultImageModelURL.path)
         let clipExclusion = clipInstalled
             ? "AND \(DBWriter.skipSetClipBackfillExclusionSQL)" : ""
+        // Same CLIP gate keeps an embeddingless `.obj` 3D model in the pipeline to backfill.
+        let modelExclusion = clipInstalled
+            ? "AND \(DBWriter.skipSetModelClipBackfillExclusionSQL)" : ""
         let textExclusion = BGETextService.isInstalledOnDisk
             ? "AND \(DBWriter.skipSetTextBackfillExclusionSQL)" : ""
         do {
@@ -373,6 +392,7 @@ public actor Discovery {
                     SELECT path_text, size_bytes, modified_at FROM files
                     WHERE failed = 0 AND path_text >= ? AND path_text < ?
                       \(clipExclusion)
+                      \(modelExclusion)
                       \(textExclusion)
                     """, arguments: [prefix, prefixUpper])
                 map.reserveCapacity(rows.count)

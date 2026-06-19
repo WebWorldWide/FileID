@@ -79,6 +79,12 @@ public struct TaggedFile: Sendable {
     public var tagsEvaluated: Bool
     public var facesEvaluated: Bool
     public var ocrStageRan: Bool
+    /// The content-derivation stage ran this session — doc/pdf text extraction OR a 3D-model
+    /// render (whether or not it produced an embeddable result). Persisted to
+    /// `files.text_stage_done` so the BGE doc carve-out AND the model CLIP carve-out stop
+    /// re-walking a file that can never produce its embedding (a text-less doc, an
+    /// un-renderable .obj).
+    public var textStageDone: Bool
 
     public init(
         url: URL, kind: String, extension ext: String, sizeBytes: Int64,
@@ -98,7 +104,8 @@ public struct TaggedFile: Sendable {
         textEmbeddingBlob: Data? = nil,
         tagsEvaluated: Bool = false,
         facesEvaluated: Bool = false,
-        ocrStageRan: Bool = false
+        ocrStageRan: Bool = false,
+        textStageDone: Bool = false
     ) {
         self.url = url
         self.kind = kind
@@ -130,6 +137,7 @@ public struct TaggedFile: Sendable {
         self.tagsEvaluated = tagsEvaluated
         self.facesEvaluated = facesEvaluated
         self.ocrStageRan = ocrStageRan
+        self.textStageDone = textStageDone
     }
 }
 
@@ -604,6 +612,16 @@ public actor DBWriter {
         // faces, OCR, CLIP) attach to the correct, surviving row on a rescan.
         let fileID: Int64 = (existing?["id"]) ?? db.lastInsertedRowID
 
+        // Mark the doc/pdf text stage attempted (idempotent) so the BGE backfill carve-out
+        // stops re-walking a doc that yields no embeddable text. Placed before the
+        // unchanged early-return so it fires on BOTH the unchanged-backfill and full-write
+        // paths; the `= 0` guard avoids a redundant write once it's set. (R-14)
+        if file.textStageDone {
+            try db.cachedStatement(sql: """
+                UPDATE files SET text_stage_done = 1 WHERE id = ? AND text_stage_done = 0
+                """).execute(arguments: [fileID])
+        }
+
         // Unchanged file: leave every child row exactly as-is. Re-detecting
         // would either duplicate rows or destroy manual person assignments for
         // a file that didn't change. One exception: a CLIP model installed
@@ -766,9 +784,26 @@ public actor DBWriter {
     /// the first scan usually predates it). Discovery ANDs this only when BGE is on
     /// disk (`BGETextService.isInstalledOnDisk`); otherwise no doc could ever embed and
     /// it would force a full re-walk of every doc on every scan forever.
+    /// The `text_stage_done = 0` clause stops the re-walk once a doc has been text-
+    /// extracted but yielded no embeddable text (image-only PDF, iWork, empty file) —
+    /// otherwise such a doc, never able to get a `text_embeddings` row, would re-walk
+    /// forever (v19_files_text_stage_done).
     static let skipSetTextBackfillExclusionSQL = """
-        NOT (files.kind IN ('doc', 'pdf') AND NOT EXISTS (
+        NOT (files.kind IN ('doc', 'pdf') AND files.text_stage_done = 0 AND NOT EXISTS (
             SELECT 1 FROM text_embeddings WHERE text_embeddings.file_id = files.id))
+        """
+
+    /// 3D-model analog: keep a `.obj` that still LACKS a `clip_embeddings` row OUT of the
+    /// skip set so its rendered-shape CLIP vector backfills on a rescan after the render→CLIP
+    /// feature shipped. Limited to `extension = 'obj'` (the only format both engines render).
+    /// The `text_stage_done = 0` clause stops the re-walk once a render has been ATTEMPTED but
+    /// failed (a corrupt / geometry-less .obj) — otherwise that .obj, never able to get a
+    /// `clip_embeddings` row, would re-walk forever (and a macOS QuickLook render can cost up
+    /// to 8 s each). CLIP ships by default, so Discovery ANDs this whenever CLIP is installed.
+    static let skipSetModelClipBackfillExclusionSQL = """
+        NOT (files.kind = 'model' AND files.extension = 'obj' AND files.text_stage_done = 0
+             AND NOT EXISTS (
+            SELECT 1 FROM clip_embeddings WHERE clip_embeddings.file_id = files.id))
         """
 
     private static func insertClipEmbedding(fileID: Int64, blob: Data, db: GRDB.Database) throws {

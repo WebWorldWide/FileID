@@ -46,10 +46,17 @@ pub(crate) fn extract(path: &Path, bytes: Option<&[u8]>) -> Result<Option<String
         .unwrap_or("")
         .to_ascii_lowercase();
     let text = match ext.as_str() {
-        "txt" | "md" => Some(read_plain(path, bytes)?),
+        // Plain text: notes + source code + prose markup (lockstep with macOS FileTypes.code).
+        "txt" | "md" | "swift" | "py" | "rb" | "js" | "jsx" | "ts" | "tsx" | "java" | "kt"
+        | "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh" | "cs" | "go" | "rs" | "php"
+        | "sh" | "bash" | "zsh" | "sql" | "scala" | "m" | "mm" | "r" | "jl" | "lua" | "dart"
+        | "vue" | "pl" | "pm" | "ps1" | "tex" | "bib" | "rst" | "org" | "adoc" => {
+            Some(read_plain(path, bytes)?)
+        }
         "docx" => Some(extract_zip_xml(path, bytes, &["word/document.xml"], &["w:t"])?),
         "pptx" => Some(extract_zip_xml_glob(path, bytes, "ppt/slides/slide", ".xml", &["a:t"])?),
         "xlsx" => Some(extract_zip_xml(path, bytes, &["xl/sharedStrings.xml"], &["t"])?),
+        "epub" => Some(extract_epub(path, bytes)?),
         #[cfg(feature = "pdf-analyze")]
         "pdf" => extract_pdf_text(path).ok(),
         _ => None,
@@ -240,6 +247,94 @@ fn extract_zip_xml_glob_inner<R: Read + Seek>(
     Ok(out)
 }
 
+/// EPUB → text. An EPUB is a zip of XHTML; concatenate the tag-stripped text of its
+/// (x)html members in reading (sorted) order, bounded the same way as the OOXML globs.
+/// Mirrors the macOS `DocText.epubText`.
+fn extract_epub(path: &Path, bytes: Option<&[u8]>) -> Result<String> {
+    if let Some(b) = bytes {
+        extract_epub_inner(Cursor::new(b), path)
+    } else {
+        let p = crate::util::path_safety::to_extended_length(path);
+        let file = std::fs::File::open(&p)?;
+        extract_epub_inner(file, path)
+    }
+}
+
+fn extract_epub_inner<R: Read + Seek>(reader: R, path: &Path) -> Result<String> {
+    let mut zip =
+        zip::ZipArchive::new(reader).with_context(|| format!("zip open {}", path.display()))?;
+    let mut names: Vec<String> = zip
+        .file_names()
+        .filter(|n| {
+            std::path::Path::new(n)
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| {
+                    e.eq_ignore_ascii_case("xhtml")
+                        || e.eq_ignore_ascii_case("html")
+                        || e.eq_ignore_ascii_case("htm")
+                })
+        })
+        .take(MAX_GLOB_MEMBERS)
+        .map(String::from)
+        .collect();
+    names.sort();
+    let mut out = String::new();
+    for name in &names {
+        let mut entry = match zip.by_name(name) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let html = match read_member_bounded(&mut entry) {
+            Some(h) => h,
+            None => continue,
+        };
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&strip_tags(&html));
+        if out.len() > MAX_TEXT_BYTES {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// Strip XML/HTML tags (each becomes a space) and collapse whitespace — cheap, dep-free,
+/// good enough for a BGE clustering snippet. Leaves entities (`&amp;`) as-is, matching the
+/// macOS `epubText` regex strip.
+fn strip_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    let mut last_ws = true; // suppress leading + run whitespace
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            // Each closed tag becomes a space (then whitespace collapses) — matches the
+            // macOS `epubText` regex replace, so the extracted text is the same.
+            '>' => {
+                in_tag = false;
+                if !last_ws {
+                    out.push(' ');
+                    last_ws = true;
+                }
+            }
+            _ if in_tag => {}
+            c if c.is_whitespace() => {
+                if !last_ws {
+                    out.push(' ');
+                    last_ws = true;
+                }
+            }
+            c => {
+                out.push(c);
+                last_ws = false;
+            }
+        }
+    }
+    out.trim().to_string()
+}
+
 /// Walk `xml` with quick-xml's pull parser, accumulating text from every
 /// element whose **local name** appears in `target_elems` (the namespace
 /// prefix before `:` is ignored). `["w:t", "t"]` matches `<w:t>`, `<a:t>`,
@@ -296,6 +391,14 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static N: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn strip_tags_keeps_text_drops_markup() {
+        let html = "<html><body><h1>Moby Dick</h1>\n<p>Call me  Ishmael.</p></body></html>";
+        assert_eq!(strip_tags(html), "Moby Dick Call me Ishmael.");
+        assert_eq!(strip_tags("<p>a</p><p>b</p>"), "a b");
+        assert_eq!(strip_tags("   <i></i>   "), "");
+    }
 
     fn tmp_with(suffix: &str, body: &[u8]) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!(

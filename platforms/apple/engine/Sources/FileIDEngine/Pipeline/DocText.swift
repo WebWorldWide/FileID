@@ -19,8 +19,9 @@ enum DocText {
     /// unreadable. Bounded in time + size.
     static func extract(path: String, maxChars: Int = 4000) -> String? {
         let url = URL(fileURLWithPath: path)
+        let ext = url.pathExtension.lowercased()
         let raw: String?
-        switch url.pathExtension.lowercased() {
+        switch ext {
         case "txt", "md", "markdown", "csv", "log", "text":
             raw = boundedRead(url)
         case "pdf":
@@ -31,8 +32,11 @@ enum DocText {
             raw = officeXML(url, member: "ppt/slides/slide*.xml", tag: "a:t")
         case "xlsx":
             raw = officeXML(url, member: "xl/sharedStrings.xml", tag: "t")
+        case "epub":
+            raw = epubText(url)
         default:
-            raw = nil
+            // Source code + prose markup → read as UTF-8 (BGE clusters by content).
+            raw = FileTypes.code.contains(ext) ? boundedRead(url) : nil
         }
         guard let t = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else {
             return nil
@@ -82,6 +86,19 @@ enum DocText {
         }
         let joined = parts.joined(separator: " ")
         return joined.isEmpty ? nil : joined
+    }
+
+    /// EPUB → text: an EPUB is a zip of XHTML, so concatenate the content members (`unzip`'s
+    /// member glob pulls them in one shot, bounded by runBounded) and strip the tags. Only
+    /// the first ~256 tokens reach BGE, so the 16 KB read cap is plenty. Mirrors the Windows
+    /// `doc_extract` EPUB path.
+    private static func epubText(_ url: URL) -> String? {
+        guard let data = runBounded("/usr/bin/unzip", ["-p", url.path, "*.xhtml", "*.html", "*.htm"]),
+              let html = String(data: data, encoding: .utf8) else { return nil }
+        let stripped = html.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+        let collapsed = stripped.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        let trimmed = collapsed.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     /// Run a converter subprocess with a watchdog (terminates a stuck child) + a `maxBytes`

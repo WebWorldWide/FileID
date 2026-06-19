@@ -224,6 +224,10 @@ pub struct TaggedFile {
     /// when the stage ran, never on the ambiguous default-skip path.
     pub ocr_stage_ran: bool,
     pub doc_stage_ran: bool,
+    /// The doc/pdf text-extraction stage ran this session (whether or not text was found).
+    /// Persisted to `files.text_stage_done` so the BGE backfill carve-out stops re-walking
+    /// a doc that yields no embeddable text (lockstep with macOS).
+    pub text_stage_done: bool,
 
     /// True iff the tagging stage(s) actually produced this file's tag set this
     /// session (RAM++ / CLIP-scene / enriched extras for images; keyword / audio
@@ -868,6 +872,7 @@ impl Tagger {
                                 faces_evaluated: false,
                                 ocr_stage_ran: false,
                                 doc_stage_ran: false,
+                                text_stage_done: false,
                                 tags_evaluated: false,
                             }
                         }
@@ -1082,6 +1087,22 @@ fn run_decoder_thread(
             match file.kind {
                 FileKind::Image => Some(decode_image_sync(&file.path, file_bytes.as_deref())),
                 FileKind::Video => Some(decode_video_keyframe_sync(&file.path)),
+                // 3D `.obj` → rendered-shape RGB for CLIP (lockstep with macOS processModel).
+                // A render failure is NOT a file failure (the model still groups under 3D
+                // Models/), so map Err→None rather than letting the Some(Err) path mark the
+                // row failed. Non-obj 3D formats produce no frame (grouped, not CLIP'd).
+                FileKind::Model => {
+                    let is_obj = file
+                        .path
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(|e| e.eq_ignore_ascii_case("obj"));
+                    if is_obj {
+                        crate::pipeline::obj_render::render_obj_to_rgb(&file.path).ok().map(Ok)
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
             }
         };
@@ -1348,6 +1369,7 @@ async fn process_file_predecoded(
         faces_evaluated: false,
         ocr_stage_ran: false,
         doc_stage_ran: false,
+        text_stage_done: false,
         tags_evaluated: false,
     };
 
@@ -1373,6 +1395,12 @@ async fn process_file_predecoded(
     // stale doc_text/doc_fts DELETE on this so a re-process that now yields
     // empty text clears phantom FTS hits (#11).
     tagged.doc_stage_ran = matches!(file.kind, FileKind::Doc | FileKind::Pdf) && !file.online_only;
+    // The content-derivation stage ran iff we attempted doc-text extraction OR a model
+    // render. Persisted to text_stage_done so BOTH the BGE doc carve-out and the model CLIP
+    // carve-out stop re-walking a file that can never produce its embedding (a text-less
+    // doc, an un-renderable .obj).
+    tagged.text_stage_done =
+        tagged.doc_stage_ran || (matches!(file.kind, FileKind::Model) && !file.online_only);
     if let Some(text) = doc_text {
         if !text.trim().is_empty() {
             for (label, score) in crate::util::keywords::extract(&text) {
@@ -1428,7 +1456,9 @@ async fn process_file_predecoded(
         // failed would wrongly hide a fully-processed file from the Library until
         // the next healthy scan. (Their optional BGE embedding is skipped, but
         // FTS keyword search still works, so leaving them failed=false is correct.)
-        let needed_gpu = matches!(file.kind, FileKind::Image | FileKind::Video);
+        // Models need the GPU for the .obj render→CLIP step; a transient retry for a
+        // non-obj model after a (rare) GPU death self-corrects on the next healthy scan.
+        let needed_gpu = matches!(file.kind, FileKind::Image | FileKind::Video | FileKind::Model);
         tagged.failed = needed_gpu;
         if needed_gpu {
             tagged.error_message = Some(
@@ -2440,6 +2470,7 @@ mod tests {
             faces_evaluated: false,
             ocr_stage_ran: false,
             doc_stage_ran: false,
+            text_stage_done: false,
             tags_evaluated: true,
         }
     }

@@ -92,5 +92,16 @@ struct DeepAnalyzeNamingTests {
         #expect(FileTypes.kind(forExtension: "mp3") == .audio)
         #expect(DiscoveredFile.Kind.model.rawValue == "model") // DB string lockstep
         #expect(FileTypes.isTaggable("obj"), "an .obj must be scanned, not dropped")
+        // Source code + e-books cluster by their extracted text (doc); 3D formats beyond
+        // .obj group under 3D Models/. Lockstep with the Rust FileKind::from_extension.
+        #expect(FileTypes.kind(forExtension: "py") == .doc)
+        #expect(FileTypes.kind(forExtension: "RS") == .doc)
+        #expect(FileTypes.kind(forExtension: "swift") == .doc)
+        #expect(FileTypes.kind(forExtension: "epub") == .doc)
+        #expect(FileTypes.kind(forExtension: "stl") == .model)
+        #expect(FileTypes.kind(forExtension: "glb") == .model)
+        #expect(FileTypes.kind(forExtension: "usdz") == .model)
+        #expect(FileTypes.kind(forExtension: "bin") == .other, "an unknown binary stays other")
+        #expect(FileTypes.isTaggable("py") && FileTypes.isTaggable("epub") && FileTypes.isTaggable("stl"))
     }
 }

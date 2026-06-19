@@ -3554,3 +3554,39 @@ Branch `fix/audit-2026-06-10`; full inventory in `shared/docs/audit-2026-06-10/`
   already safe — these are the perf/cold-start refinements. A flaky discovery test (asserted an
   embeddingless pdf is skipped — now environment-dependent on BGE being installed) was made
   deterministic by seeding the row's `text_embeddings` so it exercises the genuine skip path.
+
+## 2026-06-19 — content clustering for EVERY file type (audio, code/e-books, 3D) + the text-less-doc loop fix
+
+- **Reuse the existing kind → embedding spaces rather than invent new ones.** Audio clusters via the
+  non-image bag-of-words pass on artist/album TAGS (not a new audio embedding) — so macOS just had to
+  start reading ID3/metadata at scan to match Windows (which already did). Code + e-books become `doc`
+  and ride the existing BGE text pipeline. 3D `.obj` becomes a CLIP vector (rendered thumbnail) and
+  rides the existing image/video visual pass. No new models, no new tables (besides v19), no IPC change.
+- **3D: `.obj`-only CLIP, symmetric across engines; other formats grouped not sub-clustered.** Both
+  engines already had an `.obj` renderer (macOS QuickLook, Windows hand-rolled `obj_render`); CLIP is
+  the same model. Renders differ per-engine (like video keyframes — an accepted soft divergence), but
+  restricting scan-time CLIP to `.obj` keeps both engines doing the SAME thing. The other 3D formats
+  are recognized (so they're not dumped in Misc) and grouped under `3D Models/` + named by Deep Analyze
+  (macOS QuickLook renders them on demand). Per-format visual clustering needs cross-platform renderers
+  (glb/gltf/fbx parsers on Windows) — deferred, tracked.
+- **`.obj`-limited CLIP backfill carve-out (no loop).** The model carve-out keys on `extension = 'obj'`
+  — the only format both engines render — so a non-renderable 3D format can't be kept in the pipeline
+  forever. New `.obj`/non-obj files still get a one-shot embed attempt at first scan; only existing
+  `.obj` rows backfill.
+- **Text-less-doc loop: a dedicated `text_stage_done` bit beats overloading `has_text`.** The doc
+  backfill carve-out re-walks any embedding-less doc; a doc that yields no embeddable text (image-only
+  PDF, iWork `.iwa` protobuf, empty file) can never get a row → re-walks forever. `has_text` can't
+  disambiguate "pre-BGE text doc (backfill)" from "text-less doc (stop)" — both read 0 until
+  re-evaluated, and macOS `has_text` is OCR-semantic (overloading it would corrupt the search facet).
+  So a purpose-built `v19_files_text_stage_done` (additive, byte-faithful) set true when the text stage
+  runs; the carve-out ANDs `text_stage_done = 0`. The first post-migration rescan re-walks each doc
+  once (extract + embed-if-text + mark done); thereafter a text-less doc is permanently skipped while a
+  text doc keeps its embedding. Self-terminating, no schema overload.
+- **Soft divergences accepted (consistent with the documented "near-identical, not bit-identical" doc
+  extraction).** macOS audio metadata (AVFoundation common keys) vs Windows (symphonia: +genre/year);
+  EPUB member order (macOS `unzip` archive order vs Windows sorted) and read caps (16 KB vs 256 KB —
+  moot, BGE uses only the first 256 tokens); 3D renders (QuickLook vs `obj_render`). All within the
+  envelope already set by docx (macOS `textutil` vs Windows `w:t` mining) and OCR/keyframes. The ADDED
+  code/e-book/3D extension SETS, however, are byte-identical across engines (verified). Pre-existing
+  image/video/audio/legacy-office set divergences are mostly decoder-capability-driven and tracked, not
+  force-aligned (adding a format an engine can't decode would only produce failed rows).

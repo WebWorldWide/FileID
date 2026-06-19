@@ -35,6 +35,7 @@ struct MigrationParityTests {
         "v16_path_search",
         "v17_face_verification_stable_keys",
         "v18_restructure_feedback",
+        "v19_files_text_stage_done",
     ]
 
     @Test("Registered migration identifiers match the canonical cross-platform list")
