@@ -794,6 +794,19 @@ public final class ReadStore: @unchecked Sendable {
         }) ?? 0
     }
 
+    /// (clip, text) embedding-row counts — what the butler restructure clusters by.
+    /// When BOTH are ~0 the scan ran without the CLIP / BGE models, so a plan can only
+    /// fall back to the date/name rule cascade (Documents/<Year>, Photos/<Year>/<Month>);
+    /// the Restructure tab surfaces this so the user knows to install the models + rescan.
+    public func contentEmbeddingCounts() -> (clip: Int, text: Int) {
+        guard let q = queue else { return (0, 0) }
+        return (try? q.read { db in
+            let clip = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM clip_embeddings") ?? 0
+            let text = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM text_embeddings") ?? 0
+            return (clip, text)
+        }) ?? (0, 0)
+    }
+
     /// Files that have a VLM-generated caption / proposed name. Used
     /// by the sidebar pipeline to know whether Deep Analyze has run.
     public func totalCaptioned() -> Int {

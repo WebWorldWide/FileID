@@ -30,12 +30,20 @@ struct PipelineProgress: View {
             switch p.phase {
             case .discovering: return .scan
             case .tagging:     return .tag
-            case .postScan:    return .people
+            // postScan is the SCAN finalizing (orphan sweep / stats), not People
+            // clustering — keep the indicator in the scan region so the fill doesn't
+            // jump to the People dot (the halfway mark) before clustering begins.
+            // It advances to People below once face clustering is actually in flight.
+            case .postScan:    return .tag
             case .completed, .cancelled, .failed, .idle: break
             }
         }
         if engine.faceClusteringInFlight { return .people }
         if engine.deepAnalyzeInFlight    { return .captions }
+        // A paused scan is mid-flight, not done — never let the DB-derived branch below
+        // advance to People/Captions (which would push the fill to/past the halfway dot)
+        // just because the partial scan already wrote some rows.
+        if engine.isPaused { return .tag }
 
         // Nothing in flight — derive from the DB state.
         let scanned   = store.totalFiles > 0

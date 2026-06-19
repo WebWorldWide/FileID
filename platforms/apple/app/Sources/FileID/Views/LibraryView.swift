@@ -649,8 +649,7 @@ struct LibraryView: View {
                                     checkedFiles[row.id] = row
                                 }
                             } else {
-                                previewSiblings = rows
-                                selected = row
+                                openPreview(row)
                             }
                         }
                         .contextMenu {
@@ -710,6 +709,24 @@ struct LibraryView: View {
     }
 
     // MARK: - Data
+
+    /// Open the full-screen preview for `row`. Opens immediately on the on-screen rows,
+    /// then upgrades the prev/next nav context to the FULL library so arrow-nav isn't
+    /// capped at the 200-tile grid window (and the frozen list won't churn with the
+    /// live-scan `scanned_at` reorder). A search / find-similar result keeps its own set
+    /// so arrows stay within those matches.
+    private func openPreview(_ row: FileRow) {
+        previewSiblings = rows
+        selected = row
+        guard searchText.trimmingCharacters(in: .whitespaces).isEmpty, similarSeed == nil else { return }
+        let kf = kindFilter
+        Task { @MainActor in
+            let full = await store.filesAsync(limit: 1_000_000, kindFilter: kf)
+            // Upgrade as long as a preview is still open — the current photo (even one the
+            // user already arrowed to) is in `full`, so its nav position carries over.
+            if selected != nil, !full.isEmpty { previewSiblings = full }
+        }
+    }
 
     private func reload() {
         // Off the MainActor: similarity + semantic search cosine-scan the full
