@@ -101,6 +101,10 @@ struct DeepAnalyzeNamingTests {
         #expect(FileTypes.kind(forExtension: "stl") == .model)
         #expect(FileTypes.kind(forExtension: "glb") == .model)
         #expect(FileTypes.kind(forExtension: "usdz") == .model)
+        // Lockstep alignment with Windows (formats macOS frameworks also handle).
+        #expect(FileTypes.kind(forExtension: "mts") == .video)
+        #expect(FileTypes.kind(forExtension: "m2ts") == .video)
+        #expect(FileTypes.kind(forExtension: "odt") == .doc)
         #expect(FileTypes.kind(forExtension: "bin") == .other, "an unknown binary stays other")
         #expect(FileTypes.isTaggable("py") && FileTypes.isTaggable("epub") && FileTypes.isTaggable("stl"))
     }
