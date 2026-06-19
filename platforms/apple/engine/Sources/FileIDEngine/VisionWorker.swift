@@ -132,11 +132,15 @@ public final class VisionWorker: @unchecked Sendable {
         // the cap stays honest instead of over-admitting while threads stall.
         let didReturn = runVisionWithTimeout { [handler] in
             defer { visionConcurrencyGate.signal() }
-            do { try handler.perform([cReq, fReq, qReq]) } catch { /* swallow */ }
+            do { try handler.perform([cReq, fReq, qReq]) } catch { }
         }
         if !didReturn {
             return pass   // timed out — didComplete stays false; file marked for retry downstream
         }
+        // If perform() threw a non-timeout error, results remain nil — treat
+        // identically to a timeout so a rescan retries rather than marking this
+        // file evaluated with zero results and silently clearing prior tags.
+        guard cReq.results != nil else { return pass }
         pass.didComplete = true
 
         if let results = cReq.results {

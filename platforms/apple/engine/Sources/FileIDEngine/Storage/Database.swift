@@ -597,6 +597,15 @@ public final class Database: @unchecked Sendable {
                 )
                 WHERE id = ?
                 """, arguments: [target, target])
+            try db.execute(sql: """
+                UPDATE persons
+                SET representative_face_id = COALESCE(
+                    (SELECT fp.id FROM face_prints fp
+                     WHERE fp.person_id = ? AND fp.arcface_embedding IS NOT NULL
+                     ORDER BY COALESCE(fp.face_quality, 0.0) DESC LIMIT 1),
+                    representative_face_id)
+                WHERE id = ?
+                """, arguments: [target, target])
             return try Int.fetchOne(db, sql:
                 "SELECT file_count FROM persons WHERE id = ?",
                 arguments: [target]) ?? 0

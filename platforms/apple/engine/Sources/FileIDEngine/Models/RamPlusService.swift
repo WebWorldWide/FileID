@@ -146,8 +146,11 @@ public final class RamPlusService: @unchecked Sendable {
                 }
             }
 
+            lock.lock()
+            let cachedEnv = self.env
+            lock.unlock()
             let ortEnv: ORTEnv
-            if let existing = self.env { ortEnv = existing }
+            if let existing = cachedEnv { ortEnv = existing }
             else { ortEnv = try ORTEnv(loggingLevel: ORTLoggingLevel.warning) }
             let opts = try ORTSessionOptions()
             let coremlOpts = ORTCoreMLExecutionProviderOptions()

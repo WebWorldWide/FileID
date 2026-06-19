@@ -66,7 +66,10 @@ public final class MobileCLIPService: @unchecked Sendable {
             return false
         }
         do {
-            let env = try self.env ?? ORTEnv(loggingLevel: ORTLoggingLevel.warning)
+            lock.lock()
+            let cachedEnv = self.env
+            lock.unlock()
+            let env = try cachedEnv ?? ORTEnv(loggingLevel: ORTLoggingLevel.warning)
             let opts = try ORTSessionOptions()
             // CoreML EP for ANE acceleration; ORT falls back to CPU if it
             // can't place a node. Mirrors ArcFaceService's posture.

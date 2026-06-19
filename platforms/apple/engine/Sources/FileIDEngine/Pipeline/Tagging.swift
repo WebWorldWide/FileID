@@ -474,7 +474,7 @@ public enum Tagging {
                     }
                     let pageCount = min(pdf.numberOfPages, 3)
                     var fullText: [String] = []
-                    for pageNum in 1...pageCount {
+                    for pageNum in 1..<(pageCount + 1) {
                         guard let page = pdf.page(at: pageNum) else { continue }
                         let bounds = page.getBoxRect(.mediaBox)
                         guard bounds.width > 0, bounds.height > 0 else { continue }

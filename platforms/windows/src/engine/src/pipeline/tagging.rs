@@ -53,6 +53,10 @@ use crate::shell;
 /// average so optimization wins (or regressions) show up in engine.jsonl.
 static STATS_FILES: AtomicU64 = AtomicU64::new(0);
 static STATS_DECODE_US: AtomicU64 = AtomicU64::new(0);
+/// Files that actually had an image/video decode step (subset of STATS_FILES).
+/// Used as the denominator for decode_us so a mixed-media library with many
+/// non-image files doesn't understate the per-image decode cost.
+static STATS_DECODED_FILES: AtomicU64 = AtomicU64::new(0);
 static STATS_EXIF_US: AtomicU64 = AtomicU64::new(0);
 static STATS_DHASH_US: AtomicU64 = AtomicU64::new(0);
 static STATS_VISION_US: AtomicU64 = AtomicU64::new(0);
@@ -80,7 +84,8 @@ fn maybe_emit_stats() {
     if n % STATS_PERIOD != 0 {
         return;
     }
-    let decode = STATS_DECODE_US.load(Ordering::Relaxed) / n;
+    let decoded_n = STATS_DECODED_FILES.load(Ordering::Relaxed);
+    let decode = STATS_DECODE_US.load(Ordering::Relaxed).checked_div(decoded_n).unwrap_or(0);
     let exif = STATS_EXIF_US.load(Ordering::Relaxed) / n;
     let dhash = STATS_DHASH_US.load(Ordering::Relaxed) / n;
     let vision = STATS_VISION_US.load(Ordering::Relaxed) / n;
@@ -100,6 +105,7 @@ fn maybe_emit_stats() {
     tracing::info!(
         target: "FileIDEngine::stats",
         processed = n,
+        decoded_files = decoded_n,
         decode_us = decode,
         exif_us = exif,
         dhash_us = dhash,
@@ -700,6 +706,28 @@ impl Tagger {
     /// keeping a warm buffer of pre-decoded frames so workers never wait
     /// on the CPU-bound path.
     pub fn spawn(self, mut input: mpsc::Receiver<DiscoveredFile>) -> mpsc::Receiver<TaggedFile> {
+        // Reset per-scan stats so each session's [STATS] log reflects only
+        // that session — not a running blend across multiple scans this process
+        // has performed. All STATS_* are process-global AtomicU64s.
+        for counter in &[
+            &STATS_FILES as &AtomicU64,
+            &STATS_DECODE_US,
+            &STATS_DECODED_FILES,
+            &STATS_EXIF_US,
+            &STATS_DHASH_US,
+            &STATS_VISION_US,
+            &STATS_CLIP_US,
+            &STATS_OCR_US,
+            &STATS_OCR_RAN,
+            &STATS_TOTAL_US,
+            &STATS_RAMPLUS_US,
+            &STATS_VISION_WAIT_US,
+        ] {
+            counter.store(0, Ordering::Relaxed);
+        }
+        crate::pipeline::batch_clip::STATS_BATCH_COUNT.store(0, Ordering::Relaxed);
+        crate::pipeline::batch_clip::STATS_BATCH_SIZE_SUM.store(0, Ordering::Relaxed);
+
         let (out_tx, out_rx) = mpsc::channel(TAGGING_CHANNEL_CAP);
 
         // Stage 1a — bridge tokio mpsc<DiscoveredFile> into a
@@ -1108,6 +1136,7 @@ fn run_decoder_thread(
         };
         if decoded.is_some() {
             STATS_DECODE_US.fetch_add(decode_started.elapsed().as_micros() as u64, Ordering::Relaxed);
+            STATS_DECODED_FILES.fetch_add(1, Ordering::Relaxed);
         }
         // Phase 4: for Doc-kind files, extract text on the same decoder
         // thread (cheap I/O; same online_only gate as content read). Re-uses

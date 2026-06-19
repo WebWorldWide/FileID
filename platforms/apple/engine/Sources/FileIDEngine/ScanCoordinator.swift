@@ -149,6 +149,18 @@ public actor ScanCoordinator {
         current = s
     }
 
+    public func bumpProcessed(by n: Int) {
+        guard n > 0, var s = current else { return }
+        s.processed += n
+        current = s
+    }
+
+    public func bumpFailed(by n: Int) {
+        guard n > 0, var s = current else { return }
+        s.failed += n
+        current = s
+    }
+
     public func setPhase(_ phase: ScanPhase) {
         guard var s = current else { return }
         s.phase = phase

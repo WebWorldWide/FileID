@@ -79,7 +79,10 @@ final class BGETextService: @unchecked Sendable {
             return false
         }
         do {
-            let env = try self.env ?? ORTEnv(loggingLevel: ORTLoggingLevel.warning)
+            lock.lock()
+            let cachedEnv = self.env
+            lock.unlock()
+            let env = try cachedEnv ?? ORTEnv(loggingLevel: ORTLoggingLevel.warning)
             let opts = try ORTSessionOptions()
             let coreml = ORTCoreMLExecutionProviderOptions()
             coreml.enableOnSubgraphs = true
