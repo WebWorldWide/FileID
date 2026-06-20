@@ -84,6 +84,13 @@ ANE/GPU semaphores (3-4 for ORT inference, 2 for CLIP) bound concurrent ML calls
 
 Performance target: ≥ 140 files/s on M1 Pro (macOS) or comparable mid-tier x64 with DirectML, scaling per hardware tier (see `shared/docs/SHIP.md`).
 
+### Restructure apply (file moves + symlinks)
+
+`pipeline/restructure_apply.rs` executes an approved restructure plan: it relocates each file (real move) or, when the user picks the "use shortcuts/symlinks instead of moving" option, creates a link in place. The on-disk primitives are platform-gated:
+
+- **Windows** — `MoveFileExW` (with the `\\?\` extended-length prefix for >260-char paths, `MOVEFILE_COPY_ALLOWED`, no `REPLACE_EXISTING`) and `CreateSymbolicLinkW` (unprivileged-create flag).
+- **Non-Windows (Linux/macOS, `#[cfg(not(windows))]`)** — a portable `std`-only path: `std::fs::rename` for the common same-filesystem move, falling back to `std::fs::copy` + `remove_file` on `EXDEV` (cross-device, e.g. a NAS mount → local disk) so the file is preserved; `std::os::unix::fs::symlink` for the symlink option. Both arms create the destination parent on demand and never clobber an existing destination (parity with the Windows no-`REPLACE_EXISTING` contract). The collision-uniquify logic (case-folded `claimed` set) sits above this and is platform-agnostic.
+
 ## ML inference
 
 ### macOS

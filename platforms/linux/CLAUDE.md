@@ -92,6 +92,10 @@ These are blockers for full feature parity on Linux but not for the scaffold. Se
 
 Each currently returns `Err("…not implemented on this platform")` from the stubs in `platforms/windows/src/engine/src/shell/mod.rs`.
 
+### Done
+
+- **Restructure apply file-move + symlink fallback** — `pipeline/restructure_apply.rs` `move_file`/`make_symlink` now have a portable `#[cfg(not(windows))]` implementation (was previously a `requires Windows` bail). Real moves use `std::fs::rename` with a copy + `remove_file` fallback on `EXDEV` (cross-device, e.g. a NAS mount → local disk); the symlink ("use shortcuts") option uses `std::os::unix::fs::symlink`. Both create the destination parent on demand and refuse to clobber an existing destination (parity with the Windows `MoveFileExW`/`CreateSymbolicLinkW` path). cargo-verified on the macOS host (the not-windows arm compiles there); portable tests `move_file_relocates_creates_parent_and_refuses_clobber` + `make_symlink_creates_link_to_original` cover it.
+
 ## Working principles
 
 - User runs the build. `cargo check` passing isn't proof of correctness — verify on real Linux hardware.
