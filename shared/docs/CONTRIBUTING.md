@@ -87,6 +87,7 @@ Prereqs:
 | `windows-engine.yml` | x64, arm64-native, arm64-cross | `cargo fmt --check`, `clippy --all-targets -D warnings`, `cargo deny`, soft-warn `cargo audit`, source-URL allowlist, build, test, startup + `verifyCudaPack` smokes, telemetry-string scan |
 | `windows-app.yml` | x64, arm64 | `msbuild` Debug + Release, self-contained publish, xUnit tests, `dotnet format`, vulnerable-package scan, telemetry-string scan, startup smoke |
 | `macos.yml` | swiftpm | `swift build`/`swift test`, startup smoke, source-URL allowlist, telemetry-string scan |
+| `linux.yml` | ubuntu engine + CLI + GTK app | engine `cargo fmt --check`/`clippy --all-targets -D warnings`/`test --lib`/telemetry-string scan, CLI `clippy -D warnings`/build/smoke test, GTK app `cargo build` (required) + advisory `clippy` + telemetry-string scan |
 
 `cargo fmt --check` is effectively a no-op: `rustfmt.toml` sets `disable_all_formatting = true` (the codebase uses hand-aligned columns rustfmt can't preserve). The gate stays wired so it starts enforcing if that setting is ever dropped — style is enforced by review.
 
