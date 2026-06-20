@@ -186,10 +186,24 @@ public actor Discovery {
             .isDirectoryKey, .isRegularFileKey, .isHiddenKey,
             .fileSizeKey, .creationDateKey, .contentModificationDateKey
         ]
+        // Without an errorHandler the enumerator SILENTLY drops any entry it
+        // can't read (permission denied, a NAS share that drops mid-scan, a file
+        // removed underfoot) — the user gets an incomplete library with no warning.
+        // Count the failures and return true to keep walking, so one unreadable
+        // subtree can't truncate the scan; the running total is surfaced as a
+        // non-fatal `discovery_partial` summary below, mirroring the Windows engine
+        // (scan_session.rs error_count → "discovery_partial").
+        var discoveryErrorCount = 0
         guard let enumerator = FileManager.default.enumerator(
             at: root,
             includingPropertiesForKeys: resourceKeys,
-            options: skipHidden ? [.skipsHiddenFiles] : []
+            options: skipHidden ? [.skipsHiddenFiles] : [],
+            errorHandler: { url, error in
+                discoveryErrorCount += 1
+                JSONLog.shared.warn(ev: "discovery_dir_access_failed",
+                                    path: redactPathForLog(url.path), error: "\(error)")
+                return true
+            }
         ) else {
             JSONLog.shared.error(ev: "discovery_enumerator_nil", path: redactPathForLog(root.path))
             return
@@ -261,6 +275,17 @@ public actor Discovery {
         }
         if !skippedTouch.isEmpty {
             await Self.touchScannedAt(skippedTouch, to: touchTime, database: database)
+        }
+        // Non-fatal partial-discovery summary: some entries under `root` couldn't be
+        // read this walk (counted by the enumerator's errorHandler above). Logged so
+        // the app (Settings → Logs) can tell the user the library may be incomplete
+        // instead of silently dropping them. Mirrors the Windows `discovery_partial`
+        // event (scan_session.rs); the scan still completes.
+        if discoveryErrorCount > 0 {
+            JSONLog.shared.info(ev: "discovery_partial",
+                                path: redactPathForLog(root.path),
+                                extra: ["skipped": AnyCodable(discoveryErrorCount),
+                                        "kept": AnyCodable(kept)])
         }
     }
 

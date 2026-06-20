@@ -753,7 +753,12 @@ public enum Restructure {
             // move there. moveItem never overwrites, so a remaining collision
             // fails safe rather than destroying data. (F-C3-011)
             let finalURL = Self.uniqueDestination(plannedURL, claimed: claimed, fm: fm)
-            claimed.insert(finalURL.path)
+            // Store case-folded: APFS (and NTFS) are case-INSENSITIVE by default, so
+            // "Photo.jpg" and "photo.jpg" are the SAME on-disk slot. A case-sensitive
+            // claim would miss that collision and let the second move overwrite the
+            // first (data loss). Erring toward uniquify is safe even on case-sensitive
+            // volumes — byte-faithful with the Windows restructure_apply fix.
+            claimed.insert(finalURL.path.lowercased())
 
             do {
                 try fm.moveItem(at: oldURL, to: finalURL)
@@ -976,7 +981,9 @@ public enum Restructure {
         _ dest: URL, claimed: Set<String>, fm: FileManager
     ) -> URL {
         func occupied(_ url: URL) -> Bool {
-            claimed.contains(url.path) || (try? fm.attributesOfItem(atPath: url.path)) != nil
+            // Case-folded membership: the claimed set is stored lowercased so a
+            // case-only collision (APFS/NTFS are case-insensitive) is still detected.
+            claimed.contains(url.path.lowercased()) || (try? fm.attributesOfItem(atPath: url.path)) != nil
         }
         if !occupied(dest) { return dest }
         let parent = dest.deletingLastPathComponent()

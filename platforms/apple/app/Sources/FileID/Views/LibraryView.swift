@@ -55,6 +55,10 @@ struct LibraryView: View {
     /// `rows` don't yank the file the user is looking at out of the
     /// nav context (the LIMIT 200 query reorders by scanned_at).
     @State private var previewSiblings: [FileRow] = []
+    /// In-flight full-library sibling upgrade for the open preview. Cancelled
+    /// before each new `openPreview` and on dismiss so rapid open/close or
+    /// fast photo-switching can't pile up concurrent 1M-row fetches.
+    @State private var previewSiblingTask: Task<Void, Never>? = nil
     @State private var bulkRenameSheetOpen: Bool = false
     @State private var lastBatchAvailable: Bool = false
     @State private var lastTagBatchAvailable: Bool = false
@@ -690,7 +694,13 @@ struct LibraryView: View {
         // sheet keeps identity; the displayed file is driven by selectedID.
         .sheet(isPresented: Binding(
             get: { previewSelectedID != nil },
-            set: { if !$0 { previewSelectedID = nil } }
+            set: {
+                if !$0 {
+                    previewSelectedID = nil
+                    previewSiblingTask?.cancel()
+                    previewSiblingTask = nil
+                }
+            }
         )) {
             FilePreviewSheet(siblings: previewSiblings,
                               selectedID: $previewSelectedID,
@@ -728,8 +738,10 @@ struct LibraryView: View {
         previewSelectedID = row.id
         guard searchText.trimmingCharacters(in: .whitespaces).isEmpty, similarSeed == nil else { return }
         let kf = kindFilter
-        Task { @MainActor in
+        previewSiblingTask?.cancel()
+        previewSiblingTask = Task { @MainActor in
             let full = await store.filesAsync(limit: 1_000_000, kindFilter: kf)
+            guard !Task.isCancelled else { return }
             // Upgrade the nav context by id — the user may have arrowed to a
             // different photo while this loaded; keep the upgrade as long as the
             // current selection is still represented in the full set.

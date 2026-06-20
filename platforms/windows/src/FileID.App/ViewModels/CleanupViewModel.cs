@@ -102,7 +102,7 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
             // flip mid-refresh can't make the background Load read a torn value;
             // the generation guard in ApplyOnUi still discards the stale result.
             var mode = _mode;
-            var groups = await Task.Run(() => Load(token, mode), token).ConfigureAwait(false);
+            var groups = await Task.Run(() => Load(mode, token), token).ConfigureAwait(false);
             if (_disposed || token.IsCancellationRequested) return;
             ApplyOnUi(groups, myGen);
         }
@@ -141,7 +141,7 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
     /// "likely", not byte-verified. Mirror of the engine's FULL_HASH_MAX_BYTES.</summary>
     private const long FullHashMaxBytes = 16L * 1024 * 1024;
 
-    private List<DuplicateGroup> Load(CancellationToken ct, CleanupMode mode)
+    private List<DuplicateGroup> Load(CleanupMode mode, CancellationToken ct)
         => mode == CleanupMode.Similar ? LoadSimilar(ct) : LoadExact(ct);
 
     private List<DuplicateGroup> LoadExact(CancellationToken ct)

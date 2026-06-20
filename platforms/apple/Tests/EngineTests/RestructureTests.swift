@@ -316,9 +316,16 @@ struct RestructureApplyTests {
 
         // Free → returned as-is.
         #expect(Restructure.uniqueDestination(dest, claimed: [], fm: fm) == dest)
-        // Claimed this batch → " (2)".
-        let d2 = Restructure.uniqueDestination(dest, claimed: [dest.path], fm: fm)
+        // Claimed this batch → " (2)". The claimed set is stored case-folded
+        // (APFS/NTFS are case-insensitive), so claims are registered lowercased.
+        let d2 = Restructure.uniqueDestination(dest, claimed: [dest.path.lowercased()], fm: fm)
         #expect(d2 == tmp.appendingPathComponent("audio (2).mp3"))
+        // Case-ONLY collision is detected (the data-loss fix): a destination that
+        // differs from a claimed path only in case maps to the same on-disk slot and
+        // must be uniquified, never silently overwritten.
+        let dUpper = tmp.appendingPathComponent("AUDIO.mp3")
+        let d2ci = Restructure.uniqueDestination(dUpper, claimed: [dest.path.lowercased()], fm: fm)
+        #expect(d2ci == tmp.appendingPathComponent("AUDIO (2).mp3"))
         // On disk → also bumped.
         try Data("x".utf8).write(to: dest)
         let d3 = Restructure.uniqueDestination(dest, claimed: [], fm: fm)
