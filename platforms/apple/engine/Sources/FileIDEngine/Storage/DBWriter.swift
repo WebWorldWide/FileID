@@ -47,6 +47,11 @@ public struct TaggedFile: Sendable {
     public var faceYaws: [Double?]           // radians, parallel to faceBBoxes; nil = missing
     public var facePitches: [Double?]        // radians, parallel to faceBBoxes; nil = missing
     public var ocrText: String?              // empty/nil if no text or skipped
+    /// Extracted document/PDF text — the SAME text fed to BGE — persisted into the
+    /// `doc_text` table so the v15 AFTER INSERT trigger fills `doc_fts` for full-text
+    /// search. nil for non-documents or when extraction yielded nothing. Mirrors the
+    /// Windows `doc_text` row field (tagging.rs / dbwriter.rs).
+    public var docText: String?
     public var cameraModel: String?
     public var locationLat: Double?
     public var locationLon: Double?
@@ -96,7 +101,7 @@ public struct TaggedFile: Sendable {
         facePrints: [Data] = [], faceBBoxes: [String] = [],
         faceQualities: [Double] = [],
         faceYaws: [Double?] = [], facePitches: [Double?] = [],
-        ocrText: String? = nil, cameraModel: String? = nil,
+        ocrText: String? = nil, docText: String? = nil, cameraModel: String? = nil,
         locationLat: Double? = nil, locationLon: Double? = nil,
         failed: Bool = false, errorMessage: String? = nil,
         perFileTotalMs: Double = 0,
@@ -126,6 +131,7 @@ public struct TaggedFile: Sendable {
         self.faceYaws = faceYaws
         self.facePitches = facePitches
         self.ocrText = ocrText
+        self.docText = docText
         self.cameraModel = cameraModel
         self.locationLat = locationLat
         self.locationLon = locationLon
@@ -704,6 +710,24 @@ public actor DBWriter {
             if let text = file.ocrText, !text.isEmpty {
                 try db.cachedStatement(sql: """
                     INSERT INTO ocr_text (file_id, text) VALUES (?, ?)
+                    """).execute(arguments: [fileID, text])
+            }
+        }
+
+        // 3b. Document text → doc_text (+doc_fts via the v15 AFTER INSERT trigger). Same
+        // stage-ran-gated delete-then-conditional-insert as ocr_text above: gate on
+        // textStageDone (the doc/pdf text-extraction stage ran this session) so a
+        // re-process that now yields empty text clears phantom doc_fts postings, while a
+        // doc/pdf timeout (stage didn't run) leaves prior text intact. The extracted text
+        // is byte-identical to the BGE input, so doc_text round-trips with the Windows
+        // engine's doc_stage_ran-gated write (dbwriter.rs). Model files set textStageDone
+        // too but carry no docText, so their DELETE is a harmless no-op.
+        if file.textStageDone {
+            try db.cachedStatement(sql: "DELETE FROM doc_text WHERE file_id = ?")
+                .execute(arguments: [fileID])
+            if let text = file.docText, !text.isEmpty {
+                try db.cachedStatement(sql: """
+                    INSERT INTO doc_text (file_id, text) VALUES (?, ?)
                     """).execute(arguments: [fileID, text])
             }
         }

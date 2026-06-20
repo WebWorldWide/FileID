@@ -23,7 +23,11 @@ final class BGETextService: @unchecked Sendable {
     /// Bounds concurrent CoreML inferences so a doc-heavy scan (up to `workerCap` doc
     /// workers all calling `embed`) can't flood the ANE. Mirrors ArcFaceService /
     /// MobileCLIPService (value: 4).
-    private let inferenceSem = DispatchSemaphore(value: 4)
+    // Defaults to 4 (ANE-thrash cap); raise on high-core Macs via FILEID_INFERENCE_CONCURRENCY.
+    private static let inferenceConcurrency: Int =
+        ProcessInfo.processInfo.environment["FILEID_INFERENCE_CONCURRENCY"]
+            .flatMap { Int($0) }.map { max(1, min(16, $0)) } ?? 4
+    private let inferenceSem = DispatchSemaphore(value: BGETextService.inferenceConcurrency)
     private var env: ORTEnv?
     private var session: ORTSession?
     private var inputNames: [String] = []

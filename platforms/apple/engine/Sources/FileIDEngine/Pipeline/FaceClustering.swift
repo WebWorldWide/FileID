@@ -149,12 +149,12 @@ public enum FaceClustering {
         // are filtered out: the user explicitly said "don't cluster these",
         // so they stay attached to their existing unknown person row and
         // never participate in a re-cluster pass.
-        struct FaceRow: Sendable { let id: Int64; let arcFace: Data }
+        struct FaceRow: Sendable { let id: Int64; let arcFace: Data; let quality: Double }
         let rows: [FaceRow]
         do {
             rows = try await database.pool.read { db in
                 let r = try GRDB.Row.fetchAll(db, sql: """
-                    SELECT id, arcface_embedding
+                    SELECT id, arcface_embedding, face_quality
                     FROM face_prints
                     WHERE excluded = 0
                       AND LENGTH(arcface_embedding) > 0
@@ -164,7 +164,8 @@ public enum FaceClustering {
                     let id: Int64 = row["id"] ?? 0
                     if unknownFaceIDs.contains(id) { return nil }
                     return FaceRow(id: id,
-                                   arcFace: row["arcface_embedding"] ?? Data())
+                                   arcFace: row["arcface_embedding"] ?? Data(),
+                                   quality: row["face_quality"] ?? -1)
                 }
             }
         } catch {
@@ -195,6 +196,12 @@ public enum FaceClustering {
             JSONLog.shared.warn(ev: "face_cluster_overflow",
                                 error: "embedded faces reached the \(maxFacesPerRun) per-run cap; faces past it stay unassigned until a window-aware persist lands.")
         }
+
+        // Per-face capture quality keyed by face id (parallel to the embeddings), so each
+        // cluster's representative face is its highest-quality member — mirrors the Windows
+        // anchor pick in face_clustering.rs (`max_by quality`) rather than just `.first`.
+        let faceQualityByID: [Int64: Double] = Dictionary(
+            rows.map { ($0.id, $0.quality) }, uniquingKeysWith: { first, _ in first })
 
         struct DecodedFace { let id: Int64; let vec: [Float] }
         var decoded: [DecodedFace] = []
@@ -352,7 +359,7 @@ public enum FaceClustering {
             let anchorRadius: Float
             let inherited: PriorAnchorMatch?
         }
-        let nextClusters: [(centroid: [Float], radius: Float, faceIDs: [Int64])] =
+        let nextClusters: [(centroid: [Float], radius: Float, faceIDs: [Int64], repFaceID: Int64)] =
             byCluster.sorted { $0.key < $1.key }.map { (_, denseIdxs) in
                 let centroid = computeNormalizedCentroid(
                     denseIdxs: denseIdxs, vecsByDense: vecsByDense, dim: firstDim
@@ -360,7 +367,9 @@ public enum FaceClustering {
                 let radius = computeAnchorRadius(
                     denseIdxs: denseIdxs, vecsByDense: vecsByDense, centroid: centroid
                 )
-                return (centroid, radius, denseIdxs.map { denseToFaceID[$0] })
+                let faceIDs = denseIdxs.map { denseToFaceID[$0] }
+                return (centroid, radius, faceIDs,
+                        representativeFaceID(faceIDs, quality: faceQualityByID))
             }
 
         struct PersistStats: Sendable { let inherited: Int; let lostNames: Int; let priors: Int }
@@ -404,7 +413,7 @@ public enum FaceClustering {
 
                 let personsList: [ClusterPersist] = nextClusters.enumerated().map { idx, c in
                     ClusterPersist(
-                        repFaceID: c.faceIDs.first ?? 0,
+                        repFaceID: c.repFaceID,
                         faceIDs: c.faceIDs,
                         count: c.faceIDs.count,
                         centroid: c.centroid,
@@ -950,6 +959,24 @@ public enum FaceClustering {
         let p10Index = max(0, Int((Float(sims.count) * 0.10).rounded(.down)))
         let raw = sims[p10Index]
         return min(0.85, max(0.45, raw))
+    }
+
+    /// The cluster's representative face = its highest-quality member, so the People tab
+    /// anchors on the sharpest / most-frontal crop. Mirrors the Windows anchor pick
+    /// (face_clustering.rs `max_by quality`). Falls back to the first face id when no member
+    /// carries a measured quality; strict `>` keeps the earliest of any ties so the rep is
+    /// stable across runs. (audit parity)
+    fileprivate static func representativeFaceID(
+        _ faceIDs: [Int64], quality: [Int64: Double]
+    ) -> Int64 {
+        guard let first = faceIDs.first else { return 0 }
+        var best = first
+        var bestQ = quality[first] ?? -1
+        for fid in faceIDs.dropFirst() {
+            let q = quality[fid] ?? -1
+            if q > bestQ { best = fid; bestQ = q }
+        }
+        return bestQ < 0 ? first : best
     }
 
     /// Read every existing persons row + its face_id set + any prior

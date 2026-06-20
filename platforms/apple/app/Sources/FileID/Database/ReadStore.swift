@@ -224,7 +224,7 @@ public final class ReadStore: @unchecked Sendable {
                 let totalFiles  = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files") ?? 0
                 let totalImages = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'image' AND failed = 0") ?? 0
 
-                // Duplicate groups by phash (groups of size > 1). Mirror the
+                // Duplicate groups by content_hash (byte-exact; groups of size > 1). Mirror the
                 // Cleanup list exactly: filter failed = 0, and compute
                 // reclaimable bytes against the ACTUAL keeper (the same
                 // aesthetic↓, size↓, createdAt↑, path-length↑ rank the list
@@ -297,13 +297,14 @@ public final class ReadStore: @unchecked Sendable {
                         .replacingOccurrences(of: "_", with: "\\_")
                     let like = "%\(escapedSearch)%"
                     let ftsQuery = FTSQuery.quoted(trimmedSearch)
-                    // Keyword search across filename, OCR text,
-                    // vision tags, smart names, and VLM captions.
-                    // CLIP semantic search runs separately when
-                    // the encoder is installed.
+                    // Keyword search across filename, OCR text, extracted
+                    // document text, vision tags, smart names, VLM captions,
+                    // and person names. CLIP semantic search runs separately
+                    // when the encoder is installed.
                     sql += """
                          AND (
                               id IN (SELECT rowid FROM ocr_fts WHERE ocr_fts MATCH ?)
+                              OR id IN (SELECT rowid FROM doc_fts WHERE doc_fts MATCH ?)
                               OR path_search LIKE ? ESCAPE '\\'
                               OR vlm_proposed_name LIKE ? ESCAPE '\\'
                               OR vlm_description LIKE ? ESCAPE '\\'
@@ -314,10 +315,13 @@ public final class ReadStore: @unchecked Sendable {
                                   WHERE persons.name LIKE ? ESCAPE '\\'
                                      OR persons.first_name LIKE ? ESCAPE '\\'
                                      OR persons.last_name LIKE ? ESCAPE '\\'
+                                     OR persons.middle_name LIKE ? ESCAPE '\\'
+                                     OR persons.title LIKE ? ESCAPE '\\'
+                                     OR persons.suffix LIKE ? ESCAPE '\\'
                               )
                             )
                         """
-                    args += [ftsQuery, like, like, like, like, like, like, like]
+                    args += [ftsQuery, ftsQuery, like, like, like, like, like, like, like, like, like, like]
                 }
                 if let k = kindFilter {
                     sql += " AND kind = ?"

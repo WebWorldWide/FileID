@@ -218,6 +218,9 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
                        WHERE p.name LIKE $like ESCAPE '\'
                           OR p.first_name LIKE $like ESCAPE '\'
                           OR p.last_name LIKE $like ESCAPE '\'
+                          OR p.middle_name LIKE $like ESCAPE '\'
+                          OR p.title LIKE $like ESCAPE '\'
+                          OR p.suffix LIKE $like ESCAPE '\'
                    )
               )
             ORDER BY f.scanned_at DESC, f.id DESC
