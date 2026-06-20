@@ -296,11 +296,37 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         || ViewModel.Groups.Count == 0
             ? Visibility.Visible : Visibility.Collapsed;
 
+    // ─── Cleanup mode (Exact | Similar) — macOS parity ──────────────────────
+    public bool IsSimilarMode => ViewModel.Mode == CleanupMode.Similar;
+
+    /// <summary>The "review — not identical" warning banner shows only in Similar
+    /// mode.</summary>
+    public Visibility SimilarWarningVisibility =>
+        IsSimilarMode ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>The global "Trash non-keepers" bulk action is hidden in Similar
+    /// mode: those copies are NOT byte-identical, so one-click mass deletion would
+    /// be unsafe (macOS parity — "Select all non-keepers" is hidden there too). The
+    /// per-group right-click trash stays available for explicit, reviewed deletes.</summary>
+    public Visibility TrashNonKeepersVisibility =>
+        IsSimilarMode ? Visibility.Collapsed : Visibility.Visible;
+
     public string HeaderStats
     {
         get
         {
             if (ViewModel.Groups.Count == 0) return string.Empty;
+            // Similar mode never stages files for the (hidden) bulk delete — present
+            // a review-first summary instead of a "reclaimable" figure so nothing
+            // reads as pre-selected for deletion (macOS parity).
+            if (IsSimilarMode)
+            {
+                int skippedSimilar = 0;
+                foreach (var g in ViewModel.Groups) if (g.IsSkipped) skippedSimilar++;
+                int activeSimilar = ViewModel.Groups.Count - skippedSimilar;
+                var msg = $"{activeSimilar} similar group{(activeSimilar == 1 ? "" : "s")} • review each before deleting — NOT byte-identical";
+                return skippedSimilar > 0 ? $"{msg} • {skippedSimilar} skipped" : msg;
+            }
             long files = 0;
             long bytes = 0;
             int eligibleGroups = 0;
@@ -317,6 +343,33 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
             return $"{eligibleGroups} group{(eligibleGroups == 1 ? "" : "s")} • {files} non-keeper file{(files == 1 ? "" : "s")} • {FormatSize(bytes)} reclaimable";
         }
     }
+
+    // ─── Mode toggle (Exact | Similar) ──────────────────────────────────────
+    // The two RadioButtons share GroupName="CleanupMode"; Checked fires only on
+    // the newly-selected one. The Exact radio's IsChecked="True" fires once during
+    // XAML init — SwitchMode no-ops because the VM already defaults to Exact, so
+    // the initial OnLoaded refresh stays the single first load.
+    private void OnExactModeChecked(object sender, RoutedEventArgs e)
+        => SwitchMode(CleanupMode.Exact);
+
+    private void OnSimilarModeChecked(object sender, RoutedEventArgs e)
+        => SwitchMode(CleanupMode.Similar);
+
+    private void SwitchMode(CleanupMode mode)
+        => DebugLog.SafeRun(nameof(SwitchMode), () =>
+        {
+            if (_unloaded) return;
+            if (ViewModel.Mode == mode) return;
+            ViewModel.Mode = mode;
+            OnPropertyChanged(nameof(IsSimilarMode));
+            OnPropertyChanged(nameof(SimilarWarningVisibility));
+            OnPropertyChanged(nameof(TrashNonKeepersVisibility));
+            OnPropertyChanged(nameof(HeaderStats));
+            // Reload for the new mode. RequestCleanupRefresh coalesces with any
+            // in-flight scan-driven refresh; the VM's generation guard discards a
+            // superseded result so the just-selected mode wins.
+            RequestCleanupRefresh();
+        });
 
     private async void OnRefreshClicked(object sender, RoutedEventArgs e)
         => await ViewModel.RefreshAsync(CancellationToken.None);
