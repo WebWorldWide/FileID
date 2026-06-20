@@ -19,7 +19,8 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <Grid Grid.Row="0">
+        <StackPanel Grid.Row="0" Spacing="14">
+            <Grid>
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
@@ -58,6 +59,7 @@
                         </StackPanel>
                     </Button>
                     <Button Click="OnTrashNonKeepersClicked"
+                            Visibility="{x:Bind TrashNonKeepersVisibility, Mode=OneWay}"
                             AutomationProperties.Name="Trash non-keepers"
                             AutomationProperties.HelpText="Move every non-keeper duplicate to the Recycle Bin."
                             ToolTipService.ToolTip="Move every non-keeper duplicate to the Recycle Bin.">
@@ -77,7 +79,47 @@
                     </Button>
                 </StackPanel>
             </ScrollViewer>
-        </Grid>
+            </Grid>
+
+            <!-- Mode toggle (Exact | Similar) — macOS parity. Default Exact keeps
+                 current behavior unchanged; Similar groups visually near-identical
+                 images by perceptual-hash (dHash) Hamming distance. -->
+            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                <RadioButton x:Name="ExactModeRadio"
+                             GroupName="CleanupMode"
+                             Content="Exact"
+                             IsChecked="True"
+                             Checked="OnExactModeChecked"
+                             AutomationProperties.Name="Exact duplicates"
+                             ToolTipService.ToolTip="Byte-for-byte identical copies (same content hash)." />
+                <RadioButton x:Name="SimilarModeRadio"
+                             GroupName="CleanupMode"
+                             Content="Similar"
+                             Checked="OnSimilarModeChecked"
+                             AutomationProperties.Name="Visually similar images"
+                             ToolTipService.ToolTip="Visually near-identical images (resizes, re-encodes, crops, light edits) found by perceptual hash — review before deleting; they are NOT byte-identical." />
+            </StackPanel>
+
+            <!-- CRITICAL safety UX: Similar groups are NOT byte-identical. Shown
+                 only in Similar mode. Mirrors macOS CleanupView's orange warning. -->
+            <Border Visibility="{x:Bind SimilarWarningVisibility, Mode=OneWay}"
+                    Background="{ThemeResource SystemFillColorCautionBackgroundBrush}"
+                    BorderBrush="{ThemeResource SystemFillColorCautionBrush}"
+                    BorderThickness="1"
+                    CornerRadius="6"
+                    Padding="12,10">
+                <StackPanel Orientation="Horizontal" Spacing="10">
+                    <FontIcon Glyph="&#xE7BA;"
+                              FontSize="16"
+                              Foreground="{ThemeResource SystemFillColorCautionBrush}"
+                              VerticalAlignment="Top" />
+                    <TextBlock TextWrapping="Wrap"
+                               FontSize="12"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Text="Visually similar — review before deleting (not identical). These images match by perceptual hash (resizes, re-encodes, crops, light edits), not byte-for-byte. Nothing is pre-selected — open each, confirm it's a true duplicate, then trash the copies you don't want." />
+                </StackPanel>
+            </Border>
+        </StackPanel>
 
         <ScrollViewer Grid.Row="1"
                       VerticalScrollBarVisibility="Auto"
@@ -151,9 +193,25 @@
                                 </MenuFlyout>
                             </Grid.ContextFlyout>
                             <StackPanel Spacing="6">
-                                <TextBlock Text="{x:Bind Caption, Mode=OneWay}"
-                                           AutomationProperties.HeadingLevel="Level2"
-                                           Style="{StaticResource BodyStrongTextBlockStyle}"/>
+                                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                    <!-- Per-group "Visually similar" caution badge — visible
+                                         only for perceptual groups (Similar mode). macOS parity. -->
+                                    <Border Visibility="{x:Bind SimilarBadgeVisibility, Mode=OneWay}"
+                                            Background="{ThemeResource SystemFillColorCautionBackgroundBrush}"
+                                            BorderBrush="{ThemeResource SystemFillColorCautionBrush}"
+                                            BorderThickness="1"
+                                            CornerRadius="10"
+                                            Padding="8,2"
+                                            VerticalAlignment="Center">
+                                        <TextBlock Text="Visually similar"
+                                                   FontSize="11"
+                                                   Foreground="{ThemeResource SystemFillColorCautionBrush}"/>
+                                    </Border>
+                                    <TextBlock Text="{x:Bind Caption, Mode=OneWay}"
+                                               AutomationProperties.HeadingLevel="Level2"
+                                               Style="{StaticResource BodyStrongTextBlockStyle}"
+                                               VerticalAlignment="Center"/>
+                                </StackPanel>
                                 <!-- Horizontal strip of thumbnail tiles (macOS CopyTile
                                      parity). Thumbnails load lazily via the members
                                      repeater's ElementPrepared (like LibraryView). -->

@@ -21,6 +21,11 @@ using Microsoft.UI.Dispatching;
 
 namespace FileID.ViewModels;
 
+/// <summary>Cleanup tab mode (macOS parity). Exact = byte-identical copies by
+/// content_hash (default); Similar = visually near-identical images grouped by
+/// dHash Hamming distance.</summary>
+internal enum CleanupMode { Exact, Similar }
+
 internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
 {
     private readonly string _dbPath;
@@ -69,6 +74,17 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         private set { if (_errorMessage != value) { _errorMessage = value; OnPropertyChanged(); } }
     }
 
+    // Cleanup has two modes (macOS parity): Exact groups byte-identical copies by
+    // content_hash (default, unchanged behavior); Similar groups visually
+    // near-identical images by dHash Hamming distance (resizes / re-encodes /
+    // crops / light edits). The view sets Mode, then calls RefreshAsync to reload.
+    private CleanupMode _mode = CleanupMode.Exact;
+    public CleanupMode Mode
+    {
+        get => _mode;
+        set { if (_mode != value) { _mode = value; OnPropertyChanged(); } }
+    }
+
     public async Task RefreshAsync(CancellationToken ct)
     {
         if (_disposed) return;
@@ -82,7 +98,11 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
             var token = linked.Token;
             OnUi(() => { IsLoading = true; ErrorMessage = null; });
-            var groups = await Task.Run(() => Load(token), token).ConfigureAwait(false);
+            // Snapshot the mode before fanning out to the thread pool so a mode
+            // flip mid-refresh can't make the background Load read a torn value;
+            // the generation guard in ApplyOnUi still discards the stale result.
+            var mode = _mode;
+            var groups = await Task.Run(() => Load(token, mode), token).ConfigureAwait(false);
             if (_disposed || token.IsCancellationRequested) return;
             ApplyOnUi(groups, myGen);
         }
@@ -121,7 +141,10 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
     /// "likely", not byte-verified. Mirror of the engine's FULL_HASH_MAX_BYTES.</summary>
     private const long FullHashMaxBytes = 16L * 1024 * 1024;
 
-    private List<DuplicateGroup> Load(CancellationToken ct)
+    private List<DuplicateGroup> Load(CancellationToken ct, CleanupMode mode)
+        => mode == CleanupMode.Similar ? LoadSimilar(ct) : LoadExact(ct);
+
+    private List<DuplicateGroup> LoadExact(CancellationToken ct)
     {
         // First-launch guard: the engine creates the DB on first scan.
         if (!File.Exists(_dbPath))
@@ -235,6 +258,179 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
             });
         }
 
+        groups.Sort((a, b) => b.MemberCount.CompareTo(a.MemberCount));
+        if (groups.Count > 200) groups.RemoveRange(200, groups.Count - 200);
+        return groups;
+    }
+
+    // ─── Perceptual near-duplicate ("Visually similar") grouping ─────────────
+    // Mirrors macOS ReadStore.similarImageGroups(maxHamming:). Images whose 64-bit
+    // dHashes (files.phash) are within a Hamming threshold of one another are
+    // transitively unioned into a group via PerceptualGrouping. Same keeper rank
+    // as exact dupes. Pure byte-exact clusters are dropped — they already appear
+    // under "Exact".
+
+    /// <summary>Default Hamming threshold for "visually similar" grouping.
+    /// FILEID_NEARDUP_HAMMING overrides; clamped to 0..20. 8 of 64 bits ≈ visually
+    /// near-identical (resize / re-encode / crop / light edit) — deliberately tight
+    /// so distinct photos of the same subject over time don't collapse into one
+    /// group. (mirrors macOS ReadStore.defaultNearDupHamming)</summary>
+    private static int NearDupHammingThreshold
+    {
+        get
+        {
+            var raw = Environment.GetEnvironmentVariable("FILEID_NEARDUP_HAMMING");
+            if (!string.IsNullOrEmpty(raw) && int.TryParse(raw, out var v))
+            {
+                return Math.Min(20, Math.Max(0, v));
+            }
+            return 8;
+        }
+    }
+
+    /// <summary>Above this image-with-dHash count the O(N²) pairwise scan is skipped
+    /// rather than hang the UI. (mirrors macOS ReadStore.nearDupImageCap)</summary>
+    private const int NearDupImageCap = 20_000;
+
+    private List<DuplicateGroup> LoadSimilar(CancellationToken ct)
+    {
+        if (!File.Exists(_dbPath))
+        {
+            return new List<DuplicateGroup>();
+        }
+        var connString = new SqliteConnectionStringBuilder
+        {
+            DataSource = _dbPath,
+            Mode = SqliteOpenMode.ReadOnly,
+        }.ToString();
+        using var conn = new SqliteConnection(connString);
+        conn.Open();
+        // Only images carry a dHash. phash == 0 is the engine's "none / failed"
+        // sentinel (see the Rust dbwriter), so exclude it alongside NULL — else
+        // every blank-hash image would collapse into one giant false group.
+        // content_hash rides along so pure byte-exact clusters can be dropped;
+        // created_at + aesthetic + size feed the keeper rank (macOS parity).
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT id, path_text, size_bytes, content_hash, modified_at, created_at, aesthetic, phash
+            FROM files
+            WHERE kind = 'image' AND failed = 0
+              AND phash IS NOT NULL AND phash != 0
+            """;
+        var rawMembers = new List<(long Id, string Path, long Size, byte[]? Hash, double? ModifiedAt, double? CreatedAt, double? Aesthetic, long Phash)>(2048);
+        using (var reader = cmd.ExecuteReader())
+        {
+            while (reader.Read())
+            {
+                ct.ThrowIfCancellationRequested();
+                if (reader.IsDBNull(7)) continue;
+                var phash = reader.GetInt64(7);
+                if (phash == 0) continue;
+                var hashBytes = reader.IsDBNull(3) ? null : (byte[])reader[3];
+                var modifiedAt = reader.IsDBNull(4) ? (double?)null : reader.GetDouble(4);
+                var createdAt = reader.IsDBNull(5) ? (double?)null : reader.GetDouble(5);
+                var aesthetic = reader.IsDBNull(6) ? (double?)null : reader.GetDouble(6);
+                rawMembers.Add((reader.GetInt64(0), reader.GetString(1), reader.GetInt64(2), hashBytes, modifiedAt, createdAt, aesthetic, phash));
+            }
+        }
+
+        if (rawMembers.Count <= 1) return new List<DuplicateGroup>();
+        if (rawMembers.Count > NearDupImageCap)
+        {
+            // Exceeds the O(N²) cap — skip perceptual grouping to protect the UI
+            // (mirrors macOS). The exact view stays available.
+            return new List<DuplicateGroup>();
+        }
+
+        var indexById = new Dictionary<long, int>(rawMembers.Count);
+        var items = new List<(long Id, long Phash)>(rawMembers.Count);
+        for (int i = 0; i < rawMembers.Count; i++)
+        {
+            indexById[rawMembers[i].Id] = i;
+            items.Add((rawMembers[i].Id, rawMembers[i].Phash));
+        }
+
+        var maxHamming = NearDupHammingThreshold;
+        var groups = new List<DuplicateGroup>();
+        foreach (var ids in PerceptualGrouping.GroupByHamming(items, maxHamming))
+        {
+            ct.ThrowIfCancellationRequested();
+            var indices = new List<int>(ids.Count);
+            foreach (var id in ids)
+            {
+                if (indexById.TryGetValue(id, out var idx)) indices.Add(idx);
+            }
+            if (indices.Count < 2) continue;
+
+            // Drop pure byte-exact clusters — every member shares one non-null
+            // content_hash — since they already appear under "Exact".
+            bool allByteExact = true;
+            string? firstHex = null;
+            foreach (var idx in indices)
+            {
+                var h = rawMembers[idx].Hash;
+                if (h == null || h.Length == 0) { allByteExact = false; break; }
+                var hex = Convert.ToHexString(h);
+                if (firstHex == null) firstHex = hex;
+                else if (!string.Equals(firstHex, hex, StringComparison.Ordinal)) { allByteExact = false; break; }
+            }
+            if (allByteExact) continue;
+
+            // Keeper rank (macOS parity): aesthetic DESC, size DESC, earliest
+            // created_at ASC, shortest path ASC, then path ordinal as a stable
+            // final tiebreaker. The member that sorts first is the default keeper.
+            indices.Sort((a, b) =>
+            {
+                var ma = rawMembers[a];
+                var mb = rawMembers[b];
+                var aestheticCmp = (mb.Aesthetic ?? 0).CompareTo(ma.Aesthetic ?? 0);
+                if (aestheticCmp != 0) return aestheticCmp;
+                if (ma.Size != mb.Size) return mb.Size.CompareTo(ma.Size);
+                var createdCmp = (ma.CreatedAt ?? double.MaxValue).CompareTo(mb.CreatedAt ?? double.MaxValue);
+                if (createdCmp != 0) return createdCmp;
+                if (ma.Path.Length != mb.Path.Length) return ma.Path.Length.CompareTo(mb.Path.Length);
+                return string.CompareOrdinal(ma.Path, mb.Path);
+            });
+
+            // Stable group identity: the smallest member file id — independent of
+            // which copy currently ranks as keeper, so a mid-scan re-rank doesn't
+            // change the group key (and the identity-stable merge keeps the
+            // instance + skip state). Mirrors macOS's gid = files.map(\.id).min().
+            long gid = long.MaxValue;
+            foreach (var idx in indices)
+            {
+                if (rawMembers[idx].Id < gid) gid = rawMembers[idx].Id;
+            }
+            var groupKey = $"sim-{gid}";
+            var members = new List<DuplicateMember>(indices.Count);
+            for (int k = 0; k < indices.Count; k++)
+            {
+                var m = rawMembers[indices[k]];
+                members.Add(new DuplicateMember
+                {
+                    Id = m.Id,
+                    Path = m.Path,
+                    FileName = System.IO.Path.GetFileName(m.Path),
+                    SizeBytes = m.Size,
+                    ModifiedAt = m.ModifiedAt,
+                    GroupKey = groupKey,
+                    // A recommended keeper is still marked (so the per-group trash
+                    // never targets the whole group), but the global "Trash
+                    // non-keepers" bulk action is hidden in Similar mode — these
+                    // are NOT byte-identical, so no one-click mass delete.
+                    IsKeeper = k == 0,
+                });
+            }
+            groups.Add(new DuplicateGroup
+            {
+                ContentHash = groupKey,
+                Members = members,
+                IsApproximate = false,
+                IsSimilar = true,
+            });
+        }
+
+        // Largest clusters first, mirroring the exact view's ORDER BY n DESC.
         groups.Sort((a, b) => b.MemberCount.CompareTo(a.MemberCount));
         if (groups.Count > 200) groups.RemoveRange(200, groups.Count - 200);
         return groups;
@@ -367,6 +563,16 @@ internal sealed class DuplicateGroup : INotifyPropertyChanged
     /// byte-verified duplicates. Drives the cautious caption (#3).</summary>
     public bool IsApproximate { get; init; }
 
+    /// <summary>True for a perceptual ("Visually similar") group — its members are
+    /// near-identical by dHash Hamming distance, NOT byte-for-byte identical. Drives
+    /// the per-group "Visually similar" badge + the cautious caption. (macOS parity:
+    /// DuplicateGroup.isSimilar)</summary>
+    public bool IsSimilar { get; init; }
+
+    /// <summary>Visibility of the per-group "Visually similar" caution badge.</summary>
+    public Microsoft.UI.Xaml.Visibility SimilarBadgeVisibility =>
+        IsSimilar ? Microsoft.UI.Xaml.Visibility.Visible : Microsoft.UI.Xaml.Visibility.Collapsed;
+
     // FEAT-CRIT-2: per-group skip flag. Members of a skipped group are
     // excluded from "Trash non-keepers". Mirrors the macOS Cleanup
     // per-group "Skip" action.
@@ -387,12 +593,23 @@ internal sealed class DuplicateGroup : INotifyPropertyChanged
     {
         get
         {
-            // Approximate (>16 MB composite-hash) groups are NOT byte-verified —
-            // present them as "likely duplicates — verify before deleting" so the
-            // caption never makes a false byte-for-byte guarantee (#3).
-            var label = IsApproximate
-                ? $"{MemberCount} likely duplicates — verify before deleting · {ShortHash}"
-                : $"{MemberCount} identical copies · {ShortHash}";
+            string label;
+            if (IsSimilar)
+            {
+                // Perceptual group: the key is synthetic (no content hash to show).
+                // Mirror the macOS "N images · review before deleting" framing so the
+                // caption never implies a byte-for-byte guarantee.
+                label = $"{MemberCount} visually similar image{(MemberCount == 1 ? "" : "s")} — review before deleting";
+            }
+            else
+            {
+                // Approximate (>16 MB composite-hash) groups are NOT byte-verified —
+                // present them as "likely duplicates — verify before deleting" so the
+                // caption never makes a false byte-for-byte guarantee (#3).
+                label = IsApproximate
+                    ? $"{MemberCount} likely duplicates — verify before deleting · {ShortHash}"
+                    : $"{MemberCount} identical copies · {ShortHash}";
+            }
             return IsSkipped ? $"{label} · SKIPPED" : label;
         }
     }
