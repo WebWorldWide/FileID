@@ -279,13 +279,23 @@ public enum Tagging {
                         hasOCR: ocr?.isEmpty == false,
                         hasLocation: exif.lat != nil && exif.lon != nil
                     ))
+                    // Case-insensitive dedup (keep first-seen casing) then cap to 16 —
+                    // mirrors the Windows engine's pre-DB-write retain(seen)+truncate(16)
+                    // (tagging.rs) so a library's stored tag set is identical cross-platform.
+                    var seenTagKeys = Set<String>()
+                    var dedupedTags: [String] = []
+                    for tag in enrichedTags {
+                        guard seenTagKeys.insert(tag.lowercased()).inserted else { continue }
+                        dedupedTags.append(tag)
+                        if dedupedTags.count >= 16 { break }
+                    }
 
                     var tagged = TaggedFile(
                         url: url, kind: "image", extension: ext,
                         sizeBytes: discovered.sizeBytes,
                         createdAt: discovered.creationDate,
                         modifiedAt: discovered.modificationDate,
-                        visionTags: enrichedTags,
+                        visionTags: dedupedTags,
                         tagScores: tagScores,
                         phash: phash,
                         contentHash: contentHash,
@@ -405,7 +415,9 @@ public enum Tagging {
                     visionTags: ["Doc"],
                     tagsEvaluated: true
                 )
-                tagged.textEmbeddingBlob = bgeTextEmbeddingBlob(url: url)
+                let extracted = bgeTextAndEmbedding(url: url)
+                tagged.docText = extracted.text
+                tagged.textEmbeddingBlob = extracted.blob
                 tagged.textStageDone = true   // attempted — stops the backfill carve-out re-walk
                 tagged.perFileTotalMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
                 cont.resume(returning: tagged)
@@ -413,14 +425,23 @@ public enum Tagging {
         }
     }
 
-    /// Extract a document's text + embed it with BGE → a float32-LE blob for `text_embeddings`.
-    /// nil if BGE isn't installed or no text could be extracted (the doc then clusters by
-    /// filename). Bounded by DocText's readers + BGE's 256-token cap. Call ON visionQueue.
-    static func bgeTextEmbeddingBlob(url: URL) -> Data? {
+    /// Extract a document's text ONCE and return both the raw text (for `doc_text` /
+    /// doc_fts full-text search) and its BGE semantic embedding blob (for `text_embeddings`).
+    /// Extraction — PDFKit on a large PDF especially — is the expensive step, so the two
+    /// consumers share a single `DocText.extract` (never extract twice). The text is captured
+    /// even when BGE isn't installed (blob nil), so doc_fts keyword search still works —
+    /// mirrors the Windows decoder-thread extract + optional BGE embed (tagging.rs). Bounded
+    /// by DocText's readers + BGE's 256-token cap. Call ON visionQueue.
+    static func bgeTextAndEmbedding(url: URL) -> (text: String?, blob: Data?) {
+        guard let text = DocText.extract(path: url.path),
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return (nil, nil)
+        }
         guard BGETextService.shared.load(modelDir: BGETextService.defaultModelDir),
-              let text = DocText.extract(path: url.path),
-              let emb = BGETextService.shared.embed(text) else { return nil }
-        return MobileCLIPService.embeddingToBlob(emb)
+              let emb = BGETextService.shared.embed(text) else {
+            return (text, nil)
+        }
+        return (text, MobileCLIPService.embeddingToBlob(emb))
     }
 
     // MARK: - PDF pipeline
@@ -525,7 +546,9 @@ public enum Tagging {
                 // A PDF is a document — cache its BGE content embedding for restructure
                 // (PDFKit text, not the lossy OCR), unless the file failed to open.
                 if !result.failed {
-                    result.textEmbeddingBlob = bgeTextEmbeddingBlob(url: url)
+                    let extracted = bgeTextAndEmbedding(url: url)
+                    result.docText = extracted.text
+                    result.textEmbeddingBlob = extracted.blob
                     result.textStageDone = true   // attempted — stops the backfill carve-out re-walk
                 }
                 cont.resume(returning: result)

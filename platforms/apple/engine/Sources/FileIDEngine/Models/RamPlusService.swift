@@ -52,8 +52,11 @@ public final class RamPlusService: @unchecked Sendable {
     private var precisionFloor: Float = RamPlusService.defaultPrecisionFloor
     private var maxTags: Int = RamPlusService.defaultMaxTags
     private var suppressExtra: Set<String> = []
-    // Match ArcFace's ANE-thrash cap.
-    private let inferenceSem = DispatchSemaphore(value: 4)
+    // Match ArcFace's ANE-thrash cap: defaults to 4, raise on high-core Macs via FILEID_INFERENCE_CONCURRENCY.
+    private static let inferenceConcurrency: Int =
+        ProcessInfo.processInfo.environment["FILEID_INFERENCE_CONCURRENCY"]
+            .flatMap { Int($0) }.map { max(1, min(16, $0)) } ?? 4
+    private let inferenceSem = DispatchSemaphore(value: RamPlusService.inferenceConcurrency)
 
     private init() {}
 

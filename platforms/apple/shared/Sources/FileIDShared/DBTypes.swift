@@ -83,4 +83,17 @@ public struct DuplicateGroup: Sendable, Identifiable, Hashable {
     public var reclaimableBytes: Int64 { totalBytes - (files.first?.sizeBytes ?? 0) }
     public var keeper: FileRow? { files.first }
     public var trashable: ArraySlice<FileRow> { files.dropFirst() }
+
+    /// Files at or below this size get a full byte-for-byte SHA-256; larger files
+    /// are matched by a head+samples+tail+size composite, so a group whose largest
+    /// member is above it is only a *likely* match, not byte-verified. Mirrors the
+    /// engine's internal `ContentHash.fullHashMaxBytes` (16 MiB, == Windows FULL_HASH_MAX_BYTES).
+    public static let fullHashMaxBytes: Int64 = 16 * 1024 * 1024
+
+    /// True when the largest member exceeds the full-hash threshold, so the group
+    /// rests on the composite fingerprint rather than a byte-exact hash. Cleanup
+    /// surfaces this as a "likely match" disclaimer before the user trashes copies.
+    public var isApproximate: Bool {
+        (files.map(\.sizeBytes).max() ?? 0) > Self.fullHashMaxBytes
+    }
 }

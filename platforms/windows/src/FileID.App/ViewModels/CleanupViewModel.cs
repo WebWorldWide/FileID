@@ -146,12 +146,14 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         // same path|mtime cache key LibraryView uses (ReadStore reads the same
         // column) — a file shown in both tabs then shares one L1/L2 cache entry
         // instead of being decoded + cached twice under divergent keys.
+        // created_at + aesthetic ride along for keeper ranking (macOS parity); both
+        // are nullable DOUBLE on `files`, NULL when never scored.
         cmd.CommandText = """
-            SELECT id, path_text, size_bytes, content_hash, modified_at
+            SELECT id, path_text, size_bytes, content_hash, modified_at, created_at, aesthetic
             FROM files
             WHERE content_hash IS NOT NULL AND failed = 0
             """;
-        var rawMembers = new List<(long Id, string Path, long Size, string Hash, double? ModifiedAt)>(2048);
+        var rawMembers = new List<(long Id, string Path, long Size, string Hash, double? ModifiedAt, double? CreatedAt, double? Aesthetic)>(2048);
         using (var reader = cmd.ExecuteReader())
         {
             while (reader.Read())
@@ -162,7 +164,9 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
                 if (hashBytes.Length == 0) continue;
                 var hashHex = Convert.ToHexString(hashBytes);
                 var modifiedAt = reader.IsDBNull(4) ? (double?)null : reader.GetDouble(4);
-                rawMembers.Add((reader.GetInt64(0), reader.GetString(1), reader.GetInt64(2), hashHex, modifiedAt));
+                var createdAt = reader.IsDBNull(5) ? (double?)null : reader.GetDouble(5);
+                var aesthetic = reader.IsDBNull(6) ? (double?)null : reader.GetDouble(6);
+                rawMembers.Add((reader.GetInt64(0), reader.GetString(1), reader.GetInt64(2), hashHex, modifiedAt, createdAt, aesthetic));
             }
         }
 
@@ -181,10 +185,23 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         foreach (var (_, indices) in byHash)
         {
             if (indices.Count < 2) continue;
-            // All members share identical bytes (and size); order by path for a
-            // stable display and keep the first as the default keeper. The user
-            // can re-pick in the UI.
-            indices.Sort((a, b) => string.CompareOrdinal(rawMembers[a].Path, rawMembers[b].Path));
+            // Keeper rank (macOS parity): the member that sorts first becomes the
+            // default keeper, so the re-encoded / resized copies sort lower and get
+            // deleted. Rank by aesthetic DESC, then size DESC, then earliest
+            // created_at ASC, then shortest path ASC, with path ordinal as a stable
+            // final tiebreaker. The user can still re-pick in the UI.
+            indices.Sort((a, b) =>
+            {
+                var ma = rawMembers[a];
+                var mb = rawMembers[b];
+                var aestheticCmp = (mb.Aesthetic ?? 0).CompareTo(ma.Aesthetic ?? 0);
+                if (aestheticCmp != 0) return aestheticCmp;
+                if (ma.Size != mb.Size) return mb.Size.CompareTo(ma.Size);
+                var createdCmp = (ma.CreatedAt ?? double.MaxValue).CompareTo(mb.CreatedAt ?? double.MaxValue);
+                if (createdCmp != 0) return createdCmp;
+                if (ma.Path.Length != mb.Path.Length) return ma.Path.Length.CompareTo(mb.Path.Length);
+                return string.CompareOrdinal(ma.Path, mb.Path);
+            });
             var hash = rawMembers[indices[0]].Hash;
             // shared GroupName for the keeper RadioButton so mutual exclusion
             // within a duplicate group works. The content hash uniquely

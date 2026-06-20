@@ -439,6 +439,10 @@ private struct GroupCard: View {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
                     BadgePill(label: "\(group.files.count) copies")
+                    if group.isApproximate {
+                        BadgePill(label: "~ likely match")
+                            .help("These copies are larger than 16 MB, so they're matched by a fast partial-content fingerprint (head + samples + tail + size) instead of a full byte-for-byte hash. They're almost certainly identical — but preview before deleting, since they aren't byte-verified.")
+                    }
                     Text(String(format: "%.1f MB total · %.1f MB if you keep 1",
                                 Double(group.totalBytes) / 1_048_576,
                                 Double(group.reclaimableBytes) / 1_048_576))
