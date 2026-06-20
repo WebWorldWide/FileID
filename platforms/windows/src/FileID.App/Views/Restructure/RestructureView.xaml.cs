@@ -311,11 +311,17 @@ public sealed partial class RestructureView : UserControl
         // Ask-confidence moves start deselected — the user must explicitly check
         // them. (RESTRUCTURE.md §6 — confidence-tier autonomy)
         foreach (var kv in _allFileRows)
+        {
             if (string.Equals(kv.Value.Move.Confidence, "ask", StringComparison.OrdinalIgnoreCase))
+            {
                 kv.Value.IsSelected = false;
+            }
+        }
         // Re-apply the selections the user made before navigating away (see _deselectedFileIds).
         foreach (var kv in _allFileRows)
-            if (_deselectedFileIds.Contains(kv.Key)) kv.Value.IsSelected = false;
+        {
+            if (_deselectedFileIds.Contains(kv.Key)) { kv.Value.IsSelected = false; }
+        }
         _suppressRecompute = false;
 
         ApplyBarTotalCount.Text = moveCount.ToString("N0");
