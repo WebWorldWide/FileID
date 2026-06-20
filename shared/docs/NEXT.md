@@ -1,5 +1,12 @@
 # NEXT — resume here
 
+## 2026-06-20 — follow-ups after the quality-audit loop
+
+- **Windows near-dup parity (LOCKSTEP GAP)**: port the Cleanup "Visually similar" mode to Windows — the Rust engine already computes the same dhash (`phash`, unused); needs the Hamming union-find grouping + a C# Cleanup mode toggle + the no-auto-select safety UX. Mirror macOS `PerceptualGrouping` + `ReadStore.similarImageGroups` + `CleanupView`. CI-verified only (no local C# build).
+- **Crop-tolerant near-dup tier** (~16 Hamming) as a future opt-in mode (default stays 8).
+- **ANE concurrency**: default 4 kept; if profiling on a specific high-core Mac shows clear gains, consider a Settings slider (per-machine, not a hardcoded default).
+- **User actions for full value**: install BGE in Settings + rescan to (a) cluster docs by content and (b) populate `doc_text` for document keyword search; a rescan also applies RAM++ tags to images scanned before RAM++ was installed.
+
 ## 2026-06-20 — follow-ups after the macOS fix pass
 
 - **Install BGE via Settings + rescan the library** to cluster the user's 1737 docs by content (text_embeddings is currently 0 — the BGE model isn't installed; the engine wiring is already complete and byte-faithful to Windows). The user's library is doc-heavy (1039 PDFs + 698 docs).
