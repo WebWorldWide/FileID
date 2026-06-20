@@ -132,12 +132,17 @@ where
     }
     let dim = embeddings[0].len();
     if dim == 0 {
+        // Treat every face as its own singleton cluster so cluster_count ==
+        // cluster_ids.iter().max() + 1 and the caller can iterate 0..cluster_count
+        // without missing any id. Returning cluster_count: 0 with cluster_ids all
+        // set to 0 was contradictory: the caller skips People-tab population for
+        // ids >= cluster_count, orphaning all n faces.
         return ClusterResult {
-            cluster_ids: vec![0; n],
-            cluster_count: 0,
+            cluster_ids: (0..n).collect(),
+            cluster_count: n,
             core_count: 0,
             outliers_assigned: 0,
-            outliers_as_singletons: 0,
+            outliers_as_singletons: n,
             splits_applied: 0,
             duration_seconds: 0.0,
         };

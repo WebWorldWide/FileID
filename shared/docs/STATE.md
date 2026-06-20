@@ -8,7 +8,264 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
-## 2026-06-19 (latest) — macOS↔Windows lockstep pass: extension sets aligned + restructure verified byte-faithful
+## 2026-06-19 (parity audit) — fix(parity): macOS/Windows UI parity audit — 8 bugs fixed: statusBanner error icon, dismissedDeepAnalyzeHint persistence, FaceEmbedderCard copy, dead lastSeenVersion, FaceClusteringInFlight banner (Windows), LastScanProcessedFiles PropertyChanged, ApplyBarHint text, FaceClusteringBanner wiring
+
+Full six-tab parity audit via parallel agents (macOS inventory + Windows inventory). Verified: Swift build clean, 253/253 Swift tests pass, Rust clippy -D warnings clean.
+
+**macOS (RestructureView.swift + LibraryView.swift + SettingsView.swift):**
+- **statusBanner always showed gold checkmark** even for error messages ("Engine unavailable", "Couldn't compute a plan", etc.). Fixed: added `isError: Bool = false` parameter + `@State private var statusIsError`; error sites set `statusIsError = true`, success sites set `false`; banner shows orange `exclamationmark.triangle.fill` for errors.
+- **`dismissedDeepAnalyzeHint` not persisted**: `@State` var reset on every tab navigation, so the "Run Deep Analyze" hint banner couldn't be permanently dismissed. Fixed: changed to `@AppStorage("restructure.dismissedDeepAnalyzeHint")`.
+- **FaceEmbedderCard copy outdated**: description said "Pre-converted from Buffalo (Immich) ONNX" — the app now uses SFace (Apache-2.0). Fixed: updated to accurate SFace description.
+- **Dead `lastSeenVersion` state** (LibraryView): `@State private var lastSeenVersion: Int = -1` declared but never read or written. Removed.
+
+**Windows (EngineClient.cs + EngineClient.Commands.cs + LibraryView.xaml.cs + RestructureView.xaml.cs):**
+- **`LastScanProcessedFiles` missing PropertyChanged**: auto-property with `private set` bypassed the `Set(ref ...)` helper, so any XAML binding to this property would never update after scan completion. Fixed: added backing field + `Set(ref _lastScanProcessedFiles, value)`.
+- **FaceClusteringBanner always Collapsed**: banner existed in XAML but `SyncBanners()` hardcoded `Visibility.Collapsed` unconditionally. Fixed: added observable `FaceClusteringInFlight` bool property to EngineClient (backed by `_faceClusteringInFlight`, set true at both `AutoTriggerFaceClusteringAsync` call sites on UI thread, cleared on `FaceClusteringCompleteEvent` and `face_clustering_failed`, dispatched via `_ui.TryEnqueue` from catch block); `SyncBanners` now checks it. Mirrors macOS `faceClusteringInFlight`.
+- **ApplyBarHint wrong text for real moves**: hint always said "Originals stay put - applying creates shortcuts you can review" — inaccurate when user applies real moves (originals move). Fixed: "Shortcuts leave originals in place · Moves are permanent but undoable."
+
+## 2026-06-19 (latest) — fix(quality): 11 bugs fixed across macOS+Windows — cross-segment name collision, zero-timestamp guard, audio year folders, IPCSink false-positive pinning, transcribeAudio timeout, scan queue guard, planRestructure shutdown race, resolveTargets data corruption, audio year tag format
+
+Two parallel code-review audits (macOS engine + Windows engine) surfaced 11 bugs/quality issues. All fixed and verified: Rust clippy -D warnings clean, 370 Rust tests pass, 253/253 Swift tests pass, 11/11 iterate.sh assertions GREEN.
+
+**Windows engine (restructure_semantic.rs + restructure.rs + audio_meta.rs):**
+- **BL-01 CRITICAL**: `semantic_classify` — cross-segment name collision. After time-gap segmentation, each segment's `semantic_classify_profiled` call had its own local `used_group_names` HashSet that was discarded after the call, so two separate beach-trip segments could both produce a `Beach/` folder, merging photos from different events. Fixed: `used_group_names` is now passed as `&mut HashSet<String>` across all segment calls.
+- **BL-02**: Zero/near-zero timestamp (FAT32 zero-epoch, corrupt mtime) silently placed files in `Photos/1970/January/` with Review confidence. Fixed: `ts_valid = ts > 86400` guard — invalid timestamps produce Ask confidence and flat (dateless) parent folders (`Photos/` not `Photos/1970/`). Applied to image, video, doc, and audio branches.
+- **BL-03**: Audio files routed to flat `Audio/` with no year structure even when a valid timestamp was present. Fixed: now routes to `Audio/<Year>/` (mirrors Video → `Videos/<Year>/`). Flat `Audio/` used only when ts_valid is false.
+- **WR-02**: Audio date tags emitted raw year strings (`"2019"`) instead of the `Year_NNN` format used by all other file kinds, producing double tags (`"2019"` + `"Year_2019"`) in the Library chip row. Fixed: `audio_meta.rs` now emits `"Year_2019"` format.
+
+**macOS engine (FileIDEngineMain.swift + IPCSink.swift + DeepAnalyzeNaming.swift + DeepAnalyzeRunner.swift + Restructure.swift):**
+- **CR-01 CRITICAL**: `transcribeAudio` had no timeout. SFSpeechRecognizer never delivers `isFinal` for silence-only files, unsupported codecs, or very short recordings — the `withCheckedContinuation` parked forever, stalling all subsequent Deep Analyze work. Fixed: wrapped in `withTaskGroup` race against 30-second timeout.
+- **CR-02**: `resolveTargets` in DeepAnalyzeRunner coalesced nil DB columns with `?? 0` / `?? ""` defaults, producing `Target(id: 0, path: "")`. The id=0 UPDATE silently matched zero rows; the empty path resolved to the process working directory as a "file to analyze". Fixed: `compactMap` with explicit `guard let rowID: Int64, rowID > 0, !path.isEmpty` — invalid rows are dropped, not faked.
+- **CR-03**: `startScan` enqueued jobs unconditionally. A rapidly-clicking or misbehaving app could pile up unlimited scan jobs. Fixed: rejects with `scan_already_queued` error if `JobQueue.shared.hasActive(category: .scan)` is true.
+- **WR-01**: `planRestructure` spawned an unregistered `Task.detached`. A `.shutdown` arriving during plan generation would call `_exit(0)` before the plan task emitted `restructurePlan`, leaving the Restructure tab stuck on "Computing plan…". Fixed: task is now registered via `coordinator.setActiveRestructure` so `awaitActiveRestructure()` in `main()` drains it before exit.
+- **WR-02 IPCSink**: `criticalNeedles` used bare strings like `"error"` — matched ANY JSON string value containing that word (e.g. a tag named "ready", a path component "scanComplete", a caption word "error"). Fixed: needles now use `"error":{` form to match JSON *object keys* only, not string values.
+- **macOS rule cascade (Restructure.swift)**: Zero-timestamp guard and audio year structure applied identically to Windows (BL-02 + BL-03 mirror).
+
+**Tests added:**
+- Rust: `audio_year_subfolder` — asserts dated audio goes to `Audio/2024/`, not flat `Audio/`
+- Rust: `zero_timestamp_gets_ask_confidence` — asserts zero-ts image gets Ask confidence and no 1970 folder
+- Swift: Updated `videoAudioBuckets` and `missingTimestampYear` tests to match new behavior
+
+## 2026-06-19 — feat(restructure): time-gap segmentation + richer time encoding + ask-deselection + CVD Sankey palette
+
+Deep investigation into why restructure underperforms. Two-agent audit identified root causes; 8 improvements implemented across both engines and the macOS UI. All verified: Rust clippy -D warnings clean, 253/253 Swift tests pass.
+
+**Root causes diagnosed:**
+1. No time-gap event segmentation — photos from different days competed in the same cluster
+2. Time encoding only had day-of-year (2 floats); same-day events in different years were indistinguishable
+3. `ask`-confidence moves started selected — users could accidentally apply low-confidence moves
+4. Sankey ribbons were all gold regardless of destination — no visual distinction between categories
+5. `pass2Margin` not getting the granularity delta — asymmetry at `tight`/`loose` granularity settings
+6. Face, GPS, path signals not fused (documented gap; tracked for future work)
+
+**Changes (both engines — byte-faithful lockstep):**
+- **Time-gap event segmentation**: `classify()` (macOS) / `semantic_classify()` (Rust) now pre-segment photos by capture-time gap (default 2 h, `FILEID_RESTRUCTURE_TIME_GAP` env override) before clustering. Events separated by hours/days never compete in the same cluster. Photos without timestamps cluster independently as a trailing group.
+- **Richer time encoding**: `dayOfYearCyclical` → `timeFeatures` returning 5 values: day-of-year sin/cos (seasonality), time-of-day sin/cos (morning vs evening), log-compressed absolute year (separates same-calendar-day events across years). Fused-vector capacity updated from +2 to +5.
+- **`pass2Margin` gets granularity delta** (`0.08 + d * 0.5`): margin now scales proportionally when `FILEID_RESTRUCTURE_GRANULARITY=tight/loose`, eliminating the asymmetry where cosines shifted but margin didn't.
+- `#[derive(Clone)]` added to `SemanticFile` (Rust) to enable per-segment cloning.
+
+**macOS UI:**
+- **`.ask` proposals start deselected** (`RestructureView.swift`): "No clear signal — the decision is yours" moves are unchecked by default; user must explicitly select them before applying.
+- **Sankey Okabe-Ito CVD-safe palette**: destination nodes now each get a distinct color (blue, vermilion, green, sky blue, orange, purple, yellow); ribbons carry the destination color so the user sees "what does this become?" from the hue. Source nodes are neutral (`.secondary`) so destinations dominate. Ribbon palette is CVD-safe for all common deficiency types.
+
+**Windows UI:**
+- **`.ask` proposals start deselected** (`RestructureView.xaml.cs`): `ask`-confidence rows deselected in a suppressed pass alongside the existing `_deselectedFileIds` restoration.
+
+**Still tracked / deferred:**
+- Face identity signal in fusion vector (requires person→file DB join + multi-hot block)
+- GPS signal in fusion vector (reverse geocoding or coordinate normalization)
+- VLM group naming (Qwen2.5-VL label-then-reason; per-call model reload too slow)
+- `staysPutFiles` in IPC (IPC schema change needed)
+- Win2D Sankey color upgrade (Windows uses a different Sankey rendering path)
+
+---
+
+## 2026-06-19 — fix: 3 final bugs (macOS: WelcomeSheet VLM error hidden, SettingsView blocking DB read; Windows: SettingsView SqliteConnection leak)
+
+3 final bugs fixed. All verified: Rust clippy -D warnings clean, 253 Swift tests pass.
+
+- **WelcomeSheet.swift** (MEDIUM): VLM install error was silently dropped. `vlmProgressLabel` returns "Failed: …" when `vlmLastError` is set, but that label was only rendered inside `if inProgress { }`. When an error fires, `vlmRequested` becomes false → `vlmInProgress = false` → the block is never entered. Added `else if let label = progressLabel { Text(label).foregroundStyle(.red) }` so errors surface below the title row.
+- **SettingsView.swift** (LOW): `store.recentSessions()` called synchronously on the main actor in `.onAppear` and `.onChange(of: showAdvanced)`. GRDB's `DatabaseQueue.read` blocks the calling thread. Wrapped in `Task { }` so it runs cooperatively without stalling the run loop.
+- **SettingsView.xaml.cs** (HIGH): `PopulateRecentScansAsync` opened `SqliteConnection` without `using` — leaked one OS read handle per Settings tab visit. Changed `var conn` to `using var conn`.
+
+## 2026-06-19 — fix: 7 bugs (macOS: preview sibling race, DA error stale progress, DA url force-unwrap; Windows: SqliteConnection leak, ReadStore missing OpenAsync, _deselectedFileIds race, restructure_semantic empty filename)
+
+7 additional bugs fixed. All verified: Rust clippy -D warnings clean, 253 Swift tests pass.
+
+- **LibraryView.swift** (MEDIUM): `openPreview` race — async task that upgrades `previewSiblings` only gated on `selected != nil`; if user arrowed to a different photo before the task completed, the original photo's sibling list replaced the new photo's. Fixed: capture `row.id` at spawn time, gate on `selected?.id == seedID`.
+- **EngineClient.swift** (MEDIUM): `deepAnalyzeProgress` not cleared on `deep*` engine errors. `deepAnalyzeInFlight` was cleared but `deepAnalyzeProgress` was not, leaving a frozen "Working…" progress card with no way to dismiss it. Fixed: added `deepAnalyzeProgress = nil` alongside `deepAnalyzeInFlight = false`.
+- **DeepAnalyzeViews.swift** (LOW): `ModelInstallStatus.isInstalled` force-unwrapped `.urls(...).first!` — crashes if sandbox disallows the document directory. Changed to `guard let base = ... else { return false }`.
+- **DeepAnalyzeView.xaml.cs** (HIGH): `RefreshNamePeopleGateAsync` opened a `SqliteConnection` without `using` — leaked a read handle on every call (tab load + face-cluster-complete events). Changed to `using var conn`.
+- **DeepAnalyzeView.xaml.cs** (MEDIUM): `RunApplyAsync` used `ReadStore` without calling `OpenAsync()` before the first query. All three Apply buttons (Apply Tags, Apply People, Apply All) threw `NullReferenceException` inside the store and silently failed, showing 0 tagged/peopled. Added `await store.OpenAsync()`.
+- **RestructureView.xaml.cs** (MEDIUM): `DeepAnalyzeComplete` handler called `_deselectedFileIds.Clear()` (a static field shared across view instances) after an `await` without re-checking `_unloaded` — could clobber the new view instance's selection state if the view was recreated during the await. Added `if (_unloaded) return;` after `await RefreshDeepAnalyzeHintAsync()`.
+- **restructure_semantic.rs** (LOW): `file.source.file_name().unwrap_or_default()` produced an empty `OsStr` for paths ending in `/` or `..`, causing `dest_dir.join("")` to silently resolve to the directory itself. Changed to `let Some(name) = file.source.file_name() else { continue }`.
+
+## 2026-06-19 — fix: 4 more bugs (macOS: face-name inheritance threshold, restructure feedback skip; Windows: RAM++ 0-tag wipes prior tags, tagging visual_tagger_ran scope)
+
+4 additional bugs fixed. All verified: Rust clippy -D warnings clean, 253 Swift tests pass.
+
+- **FaceClustering.swift L1034** (HIGH): Wave-1 name-inheritance threshold used floor division — `3 / 2 = 1` face could claim a 3-face prior cluster (33% overlap satisfying the "≥ 50%" comment). Fixed to ceiling: `(n + 1) / 2` → requires 2 of 3 faces.
+- **Restructure.swift L771-778** (LOW): `appliedPairs` (learn-from-corrections feedback) was gated inside `if let h = undoHandle`, so moves were silently uncredited when the undo journal failed to open (disk-full / sandbox). Decoupled: always collect pairs when `recordUndo=true`, write to journal separately.
+- **tagging.rs L1960-1966** (MEDIUM): `visual_tagger_ran = models.ram_plus.is_some()` — true whenever RAM++ model is loaded, even when it ran and emitted 0 tags. `tags_evaluated=true` then caused dbwriter to wipe previously-stored content tags on re-scan of abstract/solid-color images. Fixed: hoisted `ram_plus_ran` (set to `ram_emit_count > 0`) before the image block; `visual_tagger_ran` now requires RAM++ to have emitted at least one tag, or CLIP scene tags to be enabled with an embedding.
+- **tagging.rs L1719** (bookkeeping): `let mut ram_plus_ran` was declared inside the `if let Some((rgb, w, h)) = image_source` block, making it inaccessible at the `visual_tagger_ran` site. Hoisted to function scope.
+
+## 2026-06-19 — fix: 6 bugs (macOS: unknown-person survivor, displayName double-space, nonisolated statics; Windows: _lastAnyProgressAt race, Whisper/Bge subscriptions, thumbnail drain block)
+
+6 additional bugs fixed. All verified: Rust clippy -D warnings clean, 253 Swift tests pass.
+
+- **ReadStore.swift** (HIGH): `mergePersonsBatch` set `isNamed=true` for `is_unknown` persons, causing Unknown clusters to beat genuinely unnamed persons in survivor selection and swallow their faces. Fixed to `false`.
+- **ReadStore.swift** (MEDIUM): `displayName` with suffix produced `"John Smith  Jr"` (double-space). `", Jr".replacingOccurrences(", ", " ")` yields `" Jr"` (leading space) before join. Simplified to `parts.append(s)`.
+- **DeepAnalyze.swift** (MEDIUM): `compareCallsSinceClear` and `compareSampleLogged` declared `nonisolated(unsafe) private static`, opting out of actor isolation though only used inside the actor method `compareFaces`. Promoted to actor instance variables.
+- **ModelInstallerService.cs** (MEDIUM): `_lastAnyProgressAt` was a plain `static DateTime` field written from PropertyChanged callback thread and read from thread-pool watchdog without synchronization. `volatile` is illegal on struct fields in C#; changed to `long _lastAnyProgressAtTicks` with `Interlocked.Exchange`/`Read`.
+- **ModelInstallerService.cs** (LOW): `Whisper` and `Bge` slots not subscribed to `OnSlotPropertyChanged`. Added missing subscriptions to prevent perpetual stale aggregates if either slot is added to `IsBusy`/`CoreModelsInstalled` in the future.
+- **ThumbnailService.cs** (MEDIUM): `Thread.Sleep(50)` in `TryEnqueueWithRetry` blocked the single drain worker for 50ms on every compositor-shutdown `TryEnqueue` failure, stalling all queued thumbnail requests. Removed; immediate retry is sufficient.
+
+## 2026-06-19 — fix: 10 more bugs (Windows: mobileclip embedding corruption, face crop leak, downloader progress; macOS: mergeTags duplicate, mergePersons null, undo identity skip)
+
+10 additional bugs fixed. All verified: Rust clippy -D warnings clean, 253 Swift tests pass.
+
+1. **mobileclip.rs (HIGH) — integer division truncates last embedding in batch**:
+   `embed_dim = total / batch` silently discards a remainder if ORT output isn't cleanly divisible.
+   The last embedding in any batch gets the wrong dimension, corrupting cosine similarity in semantic
+   search with no error emitted. Fix: bail if `total % batch != 0`.
+   File: `platforms/windows/src/engine/src/models/mobileclip.rs`
+
+2. **dbwriter.rs (HIGH) — `.filter_map(ok)` silently drops row errors → stale face crop files never pruned**:
+   `stale_face_ids` was collected with `.filter_map(|r| r.ok())`, silently dropping any row error.
+   The face DELETE still ran, but the silently-dropped IDs were never added to `crop_ids_to_prune`,
+   leaving `face_crops/<id>.jpg` files on disk forever. Fix: `.collect::<rusqlite::Result<Vec<_>>>()?`
+   so any row error surfaces and aborts the transaction rather than leaking files.
+   File: `platforms/windows/src/engine/src/pipeline/dbwriter.rs`
+
+3. **identity_clustering.rs (MEDIUM) — `dim == 0` returns contradictory cluster_ids/cluster_count**:
+   Returned `cluster_ids: vec![0; n]` (all faces in cluster 0) with `cluster_count: 0`. Callers
+   that iterate `0..cluster_count` create zero People entries, orphaning all n faces from the tab.
+   Fix: return `cluster_ids: (0..n).collect()`, `cluster_count: n` (each face its own singleton).
+   File: `platforms/windows/src/engine/src/pipeline/identity_clustering.rs`
+
+4. **downloader.rs (MEDIUM) — final 100% progress event never emitted in `download_parallel`**:
+   The 10 Hz throttle could suppress the last chunk's progress; a stale no-op block at the end
+   silenced the "silence unused variable" intent. The progress bar stalled at ~99% permanently.
+   Fix: emit unconditional final event inside the drainer when `rx.recv()` returns `None`.
+   File: `platforms/windows/src/engine/src/downloader.rs`
+
+5. **scan.rs (LOW) — panic in `ScanSession::new_with_options` leaves scan_state permanently set**:
+   If the scan task panicked before the `*scan_state_release.lock() = None` cleanup, the slot
+   stayed occupied and every subsequent `startScan` returned `scan_already_running` until restart.
+   Fix: RAII `ScanStateGuard` struct whose `Drop` clears the slot on any unwind.
+   File: `platforms/windows/src/engine/src/commands/scan.rs`
+
+6. **TagWriter.swift (MEDIUM) — `mergeTags` allows case-variant duplicates from the `new` array**:
+   `lowerExisting` was built once from `existing` and not updated as tags were appended. Two tags
+   in `new` like `["vacation", "Vacation"]` both passed the guard and were written as distinct
+   Finder tags. Fix: promote `lowerExisting` → `lowerSeen: var Set` and update on each insertion.
+   File: `platforms/apple/shared/Sources/FileIDShared/TagWriter.swift`
+
+7. **TagWriter.swift (LOW) — `undoBulkAdd` strips tags without identity verification for nil-identity journal entries**:
+   The size/mtime guard was entered only if BOTH were non-nil; entries from older builds (nil fields)
+   bypassed it entirely and could mangle an unrelated replacement file. Fix: `guard let` skips the
+   undo for any entry with missing identity data (safer than mangling a different file).
+   File: `platforms/apple/shared/Sources/FileIDShared/TagWriter.swift`
+
+8. **Database.swift (MEDIUM) — `mergePersons` representative_face_id stays NULL during initial re-scan**:
+   The `COALESCE(SELECT ... WHERE arcface_embedding IS NOT NULL, representative_face_id)` always
+   evaluates to `representative_face_id` (NULL) while the v12 reset is in progress and no embeddings
+   exist yet. Any merge during the initial re-scan leaves the target person with no representative
+   face — the People UI shows no crop until the next re-cluster. Fix: add a second fallback
+   sub-select (any face_print, ignoring embedding) before falling back to the existing value.
+   File: `platforms/apple/engine/Sources/FileIDEngine/Storage/Database.swift`
+
+9. **Database.swift (LOW) — `Int($0)` truncation in `mergePersons` args**:
+   `validSources: [Int64]` were cast to `Int` before being appended to the GRDB args array.
+   Safe on 64-bit macOS (same width) but fragile. Fix: pass `validSources` directly.
+   File: `platforms/apple/engine/Sources/FileIDEngine/Storage/Database.swift`
+
+10. **CleanupViewModel.cs (LOW) — dead null guard on content_hash read**:
+    `(byte[])reader[3]` throws `InvalidCastException` for DBNull (the null guard can never catch it).
+    The WHERE clause already filters, but the guard masked a future regression risk.
+    Fix: `if (reader.IsDBNull(3)) continue;` before the cast.
+    File: `platforms/windows/src/FileID.App/ViewModels/CleanupViewModel.cs`
+
+## 2026-06-19 — fix: 6 bugs across macOS + Windows (trash DB deadlock, person ID corruption, actor blocking, data race)
+
+Six bugs fixed and verified (253 Swift tests + Rust clippy -D warnings clean):
+
+1. **trash.rs T-1 (HIGH) — DB mutex held during PowerShell restore (30 s stall)**:
+   `handle_restore_from_trash` acquired `db.lock()` at the top and held it through
+   `restore_batch_from_recycle_bin`, which shells out to PowerShell (up to 30 s). Every DB reader
+   (including the UI's `ReadStore`) was blocked for the full duration of any undo operation.
+   Fix: compute filesystem-only `pre_occupied` before the lock; read `allowed_canonical` in a
+   short-lived block (lock drops immediately after); PowerShell runs with no lock held; re-acquire
+   for the post-restore transaction. File: `platforms/windows/src/engine/src/commands/trash.rs`
+
+2. **trash.rs T-2 (HIGH) — wrong person ID on revert-merge when `source_person_id` was recycled**:
+   `INSERT OR IGNORE INTO persons (id=source_person_id)` silently no-ops when that id is already
+   held by a *different* person (SQLite auto-incremented past it and reused the value). The
+   subsequent `SELECT id FROM persons WHERE id = source_person_id` then returns the occupant,
+   and all reverted face-prints land on the wrong person. Fix: check `execute()` rows-changed
+   (0 = conflict); on conflict, do a plain `INSERT INTO persons` (no id) and use `last_insert_rowid()`.
+   File: `platforms/windows/src/engine/src/commands/trash.rs`
+
+3. **trash.rs T-3 (MEDIUM) — `let _ = tx.execute(...)` silences real DB errors after restore**:
+   After a successful on-disk restore, `INSERT OR IGNORE INTO files` used `let _ =`, discarding
+   errors from disk-full / corruption / schema mismatch — the file exists on disk but never
+   appears in the Library. Fix: `tx.execute(...)?` — `OR IGNORE` already returns `Ok(0)` for
+   constraint conflicts, so `?` only fires on genuine failures.
+   File: `platforms/windows/src/engine/src/commands/trash.rs`
+
+4. **restructure.rs R-1 (MEDIUM) — silent signals load failure**:
+   The `spawn_blocking` signals load matched only `Ok(Ok(v))` + a catch-all `_`; a real
+   `Ok(Err(anyhow_error))` or a panic `Err(JoinError)` both silently fell through to empty maps
+   with no log line, making restructure silently degrade instead of reporting the cause.
+   Fix: explicit `Ok(Err(err))` and `Err(err)` arms with `tracing::warn!`.
+   File: `platforms/windows/src/engine/src/commands/restructure.rs`
+
+5. **VLMDownloader.swift (HIGH) — `sha256HexOfFile` blocks actor thread**:
+   For partially-downloaded models (no sentinel, right size), the sha256 verification was called
+   synchronously on the actor thread — blocking for up to ~27 s per file (e.g. 13.5 GB Mistral)
+   with no cancellation possible. Fix: offload to `DispatchQueue.global(qos: .utility)` via
+   `withCheckedContinuation`, suspending the actor during the hash.
+   File: `platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift`
+
+6. **VLMDownloader.swift (LOW) + TLSPinning.swift (MEDIUM)**:
+   - Sentinel write failure was `try?`-silenced; offline Macs hit HF on every DA launch with no
+     log entry. Fix: log `vlm_sentinel_write_failed` via `JSONLog.shared.warn`.
+   - `TLSPinningSessionDelegate.pinningRejected` was a plain `var` written on URLSession's
+     delegate queue and read on the actor thread — data race under Swift 6. Fix: `NSLock`
+     with a computed getter; writer uses lock/unlock in the delegate callback.
+   Files: `VLMDownloader.swift`, `platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift`
+
+On-hardware verified (prior session): TrueNAS corpus 60K files, face clustering 3.75 s / 39 faces → 18 persons.
+
+## 2026-06-19 — fix: face clustering "never completes" (macOS HNSW O(ef²) → O(ef log ef))
+
+Three fixes for the face clustering hang reported on macOS:
+
+1. **Root cause fixed — `HNSWIndex.searchLayer` was O(ef²·M)**:
+   The beam search used sorted `[(Int32, Float)]` arrays as priority queues. `removeFirst()` is O(ef)
+   (shifts all elements); `insertSorted` is O(ef) (array shift after binary-search position). With
+   `efConstruction=200` and up to 200K faces, the HNSW build took an estimated 30+ minutes — explaining
+   "never completes." Fixed by replacing the sorted arrays with proper binary heaps: `MinHeap` for the
+   candidate frontier (O(log ef) extract-min, O(log ef) insert) and `MaxHeap` for the bounded result
+   window (O(1) peek-max, O(log ef) evict). Complexity drops from O(ef²·M) → O(ef·M·log ef) per
+   `searchLayer` call — approximately 1000× fewer operations for N=200K, ef=200, M=16.
+   File: `platforms/apple/engine/Sources/FileIDEngine/Models/HNSWIndex.swift`
+
+2. **Cancellation check added to HNSW build loop**:
+   The 200K-face insert loop had no cancellation check, so a Cancel/Shutdown during HNSW build would
+   either be ignored until the loop finished or kill the process mid-transaction. Now polls
+   `clusterShouldCancel` every 1,000 insertions — responsive without measurable overhead.
+   File: `platforms/apple/engine/Sources/FileIDEngine/Pipeline/FaceClustering.swift`
+
+3. **`ArcFaceService.self.env` data race fixed**:
+   `load(_:)` read `self.env` without holding `lock`, while `MobileCLIPService`, `BGETextService`, and
+   `RamPlusService` were all fixed with the same lock-bracket pattern in the previous session (commit
+   `72492b6`). Applied the identical fix: `lock.lock(); let cachedEnv = self.env; lock.unlock()`.
+   File: `platforms/apple/engine/Sources/FileIDEngine/Models/ArcFaceService.swift`
+
+Needs hardware verification: `swift build` + face clustering on real Mac against a library with 1K+ faces.
+
+## 2026-06-19 — macOS↔Windows lockstep pass: extension sets aligned + restructure verified byte-faithful
 
 Brought macOS up to Windows (and vice-versa) on every front I can verify headlessly:
 - **Extension sets aligned** (the decodable ones, both directions): macOS gained `mts`/`m2ts`

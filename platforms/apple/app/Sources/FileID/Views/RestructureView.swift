@@ -37,6 +37,7 @@ struct RestructureView: View {
     @State private var selectedIDs: Set<Int64> = []
     @State private var loading = false
     @State private var status: String?
+    @State private var statusIsError = false
     @State private var showingPicker = false
     @State private var staysPutExpanded: Bool = false
     @State private var confirmApply: Bool = false
@@ -69,7 +70,7 @@ struct RestructureView: View {
     @State private var hasPulsed = false
     @State private var captionedFraction: Double = 0
     @State private var totalAnalyzableFiles = 0
-    @State private var dismissedDeepAnalyzeHint = false
+    @AppStorage("restructure.dismissedDeepAnalyzeHint") private var dismissedDeepAnalyzeHint = false
     /// (clip, text) embedding counts at plan time. nil = not yet measured. When both are
     /// 0 the scan ran without the CLIP/BGE models, so the plan is date/name-only — we tell
     /// the user to install the models + rescan for content-based grouping.
@@ -195,7 +196,7 @@ struct RestructureView: View {
                         }
                     }
                     if let s = status {
-                        statusBanner(s)
+                        statusBanner(s, isError: statusIsError)
                     }
                     // Reserve room for the floating apply bar.
                     Color.clear.frame(height: applyBarVisible ? 96 : 0)
@@ -251,12 +252,14 @@ struct RestructureView: View {
                         guard let root = libraryRoot, !applying else { return }
                         applying = true
                         status = "Undoing the last restructure…"
+                        statusIsError = false
                         // A failed send (engine respawning) would otherwise wedge
                         // `applying` true forever — no result event ever arrives to
                         // clear it, leaving the button permanently disabled. (audit R2-app)
                         if !engine.undoRestructure(libraryRoot: root.path) {
                             applying = false
                             status = "Engine is unavailable — try again in a moment."
+                            statusIsError = true
                         }
                     }
                     .buttonStyle(.borderedProminent)
@@ -324,8 +327,10 @@ struct RestructureView: View {
             applying = false
             if let priv = result.privilegeError, !priv.isEmpty {
                 status = priv
+                statusIsError = true
             } else {
                 status = "\(result.applied) moved · \(result.failed) failed"
+                statusIsError = false
             }
             store.notifyChanged()
             requestPlan()
@@ -336,6 +341,7 @@ struct RestructureView: View {
             if applying {
                 applying = false
                 status = "Engine restarted — apply interrupted. Recheck your library and try again."
+                statusIsError = true
             }
             loading = false
         }
@@ -356,15 +362,18 @@ struct RestructureView: View {
             if applying, kind == "db_unavailable" {
                 applying = false
                 status = "The engine isn't ready — try again in a moment."
+                statusIsError = true
             }
             guard loading else { return }
             switch kind {
             case "plan_restructure_failed", "db_unavailable":
                 loading = false
                 status = "Couldn't compute a plan. Please try again."
+                statusIsError = true
             case "ipc_frame_too_large":
                 loading = false
                 status = "This library's plan is too large to display. Try restructuring a smaller folder."
+                statusIsError = true
             default:
                 break
             }
@@ -645,10 +654,10 @@ struct RestructureView: View {
     /// at the bottom of the page — replaces the prior GlassCard so
     /// it doesn't compete with the unified surface above.
     @ViewBuilder
-    private func statusBanner(_ message: String) -> some View {
+    private func statusBanner(_ message: String, isError: Bool = false) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: "checkmark.seal.fill")
-                .foregroundStyle(Theme.gold)
+            Image(systemName: isError ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
+                .foregroundStyle(isError ? .orange : Theme.gold)
             Text(message)
                 .font(.callout)
             Spacer()
@@ -1012,6 +1021,7 @@ struct RestructureView: View {
         if !engine.planRestructure(libraryRoot: root.path) {
             loading = false
             status = "Engine is starting — reopen the tab to load your plan."
+            statusIsError = true
         }
     }
 
@@ -1033,6 +1043,12 @@ struct RestructureView: View {
             .sorted { $0.proposals.count > $1.proposals.count }
 
         selectedIDs = Set(mapped.map(\.fileID))
+        // Ask-confidence moves start deselected — "No clear signal, the decision
+        // is yours." The user must explicitly check them before applying.
+        // (RESTRUCTURE.md §6 — confidence-tier autonomy)
+        for p in mapped where p.confidence.lowercased() == "ask" {
+            selectedIDs.remove(p.fileID)
+        }
         // Re-apply per-file deselections that carried into the fresh set.
         selectedIDs.subtract(priorDeselectedIDs)
         // Preserve the user's "Skip these" choices: re-exclude any persisted
@@ -1097,6 +1113,7 @@ struct RestructureView: View {
         guard !applying else { return }
         guard let root = libraryRoot else {
             status = "Pick a library folder before applying."
+            statusIsError = true
             return
         }
         // R6-01: apply exactly the set frozen when the dialog was presented, not
@@ -1104,6 +1121,7 @@ struct RestructureView: View {
         let moves = pendingMoves
         guard !moves.isEmpty else {
             status = "Nothing selected to apply."
+            statusIsError = true
             return
         }
         applying = true
@@ -1111,6 +1129,7 @@ struct RestructureView: View {
         if !engine.applyRestructure(libraryRoot: root.path, moves: moves) {
             applying = false
             status = "Engine is unavailable — try again in a moment."
+            statusIsError = true
         }
     }
 

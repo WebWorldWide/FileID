@@ -580,14 +580,14 @@ public final class Database: @unchecked Sendable {
         return try await pool.write { db in
             let placeholders = validSources.map { _ in "?" }.joined(separator: ",")
             var args: [DatabaseValueConvertible] = [target]
-            args.append(contentsOf: validSources.map { Int($0) })
+            args.append(contentsOf: validSources)
             try db.execute(
                 sql: "UPDATE face_prints SET person_id = ? WHERE person_id IN (\(placeholders))",
                 arguments: StatementArguments(args)
             )
             try db.execute(
                 sql: "DELETE FROM persons WHERE id IN (\(placeholders))",
-                arguments: StatementArguments(validSources.map { Int($0) })
+                arguments: StatementArguments(validSources)
             )
             try db.execute(sql: """
                 UPDATE persons SET file_count = (
@@ -603,9 +603,12 @@ public final class Database: @unchecked Sendable {
                     (SELECT fp.id FROM face_prints fp
                      WHERE fp.person_id = ? AND fp.arcface_embedding IS NOT NULL
                      ORDER BY COALESCE(fp.face_quality, 0.0) DESC LIMIT 1),
+                    (SELECT fp.id FROM face_prints fp
+                     WHERE fp.person_id = ?
+                     ORDER BY COALESCE(fp.face_quality, 0.0) DESC LIMIT 1),
                     representative_face_id)
                 WHERE id = ?
-                """, arguments: [target, target])
+                """, arguments: [target, target, target])
             return try Int.fetchOne(db, sql:
                 "SELECT file_count FROM persons WHERE id = ?",
                 arguments: [target]) ?? 0

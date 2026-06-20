@@ -708,6 +708,17 @@ where
                 });
             }
         }
+        // All chunk senders dropped — emit the unconditional 100% completion
+        // event so the UI progress bar always reaches 100%, regardless of the
+        // 10 Hz throttle window.
+        let final_done = bytes_done_drain.load(Ordering::Relaxed);
+        let elapsed_secs = started.elapsed().as_secs_f64().max(0.001);
+        progress(DownloadProgress {
+            url: url_for_drain,
+            bytes_done: final_done,
+            bytes_total: Some(total_for_drain),
+            bytes_per_second: final_done as f64 / elapsed_secs,
+        });
     });
 
     // Spawn the chunk downloaders.
@@ -810,12 +821,7 @@ where
         let _ = tokio::fs::remove_file(part_file_path(&request.destination, i)).await;
     }
 
-    let final_done = bytes_done.load(Ordering::Relaxed);
     Ok(())
-        .map(|_| {
-            let _ = final_done; // silence unused if no progress callbacks
-        })
-        .map(|_| ())
 }
 
 /// One-byte `Range:` probe to confirm the server honors ranges when

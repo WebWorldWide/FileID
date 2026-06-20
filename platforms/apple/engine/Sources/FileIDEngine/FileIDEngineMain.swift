@@ -189,6 +189,16 @@ struct FileIDEngineMain {
                 )))
                 return
             }
+            // Reject a start-scan while one is already queued or running. Mirrors
+            // the Windows engine's scan_session.rs guard. Prevents unbounded job
+            // queue growth from a misbehaving or rapidly-clicking app client.
+            if await JobQueue.shared.hasActive(category: .scan) {
+                await sink.emit(.error(EngineError(
+                    kind: "scan_already_queued",
+                    message: "A scan is already running or queued — cancel it first."
+                )))
+                return
+            }
             // The app resolves the security-scoped bookmark to a filesystem
             // path before sending, so the engine receives a ready-to-walk
             // path. `rootDisplay` defaults to `rootPath` when omitted.
@@ -442,7 +452,7 @@ struct FileIDEngineMain {
                 return
             }
             let planRoot = URL(fileURLWithPath: libraryRoot)
-            Task.detached(priority: .userInitiated) {
+            let planTask = Task.detached(priority: .userInitiated) {
                 JSONLog.shared.info(ev: "plan_restructure_requested",
                                     path: redactPathForLog(libraryRoot))
                 do {
@@ -462,7 +472,12 @@ struct FileIDEngineMain {
                         message: "Restructure planning did not complete: \(error)"
                     )))
                 }
+                // Registered so awaitActiveRestructure() in main() drains this
+                // task before _exit — prevents losing the restructurePlan event
+                // on a shutdown that arrives while planning is in progress.
+                await coordinator.setActiveRestructure(nil)
             }
+            await coordinator.setActiveRestructure(planTask)
         case .applyRestructure(let libraryRoot, let moves, _):
             // macOS performs real filesystem moves; the Windows engine's
             // symlink-preview mode has no macOS equivalent, so `useSymlinks`

@@ -723,7 +723,6 @@ internal sealed class ThumbnailService : IDisposable
         Microsoft.UI.Dispatching.DispatcherQueueHandler action)
     {
         if (dispatcher.TryEnqueue(action)) return true;
-        Thread.Sleep(50);
         return dispatcher.TryEnqueue(action);
     }
 

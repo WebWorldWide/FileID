@@ -707,7 +707,7 @@ public final class ReadStore: @unchecked Sendable {
             if let m = middleName?.trimmingCharacters(in: .whitespaces), !m.isEmpty { parts.append(m) }
             if let l = lastName?.trimmingCharacters(in: .whitespaces), !l.isEmpty { parts.append(l) }
             if let s = suffix?.trimmingCharacters(in: .whitespaces), !s.isEmpty {
-                parts.append(parts.isEmpty ? s : ", \(s)".replacingOccurrences(of: ", ", with: " "))
+                parts.append(s)
             }
             if !parts.isEmpty { return parts.joined(separator: " ") }
             if let n = name, !n.isEmpty { return n }
@@ -1083,7 +1083,7 @@ public final class ReadStore: @unchecked Sendable {
                     let id: Int64 = r["id"] ?? 0
                     fileCount[id] = r["file_count"] ?? 0
                     if (r["is_unknown"] as Int? ?? 0) != 0 {
-                        isNamed[id] = true
+                        isNamed[id] = false
                     } else {
                         let cols = ["name", "title", "first_name",
                                     "middle_name", "last_name", "suffix"]

@@ -35,7 +35,11 @@ public enum DeepAnalyzeRunner {
                     SELECT id, path_text FROM files
                     WHERE id = ? AND kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0
                     """, arguments: [id])
-                if let r { return [Target(id: r["id"] ?? 0, path: r["path_text"] ?? "")] }
+                if let r,
+                   let rowID: Int64 = r["id"], rowID > 0,
+                   let path: String = r["path_text"], !path.isEmpty {
+                    return [Target(id: rowID, path: path)]
+                }
                 return []
             case .folder(let prefix):
                 let p = prefix.hasSuffix("/") ? prefix : prefix + "/"
@@ -49,7 +53,11 @@ public enum DeepAnalyzeRunner {
                       AND (path_text = ? OR path_text LIKE ? ESCAPE '\\')
                     ORDER BY scanned_at ASC
                     """, arguments: [prefix, Self.escapeLike(p) + "%"])
-                return r.map { Target(id: $0["id"] ?? 0, path: $0["path_text"] ?? "") }
+                return r.compactMap { row -> Target? in
+                    guard let rowID: Int64 = row["id"], rowID > 0,
+                          let path: String = row["path_text"], !path.isEmpty else { return nil }
+                    return Target(id: rowID, path: path)
+                }
             case .wholeLibrary(let skipExisting):
                 let sql: String
                 let args: StatementArguments
@@ -70,7 +78,11 @@ public enum DeepAnalyzeRunner {
                     args = []
                 }
                 let r = try GRDB.Row.fetchAll(db, sql: sql, arguments: args)
-                return r.map { Target(id: $0["id"] ?? 0, path: $0["path_text"] ?? "") }
+                return r.compactMap { row -> Target? in
+                    guard let rowID: Int64 = row["id"], rowID > 0,
+                          let path: String = row["path_text"], !path.isEmpty else { return nil }
+                    return Target(id: rowID, path: path)
+                }
             }
         }
         return rows.map { ($0.id, $0.path) }

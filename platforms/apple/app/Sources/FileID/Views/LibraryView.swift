@@ -45,7 +45,6 @@ struct LibraryView: View {
     private var kindFilter: String? {
         get { kindFilterRaw.isEmpty ? nil : kindFilterRaw }
     }
-    @State private var lastSeenVersion: Int = -1
     @State private var lastSeenBatchIndex: Int = -1
     @State private var lastReloadAt: Date = .distantPast
     @State private var selected: FileRow?
@@ -720,11 +719,13 @@ struct LibraryView: View {
         selected = row
         guard searchText.trimmingCharacters(in: .whitespaces).isEmpty, similarSeed == nil else { return }
         let kf = kindFilter
+        let seedID = row.id
         Task { @MainActor in
             let full = await store.filesAsync(limit: 1_000_000, kindFilter: kf)
-            // Upgrade as long as a preview is still open — the current photo (even one the
-            // user already arrowed to) is in `full`, so its nav position carries over.
-            if selected != nil, !full.isEmpty { previewSiblings = full }
+            // Gate on the seed file so a race where the user arrow-navigated to a
+            // different photo before this task completed doesn't replace the new
+            // photo's sibling list with the original photo's set.
+            if selected?.id == seedID, !full.isEmpty { previewSiblings = full }
         }
     }
 

@@ -236,6 +236,8 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         RamPlus.PropertyChanged += OnSlotPropertyChanged;
         DeepVlm.PropertyChanged += OnSlotPropertyChanged;
         Accelerator.PropertyChanged += OnSlotPropertyChanged;
+        Whisper.PropertyChanged += OnSlotPropertyChanged;
+        Bge.PropertyChanged += OnSlotPropertyChanged;
 
         SeedFromSentinels();
         EngineClient.Instance.PropertyChanged += OnEngineClientChanged;
@@ -802,7 +804,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
                 if (slot.Status != ModelInstallStatus.Downloading) return;
                 // B2: this slot OR any other download progressed after we
                 // scheduled → the engine is alive; don't false-fail.
-                if (slot.LastProgressAt > sentAt || _lastAnyProgressAt > sentAt) return;
+                if (slot.LastProgressAt > sentAt || new DateTime(Interlocked.Read(ref _lastAnyProgressAtTicks), DateTimeKind.Utc) > sentAt) return;
                 DebugLog.Warn($"[INSTALL] {modelKind} no-progress watchdog firing (no events in {NoProgressTimeout.TotalSeconds:0}s)");
                 if (ui is not null)
                 {
@@ -905,7 +907,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     /// model. The no-progress watchdog (static) reads this so an active
     /// download on one slot keeps every slot's watchdog from false-failing
     /// under multi-download contention.</summary>
-    private static DateTime _lastAnyProgressAt = DateTime.MinValue;
+    private static long _lastAnyProgressAtTicks = DateTime.MinValue.Ticks;
 
     private void OnEngineClientChanged(object? sender, PropertyChangedEventArgs e)
         => DebugLog.SafeRun("ModelInstallerService.OnEngineClientChanged", () =>
@@ -949,7 +951,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         // silent under multi-download contention isn't false-failed while
         // another model is actively streaming bytes. Set for EVERY progress
         // event, including the slot-less auto-installer runtime packs.
-        _lastAnyProgressAt = DateTime.UtcNow;
+        Interlocked.Exchange(ref _lastAnyProgressAtTicks, DateTime.UtcNow.Ticks);
         var n = Interlocked.Increment(ref _progressEventCount);
         if (n <= 5 || n % 50 == 0 || p.Fraction >= 0.999)
         {

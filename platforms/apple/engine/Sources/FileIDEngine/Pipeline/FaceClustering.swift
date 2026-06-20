@@ -216,7 +216,18 @@ public enum FaceClustering {
         denseToFaceID.reserveCapacity(decoded.count)
         vecsByDense.reserveCapacity(decoded.count)
         var unmatched = 0
-        for face in decoded {
+        for (i, face) in decoded.enumerated() {
+            if i % 1_000 == 0, Self.clusterShouldCancel(
+                baseline: cancelBaseline,
+                current: ScanCoordinator.isCancelledSync(),
+                shuttingDown: ScanCoordinator.isShuttingDownSync()
+            ) {
+                JSONLog.shared.info(ev: "face_cluster_cancelled",
+                                    extra: ["faces": AnyCodable(decoded.count)])
+                return FaceClusteringResult(personCount: 0, faceCount: decoded.count,
+                                            unmatchedFaces: unmatched,
+                                            durationSeconds: Date().timeIntervalSince(started))
+            }
             let hnswID = index.insert(face.vec)
             guard hnswID >= 0 else { unmatched += 1; continue }
             denseToFaceID.append(face.id)
@@ -1019,8 +1030,8 @@ public enum FaceClustering {
                 let overlap = prior.faceIDs.intersection(faceSet).count
                 if overlap > bestCount { bestCount = overlap; bestIdx = idx }
             }
-            // Require ≥ 50% of the prior's faces in this cluster.
-            let threshold = max(1, prior.faceIDs.count / 2)
+            // Require ≥ 50% of the prior's faces in this cluster (ceiling division).
+            let threshold = max(1, (prior.faceIDs.count + 1) / 2)
             guard bestIdx >= 0, bestCount >= threshold else { continue }
             // Conflict: another prior already claimed this cluster?
             if let otherPriorID = claimedByCluster[bestIdx] {

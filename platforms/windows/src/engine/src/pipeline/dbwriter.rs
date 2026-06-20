@@ -480,10 +480,8 @@ impl DbWriter {
                     let stale_face_ids: Vec<i64> = {
                         let mut q =
                             tx.prepare_cached("SELECT id FROM face_prints WHERE file_id = ?1")?;
-                        let ids = q
-                            .query_map(params![file_id], |r| r.get::<_, i64>(0))?
-                            .filter_map(|r| r.ok())
-                            .collect::<Vec<_>>();
+                        let ids = q.query_map(params![file_id], |r| r.get::<_, i64>(0))?
+                            .collect::<rusqlite::Result<Vec<_>>>()?;
                         ids
                     };
                     face_delete

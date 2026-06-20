@@ -184,6 +184,12 @@ impl MobileClipImage {
                 data.len()
             );
         }
+        if batch == 0 || total % batch != 0 {
+            anyhow::bail!(
+                "MobileCLIP output total {} not divisible by batch size {}; shape {:?}",
+                total, batch, shape
+            );
+        }
         let embed_dim = total / batch;
         let mut out = Vec::with_capacity(batch);
         for b in 0..batch {

@@ -175,6 +175,7 @@ public sealed partial class RestructureView : UserControl
                         {
                             if (_unloaded) return;
                             await RefreshDeepAnalyzeHintAsync();
+                            if (_unloaded) return;
                             if (!string.IsNullOrEmpty(folder))
                             {
                                 // This recompute supersedes any prior plan, so the
@@ -305,16 +306,17 @@ public sealed partial class RestructureView : UserControl
         NothingToMoveCard.Visibility = hasMoves ? Visibility.Collapsed : Visibility.Visible;
         UpdateStayingPut(keepFolders);
 
-        // Re-apply the selections the user made before navigating away (see
-        // _deselectedFileIds). Suppressed so RecomputeSelection runs once below,
-        // not once per row.
-        if (_deselectedFileIds.Count > 0)
-        {
-            _suppressRecompute = true;
-            foreach (var kv in _allFileRows)
-                if (_deselectedFileIds.Contains(kv.Key)) kv.Value.IsSelected = false;
-            _suppressRecompute = false;
-        }
+        // Suppress per-row recomputes; RecomputeSelection runs once below.
+        _suppressRecompute = true;
+        // Ask-confidence moves start deselected — the user must explicitly check
+        // them. (RESTRUCTURE.md §6 — confidence-tier autonomy)
+        foreach (var kv in _allFileRows)
+            if (string.Equals(kv.Value.Move.Confidence, "ask", StringComparison.OrdinalIgnoreCase))
+                kv.Value.IsSelected = false;
+        // Re-apply the selections the user made before navigating away (see _deselectedFileIds).
+        foreach (var kv in _allFileRows)
+            if (_deselectedFileIds.Contains(kv.Key)) kv.Value.IsSelected = false;
+        _suppressRecompute = false;
 
         ApplyBarTotalCount.Text = moveCount.ToString("N0");
         RecomputeSelection();
@@ -401,7 +403,7 @@ public sealed partial class RestructureView : UserControl
             ? $"Ready to apply {selected:N0} of {total:N0} into '{plan?.LibraryRoot}'."
             : "Select at least one file to apply.";
         ApplyBarHint.Text = total > 0
-            ? "Originals stay put - applying creates shortcuts you can review."
+            ? "Shortcuts leave originals in place · Moves are permanent but undoable."
             : "Generate a plan to enable Apply.";
         StepChip1Bg.Background = hasWork
             ? FileID.Services.ThemeHelper.GetBrushSafe("GoldBrush")

@@ -194,7 +194,10 @@ fn push_metadata(out: &mut Vec<(String, Option<f32>)>, rev: &symphonia::core::me
             Some(StandardTagKey::Date | StandardTagKey::OriginalDate) => {
                 // Keep only the year (first 4 digits) so different date formats
                 // collapse to a single tag (mm/dd/yyyy, yyyy-mm-dd, yyyy).
-                value.chars().take_while(|c| c.is_ascii_digit()).take(4).collect()
+                // Emit as "Year_NNN" to match the enriched-extras format used by
+                // all other file kinds — prevents a double tag ("2019" + "Year_2019").
+                let year: String = value.chars().take_while(|c| c.is_ascii_digit()).take(4).collect();
+                if year.len() == 4 { format!("Year_{year}") } else { continue }
             }
             _ => continue,
         };
