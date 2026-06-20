@@ -560,13 +560,59 @@ fn make_symlink(src: &str, dst: &Path) -> std::result::Result<(), ApplyError> {
 }
 
 #[cfg(not(windows))]
-fn move_file(_src: &str, _dst: &Path) -> std::result::Result<(), ApplyError> {
-    Err(ApplyError::Other(anyhow::anyhow!("move_file requires Windows")))
+fn move_file(src: &str, dst: &Path) -> std::result::Result<(), ApplyError> {
+    // Portable (Linux/macOS) mirror of the Windows MoveFileExW path. The caller
+    // already created the destination parent and resolved a collision-free name;
+    // we re-assert both guarantees here so a standalone call is just as safe:
+    //   • parent created on demand (mirrors the create_dir_all the Windows path
+    //     relies on the caller for),
+    //   • NEVER clobber — an occupied destination fails the move (parity with
+    //     MoveFileExW dropping MOVEFILE_REPLACE_EXISTING); a remaining collision
+    //     means an unexpected race, so fail safe rather than destroy data,
+    //   • cross-device (EXDEV — std::fs::rename can't span filesystems, common
+    //     with a NAS mount → local disk) falls back to copy + delete so the file
+    //     is preserved, like MOVEFILE_COPY_ALLOWED.
+    let src_path = Path::new(src);
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| ApplyError::Other(anyhow::Error::msg(e.to_string())))?;
+    }
+    // symlink_metadata does not follow links, so a pre-existing file, directory,
+    // or (broken) symlink at `dst` all count as occupied and block the move.
+    if dst.symlink_metadata().is_ok() {
+        return Err(ApplyError::Other(anyhow::anyhow!(
+            "destination already exists: {}",
+            dst.display()
+        )));
+    }
+    match std::fs::rename(src_path, dst) {
+        Ok(()) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+            // dst is verified-absent above, so copy creates a fresh file; only
+            // unlink the original once the copy is durable.
+            std::fs::copy(src_path, dst)
+                .map_err(|e| ApplyError::Other(anyhow::Error::msg(e.to_string())))?;
+            std::fs::remove_file(src_path)
+                .map_err(|e| ApplyError::Other(anyhow::Error::msg(e.to_string())))?;
+            Ok(())
+        }
+        Err(e) => Err(ApplyError::Other(anyhow::Error::msg(e.to_string()))),
+    }
 }
 
 #[cfg(not(windows))]
-fn make_symlink(_src: &str, _dst: &Path) -> std::result::Result<(), ApplyError> {
-    Err(ApplyError::Other(anyhow::anyhow!("symlink requires Windows")))
+fn make_symlink(src: &str, dst: &Path) -> std::result::Result<(), ApplyError> {
+    // The app's "use shortcuts/symlinks instead of moving" option. `dst` is the
+    // link to create, `src` the existing target it points at — same operand
+    // order as the Windows CreateSymbolicLinkW(dst, src) path. A pre-existing
+    // `dst` makes symlink() fail naturally (no clobber). Unix symlink creation
+    // is unprivileged, so there is no ApplyError::Privilege arm here.
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| ApplyError::Other(anyhow::Error::msg(e.to_string())))?;
+    }
+    std::os::unix::fs::symlink(src, dst)
+        .map_err(|e| ApplyError::Other(anyhow::Error::msg(e.to_string())))
 }
 
 fn update_path_in_db(conn: &Arc<Mutex<Connection>>, file_id: i64, new_path: &Path) -> Result<()> {
@@ -983,7 +1029,7 @@ mod tests {
     /// B3: two distinct sources sharing a basename, funnelled to the same
     /// destination, must BOTH survive — the second is uniquified, never
     /// clobbered. Windows-only: exercises the real MoveFileExW path; the
-    /// non-Windows move_file stub intentionally bails (Linux port deferred).
+    /// portable std::fs move path is covered by the not(windows) tests below.
     #[test]
     #[cfg(windows)]
     fn apply_two_same_basename_sources_keeps_both() {
@@ -1126,6 +1172,61 @@ mod tests {
         assert_eq!(res.failed, 1);
         assert!(src.exists(), "the swapped-in file must be left untouched");
         assert!(!root.join("Sorted").join("doc.pdf").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Portable (Linux/macOS) coverage for the std::fs move path: a real move
+    /// relocates the file, creates a missing destination parent on demand, and
+    /// an occupied destination is refused rather than clobbered — parity with
+    /// the Windows MoveFileExW-without-REPLACE_EXISTING contract.
+    #[test]
+    #[cfg(not(windows))]
+    fn move_file_relocates_creates_parent_and_refuses_clobber() {
+        let root = std::env::temp_dir().join(format!("fileid-movefile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let src = root.join("src.bin");
+        std::fs::write(&src, b"PAYLOAD").unwrap();
+
+        // Parent ("nested") does not exist yet — move_file must create it.
+        let dst = root.join("nested").join("out.bin");
+        move_file(&src.to_string_lossy(), &dst).expect("move succeeds");
+        assert!(!src.exists(), "source removed after a successful move");
+        assert_eq!(std::fs::read(&dst).unwrap(), b"PAYLOAD");
+
+        // No clobber: a second move onto the now-occupied destination must fail
+        // and leave both the existing file and the new source untouched.
+        let src2 = root.join("src2.bin");
+        std::fs::write(&src2, b"OTHER").unwrap();
+        assert!(
+            move_file(&src2.to_string_lossy(), &dst).is_err(),
+            "an occupied destination must not be clobbered"
+        );
+        assert_eq!(std::fs::read(&dst).unwrap(), b"PAYLOAD", "existing file preserved");
+        assert!(src2.exists(), "source preserved when the move is refused");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Portable coverage for the symlink ("use shortcuts instead of moving")
+    /// option: the link is created pointing at the original, the parent is made
+    /// on demand, and the original is left in place (symlink mode never moves).
+    #[test]
+    #[cfg(not(windows))]
+    fn make_symlink_creates_link_to_original() {
+        let root = std::env::temp_dir().join(format!("fileid-symlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("real.bin");
+        std::fs::write(&target, b"REAL").unwrap();
+        let link = root.join("links").join("alias.bin");
+
+        make_symlink(&target.to_string_lossy(), &link).expect("symlink created");
+        assert!(target.exists(), "original left in place (symlink mode does not move)");
+        let meta = std::fs::symlink_metadata(&link).unwrap();
+        assert!(meta.file_type().is_symlink(), "a real symlink was created");
+        assert_eq!(std::fs::read(&link).unwrap(), b"REAL", "link resolves to the original payload");
+
         let _ = std::fs::remove_dir_all(&root);
     }
 }
