@@ -656,6 +656,106 @@ public final class ReadStore: @unchecked Sendable {
         }.value
     }
 
+    // MARK: - Perceptual near-duplicate queries
+
+    /// Default Hamming threshold for "visually similar" grouping. `FILEID_NEARDUP_HAMMING`
+    /// overrides; clamped to 0...20. 8 of 64 bits ≈ visually near-identical (resize /
+    /// re-encode / crop / light edit) — deliberately tight so distinct photos of the
+    /// same subject over time do NOT collapse into one group.
+    public static var defaultNearDupHamming: Int {
+        guard let raw = ProcessInfo.processInfo.environment["FILEID_NEARDUP_HAMMING"],
+              let v = Int(raw) else { return 8 }
+        return min(20, max(0, v))
+    }
+
+    /// Above this image-with-dHash count the O(N²) pairwise scan is skipped rather
+    /// than hang the UI. The user's libraries are ~1.6K images (instant); a 50K
+    /// library would be ~1.25B comparisons.
+    public static let nearDupImageCap = 20_000
+
+    /// Perceptual near-duplicate groups: images whose 64-bit dHashes are within
+    /// `maxHamming` (Hamming distance) of one another, transitively unioned. Same
+    /// keeper ranking as exact dupes (aesthetic ↓, size ↓, createdAt ↑, path len ↑).
+    /// Pure byte-exact groups (every member shares one content_hash) are dropped —
+    /// they already appear in the Exact view, so this surfaces genuinely-perceptual
+    /// matches. Returns groups of size >= 2. Heavy CPU work runs outside the read
+    /// transaction; call via `similarImageGroupsAsync` to keep it off the MainActor.
+    public func similarImageGroups(maxHamming: Int) -> [DuplicateGroup] {
+        guard let q = queue else { return [] }
+        let rows: [Row]
+        do {
+            // phash == 0 is the engine's "none / failed" sentinel (see DBWriter),
+            // so exclude it alongside NULL — otherwise every blank-hash image would
+            // collapse into one giant false group.
+            rows = try q.read { db in
+                try Row.fetchAll(db, sql: """
+                    SELECT * FROM files
+                    WHERE kind = 'image' AND failed = 0
+                      AND phash IS NOT NULL AND phash != 0
+                    """)
+            }
+        } catch {
+            reportError("Similar-image query failed: \(error)")
+            return []
+        }
+
+        guard rows.count > 1 else { return [] }
+        if rows.count > Self.nearDupImageCap {
+            NSLog("FileID v2 cleanup: %ld images with a dHash exceeds the %ld near-duplicate cap — skipping perceptual grouping to protect the UI.", rows.count, Self.nearDupImageCap)
+            return []
+        }
+
+        var fileByID: [Int64: FileRow] = [:]
+        fileByID.reserveCapacity(rows.count)
+        var contentHashByID: [Int64: Data] = [:]
+        var items: [(id: Int64, phash: Int64)] = []
+        items.reserveCapacity(rows.count)
+        for r in rows {
+            guard let ph: Int64 = r["phash"] else { continue }
+            let fr = Self.toFileRow(r)
+            fileByID[fr.id] = fr
+            if let ch: Data = r["content_hash"] { contentHashByID[fr.id] = ch }
+            items.append((id: fr.id, phash: ph))
+        }
+
+        var groups: [DuplicateGroup] = []
+        for ids in PerceptualGrouping.groupByHamming(items, maxHamming: maxHamming) {
+            var files = ids.compactMap { fileByID[$0] }
+            guard files.count > 1 else { continue }
+            // Drop pure byte-exact clusters — already shown under "Exact".
+            let hashes = files.map { contentHashByID[$0.id] }
+            let allByteExact = !hashes.contains(nil) && Set(hashes.compactMap { $0 }).count == 1
+            if allByteExact { continue }
+            files.sort { a, b in
+                if (a.aesthetic ?? 0) != (b.aesthetic ?? 0) {
+                    return (a.aesthetic ?? 0) > (b.aesthetic ?? 0)
+                }
+                if a.sizeBytes != b.sizeBytes { return a.sizeBytes > b.sizeBytes }
+                let ad = a.createdAt ?? .distantFuture
+                let bd = b.createdAt ?? .distantFuture
+                if ad != bd { return ad < bd }
+                return a.pathText.count < b.pathText.count
+            }
+            // Stable Identifiable id: the smallest member file id — independent of
+            // which copy currently ranks as keeper, so SwiftUI identity (and the
+            // user's skip state) survives a mid-scan re-rank.
+            let gid = files.map(\.id).min() ?? files[0].id
+            groups.append(DuplicateGroup(id: gid, files: files, isSimilar: true))
+        }
+        // Largest clusters first, mirroring the exact view's ORDER BY n DESC.
+        groups.sort { $0.files.count > $1.files.count }
+        return groups
+    }
+
+    /// Off-main twin of `similarImageGroups`. The O(N²) Hamming scan + per-group
+    /// sort run on a background task; only the assignment lands on main. (mirrors
+    /// `duplicateGroupsAsync`)
+    public func similarImageGroupsAsync(maxHamming: Int = ReadStore.defaultNearDupHamming) async -> [DuplicateGroup] {
+        await Task.detached(priority: .userInitiated) { [self] in
+            similarImageGroups(maxHamming: maxHamming)
+        }.value
+    }
+
     // MARK: - Scan sessions
 
     public struct ScanSessionRow: Sendable, Identifiable {

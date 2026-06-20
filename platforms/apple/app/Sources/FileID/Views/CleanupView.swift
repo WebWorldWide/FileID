@@ -1,6 +1,8 @@
-// Cleanup: phash duplicate groups with per-tile selection. Default
-// selection is "every non-keeper". The user can override per group, or
-// trash across all groups at once.
+// Cleanup: two modes. "Exact" groups byte-identical copies (content_hash);
+// "Similar" groups visually near-identical images by dHash Hamming distance
+// (resizes / re-encodes / crops / light edits). Per-tile selection; the user
+// can override the keeper per group or trash across all groups at once. Similar
+// mode never pre-selects — those copies are NOT byte-identical.
 import SwiftUI
 import AppKit
 import FileIDShared
@@ -8,6 +10,10 @@ import FileIDShared
 struct CleanupView: View {
     let engine: EngineClient
     let store: ReadStore
+
+    /// "exact" (byte-identical content_hash) | "similar" (perceptual dHash).
+    @State private var mode: String = "exact"
+    private var isSimilar: Bool { mode == "similar" }
 
     @State private var groups: [DuplicateGroup] = []
     @State private var lastSeenBatchIndex: Int = -1
@@ -66,6 +72,15 @@ struct CleanupView: View {
             // batches we deferred while it was open, re-deriving keepers.
             if !presented { reload() }
         }
+        .onChange(of: mode) { _, _ in
+            // Switching modes starts from a clean slate — nothing carries over,
+            // and Similar mode must begin with NOTHING pre-selected for deletion.
+            selection.removeAll()
+            skippedGroups.removeAll()
+            status = nil
+            groups = []
+            reload()
+        }
     }
 
     // MARK: - Header
@@ -79,12 +94,22 @@ struct CleanupView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
+            ThemedSegmentedControl(
+                selection: $mode,
+                options: [(tag: "exact", label: "Exact"), (tag: "similar", label: "Similar")]
+            )
+            .help("Exact: byte-for-byte identical copies. Similar: visually near-identical images (resizes, re-encodes, crops, light edits) found by perceptual hash — review each before deleting, they are NOT byte-identical.")
             Spacer()
             if !visibleGroups.isEmpty {
                 HStack(spacing: 6) {
-                    Button("Select all non-keepers") { selectAllNonKeepers() }
-                        .buttonStyle(.bordered)
-                        .help("Default: select every duplicate except the keeper in each group.")
+                    // Bulk "select every non-keeper" is hidden in Similar mode: those
+                    // copies are NOT byte-identical, so one-click mass selection would
+                    // be unsafe — the user must pick copies deliberately per group.
+                    if !isSimilar {
+                        Button("Select all non-keepers") { selectAllNonKeepers() }
+                            .buttonStyle(.bordered)
+                            .help("Select every duplicate except the keeper in each group.")
+                    }
                     Button("Clear selection") { selection.removeAll() }
                         .buttonStyle(.bordered)
                         .disabled(totalSelected == 0)
@@ -129,9 +154,16 @@ struct CleanupView: View {
 
     private var headerSubtitle: String {
         let g = visibleGroups.count
-        let mb = String(format: "%.1f", store.totalReclaimableMB)
         let skipped = skippedGroups.count
-        let base = "\(g) duplicate group\(g == 1 ? "" : "s") · \(mb) MB reclaimable if you keep 1 per group"
+        let base: String
+        if isSimilar {
+            base = g == 0
+                ? "Visually similar images — resizes, re-encodes, crops, and light edits that byte-exact matching misses"
+                : "\(g) similar group\(g == 1 ? "" : "s") · review each before deleting — these are NOT byte-identical"
+        } else {
+            let mb = String(format: "%.1f", store.totalReclaimableMB)
+            base = "\(g) duplicate group\(g == 1 ? "" : "s") · \(mb) MB reclaimable if you keep 1 per group"
+        }
         return skipped > 0 ? "\(base) · \(skipped) skipped" : base
     }
 
@@ -155,11 +187,17 @@ struct CleanupView: View {
                 Button("Show skipped groups again") { skippedGroups.removeAll() }
                     .buttonStyle(.bordered)
             }
+        } else if isSimilar {
+            EmptyStateView(
+                icon: "checkmark.seal.fill",
+                title: "No visually similar images found",
+                message: "All \(store.totalImages) images compared — none are near-identical within the similarity threshold. Byte-for-byte duplicates appear under \"Exact\"."
+            )
         } else {
             EmptyStateView(
                 icon: "checkmark.seal.fill",
                 title: "No duplicates found",
-                message: "All \(store.totalImages) images compared — none look visually identical."
+                message: "All \(store.totalImages) images compared — none are byte-for-byte identical."
             )
         }
     }
@@ -170,17 +208,32 @@ struct CleanupView: View {
             LazyVStack(alignment: .leading, spacing: 16) {
                 // First-timer explainer above the groups. Inline (not a
                 // tooltip) so the keeper concept is impossible to miss.
-                HStack(spacing: 8) {
-                    Image(systemName: "info.circle")
-                        .foregroundStyle(.green)
-                    Text("Each group is a set of duplicate copies. The **KEEPER** is the copy we recommend you keep — usually the largest. Click another tile in a group to make it the keeper instead. Selected copies move to Trash; you can restore them if you change your mind.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                if isSimilar {
+                    // CRITICAL safety UX: similar groups are NOT byte-identical.
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text("**Visually similar — review before deleting (not identical).** These images match by perceptual hash (resizes, re-encodes, crops, light edits), not byte-for-byte. Nothing is pre-selected: open each, confirm it's a true duplicate, then choose which copies to Trash.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(10)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.orange.opacity(0.10)))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.orange.opacity(0.35), lineWidth: 1))
+                    .padding(.bottom, 4)
+                } else {
+                    HStack(spacing: 8) {
+                        Image(systemName: "info.circle")
+                            .foregroundStyle(.green)
+                        Text("Each group is a set of duplicate copies. The **KEEPER** is the copy we recommend you keep — usually the largest. Click another tile in a group to make it the keeper instead. Selected copies move to Trash; you can restore them if you change your mind.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(10)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.green.opacity(0.08)))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.green.opacity(0.3), lineWidth: 1))
+                    .padding(.bottom, 4)
                 }
-                .padding(10)
-                .background(RoundedRectangle(cornerRadius: 6).fill(Color.green.opacity(0.08)))
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.green.opacity(0.3), lineWidth: 1))
-                .padding(.bottom, 4)
                 ForEach(visibleGroups) { group in
                     GroupCard(
                         group: group,
@@ -386,7 +439,11 @@ struct CleanupView: View {
         reloadTask = Task { @MainActor in
             repeat {
                 reloadPending = false
-                let newGroups = await store.duplicateGroupsAsync()
+                // Read the mode fresh each iteration so a mid-flight mode switch
+                // (which marks reloadPending) re-queries the now-selected mode.
+                let newGroups = isSimilar
+                    ? await store.similarImageGroupsAsync()
+                    : await store.duplicateGroupsAsync()
                 // A newer reload landed while this query ran — its result is stale;
                 // loop and re-query rather than assigning it.
                 if reloadPending { continue }
@@ -438,8 +495,11 @@ private struct GroupCard: View {
         GlassCard {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
-                    BadgePill(label: "\(group.files.count) copies")
-                    if group.isApproximate {
+                    BadgePill(label: "\(group.files.count) \(group.isSimilar ? "images" : "copies")")
+                    if group.isSimilar {
+                        BadgePill(label: "Visually similar", color: .orange)
+                            .help("Matched by perceptual hash (dHash), NOT byte-for-byte. Resizes, re-encodes, crops, and light edits land here — review each before deleting.")
+                    } else if group.isApproximate {
                         BadgePill(label: "~ likely match")
                             .help("These copies are larger than 16 MB, so they're matched by a fast partial-content fingerprint (head + samples + tail + size) instead of a full byte-for-byte hash. They're almost certainly identical — but preview before deleting, since they aren't byte-verified.")
                     }
