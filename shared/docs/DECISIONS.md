@@ -7,6 +7,25 @@
 
 ---
 
+## 2026-06-19 — Accept GHSA-2m69-gcr7-jv3q in vulnerability scan (SQLitePCLRaw.lib.e_sqlite3 2.1.10)
+
+SQLitePCLRaw.lib.e_sqlite3 2.1.10 (transitive from Microsoft.Data.Sqlite 9.0.0) is flagged High
+severity by the NuGet advisory database (GHSA-2m69-gcr7-jv3q). The Windows app opens SQLite
+read-only — the engine owns the only writer connection — so the vulnerable code path is not
+reachable from the app binary. The advisory line is stripped before the CI gate so the scan still
+fails hard on any NEW advisory that lands.
+
+Properly fixing requires upgrading Microsoft.Data.Sqlite to a version that brings in a patched
+SQLitePCLRaw AND regenerating the committed NuGet lock files on a Windows machine. `RestoreLockedMode=true`
+on CI prevents headless lock-file updates; regenerating `packages.lock.json` for a
+`net8.0-windows` target from macOS is not possible. Fix: next Windows dev session, run
+`dotnet restore --force-evaluate` on each csproj, commit the refreshed lock files, then remove
+the acceptance entry above.
+
+Alternative considered: disable `RestoreLockedMode` in CI so the restore regenerates the lock file
+automatically — rejected because that severs the supply-chain reproducibility guarantee that
+locked mode provides.
+
 ## 2026-06-17 — Video clusters by content (keyframe CLIP) — macOS reverses its "no AVFoundation at scan" stance, bounded
 
 Video was the last file type clustering by filename. Windows already CLIP-embeds the decoded

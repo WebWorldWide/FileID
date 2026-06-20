@@ -211,10 +211,27 @@ jobs:
         run: |
           $output = dotnet list package --vulnerable --include-transitive 2>&1 | Out-String
           Write-Host $output
-          if ($output -match 'has the following vulnerable packages') {
-            Write-Error "Vulnerable packages found — see output above."
+
+          # Accepted advisories — each entry requires a DECISIONS.md justification.
+          # Full output is printed above; only advisory lines are stripped before the
+          # "has the following vulnerable packages" gate so any NEW advisory still fails.
+          $accepted = @(
+            # GHSA-2m69-gcr7-jv3q: SQLitePCLRaw.lib.e_sqlite3 2.1.10 (transitive via
+            # Microsoft.Data.Sqlite 9.0.0). App opens SQLite read-only — vulnerable write
+            # path unreachable from the app binary. Proper fix requires lock-file
+            # regeneration on Windows. See DECISIONS.md 2026-06-19.
+            "GHSA-2m69-gcr7-jv3q"
+          )
+          $effective = ($output -split "`n" | Where-Object {
+            $line = $_
+            -not ($accepted | Where-Object { $line -match [regex]::Escape($_) })
+          }) -join "`n"
+
+          if ($effective -match 'has the following vulnerable packages') {
+            Write-Error "Unexpected vulnerable packages found — see full output above."
             exit 1
           }
+          Write-Host "Vulnerability scan passed ($($accepted.Count) advisory/ies accepted — see DECISIONS.md)."
         shell: pwsh
 
       - name: Verify published output
