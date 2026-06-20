@@ -34,6 +34,27 @@ Prereqs:
 - Xcode 16+ with the Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`).
 - `cmake` for the MLX `mlx.metallib` GPU kernels (`brew install cmake`).
 
+### CLI (`fileid`) — cross-platform
+
+The `fileid` command-line front-end lives at `platforms/cli/`. **It's cross-OS** (builds and runs on macOS, Linux, and Windows despite living under `platforms/`): it links the shared Rust engine as a library and uses only portable `std` + bundled SQLite. It is its own standalone Cargo workspace.
+
+```bash
+git clone <repo>
+cd FileID/platforms/cli
+cargo build --release          # compiles the shared engine too (first build is slow)
+./target/release/fileid --help
+
+# self-verify (same gates as the engine; pinned Rust 1.90 via rust-toolchain.toml)
+cargo clippy --all-targets -- -D warnings
+cargo test                     # model-free, isolated scan→search→info smoke test
+```
+
+There is **no separate engine build step** — `fileid-engine` is a path dependency (`../windows/src/engine`, `default-features = false`) compiled into the single `fileid` binary. The MVP is read/query + plan only (model-free); see `platforms/cli/README.md` for the command reference, the library-location rules (`--db` / `$FILEID_DB` / `$CFFIXED_USER_HOME` / engine default), and the documented follow-ons (apply commands, semantic search, full-pipeline scan, TUI).
+
+Prereqs:
+- Rust 1.90 (`rustup install 1.90`). The crate pins it via `rust-toolchain.toml`.
+- A C toolchain for the engine's bundled SQLite / native deps (Xcode CLT on macOS, `build-essential` on Linux, MSVC on Windows) — same as building the engine.
+
 ## Workflow
 
 1. **Branch** from `main`. Name it after the change (`fix-prewarm-race`, not `bug123`).

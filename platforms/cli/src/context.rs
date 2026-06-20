@@ -1,0 +1,140 @@
+//! Run context: global flags + output helpers shared by every subcommand.
+
+use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context as _, Result};
+
+/// Resolved global flags, threaded through every command handler.
+pub struct Ctx {
+    /// Emit machine-readable JSON instead of human tables.
+    pub json: bool,
+    /// Suppress progress + non-essential chrome.
+    pub quiet: bool,
+    /// ANSI color is allowed (TTY + not `--no-color`).
+    pub color: bool,
+    /// Absolute path to the library SQLite file.
+    pub db: PathBuf,
+}
+
+impl Ctx {
+    /// Resolve the database path. Precedence:
+    ///   1. `--db <path>`
+    ///   2. `$FILEID_DB`
+    ///   3. `$CFFIXED_USER_HOME/fileid.sqlite` (parity with the macOS app's
+    ///      sandbox-root env var; convenient for isolating a test library)
+    ///   4. `fileid_engine::paths::db_path()` — the engine's canonical
+    ///      location (honors `$XDG_DATA_HOME` / `%LOCALAPPDATA%`), i.e. the
+    ///      same file the desktop apps read/write.
+    pub fn resolve(
+        db_flag: Option<PathBuf>,
+        json: bool,
+        quiet: bool,
+        no_color: bool,
+    ) -> Result<Self> {
+        let db = if let Some(p) = db_flag {
+            p
+        } else if let Ok(s) = std::env::var("FILEID_DB") {
+            PathBuf::from(s)
+        } else if let Ok(home) = std::env::var("CFFIXED_USER_HOME") {
+            PathBuf::from(home).join("fileid.sqlite")
+        } else {
+            fileid_engine::paths::db_path().context("resolving default library location")?
+        };
+        let color = !no_color && std::io::stdout().is_terminal();
+        Ok(Self { json, quiet, color, db })
+    }
+
+    /// Stream a progress line to stderr unless `--quiet`. Never goes to stdout
+    /// so it can't corrupt `--json` output (which is the only thing on stdout).
+    pub fn progress(&self, msg: &str) {
+        if !self.quiet {
+            eprintln!("{msg}");
+        }
+    }
+
+    pub fn bold(&self, s: &str) -> String {
+        if self.color {
+            format!("\x1b[1m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+
+    pub fn dim(&self, s: &str) -> String {
+        if self.color {
+            format!("\x1b[2m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+
+    /// The DB file must exist for any read command. Gives a friendlier error
+    /// than rusqlite's raw "unable to open database file".
+    pub fn require_db_exists(&self) -> Result<()> {
+        if self.db.exists() {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "no library database at {}\n  Run `fileid scan <path>` first, or pass --db <path>.",
+                self.db.display()
+            )
+        }
+    }
+}
+
+/// Print a JSON value to stdout (pretty when on a TTY-less pipe is fine too).
+pub fn print_json(value: &serde_json::Value) {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+    );
+}
+
+/// Compact a path for table display: keep it absolute but collapse `$HOME`.
+pub fn display_path(p: &str) -> String {
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            if let Some(rest) = p.strip_prefix(&home) {
+                return format!("~{rest}");
+            }
+        }
+    }
+    p.to_string()
+}
+
+/// Human-readable byte size.
+pub fn human_size(bytes: i64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    format!("{size:.1} {}", UNITS[unit])
+}
+
+/// Mirror of the engine's `util::path_safety::stable_path_hash` (which is
+/// crate-private). Byte-faithful: lowercase the path, hash with the std
+/// `DefaultHasher` (fixed-key SipHash → deterministic across runs/machines on
+/// the same std), store the `i64`. Keeping this in lockstep means a row the
+/// CLI writes is found by the engine's `index_files_on_path_hash` lookups and
+/// vice-versa.
+pub fn stable_path_hash(path: &str) -> i64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    path.to_ascii_lowercase().hash(&mut h);
+    h.finish() as i64
+}
+
+/// Best-effort absolute, lexically-normalized path string for `path_text`.
+pub fn canonical_path_text(p: &Path) -> String {
+    std::fs::canonicalize(p)
+        .unwrap_or_else(|_| p.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
