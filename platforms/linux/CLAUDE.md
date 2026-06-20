@@ -66,7 +66,7 @@ The engine and the app build separately today. Phase 1 plans a unified `build/bu
 
 - **GTK4 idioms.** Subclass `gtk::Application` / `adw::Window` via `glib::object_subclass!`. Use `clone!` macro for signal handlers (defaults to weak refs).
 - **No new dependencies without asking.** Locked set in `src/app/Cargo.toml`. Community-toolkit crates like `gtk4-rs` extension libs require justification in `shared/docs/DECISIONS.md`.
-- **No telemetry, ever.** Enforced by CI binary scan (Linux scan will mirror the Windows + macOS one once `linux-app.yml` lands).
+- **No telemetry, ever.** Enforced by CI binary scan — `.github/workflows/linux.yml` builds the engine + CLI + GTK app on ubuntu and mirrors the Windows + macOS telemetry-string scan on the engine and app binaries.
 - **Path redaction in logs.** Reuse the engine's `redact_path_for_log` for any user file path that hits a log call.
 - **Default to no comments.** Add only when the WHY is non-obvious.
 - **Springs everywhere.** Use `adw::SpringAnimation` (libadwaita 1.4+); map SwiftUI/WinUI `response`/`dampingFraction` 1:1 via `SpringParams::new(damping_ratio, mass, stiffness)` — derive stiffness from response via `(2π/response)² × mass`.

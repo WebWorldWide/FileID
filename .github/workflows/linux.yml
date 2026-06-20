@@ -1,0 +1,316 @@
+name: Linux (engine + CLI + GTK app)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'platforms/linux/**'
+      - 'platforms/cli/**'
+      - 'platforms/windows/src/engine/**'
+      - 'shared/ipc-schema/**'
+      - '.github/workflows/linux.yml'
+  pull_request:
+    paths:
+      - 'platforms/linux/**'
+      - 'platforms/cli/**'
+      - 'platforms/windows/src/engine/**'
+      - 'shared/ipc-schema/**'
+      - '.github/workflows/linux.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref to save runner minutes on rapid
+# pushes. (The Windows/macOS workflows predate this; new workflows adopt it.)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Engine — build + verify the cross-platform Rust engine on Linux. This is
+  # the concrete proof of the "engine is cross-platform-clean" claim: the same
+  # crate that ships on Windows compiles, clippy-clean (-D warnings), and tests
+  # green on a non-windows host (the Win32 surface is cfg(windows)-gated). The
+  # exact commands below are the ones the engine is verified green with on the
+  # macOS (non-windows) dev host, so they are high-confidence on Linux.
+  # ---------------------------------------------------------------------------
+  engine:
+    name: Engine (cross-platform Rust) — Linux x64
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    defaults:
+      run:
+        working-directory: platforms/windows/src/engine
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # MSRV pinned to 1.90 in rust-toolchain.toml (engine + CLI). Keep both
+          # in sync — drift here means CI builds with a different toolchain than
+          # contributors use locally.
+          toolchain: 1.90
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            platforms/windows/src/engine/target
+          key: cargo-engine-linux-${{ hashFiles('platforms/windows/src/engine/Cargo.lock', 'platforms/windows/src/engine/Cargo.toml') }}
+          restore-keys: |
+            cargo-engine-linux-
+
+      - name: Format check
+        # rustfmt.toml sets disable_all_formatting=true, so this is a no-op gate
+        # (parity with windows-engine.yml). It starts enforcing if that flips.
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (-D warnings, full)
+        # Default features (pdf-analyze on). pdfium-render binds libpdfium at
+        # RUNTIME via libloading, so the crate compiles on Linux with no system
+        # library present — the same command the engine is verified green with
+        # on the macOS (non-windows) dev host.
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build (release)
+        run: cargo build --release
+
+      - name: Test (lib)
+        # `--lib` mirrors the proven non-windows local gate (macOS dev host, no
+        # system libpdfium): the pdf paths call Pdfium::bind_to_system_library()
+        # and map an absent lib to an Err rather than aborting the test run.
+        run: cargo test --lib
+
+      - name: Verify binary exists
+        run: |
+          set -euo pipefail
+          bin="target/release/FileIDEngine"
+          if [[ ! -x "$bin" ]]; then
+            echo "::error::Engine binary missing: $bin"
+            exit 1
+          fi
+          size_mb=$(du -m "$bin" | cut -f1)
+          echo "$bin OK (${size_mb} MB)"
+
+      # Privacy gate: the shipped engine binary must NOT contain telemetry SDK
+      # strings. Parity with macos.yml + windows-engine.yml — the forbidden list
+      # MUST stay in sync across all workflows + publish-bundle.ps1. Failing this
+      # is a release blocker; no exception.
+      - name: Privacy — telemetry-string scan
+        run: |
+          set -euo pipefail
+          forbidden=(
+            "sentry.io"
+            "io.sentry"
+            "applicationinsights"
+            "applicationinsights.azure.com"
+            "googletagmanager"
+            "google-analytics.com"
+            "segment.io"
+            "segment.com"
+            "mixpanel.com"
+            "amplitude.com"
+            "posthog.com"
+            "datadoghq"
+            "bugsnag"
+            "rollbar.com"
+            "honeycomb.io"
+            "newrelic.com"
+            "raygun.io"
+            "firebase"
+            "firebaseio.com"
+            "appcenter.ms"
+            "in.appcenter.ms"
+            "crashpad"
+            "breakpad"
+          )
+          bin="target/release/FileIDEngine"
+          hits=()
+          for needle in "${forbidden[@]}"; do
+            # `strings -a` extracts printable ASCII + UTF-16 runs; covers Rust
+            # literal pools and ELF .rodata sections.
+            if strings -a "$bin" | grep -q -F "$needle"; then
+              hits+=("$bin:$needle")
+            fi
+          done
+          if (( ${#hits[@]} > 0 )); then
+            printf '::error::Telemetry strings found in shipped binary:\n'
+            printf '  %s\n' "${hits[@]}"
+            exit 1
+          fi
+          echo "No telemetry strings detected. ✅"
+
+  # ---------------------------------------------------------------------------
+  # CLI — the cross-OS `fileid` front-end. It's its own Cargo workspace and
+  # links the shared engine as a library (with default-features = false, so the
+  # no-pdfium engine path). clippy -D warnings + build + the smoke test.
+  # ---------------------------------------------------------------------------
+  cli:
+    name: CLI (fileid) — Linux x64
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    defaults:
+      run:
+        working-directory: platforms/cli
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Matches platforms/cli/rust-toolchain.toml (1.90, same as the engine).
+          toolchain: 1.90
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            platforms/cli/target
+          key: cargo-cli-linux-${{ hashFiles('platforms/cli/Cargo.lock', 'platforms/cli/Cargo.toml') }}
+          restore-keys: |
+            cargo-cli-linux-
+
+      - name: Clippy (-D warnings, full)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build
+
+      - name: Test (smoke)
+        run: cargo test
+
+  # ---------------------------------------------------------------------------
+  # App — the GTK4 + libadwaita Linux app. ubuntu-latest (24.04) ships gtk4
+  # 4.14 + libadwaita 1.5, matching the crates' v4_14 / v1_5 features.
+  #
+  # RISK POSTURE: `cargo build` is the REQUIRED gate (proves the scaffold links
+  # against the system GTK stack + the shared engine). `cargo clippy -D warnings`
+  # is ADVISORY (continue-on-error) so a Phase-0 scaffold clippy nit can't
+  # red-gate this keystone workflow. Promote clippy to a hard gate once the app
+  # is known warning-clean.
+  # ---------------------------------------------------------------------------
+  app:
+    name: GTK4 app (fileid-linux) — Linux x64
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    defaults:
+      run:
+        working-directory: platforms/linux
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GTK4 + libadwaita system deps
+        # gtk4-rs (v4_14) needs libgtk-4-dev, which pulls the glib/cairo/pango/
+        # gdk-pixbuf/graphene dev headers; libadwaita-rs (v1_5) needs
+        # libadwaita-1-dev. build-essential = C toolchain (cc/linker) for the
+        # engine's bundled SQLite + the gtk-rs -sys crates; pkg-config locates
+        # all of the above.
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            build-essential \
+            pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # 1.90 to match the shared engine path dependency (the app's own
+          # rust-version floor is lower, but the engine pins 1.90).
+          toolchain: 1.90
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            platforms/linux/target
+          key: cargo-app-linux-${{ hashFiles('platforms/linux/Cargo.lock', 'platforms/linux/src/app/Cargo.toml') }}
+          restore-keys: |
+            cargo-app-linux-
+
+      - name: Build (required gate)
+        run: cargo build
+
+      - name: Clippy (advisory)
+        # Advisory until the scaffold is confirmed warning-clean — see the
+        # job comment. Surfaces nits in the log without red-gating CI.
+        continue-on-error: true
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Verify binary exists
+        run: |
+          set -euo pipefail
+          bin="target/debug/fileid-linux"
+          if [[ ! -x "$bin" ]]; then
+            echo "::error::App binary missing: $bin"
+            exit 1
+          fi
+          size_mb=$(du -m "$bin" | cut -f1)
+          echo "$bin OK (${size_mb} MB)"
+
+      # Privacy gate parity with the engine + macOS/Windows app workflows. The
+      # GTK app dynamically links the system GTK stack, so only the statically
+      # linked Rust crates (tokio/serde/tracing/glib-rs bindings) contribute
+      # strings here — none carry telemetry endpoints. Closes the CLAUDE.md TODO
+      # ("Linux scan will mirror the Windows + macOS one once linux CI lands").
+      - name: Privacy — telemetry-string scan
+        run: |
+          set -euo pipefail
+          forbidden=(
+            "sentry.io"
+            "io.sentry"
+            "applicationinsights"
+            "applicationinsights.azure.com"
+            "googletagmanager"
+            "google-analytics.com"
+            "segment.io"
+            "segment.com"
+            "mixpanel.com"
+            "amplitude.com"
+            "posthog.com"
+            "datadoghq"
+            "bugsnag"
+            "rollbar.com"
+            "honeycomb.io"
+            "newrelic.com"
+            "raygun.io"
+            "firebase"
+            "firebaseio.com"
+            "appcenter.ms"
+            "in.appcenter.ms"
+            "crashpad"
+            "breakpad"
+          )
+          bin="target/debug/fileid-linux"
+          hits=()
+          for needle in "${forbidden[@]}"; do
+            if strings -a "$bin" | grep -q -F "$needle"; then
+              hits+=("$bin:$needle")
+            fi
+          done
+          if (( ${#hits[@]} > 0 )); then
+            printf '::error::Telemetry strings found in shipped binary:\n'
+            printf '  %s\n' "${hits[@]}"
+            exit 1
+          fi
+          echo "No telemetry strings detected. ✅"
