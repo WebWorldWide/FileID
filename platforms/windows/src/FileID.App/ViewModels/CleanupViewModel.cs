@@ -371,7 +371,7 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
                 var h = rawMembers[idx].Hash;
                 if (h == null || h.Length == 0) { allByteExact = false; break; }
                 var hex = Convert.ToHexString(h);
-                if (firstHex == null) firstHex = hex;
+                if (firstHex == null) { firstHex = hex; }
                 else if (!string.Equals(firstHex, hex, StringComparison.Ordinal)) { allByteExact = false; break; }
             }
             if (allByteExact) continue;
