@@ -118,8 +118,13 @@ impl RestructureApply {
         let mut applied_pairs: Vec<(String, PathBuf)> = Vec::new();
         // B3: destinations claimed earlier in THIS batch, so two distinct
         // sources that map to the same basename don't collide before either
-        // touches disk.
-        let mut claimed: HashSet<PathBuf> = HashSet::new();
+        // touches disk. Keyed by the LOWERCASED path string: NTFS (and APFS)
+        // are case-insensitive by default, so "Photo.jpg" and "photo.jpg" name
+        // the same file — case-folding the key makes the second move uniquify
+        // instead of silently clobbering the first (data loss). Mirrors the
+        // `ci_starts_with` full-Unicode fold and the macOS `Restructure.swift`
+        // lowercased claimed set, so a library round-trips identically.
+        let mut claimed: HashSet<String> = HashSet::new();
 
         // F-C6-013: the apply loop was a silent, unstoppable serial walk — at
         // 100k+ moves the user got no feedback and no stop.
@@ -235,7 +240,7 @@ impl RestructureApply {
                 dest.clone()
             } else {
                 let d = unique_destination(&dest, &claimed);
-                claimed.insert(d.clone());
+                claimed.insert(d.to_string_lossy().to_lowercase());
                 d
             };
 
@@ -636,11 +641,13 @@ fn paths_equal(a: &str, b: &str) -> bool {
 /// destination already claimed by an earlier move in this batch, by appending
 /// ` (2)`, ` (3)`, … before the extension — within the same parent so the
 /// containment/reparse checks already performed on `dest` still hold.
-fn unique_destination(dest: &Path, claimed: &HashSet<PathBuf>) -> PathBuf {
+fn unique_destination(dest: &Path, claimed: &HashSet<String>) -> PathBuf {
     let occupied = |p: &Path| {
         // \\?\ prefix so a deep already-occupied destination is detected rather
         // than mis-probed as free (std::fs silently fails past MAX_PATH).
-        claimed.contains(p)
+        // `claimed` is keyed by the lowercased path string so a case-only
+        // difference (NTFS/APFS are case-insensitive) still registers as taken.
+        claimed.contains(&p.to_string_lossy().to_lowercase())
             || std::fs::symlink_metadata(crate::util::path_safety::to_extended_length(p)).is_ok()
     };
     if !occupied(dest) {
@@ -879,11 +886,11 @@ mod tests {
         let _ = std::fs::create_dir_all(&tmp);
         let dest = tmp.join("audio.mp3");
         // Nothing assigned, file absent → original name.
-        let assigned0: HashSet<PathBuf> = HashSet::new();
+        let assigned0: HashSet<String> = HashSet::new();
         assert_eq!(unique_destination(&dest, &assigned0), dest);
         // A second move targeting the same name in-batch → " (2)".
-        let mut assigned1: HashSet<PathBuf> = HashSet::new();
-        assigned1.insert(dest.clone());
+        let mut assigned1: HashSet<String> = HashSet::new();
+        assigned1.insert(dest.to_string_lossy().to_lowercase());
         let d2 = unique_destination(&dest, &assigned1);
         assert_eq!(d2, tmp.join("audio (2).mp3"));
         assert_ne!(d2, dest);
@@ -921,8 +928,33 @@ mod tests {
 
         // " (2)" also claimed this batch → bumped to " (3)".
         let mut claimed = HashSet::new();
-        claimed.insert(dir.join("IMG (2).jpg"));
+        claimed.insert(dir.join("IMG (2).jpg").to_string_lossy().to_lowercase());
         assert_eq!(unique_destination(&dest, &claimed), dir.join("IMG (3).jpg"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// DATA-INTEGRITY: NTFS/APFS are case-insensitive by default, so a target
+    /// claimed earlier in the batch as "photo.jpg" and a later move to
+    /// "Photo.jpg" name the SAME file. The case-folded `claimed` key must catch
+    /// this so the second move uniquifies instead of silently clobbering the
+    /// first. Parity with `Restructure.swift`'s lowercased claimed set.
+    #[test]
+    fn unique_destination_detects_case_only_claimed_collision() {
+        let dir = std::env::temp_dir().join(format!("fileid-uniqdest-ci-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // First move claimed "photo.jpg" (stored lowercased, as `apply` does).
+        let mut claimed = HashSet::new();
+        claimed.insert(dir.join("photo.jpg").to_string_lossy().to_lowercase());
+
+        // Second move targets the case-variant "Photo.jpg" — same file on a
+        // case-insensitive FS → must be detected and bumped to " (2)".
+        assert_eq!(
+            unique_destination(&dir.join("Photo.jpg"), &claimed),
+            dir.join("Photo (2).jpg")
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

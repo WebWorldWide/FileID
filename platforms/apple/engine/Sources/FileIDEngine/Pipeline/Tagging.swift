@@ -474,7 +474,30 @@ public enum Tagging {
 
         return await withCheckedContinuation { (cont: CheckedContinuation<TaggedFile, Never>) in
             visionQueue.async {
+                // De-dup the NAS read: extract the PDF's text layer ONCE (PDFKit via
+                // DocText) and reuse it for both doc_fts and the BGE embedding. A
+                // text-layer PDF — the common case — yields text here, so the
+                // CGPDFDocument rasterize + OCR pass is SKIPPED: that pass exists only
+                // to recover text from image-only/scanned PDFs, so re-opening the file
+                // to OCR pages whose text we already have is pure redundant I/O (the
+                // user's 1039-PDF NAS corpus). Mirrors the Windows engine, which gets
+                // PDF text via pdfium and never raster-OCRs a PDF.
+                let extracted = bgeTextAndEmbedding(url: url)
                 var result = autoreleasepool { () -> TaggedFile in
+                    if let docText = extracted.text, !docText.isEmpty {
+                        return TaggedFile(
+                            url: url, kind: "pdf", extension: "pdf",
+                            sizeBytes: discovered.sizeBytes,
+                            createdAt: discovered.creationDate,
+                            modifiedAt: discovered.modificationDate,
+                            visionTags: ["PDF"],
+                            perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000,
+                            tagsEvaluated: true
+                        )
+                    }
+                    // No extractable text → scanned/image-only PDF: fall back to the
+                    // CGPDFDocument rasterize + first-pages OCR (the macOS recovery the
+                    // Windows pdfium path lacks).
                     guard let pdf = CGPDFDocument(url as CFURL) else {
                         // R3-13: a transient open failure must be recorded as a
                         // FAILURE (not a success with tagsEvaluated:true) — mirrors
@@ -543,13 +566,14 @@ public enum Tagging {
                         ocrStageRan: true
                     )
                 }
-                // A PDF is a document — cache its BGE content embedding for restructure
-                // (PDFKit text, not the lossy OCR), unless the file failed to open.
+                // Cache the BGE content embedding for restructure (PDFKit text, not the
+                // lossy OCR) — reusing the single extraction above — unless the file
+                // failed to open. textStageDone records the attempt (stops the backfill
+                // carve-out re-walk).
                 if !result.failed {
-                    let extracted = bgeTextAndEmbedding(url: url)
                     result.docText = extracted.text
                     result.textEmbeddingBlob = extracted.blob
-                    result.textStageDone = true   // attempted — stops the backfill carve-out re-walk
+                    result.textStageDone = true
                 }
                 cont.resume(returning: result)
             }
