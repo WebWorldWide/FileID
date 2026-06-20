@@ -8,6 +8,14 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-20 (CLI MVP) — new cross-platform `fileid` command-line front-end (in-process over the engine)
+
+Added a fourth client alongside apple/windows/linux: a cross-OS **`fileid` CLI** at `platforms/cli/` (its own standalone Cargo workspace, pinned Rust 1.90 to match the engine). It links the shared engine crate as a path dependency (`fileid-engine = { path = "../windows/src/engine", default-features = false }`) and integrates **in-process** — calling the engine's public library surface directly rather than spawning the engine binary. **Verified on this macOS host: `cargo clippy --all-targets -- -D warnings` clean, `cargo build` clean, `cargo test` green (1 smoke test).**
+
+Architecture choice (in-process vs spawn): the MVP is read/query + plan, and search/info/people/dedupe have **no IPC command** — the macOS/Windows apps run them as direct read-only SQL — so the CLI does the same via `db::open_read`. The engine's `startScan` IPC hard-gates on ML models (`mobileclip_s2`+`arcface`), which is incompatible with a model-free CLI, so `scan` is a model-free FTS indexer writing through `db::open_writer` (engine schema + migrations; `doc_fts` filled by the v15 triggers). `restructure --plan` reuses the engine's public, pure, model-free `pipeline::restructure::classify` rule cascade. Net: zero contract drift, single self-contained binary, no engine-binary dependency.
+
+Commands (each mapped to the engine surface): `scan <path> [--rescan]` (model-free index → `files` + `doc_text`); `search <query> [--similar]` (FTS5 over `doc_fts`+`ocr_fts` + filename fallback; `--similar` returns a clear needs-models notice); `info <path-or-id>` (metadata/tags/people/snippet); `people` (persons + face counts); `dedupe [--exact|--similar]` (content_hash groups / phash Hamming union-find, default threshold 8 mirroring the engine); `restructure --plan [root]` (read-only plan). Global flags `--json`/`--quiet`/`--no-color`/`--db`; library location resolves `--db` → `$FILEID_DB` → `$CFFIXED_USER_HOME` → engine default (`$XDG_DATA_HOME`/`%LOCALAPPDATA%`), so it reads the same DB the desktop apps build. Smoke test is model-free + isolated (`--db` tempdir): creates text/markdown files, scans, asserts search + info + re-scan-skip + plan. No engine/Swift/C#/GTK files were modified. Docs: new `platforms/cli/README.md`, ARCHITECTURE front-ends note, CONTRIBUTING "Build the CLI", DECISIONS entry, NEXT follow-ons (apply commands, semantic-search wiring, full-pipeline `scan --models`, TUI).
+
 ## 2026-06-20 (quality audit loop) — perf + accuracy audit across all features; near-duplicate detection feature
 
 Workflow-driven audit campaign: 8 subsystems each FIND→adversarial-default-reject-VERIFY, fix verified safe/high-value findings, re-audit. Shipped (all: swift build clean, 260/260 Swift tests pass, CI green):

@@ -1,0 +1,8 @@
+[toolchain]
+# Match the engine's pin (platforms/windows/src/engine/rust-toolchain.toml)
+# and the repo MSRV (1.90) so `cd platforms/cli && cargo …` verifies with the
+# same toolchain the engine + CI use. No platform targets needed — the CLI is
+# pure portable std + SQLite and builds for the host triple.
+channel = "1.90"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

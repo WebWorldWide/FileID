@@ -1,5 +1,16 @@
 # NEXT — resume here
 
+## 2026-06-20 — `fileid` CLI follow-ons (MVP landed)
+
+The cross-platform CLI MVP (`platforms/cli/`) is read/query + plan only, model-free, and verified green on the macOS host (clippy `-D warnings`, build, test). Follow-ons, roughly in priority order:
+
+- **`fileid apply` (destructive commands)** — wire the apply paths that the MVP deliberately omits: `restructure --apply` (→ `applyRestructure`, with `--symlinks` for the preview mode), `rename`/`retag`/`trash` (→ `bulkAction`/`trashFiles`). These move/modify user files, so gate behind explicit confirmation + a `--dry-run` default. Acceptance: a restructure plan can be applied and undone (`undoRestructure`) from the CLI; trash is recoverable; no DB write races the engine (route writes through the engine, never a second writer).
+- **Semantic / `--similar` search** — currently returns a clear "needs models" notice. Wire it to the engine's CLIP path (`embedTextQuery`/`embedImageQuery` → cosine over `clip_embeddings`). Either load the model in-process or spawn the engine for the query. Acceptance: `fileid search --similar "sunset over water"` ranks image files with CLIP embeddings present; degrades cleanly when models/embeddings are absent.
+- **Full-pipeline `scan --models`** — an opt-in flag that drives the engine's real `startScan` (spawn + NDJSON, mirroring `platforms/linux/.../engine_client.rs`) so the CLI can produce ML tags/faces/embeddings/hashes, not just FTS. This is what makes `people`/`dedupe`/semantic-search populate on a CLI-built library. Acceptance: with models installed, `scan --models` yields the same `tags`/`face_prints`/`clip_embeddings`/`content_hash`/`phash` rows a desktop scan would; without models it prints the engine's `models_not_installed` guidance.
+- **TUI (ratatui)** — interactive terminal UI on top of the same in-process calls (browse library, live search, review dedupe/restructure). Justify the `ratatui` dep in DECISIONS first. Acceptance: a single `fileid tui` over an existing library; springs-everywhere is GUI-only, so the TUI just needs to be fast + keyboard-driven.
+- **CI job for the CLI** — add a `cli.yml` (or fold into an existing Rust workflow) running `cargo clippy --all-targets -- -D warnings` + `cargo test` on the `platforms/cli` workspace, plus the no-telemetry binary scan on the `fileid` binary (the release blocker that already gates the other binaries).
+- **Engine relocation ripple** — when the engine moves to `shared/engine/` (tracked below), update the CLI's `fileid-engine` path dependency (`../windows/src/engine` → `../../shared/engine`) in lockstep with the GTK app's.
+
 ## 2026-06-20 — follow-ups after the quality-audit loop
 
 - **Windows near-dup parity (LOCKSTEP GAP)**: port the Cleanup "Visually similar" mode to Windows — the Rust engine already computes the same dhash (`phash`, unused); needs the Hamming union-find grouping + a C# Cleanup mode toggle + the no-auto-select safety UX. Mirror macOS `PerceptualGrouping` + `ReadStore.similarImageGroups` + `CleanupView`. CI-verified only (no local C# build).

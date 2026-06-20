@@ -1,0 +1,59 @@
+# FileID CLI — cross-platform `fileid` command-line front-end.
+#
+# Despite living under platforms/ (alongside apple/windows/linux), this crate
+# is CROSS-OS: it links the shared Rust engine as a library and uses only
+# portable std + SQLite. It builds and runs identically on macOS, Linux, and
+# Windows. It is its OWN standalone Cargo workspace (mirroring platforms/linux),
+# not a member of any platform workspace.
+#
+# Engine integration is IN-PROCESS: the CLI calls the engine crate's public
+# library surface (db::open_writer/open_read + migrations, pipeline::discovery,
+# pipeline::restructure::classify, paths) directly, rather than spawning the
+# engine binary over stdio. Rationale in shared/docs/DECISIONS.md.
+
+[workspace]
+
+[package]
+name = "fileid-cli"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+description = "FileID — local AI file organizer. Cross-platform CLI front-end over the shared Rust engine."
+license = "TBD"
+publish = false
+
+[[bin]]
+name = "fileid"
+path = "src/main.rs"
+
+[dependencies]
+# Reuse the engine crate directly so the IPC/DB contract can never drift:
+# same schema + migrations, same FileKind classification, same restructure
+# rule cascade. `default-features = false` drops the engine's `pdf-analyze`
+# (pdfium) feature — the CLI never rasterizes PDFs, and the engine explicitly
+# supports the no-default-features build.
+fileid-engine = { path = "../windows/src/engine", default-features = false }
+
+# Subcommand parsing (derive API). The only genuinely new dependency this
+# crate introduces; justified in shared/docs/DECISIONS.md.
+clap = { version = "4", features = ["derive"] }
+
+# All of the following are already engine dependencies; declaring them here at
+# the same versions means Cargo unifies them (no new crates in the lock graph).
+# rusqlite for the read/write SQL the CLI runs against the engine's DB; the
+# engine's wider feature set (blob/chrono/limits/modern_sqlite) is unified in.
+rusqlite   = { version = "0.31", features = ["bundled"] }
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow     = "1"
+walkdir    = "2"
+
+[profile.release]
+opt-level     = 3
+lto           = "thin"
+codegen-units = 16
+strip         = "symbols"
+
+[lints.rust]
+unused_imports = "warn"
+dead_code      = "warn"

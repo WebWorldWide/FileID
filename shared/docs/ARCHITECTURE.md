@@ -23,6 +23,10 @@ FileID is split across three platform implementations that share a contract, a d
 
 Two binaries per platform. The app spawns the engine as a child process. They talk newline-delimited JSON over stdin (app → engine) and stdout (engine → app). The app reads the DB via a read-only connection; the engine is the sole writer. SQLite WAL allows concurrent readers without blocking the writer.
 
+### Front-ends over the contract
+
+The SwiftUI / WinUI 3 / GTK4 apps are not the only clients. There is also a cross-platform **CLI** (`platforms/cli`, the `fileid` binary) over the same library DB + engine. Where the GUI apps *spawn* the engine and stream IPC, the CLI *links the engine crate as a library* and calls its public surface in-process (`db::open_writer`/`open_read` + migrations, `pipeline::discovery::FileKind`, `pipeline::restructure::classify`, `paths::db_path`). The two integration styles are deliberate: the MVP's read/query commands (search, info, people, dedupe) have **no IPC command** — the GUIs run them as direct read-only SQL too — and the engine's `startScan` IPC hard-requires ML models, so the CLI's model-free FTS `scan` writes through the engine's own schema instead. Linking the engine (path dependency) guarantees the CLI shares the exact tables, migrations, and classification logic — it cannot drift from the contract. See `platforms/cli/README.md`.
+
 When the engine crashes the app respawns it with bounded backoff (1 s / 4 s / 16 s within a 60 s window). Three failures in a row puts the app in `.crashed` state; user dismisses or retries.
 
 ## Storage
