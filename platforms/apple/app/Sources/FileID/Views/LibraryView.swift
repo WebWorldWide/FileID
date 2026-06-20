@@ -1333,7 +1333,13 @@ private struct FilePreviewSheet: View {
         .focused($keyFocus)
         // Grab key focus when the sheet appears so the arrow handlers fire
         // without a click; reclaim it whenever the tag field gives focus up.
-        .task { keyFocus = true }
+        // The brief defer lets the sheet enter the responder hierarchy first —
+        // setting focus synchronously in .task doesn't reliably stick on a
+        // freshly presented sheet.
+        .task {
+            try? await Task.sleep(for: .milliseconds(50))
+            keyFocus = true
+        }
         .onChange(of: tagFieldFocused) { _, focused in
             if !focused { keyFocus = true }
         }

@@ -24,6 +24,8 @@ User reported macOS being slow, with broken Restructure sorting, broken face clu
 
 **Lockstep:** RAM++ tagger + BGE doc embeddings are already implemented on macOS (byte-faithful to Windows). BGE model isn't installed in the user's library (install via Settings → rescan to cluster the 1737 docs by content); RAM++ is installed + wired.
 
+**Follow-ups (same day):** preview-nav focus hardened — the sheet now grabs key focus after a brief defer (`.task { try? await Task.sleep(.milliseconds(50)); keyFocus = true }`) so arrows work without a click. Face-cluster fragmentation investigated on the real embeddings: it is intrinsic to age progression (same child across years overlaps the different-people cosine band), so auto-merge thresholds stay at 0.65/0.55 and consolidation is left to the already-wired "Suggest merges" UI (which surfaces the 0.50–0.64 candidates) — see DECISIONS.md.
+
 ## 2026-06-19 (parity audit) — fix(parity): macOS/Windows UI parity audit — 8 bugs fixed: statusBanner error icon, dismissedDeepAnalyzeHint persistence, FaceEmbedderCard copy, dead lastSeenVersion, FaceClusteringInFlight banner (Windows), LastScanProcessedFiles PropertyChanged, ApplyBarHint text, FaceClusteringBanner wiring
 
 Full six-tab parity audit via parallel agents (macOS inventory + Windows inventory). Verified: Swift build clean, 253/253 Swift tests pass, Rust clippy -D warnings clean.
