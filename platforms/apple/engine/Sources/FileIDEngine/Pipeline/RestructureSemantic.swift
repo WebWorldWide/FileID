@@ -223,16 +223,26 @@ public enum RestructureSemantic {
         profile: Profile = imageProfile
     ) -> [Move] {
         let hp = fileHyperparams()
+        // Shared name registry created ONCE here and threaded through every
+        // segment, so segment 1's "Beach" cluster doesn't collide with segment
+        // 2's independent "Beach" cluster into the same folder — names stay
+        // globally unique across the whole reorg. (BL-01)
+        var usedGroupNames = Set<String>()
         // Non-default profile (document / non-image pass): skip time segmentation —
         // docs lack reliable timestamps and the passage handles them separately.
         guard profile.wTime == imageProfile.wTime && profile.wClip == imageProfile.wClip else {
             return classifyProfiled(files: files, prototypes: prototypes,
-                                    libraryRoot: libraryRoot, profile: profile, hp: hp)
+                                    libraryRoot: libraryRoot, profile: profile, hp: hp,
+                                    usedGroupNames: &usedGroupNames)
         }
-        return timeSegments(files).flatMap {
-            classifyProfiled(files: $0, prototypes: prototypes,
-                             libraryRoot: libraryRoot, profile: profile, hp: hp)
+        var moves: [Move] = []
+        for segment in timeSegments(files) {
+            moves.append(contentsOf: classifyProfiled(
+                files: segment, prototypes: prototypes,
+                libraryRoot: libraryRoot, profile: profile, hp: hp,
+                usedGroupNames: &usedGroupNames))
         }
+        return moves
     }
 
     /// Default time-gap threshold: 2 hours between consecutive photos signals a
@@ -269,7 +279,8 @@ public enum RestructureSemantic {
         prototypes: [FolderPrototype],
         libraryRoot: String,
         profile: Profile,
-        hp: IdentityClustering.Hyperparameters
+        hp: IdentityClustering.Hyperparameters,
+        usedGroupNames: inout Set<String>
     ) -> [Move] {
         guard !files.isEmpty else { return [] }
         let globalFreq = tagFrequencies(files)
@@ -281,13 +292,13 @@ public enum RestructureSemantic {
         for (i, cid) in clusterIDs.enumerated() { clusters[cid, default: []].append(i) }
 
         var moves: [Move] = []
-        // Group names already claimed by a *different* new-group cluster this
-        // run. Without this, two clusters with identical top tags collapse into
-        // one folder (#9). Consulted ONLY by the new-group branch; the
-        // existing-folder branch legitimately routes many clusters into one
+        // `usedGroupNames` (an inout param) is the shared registry of names
+        // already claimed by a *different* new-group cluster — this run AND
+        // every prior time-segment, so two segments that both mint "Beach" get
+        // distinct folders (BL-01, #9). Consulted ONLY by the new-group branch;
+        // the existing-folder branch legitimately routes many clusters into one
         // user folder. Tracked in the SANITIZED namespace that actually backs
         // the directory. (F-C3-014)
-        var usedGroupNames = Set<String>()
         // Stable cluster iteration (smallest id first) so the dedup below is
         // deterministic across runs.
         for cid in clusters.keys.sorted() {
@@ -412,9 +423,10 @@ public enum RestructureSemantic {
         // already is. Real user folders ("Taxes", "Invoices") still anchor.
         // (RESTRUCTURE.md R1)
         let protos = folderPrototypes(sigs, minFiles: 4).filter { !isJunkPrototypeFolder($0.path) }
+        var usedGroupNames = Set<String>()
         return classifyProfiled(files: sigs, prototypes: protos,
                                 libraryRoot: libraryRoot, profile: nonImageProfile,
-                                hp: fileHyperparams())
+                                hp: fileHyperparams(), usedGroupNames: &usedGroupNames)
     }
 
     /// Document-content pass — cluster documents by their BGE text embedding (in `clip`),
@@ -428,9 +440,10 @@ public enum RestructureSemantic {
     ) -> [Move] {
         guard files.count >= 2 else { return [] }
         let protos = folderPrototypes(files, minFiles: 4).filter { !isJunkPrototypeFolder($0.path) }
+        var usedGroupNames = Set<String>()
         return classifyProfiled(files: files, prototypes: protos,
                                 libraryRoot: libraryRoot, profile: docProfile,
-                                hp: docHyperparams())
+                                hp: docHyperparams(), usedGroupNames: &usedGroupNames)
     }
 
     /// Document content-embedding profile (byte-faithful with Rust `doc_profile`). The

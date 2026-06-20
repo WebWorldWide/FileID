@@ -1,5 +1,12 @@
 # NEXT — resume here
 
+## 2026-06-20 — follow-ups after the macOS fix pass
+
+- **Install BGE via Settings + rescan the library** to cluster the user's 1737 docs by content (text_embeddings is currently 0 — the BGE model isn't installed; the engine wiring is already complete and byte-faithful to Windows). The user's library is doc-heavy (1039 PDFs + 698 docs).
+- **Rescan to apply RAM++ image tags** if the 1603 images were scanned before RAM++ was installed (the ram_plus model was installed 2026-06-20; RAM++ is wired in Tagging.swift and runs on scan).
+- **GUI confirm** preview-nav arrow-key focus on real hardware: the fix uses `.task { keyFocus = true }` to grab key focus in FilePreviewSheet; if arrows need a click first, switch to `.onAppear { DispatchQueue.main.async { keyFocus = true } }`.
+- **Pre-existing (not introduced here):** DeepAnalyzeViews.swift has two Swift-6 `writeTags` main-actor-isolation warnings (~lines 444/450) — latent, surfaced when the file recompiled; fix when touching that area.
+
 ## 2026-06-17 — Content clustering covers ALL file types (images/docs/video); a few perf/polish follow-ups
 
 Restructure now clusters images (CLIP), documents (BGE 46%→53%), AND video (keyframe CLIP, 87%) by

@@ -16,6 +16,10 @@ struct PeopleView: View {
     @State private var hiddenUnknownCount: Int = 0
     @State private var showHiddenUnknowns: Bool = false
     @State private var lastVersionSeen: Int = -1
+    /// Throttle state for the `store.version` reload coalescer (see
+    /// `throttledReload`): leading-edge timestamp + trailing debounce.
+    @State private var lastReloadAt: Date = .distantPast
+    @State private var reloadDebounce: Task<Void, Never>?
 
     /// Cards become checkboxes; "Merge selected" picks a target.
     @State private var mergeMode: Bool = false
@@ -61,7 +65,7 @@ struct PeopleView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { reload() }
-        .onChange(of: store.version) { _, _ in reload() }
+        .onChange(of: store.version) { _, _ in throttledReload() }
         .onChange(of: engine.lastFaceClustering?.personCount) { _, _ in reload() }
         .sheet(item: $activeSheet) { sheet in
             switch sheet {
@@ -622,6 +626,29 @@ struct PeopleView: View {
     }
 
     // MARK: - Reload
+
+    /// Coalesce the ~1/sec `store.version` bumps a live scan emits into at
+    /// most one reload per second so this tab's 3 DB queries (totalFacePrints
+    /// / persons / hiddenUnknownCount) don't fire 1000× — including while it's
+    /// off-screen. Leading edge reloads at once when the last reload was ≥1s
+    /// ago; otherwise a trailing debounce guarantees a final reload after the
+    /// burst settles. Mirrors LibraryView's batch throttle + search debounce.
+    private func throttledReload() {
+        let now = Date()
+        if now.timeIntervalSince(lastReloadAt) >= 1.0 {
+            lastReloadAt = now
+            reloadDebounce?.cancel()
+            reload()
+        } else {
+            reloadDebounce?.cancel()
+            reloadDebounce = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard !Task.isCancelled else { return }
+                lastReloadAt = Date()
+                reload()
+            }
+        }
+    }
 
     private func reload() {
         totalFacePrints = store.totalFacePrints()

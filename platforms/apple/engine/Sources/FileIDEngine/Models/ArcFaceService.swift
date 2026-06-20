@@ -61,6 +61,14 @@ public final class ArcFaceService: @unchecked Sendable {
     /// row just doesn't get an arcface_embedding).
     @discardableResult
     public func load(_ kind: FaceEmbedderKind) -> Bool {
+        // Execution-provider preference. "cpu" binds ORT's implicit CPU EP
+        // only; "coreml"/"auto" attempt the CoreML EP and fall back to CPU if
+        // it can't bind — so load() succeeds whenever ORT can parse the model,
+        // even on Macs where CoreML is unavailable. (hardening)
+        let epPref = (ProcessInfo.processInfo.environment["FILEID_FACE_EP"] ?? "auto")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
         // Fast path — already loaded with the right kind.
         lock.lock()
         if let loaded = loadedKind, loaded == kind, session != nil {
@@ -100,10 +108,28 @@ public final class ArcFaceService: @unchecked Sendable {
             // CoreML EP — enables ANE/GPU acceleration on Apple Silicon.
             // MLProgram = post-iOS15/macOS12 program format (faster init,
             // better op coverage than the legacy NeuralNetwork format).
-            let coremlOpts = ORTCoreMLExecutionProviderOptions()
-            coremlOpts.enableOnSubgraphs = true
-            coremlOpts.useCPUAndGPU = true
-            try opts.appendCoreMLExecutionProvider(with: coremlOpts)
+            // Appended in its OWN do/catch: a CoreML bind failure (or an
+            // explicit FILEID_FACE_EP=cpu) drops to ORT's implicit CPU EP so
+            // session creation — and embedding — still succeed. (hardening)
+            var ep = "coreml"
+            if epPref == "cpu" {
+                ep = "cpu"
+                JSONLog.shared.warn(ev: "arcface_coreml_ep_unavailable",
+                                    path: redactPathForLog(url.path),
+                                    error: "FILEID_FACE_EP=cpu; binding ORT CPU EP only.")
+            } else {
+                do {
+                    let coremlOpts = ORTCoreMLExecutionProviderOptions()
+                    coremlOpts.enableOnSubgraphs = true
+                    coremlOpts.useCPUAndGPU = true
+                    try opts.appendCoreMLExecutionProvider(with: coremlOpts)
+                } catch {
+                    ep = "cpu"
+                    JSONLog.shared.warn(ev: "arcface_coreml_ep_unavailable",
+                                        path: redactPathForLog(url.path),
+                                        error: "CoreML EP could not bind; falling back to CPU: \(error)")
+                }
+            }
             let session = try ORTSession(env: env, modelPath: url.path, sessionOptions: opts)
             // Discover input name — Buffalo ONNX uses "input.1" after
             // PyTorch tracing renames the original; mobileface may differ.
@@ -123,7 +149,8 @@ public final class ArcFaceService: @unchecked Sendable {
             JSONLog.shared.info(ev: "arcface_model_loaded",
                                 extra: ["kind": AnyCodable(kind.rawValue),
                                         "path": AnyCodable(redactPathForLog(url.path)),
-                                        "input": AnyCodable(firstInput)])
+                                        "input": AnyCodable(firstInput),
+                                        "ep": AnyCodable(ep)])
             return true
         } catch {
             JSONLog.shared.error(ev: "arcface_model_load_failed",
@@ -152,7 +179,11 @@ public final class ArcFaceService: @unchecked Sendable {
         let name = inputName
         lock.unlock()
         guard let s, let name else { return nil }
-        guard let tensor = makeNCHWTensor(crop, side: 112) else { return nil }
+        guard let tensor = makeNCHWTensor(crop, side: 112) else {
+            JSONLog.shared.error(ev: "arcface_preprocess_failed",
+                                 error: "Could not build the 112×112 NCHW input tensor from the \(crop.width)×\(crop.height) face crop; skipping this face.")
+            return nil
+        }
 
         inferenceSem.wait()
         defer { inferenceSem.signal() }
