@@ -1,5 +1,13 @@
 # NEXT — resume here
 
+## 2026-06-20 — Linux GUI + packaging roadmap (foundation done)
+
+- **Six GTK4 tabs**, mirroring the macOS reference 1:1 (gold palette via CSS, LavaLamp via Cairo, libadwaita SpringAnimation, GlassCards): Library (grid+search+preview) first, then People, Cleanup, Deep Analyze, Restructure (Sankey via Cairo), Settings. Each compile-gated by linux.yml; behavioral verification needs a Linux box.
+- **Engine shell fallbacks** for Linux parity (`#[cfg(not(windows))]` in platforms/windows/src/engine/src/shell/): OCR (tesseract/none), video keyframes (ffmpeg-next), reveal (DBus org.freedesktop.FileManager1), tags (user.xdg.* xattr), trash (freedesktop), HEIC (libheif). Each cargo-verifiable on the non-windows path.
+- **Universal distro packaging** (so it runs on Debian/Ubuntu/Arch/Gentoo/NixOS/Fedora): Flatpak (primary — bundles a pinned org.gnome.Platform runtime so it never depends on the host GTK; reuse the existing AppStream metainfo+desktop; finish-args: filesystem for library+NAS, network for HF model pulls only, --device=dri; + a flatpak-builder CI job). Then AppImage (old-glibc baseline, single file) + a Nix flake + AUR PKGBUILD for the distro-natives.
+- **CLI follow-ons**: full-pipeline `scan --models` (tags/faces/CLIP/phash, not just FTS), semantic/`--similar` search wiring, apply commands (dedupe/restructure --apply), a CLI CI job.
+- **TUI** (ratatui) over the same engine/CLI command surface, after the CLI surface matures.
+
 ## 2026-06-20 — `fileid` CLI follow-ons (MVP landed)
 
 The cross-platform CLI MVP (`platforms/cli/`) is read/query + plan only, model-free, and verified green on the macOS host (clippy `-D warnings`, build, test). Follow-ons, roughly in priority order:

@@ -8,6 +8,16 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-20 (Linux foundation) — engine + CLI + GTK app all build on Linux (CI-green); CLI MVP; engine Linux restructure fallback
+
+The Linux build foundation is now CI-verified end to end (new `.github/workflows/linux.yml`, 3 jobs on ubuntu-latest, all green):
+- **Engine (cross-platform Rust) — green.** `cargo fmt`/`clippy -D warnings`/`test` pass on Linux + telemetry scan. The "engine is cross-platform-clean" claim is now concretely proven on an actual Linux host (was only inferred).
+- **CLI (`fileid`) — green.** Builds + the model-free smoke test passes on Linux. A new cross-platform front-end (`platforms/cli/`) linking the engine in-process: scan (FTS), search, info, people, dedupe (exact + phash near-dup), restructure --plan; `--json/--quiet`. For headless/NAS/scripting.
+- **GTK4 app (`fileid-linux`) — green (compiles).** The Phase-0 scaffold builds once the dependency train was aligned: it pinned `gtk4 0.7` against `libadwaita 0.6`, which transitively needs `gtk4 0.8` (two gtk4 majors both linking native gtk-4 → Cargo conflict). Fixed to the single `gtk4 0.8 / libadwaita 0.6 / glib+gio 0.19` train (GTK 4.14 / libadwaita 1.5 — what ubuntu-24.04/Fedora 40/Arch ship); committed the resolved Cargo.lock.
+- **Engine restructure file-move/symlink** now has a portable `#[cfg(not(windows))]` impl (`std::fs::rename` + EXDEV copy-fallback for NAS mounts; `std::os::unix::fs::symlink`) — Restructure apply works on Linux. cargo-verified, 2 new portable tests.
+
+This is the FOUNDATION (everything compiles + the engine/CLI are functional on Linux). Remaining for a feature-complete Linux GUI is tracked in NEXT.md. Note: the GTK app's *behavioral* verification needs an actual Linux box (CI only proves it compiles), same as C# is CI-verified.
+
 ## 2026-06-20 (CLI MVP) — new cross-platform `fileid` command-line front-end (in-process over the engine)
 
 Added a fourth client alongside apple/windows/linux: a cross-OS **`fileid` CLI** at `platforms/cli/` (its own standalone Cargo workspace, pinned Rust 1.90 to match the engine). It links the shared engine crate as a path dependency (`fileid-engine = { path = "../windows/src/engine", default-features = false }`) and integrates **in-process** — calling the engine's public library surface directly rather than spawning the engine binary. **Verified on this macOS host: `cargo clippy --all-targets -- -D warnings` clean, `cargo build` clean, `cargo test` green (1 smoke test).**
