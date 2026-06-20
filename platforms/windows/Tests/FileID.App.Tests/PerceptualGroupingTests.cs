@@ -1,4 +1,4 @@
-// Perceptual near-duplicate grouping: Hamming distance over 64-bit dHashes +
+﻿// Perceptual near-duplicate grouping: Hamming distance over 64-bit dHashes +
 // union-find clustering. Drives the pure logic behind Cleanup's "Similar" mode
 // directly, separate from the SQLite query that feeds it. Mirrors the macOS
 // SharedTests/PerceptualGroupingTests.swift case-for-case.
