@@ -70,13 +70,20 @@ public struct FileRow: Sendable, Hashable, Identifiable, Codable {
     public var isVideo: Bool { kind == "video" }
 }
 
-/// Duplicate group — files sharing the same byte-exact content_hash (item 1).
+/// Duplicate group — files sharing the same byte-exact content_hash (item 1), or
+/// a perceptual near-duplicate cluster when `isSimilar` is true (Cleanup's
+/// "Similar" mode: dHash Hamming grouping — NOT byte-identical).
 public struct DuplicateGroup: Sendable, Identifiable, Hashable {
-    public let id: Int64           // first 8 bytes of the group's content_hash
+    public let id: Int64           // exact: first 8 bytes of content_hash; similar: min member file id
     public let files: [FileRow]    // sorted by keeperRank descending (best first)
-    public init(id: Int64, files: [FileRow]) {
+    /// True for perceptual near-duplicate groups. The Cleanup "Similar" view
+    /// surfaces these with a "review before deleting — not identical" disclaimer
+    /// and never pre-selects copies for deletion.
+    public let isSimilar: Bool
+    public init(id: Int64, files: [FileRow], isSimilar: Bool = false) {
         self.id = id
         self.files = files
+        self.isSimilar = isSimilar
     }
 
     public var totalBytes: Int64 { files.reduce(0) { $0 + $1.sizeBytes } }
