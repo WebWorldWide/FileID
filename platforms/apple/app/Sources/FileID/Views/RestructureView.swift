@@ -120,6 +120,9 @@ struct RestructureView: View {
         let newPath: String
         let bucket: String        // destination bucket (e.g. "People/Marie Curie")
         let sourceFolder: String  // current parent folder (for "from X" display)
+        // Precomputed display strings — avoids re-parsing the path on every row render.
+        let filename: String
+        let sourceName: String
         let kind: ProposalKind
         // Butler confidence band ("auto"/"review"/"ask", "" when unstamped) + the
         // engine's plain-language "why filed here". Surfaced per the deep-research
@@ -906,8 +909,8 @@ struct RestructureView: View {
 
     private func proposalRow(_ p: Proposal) -> some View {
         let on = selectedIDs.contains(p.fileID)
-        let filename = URL(fileURLWithPath: p.oldPath).lastPathComponent
-        let sourceName = (p.sourceFolder as NSString).lastPathComponent
+        let filename = p.filename
+        let sourceName = p.sourceName
         let icon = Self.fileIcon(forFilename: filename)
         return HStack(spacing: 8) {
             Image(systemName: on ? "checkmark.square.fill" : "square")
@@ -1149,6 +1152,8 @@ struct RestructureView: View {
                 bucket: bucketLabel(destination: m.destination,
                                     root: plan.libraryRoot, fallback: m.category),
                 sourceFolder: (m.source as NSString).deletingLastPathComponent,
+                filename: URL(fileURLWithPath: m.source).lastPathComponent,
+                sourceName: ((m.source as NSString).deletingLastPathComponent as NSString).lastPathComponent,
                 kind: kind(forTier: m.tier),
                 confidence: m.confidence,
                 reason: m.reason)
@@ -1609,6 +1614,8 @@ enum RestructureEngine {
                 newPath: resolvedTarget,
                 bucket: bucket,
                 sourceFolder: parent,
+                filename: URL(fileURLWithPath: f.pathText).lastPathComponent,
+                sourceName: (parent as NSString).lastPathComponent,
                 kind: proposalKind
             ))
         }

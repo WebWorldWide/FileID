@@ -1288,33 +1288,55 @@ public final class ReadStore: @unchecked Sendable {
     /// `PersonRow.displayName`, which has a suffix double-space quirk and a
     /// "Person N" fallback that must never become a file tag.)
     static func personTagName(_ p: PersonRow) -> String {
-        let parts = [p.title, p.firstName, p.middleName, p.lastName, p.suffix]
+        personTagName(title: p.title, first: p.firstName, middle: p.middleName,
+                      last: p.lastName, suffix: p.suffix, legacy: p.name)
+    }
+
+    static func personTagName(title: String?, first: String?, middle: String?,
+                              last: String?, suffix: String?, legacy: String?) -> String {
+        let parts = [title, first, middle, last, suffix]
             .compactMap { $0?.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
         if !parts.isEmpty { return parts.joined(separator: " ") }
-        return (p.name ?? "").trimmingCharacters(in: .whitespaces)
+        return (legacy ?? "").trimmingCharacters(in: .whitespaces)
     }
 
     /// Item 5: (url, names) for every file containing ≥1 NAMED person, so the
     /// "Apply people as tags" action can write the person names onto the files.
     /// Skips Unknown / unnamed clusters. Aggregated per file.
     public func filesWithPersonTags() -> [(url: URL, names: [String])] {
-        let named = persons(includeUnknown: false).filter { $0.hasAnyName && !$0.isUnknown }
-        guard !named.isEmpty else { return [] }
-        var byPath: [String: [String]] = [:]
-        var order: [String] = []
-        for person in named {
-            let name = Self.personTagName(person)
-            guard !name.isEmpty else { continue }
-            for file in files(forPersonID: person.id, limit: 1_000_000) {
-                let path = file.pathText
-                if byPath[path] == nil { order.append(path) }
-                if !(byPath[path]?.contains(name) ?? false) {
-                    byPath[path, default: []].append(name)
+        guard let q = queue else { return [] }
+        do {
+            return try q.read { db in
+                let rows = try Row.fetchAll(db, sql: """
+                    SELECT files.path_text AS path,
+                           p.title, p.first_name, p.middle_name,
+                           p.last_name, p.suffix, p.name
+                    FROM persons p
+                    INNER JOIN face_prints ON face_prints.person_id = p.id
+                    INNER JOIN files ON files.id = face_prints.file_id
+                    WHERE IFNULL(p.is_unknown, 0) = 0 AND files.failed = 0
+                    ORDER BY p.file_count DESC, p.id ASC, files.scanned_at DESC
+                    """)
+                var byPath: [String: [String]] = [:]
+                var order: [String] = []
+                for r in rows {
+                    guard let path: String = r["path"] else { continue }
+                    let name = Self.personTagName(
+                        title: r["title"], first: r["first_name"], middle: r["middle_name"],
+                        last: r["last_name"], suffix: r["suffix"], legacy: r["name"])
+                    guard !name.isEmpty else { continue }
+                    if byPath[path] == nil { order.append(path) }
+                    if !(byPath[path]?.contains(name) ?? false) {
+                        byPath[path, default: []].append(name)
+                    }
                 }
+                return order.map { (url: URL(fileURLWithPath: $0), names: byPath[$0] ?? []) }
             }
+        } catch {
+            reportError("filesWithPersonTags failed: \(error)")
+            return []
         }
-        return order.map { (url: URL(fileURLWithPath: $0), names: byPath[$0] ?? []) }
     }
 
     public func filesWithProposedNames(limit: Int = 1000) -> [FileRow] {
