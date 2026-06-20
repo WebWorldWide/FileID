@@ -8,6 +8,22 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-20 (quality audit loop) — perf + accuracy audit across all features; near-duplicate detection feature
+
+Workflow-driven audit campaign: 8 subsystems each FIND→adversarial-default-reject-VERIFY, fix verified safe/high-value findings, re-audit. Shipped (all: swift build clean, 260/260 Swift tests pass, CI green):
+- **N+1**: `filesWithPersonTags` 407 per-person queries → 1 JOIN (mirrors Windows `NamedPersonFileIdsAsync`).
+- **Tag dedup+cap**: visionTags now case-insensitively deduped + capped at 16 before write (mirrors Windows `tagging.rs`) — fixes "Dog"/"dog" dupes + unbounded tags.
+- **Document content search**: macOS now stores extracted doc text into `doc_text` at scan (v15 trigger fills `doc_fts`), so PDFs/docs are keyword-searchable — was a parity regression vs Windows. Verified e2e (4/4 distinctive tokens matched their files; real DB untouched).
+- **Representative face by max `face_quality`** (was `.first`) — sharper People cluster thumbnails, mirrors Windows.
+- **Person search** adds title/middle_name/suffix (both platforms were missing them).
+- **Approximate-dup disclosure**: duplicate groups whose largest member exceeds the 16 MB full-hash cap are matched by a composite fingerprint, not byte-exact SHA — now badged "~ likely match" in Cleanup (Windows already disclosed this).
+- **Windows parity**: duplicate keeper selection is now quality-first (aesthetic/size/created/path) instead of alphabetical, mirroring macOS.
+- **`FILEID_INFERENCE_CONCURRENCY`** env knob on the 4 model inference semaphores (default 4 kept).
+- **NEW FEATURE — perceptual near-duplicate detection** (Cleanup "Visually similar" mode): uses the already-computed-but-unused dhash; union-find on Hamming distance; default threshold 8 (validated on real images: resize/re-encode → Hamming ≤1; nearest distinct photo = 24, a 3× safety margin). No auto-select for delete; "review — not identical" warning. **macOS only so far** (Windows mirror is the remaining lockstep item).
+- Restructure proposal-row string precompute (minor perf).
+
+Audit verifiers correctly REJECTED marginal items: CLIP batching (RAM++ Swin-L@384 is the dominant scan cost, not CLIP) and "synchronous applyPlan" (a full scan of 3372 rows is ~10 ms, not the claimed 100 ms).
+
 ## 2026-06-20 — fix(macOS): 4 user-reported issues fixed + Windows lockstep confirmed — preview nav, face clustering, restructure sorting, performance
 
 User reported macOS being slow, with broken Restructure sorting, broken face clustering, and totally-broken preview navigation (arrow keys + clicking). All four root-caused and fixed. Verified: `swift build` clean (debug+release), 253/253 Swift tests pass, on-corpus e2e green (CFFIXED_USER_HOME-isolated copy of the user's library), Windows confirmed already in lockstep.
