@@ -213,16 +213,20 @@ public actor IPCSink {
     /// search instead of UTF-8 decode + 6 substring scans. Called in the
     /// hot path of buffer eviction — `Data.range(of:)` matches the bytes
     /// directly without allocating a String.
+    // Each needle matches a JSON *object key* (followed by `:{`) so that user-data
+    // strings (a tag named "ready", a caption containing "error", a path component
+    // named "scanComplete") never trigger a false-positive critical pin. Swift's
+    // default Codable encoding for enum cases always emits `"caseName":{...}`.
     private static let criticalNeedles: [Data] = [
-        Data("\"ready\"".utf8),
-        Data("\"error\"".utf8),
-        Data("\"scanComplete\"".utf8),
-        Data("\"deepAnalyzeComplete\"".utf8),
-        Data("\"faceClusteringComplete\"".utf8),
-        Data("\"restructurePlan\"".utf8),
-        Data("\"restructureApplyResult\"".utf8),
-        Data("\"discoveryComplete\"".utf8),
-        Data("\"phaseChanged\"".utf8),
+        Data("\"ready\":{".utf8),
+        Data("\"error\":{".utf8),
+        Data("\"scanComplete\":{".utf8),
+        Data("\"deepAnalyzeComplete\":{".utf8),
+        Data("\"faceClusteringComplete\":{".utf8),
+        Data("\"restructurePlan\":{".utf8),
+        Data("\"restructureApplyResult\":{".utf8),
+        Data("\"discoveryComplete\":{".utf8),
+        Data("\"phaseChanged\":{".utf8),
     ]
     static func entryLooksCritical(_ data: Data) -> Bool {
         for needle in criticalNeedles {

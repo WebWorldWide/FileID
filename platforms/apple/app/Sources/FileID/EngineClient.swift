@@ -564,9 +564,10 @@ public final class EngineClient {
             if e.kind.hasPrefix("deep") {
                 // A deep-analyze error (e.g. unknown model kind → "deep_invalid")
                 // means we'll never get .deepAnalyzeComplete, which is the only
-                // place that clears this flag — so clear it here or the UI stays
-                // stuck "analyzing…" forever.
+                // place that clears these flags — so clear them here or the UI
+                // stays stuck "analyzing…" forever.
                 deepAnalyzeInFlight = false
+                deepAnalyzeProgress = nil
                 if autoPilotActive {
                     // Deep Analyze failure during auto-pilot — same idea.
                     autoPilotStage = .ready

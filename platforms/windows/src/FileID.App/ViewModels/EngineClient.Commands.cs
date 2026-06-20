@@ -97,7 +97,12 @@ internal sealed partial class EngineClient
     /// Authoritative processed-file count from the last ScanComplete (the
     /// engine's final total). The completed-scan summary reads this instead of
     /// LastProgress.Processed, which can be throttle-stale by up to one batch.
-    public ulong LastScanProcessedFiles { get; private set; }
+    private ulong _lastScanProcessedFiles;
+    public ulong LastScanProcessedFiles
+    {
+        get => _lastScanProcessedFiles;
+        private set => Set(ref _lastScanProcessedFiles, value);
+    }
     public Task StartScanAsync(string rootPath, string? rootDisplay = null, bool rescan = false)
     {
         _scanStartedAt = DateTime.UtcNow;

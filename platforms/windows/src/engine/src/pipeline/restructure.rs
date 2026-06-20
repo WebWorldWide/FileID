@@ -195,7 +195,7 @@ pub fn strip_anchor_folder_moves_except<S: std::hash::BuildHasher>(
 ///   3. Document       → Documents/<Year>/
 ///   4. Image          → Photos/<Year>/<MonthName>/
 ///   5. Video          → Videos/<Year>/
-///   6. Audio          → Audio/
+///   6. Audio          → Audio/<Year>/  (flat Audio/ when no date signal)
 ///   7. Fallback       → Misc/
 pub fn classify(
     files: &[FileForClassify],
@@ -204,6 +204,10 @@ pub fn classify(
     let mut out = Vec::with_capacity(files.len());
     for f in files {
         let ts = f.created_unix.unwrap_or(f.modified_unix);
+        // A zero or negative timestamp is not a real date (FAT32 zero-epoch, corrupt
+        // mtime). Use Ask confidence and skip year folders so the user isn't misled
+        // into accepting 1970 placements silently.
+        let ts_valid = ts > 86_400.0; // > 1970-01-02 avoids zero/near-zero epoch artefacts
         let (y, m) = year_month(ts);
         let mname = month_name(m);
 
@@ -222,23 +226,40 @@ pub fn classify(
              Confidence::Review,
              "Taken at a shared location".to_string())
         } else if f.has_text || matches!(f.kind, FileKind::Pdf | FileKind::Doc) {
-            (library_root.join("Documents").join(format!("{y}")),
-             "document".to_string(),
-             Confidence::Review,
-             format!("Document from {y}"))
+            let dest = if ts_valid {
+                library_root.join("Documents").join(format!("{y}"))
+            } else {
+                library_root.join("Documents")
+            };
+            let conf = if ts_valid { Confidence::Review } else { Confidence::Ask };
+            let reason = if ts_valid { format!("Document from {y}") } else { "Document — no date signal".to_string() };
+            (dest, "document".to_string(), conf, reason)
         } else if matches!(f.kind, FileKind::Image) {
-            (library_root.join("Photos").join(format!("{y}")).join(&mname),
-             "photo".to_string(),
-             Confidence::Review,
-             format!("Photo from {mname} {y}"))
+            let dest = if ts_valid {
+                library_root.join("Photos").join(format!("{y}")).join(&mname)
+            } else {
+                library_root.join("Photos")
+            };
+            let conf = if ts_valid { Confidence::Review } else { Confidence::Ask };
+            let reason = if ts_valid { format!("Photo from {mname} {y}") } else { "Photo — no capture date".to_string() };
+            (dest, "photo".to_string(), conf, reason)
         } else if matches!(f.kind, FileKind::Video) {
-            (library_root.join("Videos").join(format!("{y}")),
-             "video".to_string(),
-             Confidence::Review,
-             format!("Video from {y}"))
+            let dest = if ts_valid {
+                library_root.join("Videos").join(format!("{y}"))
+            } else {
+                library_root.join("Videos")
+            };
+            let conf = if ts_valid { Confidence::Review } else { Confidence::Ask };
+            let reason = if ts_valid { format!("Video from {y}") } else { "Video — no date signal".to_string() };
+            (dest, "video".to_string(), conf, reason)
         } else if matches!(f.kind, FileKind::Audio) {
-            (library_root.join("Audio"), "audio".to_string(),
-             Confidence::Review, "Audio file".to_string())
+            let dest = if ts_valid {
+                library_root.join("Audio").join(format!("{y}"))
+            } else {
+                library_root.join("Audio")
+            };
+            let reason = if ts_valid { format!("Audio file from {y}") } else { "Audio file".to_string() };
+            (dest, "audio".to_string(), Confidence::Review, reason)
         } else if matches!(f.kind, FileKind::Model) {
             (library_root.join("3D Models"), "model".to_string(),
              Confidence::Review, "3D model".to_string())
@@ -515,6 +536,47 @@ mod tests {
         assert!(dest.contains("Videos"), "dest={dest}");
         assert!(dest.contains("2024"), "dest={dest}");
         assert!(!dest.contains("March"), "videos should not have month: dest={dest}");
+    }
+
+    #[test]
+    fn audio_year_subfolder() {
+        let f = FileForClassify {
+            file_id: 1,
+            source: PathBuf::from("C:/scan/song.mp3"),
+            kind: FileKind::Audio,
+            modified_unix: 1_710_504_000.0, // 2024
+            created_unix: None,
+            person_name: None,
+            location_lat: None,
+            location_lon: None,
+            has_text: false,
+        };
+        let m = classify(&[f], Path::new("D:/Library"));
+        let dest = m[0].destination.to_string_lossy();
+        assert!(dest.contains("Audio"), "dest={dest}");
+        assert!(dest.contains("2024"), "audio should have year sub-folder: dest={dest}");
+    }
+
+    #[test]
+    fn zero_timestamp_gets_ask_confidence() {
+        // A zero timestamp (FAT32 zero-epoch, corrupt mtime) must produce Ask
+        // confidence and skip the year sub-folder so the user isn't silently
+        // filed under 1970.
+        let f = FileForClassify {
+            file_id: 1,
+            source: PathBuf::from("C:/scan/photo.jpg"),
+            kind: FileKind::Image,
+            modified_unix: 0.0,
+            created_unix: None,
+            person_name: None,
+            location_lat: None,
+            location_lon: None,
+            has_text: false,
+        };
+        let m = classify(&[f], Path::new("D:/Library"));
+        assert_eq!(m[0].confidence, Confidence::Ask, "zero-ts must surface as Ask");
+        let dest = m[0].destination.to_string_lossy();
+        assert!(!dest.contains("1970"), "zero-ts must not land in 1970: dest={dest}");
     }
 
     #[test]

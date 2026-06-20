@@ -157,8 +157,9 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
             while (reader.Read())
             {
                 ct.ThrowIfCancellationRequested();
+                if (reader.IsDBNull(3)) continue;
                 var hashBytes = (byte[])reader[3];
-                if (hashBytes is null || hashBytes.Length == 0) continue;
+                if (hashBytes.Length == 0) continue;
                 var hashHex = Convert.ToHexString(hashBytes);
                 var modifiedAt = reader.IsDBNull(4) ? (double?)null : reader.GetDouble(4);
                 rawMembers.Add((reader.GetInt64(0), reader.GetString(1), reader.GetInt64(2), hashHex, modifiedAt));

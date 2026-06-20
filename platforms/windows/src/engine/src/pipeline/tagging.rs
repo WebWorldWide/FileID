@@ -1522,6 +1522,7 @@ async fn process_file_predecoded(
     };
     perf_trace("image_decode_done", &file.path, started.elapsed().as_secs_f64() * 1000.0);
 
+    let mut ram_plus_ran = false;
     if let Some((rgb, w, h)) = image_source {
         tagged.image_width = w;
         tagged.image_height = h;
@@ -1716,7 +1717,7 @@ async fn process_file_predecoded(
                 // MobileCLIP embed so semantic-search embeddings are always
                 // computed regardless of which tagger is active. Shares the
                 // `vision_sem` GPU budget; device-removed → cancel the scan.
-                let mut ram_plus_ran = false;
+                ram_plus_ran = false;
                 if !coord.is_gpu_dead() {
                     // Tags come from EITHER the batch coordinator (one batched
                     // Session — HW-4 throughput path; no vision_sem because the
@@ -1957,9 +1958,10 @@ async fn process_file_predecoded(
     // only the Year/camera enriched extras — not an authoritative empty — so
     // setting tags_evaluated would make the dbwriter delete-then-reinsert wipe
     // the file's previously-persisted content tags. (audit R3-19)
-    let visual_tagger_ran = models.ram_plus.is_some()
-        || models.ram_plus_batch.is_some()
-        || (models.scene_labeler.is_some() && tagged.clip_embedding.is_some());
+    let visual_tagger_ran = ram_plus_ran
+        || (models.scene_labeler.is_some()
+            && tagged.clip_embedding.is_some()
+            && crate::models::scene_vocab::ENABLE_CLIP_SCENE_TAGS);
     tagged.tags_evaluated = !coord.is_gpu_dead()
         && !tagged.failed
         && !file.online_only

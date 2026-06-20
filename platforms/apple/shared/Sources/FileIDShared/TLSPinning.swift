@@ -177,13 +177,23 @@ public enum TLSPinning {
 /// callbacks. `pinningRejected` lets the caller distinguish a pinning
 /// cancellation (surfaces as URLError.cancelled) from a user cancel.
 public final class TLSPinningSessionDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
-    public private(set) var pinningRejected = false
+    private let rejectedLock = NSLock()
+    private var _pinningRejected = false
+    public var pinningRejected: Bool {
+        rejectedLock.lock()
+        defer { rejectedLock.unlock() }
+        return _pinningRejected
+    }
 
     public func urlSession(_ session: URLSession,
                            didReceive challenge: URLAuthenticationChallenge,
                            completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
         let (disposition, credential) = TLSPinning.evaluate(challenge: challenge)
-        if disposition == .cancelAuthenticationChallenge { pinningRejected = true }
+        if disposition == .cancelAuthenticationChallenge {
+            rejectedLock.lock()
+            _pinningRejected = true
+            rejectedLock.unlock()
+        }
         completionHandler(disposition, credential)
     }
 }

@@ -103,10 +103,19 @@ public actor VLMDownloader {
                 if sentinelValid {
                     continue
                 }
-                if let expected = f.sha256,
-                   let actual = try? sha256HexOfFile(at: dest),
-                   actual == expected.lowercased() {
-                    continue
+                if let expected = f.sha256 {
+                    // Offload the blocking multi-GB read off the actor thread so the
+                    // actor can be suspended (and cancelled) while hashing. On an
+                    // unverified 13.5 GB Mistral file this previously blocked for ~27 s
+                    // with no cancellation possible.
+                    let actual: String? = await withCheckedContinuation { cont in
+                        DispatchQueue.global(qos: .utility).async {
+                            cont.resume(returning: try? sha256HexOfFile(at: dest))
+                        }
+                    }
+                    if actual == expected.lowercased() {
+                        continue
+                    }
                 }
             }
             todo.append(f)
@@ -195,7 +204,13 @@ public actor VLMDownloader {
     }
 
     private static func writeVerifiedSentinel(_ sentinel: URL) {
-        try? Data().write(to: sentinel)
+        do {
+            try Data().write(to: sentinel)
+        } catch {
+            JSONLog.shared.warn(ev: "vlm_sentinel_write_failed",
+                                path: redactPathForLog(sentinel.path),
+                                error: "\(error)")
+        }
     }
 
     // MARK: - HF tree listing

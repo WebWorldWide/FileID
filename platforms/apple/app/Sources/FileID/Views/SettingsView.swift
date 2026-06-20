@@ -163,10 +163,10 @@ struct SettingsTab: View {
             .padding(24)
         }
         .onAppear {
-            sessions = store.recentSessions()
+            Task { sessions = store.recentSessions() }
         }
         .onChange(of: showAdvanced) { _, expanded in
-            if expanded { sessions = store.recentSessions() }
+            if expanded { Task { sessions = store.recentSessions() } }
         }
     }
 
@@ -612,7 +612,7 @@ struct FaceEmbedderCard: View {
         GlassCard {
             VStack(alignment: .leading, spacing: 10) {
                 Text("AI Models — face recognition").font(.headline)
-                Text("On-device face embedder for clustering people. Pre-converted from Buffalo (Immich) ONNX — install with one click, no Python required.")
+                Text("SFace (Apache-2.0) produces a 128-d face embedding per detected face, used to cluster people across your library — install with one click, no Python required.")
                     .font(.callout).foregroundStyle(.secondary)
                 Divider().opacity(0.3)
                 ForEach(FaceEmbedderKind.allCases, id: \.rawValue) { kind in

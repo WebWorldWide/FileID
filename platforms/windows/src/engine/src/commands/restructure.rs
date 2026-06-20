@@ -243,11 +243,22 @@ pub(crate) async fn handle_plan_restructure(
     .await;
     let (mut embeddings, mut tags_map, mut text_embeddings) = match signals {
         Ok(Ok(v)) => v,
-        _ => (
-            std::collections::HashMap::new(),
-            std::collections::HashMap::new(),
-            std::collections::HashMap::new(),
-        ),
+        Ok(Err(err)) => {
+            tracing::warn!(?err, "signals load failed; proceeding with empty maps");
+            (
+                std::collections::HashMap::new(),
+                std::collections::HashMap::new(),
+                std::collections::HashMap::new(),
+            )
+        }
+        Err(err) => {
+            tracing::warn!(?err, "signals task panicked; proceeding with empty maps");
+            (
+                std::collections::HashMap::new(),
+                std::collections::HashMap::new(),
+                std::collections::HashMap::new(),
+            )
+        }
     };
 
     // Drain (remove) instead of clone: each file_id is a PK consumed once here,

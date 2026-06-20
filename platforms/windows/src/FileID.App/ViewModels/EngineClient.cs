@@ -132,6 +132,16 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     // clustering error. Mirrors macOS EngineClient.faceClusteringInFlight.
     private int _faceClusterAutoInFlight;
 
+    // Observable counterpart of _faceClusterAutoInFlight: true while a clustering
+    // pass is in progress, false otherwise. Set on the UI thread (inside Apply())
+    // so PropertyChanged fires safely. Mirrors macOS faceClusteringInFlight @Published.
+    private bool _faceClusteringInFlight;
+    public bool FaceClusteringInFlight
+    {
+        get => _faceClusteringInFlight;
+        private set => Set(ref _faceClusteringInFlight, value);
+    }
+
     // Throttle for scan FileDone events. A fast scan can emit hundreds per
     // second; publishing each through the Rx Subject inflates UI work for
     // every subscriber (LibraryView, transcript, etc.). Sample every Nth
@@ -1185,6 +1195,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         // pass on cancel races the engine's own teardown.
                         if (pc.Phase == ScanPhase.Failed)
                         {
+                            FaceClusteringInFlight = true;
                             _ = AutoTriggerFaceClusteringAsync();
                         }
                         break;
@@ -1233,6 +1244,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         // path), so this is safe even on a library with no images.
                         // Deep Analyze stays manual — matches macOS, which gates
                         // it on the user naming ≥1 person first.
+                        FaceClusteringInFlight = true;
                         _ = AutoTriggerFaceClusteringAsync();
                         break;
                     case ErrorEvent e:
@@ -1258,6 +1270,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         if (e.Error.Kind == "face_clustering_failed")
                         {
                             Interlocked.Exchange(ref _faceClusterAutoInFlight, 0);
+                            FaceClusteringInFlight = false;
                         }
                         break;
                     case LogEvent:
@@ -1266,6 +1279,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         break;
                     case FaceClusteringCompleteEvent fc:
                         LastFaceClustering = fc.Result;
+                        FaceClusteringInFlight = false;
                         Interlocked.Exchange(ref _faceClusterAutoInFlight, 0); // PAR-111: release the auto gate
                         break;
                     case DeepAnalyzeStartingEvent das:
@@ -1443,6 +1457,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         {
             // The IPC send failed — release the gate so a later scan can retry.
             Interlocked.Exchange(ref _faceClusterAutoInFlight, 0);
+            _ui.TryEnqueue(() => FaceClusteringInFlight = false);
             DebugLog.Warn("[AUTO-ADVANCE] face clustering trigger threw: " + ex.Message);
         }
     }

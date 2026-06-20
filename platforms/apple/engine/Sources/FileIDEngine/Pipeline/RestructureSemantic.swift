@@ -177,7 +177,7 @@ public enum RestructureSemantic {
         return IdentityClustering.Hyperparameters(
             pass1Cosine: envFloat("FILEID_RESTRUCTURE_CLUSTER_P1", 0.84) + d,
             pass2Cosine: envFloat("FILEID_RESTRUCTURE_CLUSTER_P2", 0.76) + d,
-            pass2Margin: 0.08,
+            pass2Margin: 0.08 + d * 0.5,  // delta scales margin proportionally
             pass3VarianceThreshold: 0.06,
             pass3MinMeanCosine: envFloat("FILEID_RESTRUCTURE_CLUSTER_P3", 0.76) + d,
             pass3MaxSplits: 5, kNN: 12)
@@ -211,14 +211,57 @@ public enum RestructureSemantic {
     /// distinctively-named group under `libraryRoot`. Density-noise / singleton
     /// files are not returned — the caller routes the rest through its rule
     /// cascade fallback.
+    ///
+    /// The image pass pre-segments files by capture-time gap before clustering so
+    /// events separated by > `FILEID_RESTRUCTURE_TIME_GAP` seconds (default 2 h)
+    /// never compete in the same cluster. Time gaps are the strongest natural
+    /// album-boundary signal; CLIP handles within-event appearance separation.
     public static func classify(
         files: [SemanticFile],
         prototypes: [FolderPrototype],
         libraryRoot: String,
         profile: Profile = imageProfile
     ) -> [Move] {
-        classifyProfiled(files: files, prototypes: prototypes, libraryRoot: libraryRoot,
-                         profile: profile, hp: fileHyperparams())
+        let hp = fileHyperparams()
+        // Non-default profile (document / non-image pass): skip time segmentation —
+        // docs lack reliable timestamps and the passage handles them separately.
+        guard profile.wTime == imageProfile.wTime && profile.wClip == imageProfile.wClip else {
+            return classifyProfiled(files: files, prototypes: prototypes,
+                                    libraryRoot: libraryRoot, profile: profile, hp: hp)
+        }
+        return timeSegments(files).flatMap {
+            classifyProfiled(files: $0, prototypes: prototypes,
+                             libraryRoot: libraryRoot, profile: profile, hp: hp)
+        }
+    }
+
+    /// Default time-gap threshold: 2 hours between consecutive photos signals a
+    /// new event. Configurable via `FILEID_RESTRUCTURE_TIME_GAP` (seconds).
+    static func timeGapSeconds() -> Double {
+        ProcessInfo.processInfo.environment["FILEID_RESTRUCTURE_TIME_GAP"]
+            .flatMap(Double.init) ?? 7_200
+    }
+
+    /// Pre-segment photos by capture-time gap. Files separated by > `timeGapSeconds()`
+    /// go into independent segments that are clustered on their own — time gaps are
+    /// the primary event-boundary signal. Files without a timestamp cluster last.
+    /// (RESTRUCTURE.md §2 — "time-gap event segmentation cascade")
+    static func timeSegments(_ files: [SemanticFile]) -> [[SemanticFile]] {
+        guard files.count >= 2 else { return [files] }
+        let gap = timeGapSeconds()
+        let timed = files.filter { $0.timeUnix > 0 }.sorted { $0.timeUnix < $1.timeUnix }
+        let untimed = files.filter { $0.timeUnix <= 0 }
+        var segments: [[SemanticFile]] = []
+        var cur: [SemanticFile] = []
+        for f in timed {
+            if let last = cur.last, f.timeUnix - last.timeUnix > gap {
+                segments.append(cur)
+                cur = [f]
+            } else { cur.append(f) }
+        }
+        if !cur.isEmpty { segments.append(cur) }
+        if !untimed.isEmpty { segments.append(untimed) }
+        return segments
     }
 
     static func classifyProfiled(
@@ -543,7 +586,7 @@ public enum RestructureSemantic {
     /// L2-normalize the whole so the clusterer's cosine is meaningful.
     private static func fuse(_ file: SemanticFile, vocab: [String: Int], profile: Profile) -> [Float] {
         var out: [Float] = []
-        out.reserveCapacity(file.clip.count + vocab.count + 2)
+        out.reserveCapacity(file.clip.count + vocab.count + 5)
 
         let clip = l2Normalized(file.clip)
         out.append(contentsOf: clip.map { $0 * profile.wClip })
@@ -553,19 +596,31 @@ public enum RestructureSemantic {
         let tagsN = l2Normalized(tags)
         out.append(contentsOf: tagsN.map { $0 * profile.wTags })
 
-        let (s, c) = dayOfYearCyclical(file.timeUnix)
-        out.append(s * profile.wTime)
-        out.append(c * profile.wTime)
+        let tf = timeFeatures(file.timeUnix)
+        for v in tf { out.append(v * profile.wTime) }
 
         return l2Normalized(out)
     }
 
-    /// sin/cos of the day-of-year angle (captures seasonality without raw epoch).
-    private static func dayOfYearCyclical(_ timeUnix: Double) -> (Float, Float) {
-        guard timeUnix > 0 else { return (0, 0) }
-        let day = (Int(timeUnix) / 86_400) % 365
-        let angle = 2 * Double.pi * Double(day) / 365
-        return (Float(sin(angle)), Float(cos(angle)))
+    /// Five time features: day-of-year cyclical (2), time-of-day cyclical (2),
+    /// log-compressed absolute year (1). Together they separate:
+    /// - events in different seasons (day-of-year cyclical)
+    /// - morning vs evening sessions (time-of-day cyclical)
+    /// - same calendar day in different years (log-year, monotonic)
+    /// Byte-faithful with the Rust engine. (RESTRUCTURE.md §2)
+    static func timeFeatures(_ timeUnix: Double) -> [Float] {
+        guard timeUnix > 0 else { return [Float](repeating: 0, count: 5) }
+        let secs = Int64(timeUnix)
+        let day = Int((secs / 86_400) % 365)
+        let dayAngle = 2 * Double.pi * Double(day) / 365
+        let secondOfDay = Int(secs % 86_400)
+        let todAngle = 2 * Double.pi * Double(secondOfDay) / 86_400
+        // log1p(years) / log1p(100): monotonic 0→1 over a 100-year range;
+        // separates same-calendar-day events in different years.
+        let years = max(0, min(100, timeUnix / (365.25 * 86_400)))
+        let logYear = Float(log(1 + years) / log(101))
+        return [Float(sin(dayAngle)), Float(cos(dayAngle)),
+                Float(sin(todAngle)), Float(cos(todAngle)), logYear]
     }
 
     // MARK: - Clustering (reuse IdentityClustering)

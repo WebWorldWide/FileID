@@ -227,6 +227,8 @@ struct WelcomeSheet: View {
                         Text(rateETA).font(.caption2.monospaced())
                             .foregroundStyle(.tertiary)
                     }
+                } else if let label = progressLabel {
+                    Text(label).font(.caption2.monospaced()).foregroundStyle(.red)
                 }
             }
             if installed {

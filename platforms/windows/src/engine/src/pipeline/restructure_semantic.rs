@@ -20,6 +20,7 @@ use super::restructure::{Confidence, ProposedMove};
 
 /// Per-file signals. `clip` is the L2-normalized 512-d CLIP image embedding;
 /// callers only pass files that have one (images), so it is never empty here.
+#[derive(Clone)]
 pub struct SemanticFile {
     pub file_id: i64,
     pub source: PathBuf,
@@ -162,7 +163,7 @@ fn file_hyperparams() -> Hyperparameters {
     Hyperparameters {
         pass1_cosine: env_f32("FILEID_RESTRUCTURE_CLUSTER_P1", 0.84) + d,
         pass2_cosine: env_f32("FILEID_RESTRUCTURE_CLUSTER_P2", 0.76) + d,
-        pass2_margin: 0.08,
+        pass2_margin: 0.08 + d * 0.5,  // delta scales margin proportionally
         pass3_variance_threshold: 0.06,
         pass3_min_mean_cosine: env_f32("FILEID_RESTRUCTURE_CLUSTER_P3", 0.76) + d,
         pass3_max_splits: 5,
@@ -238,16 +239,80 @@ pub fn folder_prototypes(files: &[SemanticFile], min_files: usize) -> Vec<Folder
     out
 }
 
+/// Default time-gap threshold: 2 hours between consecutive photos signals a
+/// new event. Configurable via `FILEID_RESTRUCTURE_TIME_GAP` (seconds).
+fn time_gap_secs() -> f64 {
+    std::env::var("FILEID_RESTRUCTURE_TIME_GAP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(7_200.0)
+}
+
+/// Pre-segment photos by capture-time gap. Returns a vec of index groups; each
+/// group should be clustered independently so events separated by more than
+/// `time_gap_secs()` never compete in the same cluster. Files without a valid
+/// timestamp (time_unix <= 0) go in their own trailing group.
+/// (RESTRUCTURE.md §2 — "time-gap event segmentation cascade")
+fn time_segment_indices(files: &[SemanticFile]) -> Vec<Vec<usize>> {
+    let gap = time_gap_secs();
+    let (mut timed, untimed): (Vec<usize>, Vec<usize>) =
+        (0..files.len()).partition(|&i| files[i].time_unix > 0.0);
+    timed.sort_unstable_by(|&a, &b| {
+        files[a]
+            .time_unix
+            .partial_cmp(&files[b].time_unix)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut segments: Vec<Vec<usize>> = Vec::new();
+    let mut cur: Vec<usize> = Vec::new();
+    for &i in &timed {
+        if let Some(&last) = cur.last() {
+            if files[i].time_unix - files[last].time_unix > gap {
+                segments.push(std::mem::take(&mut cur));
+            }
+        }
+        cur.push(i);
+    }
+    if !cur.is_empty() {
+        segments.push(cur);
+    }
+    if !untimed.is_empty() {
+        segments.push(untimed);
+    }
+    segments
+}
+
 /// Classify `files` into proposed moves: each discovered cluster either extends
 /// the nearest confident existing folder or becomes a new tag-named group under
 /// `library_root`. Density-noise / singleton files are simply not returned — the
 /// caller routes anything left unmoved through its rule-cascade fallback.
+///
+/// The image pass pre-segments files by capture-time gap before clustering so
+/// events separated by > `FILEID_RESTRUCTURE_TIME_GAP` seconds (default 2 h)
+/// never compete in the same cluster. (RESTRUCTURE.md §2)
 pub fn semantic_classify(
     files: &[SemanticFile],
     prototypes: &[FolderPrototype],
     library_root: &Path,
 ) -> Vec<ProposedMove> {
-    semantic_classify_profiled(files, prototypes, library_root, image_profile(), file_hyperparams())
+    let profile = image_profile();
+    let hp = file_hyperparams();
+    let segments = time_segment_indices(files);
+    // Shared name registry so segment 1's "Beach" cluster doesn't collide
+    // with segment 2's independent "Beach" cluster into the same folder.
+    let mut shared_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if segments.len() <= 1 {
+        return semantic_classify_profiled(files, prototypes, library_root, profile, hp, &mut shared_names);
+    }
+    // Pre-segmented: cluster each time-gap window independently so content
+    // similarity doesn't merge events that are separated by hours or days.
+    let mut all_moves = Vec::new();
+    for idxs in &segments {
+        let seg: Vec<SemanticFile> = idxs.iter().map(|&i| files[i].clone()).collect();
+        let moves = semantic_classify_profiled(&seg, prototypes, library_root, profile, hp, &mut shared_names);
+        all_moves.extend(moves);
+    }
+    all_moves
 }
 
 fn semantic_classify_profiled(
@@ -256,6 +321,7 @@ fn semantic_classify_profiled(
     library_root: &Path,
     profile: Profile,
     hp: Hyperparameters,
+    used_group_names: &mut std::collections::HashSet<String>,
 ) -> Vec<ProposedMove> {
     if files.is_empty() {
         return Vec::new();
@@ -273,11 +339,11 @@ fn semantic_classify_profiled(
 
     let mut moves = Vec::new();
 
-    // Group names already claimed by a *different* new-group cluster this run.
-    // Without this, two clusters with identical top tags collapse into one
-    // folder (#9). Consulted ONLY by the new-group branch; the existing-folder
-    // branch legitimately routes many clusters into one user folder.
-    let mut used_group_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Group names already claimed by a *different* new-group cluster this run
+    // (or a prior time-segment run — the set is shared across all segments so
+    // two segments that both produce "Beach" get distinct folder names).
+    // Consulted ONLY by the new-group branch; the existing-folder branch
+    // legitimately routes many clusters into one user folder.
 
     // Stable cluster iteration (smallest id first) — makes the collision
     // disambiguation below deterministic across runs.
@@ -414,7 +480,8 @@ fn semantic_classify_profiled(
 
         for &i in members {
             let file = &files[i];
-            let dest = dest_dir.join(file.source.file_name().unwrap_or_default());
+            let Some(name) = file.source.file_name() else { continue };
+            let dest = dest_dir.join(name);
             moves.push(ProposedMove {
                 file_id: file.file_id,
                 source: file.source.clone(),
@@ -452,7 +519,7 @@ pub fn classify_non_image(files: &[SemanticFile], library_root: &Path) -> Vec<Pr
         .into_iter()
         .filter(|p| !is_junk_prototype_folder(&p.path))
         .collect();
-    semantic_classify_profiled(&sigs, &protos, library_root, non_image_profile(), file_hyperparams())
+    semantic_classify_profiled(&sigs, &protos, library_root, non_image_profile(), file_hyperparams(), &mut std::collections::HashSet::new())
 }
 
 /// Document-content pass — cluster documents by their BGE text embedding (read from
@@ -470,7 +537,7 @@ pub fn classify_documents(files: &[SemanticFile], library_root: &Path) -> Vec<Pr
         .into_iter()
         .filter(|p| !is_junk_prototype_folder(&p.path))
         .collect();
-    semantic_classify_profiled(files, &protos, library_root, doc_profile(), doc_hyperparams())
+    semantic_classify_profiled(files, &protos, library_root, doc_profile(), doc_hyperparams(), &mut std::collections::HashSet::new())
 }
 
 /// Document content-embedding profile. The representative IS the 384-d BGE vector (so
@@ -655,7 +722,7 @@ fn build_tag_vocab(files: &[SemanticFile], cap: usize) -> HashMap<String, usize>
 /// Fuse one file: per-block L2-normalize, scale by weight, concatenate, then
 /// L2-normalize the whole so the clusterer's cosine is meaningful.
 fn fuse(file: &SemanticFile, vocab: &HashMap<String, usize>, profile: Profile) -> Vec<f32> {
-    let mut out = Vec::with_capacity(file.clip.len() + vocab.len() + 2);
+    let mut out = Vec::with_capacity(file.clip.len() + vocab.len() + 5);
 
     // CLIP block (already unit; re-normalize defensively).
     let clip = l2_normalized(&file.clip);
@@ -671,22 +738,41 @@ fn fuse(file: &SemanticFile, vocab: &HashMap<String, usize>, profile: Profile) -
     let tags = l2_normalized(&tags);
     out.extend(tags.iter().map(|x| x * profile.w_tags));
 
-    // Time block: cyclical day-of-year (captures seasonality without raw epoch).
-    let (s, c) = day_of_year_cyclical(file.time_unix);
-    out.push(s * profile.w_time);
-    out.push(c * profile.w_time);
+    // Time block: 5 features (see time_features). Byte-faithful with Swift engine.
+    for v in time_features(file.time_unix) {
+        out.push(v * profile.w_time);
+    }
 
     l2_normalized(&out)
 }
 
-/// `sin`/`cos` of the day-of-year angle. Zero time → (0,0) (no contribution).
-fn day_of_year_cyclical(time_unix: f64) -> (f32, f32) {
+/// Five time features: day-of-year cyclical (2), time-of-day cyclical (2),
+/// log-compressed absolute year (1). Together they separate:
+/// - events in different seasons (day-of-year)
+/// - morning vs evening sessions (time-of-day)
+/// - same calendar day in different years (log-year, monotonic)
+///
+/// Byte-faithful with the Swift engine. (RESTRUCTURE.md §2)
+fn time_features(time_unix: f64) -> [f32; 5] {
     if time_unix <= 0.0 {
-        return (0.0, 0.0);
+        return [0.0; 5];
     }
-    let day = ((time_unix as i64) / 86_400) % 365;
-    let angle = std::f64::consts::TAU * (day as f64) / 365.0;
-    (angle.sin() as f32, angle.cos() as f32)
+    let secs = time_unix as i64;
+    let day = (secs / 86_400) % 365;
+    let day_angle = std::f64::consts::TAU * (day as f64) / 365.0;
+    let second_of_day = secs % 86_400;
+    let tod_angle = std::f64::consts::TAU * (second_of_day as f64) / 86_400.0;
+    // log1p(years) / log1p(100): monotonic 0→1 over a 100-year range;
+    // separates same-calendar-day events in different years.
+    let years = (time_unix / (365.25 * 86_400.0)).clamp(0.0, 100.0);
+    let log_year = years.ln_1p() / 100.0_f64.ln_1p();
+    [
+        day_angle.sin() as f32,
+        day_angle.cos() as f32,
+        tod_angle.sin() as f32,
+        tod_angle.cos() as f32,
+        log_year as f32,
+    ]
 }
 
 // ── Clustering (reuse identity_clustering) ──────────────────────────────────

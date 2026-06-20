@@ -149,6 +149,8 @@ internal static class CudaAutoInstaller
         });
         _ = task.ContinueWith(
             t => DebugLog.Error("[CUDA-AUTO] OpenVINO worker faulted: " + t.Exception),
-            System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted);
+            System.Threading.CancellationToken.None,
+            System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted,
+            System.Threading.Tasks.TaskScheduler.Default);
     }
 }

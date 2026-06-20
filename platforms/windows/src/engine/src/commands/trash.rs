@@ -46,20 +46,9 @@ pub(crate) async fn handle_restore_from_trash(
         let mut failed = 0u32;
         let mut messages = Vec::new();
 
-        // The Recycle Bin restore via IFileOperation::Recycle reverse is
-        // non-trivial — IShellFolder enumeration of the bin + matching pidl
-        // by display path. Shell out to PowerShell's direct cmdlet instead.
-        // On success, the file lands at its original path; we re-INSERT a
-        // stripped-down DB row so the Library tab shows it again.
-        let conn = db.lock();
-
-        // C1-003: capture each destination's pre-restore occupancy. A path that
-        // is ALREADY occupied (by a DIFFERENT file the user re-created) cannot be
-        // restored without clobbering it — the bin's Undelete is a no-op there and
-        // the bytes stay trapped. We must surface that as a conflict error rather
-        // than seeing the occupant via Path::exists() and falsely reporting
-        // success. Probed before the restore so a successfully-restored file isn't
-        // mistaken for a pre-existing occupant.
+        // C1-003: pre-restore occupancy probe — filesystem only, no DB lock needed.
+        // Probed before the restore so a successfully-restored file isn't mistaken
+        // for a pre-existing occupant.
         let pre_occupied: std::collections::HashSet<String> = entry
             .items
             .iter()
@@ -71,27 +60,22 @@ pub(crate) async fn handle_restore_from_trash(
             .map(|item| item.original_path.clone())
             .collect();
 
-        // SEC-7: collect every authorized scan root from scan_sessions and
-        // require each restore destination to be a descendant. Defends
-        // against trash_log forgery — a local attacker who appends a
-        // hostile entry like
-        //   {"original_path":"C:\\Windows\\System32\\foo.exe", ...}
-        // would otherwise be able to write into System32 via our
-        // PowerShell shell-out. With containment, restore destinations
-        // are restricted to user-blessed library directories.
-        let allowed_roots: Vec<String> = {
+        // SEC-7: collect authorized roots under a short lock scope so PowerShell
+        // runs without holding the DB mutex. The old code held `conn` from here
+        // through `restore_batch_from_recycle_bin`, blocking every DB reader for
+        // the full 30 s PowerShell call. (T-1 fix)
+        let allowed_canonical: Vec<std::path::PathBuf> = {
+            let conn = db.lock();
             let mut stmt = conn.prepare(
                 "SELECT DISTINCT root_path FROM scan_sessions WHERE root_path IS NOT NULL",
             )?;
             let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-            rows.filter_map(|r| r.ok()).collect()
-        };
-        let allowed_canonical: Vec<std::path::PathBuf> = allowed_roots
-            .iter()
-            .filter_map(|r| std::fs::canonicalize(r).ok())
-            .collect();
-
-        let tx = conn.unchecked_transaction()?;
+            let roots: Vec<String> = rows.filter_map(|r| r.ok()).collect();
+            roots
+                .iter()
+                .filter_map(|r| std::fs::canonicalize(r).ok())
+                .collect()
+        }; // conn dropped here — DB mutex released before PowerShell
 
         // C1-007: partition into (allowed-to-restore, conflict, refused) WITHOUT
         // spawning PowerShell per item. The allowed set is restored in a SINGLE
@@ -144,8 +128,12 @@ pub(crate) async fn handle_restore_from_trash(
             }
         }
 
-        // Single bin enumeration for the whole batch (C1-007).
+        // Single bin enumeration WITHOUT DB lock held (T-1 fix).
         restore_batch_from_recycle_bin(&to_restore);
+
+        // Re-acquire DB lock for post-restore inserts.
+        let conn = db.lock();
+        let tx = conn.unchecked_transaction()?;
 
         for item in &entry.items {
             // Skip the ones already accounted for above (refused / conflict).
@@ -172,7 +160,10 @@ pub(crate) async fn handle_restore_from_trash(
                     .unwrap_or("")
                     .to_ascii_lowercase();
                 let kind = crate::pipeline::discovery::FileKind::from_extension(&extension);
-                let _ = tx.execute(
+                // T-3 fix: propagate real DB errors. OR IGNORE returns Ok(0) for
+                // constraint conflicts (path already indexed), so `?` only fires on
+                // genuine failures (disk full, corruption, schema mismatch).
+                tx.execute(
                     "INSERT OR IGNORE INTO files \
                      (path_text, path_hash, path_search, size_bytes, scanned_at, kind, extension, \
                       has_faces, has_text, failed) \
@@ -183,11 +174,9 @@ pub(crate) async fn handle_restore_from_trash(
                         now,
                         kind.as_str(),
                         extension,
-                        // path_search NFC-normalized (not verbatim ?1) so a restored
-                        // NFD-accented file stays findable by name. (audit parity)
                         crate::pipeline::dbwriter::nfc_path_search(&item.original_path),
                     ],
-                );
+                )?;
                 succeeded += 1;
                 messages.push(BulkActionItem {
                     file_id: Some(item.file_id),
@@ -302,16 +291,25 @@ pub(crate) async fn handle_revert_merge(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
-        // Use the original id if it's still free; else let SQLite pick a new one.
-        tx.execute(
+        // Attempt to reclaim the original person id. rows_changed == 0 means
+        // OR IGNORE fired: the id was recycled by SQLite for a DIFFERENT person
+        // after the prior merge deleted the original row. In that case a SELECT
+        // would return the wrong person and all reverted faces would land there.
+        // Instead allocate a fresh row so faces always go to the right person.
+        // (T-2 fix)
+        let rows_changed = tx.execute(
             "INSERT OR IGNORE INTO persons (id, file_count, created_at) VALUES (?1, 0, ?2)",
             rusqlite::params![payload.source_person_id, now],
         )?;
-        let new_pid: i64 = tx.query_row(
-            "SELECT id FROM persons WHERE id = ?1",
-            rusqlite::params![payload.source_person_id],
-            |r| r.get(0),
-        )?;
+        let new_pid: i64 = if rows_changed > 0 {
+            payload.source_person_id
+        } else {
+            tx.execute(
+                "INSERT INTO persons (file_count, created_at) VALUES (0, ?1)",
+                rusqlite::params![now],
+            )?;
+            tx.last_insert_rowid()
+        };
         let mut update = tx.prepare("UPDATE face_prints SET person_id = ?1 WHERE id = ?2")?;
         let mut moved = 0u32;
         for fid in &payload.face_ids_to_revert {

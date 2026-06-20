@@ -169,7 +169,7 @@ public sealed partial class DeepAnalyzeView : UserControl
                 try
                 {
                     if (!System.IO.File.Exists(dbPath)) return 0;
-                    var conn = new Microsoft.Data.Sqlite.SqliteConnection(
+                    using var conn = new Microsoft.Data.Sqlite.SqliteConnection(
                         new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
                         {
                             DataSource = dbPath,
@@ -834,6 +834,7 @@ public sealed partial class DeepAnalyzeView : UserControl
         try
         {
             using var store = new Services.ReadStore(Services.AppPaths.DbPath);
+            await store.OpenAsync();
             var ct = System.Threading.CancellationToken.None;
             if (keywords)
             {

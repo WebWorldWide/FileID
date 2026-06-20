@@ -48,7 +48,7 @@ struct RestructureCascadeTests {
         #expect(cat[5] == "misc")
     }
 
-    @Test("A dated video routes to Videos/<Year>, dated audio to Audio")
+    @Test("A dated video routes to Videos/<Year>, dated audio to Audio/<Year>")
     func videoAudioBuckets() {
         let moves = Restructure.ruleClassify(
             [f(1, "video"), f(2, "audio")], libraryRoot: root)
@@ -57,8 +57,7 @@ struct RestructureCascadeTests {
         #expect(!vid.newPath.contains("March"), "videos have no month: \(vid.newPath)")
         #expect(vid.bucket == "video")
         let aud = moves.first { $0.fileID == 2 }!
-        #expect(aud.newPath.contains("/Audio/"))
-        #expect(!aud.newPath.contains("2024"), "audio has no year: \(aud.newPath)")
+        #expect(aud.newPath.contains("/Audio/2024/"), "audio should have year sub-folder: \(aud.newPath)")
         #expect(aud.bucket == "audio")
     }
 
@@ -69,14 +68,15 @@ struct RestructureCascadeTests {
         #expect(moves[0].bucket == "photo")
     }
 
-    @Test("A file with no timestamp coerces to the 1970 year bucket (Windows)")
+    @Test("A file with no timestamp gets flat folder + Ask confidence")
     func missingTimestampYear() {
         #expect(Restructure.yearMonth(0).year == 1970)
         #expect(Restructure.yearMonth(0).month == 1)
-        // modifiedUnix 0, no createdUnix → ts 0 → 1970.
+        // modifiedUnix 0, no createdUnix → ts invalid → flat Photos/, Ask confidence.
         let moves = Restructure.ruleClassify(
             [f(1, "image", modified: 0)], libraryRoot: root)
-        #expect(moves[0].newPath.contains("/Photos/1970/"))
+        #expect(!moves[0].newPath.contains("1970"), "zero-timestamp must not land in 1970: \(moves[0].newPath)")
+        #expect(moves[0].confidence == "ask", "zero-timestamp must surface for user decision")
     }
 
     @Test("Anchor-folder files emit no move proposals (classify + strip)")

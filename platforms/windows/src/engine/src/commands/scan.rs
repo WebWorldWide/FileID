@@ -290,9 +290,14 @@ pub(crate) async fn handle_start_scan(
     );
     let root = PathBuf::from(payload.root_path.clone());
 
-    let scan_state_release = scan_state.clone();
+    // RAII guard: clear scan_state on normal completion OR panic so a faulting
+    // task can't permanently block future scans.
+    struct ScanStateGuard(Arc<Mutex<Option<ScanCoordinator>>>);
+    impl Drop for ScanStateGuard {
+        fn drop(&mut self) { *self.0.lock() = None; }
+    }
+    let _state_guard = ScanStateGuard(scan_state.clone());
     let outcome = session.run(&root, |_| {}).await;
-    *scan_state_release.lock() = None;
 
     if let Err(err) = outcome {
         tracing::warn!(?err, root = %platform::redact_path_for_log(&root), "scan failed");

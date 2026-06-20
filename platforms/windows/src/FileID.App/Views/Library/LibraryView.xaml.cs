@@ -139,6 +139,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                     DispatcherQueue.TryEnqueue(SyncBanners);
                     break;
                 case nameof(EngineClient.LastFaceClustering):
+                case nameof(EngineClient.FaceClusteringInFlight):
                     DispatcherQueue.TryEnqueue(SyncBanners);
                     break;
             }
@@ -188,12 +189,9 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             DeepAnalyzeBanner.Visibility = Visibility.Collapsed;
         }
 
-        // Face clustering banner: simple — currently we don't get a
-        // progress event during clustering, so just show it briefly when
-        // the engine kicks off and clear it when LastFaceClustering lands.
-        // The auto-trigger after a scan completes runs in <2s on typical
-        // libraries so a short banner is enough.
-        FaceClusteringBanner.Visibility = Visibility.Collapsed;
+        FaceClusteringBanner.Visibility = EngineClient.Instance.FaceClusteringInFlight
+            ? Visibility.Visible
+            : Visibility.Collapsed;
     }
 
     private async void OnInstallClipFromBannerClicked(object sender, RoutedEventArgs e)

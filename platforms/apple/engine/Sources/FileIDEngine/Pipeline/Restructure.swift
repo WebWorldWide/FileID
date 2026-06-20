@@ -10,7 +10,7 @@
 //   3. Document     → Documents/<Year>/           (category "document")
 //   4. Image        → Photos/<Year>/<MonthName>/  (category "photo")
 //   5. Video        → Videos/<Year>/              (category "video")
-//   6. Audio        → Audio/                      (category "audio")
+//   6. Audio        → Audio/<Year>/                (category "audio"; flat when no date signal)
 //   7. Fallback     → Misc/                       (category "misc")
 //
 // `vlm_proposed_name` becomes the new filename within whichever
@@ -374,9 +374,9 @@ public enum Restructure {
     ///   3. Document       → Documents/<Year>/          (category "document")
     ///   4. Image          → Photos/<Year>/<MonthName>/ (category "photo")
     ///   5. Video          → Videos/<Year>/             (category "video")
-    ///   6. Audio          → Audio/                     (category "audio")
+    ///   6. Audio          → Audio/<Year>/               (category "audio"; flat when no date signal)
     ///   7. Fallback       → Misc/                      (category "misc")
-    /// A missing timestamp coerces to 1970 (Windows year_month). (F-C3-017..020)
+    /// A zero/missing timestamp produces Ask confidence and a flat (dateless) folder.
     public static func ruleClassify(
         _ files: [FileForClassify], libraryRoot: URL
     ) -> [RestructureProposal] {
@@ -384,6 +384,10 @@ public enum Restructure {
         out.reserveCapacity(files.count)
         for f in files {
             let ts = f.createdUnix ?? f.modifiedUnix
+            // A zero or near-zero timestamp is not a real date (FAT32 zero-epoch,
+            // corrupt mtime). Flag with Ask confidence and skip year sub-folders
+            // so the user isn't silently placed into a 1970 folder.
+            let tsValid = ts > 86_400  // > 1970-01-02 avoids zero/near-zero epoch artefacts
             let (y, m) = yearMonth(ts)
             let mname = monthName(m)
 
@@ -410,29 +414,32 @@ public enum Restructure {
                 confidence = "review"
                 reason = "Taken at a shared location"
             } else if f.hasText || f.kind == "pdf" || f.kind == "doc" {
-                dir = libraryRoot.appendingPathComponent("Documents", isDirectory: true)
-                    .appendingPathComponent("\(y)", isDirectory: true)
+                let docs = libraryRoot.appendingPathComponent("Documents", isDirectory: true)
+                dir = tsValid ? docs.appendingPathComponent("\(y)", isDirectory: true) : docs
                 category = "document"
-                confidence = "review"
-                reason = "Document from \(y)"
+                confidence = tsValid ? "review" : "ask"
+                reason = tsValid ? "Document from \(y)" : "Document — no date signal"
             } else if f.kind == "image" {
-                dir = libraryRoot.appendingPathComponent("Photos", isDirectory: true)
-                    .appendingPathComponent("\(y)", isDirectory: true)
-                    .appendingPathComponent(mname, isDirectory: true)
+                let photos = libraryRoot.appendingPathComponent("Photos", isDirectory: true)
+                dir = tsValid
+                    ? photos.appendingPathComponent("\(y)", isDirectory: true)
+                            .appendingPathComponent(mname, isDirectory: true)
+                    : photos
                 category = "photo"
-                confidence = "review"
-                reason = "Photo from \(mname) \(y)"
+                confidence = tsValid ? "review" : "ask"
+                reason = tsValid ? "Photo from \(mname) \(y)" : "Photo — no capture date"
             } else if f.kind == "video" {
-                dir = libraryRoot.appendingPathComponent("Videos", isDirectory: true)
-                    .appendingPathComponent("\(y)", isDirectory: true)
+                let videos = libraryRoot.appendingPathComponent("Videos", isDirectory: true)
+                dir = tsValid ? videos.appendingPathComponent("\(y)", isDirectory: true) : videos
                 category = "video"
-                confidence = "review"
-                reason = "Video from \(y)"
+                confidence = tsValid ? "review" : "ask"
+                reason = tsValid ? "Video from \(y)" : "Video — no date signal"
             } else if f.kind == "audio" {
-                dir = libraryRoot.appendingPathComponent("Audio", isDirectory: true)
+                let audio = libraryRoot.appendingPathComponent("Audio", isDirectory: true)
+                dir = tsValid ? audio.appendingPathComponent("\(y)", isDirectory: true) : audio
                 category = "audio"
                 confidence = "review"
-                reason = "Audio file"
+                reason = tsValid ? "Audio file from \(y)" : "Audio file"
             } else if f.kind == "model" {
                 dir = libraryRoot.appendingPathComponent("3D Models", isDirectory: true)
                 category = "model"
@@ -773,8 +780,10 @@ public enum Restructure {
                     UndoEntry(fileID: p.fileID, from: finalURL.path, to: oldURL.path), to: h)
                 undoCount += 1
                 if undoCount % Self.applyProgressInterval == 0 { try? h.synchronize() }
-                // Same forward-only gate as the journal: this move was approved by the
-                // user, so credit it to the feedback memory.
+            }
+            if recordUndo {
+                // Credit every successful move to the feedback memory regardless
+                // of whether the undo journal opened (disk-full / sandbox failure).
                 appliedPairs.append((source: oldURL.path, destination: finalURL.path))
             }
             if finalURL.path != plannedURL.path { conflicts.append(plannedURL.path) }

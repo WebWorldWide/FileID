@@ -225,20 +225,33 @@ enum DeepAnalyzeNaming {
         guard await requestSpeechAuthorization() else { return nil }
         guard let recognizer = SFSpeechRecognizer(), recognizer.isAvailable,
               recognizer.supportsOnDeviceRecognition else { return nil }
-        let request = SFSpeechURLRecognitionRequest(url: url)
-        request.requiresOnDeviceRecognition = true
-        request.shouldReportPartialResults = false
-        let once = OnceFlag()
-        return await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in
-            recognizer.recognitionTask(with: request) { result, error in
-                // Resume exactly once — on the final transcript or on error (a checked
-                // continuation double-resume traps); partials are ignored.
-                if let result, result.isFinal {
-                    if once.claim() { cont.resume(returning: result.bestTranscription.formattedString) }
-                } else if error != nil {
-                    if once.claim() { cont.resume(returning: nil) }
+        // Race against a 30-second timeout. SFSpeechRecognizer may never deliver isFinal
+        // for silence-only files, unsupported codecs, or brief recordings — without a
+        // timeout the withCheckedContinuation parks forever, stalling all subsequent
+        // Deep Analyze work on the same serial queue.
+        return await withTaskGroup(of: String?.self) { group in
+            group.addTask {
+                let request = SFSpeechURLRecognitionRequest(url: url)
+                request.requiresOnDeviceRecognition = true
+                request.shouldReportPartialResults = false
+                let once = OnceFlag()
+                return await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in
+                    recognizer.recognitionTask(with: request) { result, error in
+                        if let result, result.isFinal {
+                            if once.claim() { cont.resume(returning: result.bestTranscription.formattedString) }
+                        } else if error != nil {
+                            if once.claim() { cont.resume(returning: nil) }
+                        }
+                    }
                 }
             }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first ?? nil
         }
     }
 

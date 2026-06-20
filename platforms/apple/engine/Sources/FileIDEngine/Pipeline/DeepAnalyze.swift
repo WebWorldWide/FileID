@@ -427,27 +427,27 @@ public actor DeepAnalyze {
         }
         // Clear MLX cache every 50 calls. Per-call clearing thrashes
         // the scratch allocator.
-        Self.compareCallsSinceClear &+= 1
-        if Self.compareCallsSinceClear >= 50 {
+        compareCallsSinceClear &+= 1
+        if compareCallsSinceClear >= 50 {
             MLX.GPU.clearCache()
-            Self.compareCallsSinceClear = 0
+            compareCallsSinceClear = 0
         }
         let raw = collector.snapshot()
         // Sample the raw VLM output for the first 10 calls so we can
         // diagnose model output formats without re-running the pass.
-        Self.compareSampleLogged &+= 1
-        if Self.compareSampleLogged <= 10 {
+        compareSampleLogged &+= 1
+        if compareSampleLogged <= 10 {
             let sample = raw.prefix(200).replacingOccurrences(of: "\n", with: " | ")
             JSONLog.shared.info(ev: "vlm_compare_raw_sample",
-                                extra: ["call": AnyCodable(Self.compareSampleLogged),
+                                extra: ["call": AnyCodable(compareSampleLogged),
                                         "raw": AnyCodable(String(sample))])
         }
         return Self.parseFaceComparison(raw)
     }
 
-    nonisolated(unsafe) private static var compareSampleLogged: Int = 0
+    private var compareSampleLogged: Int = 0
 
-    nonisolated(unsafe) private static var compareCallsSinceClear: Int = 0
+    private var compareCallsSinceClear: Int = 0
 
     /// Parse the VLM's response into a typed result. Robust against
     /// models that drop the structured `VERDICT:` / `CONFIDENCE:`

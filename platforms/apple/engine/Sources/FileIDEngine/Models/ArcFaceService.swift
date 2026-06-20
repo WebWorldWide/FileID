@@ -87,8 +87,11 @@ public final class ArcFaceService: @unchecked Sendable {
 
         do {
             // ORTEnv is process-wide; reuse across model swaps.
+            lock.lock()
+            let cachedEnv = self.env
+            lock.unlock()
             let env: ORTEnv
-            if let existing = self.env {
+            if let existing = cachedEnv {
                 env = existing
             } else {
                 env = try ORTEnv(loggingLevel: ORTLoggingLevel.warning)
