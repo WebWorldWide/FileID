@@ -212,9 +212,13 @@ jobs:
           $output = dotnet list package --vulnerable --include-transitive 2>&1 | Out-String
           Write-Host $output
 
-          # Accepted advisories — each entry requires a DECISIONS.md justification.
-          # Full output is printed above; only advisory lines are stripped before the
-          # "has the following vulnerable packages" gate so any NEW advisory still fails.
+          # Extract every advisory GHSA-ID from the output, then reject any that
+          # are not in the accepted list. Full output is always logged above; this
+          # gate ensures any NEW advisory still fails CI.
+          $found = [regex]::Matches($output, 'https://github\.com/advisories/(GHSA-[a-z0-9-]+)') |
+            ForEach-Object { $_.Groups[1].Value }
+
+          # Accepted advisories — each requires a DECISIONS.md justification.
           $accepted = @(
             # GHSA-2m69-gcr7-jv3q: SQLitePCLRaw.lib.e_sqlite3 2.1.10 (transitive via
             # Microsoft.Data.Sqlite 9.0.0). App opens SQLite read-only — vulnerable write
@@ -222,16 +226,17 @@ jobs:
             # regeneration on Windows. See DECISIONS.md 2026-06-19.
             "GHSA-2m69-gcr7-jv3q"
           )
-          $effective = ($output -split "`n" | Where-Object {
-            $line = $_
-            -not ($accepted | Where-Object { $line -match [regex]::Escape($_) })
-          }) -join "`n"
 
-          if ($effective -match 'has the following vulnerable packages') {
-            Write-Error "Unexpected vulnerable packages found — see full output above."
+          $unexpected = $found | Where-Object { $accepted -notcontains $_ }
+          if ($unexpected.Count -gt 0) {
+            Write-Error "Unexpected vulnerable packages: $($unexpected -join ', ') — see full output above."
             exit 1
           }
-          Write-Host "Vulnerability scan passed ($($accepted.Count) advisory/ies accepted — see DECISIONS.md)."
+          if ($found.Count -gt 0) {
+            Write-Host "Vulnerability scan: $($found.Count) advisory/ies found, all accepted (see DECISIONS.md)."
+          } else {
+            Write-Host "Vulnerability scan passed — no vulnerabilities found."
+          }
         shell: pwsh
 
       - name: Verify published output
