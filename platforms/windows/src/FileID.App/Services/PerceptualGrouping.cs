@@ -1,4 +1,4 @@
-// Perceptual near-duplicate grouping — pure + testable. Mirrors the macOS
+﻿// Perceptual near-duplicate grouping — pure + testable. Mirrors the macOS
 // FileIDShared.PerceptualGrouping 1:1 (platforms/apple/.../PerceptualGrouping.swift).
 // The engine stores a 64-bit difference-hash (dHash) per image in `files.phash`
 // (the Int64 bit-pattern of a UInt64). Two images are "visually similar" when the
