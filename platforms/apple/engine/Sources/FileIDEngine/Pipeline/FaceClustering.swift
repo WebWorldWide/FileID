@@ -88,19 +88,36 @@ public enum FaceClustering {
         // feature prints aren't face-identity-trained; clustering on them
         // produces mega-clusters at scale (the bug we're fixing). If the
         // model isn't installed we surface an actionable error and exit.
-        if !ArcFaceService.shared.isReady {
+        var loadOK = ArcFaceService.shared.isReady
+        if !loadOK {
             for kind in FaceEmbedderKind.installedKinds() {
-                _ = ArcFaceService.shared.load(kind)
+                loadOK = ArcFaceService.shared.load(kind)
                 break
             }
         }
         guard ArcFaceService.shared.isReady else {
-            JSONLog.shared.warn(ev: "face_cluster_skipped_no_model",
-                                error: "ArcFace model not installed; cannot cluster.")
-            await sink.emit(.error(EngineError(
-                kind: "face_cluster_no_model",
-                message: "Face-recognition model not installed. Open Settings → AI Models — face recognition to install ArcFace iResNet50 (166 MB) or MobileFace (13 MB)."
-            )))
+            // Two distinct failures, two accurate IPC errors. Both keep the
+            // `face_cluster` prefix the app keys on (EngineClient.swift
+            // `hasPrefix("face_cluster")`) so the clustering gate still
+            // releases instead of the UI hanging "clustering…". (hardening)
+            if FaceEmbedderKind.installedKinds().isEmpty {
+                JSONLog.shared.warn(ev: "face_cluster_skipped_no_model",
+                                    error: "ArcFace model not installed; cannot cluster.")
+                await sink.emit(.error(EngineError(
+                    kind: "face_cluster_no_model",
+                    message: "Face-recognition model not installed. Open Settings → AI Models — face recognition to install ArcFace iResNet50 (166 MB) or MobileFace (13 MB)."
+                )))
+            } else {
+                // A model IS on disk but load() couldn't bind it (execution
+                // provider / corrupt-ONNX / runtime error). The "install the
+                // model" prompt would be wrong here — surface the real state.
+                JSONLog.shared.error(ev: "face_cluster_embedder_load_failed",
+                                     error: "Face embedder installed but load() failed (loadOK=\(loadOK)); execution-provider/runtime error.")
+                await sink.emit(.error(EngineError(
+                    kind: "face_cluster_embedder_load_failed",
+                    message: "Face-recognition model is installed but failed to load (execution-provider/runtime error). See logs."
+                )))
+            }
             return FaceClusteringResult(personCount: 0, faceCount: 0,
                                         unmatchedFaces: 0,
                                         durationSeconds: Date().timeIntervalSince(started))

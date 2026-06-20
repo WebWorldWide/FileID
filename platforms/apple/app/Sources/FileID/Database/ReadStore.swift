@@ -734,11 +734,13 @@ public final class ReadStore: @unchecked Sendable {
                       p.representative_face_id, p.file_count,
                       f.bbox AS rep_bbox, f.file_id AS rep_file_id,
                       files.path_text AS rep_path,
-                      (SELECT COUNT(*) FROM face_prints WHERE person_id = p.id) AS face_count
+                      COUNT(fp.id) AS face_count
                     FROM persons p
                     LEFT JOIN face_prints f ON f.id = p.representative_face_id
                     LEFT JOIN files ON files.id = f.file_id
+                    LEFT JOIN face_prints fp ON fp.person_id = p.id
                     \(where_)
+                    GROUP BY p.id
                     ORDER BY p.is_unknown ASC, p.file_count DESC, p.id ASC
                     """)
                 return rows.map { r in

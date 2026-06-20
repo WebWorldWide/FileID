@@ -217,6 +217,11 @@ struct DeepAnalyzeView: View {
     /// useless. User must visit People and name at least one cluster.
     @State private var hasNamedAnyone = false
 
+    /// Throttle state for the `store.version` refresh coalescer (see
+    /// `throttledRefresh`): leading-edge timestamp + trailing debounce.
+    @State private var lastReloadAt: Date = .distantPast
+    @State private var refreshDebounce: Task<Void, Never>?
+
     // Engine is alive (not crashed / mid-respawn); the live run cards key
     // off this so a crash mid-run tears them down at once (F-C4-016).
     private var engineLive: Bool {
@@ -284,10 +289,7 @@ struct DeepAnalyzeView: View {
             refreshPendingRenameCount()
             refreshStatusCounts()
         }
-        .onChange(of: store.version) { _, _ in
-            refreshPendingRenameCount()
-            refreshStatusCounts()
-        }
+        .onChange(of: store.version) { _, _ in throttledRefresh() }
         .onChange(of: settings.activeKind.rawValue) { _, _ in
             refreshStatusCounts()   // pending is keyed by active model (R6-02)
         }
@@ -298,6 +300,32 @@ struct DeepAnalyzeView: View {
 
     private func refreshPendingRenameCount() {
         pendingRenameCount = store.countFilesWithProposedNames()
+    }
+
+    /// Coalesce the ~1/sec `store.version` bumps a live scan emits into at
+    /// most one refresh per second so the 3 status COUNT(*) queries
+    /// (countFilesWithProposedNames / deepAnalyzePending / namedPersonCount)
+    /// don't fire 1000× — including while this tab is off-screen. Leading
+    /// edge refreshes at once when the last was ≥1s ago; otherwise a trailing
+    /// debounce guarantees a final refresh after the burst settles. Mirrors
+    /// LibraryView's batch throttle + search debounce.
+    private func throttledRefresh() {
+        let now = Date()
+        if now.timeIntervalSince(lastReloadAt) >= 1.0 {
+            lastReloadAt = now
+            refreshDebounce?.cancel()
+            refreshPendingRenameCount()
+            refreshStatusCounts()
+        } else {
+            refreshDebounce?.cancel()
+            refreshDebounce = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard !Task.isCancelled else { return }
+                lastReloadAt = Date()
+                refreshPendingRenameCount()
+                refreshStatusCounts()
+            }
+        }
     }
 
     // R6-02: refresh the cached status counts off the 4 Hz body-eval path.

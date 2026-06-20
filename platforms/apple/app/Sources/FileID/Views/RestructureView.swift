@@ -1040,7 +1040,7 @@ struct RestructureView: View {
 
         let by = Dictionary(grouping: mapped, by: { $0.bucket })
         groups = by.map { Group(bucket: $0.key, proposals: $0.value) }
-            .sorted { $0.proposals.count > $1.proposals.count }
+            .sorted { a, b in a.proposals.count != b.proposals.count ? a.proposals.count > b.proposals.count : a.bucket < b.bucket }
 
         selectedIDs = Set(mapped.map(\.fileID))
         // Ask-confidence moves start deselected — "No clear signal, the decision

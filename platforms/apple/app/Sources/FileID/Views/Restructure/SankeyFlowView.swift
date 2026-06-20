@@ -619,12 +619,12 @@ struct SankeyFlowView: View {
         // 2. Pick top-N visible nodes per column. Long tail rolls up
         // into a single "Other" placeholder.
         let allSrcs = srcAccum.values
-            .sorted { $0.count > $1.count }
+            .sorted { a, b in a.count != b.count ? a.count > b.count : a.folder < b.folder }
         let visibleSrcs = Array(allSrcs.prefix(topN))
         let tailSrcs = Array(allSrcs.dropFirst(topN))
         let allDsts = dstCount
             .map { (bucket: $0.key, count: $0.value) }
-            .sorted { $0.count > $1.count }
+            .sorted { a, b in a.count != b.count ? a.count > b.count : a.bucket < b.bucket }
         let visibleDsts = Array(allDsts.prefix(topN))
         let tailDsts = Array(allDsts.dropFirst(topN))
 

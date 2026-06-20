@@ -47,7 +47,10 @@ struct LibraryView: View {
     }
     @State private var lastSeenBatchIndex: Int = -1
     @State private var lastReloadAt: Date = .distantPast
-    @State private var selected: FileRow?
+    /// Drives the preview sheet: which file is shown is keyed on its id
+    /// (not a raw `FileRow`) so navigation mutates the displayed file in
+    /// place — the sheet keeps identity instead of dismissing+re-presenting.
+    @State private var previewSelectedID: Int64? = nil
     /// Siblings frozen at preview-open time so live-scan updates to
     /// `rows` don't yank the file the user is looking at out of the
     /// nav context (the LIMIT 200 query reorders by scanned_at).
@@ -665,7 +668,7 @@ struct LibraryView: View {
                         }
                         .background(
                             RoundedRectangle(cornerRadius: Theme.Radius.m)
-                                .stroke(selected?.id == row.id && !selectMode
+                                .stroke(previewSelectedID == row.id && !selectMode
                                         ? Theme.gold : Color.clear,
                                         lineWidth: 2)
                         )
@@ -683,9 +686,15 @@ struct LibraryView: View {
             // allocates a new array per render and adds up at 1000+ tiles.
             .animation(.easeOut(duration: 0.30), value: rows.count)
         }
-        .sheet(item: $selected) { file in
-            FilePreviewSheet(file: file, store: store, engine: engine,
-                              siblings: previewSiblings, onSelect: { selected = $0 },
+        // One stable sheet. `isPresented` stays true across navigation so the
+        // sheet keeps identity; the displayed file is driven by selectedID.
+        .sheet(isPresented: Binding(
+            get: { previewSelectedID != nil },
+            set: { if !$0 { previewSelectedID = nil } }
+        )) {
+            FilePreviewSheet(siblings: previewSiblings,
+                              selectedID: $previewSelectedID,
+                              store: store, engine: engine,
                               onEdit: { editEpoch += 1 })
         }
     }
@@ -716,16 +725,17 @@ struct LibraryView: View {
     /// so arrows stay within those matches.
     private func openPreview(_ row: FileRow) {
         previewSiblings = rows
-        selected = row
+        previewSelectedID = row.id
         guard searchText.trimmingCharacters(in: .whitespaces).isEmpty, similarSeed == nil else { return }
         let kf = kindFilter
-        let seedID = row.id
         Task { @MainActor in
             let full = await store.filesAsync(limit: 1_000_000, kindFilter: kf)
-            // Gate on the seed file so a race where the user arrow-navigated to a
-            // different photo before this task completed doesn't replace the new
-            // photo's sibling list with the original photo's set.
-            if selected?.id == seedID, !full.isEmpty { previewSiblings = full }
+            // Upgrade the nav context by id — the user may have arrowed to a
+            // different photo while this loaded; keep the upgrade as long as the
+            // current selection is still represented in the full set.
+            guard let id = previewSelectedID, !full.isEmpty,
+                  full.contains(where: { $0.id == id }) else { return }
+            previewSiblings = full
         }
     }
 
@@ -1069,29 +1079,44 @@ struct FileTile: View {
 //
 // Full-bleed preview + metadata panel + tags. Reveal-in-Finder.
 private struct FilePreviewSheet: View {
-    let file: FileRow
+    let siblings: [FileRow]              // for prev/next arrow nav
+    @Binding var selectedID: Int64?
     let store: ReadStore
     let engine: EngineClient
-    let siblings: [FileRow]              // for prev/next arrow nav
-    let onSelect: (FileRow) -> Void
     /// Bump the parent's edit epoch so a Finder-tag edit / smart-name apply
     /// made in this sheet refreshes the underlying grid tile even mid-scan.
     var onEdit: () -> Void = {}
     @Environment(\.dismiss) var dismiss
     @State private var preview: NSImage?
+    /// Holds key focus so the arrow-key handlers fire; the tag field's
+    /// focus is tracked separately to suppress nav while the user types.
+    @FocusState private var keyFocus: Bool
+    @FocusState private var tagFieldFocused: Bool
 
-    private var siblingIndex: Int? {
-        siblings.firstIndex(where: { $0.id == file.id })
-    }
+    /// Displayed file + its position, derived from selectedID so navigation
+    /// mutates the shown file in place without swapping the sheet's identity.
+    private var file: FileRow? { siblings.first { $0.id == selectedID } }
+    private var siblingIndex: Int? { siblings.firstIndex { $0.id == selectedID } }
 
     private func step(_ delta: Int) {
         guard let idx = siblingIndex else { return }
-        let target = idx + delta
-        guard siblings.indices.contains(target) else { return }
-        onSelect(siblings[target])
+        let t = idx + delta
+        guard siblings.indices.contains(t) else { return }
+        selectedID = siblings[t].id
     }
 
     var body: some View {
+        Group {
+            if let file {
+                content(for: file)
+            } else {
+                Color.clear.onAppear { dismiss() }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func content(for file: FileRow) -> some View {
         VStack(spacing: 0) {
             // Toolbar.
             HStack(spacing: 12) {
@@ -1105,7 +1130,8 @@ private struct FilePreviewSheet: View {
                         .lineLimit(1).truncationMode(.head)
                 }
                 Spacer()
-                if let idx = siblingIndex {
+                if siblings.count > 1 {
+                    let idx = siblingIndex ?? 0
                     Text("\(idx + 1) of \(siblings.count)")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
@@ -1114,15 +1140,13 @@ private struct FilePreviewSheet: View {
                             Image(systemName: "chevron.left")
                         }
                         .buttonStyle(.bordered)
-                        .keyboardShortcut(.leftArrow, modifiers: [])
-                        .disabled(idx == 0)
+                        .disabled(idx <= 0)
                         .help("Previous file")
                         Button { step(1) } label: {
                             Image(systemName: "chevron.right")
                         }
                         .buttonStyle(.bordered)
-                        .keyboardShortcut(.rightArrow, modifiers: [])
-                        .disabled(idx == siblings.count - 1)
+                        .disabled(idx >= siblings.count - 1)
                         .help("Next file")
                     }
                 }
@@ -1293,7 +1317,8 @@ private struct FilePreviewSheet: View {
                                 }
                             }
                         }
-                        FinderTagsEditor(file: file, store: store, onEdit: onEdit)
+                        FinderTagsEditor(file: file, store: store,
+                                         isFocused: $tagFieldFocused, onEdit: onEdit)
                     }
                     .padding(16)
                 }
@@ -1305,14 +1330,22 @@ private struct FilePreviewSheet: View {
         .preferredColorScheme(.dark)
         .focusable()
         .focusEffectDisabled()
-        // Sheet-level key handler — beats Button.keyboardShortcut for
-        // arrows because text fields inside the sheet (tag editor) can
-        // steal focus from the buttons. .onKeyPress runs whenever the
-        // sheet's focus subtree handles a key.
+        .focused($keyFocus)
+        // Grab key focus when the sheet appears so the arrow handlers fire
+        // without a click; reclaim it whenever the tag field gives focus up.
+        .task { keyFocus = true }
+        .onChange(of: tagFieldFocused) { _, focused in
+            if !focused { keyFocus = true }
+        }
+        // Sheet-level key handler — beats Button.keyboardShortcut for arrows
+        // because focus lives on the sheet, not the nav buttons. Suppressed
+        // while the tag field is focused so typing doesn't navigate.
         .onKeyPress(.leftArrow) {
+            if tagFieldFocused { return .ignored }
             step(-1); return .handled
         }
         .onKeyPress(.rightArrow) {
+            if tagFieldFocused { return .ignored }
             step(1); return .handled
         }
         .task(id: file.id) {
@@ -1352,6 +1385,9 @@ private struct FilePreviewSheet: View {
 private struct FinderTagsEditor: View {
     let file: FileRow
     let store: ReadStore
+    /// Bound to the preview sheet's tag-field focus so it can suppress
+    /// arrow-key navigation while the user is typing a tag.
+    var isFocused: FocusState<Bool>.Binding
     /// Notify the parent grid that this file's tags changed so its tile
     /// re-reads the Finder-tag dots — needed for refresh during a live scan.
     var onEdit: () -> Void = {}
@@ -1390,6 +1426,7 @@ private struct FinderTagsEditor: View {
                     TextField("Add tag…", text: $draft, onCommit: addDraft)
                         .textFieldStyle(.roundedBorder)
                         .font(.caption)
+                        .focused(isFocused)
                     Button(action: addDraft) {
                         Image(systemName: "plus.circle.fill")
                             .foregroundStyle(Theme.gold)

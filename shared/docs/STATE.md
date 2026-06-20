@@ -8,6 +8,22 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-20 — fix(macOS): 4 user-reported issues fixed + Windows lockstep confirmed — preview nav, face clustering, restructure sorting, performance
+
+User reported macOS being slow, with broken Restructure sorting, broken face clustering, and totally-broken preview navigation (arrow keys + clicking). All four root-caused and fixed. Verified: `swift build` clean (debug+release), 253/253 Swift tests pass, on-corpus e2e green (CFFIXED_USER_HOME-isolated copy of the user's library), Windows confirmed already in lockstep.
+
+**Preview navigation (LibraryView.swift) — rebuilt.** Root cause: `.sheet(item: $selected)` swapped the sheet's bound identity on every nav so content didn't update in place; no `@FocusState` so `.onKeyPress` arrows never received key focus; and `openPreview` dropped the full-library sibling upgrade after the first nav (the `selected?.id == seedID` gate). Re-architected to a single stable `.sheet(isPresented:)` whose displayed file is driven by `previewSelectedID: Int64?`; `step()` mutates the id in place; added a `@FocusState` focus-grab + a tag-field typing guard (mirrors Windows `focused is TextBox`); fixed the sibling upgrade to track by id; nav buttons disable-don't-hide. Mirrors Windows SetSiblings/HandleKeyDown.
+
+**Face clustering (ArcFaceService.swift, FaceClustering.swift).** On-hardware diagnosis DISPROVED the suspected CoreML-EP failure — the pipeline is healthy (CoreML binds, ORT auto-appends CPU, 991/991 embed, 407 persons). The user's all-NULL embeddings / 0 persons came from clustering never *completing* in their running app session (stale bundled engine, or quit before the post-scan auto-trigger finished), not a code defect. Hardening still landed: CoreML→CPU EP fallback + `FILEID_FACE_EP` env (mirrors Windows runtime.rs; helps CoreML-less Macs), the discarded `load()` bool is now captured and surfaced as `face_cluster_embedder_load_failed` (instead of a wrong "install the model" prompt or silent NULL), plus `arcface_preprocess_failed` logging. Post-scan auto-enqueue confirmed correct as-is. The real DB was additively backfilled to 407 persons during diagnosis (adds embeddings+persons only; nothing destroyed).
+
+**Restructure (RestructureSemantic.swift + SankeyFlowView.swift + RestructureView.swift).** Mirrored the Windows BL-01 fix: `usedGroupNames` is now threaded across all time-gap segments (was fresh per segment → two different events could mint the same folder name and merge). Added count-desc/name-asc sort tie-breakers to Sankey sources/destinations + proposal grouping (determinism; matches Windows). On-corpus: 20 folders / 20 distinct leaf names (BL-01 active; disambiguation suffixes present), sensible grouping.
+
+**Performance (PeopleView.swift, DeepAnalyzeViews.swift, ReadStore.swift, ThumbnailService.swift).** macOS was catching up to Windows. Throttled the People/DeepAnalyze `store.version` reload storms (1000+ DB queries/scan → ≤1/s; copied LibraryView's leading-edge + trailing-debounce). Replaced the N+1 correlated face-count subquery in `persons()` with a `GROUP BY` join (indexes already present). Thumbnail cache: in-memory 800→4000 (+512 MB cost limit), added an on-disk SHA256(path|mtime|size|px) JPEG cache + a 6-way decode concurrency gate (NAS-friendly). Windows audit confirmed it already had all three (10 Hz throttle, GROUP BY, L1+L2 thumbnail cache) — macOS now matches.
+
+**Threshold decision:** kept macOS face auto-merge at 0.65/0.55 (NOT Windows' 0.75) — an on-corpus sweep showed 0.75 zeroes the auto-merge polish and increases fragmentation (34→39 persons, all 5 verified-correct merges lost). See DECISIONS.md.
+
+**Lockstep:** RAM++ tagger + BGE doc embeddings are already implemented on macOS (byte-faithful to Windows). BGE model isn't installed in the user's library (install via Settings → rescan to cluster the 1737 docs by content); RAM++ is installed + wired.
+
 ## 2026-06-19 (parity audit) — fix(parity): macOS/Windows UI parity audit — 8 bugs fixed: statusBanner error icon, dismissedDeepAnalyzeHint persistence, FaceEmbedderCard copy, dead lastSeenVersion, FaceClusteringInFlight banner (Windows), LastScanProcessedFiles PropertyChanged, ApplyBarHint text, FaceClusteringBanner wiring
 
 Full six-tab parity audit via parallel agents (macOS inventory + Windows inventory). Verified: Swift build clean, 253/253 Swift tests pass, Rust clippy -D warnings clean.
