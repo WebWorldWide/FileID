@@ -42,6 +42,74 @@ public enum FaceClustering {
             .flatMap { (0.0...1.0).contains($0) ? $0 : nil } ?? dflt
     }
 
+    /// Junk-cluster suppression knobs. A face cluster is only persisted as a
+    /// person when it is CORROBORATED — either it has at least `minClusterSizeToKeep`
+    /// mutually-similar faces (a real recurring identity, regardless of per-face
+    /// quality), OR its best face clears `soloQualityFloor` (Apple Vision
+    /// faceCaptureQuality). 1–2 face clusters built only from low-quality faces
+    /// (blurry / motion-blur / tiny / heavy-profile) are LEFT UNCLUSTERED
+    /// (person_id NULL — still a "candidate" the user can attach later) instead of
+    /// spawning a spurious singleton person. This is what shrinks the People tab's
+    /// long tail of junk one-off faces WITHOUT ever merging two identities.
+    ///
+    /// Calibrated on the real 991-face reference library: 268 of 407 clusters were
+    /// singletons (avg quality 0.19) and 91% were 1–2 faces; crops below quality
+    /// ~0.12 are visually unrecognizable (blur/profile/occlusion) while genuine
+    /// distinct singletons (sunglasses, face-paint, one-off portraits) sit ≥0.25.
+    /// size≥3 is protected because ≥3 faces linked at cosine ≥0.66 is a real person
+    /// even when every frame is mediocre (e.g. a 20-shot low-light cluster). Defaults
+    /// take 407→280 persons (127 junk micro-clusters suppressed, 0 identity merges).
+    /// Set FILEID_FACE_SOLO_QUALITY=0 to disable suppression entirely.
+    public static var minClusterSizeToKeep: Int { envInt("FILEID_FACE_MIN_CLUSTER_SIZE", 3, 1...10_000) }
+    public static var soloQualityFloor: Double { envDouble("FILEID_FACE_SOLO_QUALITY", 0.12, 0.0...1.0) }
+
+    /// Integer env override, clamped to `range`; falls back to `dflt`.
+    static func envInt(_ key: String, _ dflt: Int, _ range: ClosedRange<Int>) -> Int {
+        ProcessInfo.processInfo.environment[key]
+            .flatMap { Int($0) }
+            .flatMap { range.contains($0) ? $0 : nil } ?? dflt
+    }
+
+    /// Double env override, clamped to `range`; falls back to `dflt`.
+    static func envDouble(_ key: String, _ dflt: Double, _ range: ClosedRange<Double>) -> Double {
+        ProcessInfo.processInfo.environment[key]
+            .flatMap { Double($0) }
+            .flatMap { range.contains($0) ? $0 : nil } ?? dflt
+    }
+
+    /// Apply junk-cluster suppression to a dense-index cluster map: keep a cluster
+    /// iff it has ≥ `minSize` members OR its best member quality ≥ `qualityFloor`.
+    /// Pure + deterministic so it can be unit-tested without a DB. Returns the kept
+    /// clusters plus the count of suppressed clusters/faces (for logging + the
+    /// unmatched tally). `qualityFloor <= 0` disables suppression (keeps all).
+    static func suppressLowQualityClusters(
+        _ byCluster: [Int: [Int]],
+        denseToFaceID: [Int64],
+        faceQualityByID: [Int64: Double],
+        minSize: Int,
+        qualityFloor: Double
+    ) -> (kept: [Int: [Int]], suppressedClusters: Int, suppressedFaces: Int) {
+        guard qualityFloor > 0 else { return (byCluster, 0, 0) }
+        var kept: [Int: [Int]] = [:]
+        var sClusters = 0, sFaces = 0
+        for (cid, denseIdxs) in byCluster {
+            if denseIdxs.count >= minSize {
+                kept[cid] = denseIdxs
+                continue
+            }
+            let maxQ = denseIdxs.reduce(-Double.greatestFiniteMagnitude) { acc, d in
+                max(acc, faceQualityByID[denseToFaceID[d]] ?? -1)
+            }
+            if maxQ >= qualityFloor {
+                kept[cid] = denseIdxs
+            } else {
+                sClusters += 1
+                sFaces += denseIdxs.count
+            }
+        }
+        return (kept, sClusters, sFaces)
+    }
+
     /// Cap so a corrupt DB can't spawn arbitrarily many person rows.
     public static let maxPersons: Int = 8000
 
@@ -316,6 +384,29 @@ public enum FaceClustering {
         for (denseIdx, cid) in icResult.clusterIDs.enumerated() {
             byCluster[cid, default: []].append(denseIdx)
         }
+
+        // Junk-cluster suppression — drop 1–2 face clusters built only from
+        // low-quality faces so the People tab isn't flooded with spurious
+        // singleton "persons" (the over-split the user sees). Suppressed faces
+        // get no person row here; the Phase-4 persist NULLs every non-preserved
+        // face_print first, so they correctly land unclustered (a re-scan can
+        // still attach them once a higher-quality frame of the same person
+        // appears). NEVER merges identities — pure removal. (face-quality gate)
+        let (keptClusters, suppressedClusters, suppressedFaces) = suppressLowQualityClusters(
+            byCluster, denseToFaceID: denseToFaceID, faceQualityByID: faceQualityByID,
+            minSize: minClusterSizeToKeep, qualityFloor: soloQualityFloor
+        )
+        byCluster = keptClusters
+        unmatched += suppressedFaces
+        if suppressedClusters > 0 {
+            JSONLog.shared.info(ev: "face_cluster_suppressed_lowq",
+                                extra: ["suppressedClusters": AnyCodable(suppressedClusters),
+                                        "suppressedFaces": AnyCodable(suppressedFaces),
+                                        "minClusterSize": AnyCodable(minClusterSizeToKeep),
+                                        "soloQualityFloor": AnyCodable(soloQualityFloor),
+                                        "remainingClusters": AnyCodable(byCluster.count)])
+        }
+
         // Cap at maxPersons (catches DB corruption, not normal libraries).
         var truncatedAtCap = 0
         if byCluster.count > maxPersons {
