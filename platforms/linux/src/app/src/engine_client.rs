@@ -14,9 +14,12 @@
 // macOS `ReadStore` / Windows `ReadStore`. We reuse the engine crate's
 // `db::open_read` + `paths::db_path` so the schema + location can't drift.
 //
-// Thumbnails are produced client-side: a worker thread reads raw image bytes
-// off the main loop; the Library decodes + scales them into a `gdk::Texture` on
-// the main thread (GdkPixbuf isn't `Send`, so only the bytes cross threads).
+// Thumbnails are produced client-side and fully off the GTK main loop: a worker
+// thread reads raw image bytes, the call site hands those to a short-lived
+// decode thread (`decode_scaled` / the off-main-thread decode section below),
+// and only the decoded pixel `glib::Bytes` (which IS `Send`) cross back to the
+// main thread, where a `gdk::MemoryTexture` is built (GTK objects are
+// main-thread-only).
 
 use anyhow::{Context, Result};
 use async_channel::{Receiver, Sender};
@@ -217,9 +220,10 @@ impl EngineClient {
         rx
     }
 
-    /// Request raw bytes for a thumbnail. The caller decodes them into a
-    /// `gdk::Texture` on the main thread (see `tabs::library`). Returns `None`
-    /// if the file can't be read.
+    /// Request raw file bytes for a thumbnail (read off the main loop). The
+    /// caller decodes them off-thread via `decode_scaled` and builds the texture
+    /// on the main thread (see `tabs::library`). Returns `None` if the file
+    /// can't be read.
     pub fn request_thumbnail(&self, path: String) -> Receiver<Option<Vec<u8>>> {
         let (tx, rx) = async_channel::bounded::<Option<Vec<u8>>>(1);
         if let Some(thumb_tx) = &self.thumb_tx {
@@ -527,4 +531,66 @@ fn read_capped(path: &str) -> Option<Vec<u8>> {
         return None;
     }
     std::fs::read(path).ok()
+}
+
+// ─── Off-main-thread image decode ────────────────────────────────────────────
+//
+// `gdk_pixbuf::Pixbuf` and `gdk::Texture` are not `Send`, so the decode runs
+// entirely on a worker thread (gdk-pixbuf + gio memory streams are thread-safe
+// and need no GTK init) and only the raw pixel `glib::Bytes` — which IS `Send` —
+// plus its geometry cross back to the main thread, where a `gdk::MemoryTexture`
+// is built. This keeps JPEG/PNG decode (the expensive part) off the GTK main
+// loop so the grid never stutters while thumbnails stream in.
+
+/// Decoded pixels, safe to move across threads (`glib::Bytes` is `Send + Sync`).
+pub struct DecodedImage {
+    bytes: glib::Bytes,
+    width: i32,
+    height: i32,
+    rowstride: i32,
+    has_alpha: bool,
+}
+
+impl DecodedImage {
+    /// Snapshot a decoded pixbuf's pixels. Callable from any thread. For a
+    /// loaded (mutable) pixbuf, `read_pixel_bytes` returns a self-contained,
+    /// read-only copy that outlives the pixbuf — so the result is safe to send.
+    pub fn from_pixbuf(pb: &gtk::gdk_pixbuf::Pixbuf) -> Self {
+        DecodedImage {
+            width: pb.width(),
+            height: pb.height(),
+            rowstride: pb.rowstride(),
+            has_alpha: pb.has_alpha(),
+            bytes: pb.read_pixel_bytes(),
+        }
+    }
+}
+
+/// Decode + scale image bytes to fit `max_px` on the longest side. Designed to
+/// run on a worker thread (creates no widgets, touches no main-loop state).
+pub fn decode_scaled(file_bytes: &[u8], max_px: i32) -> Option<DecodedImage> {
+    let gbytes = glib::Bytes::from(file_bytes);
+    let stream = gio::MemoryInputStream::from_bytes(&gbytes);
+    let pixbuf = gtk::gdk_pixbuf::Pixbuf::from_stream_at_scale(
+        &stream,
+        max_px,
+        max_px,
+        true,
+        gio::Cancellable::NONE,
+    )
+    .ok()?;
+    Some(DecodedImage::from_pixbuf(&pixbuf))
+}
+
+/// Build a GPU texture from decoded pixels. MAIN THREAD ONLY (GTK object).
+/// GdkPixbuf decodes to packed 8-bit RGB / RGBA in byte order, matching
+/// `R8g8b8` / `R8g8b8a8`; the pixbuf `rowstride` is honored so padded rows are
+/// safe.
+pub fn texture_from_decoded(d: &DecodedImage) -> gtk::gdk::MemoryTexture {
+    let format = if d.has_alpha {
+        gtk::gdk::MemoryFormat::R8g8b8a8
+    } else {
+        gtk::gdk::MemoryFormat::R8g8b8
+    };
+    gtk::gdk::MemoryTexture::new(d.width, d.height, format, &d.bytes, d.rowstride as usize)
 }

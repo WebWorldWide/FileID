@@ -59,10 +59,12 @@ fn run(db_flag: Option<std::path::PathBuf>) -> Result<()> {
     let (tx, rx): (Sender<LoadMsg>, Receiver<LoadMsg>) = mpsc::channel();
     data::spawn_load(ctx.db.clone(), tx.clone());
 
-    let mut terminal = setup_terminal().context("entering terminal raw/alt-screen mode")?;
-    let result = event_loop(&mut terminal, &mut app, &ctx, &tx, &rx);
-    restore_terminal(&mut terminal).context("restoring terminal")?;
-    result
+    // RAII: the guard owns the terminal and its `Drop` is the single source of
+    // truth for teardown — it restores cooked mode + the main screen on a normal
+    // return AND if the event loop panics, so the user's shell is never left in
+    // raw/alternate-screen state.
+    let mut guard = setup_terminal().context("entering terminal raw/alt-screen mode")?;
+    event_loop(&mut guard.terminal, &mut app, &ctx, &tx, &rx)
 }
 
 fn event_loop(
@@ -98,17 +100,28 @@ fn event_loop(
     }
 }
 
-fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
+/// Owns the terminal while it is in raw mode + the alternate screen. The `Drop`
+/// impl is the single source of truth for teardown (RAII): it runs on a normal
+/// return AND while unwinding from a panic in the event loop, so cooked mode,
+/// the main screen, and a visible cursor are always restored.
+struct TerminalGuard {
+    terminal: Terminal<CrosstermBackend<Stdout>>,
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        // Best-effort and idempotent: we may be unwinding, so swallow errors.
+        // (Mouse capture is never enabled here, so there is no DisableMouseCapture.)
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = self.terminal.show_cursor();
+    }
+}
+
+fn setup_terminal() -> Result<TerminalGuard> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
-    Ok(terminal)
-}
-
-fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-    Ok(())
+    Ok(TerminalGuard { terminal })
 }

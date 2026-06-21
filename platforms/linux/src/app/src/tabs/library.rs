@@ -21,7 +21,9 @@ use gtk::glib;
 use gtk::glib::clone;
 use gtk::glib::BoxedAnyObject;
 
-use crate::engine_client::{EngineClient, EngineEvent, FileRow, QuerySpec};
+use crate::engine_client::{
+    decode_scaled, texture_from_decoded, DecodedImage, EngineClient, EngineEvent, FileRow, QuerySpec,
+};
 
 const QUERY_LIMIT: i64 = 1000;
 const TILE_THUMB_PX: i32 = 256;
@@ -319,18 +321,22 @@ fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem) {
         let li_weak = list_item.downgrade();
         glib::MainContext::default().spawn_local(async move {
             let Ok(Some(bytes)) = rx.recv().await else { return };
-            // Drop the result if this tile was recycled onto another file.
-            let Some(li) = li_weak.upgrade() else { return };
-            let same = li
-                .item()
-                .and_then(|o| o.downcast::<BoxedAnyObject>().ok())
-                .map(|o| o.borrow::<FileRow>().path == want)
-                .unwrap_or(false);
-            if !same {
+            // Skip the decode entirely if this tile was recycled onto another file.
+            if !tile_still_wants(&li_weak, &want) {
                 return;
             }
-            if let (Some(pic), Some(tex)) = (pic_weak.upgrade(), texture_from_bytes(&bytes, TILE_THUMB_PX)) {
-                pic.set_paintable(Some(&tex));
+            // Decode + scale OFF the main loop; only Send pixel data crosses back.
+            let (dtx, drx) = async_channel::bounded::<Option<DecodedImage>>(1);
+            std::thread::spawn(move || {
+                let _ = dtx.send_blocking(decode_scaled(&bytes, TILE_THUMB_PX));
+            });
+            let Ok(Some(decoded)) = drx.recv().await else { return };
+            // Re-check: the tile may have been recycled while we were decoding.
+            if !tile_still_wants(&li_weak, &want) {
+                return;
+            }
+            if let Some(pic) = pic_weak.upgrade() {
+                pic.set_paintable(Some(&texture_from_decoded(&decoded)));
             }
         });
     } else {
@@ -412,10 +418,15 @@ fn open_preview(engine: &Rc<RefCell<EngineClient>>, parent: &impl IsA<gtk::Widge
         let rx = engine.borrow().request_thumbnail(row.path.clone());
         let pic_weak = pic.downgrade();
         glib::MainContext::default().spawn_local(async move {
-            if let Ok(Some(bytes)) = rx.recv().await {
-                if let (Some(pic), Some(tex)) = (pic_weak.upgrade(), texture_from_bytes(&bytes, PREVIEW_PX)) {
-                    pic.set_paintable(Some(&tex));
-                }
+            let Ok(Some(bytes)) = rx.recv().await else { return };
+            // Decode + scale OFF the main loop; only Send pixel data crosses back.
+            let (dtx, drx) = async_channel::bounded::<Option<DecodedImage>>(1);
+            std::thread::spawn(move || {
+                let _ = dtx.send_blocking(decode_scaled(&bytes, PREVIEW_PX));
+            });
+            let Ok(Some(decoded)) = drx.recv().await else { return };
+            if let Some(pic) = pic_weak.upgrade() {
+                pic.set_paintable(Some(&texture_from_decoded(&decoded)));
             }
         });
     } else {
@@ -458,21 +469,16 @@ fn meta_row(key: &str, value: &str) -> gtk::Box {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Decode + scale raw image bytes into a GPU `gdk::Texture` on the main thread.
-/// GdkPixbuf isn't `Send`, so only the bytes crossed threads (read in the
-/// engine client's worker); the decode happens here for the visible tile only.
-fn texture_from_bytes(bytes: &[u8], max_px: i32) -> Option<gtk::gdk::Texture> {
-    let gbytes = glib::Bytes::from(bytes);
-    let stream = gio::MemoryInputStream::from_bytes(&gbytes);
-    let pixbuf = gtk::gdk_pixbuf::Pixbuf::from_stream_at_scale(
-        &stream,
-        max_px,
-        max_px,
-        true,
-        gio::Cancellable::NONE,
-    )
-    .ok()?;
-    Some(gtk::gdk::Texture::for_pixbuf(&pixbuf))
+/// True if `list_item` still represents the file at `want` — i.e. the recycled
+/// `GridView` tile has not been rebound to another row while a thumbnail was in
+/// flight. Used to drop stale decodes before they paint onto the wrong tile.
+fn tile_still_wants(li_weak: &glib::WeakRef<gtk::ListItem>, want: &str) -> bool {
+    li_weak
+        .upgrade()
+        .and_then(|li| li.item())
+        .and_then(|o| o.downcast::<BoxedAnyObject>().ok())
+        .map(|o| o.borrow::<FileRow>().path == want)
+        .unwrap_or(false)
 }
 
 fn icon_paintable(name: &str, size: i32) -> Option<gtk::IconPaintable> {

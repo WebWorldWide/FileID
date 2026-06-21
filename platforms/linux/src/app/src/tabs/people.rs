@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use adw::prelude::*;
 use gtk::glib;
 
-use crate::engine_client::{EngineClient, EngineEvent};
+use crate::engine_client::{texture_from_decoded, DecodedImage, EngineClient, EngineEvent};
 use fileid_engine::ipc::{
     CommandPayload, Empty, MarkPersonsAsUnknownPayload, MergeClustersPayload, RenamePersonPayload,
 };
@@ -150,7 +150,7 @@ struct Ui {
     unknown_checked: RefCell<HashSet<i64>>,
     reload_gen: Cell<u64>,
     clustering: Cell<bool>,
-    thumb_cache: RefCell<HashMap<String, gtk::gdk::Texture>>,
+    thumb_cache: RefCell<HashMap<String, gtk::gdk::MemoryTexture>>,
 
     count_label: gtk::Label,
     status_label: gtk::Label,
@@ -699,9 +699,15 @@ fn load_card_thumb(ui: &Rc<Ui>, pic: &gtk::Picture, rep_path: String, bbox: Opti
         let Ok(Some(bytes)) = rx.recv().await else {
             return;
         };
-        let Some(tex) = cropped_texture(&bytes, bbox.as_deref(), CARD_THUMB_PX) else {
+        // Decode + crop + scale OFF the main loop; only Send pixel data crosses back.
+        let (dtx, drx) = async_channel::bounded::<Option<DecodedImage>>(1);
+        std::thread::spawn(move || {
+            let _ = dtx.send_blocking(cropped_texture(&bytes, bbox.as_deref(), CARD_THUMB_PX));
+        });
+        let Ok(Some(decoded)) = drx.recv().await else {
             return;
         };
+        let tex = texture_from_decoded(&decoded);
         ui.thumb_cache.borrow_mut().insert(rep_path, tex.clone());
         if let Some(pic) = pic_weak.upgrade() {
             pic.set_paintable(Some(&tex));
@@ -990,10 +996,16 @@ fn build_photo_tile(ui: &Rc<Ui>, path: &str) -> gtk::Widget {
         let Ok(Some(bytes)) = rx.recv().await else {
             return;
         };
-        if let (Some(pic), Some(tex)) =
-            (pic_weak.upgrade(), cropped_texture(&bytes, None, PHOTO_THUMB_PX))
-        {
-            pic.set_paintable(Some(&tex));
+        // Decode + scale OFF the main loop; only Send pixel data crosses back.
+        let (dtx, drx) = async_channel::bounded::<Option<DecodedImage>>(1);
+        std::thread::spawn(move || {
+            let _ = dtx.send_blocking(cropped_texture(&bytes, None, PHOTO_THUMB_PX));
+        });
+        let Ok(Some(decoded)) = drx.recv().await else {
+            return;
+        };
+        if let Some(pic) = pic_weak.upgrade() {
+            pic.set_paintable(Some(&texture_from_decoded(&decoded)));
         }
     });
     vbox.upcast()
@@ -1593,7 +1605,7 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
 /// full-res is required because the bbox is in the original image's pixel space
 /// and the DB stores no dimensions to normalize against. Any failure falls back
 /// to the uncropped frame, then to `None` (icon placeholder).
-fn cropped_texture(bytes: &[u8], bbox: Option<&str>, max_px: i32) -> Option<gtk::gdk::Texture> {
+fn cropped_texture(bytes: &[u8], bbox: Option<&str>, max_px: i32) -> Option<DecodedImage> {
     let gbytes = glib::Bytes::from(bytes);
     let stream = gio::MemoryInputStream::from_bytes(&gbytes);
     let full = gtk::gdk_pixbuf::Pixbuf::from_stream(&stream, gio::Cancellable::NONE).ok()?;
@@ -1614,7 +1626,7 @@ fn cropped_texture(bytes: &[u8], bbox: Option<&str>, max_px: i32) -> Option<gtk:
     } else {
         cropped
     };
-    Some(gtk::gdk::Texture::for_pixbuf(&scaled))
+    Some(DecodedImage::from_pixbuf(&scaled))
 }
 
 fn crop_to_bbox(full: &gtk::gdk_pixbuf::Pixbuf, bbox: &str) -> Option<gtk::gdk_pixbuf::Pixbuf> {
