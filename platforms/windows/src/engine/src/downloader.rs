@@ -1077,6 +1077,130 @@ async fn download_range_with_retry(
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Blocking model installer.
+//
+// The synchronous orchestration the cross-platform `fileid` CLI drives — it
+// links the engine as a library and has no async runtime of its own. Mirrors
+// `commands::prewarm::handle_prewarm_model` minus the IPC plumbing: download
+// every file in the bundle (SHA256-verified parallel range-GET), extract any
+// `.zip` artifact in place (llama.cpp / EP runtime packs), then drop the
+// revision-keyed install sentinel so `scan --models` (and the desktop apps)
+// see the model installed. Network egress is HuggingFace + the pinned
+// GitHub/NVIDIA release URLs only — exactly the manifest, user-initiated.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Per-file progress for [`install_model_blocking`]'s callback. Consumed by the
+/// `fileid` CLI (external lib consumer), not the engine binary — `allow(dead_code)`.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct InstallFileProgress {
+    /// 0-based index of the file currently downloading within the bundle.
+    pub file_index: usize,
+    /// Total number of files in the bundle.
+    pub file_count: usize,
+    /// Destination file name (e.g. `ram_plus.onnx`).
+    pub file_name: String,
+    pub bytes_done: u64,
+    pub bytes_total: Option<u64>,
+    pub bytes_per_second: f64,
+}
+
+/// Download + install one model bundle, blocking until done. Builds its own
+/// current-thread Tokio runtime so a non-async caller (the CLI) needs none.
+///
+/// Reuses [`download_parallel`] (12-way range-GET, resume, SHA256 verify) for
+/// each file, extracts any `.zip` artifact in place, and writes the
+/// revision-keyed install sentinel via
+/// [`crate::models::registry::sentinel_path`]. Returns early-`Ok` when the
+/// sentinel already exists (idempotent re-install). `progress` is an `Fn` that is
+/// `Send`/`Sync` so each file's download task can call it; use interior
+/// mutability if the caller needs mutable state.
+///
+/// Driven by the `fileid` CLI (external lib consumer); the engine binary uses
+/// the IPC `handle_prewarm_model` path instead — hence `allow(dead_code)`.
+#[allow(dead_code)]
+pub fn install_model_blocking(
+    model: &crate::models::registry::Model,
+    cancel: Arc<AtomicBool>,
+    progress: Arc<dyn Fn(InstallFileProgress) + Send + Sync>,
+) -> Result<()> {
+    // Already installed (sentinel present) → nothing to do.
+    if crate::models::registry::sentinel_path(model).is_some_and(|p| p.exists()) {
+        return Ok(());
+    }
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("building model-install runtime")?;
+
+    rt.block_on(async move {
+        let client = build_shared_client()?;
+        let file_count = model.files.len();
+        for (idx, file) in model.files.iter().enumerate() {
+            if cancel.load(Ordering::Relaxed) {
+                anyhow::bail!("install cancelled");
+            }
+            let file_name = file
+                .dest
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("file")
+                .to_string();
+            let req = DownloadRequest {
+                url: file.url.clone(),
+                destination: file.dest.clone(),
+                expected_sha256: file.sha256.clone(),
+                expected_bytes: Some(file.approx_bytes),
+            };
+            let prog = progress.clone();
+            let name_for_cb = file_name.clone();
+            let cb = move |p: DownloadProgress| {
+                prog(InstallFileProgress {
+                    file_index: idx,
+                    file_count,
+                    file_name: name_for_cb.clone(),
+                    bytes_done: p.bytes_done,
+                    bytes_total: p.bytes_total,
+                    bytes_per_second: p.bytes_per_second,
+                });
+            };
+            download_parallel(client.clone(), req, cancel.clone(), cb)
+                .await
+                .with_context(|| format!("downloading {file_name}"))?;
+
+            // Extract + remove any `.zip` artifact in place (runtime / EP packs).
+            if file.dest.extension().and_then(|s| s.to_str()) == Some("zip") {
+                let dest = file.dest.clone();
+                tokio::task::spawn_blocking(move || crate::util::zip::extract_into_parent(&dest))
+                    .await
+                    .unwrap_or_else(|e| Err(anyhow::anyhow!("zip extract task panicked: {e}")))
+                    .with_context(|| format!("extracting {file_name}"))?;
+                let _ = tokio::fs::remove_file(&file.dest).await;
+            }
+        }
+
+        // Drop the install sentinel (atomic write via a `.tmp` + rename, so a
+        // kill mid-write can't leave a half-written marker treated as installed).
+        if let Some(sentinel) = crate::models::registry::sentinel_path(model) {
+            if let Some(parent) = sentinel.parent() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .with_context(|| format!("creating {}", parent.display()))?;
+            }
+            let tmp = sentinel.with_extension("installed.tmp");
+            tokio::fs::write(&tmp, model.id.as_bytes())
+                .await
+                .context("writing install sentinel")?;
+            tokio::fs::rename(&tmp, &sentinel)
+                .await
+                .context("finalizing install sentinel")?;
+        }
+        Ok(())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

@@ -46,6 +46,12 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
         anyhow::bail!("scan root is not a directory: {}", root_abs.display());
     }
 
+    // Pin the engine's OWN models dir (and inherit it into the spawned engine
+    // below) so the model gate + the scan both look where `fileid models
+    // download` installs — including on macOS, where the default would be the
+    // desktop app's read-only CoreML dir. No-op when the user pinned it.
+    crate::ensure_engine_models_dir();
+
     let models_dir = fileid_engine::paths::models_dir().ok();
     let engine_db = fileid_engine::paths::db_path().ok();
 
@@ -111,13 +117,13 @@ fn report_missing_models(ctx: &Ctx, missing: &[(&'static str, String)], models_d
     if ctx.json {
         let (message, hint) = if on_macos {
             (
-                "full-ML scanning isn't available from the CLI on macOS",
-                "on macOS, scan a folder with full ML in the FileID desktop app (it owns the macOS models); the CLI/TUI here do model-free FTS scanning (`fileid scan <folder>`) and browse your existing library",
+                "the full ML pipeline requires installed AI models",
+                "install the engine's own models with `fileid models download --all` (downloads from huggingface.co), then re-run; or scan with full ML in the FileID desktop app, which owns the separate macOS CoreML models. `fileid models list` shows the set",
             )
         } else {
             (
                 "the full ML pipeline requires installed AI models",
-                "install the models from the desktop app (Welcome screen, or Settings → Local AI); see shared/docs/MODELS.md",
+                "install them with `fileid models download --all` (downloads from huggingface.co); `fileid models list` shows the set + licenses. The desktop app's Welcome screen can also install them. See shared/docs/MODELS.md",
             )
         };
         print_json(&serde_json::json!({
@@ -133,26 +139,6 @@ fn report_missing_models(ctx: &Ctx, missing: &[(&'static str, String)], models_d
         return;
     }
 
-    if on_macos {
-        println!("{}", ctx.bold("Full-ML scanning isn't available from the CLI on macOS."));
-        println!(
-            "  On macOS, full-ML scanning (tags + faces + CLIP) is the {}'s job —",
-            ctx.bold("FileID desktop app")
-        );
-        println!("  it owns the macOS models. Scan a folder there with full ML, then explore");
-        println!("  it from here. The CLI/TUI on macOS do:");
-        println!(
-            "    • model-free indexing — {} (filenames + OCR/doc text → FTS search)",
-            ctx.bold("fileid scan <folder>")
-        );
-        println!("    • browsing your existing library — people · search · dedupe · restructure");
-        println!(
-            "  {}",
-            ctx.dim("(omit --db on macOS to open the desktop app's library automatically)")
-        );
-        return;
-    }
-
     println!("{}", ctx.bold("Full-pipeline scan unavailable — AI models not installed."));
     println!("  Missing:");
     for (kind, name) in missing {
@@ -162,8 +148,21 @@ fn report_missing_models(ctx: &Ctx, missing: &[(&'static str, String)], models_d
         println!("  Expected under: {}", dir.display());
     }
     println!("  {}", ctx.bold("To install:"));
-    println!("    Open the FileID desktop app → Welcome screen (or Settings → Local AI)");
-    println!("    and install the models. They download once from huggingface.co.");
+    println!(
+        "    {}   {}",
+        ctx.bold("fileid models download --all"),
+        ctx.dim("(or name specific models; downloads once from huggingface.co)")
+    );
+    println!(
+        "    {}",
+        ctx.dim("Preview first: fileid models download --all --dry-run   ·   fileid models list")
+    );
+    if on_macos {
+        println!(
+            "  {}",
+            ctx.dim("These are the engine's own models. The FileID desktop app installs + uses a separate macOS CoreML set.")
+        );
+    }
     println!("    Registry + licenses: shared/docs/MODELS.md.");
     println!(
         "  {}",

@@ -15,6 +15,7 @@
 mod context;
 mod dedupe;
 mod info;
+mod models;
 mod people;
 mod restructure;
 mod scan;
@@ -170,6 +171,45 @@ enum Command {
         #[arg(value_name = "ROOT")]
         root: Option<PathBuf>,
     },
+
+    /// List or download the engine's AI models (for full-ML `scan --models`).
+    ///
+    /// `list` shows the commercial-clean model set, each model's installed
+    /// state, size, license, and HuggingFace repo. `download` fetches +
+    /// installs them into the engine's own models dir so `scan --models` can
+    /// use them — user-initiated downloads from huggingface.co (the only
+    /// network egress).
+    Models {
+        #[command(subcommand)]
+        cmd: ModelsCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ModelsCmd {
+    /// List the engine's AI models: installed state, size, license, HF repo.
+    List,
+
+    /// Download + install models into the engine's models dir.
+    ///
+    /// Name specific models, or `--all` for the whole set. `--dry-run` previews
+    /// the repos + total size without fetching anything (the set is tens of GB
+    /// with the Deep Analyze VLMs). A large or `--all` download prompts for
+    /// confirmation unless `--yes`.
+    Download {
+        /// Download the entire commercial-clean model set.
+        #[arg(long)]
+        all: bool,
+        /// Show what WOULD download (repos + total size); fetch nothing.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+        /// Skip the confirmation prompt for a large / `--all` download.
+        #[arg(long)]
+        yes: bool,
+        /// Model names to download (e.g. `arcface mobileclip_s2 ram_plus`).
+        #[arg(value_name = "NAME", num_args = 0..)]
+        names: Vec<String>,
+    },
 }
 
 /// Friendly getting-started shown for a bare `fileid` (no subcommand) — a short
@@ -182,9 +222,27 @@ fn intro() -> &'static str {
      fileid search \"beach\"             find files by keyword\n  \
      fileid dedupe --similar           find visually-similar duplicates\n  \
      fileid restructure --plan         preview a tidy folder layout\n  \
+     fileid models list                see the AI models + install state\n  \
      fileid scan ~/Pictures --db ~/test.sqlite   index a new folder\n\
      \n\
      Add --help to any command for details.  (macOS: with no --db, reads your desktop app's library.)"
+}
+
+/// Point the engine at its OWN writable models dir for this process (and any
+/// engine subprocess we spawn), unless the user already pinned
+/// `FILEID_MODELS_DIR`. On macOS this is the XDG `~/.local/share/FileID/Models`,
+/// NOT the desktop app's read-only CoreML `~/Library/Application Support/...` —
+/// so `fileid models download` writes the engine's ONNX/GGUF weights somewhere
+/// it can also read for `scan --models`. On Windows/Linux this is exactly the
+/// default the engine already resolves to (so app-installed models are still
+/// found); it only makes that choice explicit + inheritable by the spawned engine.
+pub(crate) fn ensure_engine_models_dir() {
+    if std::env::var_os("FILEID_MODELS_DIR").is_some_and(|v| !v.is_empty()) {
+        return;
+    }
+    if let Ok(dir) = fileid_engine::paths::engine_models_dir() {
+        std::env::set_var("FILEID_MODELS_DIR", dir);
+    }
 }
 
 fn main() -> ExitCode {
@@ -228,6 +286,12 @@ fn main() -> ExitCode {
         Command::Restructure { plan, apply, dry_run, symlinks, yes, root } => {
             restructure::run(&ctx, plan, apply, dry_run, symlinks, yes, root)
         }
+        Command::Models { cmd } => match cmd {
+            ModelsCmd::List => models::list(&ctx),
+            ModelsCmd::Download { all, dry_run, yes, names } => {
+                models::download(&ctx, all, dry_run, yes, &names)
+            }
+        },
     };
 
     match result {

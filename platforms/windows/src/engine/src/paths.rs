@@ -50,8 +50,39 @@ pub fn logs_dir()     -> Result<PathBuf> { Ok(root()?.join("logs")) }
 // `models_dir` is the single resolution point for every model artifact — the
 // registry download dests, the install sentinels, and the per-model loaders all
 // go through it — so it's the one place that has to know where weights live.
+//
+/// `FILEID_MODELS_DIR` overrides the per-OS default on every platform (highest
+/// priority). The cross-platform `fileid` CLI points it at the engine's OWN
+/// writable model dir ([`engine_models_dir`]) so `fileid models download` writes
+/// the engine's ONNX/GGUF weights somewhere it can also read for `scan --models`
+/// — never into the macOS desktop app's read-only CoreML dir — and the engine
+/// it spawns inherits the same path. Unset → the per-OS [`default_models_dir`]
+/// below is byte-identical to before, so the desktop apps are unaffected.
+pub fn models_dir() -> Result<PathBuf> {
+    if let Some(over) = std::env::var_os("FILEID_MODELS_DIR") {
+        if !over.is_empty() {
+            return Ok(PathBuf::from(over));
+        }
+    }
+    default_models_dir()
+}
+
+/// The engine's OWN writable model directory, ignoring both the
+/// `FILEID_MODELS_DIR` override and the macOS desktop-app preference: always
+/// `<root>/Models` (`%LOCALAPPDATA%\FileID\Models`, `$XDG_DATA_HOME/FileID/Models`,
+/// or `~/.local/share/FileID/Models` on a Mac). This is where the engine
+/// downloads + loads its ONNX/GGUF weights — distinct from the macOS Swift app's
+/// CoreML `~/Library/Application Support/FileID/Models`, which is read-only by
+/// contract. The CLI puts this value into `FILEID_MODELS_DIR` so every
+/// model-aware code path (and any spawned engine) agrees on it.
+///
+/// Used by the cross-platform `fileid` CLI (an external lib consumer); the
+/// engine binary itself never calls it — hence `allow(dead_code)`.
+#[allow(dead_code)]
+pub fn engine_models_dir() -> Result<PathBuf> { Ok(root()?.join("Models")) }
+
 #[cfg(not(target_os = "macos"))]
-pub fn models_dir()   -> Result<PathBuf> { Ok(root()?.join("Models")) }
+fn default_models_dir() -> Result<PathBuf> { Ok(root()?.join("Models")) }
 
 /// macOS: prefer the desktop (SwiftUI) app's model directory
 /// `~/Library/Application Support/FileID/Models` when it exists — that's where
@@ -65,7 +96,7 @@ pub fn models_dir()   -> Result<PathBuf> { Ok(root()?.join("Models")) }
 /// unaffected — the `cfg(not(macos))` definition above is the byte-for-byte
 /// original.
 #[cfg(target_os = "macos")]
-pub fn models_dir() -> Result<PathBuf> {
+fn default_models_dir() -> Result<PathBuf> {
     if let Some(home) = std::env::var_os("HOME") {
         let app_models =
             PathBuf::from(home).join("Library/Application Support/FileID/Models");
