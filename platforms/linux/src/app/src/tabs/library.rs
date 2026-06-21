@@ -422,7 +422,7 @@ fn open_preview(engine: &Rc<RefCell<EngineClient>>, parent: &impl IsA<gtk::Widge
         pic.set_paintable(icon_paintable(icon_for_kind(&row.kind), 128).as_ref());
     }
 
-    dialog.present(Some(parent));
+    dialog.present(parent);
 
     // Springy fade-in of the body, on the shared brand spring.
     let body_weak = body.downgrade();

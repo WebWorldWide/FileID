@@ -5,10 +5,10 @@
 // the layering macOS uses (LavaLamp → ultraThinMaterial → content).
 //
 // Navigation is an `adw::ViewStack` driven by an `adw::ViewSwitcher` in the
-// header: six tabs — Library (implemented) plus People / Cleanup / Deep Analyze
-// / Restructure / Settings as "Coming soon" placeholders. The header also
-// carries the gold "Pick folder" CTA (a `gtk::FileDialog`) and "Start scan",
-// which drive the shared `EngineClient`.
+// header: six tabs — Library / People / Cleanup / Deep Analyze / Restructure /
+// Settings — each a 1:1 port of the macOS reference view, all sharing the one
+// `EngineClient`. The header also carries the gold "Pick folder" CTA (a
+// `gtk::FileDialog`) and "Start scan", which drive that shared client.
 
 use adw::prelude::*;
 use gtk::glib;
@@ -30,27 +30,33 @@ pub fn on_activate(app: &adw::Application) {
     let engine = Rc::new(RefCell::new(EngineClient::new()));
 
     // ── Tabs ─────────────────────────────────────────────────────────────────
+    // Six tabs, each a 1:1 port of the macOS reference view, all sharing the one
+    // engine client. Page names / icons / titles match the former placeholders
+    // so the ViewSwitcher ordering and any deep links are unchanged.
     let stack = adw::ViewStack::new();
 
     let library = crate::tabs::library::build(engine.clone());
     stack.add_titled_with_icon(&library, Some("library"), "Library", "view-grid-symbolic");
 
-    let placeholders: [(&str, &str, &str, &str); 5] = [
-        ("people", "People", "system-users-symbolic",
-         "Face groups land here once the People tab is ported."),
-        ("cleanup", "Cleanup", "user-trash-symbolic",
-         "Duplicate-photo cleanup lands here once the Cleanup tab is ported."),
-        ("deep", "Deep Analyze", "starred-symbolic",
-         "On-device VLM captions + smart renames land here once Deep Analyze is ported."),
-        ("restructure", "Restructure", "view-list-symbolic",
-         "Butler-grade folder reorganization lands here once Restructure is ported."),
-        ("settings", "Settings", "emblem-system-symbolic",
-         "AI models, engine info, and privacy controls land here once Settings is ported."),
-    ];
-    for (name, title, icon, desc) in placeholders {
-        let page = crate::tabs::placeholder(icon, title, desc);
-        stack.add_titled_with_icon(&page, Some(name), title, icon);
-    }
+    let people = crate::tabs::people::build(engine.clone());
+    stack.add_titled_with_icon(&people, Some("people"), "People", "system-users-symbolic");
+
+    let cleanup = crate::tabs::cleanup::build_cleanup_tab(engine.clone());
+    stack.add_titled_with_icon(&cleanup, Some("cleanup"), "Cleanup", "user-trash-symbolic");
+
+    let deep = crate::tabs::deep_analyze::build_deep_analyze_tab(engine.clone());
+    stack.add_titled_with_icon(&deep, Some("deep"), "Deep Analyze", "starred-symbolic");
+
+    let restructure = crate::tabs::restructure::build_restructure_tab(engine.clone());
+    stack.add_titled_with_icon(
+        &restructure,
+        Some("restructure"),
+        "Restructure",
+        "view-list-symbolic",
+    );
+
+    let settings = crate::tabs::settings::build(engine.clone());
+    stack.add_titled_with_icon(&settings, Some("settings"), "Settings", "emblem-system-symbolic");
 
     let switcher = adw::ViewSwitcher::builder()
         .stack(&stack)
@@ -159,6 +165,9 @@ pub fn on_activate(app: &adw::Application) {
                 EngineEvent::ScanComplete(n) => format!("Scan complete — {n} files"),
                 EngineEvent::Error(m) => format!("Engine: {m}"),
                 EngineEvent::Exited => "Engine: restarting…".to_string(),
+                // Deep Analyze / Restructure / model-download events are handled
+                // by their own tabs — don't clobber the header scan status.
+                _ => continue,
             };
             status_label.set_label(&text);
         }
