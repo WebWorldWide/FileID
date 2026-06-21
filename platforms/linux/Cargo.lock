@@ -597,6 +597,7 @@ dependencies = [
  "glib",
  "gtk4",
  "libadwaita",
+ "rusqlite",
  "serde",
  "serde_json",
  "tokio",

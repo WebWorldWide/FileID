@@ -1,110 +1,226 @@
-// Engine client — spawns the shared Rust engine as a subprocess and
-// talks newline-delimited JSON over stdin/stdout. Mirror of Windows
-// EngineClient.cs (substantially smaller because the GTK app is
-// single-threaded on the main context and the scaffold only handles
-// the four state transitions it needs to drive the HeaderBar status
-// label).
+// Engine client — the app side of the two-binary IPC design
+// (`shared/docs/ARCHITECTURE.md`). Mirrors macOS `EngineClient` + Windows
+// `EngineClient.cs`:
 //
-// Phase 1 will replace this with a full IpcCommand/IpcEvent router
-// that fans events out to per-tab subscribers, matching the macOS +
-// Windows clients.
+//   * spawns the shared Rust engine (`fileid-engine`) as a child process,
+//   * sends `IpcCommand`s as newline-delimited JSON on its stdin — reusing the
+//     engine crate's own serde types so the wire contract can never drift,
+//   * parses `IpcEvent`s off a reader thread and fans them out to every UI
+//     subscriber on the GTK main context (async-channel → glib),
+//   * respawns the engine with backoff if it dies.
+//
+// File listing is NOT an IPC command — the engine is the single DB *writer*;
+// the app reads file rows directly from the same SQLite WAL DB, exactly like
+// macOS `ReadStore` / Windows `ReadStore`. We reuse the engine crate's
+// `db::open_read` + `paths::db_path` so the schema + location can't drift.
+//
+// Thumbnails are produced client-side: a worker thread reads raw image bytes
+// off the main loop; the Library decodes + scales them into a `gdk::Texture` on
+// the main thread (GdkPixbuf isn't `Send`, so only the bytes cross threads).
 
 use anyhow::{Context, Result};
 use async_channel::{Receiver, Sender};
-use serde::Serialize;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use fileid_engine::ipc::{
+    CommandPayload, EventPayload, IpcCommand, IpcEvent, ScanProgress, StartScanPayload,
+};
+
+// ─── Public event surface ────────────────────────────────────────────────────
+
+/// The slice of `IpcEvent` the UI cares about, already unwrapped from the wire
+/// envelope. Delivered on the GTK main context.
 #[derive(Debug, Clone)]
-pub enum EngineState {
+pub enum EngineEvent {
     Spawning,
     Ready,
-    Scanning,
-    Done(u64),
-    Failed(String),
+    Progress(ScanProgress),
+    /// A batch landed — carries the running processed-file total. The Library
+    /// uses this to throttle live grid reloads during a scan.
+    BatchLanded(u64),
+    /// Terminal: scan finished with this many processed files.
+    ScanComplete(u64),
+    Error(String),
+    /// The engine process exited (crash or clean EOF). Triggers a respawn.
+    Exited,
 }
+
+/// A file row read from the DB. The app-side mirror of macOS `FileRow` /
+/// Windows `FileRow`, populated from the engine's `files` table.
+#[derive(Debug, Clone)]
+pub struct FileRow {
+    pub id: i64,
+    pub path: String,
+    pub name: String,
+    pub size_bytes: i64,
+    pub kind: String,
+    pub extension: String,
+    pub created_at: Option<f64>,
+    pub modified_at: Option<f64>,
+    pub has_faces: bool,
+    pub has_text: bool,
+    pub proposed_name: Option<String>,
+    pub description: Option<String>,
+}
+
+/// Parameters for a Library query. `search` empty = browse-all.
+#[derive(Debug, Clone, Default)]
+pub struct QuerySpec {
+    pub search: String,
+    pub kind: Option<String>,
+    pub limit: i64,
+}
+
+const RESPAWN_CAP: u32 = 5;
+
+// ─── Engine client ───────────────────────────────────────────────────────────
 
 pub struct EngineClient {
     child: Option<Child>,
     stdin: Option<Arc<Mutex<ChildStdin>>>,
-    tx: Option<Sender<EngineState>>,
+    /// Raw events from the reader thread(s) → the main-context fan-out pump.
+    raw_tx: Sender<EngineEvent>,
+    raw_rx: Option<Receiver<EngineEvent>>,
+    /// One Sender per UI subscriber; the pump clones each event to all of them.
+    subscribers: Vec<Sender<EngineEvent>>,
+    /// Thumbnail worker request channel.
+    thumb_tx: Option<Sender<ThumbJob>>,
+    next_id: u64,
+    respawns: u32,
+    /// Set on drop so the reader thread's EOF doesn't trigger a respawn.
+    shutting_down: Arc<AtomicBool>,
 }
 
 impl EngineClient {
     pub fn new() -> Self {
-        Self { child: None, stdin: None, tx: None }
+        let (raw_tx, raw_rx) = async_channel::unbounded::<EngineEvent>();
+        Self {
+            child: None,
+            stdin: None,
+            raw_tx,
+            raw_rx: Some(raw_rx),
+            subscribers: Vec::new(),
+            thumb_tx: None,
+            next_id: 0,
+            respawns: 0,
+            shutting_down: Arc::new(AtomicBool::new(false)),
+        }
     }
 
-    /// Spawn the engine binary. Returns a Receiver the UI subscribes
-    /// to for state-change events on the GTK main context.
-    pub fn spawn(&mut self) -> Receiver<EngineState> {
-        let (tx, rx) = async_channel::unbounded::<EngineState>();
-        self.tx = Some(tx.clone());
-
-        let exe = locate_engine_binary();
-        let send_failed = |tx: &Sender<EngineState>, msg: String| {
-            // Best-effort — channel can't be closed at this point.
-            let _ = tx.send_blocking(EngineState::Failed(msg));
-        };
-
-        match exe {
-            Ok(path) => {
-                let _ = tx.send_blocking(EngineState::Spawning);
-                match Command::new(&path)
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                {
-                    Ok(mut child) => {
-                        let stdin = child.stdin.take()
-                            .expect("piped stdin should be present");
-                        let stdout = child.stdout.take()
-                            .expect("piped stdout should be present");
-                        self.stdin = Some(Arc::new(Mutex::new(stdin)));
-                        // Reader thread: parse NDJSON, push EngineState
-                        // events down the channel for the GTK main loop.
-                        let tx_reader = tx.clone();
-                        thread::spawn(move || drain_engine_stdout(stdout, tx_reader));
-                        self.child = Some(child);
-                    }
-                    Err(err) => send_failed(&tx, format!("spawn failed: {err}")),
-                }
-            }
-            Err(err) => send_failed(&tx, format!("engine binary not found: {err}")),
-        }
+    /// Register a UI subscriber. Each call returns a fresh receiver that will
+    /// see every event from now on. Call before or after `start` — late
+    /// subscribers still receive future events.
+    pub fn subscribe(&mut self) -> Receiver<EngineEvent> {
+        let (tx, rx) = async_channel::unbounded::<EngineEvent>();
+        self.subscribers.push(tx);
         rx
     }
 
-    /// Send `startScan` to the engine. Caller has already collected the
-    /// folder path from the FileDialog.
-    pub fn start_scan(&mut self, root_path: &str) -> Result<()> {
-        let cmd = StartScanWire {
-            cmd: "startScan",
-            id: "scan-1",
+    /// Boot the engine + the thumbnail worker, and start the main-context
+    /// fan-out pump. Takes the shared `Rc<RefCell<Self>>` so the pump can drive
+    /// respawns on its own. Idempotent-ish: call once after construction.
+    pub fn start(this: &std::rc::Rc<std::cell::RefCell<Self>>) {
+        // Thumbnail worker.
+        let (thumb_tx, thumb_rx) = async_channel::unbounded::<ThumbJob>();
+        thread::spawn(move || thumbnail_worker(thumb_rx));
+
+        // Reader side: take the raw receiver out for the pump, keep a tx clone.
+        let raw_rx = {
+            let mut e = this.borrow_mut();
+            e.thumb_tx = Some(thumb_tx);
+            e.raw_rx.take().expect("EngineClient::start called twice")
+        };
+
+        // Spawn the engine process for the first time.
+        spawn_process(this);
+
+        // Fan-out pump on the GTK main context: raw → all subscribers, and
+        // drive respawn on Exited.
+        let this_pump = this.clone();
+        glib::MainContext::default().spawn_local(async move {
+            while let Ok(ev) = raw_rx.recv().await {
+                // Snapshot subscribers WITHOUT holding the RefCell borrow across
+                // the await below (a held borrow + await = a latent panic).
+                let subs: Vec<Sender<EngineEvent>> =
+                    this_pump.borrow().subscribers.clone();
+                for sub in &subs {
+                    let _ = sub.send(ev.clone()).await;
+                }
+                if let EngineEvent::Exited = ev {
+                    let shutting = this_pump.borrow().shutting_down.load(Ordering::Relaxed);
+                    if !shutting {
+                        schedule_respawn(&this_pump);
+                    }
+                }
+            }
+        });
+    }
+
+    /// Send `startScan` to the engine using the real `IpcCommand` types so the
+    /// wire shape matches the engine byte-for-byte.
+    pub fn start_scan(&mut self, root_path: &str, rescan: bool) -> Result<()> {
+        let payload = CommandPayload::StartScan(StartScanPayload {
             root_path: root_path.to_string(),
+            root_display: None,
+            rescan,
+        });
+        self.send(payload)
+    }
+
+    /// Serialize + write an arbitrary command as one NDJSON line.
+    pub fn send(&mut self, payload: CommandPayload) -> Result<()> {
+        self.next_id += 1;
+        let cmd = IpcCommand {
+            id: format!("lin-{}", self.next_id),
+            payload,
         };
         let line = serde_json::to_string(&cmd)? + "\n";
-        let stdin = self.stdin.as_ref()
+        let stdin = self
+            .stdin
+            .as_ref()
             .context("engine not spawned")?
             .clone();
-        let mut guard = stdin.lock().expect("engine stdin lock poisoned");
+        let mut guard = stdin.lock().expect("engine stdin poisoned");
         guard.write_all(line.as_bytes())?;
         guard.flush()?;
-        if let Some(tx) = &self.tx {
-            let _ = tx.send_blocking(EngineState::Scanning);
-        }
         Ok(())
+    }
+
+    /// Run a Library query off the main loop. Returns a oneshot receiver the
+    /// caller awaits via `spawn_local`. Each query opens a fresh read-only
+    /// connection (cheap, WAL-safe, and tolerant of the DB not existing yet).
+    pub fn query_files(&self, spec: QuerySpec) -> Receiver<Vec<FileRow>> {
+        let (tx, rx) = async_channel::bounded::<Vec<FileRow>>(1);
+        thread::spawn(move || {
+            let rows = run_query(&spec).unwrap_or_default();
+            let _ = tx.send_blocking(rows);
+        });
+        rx
+    }
+
+    /// Request raw bytes for a thumbnail. The caller decodes them into a
+    /// `gdk::Texture` on the main thread (see `tabs::library`). Returns `None`
+    /// if the file can't be read.
+    pub fn request_thumbnail(&self, path: String) -> Receiver<Option<Vec<u8>>> {
+        let (tx, rx) = async_channel::bounded::<Option<Vec<u8>>>(1);
+        if let Some(thumb_tx) = &self.thumb_tx {
+            let _ = thumb_tx.send_blocking(ThumbJob { path, reply: tx });
+        } else {
+            let _ = tx.send_blocking(None);
+        }
+        rx
     }
 }
 
 impl Drop for EngineClient {
     fn drop(&mut self) {
-        // Close stdin so the engine sees EOF and exits cleanly.
-        self.stdin.take();
+        self.shutting_down.store(true, Ordering::Relaxed);
+        self.stdin.take(); // EOF → engine exits cleanly
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -112,61 +228,270 @@ impl Drop for EngineClient {
     }
 }
 
-/// Locate the engine binary. Search order:
-///   1. `$FILEID_ENGINE` environment variable
-///   2. `target/release/FileIDEngine` next to the app binary (dev/staged)
-///   3. `/usr/lib/FileID/FileIDEngine` (installed via .deb / Flatpak)
+// ─── Process lifecycle ───────────────────────────────────────────────────────
+
+/// Spawn (or respawn) the engine child and wire its stdout to a reader thread
+/// feeding `raw_tx`. Updates `child` / `stdin` on the shared client.
+fn spawn_process(this: &std::rc::Rc<std::cell::RefCell<EngineClient>>) {
+    let raw_tx = this.borrow().raw_tx.clone();
+    let _ = raw_tx.send_blocking(EngineEvent::Spawning);
+
+    let exe = match locate_engine_binary() {
+        Ok(p) => p,
+        Err(err) => {
+            let _ = raw_tx.send_blocking(EngineEvent::Error(format!(
+                "engine binary not found: {err}"
+            )));
+            return;
+        }
+    };
+
+    match Command::new(&exe)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(mut child) => {
+            let stdin = child.stdin.take().expect("piped stdin present");
+            let stdout = child.stdout.take().expect("piped stdout present");
+            let stderr = child.stderr.take();
+            {
+                let mut e = this.borrow_mut();
+                e.stdin = Some(Arc::new(Mutex::new(stdin)));
+                e.child = Some(child);
+            }
+            let tx_reader = raw_tx.clone();
+            thread::spawn(move || drain_stdout(stdout, tx_reader));
+            // Drain stderr so a chatty engine can't fill the pipe and block on
+            // a write. Engine diagnostics land in the local debug log only.
+            if let Some(stderr) = stderr {
+                thread::spawn(move || drain_stderr(stderr));
+            }
+        }
+        Err(err) => {
+            let _ = raw_tx.send_blocking(EngineEvent::Error(format!("spawn failed: {err}")));
+        }
+    }
+}
+
+/// Respawn after exit with a capped, linearly-backed-off delay.
+fn schedule_respawn(this: &std::rc::Rc<std::cell::RefCell<EngineClient>>) {
+    let n = {
+        let mut e = this.borrow_mut();
+        e.respawns += 1;
+        e.respawns
+    };
+    if n > RESPAWN_CAP {
+        let _ = this
+            .borrow()
+            .raw_tx
+            .send_blocking(EngineEvent::Error(
+                "engine crashed repeatedly — giving up. Restart the app.".into(),
+            ));
+        return;
+    }
+    let delay = std::time::Duration::from_millis(400 * n as u64);
+    let this2 = this.clone();
+    glib::timeout_add_local_once(delay, move || spawn_process(&this2));
+}
+
+/// Locate the engine binary. Search order mirrors the scaffold:
+///   1. `$FILEID_ENGINE`
+///   2. next to the app binary (dev / staged)
+///   3. system install dirs (.deb / Flatpak)
 fn locate_engine_binary() -> Result<PathBuf> {
     if let Ok(s) = std::env::var("FILEID_ENGINE") {
         let p = PathBuf::from(s);
-        if p.exists() { return Ok(p); }
+        if p.exists() {
+            return Ok(p);
+        }
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             for candidate in ["FileIDEngine", "fileid-engine"] {
                 let p = dir.join(candidate);
-                if p.exists() { return Ok(p); }
+                if p.exists() {
+                    return Ok(p);
+                }
             }
         }
     }
-    for sys in ["/usr/lib/FileID/FileIDEngine", "/usr/libexec/FileID/FileIDEngine"] {
+    for sys in [
+        "/usr/lib/FileID/FileIDEngine",
+        "/usr/libexec/FileID/FileIDEngine",
+        "/usr/lib/FileID/fileid-engine",
+    ] {
         let p = PathBuf::from(sys);
-        if p.exists() { return Ok(p); }
+        if p.exists() {
+            return Ok(p);
+        }
     }
-    anyhow::bail!("engine binary not found (set FILEID_ENGINE or place beside the app exe)")
+    anyhow::bail!("set FILEID_ENGINE or place the engine beside the app binary")
 }
 
-fn drain_engine_stdout(stdout: std::process::ChildStdout, tx: Sender<EngineState>) {
+/// Reader thread: parse NDJSON `IpcEvent`s into `EngineEvent`s. Tolerant — a
+/// line that doesn't parse is ignored (the engine also emits human log lines).
+fn drain_stdout(stdout: std::process::ChildStdout, tx: Sender<EngineEvent>) {
     let reader = BufReader::new(stdout);
     for line in reader.lines() {
         let Ok(line) = line else { break };
-        // Tolerant parse: extract only the event-type discriminator we
-        // care about for the scaffold's state transitions. Phase 1
-        // routes the full IpcEvent payload via the engine's serde types.
-        if line.contains("\"ready\"") {
-            let _ = tx.send_blocking(EngineState::Ready);
-        } else if line.contains("\"scanComplete\"") {
-            // Extract total file count if present.
-            let n = extract_u64(&line, "processed").unwrap_or(0);
-            let _ = tx.send_blocking(EngineState::Done(n));
-        } else if line.contains("\"error\"") {
-            let _ = tx.send_blocking(EngineState::Failed(line));
+        if line.trim().is_empty() {
+            continue;
         }
+        let Ok(event) = serde_json::from_str::<IpcEvent>(&line) else {
+            continue;
+        };
+        let mapped = match event.payload {
+            EventPayload::Ready(_) => Some(EngineEvent::Ready),
+            EventPayload::Progress(w) => Some(EngineEvent::Progress(w.inner)),
+            EventPayload::BatchSummary(w) => Some(EngineEvent::BatchLanded(w.inner.processed_total)),
+            EventPayload::ScanComplete(w) => {
+                Some(EngineEvent::ScanComplete(w.inner.processed_files))
+            }
+            EventPayload::Error(w) => Some(EngineEvent::Error(w.inner.message)),
+            _ => None,
+        };
+        if let Some(ev) = mapped {
+            if tx.send_blocking(ev).is_err() {
+                return;
+            }
+        }
+    }
+    // stdout closed → engine exited.
+    let _ = tx.send_blocking(EngineEvent::Exited);
+}
+
+/// Drain the engine's stderr to the local debug log. Never transmits.
+fn drain_stderr(stderr: std::process::ChildStderr) {
+    let reader = BufReader::new(stderr);
+    for line in reader.lines() {
+        let Ok(line) = line else { break };
+        tracing::debug!(target: "engine_stderr", "{line}");
     }
 }
 
-fn extract_u64(s: &str, key: &str) -> Option<u64> {
-    let needle = format!("\"{key}\":");
-    let idx = s.find(&needle)?;
-    let after = &s[idx + needle.len()..];
-    let digits: String = after.chars().skip_while(|c| !c.is_ascii_digit()).take_while(|c| c.is_ascii_digit()).collect();
-    digits.parse().ok()
+// ─── DB reads (mirror of macOS/Windows ReadStore) ────────────────────────────
+
+const SELECT_COLS: &str = "id, path_text, size_bytes, created_at, modified_at, kind, extension, \
+    has_faces, has_text, vlm_proposed_name, vlm_description";
+
+fn run_query(spec: &QuerySpec) -> Result<Vec<FileRow>> {
+    let db_path = fileid_engine::paths::db_path()?;
+    if !db_path.exists() {
+        return Ok(Vec::new()); // no scan yet
+    }
+    let conn = fileid_engine::db::open_read(&db_path)?;
+
+    let trimmed = spec.search.trim();
+    let has_search = !trimmed.is_empty();
+    let like = format!("%{}%", escape_like(trimmed));
+    let fts = fts_match(trimmed);
+    let has_fts = !fts.is_empty();
+    let limit = if spec.limit > 0 { spec.limit } else { 500 };
+
+    let sql = format!(
+        "SELECT {cols} FROM files f \
+         WHERE ( :has_search = 0 \
+                 OR f.path_text LIKE :like ESCAPE '\\' \
+                 OR EXISTS (SELECT 1 FROM tags t WHERE t.file_id = f.id AND t.tag LIKE :like ESCAPE '\\') \
+                 OR ( :has_fts = 1 AND f.id IN (SELECT rowid FROM ocr_fts WHERE ocr_fts MATCH :fts) ) ) \
+           AND ( :kind IS NULL OR f.kind = :kind ) \
+         ORDER BY f.scanned_at DESC \
+         LIMIT :limit",
+        cols = SELECT_COLS
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(
+            rusqlite::named_params! {
+                ":has_search": has_search as i64,
+                ":like": like,
+                ":has_fts": has_fts as i64,
+                ":fts": fts,
+                ":kind": spec.kind,
+                ":limit": limit,
+            },
+            map_row,
+        )?
+        .collect::<rusqlite::Result<Vec<FileRow>>>()?;
+    Ok(rows)
 }
 
-#[derive(Serialize)]
-struct StartScanWire {
-    cmd: &'static str,
-    id: &'static str,
-    #[serde(rename = "rootPath")]
-    root_path: String,
+fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
+    let path: String = row.get(1)?;
+    let name = std::path::Path::new(&path)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.clone());
+    Ok(FileRow {
+        id: row.get(0)?,
+        path,
+        name,
+        size_bytes: row.get(2)?,
+        created_at: row.get(3)?,
+        modified_at: row.get(4)?,
+        kind: row.get(5)?,
+        extension: row.get(6)?,
+        has_faces: row.get::<_, i64>(7)? != 0,
+        has_text: row.get::<_, i64>(8)? != 0,
+        proposed_name: row.get(9)?,
+        description: row.get(10)?,
+    })
+}
+
+/// Escape `%`, `_` and `\` for a `LIKE … ESCAPE '\'` pattern.
+fn escape_like(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c == '%' || c == '_' || c == '\\' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Build a safe FTS5 MATCH expression: quote each alphanumeric token so user
+/// punctuation can't produce a malformed-MATCH error. Empty when no usable
+/// tokens (the caller then skips the FTS subquery).
+fn fts_match(s: &str) -> String {
+    let tokens: Vec<String> = s
+        .split_whitespace()
+        .map(|t| {
+            t.chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect::<String>()
+        })
+        .filter(|t| !t.is_empty())
+        .map(|t| format!("\"{t}\""))
+        .collect();
+    tokens.join(" ")
+}
+
+// ─── Thumbnail worker ────────────────────────────────────────────────────────
+
+struct ThumbJob {
+    path: String,
+    reply: Sender<Option<Vec<u8>>>,
+}
+
+/// Cap the bytes we'll read for a thumbnail so a stray multi-GB file can't
+/// balloon memory. Anything larger falls back to the icon placeholder.
+const THUMB_MAX_BYTES: u64 = 48 * 1024 * 1024;
+
+fn thumbnail_worker(rx: Receiver<ThumbJob>) {
+    while let Ok(job) = rx.recv_blocking() {
+        let bytes = read_capped(&job.path);
+        let _ = job.reply.send_blocking(bytes);
+    }
+}
+
+fn read_capped(path: &str) -> Option<Vec<u8>> {
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.len() > THUMB_MAX_BYTES {
+        return None;
+    }
+    std::fs::read(path).ok()
 }

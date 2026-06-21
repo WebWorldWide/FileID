@@ -7,6 +7,27 @@
 
 ---
 
+## 2026-06-20 — Linux GTK app reads the DB directly via `rusqlite` (no file-listing IPC command)
+
+The Linux Library tab needs to list + search file rows. The IPC contract has **no** query /
+file-listing command — by design, the engine is the single SQLite *writer* and every platform's
+app reads rows directly (macOS `ReadStore`, Windows `ReadStore`). The GTK app mirrors that: it
+reads from the same WAL DB through the engine crate's own `db::open_read` + `paths::db_path`, so
+the schema + location can't drift. This requires `rusqlite` as a **direct** dependency of
+`platforms/linux/src/app`.
+
+Decision: add `rusqlite = { version = "0.31", features = ["bundled"] }` to the GTK app crate.
+It's not a new crate to the build — `rusqlite 0.31` is already a transitive dependency via
+`fileid-engine` (which enables `bundled` for byte-faithful FTS5 schema parity), so Cargo unifies
+to one rusqlite build and one bundled libsqlite3. Declaring it directly + `bundled` just lets the
+app name the `Connection` and guarantees the same SQLite is linked.
+
+Alternatives considered: (1) add a `queryFiles` IPC command to the engine — rejected: it's
+contract drift (the schema would grow a command no other platform uses), it would funnel every
+row through JSON over a pipe (slower than an in-process read), and it touches the shared engine.
+(2) Open SQLite with a different crate — rejected: a second SQLite in the binary + schema-parity
+risk. Reading the engine's own DB through the engine's own `open_read` is the lowest-drift option.
+
 ## 2026-06-19 — Accept GHSA-2m69-gcr7-jv3q in vulnerability scan (SQLitePCLRaw.lib.e_sqlite3 2.1.10)
 
 SQLitePCLRaw.lib.e_sqlite3 2.1.10 (transitive from Microsoft.Data.Sqlite 9.0.0) is flagged High
