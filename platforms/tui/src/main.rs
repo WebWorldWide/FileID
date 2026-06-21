@@ -15,6 +15,7 @@
 mod app;
 mod context;
 mod data;
+mod models;
 mod scan;
 mod ui;
 
@@ -103,6 +104,13 @@ fn event_loop(
         // the terminal). The thread streams status + reloads on completion.
         if let Some(root) = app.scan_requested.take() {
             scan::spawn_scan(ctx.db.clone(), root, ctx.engine_data_home.clone(), tx.clone());
+        }
+        // A Settings `D` arms an AI-model download; drive it on a worker thread
+        // so the UI stays live (q keeps quitting; TerminalGuard still restores).
+        // The thread streams progress to the status line and reloads on success.
+        if app.download_requested {
+            app.download_requested = false;
+            models::spawn_download(ctx.db.clone(), tx.clone());
         }
         if app.should_quit {
             return Ok(());

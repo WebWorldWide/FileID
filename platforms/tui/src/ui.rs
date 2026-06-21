@@ -452,6 +452,19 @@ fn render_settings(f: &mut Frame, app: &App, area: Rect) {
         bullet("No cloud, no telemetry — ever."),
         bullet("Only network use: downloading AI models from huggingface.co."),
         Line::from(""),
+        section("AI models"),
+        Line::from(vec![
+            Span::styled(
+                " D ",
+                Style::default().fg(Color::Black).bg(GOLD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  Download all AI models for full scanning", Style::default().fg(FG)),
+        ]),
+        Line::from(Span::styled(
+            "Needed for tags, faces & search. Fetched from huggingface.co; progress shows below.",
+            Style::default().fg(DIM),
+        )),
+        Line::from(""),
         section("Under the hood"),
         Line::from(Span::styled(
             "Reads the same library DB as the CLI and desktop apps (no contract drift).",
@@ -536,12 +549,16 @@ fn key_hints(app: &App) -> Vec<(&'static str, &'static str)> {
     if app.input_active {
         return vec![("a-z", "type a path"), ("Enter", "confirm"), ("Esc", "cancel")];
     }
-    if app.browser.is_some() {
+    if let Some(b) = &app.browser {
+        // `hidden off`/`hidden on` are both static, so the bar stays a Vec of
+        // `&'static str` while still reflecting the toggle state (FEATURE 2).
+        let hidden = if b.show_hidden { "hidden on" } else { "hidden off" };
         return vec![
             ("↑↓", "move"),
-            ("Enter", "open"),
             ("Bksp", "up"),
-            ("s", "scan this folder"),
+            ("d", "drives"),
+            (".", hidden),
+            ("s", "scan"),
             ("Esc", "cancel"),
         ];
     }
@@ -550,7 +567,7 @@ fn key_hints(app: &App) -> Vec<(&'static str, &'static str)> {
     }
     // Concise so the busiest tab (Library) still fits an 80-col terminal with the
     // right-pinned `? for all keys` tail; the `?` overlay carries fuller wording.
-    let mut v = Vec::with_capacity(5);
+    let mut v = Vec::with_capacity(6);
     if app.tab != Tab::Settings {
         v.push(("↑↓", "move"));
     }
@@ -559,6 +576,9 @@ fn key_hints(app: &App) -> Vec<(&'static str, &'static str)> {
     }
     v.push(("Tab", "switch"));
     v.push(("s", "scan"));
+    if app.tab == Tab::Settings {
+        v.push(("D", "get AI models"));
+    }
     v.push(("q", "quit"));
     v
 }
@@ -576,6 +596,7 @@ fn render_help(f: &mut Frame, area: Rect) {
         hrow("↑↓  /  j k", "move selection"),
         hrow("g / G", "first / last in list"),
         hrow("s", "browse folders + scan"),
+        hrow("D", "download AI models — Settings tab"),
         hrow("/", "search (Library tab)"),
         hrow("r", "reload from the library DB"),
         hrow("?", "toggle this help"),
@@ -586,6 +607,7 @@ fn render_help(f: &mut Frame, area: Rect) {
         hrow("Backspace / h", "go up a level"),
         hrow("s", "scan THIS folder"),
         hrow("t", "type a path instead · Esc cancel"),
+        hrow("d  ·  .", "external drives · show hidden"),
         Line::from(""),
         note("macOS: full-AI scan needs the desktop app's models."),
         note("Without them: fileid scan <folder> (model-free), then r."),
@@ -691,11 +713,12 @@ fn render_browser(f: &mut Frame, browser: &Browser, area: Rect) {
         );
         idx += 1;
     }
+    let hidden_state = if browser.show_hidden { "hidden:on" } else { "hidden:off" };
+    let hint = format!(
+        "↑↓ move · Enter open · ← up · d drives · . {hidden_state} · s scan · Esc cancel"
+    );
     f.render_widget(
-        Paragraph::new(Span::styled(
-            "↑↓ move · Enter open · Bksp up · s scan this folder · t type · Esc cancel",
-            Style::default().fg(DIM),
-        )),
+        Paragraph::new(Span::styled(truncate(&hint, inner.width as usize), Style::default().fg(DIM))),
         rows[idx],
     );
 }
@@ -1321,8 +1344,72 @@ mod tests {
         assert!(text.contains("Files here"), "file preview header missing");
         assert!(text.contains("photo.png"), "preview file not listed");
         assert!(text.contains(".."), "the up-a-level row is missing");
-        assert!(text.contains("scan this folder"), "browser key hint missing");
+        // The hint line advertises the new drives jump + hidden toggle (with its
+        // current state), alongside the scan/cancel affordances.
+        assert!(text.contains("d drives"), "browser drives hint missing");
+        assert!(text.contains("hidden:off"), "browser hidden-toggle hint missing");
+        assert!(text.contains("s scan"), "browser scan hint missing");
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// At a tight 80×24 the browser overlay still shows the new drives jump +
+    /// hidden-toggle hints un-clipped (the in-popup hint truncates gracefully
+    /// rather than overflowing).
+    #[test]
+    fn browser_overlay_hints_render_at_80_cols() {
+        use crate::app::{App, Browser};
+
+        let mut app = App::new("/tmp/x.sqlite".into());
+        app.browser = Some(Browser::open(std::env::temp_dir()));
+        let text = frame_text(80, 24, &app);
+        assert!(text.contains("d drives"), "drives hint clipped/missing at 80 cols");
+        assert!(text.contains("hidden:off"), "hidden hint clipped/missing at 80 cols");
+        assert!(text.contains("Esc cancel"), "cancel hint clipped at 80 cols");
+    }
+
+    /// FEATURE 2: dotfiles are hidden by default, and the browser hint reflects
+    /// the toggle state; pressing `.` flips it to `hidden:on`.
+    #[test]
+    fn browser_dotfile_toggle_reflects_state_in_hint() {
+        use crate::app::{App, Browser};
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let base = std::env::temp_dir().join(format!("fileid-ui-dot-{}", std::process::id()));
+        std::fs::create_dir_all(base.join("Shown")).unwrap();
+        std::fs::create_dir_all(base.join(".cache")).unwrap();
+        std::fs::write(base.join(".env"), "x").unwrap();
+
+        let mut app = App::new("/tmp/x.sqlite".into());
+        app.browser = Some(Browser::open(base.clone()));
+        // Default: the dot-entries are filtered, and the hint reads `hidden:off`.
+        let text = frame_text(100, 30, &app);
+        assert!(text.contains("hidden:off"), "default state must read hidden:off");
+        assert!(!text.contains(".cache/"), "hidden subdir must not render by default");
+
+        // Press `.` → hidden entries reveal, and the hint flips to `hidden:on`.
+        app.on_key(KeyCode::Char('.'), KeyModifiers::NONE);
+        let text = frame_text(100, 30, &app);
+        assert!(text.contains("hidden:on"), "toggled state must read hidden:on");
+        assert!(text.contains(".cache/"), "hidden subdir renders once toggled on");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// FEATURE 3: the Settings panel surfaces the model-download action, and the
+    /// always-visible key bar advertises `D` — fitting an 80-col row.
+    #[test]
+    fn settings_tab_shows_model_download_action_and_key() {
+        use crate::app::{App, Tab};
+        use crate::data::{LoadMsg, Snapshot};
+
+        let mut app = App::new("/tmp/x.sqlite".into());
+        app.tab = Tab::Settings;
+        app.apply_load(LoadMsg::Done(Box::new(Snapshot { db_exists: true, ..Snapshot::default() })));
+        let text = frame_text(80, 30, &app);
+        assert!(text.contains("Download all AI models"), "Settings panel missing the download action");
+        assert!(text.contains("get AI models"), "Settings key bar missing the model-download hint");
+        let bar = text.lines().last().unwrap_or("");
+        assert!(bar.trim_end().chars().count() <= 80, "Settings key bar overflows 80 cols: {bar:?}");
     }
 }
