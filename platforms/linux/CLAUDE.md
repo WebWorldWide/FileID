@@ -21,9 +21,20 @@ platforms/linux/
 │   └── app/                        # GTK4 + libadwaita app
 │       ├── Cargo.toml
 │       └── src/
-│           ├── main.rs             # gtk app entrypoint, adw::Application
-│           ├── window.rs           # main window + HeaderBar + tab nav
-│           └── engine_client.rs    # spawn engine subprocess, NDJSON stdio
+│           ├── main.rs             # entrypoint: adw::Application + theme install
+│           ├── theme.rs            # design system: brand CSS (gold palette),
+│           │                       #   .glass-card / .pill / .gold-button, force-dark
+│           ├── lavalamp.rs         # LavaLampBackground — Cairo blob background
+│           │                       #   (gtk::DrawingArea + frame-clock tick)
+│           ├── spring.rs           # adw::SpringAnimation helper (macOS spring map)
+│           ├── engine_client.rs    # spawn engine (NDJSON stdio via real IpcCommand/
+│           │                       #   IpcEvent types), event fan-out, DB reads,
+│           │                       #   thumbnail worker, crash respawn
+│           ├── window.rs           # app shell: Overlay(LavaLamp→scrim→UI),
+│           │                       #   adw::ViewStack + ViewSwitcher (6 tabs), pick/scan
+│           └── tabs/
+│               ├── mod.rs          # placeholder StatusPage builder
+│               └── library.rs      # Library tab: SearchEntry + GridView + preview
 ├── data/
 │   ├── io.github.fileid.FileID.desktop      # XDG desktop entry
 │   └── io.github.fileid.FileID.metainfo.xml # AppStream metadata (Flathub)
@@ -31,6 +42,42 @@ platforms/linux/
 │   └── build.sh                    # cargo build + stage assets
 └── flatpak/                        # Phase 2: Flatpak manifest + repo bootstrap
 ```
+
+## App structure (current)
+
+Foundation + app shell + **Library tab implemented**; the other five tabs are
+`adw::StatusPage` "Coming soon" placeholders pending their ports.
+
+- **Design system** (`theme.rs`): one `gtk::CssProvider` carries the brand
+  palette as `@define-color` tokens + the reusable classes — `.glass-card`
+  (GlassCard/ultraThinMaterial analog), `.fileid-scrim`, `.pill`/`.pill-active`,
+  `.gold-button`, `.file-tile`. Force-dark via `adw::StyleManager`.
+- **LavaLamp** (`lavalamp.rs`): a `gtk::DrawingArea` paints a near-black base +
+  four drifting radial-gradient blobs (gold/lavender/cyan/pink), redrawn on a
+  frame-clock tick (auto-stops while unmapped). Layered as the bottom of a
+  `gtk::Overlay` → muted scrim → transparent UI, matching macOS's
+  LavaLamp → material → content stack.
+- **Engine client** (`engine_client.rs`): spawns the engine, sends commands as
+  NDJSON using the engine crate's **real `IpcCommand`/`IpcEvent` types** (no
+  hand-rolled wire shape — the old scaffold's flat `{cmd,id,rootPath}` was
+  contract drift; correct shape is `{id, payload:{startScan:{rootPath}}}`).
+  Events parse on a reader thread and fan out to every UI subscriber on the
+  main context. Engine crash → capped backoff respawn.
+- **Library read path**: there is **no file-listing IPC command** — the engine
+  is the single DB *writer*; the app reads file rows directly from the same
+  SQLite WAL DB via `fileid_engine::db::open_read` + `paths::db_path`, exactly
+  like macOS/Windows `ReadStore`. Search = filename/tag `LIKE` + OCR `ocr_fts`
+  MATCH. Needs `rusqlite` (already transitive via the engine; see DECISIONS).
+- **Thumbnails**: a worker thread reads raw image bytes off the main loop; the
+  Library decodes + scales them into a `gdk::Texture` on the main thread
+  (GdkPixbuf isn't `Send`). Non-images get a themed icon. Video thumbnails
+  (engine `generateVideoThumbnail`) are a follow-up.
+- **Library tab** (`tabs/library.rs`): debounced `gtk::SearchEntry`, gold kind
+  pills, a virtualized `gtk::GridView` + `SignalListItemFactory` over a
+  `gio::ListStore` of `BoxedAnyObject(FileRow)` with lazy per-tile thumbnails
+  (recycle-guarded), and an `adw::Dialog` preview (image + metadata) on
+  activation. Live-scan: throttled reloads on `batchSummary`, final on
+  `scanComplete`.
 
 ## Toolkit choice rationale
 
