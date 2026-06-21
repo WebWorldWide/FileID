@@ -391,3 +391,36 @@ fn macos_default_resolves_swift_app_library() {
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&corpus);
 }
+
+/// FIX 4 — a bare `fileid` (no subcommand) prints the friendly getting-started
+/// intro to stdout and exits 0, instead of clap's terse usage error. It must
+/// touch no library (it returns before resolving a DB), and `--help` /
+/// `--version` must still work. Fully isolated: no `--db`, no env, no writes.
+#[test]
+fn no_subcommand_prints_friendly_intro() {
+    let out = run(&[]);
+    assert!(out.status.success(), "bare `fileid` should exit 0, got {:?}", out.status);
+    let s = stdout(&out);
+    assert!(
+        s.contains("FileID — search, dedupe, and organize"),
+        "intro headline missing: {s}"
+    );
+    assert!(s.contains("fileid people"), "intro should list the people example: {s}");
+    assert!(s.contains("fileid search"), "intro should list the search example: {s}");
+    assert!(s.contains("fileid dedupe --similar"), "intro should list the dedupe example: {s}");
+    assert!(s.contains("fileid restructure --plan"), "intro should list the restructure example: {s}");
+    assert!(s.contains("--help"), "intro should point at --help: {s}");
+
+    // --version and --help still function with the subcommand now optional.
+    let out = run(&["--version"]);
+    assert!(out.status.success(), "--version should exit 0");
+    assert!(stdout(&out).contains("fileid"), "version output missing program name");
+
+    let out = run(&["--help"]);
+    assert!(out.status.success(), "--help should exit 0");
+
+    // An *unknown* subcommand must still be a hard usage error (exit != 0),
+    // never the friendly intro.
+    let out = run(&["definitely-not-a-command"]);
+    assert!(!out.status.success(), "an unknown subcommand must still error");
+}
