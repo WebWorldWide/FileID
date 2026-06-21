@@ -41,8 +41,9 @@ Resolved with the **same precedence as the CLI**:
 Populate a library out-of-band with the CLI's model-free scan — `fileid --db
 <db> scan <folder>` (filenames + OCR/doc text → FTS; works on every platform) —
 then point the TUI at the same `--db`. You can also press `s` to scan from
-inside the TUI (see Keys); that drives the engine's **full ML pipeline**, which
-runs on Linux/Windows. On macOS, scan with full ML in the desktop app instead.
+inside the TUI (see Keys); that drives the engine's **full ML pipeline** on all
+three platforms once the models are installed — press `D` on the Settings tab
+(or run `fileid models download --all`) to fetch them, macOS included.
 
 ## Keys
 
@@ -94,16 +95,19 @@ auto-reloads every view. See [`src/scan.rs`](src/scan.rs).
 `startScan` runs the **full ML pipeline**, so it requires the AI models
 (`mobileclip_s2` + `arcface`) and the engine binary:
 
-> **macOS:** this in-TUI `s` scan can't run full ML — the Rust engine needs its
-> own model layout, which the macOS app's Swift models don't satisfy, so it
-> reports "models not installed". Scan a folder with full ML in the **FileID
-> desktop app** instead and reload here with `r`; for model-free indexing, run
-> `fileid scan <folder>` (CLI). Full-ML `s` scanning is for **Linux/Windows**,
-> where the engine is native.
+> **macOS:** this in-TUI `s` scan runs full ML once you install the engine's
+> **own** models — press **`D`** on the Settings tab (or run `fileid models
+> download --all`). The Rust engine needs its own model layout, which the macOS
+> app's Swift CoreML models don't satisfy, so the TUI installs + reads its
+> weights under `~/.local/share/FileID/Models` (separate from the app's read-only
+> CoreML dir). Until then it reports "models not installed" — never a crash. You
+> can also scan with full ML in the **FileID desktop app** and reload here with
+> `r`. Full-ML `s` scanning works the same on **Linux/Windows**.
 
-- **Models** — on Linux/Windows, installed once from the desktop app
-  (Settings → Local AI). If they're missing, the status line says exactly which,
-  and how.
+- **Models** — installed once with `D` on the Settings tab (or `fileid models
+  download --all`), on every platform incl. macOS; the desktop app's
+  Settings → Local AI also installs them. If they're missing, the status line
+  says exactly which, and how.
 - **Engine binary** — located via `FILEID_ENGINE_BIN`, then beside `fileid-tui`,
   then the dev-layout `platforms/windows/src/engine/target/{release,debug}/`,
   then `PATH`. If absent, the status line says how to build/point at it.

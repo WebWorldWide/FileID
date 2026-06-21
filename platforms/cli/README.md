@@ -118,33 +118,32 @@ speaks newline-delimited JSON over stdio (reusing the engine's own
 apps do. It writes the engine's own library (`$XDG_DATA_HOME` / `%LOCALAPPDATA%`
 location), so a pinned `--db` is reported as not-applicable here.
 
-> **macOS:** `--models` doesn't work from the CLI here. The Rust engine needs
-> *its own* model layout (`mobileclip_s2` / `arcface`), which the macOS desktop
-> app's Swift models don't satisfy — so it reports "models not installed" even
-> though the app's models exist. On macOS, **scan a folder with full ML in the
-> FileID desktop app** (it owns the macOS models), then query that library with
-> the read commands above. `--models` is the right path on **Linux and Windows**,
-> where the Rust engine is native and installs its own models.
+> **macOS:** `--models` works here once you install the engine's **own** models
+> with **`fileid models download --all`**. The Rust engine needs its own model
+> layout (`mobileclip_s2` / `arcface`), which the macOS desktop app's Swift
+> CoreML models don't satisfy — so the CLI/TUI install + read the engine's
+> weights under `~/.local/share/FileID/Models` (kept separate from the app's
+> read-only CoreML dir). Alternatively, **scan with full ML in the FileID desktop
+> app** and query that library with the read commands above. `--models` works the
+> same way on **Linux and Windows**, where the Rust engine is native.
 
 Two pre-flights before it spawns anything:
 
 1. **Models installed?** Mirrors the engine's `startScan` gate (`mobileclip_s2`
    + `arcface` sentinels). If missing, it prints which models are missing, the
-   models directory, and how to install them (the desktop app's Welcome screen /
-   Settings → Local AI; see `shared/docs/MODELS.md`).
+   models directory, and how to install them (**`fileid models download --all`**,
+   or the desktop app's Welcome screen / Settings → Local AI; see
+   `shared/docs/MODELS.md`).
 2. **Engine binary located?** Looks at `$FILEID_ENGINE_BIN`, next to the
    `fileid` executable, the dev-layout engine `target/` dir, then `PATH`. If
    absent, it says how to provide it.
 
-On Linux/Windows, installing the models needs the desktop app (the CLI has no
-downloader); once they're installed, `fileid scan --models <path>` lights up
-`people`, `dedupe --exact/--similar`, and `search --similar`. On macOS, a
-desktop-app scan populates those columns instead (see the note above).
-
-## Still out of scope
-
-- A CLI model **installer** (`scan --models` consumes models; it doesn't fetch
-  them — the desktop app's downloader does, with HF egress + SHA-256 pinning).
+Install the models with **`fileid models download --all`** (the CLI's own
+downloader — user-initiated HF egress + SHA-256 pinning; the desktop app's
+installer also works). Once installed, `fileid scan --models <path>` lights up
+`people`, `dedupe --exact/--similar`, and `search --similar` on **all three
+platforms** (macOS included; see the note above). A desktop-app scan remains an
+alternative way to populate those columns.
 
 A terminal UI (ratatui) over the same in-process read surface now ships as a
 sibling crate — see [`platforms/tui`](../tui).

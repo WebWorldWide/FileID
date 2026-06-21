@@ -84,16 +84,21 @@ pub fn engine_models_dir() -> Result<PathBuf> { Ok(root()?.join("Models")) }
 #[cfg(not(target_os = "macos"))]
 fn default_models_dir() -> Result<PathBuf> { Ok(root()?.join("Models")) }
 
-/// macOS: prefer the desktop (SwiftUI) app's model directory
-/// `~/Library/Application Support/FileID/Models` when it exists — that's where
-/// the Swift front-end installs weights. The cross-platform engine/CLI/TUI
-/// otherwise follow the XDG default (`~/.local/share/FileID/Models`), which is
-/// empty on a Mac that only ever ran the desktop app, so `scan --models` could
-/// not find the already-downloaded models. Falls back to the XDG default when
-/// the app dir is absent (engine-only install). READ-only by construction:
-/// scanning reads weights from here; downloads + sentinels are a desktop-app
-/// concern, so returning this path never writes into it. Windows/Linux are
-/// unaffected — the `cfg(not(macos))` definition above is the byte-for-byte
+/// macOS, `FILEID_MODELS_DIR` UNSET only: prefer the desktop (SwiftUI) app's
+/// model directory `~/Library/Application Support/FileID/Models` when it exists —
+/// that's where the Swift front-end installs weights — else the XDG default
+/// (`~/.local/share/FileID/Models`). Used when probing for the app's already-
+/// installed weights; READ-only by construction (scanning reads here; this path
+/// never writes into the app dir).
+///
+/// The cross-platform `fileid` CLI and `fileid-tui` instead pin
+/// `FILEID_MODELS_DIR` to [`engine_models_dir`] (the engine's OWN writable XDG
+/// `~/.local/share/FileID/Models`), so `models_dir` returns the override and
+/// never reaches this branch: `fileid models download --all` (or the TUI's
+/// Settings `D`) installs the engine's ONNX/GGUF weights there, and full-ML
+/// `scan --models` then works on macOS too — no desktop app required (though a
+/// desktop-app scan remains a valid way to populate a library). Windows/Linux
+/// are unaffected — the `cfg(not(macos))` definition above is the byte-for-byte
 /// original.
 #[cfg(target_os = "macos")]
 fn default_models_dir() -> Result<PathBuf> {

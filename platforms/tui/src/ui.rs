@@ -1412,4 +1412,33 @@ mod tests {
         let bar = text.lines().last().unwrap_or("");
         assert!(bar.trim_end().chars().count() <= 80, "Settings key bar overflows 80 cols: {bar:?}");
     }
+
+    /// Empty-scratch start: a loaded-but-empty library (db_exists, zero rows on
+    /// every tab) plus an open folder browser must render at any terminal size —
+    /// including tiny ones that collapse panels to zero area — without panicking
+    /// (no out-of-range list index, no `len - 1` underflow, no bad slice range).
+    #[test]
+    fn renders_every_tab_and_browser_empty_without_panic() {
+        use crate::app::{App, Browser, Tab};
+        use crate::data::{LoadMsg, Snapshot};
+
+        // A few sizes: realistic, narrow, and pathologically small.
+        for (w, h) in [(100u16, 30u16), (80, 24), (20, 6), (4, 3), (1, 1)] {
+            for tab in Tab::ALL {
+                let mut app = App::new("/tmp/x.sqlite".into());
+                app.tab = tab;
+                // db_exists=true with empty vecs → the per-tab empty branches run
+                // (not the welcome screen), exercising the empty-list renderers.
+                app.apply_load(LoadMsg::Done(Box::new(Snapshot {
+                    db_exists: true,
+                    ..Snapshot::default()
+                })));
+                let _ = frame_text(w, h, &app); // must not panic
+
+                // …and the same with the folder browser open over it.
+                app.browser = Some(Browser::open(std::env::temp_dir()));
+                let _ = frame_text(w, h, &app); // must not panic
+            }
+        }
+    }
 }
