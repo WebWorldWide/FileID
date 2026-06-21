@@ -1,0 +1,7 @@
+# Packaging build artifacts (never commit the heavy outputs).
+flatpak/build-dir/
+flatpak/.flatpak-builder/
+flatpak/*.flatpak
+appimage/build/
+appimage/*.AppImage
+nix/result

@@ -1,0 +1,66 @@
+# Maintainer: FileID <maintainers@fileid.example>
+#
+# AUR package for the FileID Linux GTK4 app (native Arch build).
+# Arch rolling ships gtk4 4.14+ and libadwaita 1.5+, matching the app's
+# `gtk4 0.8` / `libadwaita 0.6` bindings — no Flatpak runtime needed.
+#
+# Generate .SRCINFO before publishing:  makepkg --printsrcinfo > .SRCINFO
+
+pkgname=fileid
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="On-device AI file organizer — tag, dedupe, restructure, rename files locally (GTK4)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/fileid/FileID"
+license=('Apache-2.0')
+# onnxruntime provides /usr/lib/libonnxruntime.so — the engine dlopen's it
+# (ort load-dynamic), so the default loader path resolves it at runtime.
+depends=('gtk4' 'libadwaita' 'onnxruntime' 'sqlite' 'glibc' 'glib2')
+makedepends=('rust' 'cargo' 'git' 'pkgconf')
+optdepends=('tesseract: OCR for image/document text extraction'
+            'ffmpeg: video keyframe thumbnails')
+source=("git+https://github.com/fileid/FileID.git#tag=v${pkgver}")
+sha256sums=('SKIP')
+options=('!lto')  # the engine's release profile already sets fat LTO
+
+prepare() {
+  cd "${srcdir}/FileID/platforms/linux"
+  # Vendor crates offline against the committed lockfile (reproducible, and the
+  # cargo crate fetch is the only build step that needs network — makepkg has it).
+  export CARGO_HOME="${srcdir}/cargo-home"
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "${srcdir}/FileID/platforms/linux"
+  export CARGO_HOME="${srcdir}/cargo-home"
+  export RUSTUP_TOOLCHAIN=stable
+  # Point ort at the system ONNX Runtime so `download-binaries` does not fetch
+  # a second copy. ORT_DYLIB_PATH covers the load-dynamic runtime lookup.
+  export ORT_STRATEGY=system
+  export ORT_LIB_LOCATION=/usr/lib
+  export ORT_DYLIB_PATH=/usr/lib/libonnxruntime.so
+
+  # The GTK app + the engine binary it spawns. -p selects the engine
+  # path-dependency package from the workspace graph.
+  cargo build --release --frozen
+  cargo build --release --frozen -p fileid-engine --bin FileIDEngine
+}
+
+package() {
+  cd "${srcdir}/FileID"
+  local target="platforms/linux/target/release"
+  local data="platforms/linux/data"
+
+  # Both binaries land in /usr/bin; the app finds FileIDEngine on $PATH / next
+  # to itself (locate_engine_binary search order).
+  install -Dm755 "${target}/fileid-linux" "${pkgdir}/usr/bin/fileid-linux"
+  install -Dm755 "${target}/FileIDEngine" "${pkgdir}/usr/bin/FileIDEngine"
+
+  install -Dm644 "${data}/io.github.fileid.FileID.desktop" \
+    "${pkgdir}/usr/share/applications/io.github.fileid.FileID.desktop"
+  install -Dm644 "${data}/io.github.fileid.FileID.metainfo.xml" \
+    "${pkgdir}/usr/share/metainfo/io.github.fileid.FileID.metainfo.xml"
+  install -Dm644 "${data}/io.github.fileid.FileID.svg" \
+    "${pkgdir}/usr/share/icons/hicolor/scalable/apps/io.github.fileid.FileID.svg"
+}

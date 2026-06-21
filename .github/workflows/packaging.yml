@@ -1,0 +1,89 @@
+name: Packaging (Linux — Flatpak)
+
+# Verifies the Flatpak builds. The whole job is ADVISORY (continue-on-error)
+# for now: the ONNX-Runtime-in-sandbox path (ort `download-binaries` inside a
+# Flatpak build) may need Linux-side iteration, and packaging must not red-gate
+# `main`. It surfaces progress in the log and uploads the bundle when it works.
+# Promote to a hard gate once the build is reliably green — mirrors how
+# linux.yml made the GTK app's clippy advisory until it was known clean.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packaging/**'
+      - 'platforms/linux/**'
+      - 'platforms/windows/src/engine/**'
+      - '.github/workflows/packaging.yml'
+  pull_request:
+    paths:
+      - 'packaging/**'
+      - 'platforms/linux/**'
+      - 'platforms/windows/src/engine/**'
+      - '.github/workflows/packaging.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Flatpak — the primary, universal channel. Installs the GNOME 46 runtime +
+  # the rust-stable SDK extension (GNOME 46 is based on freedesktop-sdk 23.08),
+  # then runs flatpak-builder against packaging/flatpak/. ADVISORY end to end.
+  # ---------------------------------------------------------------------------
+  flatpak:
+    name: Flatpak (GNOME 46) — x64 [advisory]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install flatpak + flatpak-builder
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder
+
+      - name: Add Flathub remote
+        run: |
+          flatpak remote-add --if-not-exists --user flathub \
+            https://flathub.org/repo/flathub.flatpakrepo
+
+      - name: Install GNOME 46 runtime + rust-stable SDK extension
+        run: |
+          set -euo pipefail
+          flatpak install -y --user flathub \
+            org.gnome.Platform//46 \
+            org.gnome.Sdk//46 \
+            org.freedesktop.Sdk.Extension.rust-stable//23.08
+
+      - name: Build the Flatpak
+        # --share=network is granted to the build step inside the manifest
+        # (build-options.build-args) so ort can download onnxruntime; nothing
+        # is uploaded — see the manifest header. The shipped sandbox's network
+        # grant is the finish-arg (user-initiated HuggingFace download only).
+        run: |
+          set -euo pipefail
+          flatpak-builder --user --force-clean --disable-rofiles-fuse \
+            --repo=repo \
+            build-dir \
+            packaging/flatpak/io.github.fileid.FileID.yaml
+
+      - name: Bundle the .flatpak (artifact)
+        run: |
+          set -euo pipefail
+          flatpak build-bundle repo FileID.flatpak io.github.fileid.FileID
+
+      - name: Upload Flatpak bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: fileid-flatpak
+          path: FileID.flatpak
+          if-no-files-found: warn
