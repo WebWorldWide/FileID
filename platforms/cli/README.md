@@ -42,6 +42,11 @@ apply + trash logic, same IPC types.
 
 ## Build
 
+Quickest path — from the repo root, `bash scripts/build-tools.sh` builds the
+engine, CLI, and TUI in release and installs `fileid`, `fileid-tui`, and the
+engine binary to `~/.cargo/bin` (make sure that's on your `PATH`). To build
+just this crate:
+
 ```bash
 cd platforms/cli
 cargo build --release          # compiles the shared engine too (first build is slow)
@@ -67,7 +72,7 @@ rasterizes PDFs.)
 | Command | What it does | Models? |
 |---|---|---|
 | `fileid scan <path> [--rescan]` | Index a directory: one `files` row per file + plain-text content into `doc_text` (FTS). Incremental by default; `--rescan` reprocesses everything. | No |
-| `fileid scan <path> --models [--rescan]` | FULL pipeline — image tags, CLIP embeddings, faces, perceptual + content hashes — by spawning the engine binary and streaming its progress. Prints an actionable message if models (or the engine binary) aren't installed. | **Yes** |
+| `fileid scan <path> --models [--rescan]` | FULL pipeline — image tags, CLIP embeddings, faces, perceptual + content hashes — by spawning the engine binary and streaming its progress. **Linux/Windows** (native engine); on **macOS** scan with full ML in the desktop app instead. Prints an actionable message if models (or the engine binary) aren't installed. | **Yes** |
 | `fileid search <query…> [--limit N]` | FTS5 keyword search over document text + image OCR text, plus a filename fallback. | No (FTS) |
 | `fileid search --similar <path-or-id> [--limit N]` | Visual / semantic nearest-neighbor: ranks files by cosine similarity to the seed file's CLIP embedding. Clear message when no embeddings are present. | reads embeddings |
 | `fileid info <path-or-id>` | A file's metadata, flags, tags, people, and a text snippet. | No |
@@ -113,6 +118,14 @@ speaks newline-delimited JSON over stdio (reusing the engine's own
 apps do. It writes the engine's own library (`$XDG_DATA_HOME` / `%LOCALAPPDATA%`
 location), so a pinned `--db` is reported as not-applicable here.
 
+> **macOS:** `--models` doesn't work from the CLI here. The Rust engine needs
+> *its own* model layout (`mobileclip_s2` / `arcface`), which the macOS desktop
+> app's Swift models don't satisfy — so it reports "models not installed" even
+> though the app's models exist. On macOS, **scan a folder with full ML in the
+> FileID desktop app** (it owns the macOS models), then query that library with
+> the read commands above. `--models` is the right path on **Linux and Windows**,
+> where the Rust engine is native and installs its own models.
+
 Two pre-flights before it spawns anything:
 
 1. **Models installed?** Mirrors the engine's `startScan` gate (`mobileclip_s2`
@@ -123,15 +136,18 @@ Two pre-flights before it spawns anything:
    `fileid` executable, the dev-layout engine `target/` dir, then `PATH`. If
    absent, it says how to provide it.
 
-Installing the models needs the desktop app (the CLI has no downloader). Once
-they're installed, `fileid scan --models <path>` lights up `people`, `dedupe
---exact/--similar`, and `search --similar`.
+On Linux/Windows, installing the models needs the desktop app (the CLI has no
+downloader); once they're installed, `fileid scan --models <path>` lights up
+`people`, `dedupe --exact/--similar`, and `search --similar`. On macOS, a
+desktop-app scan populates those columns instead (see the note above).
 
 ## Still out of scope
 
-- A **TUI** (ratatui) over the same in-process calls.
 - A CLI model **installer** (`scan --models` consumes models; it doesn't fetch
   them — the desktop app's downloader does, with HF egress + SHA-256 pinning).
+
+A terminal UI (ratatui) over the same in-process read surface now ships as a
+sibling crate — see [`platforms/tui`](../tui).
 
 ## Examples
 
@@ -141,7 +157,8 @@ fileid --db /tmp/lib.sqlite scan ~/Documents
 fileid --db /tmp/lib.sqlite search invoice 2024
 fileid --db /tmp/lib.sqlite --json info ~/Documents/invoice.pdf
 
-# Full ML pipeline on the engine's library (needs installed models)
+# Full ML pipeline on the engine's library — Linux/Windows; needs installed
+# models (on macOS, scan with full ML in the desktop app instead)
 fileid scan --models ~/Pictures
 
 # Query the library a desktop app (or `scan --models`) already built
