@@ -48,6 +48,13 @@ crossterm = "0.28"
 # TUI runs against connections returned by `fileid_engine::db::open_read`.
 rusqlite = { version = "0.31", features = ["bundled"] }
 
+# Same rationale as rusqlite: already in the lock graph (an engine dependency),
+# so declaring it here unifies to the same version — NO new crate. Required to
+# speak the engine's newline-delimited JSON IPC: serialize `ipc::IpcCommand`
+# (startScan) and deserialize `ipc::IpcEvent` (scan progress / complete / error)
+# using the engine's own types, so the wire contract can't drift.
+serde_json = "1"
+
 anyhow = "1"
 
 [profile.release]
