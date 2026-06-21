@@ -48,6 +48,20 @@ pub enum EngineEvent {
     Error(String),
     /// The engine process exited (crash or clean EOF). Triggers a respawn.
     Exited,
+
+    // ── Deep Analyze lifecycle (consumed by the Deep Analyze tab) ────────────
+    DeepAnalyzeStarting(fileid_engine::ipc::DeepAnalyzeStarting),
+    DeepAnalyzeProgress(fileid_engine::ipc::DeepAnalyzeProgress),
+    DeepAnalyzeFileDone(fileid_engine::ipc::DeepAnalyzeFileDone),
+    DeepAnalyzeComplete(fileid_engine::ipc::DeepAnalyzeComplete),
+    /// VLM / model-weight download progress (Deep Analyze + Settings).
+    ModelDownloadProgress(fileid_engine::ipc::ModelDownloadProgress),
+
+    // ── Restructure (consumed by the Restructure tab) ────────────────────────
+    /// Authoritative plan from `planRestructure`.
+    RestructurePlan(fileid_engine::ipc::RestructurePlan),
+    /// Result of `applyRestructure` (applied / failed counts, privilege error).
+    RestructureApplyResult(fileid_engine::ipc::RestructureApplyResult),
 }
 
 /// A file row read from the DB. The app-side mirror of macOS `FileRow` /
@@ -350,6 +364,25 @@ fn drain_stdout(stdout: std::process::ChildStdout, tx: Sender<EngineEvent>) {
                 Some(EngineEvent::ScanComplete(w.inner.processed_files))
             }
             EventPayload::Error(w) => Some(EngineEvent::Error(w.inner.message)),
+            EventPayload::DeepAnalyzeStarting(w) => {
+                Some(EngineEvent::DeepAnalyzeStarting(w.inner))
+            }
+            EventPayload::DeepAnalyzeProgress(w) => {
+                Some(EngineEvent::DeepAnalyzeProgress(w.inner))
+            }
+            EventPayload::DeepAnalyzeFileDone(w) => {
+                Some(EngineEvent::DeepAnalyzeFileDone(w.inner))
+            }
+            EventPayload::DeepAnalyzeComplete(w) => {
+                Some(EngineEvent::DeepAnalyzeComplete(w.inner))
+            }
+            EventPayload::ModelDownloadProgress(w) => {
+                Some(EngineEvent::ModelDownloadProgress(w.inner))
+            }
+            EventPayload::RestructurePlan(w) => Some(EngineEvent::RestructurePlan(w.inner)),
+            EventPayload::RestructureApplyResult(w) => {
+                Some(EngineEvent::RestructureApplyResult(w.inner))
+            }
             _ => None,
         };
         if let Some(ev) = mapped {
