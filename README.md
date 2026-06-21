@@ -3,21 +3,30 @@
 </p>
 
 <p align="center">
-  <strong>On-device AI file organization. macOS today, Windows next, Linux soon.</strong><br>
+  <strong>On-device AI file organization for macOS, Windows, and Linux — plus a cross-platform CLI and TUI.</strong><br>
   <em>Tag, dedupe, restructure, and rename tens of thousands of files — privately, on hardware you own.</em>
+</p>
+
+<p align="center">
+  <a href="https://adamnolle.github.io/FileID/">Website</a> ·
+  <a href="#front-ends">Front-ends</a> ·
+  <a href="#install--packaging">Install</a> ·
+  <a href="#build-from-source">Build from source</a>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/macOS-15%2B-blue?style=flat-square">
   <img src="https://img.shields.io/badge/Windows-10%2F11%20%2B%20WoA-0078d4?style=flat-square">
-  <img src="https://img.shields.io/badge/Linux-Phase%205-orange?style=flat-square">
-  <img src="https://img.shields.io/badge/100%25-on--device-green?style=flat-square">
+  <img src="https://img.shields.io/badge/Linux-GTK4%20%2B%20libadwaita-success?style=flat-square">
+  <img src="https://img.shields.io/badge/CLI%20%2B%20TUI-cross--platform-8957e5?style=flat-square">
+  <img src="https://img.shields.io/badge/100%25-on--device%20%C2%B7%20no%20telemetry-green?style=flat-square">
 </p>
 
 <p align="center">
   <a href="https://github.com/AdamNolle/FileID/actions/workflows/windows-engine.yml"><img src="https://github.com/AdamNolle/FileID/actions/workflows/windows-engine.yml/badge.svg" alt="Windows engine"></a>
   <a href="https://github.com/AdamNolle/FileID/actions/workflows/windows-app.yml"><img src="https://github.com/AdamNolle/FileID/actions/workflows/windows-app.yml/badge.svg" alt="Windows app"></a>
   <a href="https://github.com/AdamNolle/FileID/actions/workflows/macos.yml"><img src="https://github.com/AdamNolle/FileID/actions/workflows/macos.yml/badge.svg" alt="macOS app"></a>
+  <a href="https://github.com/AdamNolle/FileID/actions/workflows/linux.yml"><img src="https://github.com/AdamNolle/FileID/actions/workflows/linux.yml/badge.svg" alt="Linux (engine + CLI + TUI + GTK app)"></a>
 </p>
 
 ---
@@ -31,15 +40,17 @@ Point FileID at a folder. It reads every file inside — images, video, PDFs, do
 **For users**
 - [Quickstart](#quickstart) — get FileID running in under a minute
 - [Features](#features) — what the six tabs do
-- [Install](#install) — Windows + macOS download instructions
+- [Front-ends](#front-ends) — the three native apps, the CLI, and the TUI
+- [Install / packaging](#install--packaging) — Flatpak / AppImage / Nix / AUR · .msi · .app
 
 **For developers**
-- [Build from source](#build-from-source) — Windows + macOS
+- [Build from source](#build-from-source) — Windows · macOS · Linux
   - [Windows](#build--windows) — engine + WinUI 3 app
   - [macOS](#build--macos) — engine + SwiftUI app
+  - [Linux](#build--linux) — engine + GTK4 app + CLI + TUI
 - [Repository layout](#repository-layout) — where things live
 - [Architecture](#architecture) — two-binary IPC design, GPU acceleration, ML stack
-- [Continuous integration](#continuous-integration) — Windows + macOS workflows + privacy gate
+- [Continuous integration](#continuous-integration) — Windows · macOS · Linux workflows + privacy gate
 - [Troubleshooting](#troubleshooting) — common build / first-launch errors
 - [Contributing](#contributing) — conventions + persistence files
 
@@ -50,9 +61,9 @@ Point FileID at a folder. It reads every file inside — images, video, PDFs, do
 **One command, every platform.** From the repo root, in any bash shell (Git Bash on Windows, Terminal on macOS, anything on Linux):
 
 ```bash
-./build.sh -windows         # Windows: full fresh-install build + run
-./build.sh -mac             # macOS:   build + launch
-./build.sh -linux           # Linux:   Phase 5 (deferred — engine builds standalone today)
+./build.sh -windows                    # Windows: full fresh-install build + run
+./build.sh -mac                        # macOS:   build + launch
+bash platforms/linux/build/build.sh    # Linux:   build the GTK4 + libadwaita app + run
 ```
 
 That's the only command you need to remember. Defaults pick a sensible "I want to see this run" path: it wipes any prior install, builds Release, drops a runnable copy at `~/Desktop/FileID/`, and launches the app.
@@ -106,7 +117,7 @@ FileID writes **real Finder tags** — the system-wide `tagNamesKey` xattrs, not
 
 ### Platform status
 
-macOS is the canonical reference and ships every tab end-to-end. The Windows port is feature-complete on the six tabs (Library / People / Cleanup / Deep Analyze / Restructure / Settings) and the first-run Welcome sheet — engine + IPC schema + scan pipeline + UI all wired. Release build is warning-free across both Rust and .NET; on-hardware GPU verification is ongoing. Database migrations v1–v12 are byte-faithful with macOS GRDB, so a library scanned on one platform opens on the other. Every default model is permissively licensed (Apache-2.0 / MIT) — the project is commercial-clean. Linux is deferred to Phase 5 — the Rust engine builds standalone today, but the UI port (Avalonia or GTK4) hasn't started. See `shared/docs/SHIP.md` for the per-phase breakdown.
+macOS is the canonical visual + behavioral reference and ships every tab end-to-end. The **Windows** port (WinUI 3 / .NET) is feature-complete on the six tabs (Library / People / Cleanup / Deep Analyze / Restructure / Settings) and the first-run Welcome sheet — engine + IPC schema + scan pipeline + UI all wired; the Release build is warning-free across both Rust and .NET, with on-hardware GPU verification ongoing. The **Linux** app (GTK4 + libadwaita) is feature-complete across the same six tabs and compile-verified in CI; on-hardware polish is ongoing. Two headless front-ends — the cross-platform `fileid` **CLI** and a **ratatui TUI** — build and pass CI alongside the GUIs. Everything builds CI-green across every front-end. Database migrations are byte-faithful across platforms, so a library scanned on one platform opens on another. Every default model is permissively licensed (Apache-2.0 / MIT) — the project is commercial-clean. See `shared/docs/SHIP.md` for the per-phase breakdown.
 
 ### First launch
 
@@ -114,16 +125,63 @@ On first launch the **Welcome sheet** offers to install the on-device models: RA
 
 ---
 
-## Install
+## Front-ends
 
-End users (no source needed):
+One engine, five clients — three native desktop GUIs and two headless front-ends. None use web tech: each GUI is native to its OS, and the CLI/TUI link the engine crate in-process so they can never drift from the apps.
 
-| Platform | Download | Notes |
+| Front-end | Stack | Best for |
 | --- | --- | --- |
-| **Windows 10 22H2+ / 11** (x64 + ARM64) | `FileIDSetup.exe` (single download, auto-picks architecture) | Standard MSI install under `C:\Program Files\FileID\`. Start menu shortcut. Uninstall via Settings → Apps. |
-| **macOS 15+** (Apple Silicon) | `FileID.dmg` | Drag to Applications. |
+| **macOS app** | SwiftUI · MLX · CoreML | the reference desktop experience on Apple Silicon |
+| **Windows app** | WinUI 3 · .NET 8 | Windows 10/11 + Snapdragon WoA; DirectML / CUDA / QNN acceleration |
+| **Linux app** | GTK4 · libadwaita | GNOME-native desktop; the same six tabs |
+| **`fileid` CLI** | Rust (links the engine) | scripting, headless servers, NAS boxes |
+| **TUI** | Rust · ratatui | a terminal dashboard over the same library |
 
-Release builds aren't yet shipping — see [Build from source](#build-from-source) below to compile your own.
+### `fileid` CLI
+
+A single cross-platform binary (macOS / Linux / Windows). It reads and writes the *same* library the desktop apps use, so anything you scan in the GUI is queryable from the shell and vice-versa.
+
+```bash
+fileid scan ~/Pictures                  # index a folder into the library (model-free FTS)
+fileid scan ~/Pictures --models         # full ML pipeline: tags, CLIP, faces, hashes
+fileid search "a dog at the beach"      # FTS5 keyword search over text + OCR
+fileid search --similar 1234            # visual / semantic nearest-neighbours (CLIP)
+fileid dedupe --similar                 # list perceptual near-duplicate groups
+fileid dedupe --apply --yes             # keep one per group, trash the rest (recoverable)
+fileid restructure --plan ~/Downloads   # preview a butler-grade reorg (read-only)
+fileid restructure --apply --symlinks   # apply as reversible symlinks first
+```
+
+Add `--json` to any command for machine-readable output. Full reference: [`platforms/cli/README.md`](platforms/cli/README.md).
+
+### TUI
+
+```bash
+cd platforms/tui && cargo run --release   # browse library / people / duplicates / restructure plan
+```
+
+A read-only ratatui dashboard over the same SQLite library — pure Rust, no system libraries. Details: [`platforms/tui/README.md`](platforms/tui/README.md).
+
+---
+
+## Install / packaging
+
+> Pre-built release binaries aren't published from the repo yet — build your own with the one-command [Build from source](#build-from-source) flow, or assemble a distributable package with the recipes in [`packaging/`](packaging/) ([`packaging/README.md`](packaging/README.md)).
+
+**Linux** — packaging targets every distribution, with **Flatpak as the primary channel** (it bundles a pinned GNOME runtime, so one build runs on Debian / Ubuntu / Arch / Gentoo / NixOS / Fedora):
+
+| Channel | Recipe | Notes |
+| --- | --- | --- |
+| **Flatpak** (primary) | [`packaging/flatpak/`](packaging/flatpak/) | pinned `org.gnome.Platform` runtime; distro-agnostic |
+| **AppImage** | [`packaging/appimage/`](packaging/appimage/) | single self-contained file |
+| **Nix flake** | [`packaging/nix/`](packaging/nix/) | `nix build` on NixOS or any Nix |
+| **AUR** | [`packaging/aur/PKGBUILD`](packaging/aur/PKGBUILD) | Arch / Manjaro |
+
+**Windows** — `FileIDSetup.exe` embeds per-arch **.msi** installers (x64 + ARM64) and auto-picks the right one at install; build it with `publish-bundle.ps1` (see [Build — Windows](#build--windows)).
+
+**macOS** — a `FileID.app` bundle for Apple Silicon; build it with `./build.sh -mac`.
+
+Building from source on any platform: see [Build from source](#build-from-source) and [`shared/docs/CONTRIBUTING.md`](shared/docs/CONTRIBUTING.md).
 
 ---
 
@@ -265,17 +323,22 @@ Either builds the engine + app and launches. See `platforms/apple/CLAUDE.md` for
 
 ### Build — Linux
 
-```bash
-./build.sh -linux
-```
-
-Linux is **deferred to Phase 5** — see [`shared/docs/SHIP.md`](shared/docs/SHIP.md). The Rust engine is cross-platform-clean and will build on Linux today; the blocker is the UI (WinUI 3 is Windows-only). Engine-only standalone build:
+The Linux front-end is a **GTK4 + libadwaita** app that shares the cross-platform Rust engine with Windows. Install the GTK toolchain, then build + run via the platform script (see [`platforms/linux/README.md`](platforms/linux/README.md) and [`platforms/linux/CLAUDE.md`](platforms/linux/CLAUDE.md)):
 
 ```bash
-cd platforms/windows/src/engine && cargo build --release
+sudo apt install build-essential libgtk-4-dev libadwaita-1-dev   # or your distro's equivalent
+bash platforms/linux/build/build.sh                              # build the GTK4 app
+./platforms/linux/dist/fileid/fileid-linux                       # run it
 ```
 
-The engine binary at `target/release/fileid-engine` is fully functional headless.
+The app is feature-complete across the six tabs and compile-verified in CI ([`linux.yml`](.github/workflows/linux.yml)); on-hardware polish is ongoing. The headless **CLI** and **TUI** build standalone and run anywhere:
+
+```bash
+cd platforms/cli && cargo build --release && ./target/release/fileid --help
+cd platforms/tui && cargo run --release
+```
+
+To package the app for distribution (Flatpak / AppImage / Nix / AUR), see [Install / packaging](#install--packaging) and [`packaging/README.md`](packaging/README.md).
 
 ---
 
@@ -290,7 +353,7 @@ FileID/
 │   │   │   ├── FileID.App/         # WinUI 3 desktop app (C# + XAML)
 │   │   │   ├── FileID.Theme/       # Reusable theme + motion primitives
 │   │   │   ├── FileID.IpcSchema/   # Generated C# DTOs for the IPC contract
-│   │   │   └── engine/             # Rust crate — DB + ML + scan pipeline
+│   │   │   └── engine/             # Rust crate — DB + ML + scan pipeline (cross-platform)
 │   │   ├── installer/
 │   │   │   ├── FileID.Msi/         # Per-arch WiX v4 MSI project
 │   │   │   └── FileID.Bundle/      # WiX Burn bootstrapper bundle
@@ -299,10 +362,20 @@ FileID/
 │   │   │   ├── publish-bundle.ps1  # Release build (sign + MSI + bundle)
 │   │   │   └── build.ps1           # Engine-only Phase 0 build
 │   │   └── Tests/                  # xUnit tests for the IPC schema
-│   └── linux/                  # Phase 5 placeholder
+│   ├── linux/                  # Linux — GTK4 + libadwaita app (shares the engine)
+│   │   ├── src/                    # GTK4 app shell + six tabs
+│   │   ├── data/                   # .desktop, AppStream metainfo, app icon SVG
+│   │   └── build/build.sh          # Dev build (app + run)
+│   ├── cli/                    # `fileid` — cross-platform CLI (links the engine in-process)
+│   └── tui/                    # `fileid-tui` — ratatui terminal UI
+├── packaging/                  # Linux distribution recipes
+│   ├── flatpak/                    # Flatpak manifest (primary channel)
+│   ├── appimage/                   # AppImage build script
+│   ├── nix/                        # Nix flake
+│   └── aur/                        # Arch PKGBUILD
 ├── shared/
 │   ├── ipc-schema/             # Canonical IPC contract (JSON Schema)
-│   ├── docs/                   # Architecture, decisions, models, privacy
+│   ├── docs/                   # Architecture, decisions, models, contributing
 │   ├── test-corpus/            # Cross-platform regression assertions
 │   └── scripts/                # Shared helpers (model installers, etc.)
 └── README.md                   # ← you are here
@@ -314,12 +387,14 @@ FileID/
 
 ### Two binaries, one IPC contract
 
-Every platform ships two processes that talk newline-delimited JSON over `stdin`/`stdout`:
+Each desktop app ships two processes that talk newline-delimited JSON over `stdin`/`stdout`:
 
-- **App** (native UI per platform — SwiftUI on macOS, WinUI 3 on Windows). Spawns the engine as a child process. Auto-respawns with bounded backoff (1s/4s/16s) on crash. Verifies the engine binary's signature before each spawn (Authenticode on Windows, codesign on macOS).
-- **Engine** (Rust on Windows, Swift on macOS). Owns the SQLite WAL database, scan pipeline, ML inference. Single writer; the app reads via a separate connection.
+- **App** (native UI per platform — SwiftUI on macOS, WinUI 3 on Windows, GTK4 + libadwaita on Linux). Spawns the engine as a child process. Auto-respawns with bounded backoff (1s/4s/16s) on crash. Verifies the engine binary's signature before each spawn (Authenticode on Windows, codesign on macOS).
+- **Engine** (Rust — the same cross-platform crate on Windows and Linux; Swift on macOS). Owns the SQLite WAL database, scan pipeline, ML inference. Single writer; the app reads via a separate connection.
 
 The IPC contract lives at [`shared/ipc-schema/ipc.schema.json`](shared/ipc-schema/) — language-neutral JSON Schema, code-generated into Swift, Rust, and C# DTOs. Schema drift = build break.
+
+The headless front-ends take a shortcut: the **`fileid` CLI** and **TUI** link the Rust engine crate directly and call its public surface in-process (same tables, migrations, and dedupe/restructure/apply code as the IPC handlers), so they can't drift from the apps. The one exception is `fileid scan --models`, which spawns the engine binary and speaks the same newline-JSON IPC the desktop apps use.
 
 Why two binaries? **Crash isolation.** A panic in the ML pipeline (corrupted ONNX file, GPU driver bug, OOM on a huge image) kills the engine, not the UI. The app surfaces a "engine restarted" pill in the sidebar and the user keeps going. Same architecture as VS Code's renderer/extension-host split.
 
@@ -340,7 +415,7 @@ DirectML covers every Windows GPU vendor in one shipped backend. Performance Pac
 
 ### ML stack
 
-All default weights are permissively licensed (Apache-2.0 / MIT). The Windows column is live; macOS is adopting the same stack (rows marked *lockstep pending* — see [`shared/docs/MODELS.md`](shared/docs/MODELS.md)).
+All default weights are permissively licensed (Apache-2.0 / MIT). The Windows column is live; **Linux runs the same Rust engine and ONNX stack as Windows**, and macOS is adopting it (rows marked *lockstep pending* — see [`shared/docs/MODELS.md`](shared/docs/MODELS.md)).
 
 | Capability | macOS | Windows |
 | --- | --- | --- |
@@ -358,15 +433,16 @@ Full mapping: [`shared/docs/ARCHITECTURE.md`](shared/docs/ARCHITECTURE.md).
 
 ### Continuous integration
 
-Three GitHub Actions workflows run on every push + PR. All three must stay green.
+Four GitHub Actions workflows run on every push + PR. All must stay green.
 
 | Workflow | What it runs | Matrix |
 | --- | --- | --- |
 | [`windows-engine.yml`](.github/workflows/windows-engine.yml) | `cargo fmt`, `clippy --all-targets -D warnings`, `cargo deny` (license + advisory), source-URL allowlist scan, `cargo build --release`, `cargo test`, startup smoke (engine emits `ready` + executes a `verifyCudaPack` reprobe), telemetry-string privacy gate | x64 (`windows-latest`) · arm64-native (`windows-11-arm`) · arm64-cross |
 | [`windows-app.yml`](.github/workflows/windows-app.yml) | NuGet restore (locked), `dotnet build` Debug + Release for the WinUI 3 app, IpcSchema xUnit tests | x64 + arm64 (`windows-latest`) |
 | [`macos.yml`](.github/workflows/macos.yml) | SwiftPM resolve + cache, `swift build -c release` for engine + app, `swift test` (Shared + Engine tests), binary smoke, telemetry-string privacy gate | `macos-15` |
+| [`linux.yml`](.github/workflows/linux.yml) | Four jobs — **Engine** (`fmt`, `clippy -D warnings`, `build --release`, `cargo test`, telemetry scan), **CLI** (`fileid` — clippy + build + smoke test), **TUI** (`fileid-tui` — clippy + build + headless test), **GTK4 app** (`cargo build` against system GTK; clippy advisory) | `ubuntu-latest` (x64) |
 
-The **privacy gate** in the engine + macOS workflows scans every shipped binary for telemetry-SDK URLs (Sentry, Datadog, Firebase, Crashpad, Breakpad, and ~20 others). Zero hits required to ship — same gate `publish-bundle.ps1` enforces locally.
+The **privacy gate** in the engine, macOS, and Linux workflows scans every shipped binary for telemetry-SDK URLs (Sentry, Datadog, Firebase, Crashpad, Breakpad, and ~20 others). Zero hits required to ship — same gate `publish-bundle.ps1` enforces locally.
 
 ### State directories
 
@@ -381,6 +457,8 @@ User data lives outside the install dir so an uninstall doesn't wipe it. Use Set
 | `%LOCALAPPDATA%\FileID\thumbs.cache\` | same parent | Thumbnail cache |
 | `%LOCALAPPDATA%\FileID\face_crops\` | same parent | Face crop JPEGs for People view |
 | `%LOCALAPPDATA%\FileID\settings.json` | same parent | Per-user settings (GPU EP override, etc.) |
+
+On **Linux** the same tree lives under `$XDG_DATA_HOME/FileID/` (default `~/.local/share/FileID/`) — the CLI, TUI, and GTK app all read/write this one library.
 
 ---
 
@@ -411,10 +489,13 @@ See [`platforms/apple/CLAUDE.md`](platforms/apple/CLAUDE.md).
 
 ## Contributing
 
-Conventions per platform live in `platforms/<platform>/CLAUDE.md`:
+Start with [`shared/docs/CONTRIBUTING.md`](shared/docs/CONTRIBUTING.md). Conventions per front-end:
 
 - Windows: [`platforms/windows/CLAUDE.md`](platforms/windows/CLAUDE.md)
 - macOS: [`platforms/apple/CLAUDE.md`](platforms/apple/CLAUDE.md)
+- Linux: [`platforms/linux/CLAUDE.md`](platforms/linux/CLAUDE.md)
+- CLI: [`platforms/cli/README.md`](platforms/cli/README.md) · TUI: [`platforms/tui/README.md`](platforms/tui/README.md)
+- Packaging: [`packaging/README.md`](packaging/README.md)
 
 Cross-platform principles live in the root [`CLAUDE.md`](CLAUDE.md).
 
