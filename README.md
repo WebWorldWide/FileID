@@ -110,7 +110,7 @@ fileid dedupe --similar --db ~/fileid-test.sqlite
 fileid restructure --plan --db ~/fileid-test.sqlite
 ```
 
-> **Full ML scanning** (tags + faces + CLIP) via `--models` runs on **Linux and Windows** (native Rust engine). On **macOS the CLI does model-free indexing only — scan a folder with full ML in the FileID desktop app** (it owns the macOS models), then explore that library here.
+> **Full ML scanning** (tags + faces + CLIP) via `--models` works on **all three platforms** (native Rust engine). Install the engine's own models once with **`fileid models download --all`** — on **macOS** these install under `~/.local/share/FileID/Models`, separate from the desktop app's CoreML set. (Scanning with full ML in the FileID desktop app and exploring that library here also works.)
 
 On macOS, omit `--db` to browse your desktop app's library automatically — the primary CLI use there. Add `--json` for machine-readable output or `--quiet` to silence progress.
 
@@ -122,7 +122,7 @@ fileid-tui --db ~/fileid-test.sqlite
 
 Keys: **s** scan a folder (type the path, `Enter`) · **r** reload after a scan · **Tab** switch tabs · **/** search · **↑↓**/**jk** navigate · **q** quit. The TUI paints its own dark theme, so it stays readable on light terminals.
 
-The **s** scan drives the same full-ML engine as the CLI's `--models`, so it shares the macOS limitation: it runs full ML on **Linux/Windows**, but on **macOS** scan with full ML in the desktop app instead — or index model-free with `fileid scan <folder>` (CLI) and reload here with **r**. Browsing your existing library stays the primary macOS use.
+The **s** scan drives the same full-ML engine as the CLI's `--models` on every platform: install the models once (press **D** on the Settings tab, or run `fileid models download --all`) and full-ML scanning works on **macOS too**. You can also index model-free with `fileid scan <folder>` (CLI), or browse an existing desktop-app library by pointing at it with `--db`.
 
 **Safety.** Read-only by default. Destructive actions are gated behind explicit flags: `dedupe --apply` and `restructure --apply` only touch disk with that flag (add `--dry-run` to preview), and `dedupe --similar --apply` additionally requires `--yes`.
 

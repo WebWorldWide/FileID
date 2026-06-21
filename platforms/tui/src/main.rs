@@ -35,7 +35,38 @@ use app::App;
 use context::{Ctx, Invocation};
 use data::LoadMsg;
 
+/// Point the engine at its OWN writable models dir for this process and any
+/// engine subprocess `scan.rs` spawns (which inherits the env), unless the user
+/// already pinned `FILEID_MODELS_DIR`. Mirrors the CLI's `ensure_engine_models_dir`:
+/// on macOS this is the engine's XDG `~/.local/share/FileID/Models` — where
+/// `fileid models download` / the Settings `D` action install — NOT the desktop
+/// app's read-only CoreML `~/Library/Application Support/FileID/Models`, whose
+/// CoreML weights the Rust engine can't load. On Windows/Linux it's the default
+/// the engine already resolves to, made explicit + inheritable. Both
+/// `scan::missing_models` (via `paths::models_dir`) and the spawned engine then
+/// agree on one dir. Call before any worker thread spawns.
+fn ensure_engine_models_dir() {
+    if std::env::var_os("FILEID_MODELS_DIR").is_some_and(|v| !v.is_empty()) {
+        return;
+    }
+    if let Ok(dir) = fileid_engine::paths::engine_models_dir() {
+        std::env::set_var("FILEID_MODELS_DIR", dir);
+    }
+}
+
 fn main() -> ExitCode {
+    // FIX 1: pin the engine's OWN models dir BEFORE any worker thread spawns
+    // (`set_var` must not race a concurrent env read on another thread, so this
+    // has to run while the process is still single-threaded — before
+    // `data::spawn_load` / `scan::spawn_scan`). Without it, on macOS the model
+    // gate (`scan::missing_models`) and the spawned engine resolve models via the
+    // desktop app's read-only CoreML dir, whose Swift weights the Rust engine
+    // can't load — so a scan could crash mid-pipeline on incompatible files.
+    // Pointing both at the engine's writable dir (where `fileid models download`
+    // / the Settings `D` action install) turns that into a graceful "models not
+    // installed" and lets a downloaded model set light up full-ML scanning.
+    ensure_engine_models_dir();
+
     match context::parse_args(std::env::args().skip(1)) {
         Invocation::Print(text) => {
             println!("{text}");

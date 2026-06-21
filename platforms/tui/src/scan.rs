@@ -86,10 +86,12 @@ fn run_scan(
             .collect::<Vec<_>>()
             .join(", ");
         let hint = if cfg!(target_os = "macos") {
-            "On macOS, scan a folder with full AI in the FileID desktop app (it has the models); \
-             here the TUI does model-free indexing only — or run `fileid scan <folder>` then press r."
+            "Press D on the Settings tab (or run `fileid models download --all`) to install the \
+             engine's own models, then press s again. (The FileID desktop app's full-AI scan also \
+             builds a library you can open here with --db.)"
         } else {
-            "Install them in the desktop app (Settings → Local AI), then press s again."
+            "Press D on the Settings tab (or run `fileid models download --all`) to install them, \
+             then press s again."
         };
         anyhow::bail!("scan needs AI models not installed: {names}. {hint}");
     }

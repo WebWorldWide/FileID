@@ -873,6 +873,26 @@ mod tests {
         assert_eq!(app.list_len(), 0);
     }
 
+    /// Empty-scratch start: every tab's list (and the cursor math behind it) is
+    /// empty, so navigation keys must clamp at 0 and never index out of range —
+    /// `cursor()`/`select_*` use `is_empty`/`saturating_sub`, not `len - 1`.
+    #[test]
+    fn navigation_on_every_empty_tab_is_panic_free() {
+        for tab in Tab::ALL {
+            let mut app = app_with_files(0); // no files, no people/dupes/plan
+            app.switch_tab(tab);
+            // A pre-existing stale cursor (e.g. left over from a populated load)
+            // must not let any of these index past the now-empty list.
+            app.selected[tab.index()] = 999;
+            app.select_next();
+            app.select_prev();
+            app.select_first();
+            app.select_last();
+            assert_eq!(app.cursor(), 0, "{tab:?}: empty-tab cursor must clamp to 0");
+            assert_eq!(app.list_len(), 0, "{tab:?}: list must be empty");
+        }
+    }
+
     #[test]
     fn search_filters_and_resets_cursor() {
         let mut app = app_with_files(0);
