@@ -1,9 +1,14 @@
 //! `fileid dedupe [--exact|--similar]` — list duplicate / near-duplicate
-//! groups. Read-only (never trashes anything).
+//! groups. The default listing (and any `--dry-run`) is read-only; `--apply`
+//! removes the redundant copies — trashing via `shell::trash` (or unlinking
+//! with `--delete`) — behind a confirmation that requires `--yes` on a
+//! non-interactive stdin.
 //!
 //! - `--exact`   groups by BLAKE3 `content_hash` (byte-identical files).
 //! - `--similar` groups by perceptual-hash Hamming distance (default ≤ 8,
 //!   mirroring the engine's near-dup threshold). `--threshold` overrides it.
+//!   Similar groups are transitively chained, so `--similar --apply` can
+//!   over-delete; it is gated behind an explicit `--yes` (see `apply_run`).
 //!
 //! Both signals are written by the full engine scan pipeline; the CLI's
 //! model-free `scan` does not compute them, so on a CLI-only-indexed library
@@ -343,6 +348,47 @@ fn apply_run(
     if dry_run {
         ctx.progress(&format!("  {}", ctx.dim("dry run — nothing was removed.")));
         return Ok(());
+    }
+
+    // `--similar` groups are built by TRANSITIVE chaining of perceptual-hash
+    // neighbors: A~B and B~C put {A, B, C} in one group even when A and C are
+    // not alike, so a single component can grow large and `--apply` would mark
+    // all-but-one of it for removal — an over-delete hazard the byte-identical
+    // `--exact` path does not have. Require an explicit `--yes` here (never an
+    // interactive guess, never a non-TTY auto-proceed), after a loud warning.
+    if use_similar {
+        if !ctx.json {
+            println!();
+            println!("{}", ctx.bold("WARNING: --similar --apply can over-delete."));
+            println!(
+                "  Near-duplicate groups are built by {} of perceptual-hash neighbors:",
+                ctx.bold("transitive chaining")
+            );
+            println!("  A~B and B~C put A, B and C in one group even when A and C are NOT alike,");
+            println!("  and apply keeps only one file per group — so a long chain can remove");
+            println!("  files you meant to keep.");
+            println!(
+                "  {}",
+                ctx.dim("Review first: `fileid dedupe --similar --dry-run` (or the desktop Cleanup tab).")
+            );
+        }
+        if !yes {
+            if ctx.json {
+                print_json(&serde_json::json!({
+                    "command": "dedupe", "mode": "apply", "aborted": true,
+                    "reason": "similar_apply_requires_yes",
+                    "warning": "visually-similar groups are transitively chained — members are \
+                                not all mutually identical; review with `--similar --dry-run` or \
+                                the desktop Cleanup tab, then re-run with --yes",
+                }));
+            } else {
+                println!(
+                    "Refusing without {} — re-run with it once you've reviewed the groups.",
+                    ctx.bold("--yes")
+                );
+            }
+            return Ok(());
+        }
     }
 
     let prompt = format!(

@@ -28,9 +28,14 @@ impl Ctx {
     ///   2. `$FILEID_DB`
     ///   3. `$CFFIXED_USER_HOME/fileid.sqlite` (parity with the macOS app's
     ///      sandbox-root env var; convenient for isolating a test library)
-    ///   4. `fileid_engine::paths::db_path()` — the engine's canonical
-    ///      location (honors `$XDG_DATA_HOME` / `%LOCALAPPDATA%`), i.e. the
-    ///      same file the desktop apps read/write.
+    ///   4. (macOS only) `~/Library/Application Support/FileID/fileid.sqlite`
+    ///      if it exists — the location the macOS Swift app writes its library
+    ///      to, so `fileid` "just works" against the desktop app on a Mac.
+    ///   5. `fileid_engine::paths::db_path()` — the engine's canonical
+    ///      location (honors `$XDG_DATA_HOME` / `%LOCALAPPDATA%`). On Windows
+    ///      and Linux this is the same file the desktop app reads/writes; on
+    ///      macOS the Swift app uses (4) instead (the engine defaults to the
+    ///      XDG `~/.local/share/FileID` path there), which is why (4) wins.
     pub fn resolve(
         db_flag: Option<PathBuf>,
         json: bool,
@@ -46,6 +51,8 @@ impl Ctx {
             PathBuf::from(s)
         } else if let Ok(home) = std::env::var("CFFIXED_USER_HOME") {
             PathBuf::from(home).join("fileid.sqlite")
+        } else if let Some(p) = macos_app_db() {
+            p
         } else {
             fileid_engine::paths::db_path().context("resolving default library location")?
         };
@@ -110,6 +117,25 @@ impl Ctx {
             )
         }
     }
+}
+
+/// The macOS Swift app's library location
+/// (`~/Library/Application Support/FileID/fileid.sqlite`), but only when it
+/// already exists. The Swift front-end writes there — NOT to the engine's XDG
+/// default (`~/.local/share/FileID`) — so on a Mac we prefer it when present,
+/// letting read commands resolve the desktop app's real library without an
+/// explicit `--db`. Returns `None` off macOS, leaving Win/Linux on the engine
+/// default unchanged.
+#[cfg(target_os = "macos")]
+fn macos_app_db() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let p = PathBuf::from(home).join("Library/Application Support/FileID/fileid.sqlite");
+    p.exists().then_some(p)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_app_db() -> Option<PathBuf> {
+    None
 }
 
 /// Resolve a `<path-or-id>` argument to a `files.id`. Mirrors the lookup
