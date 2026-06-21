@@ -270,3 +270,124 @@ fn file_count(db: &Path) -> i64 {
     conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
         .expect("count files")
 }
+
+/// Stamp an identical `phash` on the named files so the near-duplicate path
+/// (which the model-free CLI scan never populates) has a group to act on.
+fn seed_phash(db: &Path, names: &[&str]) {
+    let conn = rusqlite::Connection::open(db).expect("open db for seeding");
+    let phash: i64 = 0x0F0F_0F0F_0F0F_0F0F;
+    for name in names {
+        conn.execute(
+            "UPDATE files SET phash = ?1 WHERE path_text LIKE ?2",
+            rusqlite::params![phash, format!("%/{name}")],
+        )
+        .expect("seed phash");
+    }
+}
+
+/// `dedupe --similar --apply` is gated: transitively-chained perceptual groups
+/// can over-delete, so it demands an explicit `--yes`. With a non-interactive
+/// stdin and no `--yes`, the command must print the over-delete WARNING and
+/// refuse, removing nothing. (The byte-identical `--exact` path is unaffected.)
+#[test]
+fn similar_apply_requires_explicit_yes() {
+    let corpus = unique_dir("corpus_sim");
+    let dbdir = unique_dir("db_sim");
+    let db = dbdir.join("lib.sqlite");
+    let db_s = db.to_str().unwrap();
+
+    std::fs::write(corpus.join("a.txt"), "near duplicate alpha body one").unwrap();
+    std::fs::write(corpus.join("b.txt"), "near duplicate beta body two").unwrap();
+    std::fs::write(corpus.join("c.md"), "# C\nunrelated content\n").unwrap();
+
+    let out = run(&["--db", db_s, "--no-color", "--json", "scan", corpus.to_str().unwrap()]);
+    assert!(out.status.success(), "scan failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    // Seed an identical perceptual hash on the pair → one near-duplicate group.
+    seed_phash(&db, &["a.txt", "b.txt"]);
+
+    // Read-only listing sees the group (the dry/read path is intentionally fine).
+    let out = run(&["--db", db_s, "--no-color", "--json", "dedupe", "--similar"]);
+    assert!(out.status.success());
+    assert_eq!(
+        json(&out)["groups"]["similar"]["count"].as_u64(),
+        Some(1),
+        "expected one near-duplicate group"
+    );
+
+    // `--similar --apply`, no --yes, non-interactive stdin → WARN + refuse.
+    let out = run(&["--db", db_s, "--no-color", "dedupe", "--similar", "--apply"]);
+    assert!(out.status.success());
+    let so = stdout(&out);
+    assert!(
+        so.contains("WARNING: --similar --apply can over-delete"),
+        "missing over-delete warning: {so}"
+    );
+    assert!(so.contains("Refusing without --yes"), "must refuse without --yes: {so}");
+    assert!(
+        corpus.join("a.txt").exists() && corpus.join("b.txt").exists(),
+        "a refused similar-apply must not delete files"
+    );
+    assert_eq!(file_count(&db), 3, "a refused similar-apply must not drop DB rows");
+
+    let _ = std::fs::remove_dir_all(&corpus);
+    let _ = std::fs::remove_dir_all(&dbdir);
+}
+
+/// Like `run_env`, but first scrubs the library-locating env vars so default
+/// resolution is deterministic regardless of the host shell. (macOS-only test
+/// helper — gated to keep `-D warnings` happy on other platforms.)
+#[cfg(target_os = "macos")]
+fn run_env_clean(args: &[&str], envs: &[(&str, &str)]) -> Output {
+    let mut cmd = Command::new(bin());
+    cmd.args(args);
+    cmd.env_remove("FILEID_DB");
+    cmd.env_remove("CFFIXED_USER_HOME");
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    cmd.output().expect("spawn fileid binary")
+}
+
+/// On macOS, with no `--db`/env override, the CLI must resolve the macOS Swift
+/// app's library (`~/Library/Application Support/FileID/fileid.sqlite`) when it
+/// exists — so `fileid` "just works" against the desktop app. We point `HOME`
+/// at a temp dir, seed a library at that exact sub-path with an explicit
+/// `--db`, then confirm a no-`--db` `search` resolves to it.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_default_resolves_swift_app_library() {
+    let home = unique_dir("home_mac");
+    let corpus = unique_dir("corpus_mac");
+    let app_dir = home.join("Library/Application Support/FileID");
+    std::fs::create_dir_all(&app_dir).unwrap();
+    let swift_db = app_dir.join("fileid.sqlite");
+    let swift_db_s = swift_db.to_str().unwrap();
+    let home_s = home.to_str().unwrap();
+
+    std::fs::write(corpus.join("kiwi.txt"), "macos default path probe token kiwi").unwrap();
+
+    // Seed the Swift-location library explicitly (HOME pinned so we never touch
+    // the real ~/Library).
+    let out = run_env_clean(
+        &["--db", swift_db_s, "--no-color", "--json", "scan", corpus.to_str().unwrap()],
+        &[("HOME", home_s)],
+    );
+    assert!(out.status.success(), "seed scan failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(swift_db.exists(), "seed did not create the Swift-location library");
+
+    // No --db: the macOS default must resolve to the Swift-app library.
+    let out = run_env_clean(&["--no-color", "--json", "search", "kiwi"], &[("HOME", home_s)]);
+    assert!(
+        out.status.success(),
+        "default-path search failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        json(&out)["count"].as_u64().unwrap_or(0) >= 1,
+        "macOS default did not resolve to the Swift app library"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&corpus);
+}

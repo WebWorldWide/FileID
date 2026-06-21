@@ -1,11 +1,14 @@
-//! `fileid restructure --plan [root]` — compute and print the proposed reorg.
+//! `fileid restructure --plan [root]` — compute the proposed reorg; with
+//! `--apply`, execute it.
 //!
-//! READ-ONLY. This reuses the engine's exact rule-cascade classifier
+//! `--plan` is READ-ONLY: it reuses the engine's exact rule-cascade classifier
 //! (`pipeline::restructure::classify`, a pure model-free function), so the
 //! plan matches what the desktop apps' Restructure tab would propose when no
 //! CLIP embeddings are present (the semantic "butler" boost degrades to the
-//! same cascade). Applying the plan (`applyRestructure`) is a documented
-//! follow-on and is intentionally NOT implemented here.
+//! same cascade). `--apply` executes that plan in-process via the engine's
+//! `RestructureApply` (the same code path the `applyRestructure` IPC command
+//! runs: collision-uniquify, stale-plan + path-traversal guards, undo journal);
+//! it prompts unless `--yes`, and `--apply --dry-run` previews without moving.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -165,7 +168,7 @@ pub fn run(
     }
     ctx.progress(&format!(
         "  {}",
-        ctx.dim("plan only — nothing moved. Apply (applyRestructure) is a documented follow-on.")
+        ctx.dim("plan only — nothing moved. Run with --apply to execute (or --apply --dry-run to preview).")
     ));
     Ok(())
 }
